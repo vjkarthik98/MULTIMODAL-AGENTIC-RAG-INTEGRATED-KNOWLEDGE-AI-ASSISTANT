@@ -1,0 +1,13 @@
+torch
+transformers
+accelerate
+sentence-transformers
+langchain
+langchain-community
+qdrant-client 
+pydantic
+python-dotenv
+tqdm
+fastapi
+uvicorn
+pytest
