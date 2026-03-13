@@ -1,0 +1,28 @@
+[project]
+name = "multimodal-rag-assitant"
+version = "0.1.0"
+description = "Production-grade multimodal RAG assitant using open-source LLMs and Qdrant"
+authors = [
+    {name = "VK"}
+]
+readme = "README.md"
+requires-python = ">3.9"
+
+dependencies = [
+    "torch",
+    "transformers",
+    "accelerate",
+    "sentence-transformers",
+    "langchain",
+    "langchain-community",
+    "qdrant-client",
+    "pydantic",
+    "python-dotenv",
+    "tqdm", 
+    "fastapi",
+    "uvicorn"
+]
+
+[build-system]
+requires = ["setuptool>=61.0"]
+build-backend = "setuptools.build_meta"
