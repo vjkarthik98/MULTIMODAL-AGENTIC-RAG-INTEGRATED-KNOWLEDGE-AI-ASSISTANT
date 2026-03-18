@@ -18,3 +18,12 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Dependency management (requirements.txt)
 - Python packaging (pyproject.toml)
 - VERSION file for semantic versioning
+
+# [0.2.0] - FastAPI Integration
+
+### Added 
+
+- FastAPI backend for RAG system
+- API endpoints for query handling
+- Integration of RAG pipeline with API
+- End-to-End system with Qdrant + Ollama
