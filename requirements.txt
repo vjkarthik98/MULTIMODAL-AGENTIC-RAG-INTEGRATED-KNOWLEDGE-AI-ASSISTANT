@@ -11,3 +11,5 @@ uvicorn
 pillow
 opencv-python
 whisper
+pytesseract
+moviepy
