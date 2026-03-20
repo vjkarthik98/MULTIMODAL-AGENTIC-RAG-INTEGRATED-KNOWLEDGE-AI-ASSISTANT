@@ -27,3 +27,16 @@ The format follows Keep a Changelog and Semantic Versioning.
 - API endpoints for query handling
 - Integration of RAG pipeline with API
 - End-to-End system with Qdrant + Ollama
+
+# [0.3.0] - Multimodal Ingestion
+### Added
+- Multimodal ingestion pipeline (text, image, audio, video)
+- Faster-Whisper integration for audio transcription
+- OCR-based image text extraction
+- Video-to-audio transcription pipeline
+- Unified ingestion router
+
+### Improved
+- Metadata-aware ingestion schema
+- Standardized document structure (text + metadata)
+- Modula ingestion architecture
