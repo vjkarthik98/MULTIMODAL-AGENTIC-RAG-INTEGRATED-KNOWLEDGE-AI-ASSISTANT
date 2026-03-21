@@ -1,6 +1,5 @@
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
-
 from app.core.config import settings
 
 class QdrantVectorStore:
@@ -20,32 +19,52 @@ class QdrantVectorStore:
             )
         )
 
-    def insert_vector(self, collection_name: str, vector, payload: dict, point_id: int):
+    def insert_documents(self, documents):
+        # Step 1 : ensure collection exists
+        collections = self.client.get_collections().collections
+        collection_names = [c.name for c in collections]
 
-        self.client.upsert(
-            collection_name=collection_name,
-            points=[
+        if settings.COLLECTION_NAME not in collection_names:
+            self.create_collection(settings.COLLECTION_NAME)
+        
+        # Step 2 : insert points
+        from qdrant_client.models import PointStruct
+        points = []
+
+        for idx, doc in enumerate(documents):
+            points.append(
                 PointStruct(
-                    id=point_id,
-                    vector=vector,
-                    payload= {
-                        "text": chunk,
-                        "source": file_name,
-                        "modality": text
+                    id=idx,
+                    vector=doc["embedding"],
+                    payload={
+                        "text": doc["text"],
+                        **doc.get("metadata", {})
                     }
                 )
-            ]
-        )
+            )
         
-    def search_vector(self, collection_name: str, query_vector, limit: int = 3):
+        self.client.upsert(
+            collection_name=settings.COLLECTION_NAME,
+            points=points
+        )
 
+    def search(self, query_vector, limit=5):
         results = self.client.query_points(
-            collection_name=collection_name,
+            collection_name=settings.COLLECTION_NAME,
             query=query_vector,
             limit=limit
         )
 
-        return results.points
+        return [
+            {
+                "text": point.payload["text"],   # payload
+                "score": point.score,          # score
+                "metadata": {
+                    k: v for k, v in point.payload.items() if k != "text"
+                }
+            }
+            for point in results.points 
+        ]
     
     def get_client(self):
         return self.client

@@ -40,3 +40,24 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Metadata-aware ingestion schema
 - Standardized document structure (text + metadata)
 - Modula ingestion architecture
+
+# [0.4.0] - Chunking Integration
+### Added 
+- Recursive chunking with overlap
+- Batch embedding pipeline
+- Qdrant vector database integration
+- Retrieval system with semantic search
+- End-to-end ingestion pipeline (chunk -> embed -> store)
+- FastAPI upload endpoint for document ingestion
+- Full RAG pipeline (retrieve + generate)
+
+### Improved
+- Embedding performance using batching
+- Modular architecture (utils, ingestion, embeddings, vectorstore)
+- Automatic Qdrant collection creation
+- Context formatting for better LLM responses
+
+### Bug Fixed
+- Qdrant API compatibility issues ('query_points')
+- Retrieval method mismatches
+- Vector Store integration bugs
