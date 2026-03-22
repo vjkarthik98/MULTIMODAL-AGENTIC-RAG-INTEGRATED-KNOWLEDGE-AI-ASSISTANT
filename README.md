@@ -172,35 +172,41 @@ The project is built using a modern AI system stack inspired by production RAG a
 
 ## 📂 Project Structure
 
+## 📂 Project Structure
+
+```bash
 project_root/
 │
 ├── app/
 │   ├── api/
-│   │   └── routes/          # FastAPI routes
-│   │       └── rag_routes.py
+│   │   └── routes/
+│   │       └── rag_routes.py      # FastAPI routes
 │   │
-│   ├── ingestion/           # Data ingestion (text, PDF, etc.)
-│   ├── embeddings/          # Embedding logic
-│   ├── vectorstore/         # Qdrant integration
-│   ├── utils/               # Chunking, preprocessing utilities
-│   ├── core/                # Config, settings
+│   ├── ingestion/                # Data ingestion (text, PDF, etc.)
+│   ├── embeddings/               # Embedding logic
+│   ├── vectorstore/              # Qdrant integration
+│   ├── utils/                    # Chunking, preprocessing utilities
+│   ├── core/                     # Config, settings
 │
 ├── src/
 │   └── rag_system/
-│       ├── pipeline/        # RAG pipeline (retrieve → generate)
-│       ├── prompt/          # Prompt engineering
-│       ├── generation/      # LLM interaction
+│       ├── pipeline/             # RAG pipeline (retrieve → generate)
+│       ├── prompt/               # Prompt engineering
+│       ├── generation/           # LLM interaction
 │
-├── tests/                   # Test cases
-├── main.py                  # FastAPI entry point
+├── tests/                        # Test cases
+├── main.py                       # FastAPI entry point
 ├── requirements.txt
 └── README.md
-
+```
 
 ### 🧠 Design Philosophy
 
 * **app/** → Handles infrastructure & APIs
 * **src/** → Contains core AI logic (RAG pipeline)
+
+
+
 
 This separation ensures:
 
@@ -308,7 +314,6 @@ Input (any modality) → Text Conversion → Chunking → Embedding → Vector D
 
 
 ## 🌐 API Layer (FastAPI)
-
 The system exposes its functionality through a FastAPI backend, enabling real-time interaction with the RAG pipeline.
 
 ### 🔌 Key Endpoints
@@ -368,9 +373,7 @@ POST /upload/file
 * Enables deployment on cloud platforms
 * Supports scalable AI applications
 
-
 ## 🧪 Installation & Setup
-
 ### 🔧 Prerequisites
 
 * Python 3.10+
@@ -379,51 +382,76 @@ POST /upload/file
 * Tesseract OCR (for image processing)
 * Ollama (for running LLM locally)
 
+---
 
 ### 📦 Clone Repository
 
-
+```bash id="f3n2lm"
 git clone https://github.com/vjkarthik98/multimodal-rag-assistant.git
 cd multimodal-rag-assistant
+```
 
+---
 
 ### 🧱 Create Virtual Environment
 
-
+```bash id="0d2kqs"
 python -m venv rag_env
 source rag_env/bin/activate      # Linux / Mac
 rag_env\Scripts\activate         # Windows
+```
 
+---
 
 ### 📥 Install Dependencies
 
-
+```bash id="8k3lmn"
 pip install -r requirements.txt
+```
 
+---
 
 ### 🗄️ Run Qdrant (Docker)
 
+```bash id="7lmv9a"
 docker run -p 6333:6333 qdrant/qdrant
+```
+
+---
 
 ### 🧠 Run Ollama (LLM)
 
+```bash id="l9a2ks"
 ollama run mistral
+```
 
+---
 
 ### 🚀 Start FastAPI Server
 
+```bash id="n2ksla"
 uvicorn main:app --reload
+```
+
+---
 
 ### 🌐 Access API
 
 * Swagger UI: http://127.0.0.1:8000/docs
 * Test endpoint: http://127.0.0.1:8000/rag/test
 
+---
+
 ### 🧪 Example Query
 
+```json id="9sk2la"
 {
   "query": "Explain artificial intelligence"
 }
+```
+
+
+
 
 ## 📊 Evaluation & Monitoring
 
