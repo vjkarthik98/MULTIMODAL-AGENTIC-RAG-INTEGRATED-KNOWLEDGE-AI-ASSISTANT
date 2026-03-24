@@ -6,6 +6,10 @@ __pycache__/
 # C extensions
 *.so
 
+# Data
+data/raw/
+data/processed
+
 # Distribution / packaging
 .Python
 build/
@@ -153,6 +157,10 @@ venv.bak/
 
 # mkdocs documentation
 /site
+
+# Models
+models/
+*.gguf
 
 # mypy
 .mypy_cache/
