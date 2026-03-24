@@ -1,3 +1,4 @@
+import uuid
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from app.core.config import settings
@@ -11,7 +12,7 @@ class QdrantVectorStore:
         )
 
     def create_collection(self, collection_name: str, vector_size: int = 384):
-        self.client.recreate_collection(
+        self.client.create_collection(
             collection_name=collection_name,
             vectors_config=VectorParams(
                 size=vector_size,
@@ -34,10 +35,13 @@ class QdrantVectorStore:
         for idx, doc in enumerate(documents):
             points.append(
                 PointStruct(
-                    id=idx,
+                    id= str(uuid.uuid4()),
                     vector=doc["embedding"],
                     payload={
                         "text": doc["text"],
+                        "source": doc.get("metadata", {}).get("source", "unknown"),
+                        "chunk_id": idx,
+                        "modality": doc.get("metadata", {}).get("modality", "text"),
                         **doc.get("metadata", {})
                     }
                 )

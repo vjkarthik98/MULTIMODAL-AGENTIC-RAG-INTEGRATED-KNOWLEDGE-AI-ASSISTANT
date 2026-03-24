@@ -11,23 +11,16 @@ class Retriever:
         self.embedder = TextEmbedder()
 
 
-    def retrieval(self, query: str, top_k: int = 3):
+    def retrieval(self, query: str, top_k: int = 5):
 
         # Step 1 : convert query -> embedding
         query_vector = self.embedder.embed_text(query)
 
         # Step 2: search vector DB
-        results = self.vector_store.search(query_vector, limit=top_k)
+        results = self.vector_store.search(
+            query_vector, 
+            limit=top_k
+        )
 
-        # Step 3: format output 
-        documents = []
-
-        for result in results:
-            documents.append({
-                "text": result["text"],
-                "source": result["metadata"].get("source", "unknown"),
-                "modality": result["metadata"].get("modality", "text"),
-                "score": result["score"]
-                })
-
-        return documents
+        # Step 3: Return Results     
+        return results

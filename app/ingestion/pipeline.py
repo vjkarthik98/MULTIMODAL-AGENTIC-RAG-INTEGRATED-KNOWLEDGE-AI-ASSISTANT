@@ -8,7 +8,7 @@ from app.ingestion.video_ingest import ingest as video_ingest
 from app.ingestion.schema import IngestedDocument
 
 
-def process_file(file_path: str) -> IngestedDocument:
+def process_file(file_path: str) -> list[IngestedDocument]:
     modality = detect_modality(file_path)
 
     if modality == "text":
