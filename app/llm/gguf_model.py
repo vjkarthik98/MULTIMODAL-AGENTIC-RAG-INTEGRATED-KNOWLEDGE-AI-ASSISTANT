@@ -17,7 +17,7 @@ class GGUFModel:
             verbose=False # temporarily enable for debugging
         )
 
-    def generate(self, prompt: str, max_tokens: int= 512):
+    def generate(self, prompt: str, max_tokens: int= 256):
         response = self.llm(
             prompt,
             max_tokens=max_tokens,

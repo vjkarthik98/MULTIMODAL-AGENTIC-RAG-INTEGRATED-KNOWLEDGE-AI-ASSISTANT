@@ -83,3 +83,28 @@ The format follows Keep a Changelog and Semantic Versioning.
 ### Notes
 - Optimized for CPU environments (no GPU dependency)
 - Designed for lightweight deployment and scalability
+
+
+
+# [0.6.0] - Improved RAG Pipeline
+
+### Added
+- Chunk-based ingestion pipeline
+- Batch embedding for documents
+- Unique UUID-based vector storage in Qdrant
+- Retriever with configurable top-k
+- Structured context formatting for LLM
+
+### Improved
+- Token usage optimization for GGUF models
+- Prompt design for better grounding
+- Duplicate document removal in retrieval
+
+### Fixed
+- Context window overflow errors
+- UUID generation bug in Qdrant storage
+- Prompt NoneType crash issue
+
+### Notes
+- System now supports production-level RAG pipeline
+- Fully optimized for CPU-based local inference
