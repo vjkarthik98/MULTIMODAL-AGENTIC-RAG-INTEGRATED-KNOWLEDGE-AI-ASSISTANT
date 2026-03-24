@@ -563,7 +563,7 @@ Aspiring GenAI Engineer | Building production-ready AI systems
 
 ### 📬 Contact
 
-* LinkedIn: *www.linkedin.com/in/vijaya-karthik-517353357*
+* LinkedIn: *P*
 * GitHub: *www.github.com/vjkarthik98*
 
 

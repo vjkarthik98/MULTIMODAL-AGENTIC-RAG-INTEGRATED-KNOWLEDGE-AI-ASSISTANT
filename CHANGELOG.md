@@ -61,3 +61,25 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Qdrant API compatibility issues ('query_points')
 - Retrieval method mismatches
 - Vector Store integration bugs
+
+# [0.5.0] - GGUF Model Integration 
+### Added
+- GGUF model integration using llama.cpp (CPU-based inference)
+- Streaming response support using FastAPI StreaminResponse
+- New `/rag/query/stream` endpoint for real-time token output
+- Modular LLM wrapper (`gguf_model.py`)
+
+### Changed
+- Replaced HuggingFace/Ollama with GGUF-based inference
+- Updated RAG pipeline to use local quantized models
+- Improved prompt formatting for Mistral Instruct
+
+### Fixed
+- Upload endpoint routing issue
+- Multipart file upload handling
+- Qdrant collection initialization flow
+- UTF-8 decoding issue for non-text files (handled via testing approach)
+
+### Notes
+- Optimized for CPU environments (no GPU dependency)
+- Designed for lightweight deployment and scalability
