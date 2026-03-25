@@ -28,25 +28,34 @@ class QdrantVectorStore:
         if settings.COLLECTION_NAME not in collection_names:
             self.create_collection(settings.COLLECTION_NAME)
         
-        # Step 2 : insert points
-        from qdrant_client.models import PointStruct
+        # Step 2 : generate a document_id for grouping
+        document_id = str(uuid.uuid4())
+
         points = []
 
-        for idx, doc in enumerate(documents):
+        for doc in documents:
+            metadata = doc.get("metadata", {})
+
+            payload = {
+                "text": doc["text"],
+
+                # core metadata (clean + controlled)
+                "document_id": document_id,
+                "source": metadata.get("source", "unknown"),
+                "modality": metadata.get("modality", "text"),
+                "chunk_id": metadata.get("chunk_id"),
+                "ingestion_time": metadata.get("ingestion_time"),
+            }
+
             points.append(
                 PointStruct(
-                    id= str(uuid.uuid4()),
+                    id=str(uuid.uuid4()), # unique per chunk
                     vector=doc["embedding"],
-                    payload={
-                        "text": doc["text"],
-                        "source": doc.get("metadata", {}).get("source", "unknown"),
-                        "chunk_id": idx,
-                        "modality": doc.get("metadata", {}).get("modality", "text"),
-                        **doc.get("metadata", {})
-                    }
+                    payload=payload
                 )
             )
         
+        # Step 3: insert
         self.client.upsert(
             collection_name=settings.COLLECTION_NAME,
             points=points
