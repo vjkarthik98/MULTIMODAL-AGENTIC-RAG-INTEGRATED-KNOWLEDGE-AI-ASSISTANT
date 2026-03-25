@@ -2,6 +2,7 @@ from app.retrieval.retriever import Retriever
 from app.prompt.prompt_builder import PromptBuilder
 from app.llm.gguf_model import GGUFModel 
 
+
 class RAGPipeline:
     def __init__(self):
         self.retriever = Retriever()

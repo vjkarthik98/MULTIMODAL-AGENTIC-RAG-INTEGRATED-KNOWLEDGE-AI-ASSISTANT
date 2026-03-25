@@ -8,6 +8,8 @@ from fastapi.responses import StreamingResponse
 
 from pydantic import BaseModel
 
+from app.ingestion.pipeline import process_file
+
 class QueryRequest(BaseModel):
     query:str
 
@@ -52,11 +54,13 @@ async def upload_file(file: UploadFile = File(...)):
             f.write(content)
 
         # run ingestion pipeline
-        count = ingest_pipeline(file_path)
+        result = process_file(file_path)
 
         return {
             "filename": file.filename,
-            "chunks_inserted": count
+            "chunks_inserted": result.get("chunks", 0),
+            "status": result.get("status", "unknown"),
+            "details": result.get("details", {})
         }
 
     except Exception as e:

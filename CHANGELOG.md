@@ -108,3 +108,26 @@ The format follows Keep a Changelog and Semantic Versioning.
 ### Notes
 - System now supports production-level RAG pipeline
 - Fully optimized for CPU-based local inference
+
+# [0.7.0] - 
+
+### Added 
+- End-to-end ingestion pipeline orchestration (process_file)
+- Structured API response (status, details, chunks)
+- Logging system for pipeline observability
+
+### Improved
+- Chunk -> Embed -> Stored pipeline consistency
+- Qdrant storage with document_id grouping
+- Metadata strucutre for better retrieval
+
+### Fixed 
+- Ingestion returning incorrect format
+- Embedding validation issues
+- Duplicate / untraceable vector storage
+
+### Validation
+- Added checks for:
+    - Empty documents
+    - Embedding failure
+    - Invalid vector formats
