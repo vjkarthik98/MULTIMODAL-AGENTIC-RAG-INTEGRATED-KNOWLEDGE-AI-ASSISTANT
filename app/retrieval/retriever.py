@@ -16,8 +16,9 @@ class Retriever:
         # Step 1 : convert query -> embedding
         query_vector = self.embedder.embed_text(query)
 
-        # Step 2: search vector DB
-        results = self.vector_store.search(
+        # Step 2: search only text collection
+        # (text + audio + video all stored here)
+        results = self.vector_store.search_text(
             query_vector, 
             limit=top_k
         )

@@ -131,3 +131,36 @@ The format follows Keep a Changelog and Semantic Versioning.
     - Empty documents
     - Embedding failure
     - Invalid vector formats
+
+# [0.8.0] - Text and Image (Ingestion + Query)
+### Added
+- Image ingestion pipeline using CLIPVisionMOdelWithProjection
+- Image query pipeline using CLIPTextModelWithProjection
+- Consistent dimensional embedding across ingestion and query
+
+### Fixed
+- Dimension mismatch issue (512 vs 768) during image query
+
+### Notes
+- Qdrant collection standardized to 384(Text) and 768(Image) vector size
+- Foundation ready for multimodal expansion (audio/video)
+
+# [0.9.0] - Audio Intelligence Upgrade
+### Features
+- Added audio ingestion using faster-whisper
+- Converted audio to text segments for embedding
+- Implemented audio query endpoint (/rag/query/audio)
+- Enabled full RAG pipeline for audio queries
+
+### Improvements
+- Segment-level audio chunking
+- Added timestamps (start_time, end_time) in metadata
+- Context enriched with audio time references
+
+### Fixes
+- Fixed retriever (removed invalid search() call)
+- Ensured pipeline consistency for all modalities
+
+### Result
+- Full multimodal RAG (text, image, audio)
+- Production-grade ingestion + query pipeline
