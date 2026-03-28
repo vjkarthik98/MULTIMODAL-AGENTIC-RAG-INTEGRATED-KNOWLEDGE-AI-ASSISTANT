@@ -2,6 +2,7 @@ from app.embeddings.text_embedder import TextEmbedder
 from app.vectorstore.qdrant_store import QdrantVectorStore
 from app.embeddings.clip_text_embedder import ClipTextEmbedder
 
+
 embedder = TextEmbedder()
 vector_store = QdrantVectorStore()
 clip_embedder = ClipTextEmbedder()
