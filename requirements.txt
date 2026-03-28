@@ -8,8 +8,20 @@ python-dotenv
 pydantic
 fastapi
 uvicorn
+
+# Image / OCR
 pillow
 opencv-python
-whisper
 pytesseract
+
+# Audio / Speech
+faster-whisper
+
+# Video
 moviepy
+
+# document ingestion
+pdfplumber
+python-docx
+pandas
+openpyxl

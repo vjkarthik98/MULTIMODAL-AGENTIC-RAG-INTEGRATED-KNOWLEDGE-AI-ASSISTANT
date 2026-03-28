@@ -1,11 +1,12 @@
 import os
+
 def detect_modality(file_path: str):
     ext = os.path.splitext(file_path)[1].lower()
 
     if ext in [".txt"]:
         return "text"
-    elif ext in [".pdf"]:
-        return "pdf"
+    elif ext in [".pdf", ".docx", ".xlsx", ".xls"]:
+        return "document"
     elif ext in [".jpg", ".jpeg", ".png"]:
         return "image"
     elif ext in [".mp3", ".wav"]:

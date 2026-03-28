@@ -11,7 +11,8 @@ class QdrantVectorStore:
             port=settings.QDRANT_PORT
         )
 
-    def create_collection(self, collection_name: str, vector_size: int = 384):
+    # Create collection with given size
+    def create_collection(self, collection_name: str, vector_size: int = int):
         self.client.create_collection(
             collection_name=collection_name,
             vectors_config=VectorParams(
@@ -19,51 +20,78 @@ class QdrantVectorStore:
                 distance=Distance.COSINE
             )
         )
-
-    def insert_documents(self, documents):
-        # Step 1 : ensure collection exists
+    # Ensure collection exists
+    def _ensure_collection(self, collection_name: str, vector_size: int):
         collections = self.client.get_collections().collections
         collection_names = [c.name for c in collections]
+    
+        if collection_name not in collection_names:
+            self.create_collection(collection_name, vector_size)
+    
+    # Insert Multimodal
+    def insert_documents(self, documents):
 
-        if settings.COLLECTION_NAME not in collection_names:
-            self.create_collection(settings.COLLECTION_NAME)
-        
-        # Step 2 : generate a document_id for grouping
         document_id = str(uuid.uuid4())
-
-        points = []
 
         for doc in documents:
             metadata = doc.get("metadata", {})
+            modality = metadata.get("modality", "text")
+
+            # Decide collection + dimension
+            if modality == "image":
+                collection_name = "image_collection"
+                vector_size = 768
+            else:
+                collection_name = "text_collection"
+                vector_size = 384
+
+            # Ensure correct collection
+            self._ensure_collection(collection_name, vector_size)
 
             payload = {
-                "text": doc["text"],
-
                 # core metadata (clean + controlled)
+                "text": doc["text"],
                 "document_id": document_id,
                 "source": metadata.get("source", "unknown"),
-                "modality": metadata.get("modality", "text"),
+                "modality": modality,
                 "chunk_id": metadata.get("chunk_id"),
                 "ingestion_time": metadata.get("ingestion_time"),
             }
 
-            points.append(
-                PointStruct(
-                    id=str(uuid.uuid4()), # unique per chunk
-                    vector=doc["embedding"],
-                    payload=payload
+            point = PointStruct(
+                id=str(uuid.uuid4()), # unique per chunk
+                vector=doc["embedding"],
+                payload=payload
                 )
-            )
         
-        # Step 3: insert
-        self.client.upsert(
-            collection_name=settings.COLLECTION_NAME,
-            points=points
+            # Insert oer collection
+            self.client.upsert(
+                collection_name=collection_name,
+                points=[point]
+            )
+    # TEXT SEARCH
+    def search_text(self, query_vector, limit=5):
+        
+        results = self.client.query_points(
+            collection_name="text_collection",
+            query=query_vector,
+            limit=limit
         )
 
-    def search(self, query_vector, limit=5):
+        return [
+            { 
+                "text": point.payload["text"],
+                "score": point.score,
+                "metadata": point.payload
+            }
+            for point in results.points
+        ]
+    
+    # IMAGE SEARCH
+    def search_image(self, query_vector, limit=5):
+ 
         results = self.client.query_points(
-            collection_name=settings.COLLECTION_NAME,
+            collection_name="image_collection",
             query=query_vector,
             limit=limit
         )
@@ -72,11 +100,9 @@ class QdrantVectorStore:
             {
                 "text": point.payload["text"],   # payload
                 "score": point.score,          # score
-                "metadata": {
-                    k: v for k, v in point.payload.items() if k != "text"
-                }
+                "metadata": point.payload
             }
-            for point in results.points 
+            for point in results.points
         ]
     
     def get_client(self):

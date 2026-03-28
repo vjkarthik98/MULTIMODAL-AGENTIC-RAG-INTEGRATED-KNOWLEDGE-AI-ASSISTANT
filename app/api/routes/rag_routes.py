@@ -10,6 +10,8 @@ from pydantic import BaseModel
 
 from app.ingestion.pipeline import process_file
 
+from app.retrieval.query_pipeline import query_text, query_image
+
 class QueryRequest(BaseModel):
     query:str
 
@@ -23,6 +25,14 @@ UPLOAD_DIR = "data/raw"
 @router.get("/test")
 def test_route():
     return{"message" : "RAG route working"}
+
+@router.get("/rag/query/text")
+def rag_text_query(q: str):
+    return {"results": query_text(q)}
+
+@router.get("/rag/query/image")
+def rag_image_query(q: str):
+    return {"results": query_image(q)}
 
 # Query endpoint (RAG)
 @router.post("/query")
