@@ -109,7 +109,7 @@ The format follows Keep a Changelog and Semantic Versioning.
 - System now supports production-level RAG pipeline
 - Fully optimized for CPU-based local inference
 
-# [0.7.0] - 
+# [0.7.0] - Production-grade ingestion pipeline
 
 ### Added 
 - End-to-end ingestion pipeline orchestration (process_file)

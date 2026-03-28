@@ -1,11 +1,10 @@
 from app.ingestion.router import detect_modality
 
-from app.ingestion.text_ingest import ingest as text_ingest
+from app.ingestion.text_ingest import ingest as text_ingest 
+from app.ingestion.document_ingest import ingest as document_ingest
 from app.ingestion.image_ingest import ingest as image_ingest
 from app.ingestion.audio_ingest import ingest as audio_ingest
 from app.ingestion.video_ingest import ingest as video_ingest
-
-from app.ingestion.schema import IngestedDocument
 
 from app.embeddings.text_embedder import TextEmbedder
 from app.vectorstore.qdrant_store import QdrantVectorStore
@@ -36,6 +35,9 @@ def process_file(file_path: str):
 
         if modality == "text":
             documents = text_ingest(file_path)
+
+        elif modality == "document":
+            documents = document_ingest(file_path)
         
         elif modality == "image": 
             documents = image_ingest(file_path)
@@ -55,8 +57,21 @@ def process_file(file_path: str):
         
         logger.info(f"Chunks created: {len(documents)}")
         
-        # Step 3: Embed all chunks (batch)
-        documents = embedder.embed_documents(documents)
+        # Step 3: Multimodal Embedding handling
+        text_docs = []
+        pre_embedded_docs = []
+
+        for doc in documents:
+            if doc.embedding is not None:
+                pre_embedded_docs.append(doc)
+            else:
+                text_docs.append(doc)
+
+        # Embed only text-based docs
+        if text_docs:
+            text_docs = embedder.embed_documents(text_docs)
+
+        documents = pre_embedded_docs + text_docs
 
         # Validation after embedding
         for doc in documents:
