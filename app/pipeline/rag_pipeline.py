@@ -11,7 +11,22 @@ class RAGPipeline:
 
     def run(self, query: str):
         # Step 1: Retrieve relevant documents (TOP-K CONTROL)
-        docs = self.retriever.retrieval(query, top_k=2)
+        docs = self.retriever.retrieval(query, top_k=5)
+
+        # Normalize docs(handle tuple issue)
+        normalized_docs = []
+
+        for doc in docs:
+            if isinstance(doc, dict):
+                normalized_docs.append(doc)
+            
+            elif isinstance(doc, tuple):
+                # assume structure: (text, score, metadata)
+                normalized_docs.append({
+                    "text": doc[0],
+                    "metadata": doc[2] if len(doc) > 2 else {}
+                })
+        docs = normalized_docs
         
         # Remove duplicate texts
         unique_docs = []
@@ -31,43 +46,73 @@ class RAGPipeline:
                 "sources": []
             }
 
-        # Step 2: Extract context with Audio TimeStamps
-        context_parts = []
+        # Step 2: Smart Context Aggregation
+        audio_texts = []
+        frame_texts = []
+        other_texts = []
 
-        for i, doc in enumerate(docs):
+        for doc in docs:
             metadata = doc.get("metadata", {})
             modality = metadata.get("modality", "text")
 
-            if modality == "audio":
-                start = metadata.get("start_time", 0)
-                end = metadata.get("end_time", 0)
+            if modality in  ["audio", "video_audio"]:
+                audio_texts.append(doc["text"])
 
-                context_parts.append(
-                    f"[Source {i + 1} | Audio {start:.2f}s]\n{doc['text'][:150]}"
-                )
-            else:
-                context_parts.append(
-                    f"[Source {i + 1}]\n{doc['text'][:150]}"
-                )
-        
-        context = "\n\n".join(context_parts)
+            elif modality == "video_frame":
+                frame_texts.append(doc["text"])
+            
+            else: 
+                other_texts.append(doc["text"])
 
-        # Step 3: Context size control 
-        context = context[:800]
+        # Combine texts
+        combined_audio = " ".join(audio_texts)
+        combined_frames = " ".join(frame_texts)
+        combined_other = " ".join(other_texts)
 
-        # Step 4: Extract sources correctly
-        sources = [
+        # Step 3: Build Strong Context
+
+        context = f"""
+    AUDIO CONTENT (main meaning):
+    {combined_audio}
+
+    VISUAL CONTENT (supporting details):
+    {combined_frames}
+
+    OTHER CONTENT:
+    {combined_other}
+    """
+        # Limit size
+        context = context[:1200]
+
+        # Step 4: Sources
+        sources = list(set([
             doc.get("metadata", {}).get("source", "unknown")
-            for doc in docs                     
-        ]
-    
-        # Step 5: Build prompt
-        prompt = self.prompt_builder.build_prompt(query, context)
-        if not prompt:
-            raise ValueError("Prompt is empty or None")
-        
+            for doc in docs
+        ]))
+
+        # Step 5: Strong Prompt
+        prompt = f"""
+    You are an AI assistant analyzing a video.
+    Use the following information:
+
+    {context}
+
+    Question: {query}
+
+    TASK:
+    - Identify the MAIN MESSAGE or THEME of the video
+    - Do NOT just describe what is visible
+    - Use AUDIO content to infer meaning
+    - Answer in 1-2 sentences clearly
+
+    If the audio suggests motivation, encouragement, or advice -> say it explicitly.
+
+
+    FINAL ANSWER:
+    """
+ 
         print("\n--- PROMPT PREVIEW ---")
-        print(prompt[:300])
+        print(prompt[:500])
         print("--------------------\n")
 
         # Step 6: Generate answer
@@ -80,6 +125,10 @@ class RAGPipeline:
 
     def stream(self, query: str):
         docs = self.retriever.retrieval(query, top_k = 3)
+        print("\n=== RETRIEVED DOCS===")
+        for d in docs:
+            print(d["text"], "|", d["metadata"])
+        print("=================\n")
 
         context_parts = []
 
@@ -87,19 +136,22 @@ class RAGPipeline:
             metadata = doc.get("metadata", {})
             modality = metadata.get("modality", "text")
 
-            if modality == "audio":
+            if modality in ["audio", "video_audio"]:
                 start = metadata.get("start_time", 0)
-                end = metadata.get("end_time", 0)
-
                 context_parts.append(
                     f"[Source {i + 1} | Audio {start:.2f}s]\n{doc['text'][:150]}"
                 )
+            
+            elif modality == "video_frame":
+                timestamp = metadata.get("timestamp", 0)
+                context_parts.append(
+                    f"[Source {i + 1} | Frame {timestamp:.2f}s]\n{doc['text'][:150]}"
+                )
+            
             else:
                 context_parts.append(
                     f"[Source {i + 1}]\n{doc['text'][:150]}"
                 )
-        
-        context = "\n\n".join(context_parts)
 
         # Context size control
         context = context[:2000]

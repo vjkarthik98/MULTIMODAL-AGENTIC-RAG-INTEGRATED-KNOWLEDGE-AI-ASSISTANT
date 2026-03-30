@@ -2,7 +2,7 @@ from fastapi import APIRouter, UploadFile, File
 import os
 
 from app.pipeline.rag_pipeline import RAGPipeline
-from app.ingestion.text_ingest import ingest_pipeline
+
 
 from fastapi.responses import StreamingResponse
 
@@ -14,6 +14,10 @@ from app.retrieval.query_pipeline import query_text, query_image
 
 from faster_whisper import WhisperModel
 
+from app.retrieval.query_pipeline import query_audio
+
+from app.retrieval.query_pipeline import query_video
+
 class QueryRequest(BaseModel):
     query:str
 
@@ -22,9 +26,6 @@ router = APIRouter()
 pipeline = RAGPipeline()
 
 UPLOAD_DIR = "data/raw"
-
-# Load audio model once
-audio_model = WhisperModel("base", compute_type="int8")
 
 # Health check
 @router.get("/test")
@@ -94,23 +95,54 @@ async def rag_audio_query(file: UploadFile = File(...)):
             content = await file.read()
             f.write(content)
 
-        # step 1: Transcribe audio
-        segments, _ = audio_model.transcribe(file_path)
-
-        query_text_data = ""
-        for segment in segments:
-            query_text_data += segment.text + " "
-
-        query_text_data = query_text_data.strip()
+        # step 1: Convert audio -> text(via query pipeline)
+        query_text_data = query_audio(file_path)
 
         if not query_text_data:
             return {"error": "Empty transcription"}
-        print(f"\n Transcribed Query: {query_text_data}\n")
+        
+        print(f"\n Transcibed Query: {query_text_data}\n")
 
-        # Step 2: Run Full RAG pipeline
+        # Step 2: Run RAG
         result = pipeline.run(query_text_data)
 
-        return result
+        return {
+            "transcribed_query": query_text_data,
+            "answer": result
+        }
+       
+    except Exception as e:
+        return {"error": str(e)}
+
+# Video Query
+@router.post("/rag/query/video")
+async def rag_video_query(file: UploadFile = File(...)):
+    try:
+        os.makedirs(UPLOAD_DIR, exist_ok = True)
+
+        file_path = os.path.join(UPLOAD_DIR, file.filename)
+
+        # Save uploaded video
+        with open(file_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+
+        # Step 1: Video -> text
+        query_text_data = query_video(file_path)
+
+        if not query_text_data:
+            return {"error": "Empty transcription"}
+        
+        print(f"\n Transcribed Video Query: {query_text_data}\n")
+
+        # Step 2: Run RAG
+        result = pipeline.run(query_text_data)
+
+        return {
+            "transcribed_query": query_text_data,
+            "answer": result
+        }
     
     except Exception as e:
         return {"error": str(e)}
+

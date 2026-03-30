@@ -66,6 +66,10 @@ def process_file(file_path: str):
                 pre_embedded_docs.append(doc)
             else:
                 text_docs.append(doc)
+        print("\n=== TEXT DOCS BEFORE EMBEDDING ===")
+        for d in text_docs[:10]:
+            print(d.text, d.metadata.get("modality"))
+        print("=================================\n")
 
         # Embed only text-based docs
         if text_docs:
