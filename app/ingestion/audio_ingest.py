@@ -41,11 +41,11 @@ def ingest(file_path:str) -> list[IngestedDocument]:
                 )
             )
 
-            # Validation (important for pipeline safety)
-            if not documents:
-                raise ValueError("No valid audio segments extracted")
+        # Validation (important for pipeline safety)
+        if not documents:
+            raise ValueError("No valid audio segments extracted")
             
-            return documents
+        return documents
         
     except Exception as e:
         raise RuntimeError(f"Audio ingestion failed: {str(e)}")

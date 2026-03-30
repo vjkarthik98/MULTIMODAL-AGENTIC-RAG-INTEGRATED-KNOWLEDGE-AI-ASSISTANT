@@ -1,6 +1,6 @@
 import uuid
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
 from app.core.config import settings
 
 class QdrantVectorStore:
@@ -52,10 +52,7 @@ class QdrantVectorStore:
                 # core metadata (clean + controlled)
                 "text": doc["text"],
                 "document_id": document_id,
-                "source": metadata.get("source", "unknown"),
-                "modality": modality,
-                "chunk_id": metadata.get("chunk_id"),
-                "ingestion_time": metadata.get("ingestion_time"),
+                **metadata 
             }
 
             point = PointStruct(
@@ -70,12 +67,25 @@ class QdrantVectorStore:
                 points=[point]
             )
     # TEXT SEARCH
-    def search_text(self, query_vector, limit=5):
+    def search_text(self, query_vector, limit=5, source_filter = None):
+
+        query_filter = None
+
+        if source_filter:
+            query_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="source",
+                        match=MatchValue(value=source_filter)
+                    )
+                ]
+            )
         
         results = self.client.query_points(
             collection_name="text_collection",
             query=query_vector,
-            limit=limit
+            limit=limit,
+            query_filter=query_filter
         )
 
         return [

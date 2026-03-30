@@ -84,8 +84,6 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Optimized for CPU environments (no GPU dependency)
 - Designed for lightweight deployment and scalability
 
-
-
 # [0.6.0] - Improved RAG Pipeline
 
 ### Added
@@ -164,3 +162,28 @@ The format follows Keep a Changelog and Semantic Versioning.
 ### Result
 - Full multimodal RAG (text, image, audio)
 - Production-grade ingestion + query pipeline
+
+# [0.10.0] - Multimodal Video Rag
+### Added 
+- Video ingestion pipeline
+- Frame extraction + BLIP captioning
+- Audio extraction + transcription (faster-whisper)
+- Multimodal embeddings (audio + frame)
+- Unified storage in Qdrant
+- Video query endpoint
+- Retrieval balancing (audio + frame)
+
+### Improved
+- Query rewriting for better semantic retrieval
+- Context aggregation for better LLM understanding
+- Prompt optimization for meaning-based answers
+
+### Fixed
+- Audio chunking issue (single segment bug)
+- FFmpeg path resolution
+- Tuple vs dict retrieval bug
+- Metadata loss in Qdrant payload
+
+### Known Issues
+- LLM sometimes prefers visual description over audio meaning
+- Needs reranking / weighting improvement
