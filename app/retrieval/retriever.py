@@ -38,7 +38,7 @@ class Retriever:
         rewritten_query = self._rewrite_query(query)
         print("DEBUG QUERY:", rewritten_query)
 
-        query_vector = self.embedder.embed_text(rewritten_query)
+        query_vector = self.embedder.embed_query(rewritten_query)
 
 
         # Step 2: Retrieve more results
@@ -73,8 +73,11 @@ class Retriever:
                 frame_docs[:2] +
                 text_docs[:1]
             )
-        else:
+        elif frame_docs:
             final_results = frame_docs[:top_k]
+
+        else:
+            final_results = text_docs[:top_k]
 
 
         # Step 5: Debug 

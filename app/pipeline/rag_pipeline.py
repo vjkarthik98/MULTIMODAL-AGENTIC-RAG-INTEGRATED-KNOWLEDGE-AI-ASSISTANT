@@ -12,6 +12,7 @@ class RAGPipeline:
     def run(self, query: str):
         # Step 1: Retrieve relevant documents (TOP-K CONTROL)
         docs = self.retriever.retrieval(query, top_k=5)
+        print("\n RETRIEVED DOCS:\n", docs)
 
         # Normalize docs(handle tuple issue)
         normalized_docs = []
@@ -152,10 +153,18 @@ class RAGPipeline:
                 context_parts.append(
                     f"[Source {i + 1}]\n{doc['text'][:150]}"
                 )
+        
+        context = "\n\n".join(context_parts)
+
 
         # Context size control
         context = context[:2000]
 
         prompt = self.prompt_builder.build_prompt(query, context)
         
-        return self.llm.stream(prompt)
+        # Wrap LLM stream properly
+        def generator():
+            for token in self.llm.stream(prompt):
+                yield token + "\n"
+        
+        return generator()

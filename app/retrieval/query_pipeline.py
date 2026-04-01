@@ -13,7 +13,7 @@ clip_embedder = ClipTextEmbedder()
 
 # TEXT QUERY
 def query_text(query: str):
-    query_vector = embedder.embed_text(query)
+    query_vector = embedder.embed_query(query)
     return vector_store.search_text(query_vector)
 
 # IMAGE QUERY
