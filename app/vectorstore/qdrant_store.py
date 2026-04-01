@@ -11,8 +11,15 @@ class QdrantVectorStore:
             port=settings.QDRANT_PORT
         )
 
+        # Centralized Collection Names
+        self.TEXT_COLLECTION = "text_collection"
+        self.IMAGE_COLLECTION = "image_collection"
+
+
     # Create collection with given size
     def create_collection(self, collection_name: str, vector_size: int = int):
+        print(f"Creating Collection: {collection_name} (dim={vector_size})")
+
         self.client.create_collection(
             collection_name=collection_name,
             vectors_config=VectorParams(
@@ -31,7 +38,13 @@ class QdrantVectorStore:
     # Insert Multimodal
     def insert_documents(self, documents):
 
+        if not documents:
+            print("No documents to insert")
+            return
+
         document_id = str(uuid.uuid4())
+        points = []
+
 
         for doc in documents:
             metadata = doc.get("metadata", {})
@@ -39,11 +52,12 @@ class QdrantVectorStore:
 
             # Decide collection + dimension
             if modality == "image":
-                collection_name = "image_collection"
+                collection_name = self.IMAGE_COLLECTION
                 vector_size = 768
             else:
-                collection_name = "text_collection"
-                vector_size = 384
+                collection_name = self.TEXT_COLLECTION
+
+                vector_size = len(doc["embedding"])
 
             # Ensure correct collection
             self._ensure_collection(collection_name, vector_size)
@@ -59,15 +73,19 @@ class QdrantVectorStore:
                 id=str(uuid.uuid4()), # unique per chunk
                 vector=doc["embedding"],
                 payload=payload
-                )
-        
-            # Insert oer collection
+            )
+            points.append(point)
+            # Batch Upsert 
+            print(f" Inserting {len(points)} points into {collection_name}")
+
             self.client.upsert(
                 collection_name=collection_name,
-                points=[point]
+                points=points
             )
     # TEXT SEARCH
     def search_text(self, query_vector, limit=5, source_filter = None):
+
+        print(f" Searching in: {self.TEXT_COLLECTION}")
 
         query_filter = None
 
@@ -82,11 +100,13 @@ class QdrantVectorStore:
             )
         
         results = self.client.query_points(
-            collection_name="text_collection",
+            collection_name=self.TEXT_COLLECTION,
             query=query_vector,
             limit=limit,
             query_filter=query_filter
         )
+
+        print(f" Retrieved {len(results.points)} results")
 
         return [
             { 
@@ -101,7 +121,7 @@ class QdrantVectorStore:
     def search_image(self, query_vector, limit=5):
  
         results = self.client.query_points(
-            collection_name="image_collection",
+            collection_name=self.IMAGE_COLLECTION,
             query=query_vector,
             limit=limit
         )

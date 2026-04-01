@@ -187,3 +187,28 @@ The format follows Keep a Changelog and Semantic Versioning.
 ### Known Issues
 - LLM sometimes prefers visual description over audio meaning
 - Needs reranking / weighting improvement
+
+# [0.11.0] - UI
+### Features
+- UI with Multi-chat sessions
+- Streaming responses (real-time token generation)
+- Multimodal upload support (PDF, Image, Audio, Video)
+- File ingestion pipeline integrated with UI
+- Session-based chat switching
+
+### RAG Improvements
+- Stable retrieval pipeline (fixed modality handling)
+- Context construction improvements
+- Source attribution in responses
+
+### Bug Fixes
+- Fixed Qdrant collection mismatch issues
+- Fixed embedding consistency (query vs document)
+- Fixed streaming pipeline (backend + frontend sync)
+- Fixed Gradio message format issues
+- Fixed chat state synchronization bug
+
+### Internal
+- Refactored retriever logic
+- Improved vector store insertion reliability
+- Cleaned pipeline structure
