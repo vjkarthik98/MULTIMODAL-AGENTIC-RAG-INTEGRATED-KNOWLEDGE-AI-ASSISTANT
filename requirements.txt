@@ -25,3 +25,6 @@ pdfplumber
 python-docx
 pandas
 openpyxl
+
+redis
+pymongo

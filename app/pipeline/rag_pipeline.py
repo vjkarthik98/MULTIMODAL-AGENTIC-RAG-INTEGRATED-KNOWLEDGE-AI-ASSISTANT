@@ -1,6 +1,8 @@
 from app.retrieval.retriever import Retriever
 from app.prompt.prompt_builder import PromptBuilder
 from app.llm.gguf_model import GGUFModel 
+from app.memory.redis_memory import RedisMemory
+from app.memory.mongo_memory import MongoMemory
 
 
 class RAGPipeline:
@@ -8,8 +10,20 @@ class RAGPipeline:
         self.retriever = Retriever()
         self.prompt_builder = PromptBuilder()
         self.llm = GGUFModel()
+        self.memory = RedisMemory()
+        self.mongo_memory = MongoMemory()
 
-    def run(self, query: str):
+    def run(self, query: str, session_id: str = "default"):
+
+        # Step 0: Load Memory
+        history = self.memory.get_history(session_id)
+
+        history_text = ""
+        for msg in history:
+            role = msg["role"].upper()
+            content = msg["content"]
+            history_text += f"{role}: {content}\n"
+
         # Step 1: Retrieve relevant documents (TOP-K CONTROL)
         docs = self.retriever.retrieval(query, top_k=5)
         print("\n RETRIEVED DOCS:\n", docs)
@@ -94,6 +108,10 @@ class RAGPipeline:
         # Step 5: Strong Prompt
         prompt = f"""
     You are an AI assistant analyzing a video.
+
+    Conversation History:
+    {history_text}
+
     Use the following information:
 
     {context}
@@ -101,13 +119,11 @@ class RAGPipeline:
     Question: {query}
 
     TASK:
-    - Identify the MAIN MESSAGE or THEME of the video
-    - Do NOT just describe what is visible
-    - Use AUDIO content to infer meaning
-    - Answer in 1-2 sentences clearly
-
-    If the audio suggests motivation, encouragement, or advice -> say it explicitly.
-
+    - Understant the conversation history before answering
+    - Identify the MAIN MESSAGE or THEME
+    - Do NOT just describe visuals
+    - Use AUDIO content for meaning
+    - Answer clearly in 1-2 sentences 
 
     FINAL ANSWER:
     """
@@ -119,6 +135,15 @@ class RAGPipeline:
         # Step 6: Generate answer
         answer = self.llm.generate(prompt)
 
+        # Step 7: Store Memory (Redis)
+        self.memory.add_message(session_id, "user", query)
+        self.memory.add_message(session_id, "assistant", answer)
+
+        # Step 8: Store in MongoDB
+        self.mongo_memory.store_message(session_id, "user", query)
+        self.mongo_memory.store_message(session_id, "assistant", answer)
+
+        # Step 9: Return
         return {
             "answer": answer,
             "sources": sources

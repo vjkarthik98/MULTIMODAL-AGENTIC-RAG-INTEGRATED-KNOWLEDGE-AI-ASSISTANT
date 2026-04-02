@@ -212,3 +212,29 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Refactored retriever logic
 - Improved vector store insertion reliability
 - Cleaned pipeline structure
+
+# [0.12.0] - Memory System Integration
+### Features
+- Added Redis-based short-term conversational memory
+- Added MongoDB-based persistent memory storage
+- Implemented session-based memory handling (multi-user support)
+- Integrated memory into RAG pipeline
+- Enabled memory support in Gradio UI (Non-Stream mode)
+
+### Improvements
+- Clean Separation of memory layers:
+    - Redis -> short-term context
+    - MongoDB -> long-term storage
+    - Qdrant -> knowledge retrieval
+- Improved pipeline structure for memory injection
+- Fixed session handling across API and UI
+
+### Fixes
+- Fixed Redis key formatting issue (Whitespace bug)
+- Fixed Gradio streaming vs non-stream mismatch
+- Fixed memory not storing from UI requests
+- Corrected pipeline memory storage order (post-generation)
+
+### Infr
+- Dockerized Redis and MongoDB
+- Added persistent container strategy (restart policies)
