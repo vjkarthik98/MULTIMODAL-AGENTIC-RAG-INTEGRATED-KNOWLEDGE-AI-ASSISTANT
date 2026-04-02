@@ -1,37 +1,38 @@
 import gradio as gr
 import requests
 
-QUERY_API = "http://127.0.0.1:8000/rag/query/stream"
+QUERY_API = "http://127.0.0.1:8000/rag/query"
 UPLOAD_API = "http://127.0.0.1:8000/rag/upload/file"
 
 
 # BACKEND STEM
 
-def stream_response(message, history):
+def chat_response(message, history):
     history = history or []
-
-    history.append({"role": "user", "content": message})
-    history.append({"role": "assistant", "content": ""})
 
     try:
         response = requests.post(
             QUERY_API,
-            json={"query": message},
-            stream=True
+            json={
+                "query": message,
+                "session_id": "gradio_user"
+            },
         )
 
-        partial = ""
+        data = response.json()
+        print("DEBUG RESPONSE:", data)
 
-        # STREAM LOOP
-        for line in response.iter_lines(decode_unicode = True):
-            if line:
-                partial += line
-                history[-1]["content"] = partial
-                yield "", history
+        answer = data.get("answer", "No answer")
+
+        # Append to chat history
+        history.append({"role": "user", "content": message})
+        history.append({"role": "assistant", "content": answer})
+       
+        return history
 
     except Exception as e:
-        history[-1]["content"] = f"Error: {str(e)}"
-        yield "", history  
+        history.append({"role": "assitant", "content": f"Error: {str(e)}"})
+        return history
 
 # UPLOAD STATUS 
 def upload_status_fn(file):
@@ -123,22 +124,16 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         outputs=[chatbot, current_chat_index]
     )
 
-    # STREAM WRAPPER
-    def wrapped_stream(message, history, chats, idx):
-        for _, updated_history in stream_response(message, history):
-            chats[idx] = updated_history
-            yield "", updated_history
-
     msg.submit(
-        wrapped_stream,
-        [msg, chatbot, chats, current_chat_index],
-        [msg, chatbot]
+        chat_response,
+        [msg, chatbot],
+        chatbot
     )  
 
     send_btn.click(
-        wrapped_stream,
-        [msg, chatbot, chats, current_chat_index],
-        [msg, chatbot]
+        chat_response,
+        [msg, chatbot],
+        chatbot
     )
 
     # Upload events (2-step UX)
