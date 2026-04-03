@@ -16,26 +16,46 @@ class RedisMemory:
         self.max_messages = max_messages
 
     def _get_key(self, session_id: str) -> str:
-        return f"chat: {session_id}"
+        return f"chat:{session_id}"
     
-    def get_history(self, session_id: str) -> List[Dict]:
+    def get_history(self, session_id: str):
         """
         Retrieve chat history for a session.
         """
         key = self._get_key(session_id)
-        data=self.client.get(key)
 
+        data= self.client.get(key)
+
+        print("\n[RedisMemory] RAW DATA:", data)
+        
         if not data:
             return []
         
-        return json.loads(data)
+        try:
+            history = json.loads(data)
+            return history
+        except Exception as e:
+            print("[RedisMemory] JSON ERROR:", e)
+            return []
+        
     
     def add_message(self, session_id: str, role: str, content: str):
         """
         Add a message to memory.
         """
-        history = self.get_history(session_id)
+        key = self._get_key(session_id)
 
+        data = self.client.get(key)
+
+        if data:
+            try:
+                history = json.loads(data)
+            except:
+                history = []
+        else:
+            history = []
+
+        # Append new message
         history.append({
             "role": role,
             "content": content
@@ -44,8 +64,10 @@ class RedisMemory:
         # Keep only last N messages
         history = history[-self.max_messages:]
 
-        key = self._get_key(session_id)
+
         self.client.set(key, json.dumps(history))
+
+        print(f"[RedisMemory] STORED -> {key} | length={len(history)}")
 
     def clear_memory(self, session_id: str):
         """
@@ -53,4 +75,5 @@ class RedisMemory:
         """
         key = self._get_key(session_id)
         self.client.delete(key)
+        print(f"[RedisMemory] CLEARED -> {key}")
     
