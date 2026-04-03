@@ -3,6 +3,8 @@ from app.prompt.prompt_builder import PromptBuilder
 from app.llm.gguf_model import GGUFModel 
 from app.memory.redis_memory import RedisMemory
 from app.memory.mongo_memory import MongoMemory
+from app.memory.memory_manager import MemoryManager
+
 
 
 class RAGPipeline:
@@ -10,19 +12,20 @@ class RAGPipeline:
         self.retriever = Retriever()
         self.prompt_builder = PromptBuilder()
         self.llm = GGUFModel()
-        self.memory = RedisMemory()
+        self.memory_manager = MemoryManager(self.llm)
         self.mongo_memory = MongoMemory()
 
     def run(self, query: str, session_id: str = "default"):
 
         # Step 0: Load Memory
-        history = self.memory.get_history(session_id)
+        history = self.memory_manager.get_history(session_id)
 
+        # Convert history -> text
         history_text = ""
         for msg in history:
-            role = msg["role"].upper()
+            role = msg["role"]
             content = msg["content"]
-            history_text += f"{role}: {content}\n"
+            history_text += f"{role.upper()}: {content}\n"
 
         # Step 1: Retrieve relevant documents (TOP-K CONTROL)
         docs = self.retriever.retrieval(query, top_k=5)
@@ -133,11 +136,22 @@ class RAGPipeline:
         print("--------------------\n")
 
         # Step 6: Generate answer
+        print("\n[PIPELINE] Generating answer...")
+
         answer = self.llm.generate(prompt)
 
-        # Step 7: Store Memory (Redis)
-        self.memory.add_message(session_id, "user", query)
-        self.memory.add_message(session_id, "assistant", answer)
+        print("\n[PIPELINE] Answer generated:")
+        print(answer)
+
+        # Step 7: Store Memory (Summarized)
+        memory_result = self.memory_manager.add_interaction(
+            session_id,
+            query,
+            answer
+        )
+        if memory_result.get("summarized"):
+            print("\n MEMORY SUMMARIZED:")
+            print(memory_result["summary"])
 
         # Step 8: Store in MongoDB
         self.mongo_memory.store_message(session_id, "user", query)

@@ -238,3 +238,19 @@ The format follows Keep a Changelog and Semantic Versioning.
 ### Infr
 - Dockerized Redis and MongoDB
 - Added persistent container strategy (restart policies)
+
+# [0.13.0] - Summarization of Redis Memory
+### Added 
+- MemoryManager for automatic summarization
+- LLM-based conversation summarization
+- Conversation history injection into RAG pipeline
+
+### Improved
+- Prompt now includes conversation history
+- Gradio UI supports conversational flow
+
+### Fixed
+- Redis key mismatch bug
+- Memory overwrite issue
+- Gradio message format error
+- LLM response not returned properly

@@ -27,12 +27,13 @@ def chat_response(message, history):
         # Append to chat history
         history.append({"role": "user", "content": message})
         history.append({"role": "assistant", "content": answer})
+
        
-        return history
+        return "", history
 
     except Exception as e:
-        history.append({"role": "assitant", "content": f"Error: {str(e)}"})
-        return history
+        history.append({"role": "assistant", "content": f"Error: {str(e)}"})
+        return "", history
 
 # UPLOAD STATUS 
 def upload_status_fn(file):
@@ -126,14 +127,14 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
 
     msg.submit(
         chat_response,
-        [msg, chatbot],
-        chatbot
+        inputs=[msg, chatbot],
+        outputs=[msg, chatbot]
     )  
 
     send_btn.click(
         chat_response,
-        [msg, chatbot],
-        chatbot
+        inputs=[msg, chatbot],
+        outputs=[msg, chatbot]
     )
 
     # Upload events (2-step UX)
