@@ -264,3 +264,27 @@ The format follows Keep a Changelog and Semantic Versioning.
 
 ### Improvement
 - Designed token-efficient, context-aware memory system
+
+# [v0.15.0] - Systerm Integration & Stabilization
+### Features
+- Image Captioning using BLIP
+- Audio Transcription pipeline
+- Video frame + audio processing
+- Unified embedding pipeline (SentenceTransformer - 384 dim)
+- Qdrant Vector database integration
+- Redis (short-term) + MongoDB(long-term) memory
+- Dynamic, modality-aware prompt system
+
+### Improved
+- Retrieval accuracy using reranker
+- Reduced hallucinations with retrieval guard
+- Unified embedding space across modalities
+- Better query relevance and context handling
+
+### Fixed
+- BLIP captioning failures(generate()bug)
+- Image ingestion issues (PIL, RGB, EXIF)
+- Vector dimension mismatch (768 vs 384)
+- Retrieval and reranker execution issues
+
+

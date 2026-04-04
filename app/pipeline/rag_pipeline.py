@@ -108,28 +108,42 @@ class RAGPipeline:
             for doc in docs
         ]))
 
-        # Step 5: Strong Prompt
+        # Step 5: Dynamic Role Deteciton
+        modality_types = set([
+            doc.get("metadata", {}).get("modality", "text")
+            for doc in docs
+        ])
+        
+        if "image" in modality_types:
+            system_role = "You are an AI assistant analyzing images."
+        elif "audio" in modality_types or "video_audio" in modality_types:
+            system_role = "You are an AI assistant analyzing audio content."
+        elif "video_frame" in modality_types:
+            system_role = "You are an AI assistant analyzing video content."
+        else:
+            system_role = "You are an AI assistant answering general knowledge questions."
+
+        # Step 6: Dynamic Prompt  
         prompt = f"""
-    You are an AI assistant analyzing a video.
+        {system_role}
 
-    Conversation History:
-    {history_text}
+        Conversation History:
+        {history_text}
 
-    Use the following information:
+        Use the following information:
 
-    {context}
+        {context}
 
-    Question: {query}
+        Question: {query}
 
-    TASK:
-    - Understant the conversation history before answering
-    - Identify the MAIN MESSAGE or THEME
-    - Do NOT just describe visuals
-    - Use AUDIO content for meaning
-    - Answer clearly in 1-2 sentences 
+        TASK:
+        - Use the provided context strictly
+        - Do not hallucinate
+        - Answer clearly and concisely
+        - If unsure, say you don't know
 
-    FINAL ANSWER:
-    """
+        FINAL ANSWER:
+        """
  
         print("\n--- PROMPT PREVIEW ---")
         print(prompt[:500])

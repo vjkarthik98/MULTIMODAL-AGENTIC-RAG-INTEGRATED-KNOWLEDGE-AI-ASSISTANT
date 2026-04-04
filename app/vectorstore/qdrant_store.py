@@ -51,13 +51,8 @@ class QdrantVectorStore:
             modality = metadata.get("modality", "text")
 
             # Decide collection + dimension
-            if modality == "image":
-                collection_name = self.IMAGE_COLLECTION
-                vector_size = 768
-            else:
-                collection_name = self.TEXT_COLLECTION
-
-                vector_size = len(doc["embedding"])
+            collection_name = self.TEXT_COLLECTION
+            vector_size = len(doc["embedding"])
 
             # Ensure correct collection
             self._ensure_collection(collection_name, vector_size)

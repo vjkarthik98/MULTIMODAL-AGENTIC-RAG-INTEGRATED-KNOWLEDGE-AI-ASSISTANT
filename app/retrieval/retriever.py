@@ -1,13 +1,24 @@
 from app.vectorstore.qdrant_store import QdrantVectorStore
 from app.embeddings.text_embedder import TextEmbedder
 
+from sentence_transformers import CrossEncoder
+
+
+
 
 class Retriever:
 
     def __init__(self):
+        print("RERANKER INITIALIZED")
 
         self.vector_store =  QdrantVectorStore()
         self.embedder = TextEmbedder()
+
+        # Reranker Model
+        self.reranker = CrossEncoder(
+            "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        )
+
 
     # -----------------------
     # NEW: QUERY REWRITING
@@ -29,6 +40,29 @@ class Retriever:
         
         return query
     
+    # Rerank Function
+    def _rerank(self, query: str, results: list, top_k: int):
+        if not results:
+            return []
+        
+        pairs = [
+            (query, r["text"])
+            for r in results
+        ]
+        scores = self.reranker.predict(pairs)
+
+        # attach scores
+        for i, r in enumerate(results):
+            r["rerank_score"] = float(scores[i])
+
+        # sort by rerank score
+        results = sorted(
+            results,
+            key = lambda x: x["rerank_score"],
+            reverse=True
+        )
+        return results[:top_k]
+        
     # ---------------------------
     # MAIN RETRIEVAL 
     # ---------------------------
@@ -44,9 +78,11 @@ class Retriever:
         # Step 2: Retrieve more results
         results = self.vector_store.search_text(
             query_vector,
-            limit=top_k * 2, 
+            limit=top_k * 3, 
             source_filter=source
         )
+        print("RERANKER RUNNING...")
+        results = self._rerank(query, results, top_k * 2)
 
         # Step 3: Separate modalities
         audio_docs = []
@@ -83,7 +119,7 @@ class Retriever:
         # Step 5: Debug 
         print("\n=== FINAL RETRIEVAL ===")
         for r in final_results:
-            print(r["metadata"].get("modality"), "|", r["text"])
+            print(r["metadata"].get("modality"), "|", r["text"][:80], "| score:", r.get("rerank_score"))
         print("========================\n")
 
         return final_results
