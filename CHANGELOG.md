@@ -287,4 +287,18 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Vector dimension mismatch (768 vs 384)
 - Retrieval and reranker execution issues
 
+# [v0.16.0] - Multimodal Intelligence & Reasoning
+### Features
+- Reasoning Engine
+- Query Decomposition
+- Mutli-Query Retrieval
+- Result Fusion & Ranking Layer
+- Diversity Filtering for context optimization
+
+### Improved
+- Retrieval quality via multi-hop search
+- Answer quality with structured reasoning
+- Context relevance with fusion + filtering
+- Memory + reasoning integration
+
 

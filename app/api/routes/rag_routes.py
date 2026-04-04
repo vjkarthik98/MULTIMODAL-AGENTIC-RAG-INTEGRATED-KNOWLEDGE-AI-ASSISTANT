@@ -45,7 +45,7 @@ def rag_image_query(q: str):
 @router.post("/query")
 def query_rag(request: QueryRequest):
     try:
-        result = pipeline.run(
+        result = query_text(
             request.query,
             session_id = request.session_id
         )

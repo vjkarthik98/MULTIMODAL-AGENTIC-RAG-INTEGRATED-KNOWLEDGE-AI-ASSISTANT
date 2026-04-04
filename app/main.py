@@ -3,7 +3,7 @@ from app.api.routes.rag_routes import router as rag_router
 
 app= FastAPI(
     title = "Multimodal RAG Assistant",
-    version = "0.15.0"
+    version = "0.16.0"
 )
 
 # Include RAG routes
