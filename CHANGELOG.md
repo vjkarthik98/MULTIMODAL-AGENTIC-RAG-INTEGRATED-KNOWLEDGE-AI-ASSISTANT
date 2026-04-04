@@ -254,3 +254,13 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Memory overwrite issue
 - Gradio message format error
 - LLM response not returned properly
+
+# [0.14.0] - Smart Memory Optimization
+### Added
+- Memory formatter
+- Semantic memory filtering
+- Memory summarization (LLM-based)
+- Memory fusion Layer
+
+### Improvement
+- Designed token-efficient, context-aware memory system

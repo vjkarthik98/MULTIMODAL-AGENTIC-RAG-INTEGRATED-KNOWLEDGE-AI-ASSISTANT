@@ -3,6 +3,10 @@ from app.vectorstore.qdrant_store import QdrantVectorStore
 from app.embeddings.clip_text_embedder import ClipTextEmbedder
 from app.ingestion.audio_ingest import model
 from moviepy.editor import VideoFileClip
+from app.memory.redis_memory import RedisMemory
+from app.memory.memory_filter import filter_relevant_history
+from app.memory.memory_fusion import build_memory_context
+from app.memory.summarizer import summarize_conversation
 import os
 
 
@@ -12,9 +16,51 @@ clip_embedder = ClipTextEmbedder()
 
 
 # TEXT QUERY
-def query_text(query: str):
-    query_vector = embedder.embed_query(query)
-    return vector_store.search_text(query_vector)
+def query_text(query: str, session_id: str = "default"):
+    try:
+        # Step 1: Get Memory (Redis)
+        memory = RedisMemory()
+        history = memory.get_history(session_id)
+
+        # Step 2: Filter relevant history
+        filtered_history = filter_relevant_history(
+            query,
+            history,
+            embedder
+        )
+
+        # Step 3: Summarize if long
+        summary = ""
+        if len(history) > 6:
+            summary = summarize_conversation(model, history)
+
+        # Step 4: Build memory context
+        memory_context = build_memory_context(
+            summary,
+            filtered_history
+        )
+
+        # Step 5: Create final query
+        final_query = query
+        if memory_context:
+            final_query = f"""
+{memory_context}
+
+User Question:
+{query}
+"""
+        # Step 6: Embed + Search
+        query_vector = embedder.embed_query(final_query)
+        results = vector_store.search_text(query_vector)
+
+        # Step 7: Store memory
+        memory.add_message(session_id, "user", query)
+        memory.add_message(session_id, "assistant", str(results))
+
+        return results
+    
+    except Exception as e:
+        return {"errro": str(e)}
 
 # IMAGE QUERY
 def query_image(query: str):
