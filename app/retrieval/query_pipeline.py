@@ -14,6 +14,18 @@ embedder = TextEmbedder()
 vector_store = QdrantVectorStore()
 clip_embedder = ClipTextEmbedder()
 
+# Detect Query
+def detect_query_type(query: str):
+    query = query.lower()
+
+    if "image" in query or "picture" in query or "photo" in query:
+        return "image"
+    elif "audio" in query or "voice" in query:
+        return "audio"
+    elif "video" in query:
+        return "video"
+    else:
+        return "text"
 
 # TEXT QUERY
 def query_text(query: str, session_id: str = "default"):
@@ -40,27 +52,73 @@ def query_text(query: str, session_id: str = "default"):
             filtered_history
         )
 
-        # Step 5: Create final query
-        final_query = query
-        if memory_context:
-            final_query = f"""
+        # Rerieval uses only Query
+        query_vector = embedder.embed_query(query)
+
+        # Detect query type
+        query_type = detect_query_type(query)
+
+        # Retrieve from vector DB
+        results = vector_store.search_text(query_vector)
+
+        # Filter by Modality
+        if query_type == "image":
+            results = [
+                r for r in results
+                if r["metadata"].get("modality") == "image"
+            ]
+
+        elif query_type == "audio":
+            results = [
+                r for r in results
+                if r ["metadata"].get("modality") == "audio"
+            ]
+        elif query_type == "video":
+            results = [
+                r for r in results
+                if r["metadata"].get("modality") == "video"
+            ]
+
+        if not results:
+            return {
+                "answer": "I couldn't find relevant information in the knowledge base. Please upload the data or ask a different question.",
+                "sources": []
+            }
+
+        # Step 5: Build cotext from retrieved docs
+        retrieved_text = "\n".join(
+            [doc.get("text", "") for doc in results]
+        )
+
+        # Step 6: Build Final Prompt
+        final_prompt = f"""
+You are an intelligent assistant.
+
+Conversation Context:
 {memory_context}
+
+Knowledge Context:
+{retrieved_text}
 
 User Question:
 {query}
+
+Answer:
 """
-        # Step 6: Embed + Search
-        query_vector = embedder.embed_query(final_query)
-        results = vector_store.search_text(query_vector)
+        # Step 7: Generate Answer (LLM)
+        answer = model.generate(final_prompt)
 
-        # Step 7: Store memory
+        # Step 8: Store memory
         memory.add_message(session_id, "user", query)
-        memory.add_message(session_id, "assistant", str(results))
+        memory.add_message(session_id, "assistant", answer)
 
-        return results
+        return {
+            "answer": answer,
+            "sources": results
+        }
     
     except Exception as e:
-        return {"errro": str(e)}
+        return {"error": str(e)}
 
 # IMAGE QUERY
 def query_image(query: str):

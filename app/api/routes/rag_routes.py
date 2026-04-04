@@ -34,8 +34,8 @@ def test_route():
     return{"message" : "RAG route working"}
 
 @router.get("/rag/query/text")
-def rag_text_query(q: str):
-    return {"results": query_text(q)}
+def rag_text_query(q: str, session_id: str = "default"):
+    return {"results": query_text(q, session_id=session_id)}
 
 @router.get("/rag/query/image")
 def rag_image_query(q: str):
@@ -58,7 +58,7 @@ def query_rag(request: QueryRequest):
 # Stream Endpoint 
 @router.post("/query/stream")
 def stream_query(request: QueryRequest):
-    generator = pipeline.stream(request.query)
+    generator = pipeline.stream(request.query, session_id=request.session_id)
 
     return StreamingResponse(
         generator,
@@ -113,7 +113,7 @@ async def rag_audio_query(file: UploadFile = File(...)):
         print(f"\n Transcibed Query: {query_text_data}\n")
 
         # Step 2: Run RAG
-        result = pipeline.run(query_text_data, session_id="audio_user")
+        result = pipeline.run(query_text_data, session_id="audio_" + file.filename)
 
         return {
             "transcribed_query": query_text_data,
@@ -145,7 +145,7 @@ async def rag_video_query(file: UploadFile = File(...)):
         print(f"\n Transcribed Video Query: {query_text_data}\n")
 
         # Step 2: Run RAG
-        result = pipeline.run(query_text_data, session_id="video_user")
+        result = pipeline.run(query_text_data, session_id="video_" + file.filename)
 
         return {
             "transcribed_query": query_text_data,
