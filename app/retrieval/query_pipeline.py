@@ -7,12 +7,23 @@ from app.memory.redis_memory import RedisMemory
 from app.memory.memory_filter import filter_relevant_history
 from app.memory.memory_fusion import build_memory_context
 from app.memory.summarizer import summarize_conversation
+from app.reasoning.reasoning_engine import ReasoningEngine
+from app.reasoning.query_decomposer import QueryDecomposer
+from app.llm.gguf_model import GGUFModel
+from app.reasoning.result_fusion import ResultFusion
+
+
 import os
 
 
 embedder = TextEmbedder()
 vector_store = QdrantVectorStore()
 clip_embedder = ClipTextEmbedder()
+llm = GGUFModel()
+reasoning_engine = ReasoningEngine(llm)
+decomposer = QueryDecomposer(llm)
+fusion = ResultFusion(top_k=5)
+
 
 # Detect Query
 def detect_query_type(query: str):
@@ -29,6 +40,7 @@ def detect_query_type(query: str):
 
 # TEXT QUERY
 def query_text(query: str, session_id: str = "default"):
+    print("NEW PIPELINE RUNNING")
     try:
         # Step 1: Get Memory (Redis)
         memory = RedisMemory()
@@ -52,14 +64,41 @@ def query_text(query: str, session_id: str = "default"):
             filtered_history
         )
 
-        # Rerieval uses only Query
-        query_vector = embedder.embed_query(query)
+        # Query Decomposition
+        
+        sub_queries = decomposer.decompose(query)
 
+        print("SUB QUERIES GENERATED:", sub_queries)
+
+        print("SUB-QUERIES", sub_queries)
+
+        all_results = []
+
+        # Multi-query retrieval
+        for sub_q in sub_queries:
+            sub_vector = embedder.embed_query(sub_q)
+            sub_results = vector_store.search_text(sub_vector)
+
+            all_results.extend(sub_results)
+
+        # Deduplicate results
+        seen = set()
+        unique_results = []
+
+        for r in all_results:
+            text = r.get("text", "")
+            if text not in seen:
+                seen.add(text)
+                unique_results.append(r)
+
+        # Fusion + Ranking
+        results = fusion.fuse(unique_results)
+
+        print("FUSED RESULTS:", len(results))
+
+  
         # Detect query type
         query_type = detect_query_type(query)
-
-        # Retrieve from vector DB
-        results = vector_store.search_text(query_vector)
 
         # Filter by Modality
         if query_type == "image":
@@ -85,30 +124,14 @@ def query_text(query: str, session_id: str = "default"):
                 "sources": []
             }
 
-        # Step 5: Build cotext from retrieved docs
-        retrieved_text = "\n".join(
-            [doc.get("text", "") for doc in results]
+        # Step 5: Generate Answer (LLM)
+        answer = reasoning_engine.generate_answer(
+            query=query,
+            retrieved_docs=results,
+            memory_context=memory_context
         )
 
-        # Step 6: Build Final Prompt
-        final_prompt = f"""
-You are an intelligent assistant.
-
-Conversation Context:
-{memory_context}
-
-Knowledge Context:
-{retrieved_text}
-
-User Question:
-{query}
-
-Answer:
-"""
-        # Step 7: Generate Answer (LLM)
-        answer = model.generate(final_prompt)
-
-        # Step 8: Store memory
+        # Step 6: Store memory
         memory.add_message(session_id, "user", query)
         memory.add_message(session_id, "assistant", answer)
 
