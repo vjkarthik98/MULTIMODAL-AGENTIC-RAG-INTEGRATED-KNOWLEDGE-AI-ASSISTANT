@@ -2,571 +2,502 @@
 
 ## 🚀 Overview
 
-A production-grade **Multimodal Retrieval-Augmented Generation (RAG) system** built with FastAPI, Qdrant, and open-source LLMs.
+A production-grade **Multimodal Retrieval-Augmented Generation (RAG) system** that supports **text, PDFs, images, audio, and video**, with memory-aware and reasoning-enhanced responses.
 
-This system enables intelligent querying over **text, PDFs, images, audio, and video**, transforming unstructured data into a searchable knowledge base.
+> ⚡ Fully runnable locally with open-source models (no API dependency)
+> 🎯 Startup-grade GenAI system with multimodal processing, memory, reasoning, and local LLM inference
 
-### 🔥 Key Highlights
+---
 
-* 🧠 Multimodal ingestion (OCR + Speech-to-Text + Video processing)
-* ⚡ Optimized RAG pipeline (chunking + embedding + retrieval)
-* 🗄️ Qdrant vector database for semantic search
-* 🚀 FastAPI backend with modular architecture
-* 🧩 Extensible design for LLMOps, monitoring, and deployment
+## 🔥 Key Highlights
 
-> Designed using production-grade AI system architecture patterns used in modern RAG startups.
-## ❗ Problem Statement
+* 🧠 Multimodal ingestion (Text, PDF, Image, Audio, Video)
+* 🔄 Unified pipeline (all modalities → text → embeddings)
+* ✂️ Recursive chunking + metadata enrichment
+* 🎯 Audio & Video query support (Speech-to-Text → RAG)
+* 🧠 Memory-enabled RAG (Redis + MongoDB)
+* 🧠 Memory summarization for long conversations
+* 🧩 Reasoning layer for context + memory fusion
+* ⚡ Local LLM inference (GGUF via llama.cpp)
+* 🚀 FastAPI backend (modular architecture)
+* 🎛️ Gradio UI (end-to-end interaction)
 
-Modern organizations deal with large volumes of unstructured data such as documents, images, audio, and videos.
-
-Traditional search systems fail to understand semantic meaning, and most RAG implementations are limited to text-only pipelines with poor chunking strategies and weak retrieval accuracy.
-
-As a result:
-
-* Relevant information is missed during retrieval
-* Context is lost due to improper chunking
-* Multimodal data remains unused
-* Systems are not scalable or production-ready
-
-
-## 💡 Solution
-
-This project implements a **production-grade Multimodal RAG system** that transforms unstructured data into a structured, searchable knowledge base.
-
-Key solutions:
-
-* Converts all modalities (text, PDF, image, audio, video) into unified text representation
-* * Applies **recursive chunking with overlap** to preserve semantic context
-* Uses **optimized embeddings** for accurate semantic retrieval
-* Stores chunk-level vectors in Qdrant for fine-grained search
-* Exposes the system via FastAPI for real-world usage
-
-This design ensures high retrieval accuracy, scalability, and extensibility for real-world AI applications.
-
-
-## 🏗️ System Architecture
-
-The system is designed using a layered architecture similar to production AI systems.
-
-### 🔷 High-Level Flow
-
-User → API Layer → RAG Pipeline → Vector DB → LLM → Response
-
-### 🧱 Architecture Layers
-
-1. **Frontend Layer**
-
-   * User interaction (UI / API clients)
-
-2. **API Layer (FastAPI)**
-
-   * Handles requests and routing
-   * Connects user queries to RAG pipeline
-
-3. **AI Pipeline**
-
-   * Query embedding
-   * Vector search (Qdrant)
-   * Context retrieval (top-k chunks)
-   * Prompt construction
-   * LLM response generation
-
-4. **Data Layer**
-
-   * Qdrant → vector storage
-   * Stores chunk-level embeddings with metadata
-
-5. **Infrastructure Layer (Planned)**
-
-   * Redis → caching
-   * MongoDB → conversation memory
-   * Monitoring tools → observability
-
-This modular design ensures scalability, maintainability, and production readiness.
-
-
-## ⚙️ Tech Stack
-
-The project is built using a modern AI system stack inspired by production RAG architectures.
-
-### 🧠 AI / ML
-
-* Embeddings: Sentence Transformers (all-MiniLM-L6-v2)
-* LLM: Mistral (via Ollama)
-* RAG Pipeline: Custom implementation
-
-### ⚡ Backend
-
-* FastAPI (API layer)
-* Python (core logic)
-
-### 🗄️ Data & Storage
-
-* Qdrant (vector database)
-* Chunk-level embedding storage with metadata
-
-### 🔄 Processing
-
-* Text processing & chunking (recursive splitting)
-* Multimodal preprocessing:
-
-  * PDF → text extraction
-  * Image → captioning
-  * Audio → speech-to-text
-  * Video → frame extraction + captioning
-
-### 🧱 Architecture & Engineering
-
-* Modular backend design (routes → services → core)
-* Batch embedding for performance optimization
-* Metadata-aware retrieval
-
-### 🚀 Future Stack (Planned)
-
-* Redis (caching)
-* MongoDB (conversation memory)
-* AWS S3 (document storage)
-* Prometheus + Grafana (monitoring)
-* MLflow (experiment tracking)
-
+---
 
 ## ✨ Features
 
-### 🔍 Core RAG Capabilities
+### 🔍 Core RAG
 
-* Semantic search using vector embeddings
-* Context-aware answer generation using LLM
-* Top-k retrieval for relevant context selection
+* Semantic retrieval using embeddings
+* Context-aware answer generation
+* Top-k chunk retrieval
 
-### 🧠 Advanced Retrieval Optimization
+### 🧠 Retrieval Optimization
 
-* Recursive chunking with overlap for context preservation
-* Chunk-level embedding storage (not document-level)
-* Batch embedding for improved performance
+* Recursive chunking (chunk_size=500, overlap=100)
+* Chunk-level storage (not document-level)
+* Metadata-aware retrieval
 
 ### 🎯 Multimodal Intelligence
 
-* Text and PDF ingestion
-* Image understanding via captioning
-* Audio processing via speech-to-text
-* Video understanding via frame extraction and captioning
+* **PDF** → text extraction
+* **Image** → BLIP captioning + OCR (Tesseract)
+* **Audio** → Whisper (speech-to-text)
+* **Video** → frame extraction + audio extraction → text
 
-### 🌐 API-Based System
+### 🧠 Memory System
 
-* FastAPI backend for real-time querying
-* Modular route-based architecture
-* Ready for frontend or external integration
+* Redis → short-term conversational memory
+* MongoDB → persistent chat history
+* Memory summarization → compress long context
 
-### 🧱 Scalable Architecture
+### 🧩 Reasoning Layer
 
-* Modular design (ingestion, embeddings, retrieval, API)
-* Metadata-aware storage for filtering and extensibility
-* Designed for multi-user and multi-document support
+* Combines retrieved context + memory
+* Enhances prompts dynamically
+* Improves response relevance
 
-### ⚙️ Engineering Best Practices
+### 🌐 Full Stack System
 
-* Clean separation of concerns
-* Batch processing for efficiency
-* Extensible pipeline design
-
-
-## 📂 Project Structure
-
-## 📂 Project Structure
-
-```bash
-project_root/
-│
-├── app/
-│   ├── api/
-│   │   └── routes/
-│   │       └── rag_routes.py      # FastAPI routes
-│   │
-│   ├── ingestion/                # Data ingestion (text, PDF, etc.)
-│   ├── embeddings/               # Embedding logic
-│   ├── vectorstore/              # Qdrant integration
-│   ├── utils/                    # Chunking, preprocessing utilities
-│   ├── core/                     # Config, settings
-│
-├── src/
-│   └── rag_system/
-│       ├── pipeline/             # RAG pipeline (retrieve → generate)
-│       ├── prompt/               # Prompt engineering
-│       ├── generation/           # LLM interaction
-│
-├── tests/                        # Test cases
-├── main.py                       # FastAPI entry point
-├── requirements.txt
-└── README.md
-```
-
-### 🧠 Design Philosophy
-
-* **app/** → Handles infrastructure & APIs
-* **src/** → Contains core AI logic (RAG pipeline)
-
-
-
-
-This separation ensures:
-
-* Clean architecture
-* Scalability
-* Easy maintainability
-
-
-## 🔄 RAG Pipeline
-
-The system follows a Retrieval-Augmented Generation (RAG) pipeline for answering user queries.
-
-### 🔁 Pipeline Flow
-
-1. **User Query**
-
-   * Input question from user
-
-2. **Query Embedding**
-
-   * Convert query into vector representation
-
-3. **Vector Search (Qdrant)**
-
-   * Perform similarity search over stored embeddings
-
-4. **Top-K Retrieval**
-
-   * Retrieve most relevant chunks (not full documents)
-
-5. **Context Construction**
-
-   * Combine retrieved chunks into a structured prompt
-
-6. **LLM Generation**
-
-   * Generate answer using Mistral (via Ollama)
-
-7. **Response Output**
-
-   * Return answer along with relevant sources
+* FastAPI backend
+* Gradio UI frontend
+* API + UI integration
 
 ---
 
-### ⚡ Key Optimizations
+## ❗ Problem Statement
 
-* Chunk-level retrieval instead of document-level
-* Recursive chunking with overlap
-* Batch embedding for performance
-* Metadata-aware filtering (extensible)
+Traditional systems:
 
----
-
-### 🎯 Why This Matters
-
-This approach improves:
-
-* Retrieval accuracy
-* Context relevance
-* Answer quality
-
-
-## 🎯 Multimodal Capabilities
-
-The system supports ingestion and understanding of multiple data modalities by converting them into a unified text representation for RAG processing.
-
-### 🧾 Supported Modalities
-
-#### 📄 Text & PDF
-
-* Direct text ingestion
-* PDF parsing and text extraction
-
-#### 🖼️ Image
-
-* Optical Character Recognition (OCR) using Tesseract
-* Extracted text used for embedding and retrieval
-
-#### 🎤 Audio
-
-* Speech-to-text conversion using Whisper
-* Transcribed text integrated into RAG pipeline
-
-#### 🎥 Video
-
-* Audio extraction from video
-* Speech-to-text processing
-* Converted into searchable text format
+* Fail to understand semantic meaning
+* Lose context due to poor chunking
+* Ignore multimodal data
+* Lack conversational memory
 
 ---
 
-### 🔄 Unified Processing Flow
+## 💡 Solution
 
-All modalities follow a common pipeline:
+This system implements a **unified multimodal RAG pipeline**:
 
-Input (any modality) → Text Conversion → Chunking → Embedding → Vector DB → Retrieval
-
----
-
-### ⚡ Design Advantage
-
-* Single unified pipeline for all data types
-* Scalable to new modalities (e.g., vision LLMs)
-* Consistent retrieval across heterogeneous data sources
-
-
-## 🌐 API Layer (FastAPI)
-The system exposes its functionality through a FastAPI backend, enabling real-time interaction with the RAG pipeline.
-
-### 🔌 Key Endpoints
-
-#### 🔍 Query Endpoint
-
-```http id="qv4wsp"
-POST /rag/query
-```
-
-**Request:**
-
-```json id="v6qozx"
-{
-  "query": "What is artificial intelligence?"
-}
-```
-
-**Response:**
-
-```json id="qv8k91"
-{
-  "answer": "Artificial intelligence is ...",
-  "sources": ["document1", "document2"]
-}
-```
+* All inputs → converted to text
+* Smart chunking with overlap
+* Embedding via MiniLM
+* Storage in Qdrant (vector DB)
+* Retrieval (top-k chunks)
+* Memory injection (Redis + summaries)
+* Reasoning layer (context fusion)
+* LLM generation (GGUF via llama.cpp)
 
 ---
-
-#### 📁 File Upload Endpoint
-
-```http id="6l9vav"
-POST /upload/file
-```
-
-* Supports multimodal file ingestion
-* Automatically routes based on file type
-* Integrates into RAG pipeline
-
----
-
-### 🧠 Backend Design
-
-* Modular route-based architecture
-* Separation of concerns:
-
-  * Routes → API layer
-  * Services → RAG logic
-  * Core → configuration
-* Easy integration with frontend or external systems
-
----
-
-### ⚡ Why This Matters
-
-* Converts RAG into a real backend system
-* Enables deployment on cloud platforms
-* Supports scalable AI applications
 
 ## 🧪 Installation & Setup
+
 ### 🔧 Prerequisites
 
 * Python 3.10+
-* Docker (for Qdrant)
-* FFmpeg (for audio/video processing)
-* Tesseract OCR (for image processing)
-* Ollama (for running LLM locally)
+* Docker
+* FFmpeg
+* Tesseract OCR
 
 ---
 
 ### 📦 Clone Repository
 
-```bash id="f3n2lm"
+```bash id="cl1"
 git clone https://github.com/vjkarthik98/multimodal-rag-assistant.git
 cd multimodal-rag-assistant
 ```
 
 ---
 
-### 🧱 Create Virtual Environment
+### 🧱 Environment Setup
 
-```bash id="0d2kqs"
-python -m venv rag_env
-source rag_env/bin/activate      # Linux / Mac
-rag_env\Scripts\activate         # Windows
-```
-
----
-
-### 📥 Install Dependencies
-
-```bash id="8k3lmn"
+```bash id="cl2"
+conda create -n rag_env python=3.10 -y
+conda activate rag_env
 pip install -r requirements.txt
 ```
 
 ---
 
-### 🗄️ Run Qdrant (Docker)
+### 🐳 Run Required Services
 
-```bash id="7lmv9a"
+```bash id="cl3"
+# Qdrant (Vector DB)
 docker run -p 6333:6333 qdrant/qdrant
+
+# Redis (Short-term memory)
+docker run -p 6379:6379 redis
+
+# MongoDB (Persistent memory)
+docker run -p 27017:27017 mongo
 ```
 
 ---
 
-### 🧠 Run Ollama (LLM)
+### 🧠 Setup GGUF Model
 
-```bash id="l9a2ks"
-ollama run mistral
+Place model file:
+
+```id="cl4"
+models/mistral/mistral-7b-instruct.Q4_K_M.gguf
 ```
 
 ---
 
-### 🚀 Start FastAPI Server
+### 🚀 Run Backend
 
-```bash id="n2ksla"
-uvicorn main:app --reload
+```bash id="cl5"
+uvicorn app.main:app --reload
 ```
 
 ---
 
-### 🌐 Access API
+### 🎛️ Run UI
 
-* Swagger UI: http://127.0.0.1:8000/docs
-* Test endpoint: http://127.0.0.1:8000/rag/test
+```bash id="cl6"
+python gradio_app.py
+```
 
 ---
 
-### 🧪 Example Query
+### 🌐 Access
 
-```json id="9sk2la"
+* API Docs → http://127.0.0.1:8000/docs
+* UI → http://127.0.0.1:7860
+
+---
+
+## 🌐 API Layer
+
+### 🔍 Query Endpoint
+
+```http id="cl7"
+POST /rag/query
+```
+
+```json id="cl8"
 {
   "query": "Explain artificial intelligence"
 }
 ```
 
+---
 
+### 📁 Upload Endpoint
 
+```http id="cl9"
+POST /upload/file
+```
 
-## 📊 Evaluation & Monitoring
+Supports:
 
-The system is designed with evaluation and observability in mind to ensure reliability and performance.
-
-### 📏 Evaluation Metrics (Planned)
-
-* **Answer Relevance** — measures how well the response matches the query
-* **Context Recall** — evaluates whether relevant chunks are retrieved
-* **Faithfulness** — checks if answers are grounded in retrieved context
-
-### 🧪 Evaluation Frameworks
-
-* RAGAS — for automated RAG evaluation
-* DeepEval — for LLM response quality assessment
+* Text / PDF / Image / Audio / Video
 
 ---
 
-### 📡 Monitoring & Observability (Planned)
+## 🧠 Memory Architecture
 
-* **Langfuse** — tracing LLM calls and prompt performance
-* **Prometheus** — system-level metrics (latency, throughput)
-* **Grafana** — visualization dashboards
+### Memory Types
+
+* **Qdrant** → Knowledge memory (embeddings)
+* **Redis** → Short-term working memory
+* **MongoDB** → Persistent chat memory
+
+### 🔄 Memory Flow
+
+User Query
+↓
+Redis (recent context)
+↓
+Retriever (Qdrant knowledge)
+↓
+Reasoning Layer
+↓
+LLM
+↓
+Response
+↓
+MongoDB
 
 ---
 
-### ⚡ Why This Matters
+## 🏗️ System Architecture
 
-* Detects hallucinations and retrieval failures
-* Improves system reliability over time
-* Enables production-grade AI monitoring
+### 🔷 High-Level Flow
+
+User Input
+↓
+Modality Detection
+↓
+Text Conversion (OCR / STT / Video Processing)
+↓
+Chunking + Metadata
+↓
+Embedding (MiniLM)
+↓
+Qdrant
+↓
+Retriever
+↓
+Memory (Redis + Summary)
+↓
+Reasoning Layer
+↓
+LLM (GGUF via llama.cpp)
+↓
+Response
+
+---
+
+## 🧱 Architecture Layers
+
+1. **Frontend Layer**
+
+   * Gradio UI
+
+2. **API Layer**
+
+   * FastAPI routes
+
+3. **Pipeline Layer**
+
+   * Orchestrates full RAG flow
+
+4. **Processing Layer**
+
+   * Ingestion + chunking + embeddings
+
+5. **Retrieval Layer**
+
+   * Qdrant vector search
+
+6. **Memory Layer**
+
+   * Redis + MongoDB
+
+7. **Reasoning Layer**
+
+   * Context + memory fusion
+
+8. **LLM Layer**
+
+   * GGUF inference (llama.cpp)
+
+9. **Infrastructure Layer**
+
+   * Docker + model offloading
+
+---
+
+## ⚙️ Tech Stack
+
+### 🧠 AI / ML
+
+* Sentence Transformers (MiniLM)
+* Mistral 7B (GGUF via llama.cpp)
+* BLIP (image captioning)
+* Whisper (speech-to-text)
+
+### ⚡ Backend
+
+* FastAPI
+
+### 🎛️ Frontend
+
+* Gradio
+
+### 🗄️ Data
+
+* Qdrant
+
+### 🧠 Memory
+
+* Redis + MongoDB
+
+### 🔄 Processing
+
+* Tesseract OCR
+* FFmpeg (video/audio processing)
+
+---
+
+## 📂 Project Structure
+
+```text
+project_root/
+│
+├── app/
+│   ├── api/
+│   │   └── routes/
+│   │       └── rag_routes.py          # FastAPI routes
+│   │
+│   ├── core/                          # Config, logging
+│   │   ├── config.py
+│   │   └── logging.py
+│   │
+│   ├── ingestion/                     # Multimodal ingestion
+│   │   ├── text_ingest.py
+│   │   ├── document_ingest.py
+│   │   ├── image_ingest.py
+│   │   ├── audio_ingest.py
+│   │   ├── video_ingest.py
+│   │   ├── frame_captioner.py         # BLIP captioning
+│   │   ├── video_frames.py
+│   │   ├── router.py                  # Modality routing
+│   │   ├── schema.py
+│   │   └── pipeline.py
+│   │
+│   ├── embeddings/                    # Embedding logic
+│   │   ├── text_embedder.py
+│   │   ├── image_embedder.py
+│   │   ├── audio_embedder.py
+│   │   ├── video_embedder.py
+│   │   └── clip_text_embedder.py
+│   │
+│   ├── vectorstore/                   # Qdrant integration
+│   │   └── main.py
+│   │
+│   ├── retrieval/                     # Retrieval pipeline
+│   │   ├── retriever.py
+│   │   └── query_pipeline.py
+│   │
+│   ├── prompt/                        # Prompt construction
+│   │   └── prompt_builder.py
+│   │
+│   ├── reasoning/                     # Reasoning layer
+│   │   ├── query_decomposer.py
+│   │   ├── reasoning_engine.py
+│   │   └── result_fusion.py
+│   │
+│   ├── llm/                           # GGUF model interface
+│   │   ├── gguf_model.py
+│   │   └── mistral_loader.py
+│   │
+│   ├── memory/                        # Memory system
+│   │   ├── memory_manager.py
+│   │   ├── redis_memory.py
+│   │   ├── mongo_memory.py
+│   │   ├── memory_filter.py
+│   │   ├── memory_fusion.py
+│   │   ├── formatter.py
+│   │   └── summarizer.py
+│   │
+│   ├── pipeline/                      # RAG orchestration
+│   │   └── rag_pipeline.py
+│   │
+│   ├── utils/                         # Utilities
+│   │   ├── chunking.py
+│   │   └── logger.py
+│   │
+│   └── main.py                        # FastAPI entry point
+│
+├── configs/                           # Environment configs
+├── data/
+│   ├── raw/                           # Raw multimodal data
+│   └── processed/                     # Processed data
+│
+├── docs/                              # Documentation & images
+├── models/                            # GGUF models
+├── notebooks/                         # Experiments
+├── offload/                           # Model optimization / CPU offloading
+│
+├── scripts/                           # Utility scripts
+│   ├── download_model.py
+│   ├── ingest_data.py
+│   ├── test_gguf.py
+│   └── test_stream.py
+│
+├── tests/                             # Test suite
+│   ├── test_ingestion.py
+│   ├── test_embeddings.py
+│   ├── test_retrieval.py
+│   ├── test_memory.py
+│   ├── test_pipeline.py
+│   └── ... (comprehensive module tests)
+│
+├── gradio_app.py                      # UI layer
+├── init_qdrant.py                     # DB initialization
+├── main.py                            # Entry script
+├── requirements.txt
+├── pyproject.toml
+├── .env / .env.example
+├── CHANGELOG.md
+├── LICENSE
+└── README.md
+```
+
+### 🧠 Design Philosophy
+
+* **app/** → Core AI system (pipeline + memory + reasoning)
+* **configs/** → Environment & configuration management
+* **data/** → Raw + processed multimodal data
+* **models/** → Local GGUF models
+* **offload/** → CPU optimization for large models
+* **scripts/** → Utility and automation scripts
+* **tests/** → Comprehensive module-level testing
+
+This structure ensures:
+
+* Modular design
+* Scalability
+* Clear separation of concerns
+* Production-grade maintainability
 
 
+---
+
+## 🔄 RAG Pipeline
+
+Query → Embed → Retrieve → Context → Memory → Reasoning → LLM → Answer
+
+---
+
+## 🎯 Multimodal Pipeline
+
+Input → Text Conversion → Chunk → Embed → Store → Retrieve
+
+---
+
+## 📊 Evaluation & Monitoring (Planned)
+
+* RAGAS
+* DeepEval
+* Langfuse
+* Prometheus + Grafana
+
+---
 
 ## 🚀 Deployment (Planned)
 
-The system is designed to be deployed using a scalable cloud architecture.
-
-### ☁️ Deployment Strategy
-
-* **Compute**: AWS EC2 (Dockerized services)
-* **Storage**: AWS S3 for document storage
-* **Containers**:
-
-  * FastAPI backend
-  * Qdrant vector database
-  * Redis (caching layer)
+* Docker + AWS EC2
+* S3 storage
+* CI/CD (GitHub Actions)
 
 ---
-
-### 🔄 CI/CD Pipeline (Planned)
-
-* GitHub Actions for automated workflows
-* Steps:
-
-  * Run tests
-  * Run evaluation pipeline
-  * Build Docker images
-  * Deploy to cloud
-
----
-
-### 🧱 Deployment Architecture
-
-User → FastAPI → RAG Pipeline → Qdrant → LLM
-↓
-Monitoring Stack
-
----
-
-### ⚡ Goals
-
-* Low-cost deployment
-* Scalable architecture
-* Production-ready system design
-
 
 ## 📈 Future Improvements
-The system is designed to be extensible and can be enhanced with additional capabilities:
 
-* 🔁 Reranking models (e.g., BGE reranker) for improved retrieval accuracy
-* 🧠 Conversation memory (short-term + long-term)
-* 🧑‍🤝‍🧑 Multi-tenant support with user-based data isolation
-* ⚡ Caching layer using Redis for faster responses
-* 📊 Monitoring and observability (Prometheus, Grafana, Langfuse)
-* 🧪 Evaluation frameworks (RAGAS, DeepEval)
-* ☁️ Cloud deployment on AWS (EC2 + S3 + Docker)
-* 🔐 Authentication and authorization (JWT-based access)
+* Reranker (cross-encoder)
+* Smart memory prioritization
+* Session-based optimization
+* Observability dashboards
+* Cloud deployment
 
-These improvements align the system with production-grade AI platforms used in industry.
-
+---
 
 ## 👨‍💻 Author
+
 **VK**
-Aspiring GenAI Engineer | Building production-ready AI systems
+Aspiring GenAI Engineer
 
 ---
 
-### 🎯 What This Project Demonstrates
+## 🎯 What This Project Demonstrates
 
-* End-to-end RAG system design (retrieval → generation → API)
-* Multimodal AI pipeline (text, image, audio, video)
-* Backend engineering with FastAPI
-* Vector database integration (Qdrant)
-* Retrieval optimization (chunking + embeddings)
-* System design aligned with real-world AI architectures
-
----
-
-### 📬 Contact
-
-* LinkedIn: *P*
-* GitHub: *www.github.com/vjkarthik98*
-
-
-
-
-
+* End-to-end multimodal RAG system
+* Memory-integrated AI architecture
+* Reasoning-enhanced LLM pipeline
+* FastAPI + Gradio full-stack system
+* Production-grade GenAI design
