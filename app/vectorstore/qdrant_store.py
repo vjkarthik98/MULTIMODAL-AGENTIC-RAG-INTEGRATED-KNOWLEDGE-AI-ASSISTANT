@@ -1,7 +1,12 @@
 import uuid
+import logging
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
 from app.core.config import settings
+
+# Logger
+logger = logging.getLogger(__name__)
+
 
 class QdrantVectorStore:
 
@@ -11,14 +16,17 @@ class QdrantVectorStore:
             port=settings.QDRANT_PORT
         )
 
-        # Centralized Collection Names
         self.TEXT_COLLECTION = "text_collection"
-        self.IMAGE_COLLECTION = "image_collection"
 
+        logger.info("[QdrantStore] Initialized client")
 
-    # Create collection with given size
-    def create_collection(self, collection_name: str, vector_size: int = int):
-        print(f"Creating Collection: {collection_name} (dim={vector_size})")
+    # -----------------------
+    # COLLECTION CREATION
+    # -----------------------
+    def create_collection(self, collection_name: str, vector_size: int):
+        logger.info(
+            f"[QdrantStore] Creating collection={collection_name} | dim={vector_size}"
+        )
 
         self.client.create_collection(
             collection_name=collection_name,
@@ -27,108 +35,147 @@ class QdrantVectorStore:
                 distance=Distance.COSINE
             )
         )
-    # Ensure collection exists
+
     def _ensure_collection(self, collection_name: str, vector_size: int):
         collections = self.client.get_collections().collections
         collection_names = [c.name for c in collections]
-    
+
         if collection_name not in collection_names:
+            logger.warning(
+                f"[QdrantStore] Collection missing → creating {collection_name}"
+            )
             self.create_collection(collection_name, vector_size)
-    
-    # Insert Multimodal
+
+    # -----------------------
+    # INSERT
+    # -----------------------
     def insert_documents(self, documents):
 
         if not documents:
-            print("No documents to insert")
+            logger.warning("[QdrantStore] No documents to insert")
             return
 
-        document_id = str(uuid.uuid4())
-        points = []
+        try:
+            document_id = str(uuid.uuid4())
+            points = []
 
+            for doc in documents:
+                metadata = doc.get("metadata", {})
 
-        for doc in documents:
-            metadata = doc.get("metadata", {})
-            modality = metadata.get("modality", "text")
+                collection_name = self.TEXT_COLLECTION
+                vector_size = len(doc["embedding"])
 
-            # Decide collection + dimension
-            collection_name = self.TEXT_COLLECTION
-            vector_size = len(doc["embedding"])
+                self._ensure_collection(collection_name, vector_size)
 
-            # Ensure correct collection
-            self._ensure_collection(collection_name, vector_size)
+                payload = {
+                    "text": doc["text"],
+                    "document_id": document_id,
+                    **metadata
+                }
 
-            payload = {
-                # core metadata (clean + controlled)
-                "text": doc["text"],
-                "document_id": document_id,
-                **metadata 
-            }
+                point = PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=doc["embedding"],
+                    payload=payload
+                )
 
-            point = PointStruct(
-                id=str(uuid.uuid4()), # unique per chunk
-                vector=doc["embedding"],
-                payload=payload
+                points.append(point)
+
+            logger.info(
+                f"[QdrantStore] Inserting points | count={len(points)}"
             )
-            points.append(point)
-            # Batch Upsert 
-            print(f" Inserting {len(points)} points into {collection_name}")
 
             self.client.upsert(
                 collection_name=collection_name,
                 points=points
             )
+
+            logger.info("[QdrantStore] Insert successful")
+
+        except Exception as e:
+            logger.error(f"[QdrantStore] Insert failed | error={str(e)}")
+            raise
+
+    # -----------------------
     # TEXT SEARCH
-    def search_text(self, query_vector, limit=5, source_filter = None):
+    # -----------------------
+    def search_text(self, query_vector, limit=5, source_filter=None, session_id=None):
 
-        print(f" Searching in: {self.TEXT_COLLECTION}")
+        try:
+            logger.debug(
+                f"[QdrantStore] Text search | limit={limit} | session_id={session_id}"
+            )
 
-        query_filter = None
+            conditions = []
 
-        if source_filter:
-            query_filter = Filter(
-                must=[
+            if source_filter:
+                conditions.append(
                     FieldCondition(
                         key="source",
                         match=MatchValue(value=source_filter)
                     )
-                ]
+                )
+
+            if session_id:
+                conditions.append(
+                    FieldCondition(
+                        key="session_id",
+                        match=MatchValue(value=session_id)
+                    )
+                )
+
+            query_filter = Filter(must=conditions) if conditions else None
+
+            results = self.client.query_points(
+                collection_name=self.TEXT_COLLECTION,
+                query=query_vector,
+                limit=limit,
+                query_filter=query_filter
             )
-        
-        results = self.client.query_points(
-            collection_name=self.TEXT_COLLECTION,
-            query=query_vector,
-            limit=limit,
-            query_filter=query_filter
-        )
 
-        print(f" Retrieved {len(results.points)} results")
+            logger.debug(
+                f"[QdrantStore] Retrieved results | count={len(results.points)}"
+            )
 
-        return [
-            { 
-                "text": point.payload["text"],
-                "score": point.score,
-                "metadata": point.payload
-            }
-            for point in results.points
-        ]
-    
+            return [
+                {
+                    "text": point.payload["text"],
+                    "score": point.score,
+                    "metadata": point.payload
+                }
+                for point in results.points
+            ]
+
+        except Exception as e:
+            logger.error(f"[QdrantStore] Search failed | error={str(e)}")
+            return []
+
+    # -----------------------
     # IMAGE SEARCH
+    # -----------------------
     def search_image(self, query_vector, limit=5):
- 
-        results = self.client.query_points(
-            collection_name=self.IMAGE_COLLECTION,
-            query=query_vector,
-            limit=limit
-        )
 
-        return [
-            {
-                "text": point.payload["text"],   # payload
-                "score": point.score,          # score
-                "metadata": point.payload
-            }
-            for point in results.points
-        ]
-    
+        try:
+            logger.debug(f"[QdrantStore] Image search | limit={limit}")
+
+            results = self.client.query_points(
+                collection_name=self.TEXT_COLLECTION,
+                query=query_vector,
+                limit=limit
+            )
+
+            return [
+                {
+                    "text": point.payload.get("text", ""),
+                    "score": point.score,
+                    "metadata": point.payload
+                }
+                for point in results.points
+            ]
+
+        except Exception as e:
+            logger.error(f"[QdrantStore] Image search failed | error={str(e)}")
+            return []
+
     def get_client(self):
         return self.client

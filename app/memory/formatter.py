@@ -3,14 +3,6 @@ from typing import List, Dict
 def format_history(history: List[Dict]) -> str:
     """
     Convert chat history into readable conversation format.
-    
-    Args:
-        history:[
-                {"role: "user", "content": "..."},
-                {"role: "assistant", "content": "..."}
-            ]
-    Returns:
-        str: formatted conversation
     """
 
     if not history:
@@ -25,6 +17,6 @@ def format_history(history: List[Dict]) -> str:
         if role == "user":
             formatted += f"User: {content}\n"
         elif role == "assistant":
-            formatted += f"Asssitant: {content}\n"
+            formatted += f"Assitant: {content}\n"
 
     return formatted.strip()

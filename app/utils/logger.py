@@ -1,24 +1,27 @@
 import logging
-logging.basicConfig(level=logging.INFO)
+import os
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
 
 def get_logger(name: str):
     logger = logging.getLogger(name)
 
-    logger.setLevel(logging.INFO)
+    # Prevent Duplicate Handlers
+    if not logger.handlers:
+        logger.setLevel(LOG_LEVEL)
 
+        handler = logging.StreamHandler()
+        handler.setLevel(LOG_LEVEL)
 
-    # FORCE handler reset 
-    if logger.hasHandlers():
-        logger.handlers.clear()
-
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.INFO)
-
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-    )
+        formatter = logging.Formatter(
+            "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+        )
     
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    # Prevent propagation to root logger
+    logger.propagate = False
 
     return logger

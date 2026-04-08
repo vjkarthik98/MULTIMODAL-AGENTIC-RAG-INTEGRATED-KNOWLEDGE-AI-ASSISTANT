@@ -3,56 +3,48 @@ from app.ingestion.schema import IngestedDocument
 
 import os
 from datetime import datetime
+import logging
 
-from app.embeddings.text_embedder import TextEmbedder
-from app.vectorstore.qdrant_store import QdrantVectorStore
-
+# Logger
+logger = logging.getLogger(__name__)
 
 
 def ingest(file_path: str) -> list[IngestedDocument]:
-    with open(file_path, "r", encoding="utf-8") as f:
-        text = f.read()
-    
-    metadata = {
-        "source": os.path.basename(file_path),
-        "modality": "text",
-        "ingestion_time": datetime.utcnow().isoformat()
-    }
+    try:
+        logger.info(f"[TextIngest] Starting ingestion | file={file_path}")
 
-    chunks = chunk_text(text)
+        with open(file_path, "r", encoding="utf-8") as f:
+            text = f.read()
 
-    return [
-        IngestedDocument(
-            text = chunk,
-            metadata={
-                **metadata,
-                "chunk_id": i
-            }
-        )
-        for i, chunk in enumerate(chunks)
-    ]
+        if not text.strip():
+            logger.error(f"[TextIngest] Empty file | file={file_path}")
+            raise ValueError("Empty text file")
 
-def ingest_pipeline(file_path: str):
-    # Step 1 : chunking (existing ingest function)
-    documents = ingest(file_path)
-
-    # Step 2 : embedding
-    embedder = TextEmbedder()
-    documents = embedder.embed_documents(documents)
-
-    # Step 3 : convert to Qdrant format
-    docs_for_qdrant = [
-        {
-            "text": doc.text,
-            "embedding": doc.embedding,
-            "metadata": doc.metadata
+        metadata = {
+            "source": os.path.basename(file_path),
+            "modality": "text",
+            "ingestion_time": datetime.utcnow().isoformat()
         }
-        for doc in documents
-    ]
 
-    # Step 4: store in Qdrant
-    store = QdrantVectorStore()
-    store.insert_documents(docs_for_qdrant)
+        chunks = chunk_text(text)
 
-    return len(documents)
+        logger.info(
+            f"[TextIngest] Chunking completed | file={file_path} | chunks={len(chunks)}"
+        )
 
+        documents = [
+            IngestedDocument(
+                text=chunk,
+                metadata={
+                    **metadata,
+                    "chunk_id": i
+                }
+            )
+            for i, chunk in enumerate(chunks)
+        ]
+
+        return documents
+
+    except Exception as e:
+        logger.error(f"[TextIngest] Failed | file={file_path} | error={str(e)}")
+        raise

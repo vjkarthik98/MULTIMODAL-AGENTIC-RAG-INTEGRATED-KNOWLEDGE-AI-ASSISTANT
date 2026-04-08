@@ -302,3 +302,17 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Memory + reasoning integration
 
 
+# [v0.17.0] - Agentic Pipeline + Model Loader + Full Observability
+### Features
+- Introduced AgentController for intelligent query routing
+- Added decision-based execution (Multimodal vs standard pipeline)
+- Added websearch tool for enhanced latest output
+- Enabled dynamic handling of image, audio, video and text queries
+
+### Improved
+- Centralized model management via ModelLoader
+- Eliminated scattered model initialization across modules
+- Centralised logging system via get_logger
+- Replaced all print statemens with structured logging
+- 
+

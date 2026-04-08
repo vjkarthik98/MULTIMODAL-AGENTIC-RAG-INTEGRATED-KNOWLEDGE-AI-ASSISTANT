@@ -10,7 +10,7 @@ def build_memory_context(
     
     Args:
         Summary: summarized long-term memory
-        filtered_history: relevant recent messges
+        filtered_history: relevant recent messages
         
     Returns:
         str: final memory context for LLM

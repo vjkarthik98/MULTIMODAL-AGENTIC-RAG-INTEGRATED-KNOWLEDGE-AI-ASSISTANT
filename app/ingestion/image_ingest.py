@@ -1,4 +1,5 @@
 from app.ingestion.schema import IngestedDocument
+from app.ingestion.frame_captioner import generate_caption
 
 import pytesseract
 from PIL import Image, ImageOps
@@ -6,95 +7,68 @@ import numpy as np
 
 import os
 from datetime import datetime
+import logging
 
-from transformers import BlipProcessor, BlipForConditionalGeneration
-import torch
+# Logger
+logger = logging.getLogger(__name__)
 
 pytesseract.pytesseract.tesseract_cmd = r"C:\Users\karth\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
 
 
-# Load BLIP model 
-processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-large")
-model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-large")
-
-def generate_caption(image):
+def ingest(file_path: str, session_id: str = "default"):
     try:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"[ImageIngest] session_id={session_id} | Loading image | file={file_path}")
 
-        model.to(device)
-
-        inputs = processor(
-            images=image,
-            return_tensors="pt"
-        ).to(device)
-
-        print("DEBUG INPUT KEYS:", inputs.keys())
-
-        with torch.no_grad():
-            out = model.generate(
-                **inputs,
-                max_new_tokens=50
-            )
-
-        caption = processor.decode(out[0], skip_special_tokens=True)
-
-        print("DEBUG CAPTION:", caption)
-
-        return caption.strip()
-    
-    except Exception as e:
-        print(f"BLIP ERROR: {e}")
-        return ""
-
-def ingest(file_path: str):
-    try:
         image = Image.open(file_path)
 
         image = ImageOps.exif_transpose(image)
-        
         image = image.convert("RGB")
-
         image = Image.fromarray(np.array(image))
-
         image.load()
 
     except Exception as e:
+        logger.error(f"[ImageIngest] session_id={session_id} | Invalid image | error={str(e)}")
         raise ValueError(f"Invalid image file: {e}")
-    
 
     # Step 1: OCR text
     ocr_text = pytesseract.image_to_string(image).strip()
 
     # Step 2: Caption
-    caption = generate_caption(image)
+    caption = generate_caption(file_path)
 
-    # Step 3: Fallback 
+    # Step 3: Fallback
     if not caption:
         caption = "An image (caption unavailable)"
 
-    # Step 3: combine text
+    # Step 4: combine text
     final_text = ""
 
     if caption:
         final_text += f"Image Description: {caption}\n"
-    
+
     if ocr_text:
         final_text += f"OCR Text: {ocr_text}"
 
     if not final_text.strip():
+        logger.error(f"[ImageIngest] session_id={session_id} | No usable content extracted")
         raise ValueError("Image ingestion failed: No caption or OCR extracted")
 
     metadata = {
         "source": os.path.basename(file_path),
         "modality": "image",
         "caption": caption,
+        "session_id": session_id,
         "ingestion_time": datetime.utcnow().isoformat(),
         "ocr": True
     }
 
+    logger.info(
+        f"[ImageIngest] session_id={session_id} | Completed | file={file_path}"
+    )
+
     return [
         IngestedDocument(
-            text = final_text.strip(),
+            text=final_text.strip(),
             metadata=metadata,
         )
     ]
