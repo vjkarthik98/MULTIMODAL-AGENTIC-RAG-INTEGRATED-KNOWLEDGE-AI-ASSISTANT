@@ -1,87 +1,69 @@
 """
-reasoning_engine.py
+query_decomposer.py
 
-Handles multimodal reasoning before LLM generation.
-Combines:
-- user query
-- retrieved context
-- memory context
-
-This is the intelligence layer of the system.
+Breaks complex queries into smaller sub-queries
+for better retrieval and reasoning.
 """
 
-from typing import List, Dict
+from typing import List
+import re
+import logging
+
+# Logger
+logger = logging.getLogger(__name__)
 
 
-class ReasoningEngine:
-
+class QueryDecomposer:
     def __init__(self, llm):
         self.llm = llm
 
-    def build_prompt(
-        self,
-        query: str,
-        retrieved_docs: List[Dict],
-        memory_context: str = ""
-    ) -> str:
+    def decompose(self, query: str) -> List[str]:
         """
-        Construct a structured reasoning prompt.
+        Decompose a complex query into simpler sub-queries.
         """
 
-        # Step 1: Prepare knowledge context
-        knowledge_context = "\n".join(
-            [doc.get("text", "") for doc in retrieved_docs]
-        )
+        try:
+            logger.debug("[QueryDecomposer] Decomposition started")
 
-        # Step 2: Build structured prompt
-        prompt = f"""
-You are an advanced multimodal AI assistant.
+            prompt = f"""
+You are an expert AI assistant.
 
-Your task is to:
-- Understand the user's intent
-- Use past conversation (if relevant)
-- Use retrieved knowledge
-- Reason step-by-step before answering
+Break the following query into clear, independent questions.
 
-Conversation Context:
-{memory_context}
+STRICT RULES:
+- Return ONLY questions
+- Do NOT write explanations
+- Do Not write "..."
+- Each question must be meaningful and complete
+- Maximum 4 questions
 
-Knowledge Context:
-{knowledge_context}
+FORMAT (STRICT)
+1. Question one?
+2. Question two?
+3. Question three?
 
-User Query:
+Query:
 {query}
-
-Instructions:
-1. Analyze the query carefully
-2. Use relevant memory if needed
-3. Use retrieved knowledge
-4. Think step-by-step (internal reasoning)
-5. Provide a clear, final answer
-
-Answer:
 """
 
-        return prompt.strip()
+            response = self.llm.generate(prompt)
 
-    def generate_answer(
-        self,
-        query: str,
-        retrieved_docs: List[Dict],
-        memory_context: str = ""
-    ) -> str:
-        print("REASONING ENGINE CALLED")
-        """
-        Generate final answer using reasoning prompt.
-        """
+            logger.debug("[QueryDecomposer] LLM response received")
 
-        prompt = self.build_prompt(
-            query,
-            retrieved_docs,
-            memory_context
-        )
+            # Extract numbered questions
+            matches = re.findall(r"\d+\.\s*(.+?\?)", response)
 
-        answer = self.llm.generate(prompt)
+            sub_queries = [m.strip() for m in matches if len(m.strip()) > 5]
 
-        return answer.strip()
-    
+            # Fallback if decomposition fails
+            if not sub_queries:
+                logger.warning("[QueryDecomposer] No decomposition found, using original query")
+                return [query]
+
+            logger.debug(f"[QueryDecomposer] Sub-queries generated count={len(sub_queries)}")
+
+            return sub_queries[:4]
+
+        except Exception as e:
+            logger.error(f"[QueryDecomposer] Failed | error={str(e)}")
+            return [query]

@@ -1,13 +1,29 @@
+# Core ML
 torch
 transformers
 sentence-transformers
+accelerate
+timm
+
+# LLM (GGUF)
+llama-cpp-python
+
+# Vector DB
 qdrant-client
-langchain
-langchain-community
-python-dotenv
-pydantic
+
+# Backend
 fastapi
 uvicorn
+python-dotenv
+pydantic
+pydantic-settings
+aiofiles
+httpx
+orjson
+
+# LangChain (optional utilities)
+langchain
+langchain-community
 
 # Image / OCR
 pillow
@@ -20,11 +36,15 @@ faster-whisper
 # Video
 moviepy
 
-# document ingestion
+# Document ingestion
 pdfplumber
 python-docx
 pandas
 openpyxl
 
+# Databases
 redis
 pymongo
+
+# Logging
+loguru

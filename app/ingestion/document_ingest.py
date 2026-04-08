@@ -1,12 +1,15 @@
-import os 
+import os
 import pdfplumber
 import docx
-import pandas as pd 
+import pandas as pd
+import logging
 
 from datetime import datetime
 from app.ingestion.schema import IngestedDocument
 from app.utils.chunking import chunk_text
 
+# ✅ Logger
+logger = logging.getLogger(__name__)
 
 
 def ingest(file_path: str):
@@ -15,6 +18,8 @@ def ingest(file_path: str):
     text = ""
 
     try:
+        logger.info(f"[DocumentIngest] Starting ingestion | file={file_path}")
+
         # PDF
         if ext == ".pdf":
             with pdfplumber.open(file_path) as pdf:
@@ -39,15 +44,18 @@ def ingest(file_path: str):
             text = df.astype(str).to_string()
 
         else:
+            logger.error(f"[DocumentIngest] Unsupported file type | file={file_path}")
             raise ValueError("Unsupported document type")
-        
+
     except Exception as e:
+        logger.error(f"[DocumentIngest] Parsing failed | file={file_path} | error={str(e)}")
         raise ValueError(f"Document parsing failed: {str(e)}")
-    
+
     # Extra Safety
     if not text.strip():
+        logger.error(f"[DocumentIngest] Empty content | file={file_path}")
         raise ValueError("No readable content extracted from document")
-    
+
     metadata = {
         "source": os.path.basename(file_path),
         "modality": "document",
@@ -57,6 +65,10 @@ def ingest(file_path: str):
     # Chunking
     chunks = chunk_text(text)
 
+    logger.info(
+        f"[DocumentIngest] Chunking completed | file={file_path} | chunks={len(chunks)}"
+    )
+
     return [
         IngestedDocument(
             text=chunk,
@@ -64,4 +76,3 @@ def ingest(file_path: str):
         )
         for i, chunk in enumerate(chunks)
     ]
-    print(file_path) 

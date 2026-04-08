@@ -9,7 +9,7 @@ class Settings:
     QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
     QDRANT_PORT = int(os.getenv("QDRANT_PORT", 6333))
 
-    COLLECTION_NAME = os.getenv("COLLETION_NAME", "multimodal_rag")
+    COLLECTION_NAME = os.getenv("COLLECTION_NAME", "multimodal_rag")
 
     EMBEDDING_MODEL = os.getenv(
         "EMBEDDING_MODEL",

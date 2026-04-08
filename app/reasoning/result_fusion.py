@@ -6,6 +6,10 @@ Combines and ranks results from multiple sub-query retrievals.
 
 from typing import List, Dict
 import numpy as np
+import logging
+
+# ✅ Logger
+logger = logging.getLogger(__name__)
 
 
 class ResultFusion:
@@ -13,7 +17,7 @@ class ResultFusion:
     def __init__(self, top_k: int = 5, similarity_threshold: float = 0.95):
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold
-    
+
     def _cosine_similarity(self, v1, v2):
         v1 = np.array(v1)
         v2 = np.array(v2)
@@ -28,55 +32,64 @@ class ResultFusion:
         """
 
         if not results:
+            logger.debug("[ResultFusion] Empty results received")
             return []
-        
-        # Step 1: Sort by rerank_score if exists
-        results = sorted(
-            results,
-            key=lambda x: x.get("rerank_score", x.get("score", 0)),
-            reverse=True
-        )
 
-        diverse_results = []
+        try:
+            logger.debug(f"[ResultFusion] Starting fusion | input_count={len(results)}")
 
-        for candidate in results:
-            keep = True
+            # Step 1: Sort by score
+            results = sorted(
+                results,
+                key=lambda x: x.get("rerank_score", x.get("score", 0)),
+                reverse=True
+            )
 
-            for selected in diverse_results:
-                # Use embeddings if available
-                vec1 = candidate.get("embedding")
-                vec2 = selected.get("embedding")
+            diverse_results = []
 
-                if vec1 is not None and vec2 is not None:
-                    sim = self._cosine_similarity(vec1, vec2)
+            # Step 2: Diversity filtering
+            for candidate in results:
+                keep = True
 
-                    if sim > self.similarity_threshold:
-                        keep = False
-                        break
-                else:
-                    # fallback -> text comparison
-                    if candidate.get("text")[:100] == selected.get("text")[:100]:
-                        keep = False
-                        break
+                for selected in diverse_results:
+                    vec1 = candidate.get("embedding")
+                    vec2 = selected.get("embedding")
 
-            if keep:
-                diverse_results.append(candidate)
+                    if vec1 is not None and vec2 is not None:
+                        sim = self._cosine_similarity(vec1, vec2)
 
-            if len(diverse_results) < 3:
-                diverse_results.append(candidate)
+                        if sim > self.similarity_threshold:
+                            keep = False
+                            break
+                    else:
+                        if candidate.get("text", "")[:100] == selected.get("text", "")[:100]:
+                            keep = False
+                            break
 
-            if len(diverse_results) >= self.top_k:
-                break
+                if keep:
+                    diverse_results.append(candidate)
 
-            return diverse_results
-        
-        # Step 2: Remove weak results
-        filtered = []
-        for r in results:
-            score = r.get("rerank_score", r.get("score", 0))
+                if len(diverse_results) >= self.top_k:
+                    break
 
-            # Threshold (tunable)
-            if score > 0:
-                filtered.append(r)
-        # Step 3: Limit top_k
-        return filtered[:self.top_k]
+            logger.debug(
+                f"[ResultFusion] Diversity filtering done | count={len(diverse_results)}"
+            )
+
+            # Step 3: Score filtering
+            filtered = []
+            for r in diverse_results:
+                score = r.get("rerank_score", r.get("score", 0))
+
+                if score > 0:
+                    filtered.append(r)
+
+            logger.debug(
+                f"[ResultFusion] Score filtering done | final_count={len(filtered)}"
+            )
+
+            return filtered[:self.top_k]
+
+        except Exception as e:
+            logger.error(f"[ResultFusion] Failed | error={str(e)}")
+            return results[:self.top_k]
