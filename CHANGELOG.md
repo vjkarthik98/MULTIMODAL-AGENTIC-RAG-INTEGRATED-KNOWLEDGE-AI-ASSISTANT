@@ -314,5 +314,18 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Eliminated scattered model initialization across modules
 - Centralised logging system via get_logger
 - Replaced all print statemens with structured logging
-- 
+
+# [v0.18.0] - Hybrid Retrieval + Reranking Stabilization
+### Features
+- Implemented BM25-based keyword retrieval using rank-bm25
+- Integrated semantic vector search using existing embedding pipeline
+- Built HybridRetriever to combine keyword + semantic results
+- Added CrossEncoder-based reranker for result refinement
+- Improved retrieval precision and reduced irrelevant chunks
+- Multimodal Ingestion Improvements
+    -> PDF: Text Extraction + Image Extraction + Table Extraction
+    -> Word: Text Extraction + Image Extraction + Table Extraction
+    -> Excel: Table Extraction with structured conversion
+- Metadata Standardization
+
 

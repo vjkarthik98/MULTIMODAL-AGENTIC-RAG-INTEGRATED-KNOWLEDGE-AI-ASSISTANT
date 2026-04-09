@@ -1,4 +1,3 @@
-from app.vectorstore.qdrant_store import QdrantVectorStore
 from app.memory.redis_memory import RedisMemory
 from app.memory.memory_filter import filter_relevant_history
 from app.memory.memory_fusion import build_memory_context
@@ -8,23 +7,25 @@ from app.reasoning.query_decomposer import QueryDecomposer
 from app.core.model_loader import model_loader
 from app.reasoning.result_fusion import ResultFusion
 from app.agents.agent_controller import AgentController
-
+from app.retrieval.hybrid_retriever import HybridRetriever
+from app.ingestion.pipeline import bm25, vector_store
 from moviepy.editor import VideoFileClip
+from app.retrieval.reranker import Reranker
 import os
 import logging
 
-# ✅ Logger
+# Logger
 logger = logging.getLogger(__name__)
 
 
 embedder = model_loader.get_embedder()
 clip_embedder = model_loader.get_clip_text_embedder()
 llm = model_loader.get_llm()
-vector_store = QdrantVectorStore()
 reasoning_engine = ReasoningEngine(llm)
 decomposer = QueryDecomposer(llm)
 fusion = ResultFusion(top_k=5)
 agent = AgentController()
+reranker = Reranker()
 
 
 def detect_query_type(query: str):
@@ -57,7 +58,6 @@ def query_text(query: str, session_id: str = "default"):
         # Step 0.5 : Agent Routing
         if decision["action"] == "multimodal":
             query_type = detect_query_type(query)
-
             logger.info(
                 f"[QueryPipeline] session_id={session_id} | Multimodal route={query_type}"
             )
@@ -127,15 +127,14 @@ def query_text(query: str, session_id: str = "default"):
             f"[QueryPipeline] session_id={session_id} | Sub-queries={sub_queries}"
         )
 
+        # Hybrid Retrieval
+        hybrid = HybridRetriever(bm25, vector_store, embedder)
+
         all_results = []
 
         for sub_q in sub_queries:
-            sub_vector = embedder.embed_query(sub_q)
-            sub_results = vector_store.search_text(
-                sub_vector,
-                session_id=session_id
-            )
-            all_results.extend(sub_results)
+            hybrid_results = hybrid.search(sub_q, top_k=10)
+            all_results.extend(hybrid_results)
 
         # Deduplicate
         seen = set()
@@ -147,18 +146,21 @@ def query_text(query: str, session_id: str = "default"):
                 seen.add(text)
                 unique_results.append(r)
 
-        # Fusion
-        results = fusion.fuse(unique_results)
+        # Reranking
+        results = reranker.rerank(query, unique_results, top_k=5)
 
         logger.debug(
-            f"[QueryPipeline] session_id={session_id} | Results after fusion={len(results)}"
+            f"[QueryPipeline] session_id={session_id} | Results after rerank={len(results)}"
         )
 
-        # Modality filter
+        # Query Type
         query_type = detect_query_type(query)
 
+        # Modality filter
         if query_type == "image":
-            results = [r for r in results if r["metadata"].get("modality") == "image"]
+            filtered = [r for r in results if r["metadata"].get("modality") == "image"]
+            if filtered:
+                results = filtered 
 
         elif query_type == "audio":
             results = [r for r in results if r["metadata"].get("modality") == "audio"]
@@ -174,6 +176,8 @@ def query_text(query: str, session_id: str = "default"):
                 "answer": "I couldn't find relevant information in the knowledge base.",
                 "sources": []
             }
+            
+        logger.info(f"[DEBUG] Results count before LLM = {len(results)}")
 
         # Step 6: LLM
         logger.info(f"[QueryPipeline] session_id={session_id} | Generating answer")
@@ -211,7 +215,7 @@ def query_image(query: str, session_id: str):
 
     query_vector = embedder.embed_query(query)
 
-    results = vector_store.search_text(query_vector, session_id=session_id)
+    results = vector_store.search_text(query_vector, session_id="session_id")
 
     results = [
         r for r in results
