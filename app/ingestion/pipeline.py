@@ -9,11 +9,14 @@ from app.ingestion.video_ingest import ingest as video_ingest
 from app.core.model_loader import model_loader
 from app.vectorstore.qdrant_store import QdrantVectorStore
 
+from app.retrieval.bm25_retriever import BM25Retriever
+
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 vector_store = QdrantVectorStore()
+bm25 = BM25Retriever()
 
 
 def process_file(file_path, session_id="default"):
@@ -52,7 +55,17 @@ def process_file(file_path, session_id="default"):
             raise ValueError("No content extracted from file")
 
         logger.info(f"[IngestionPipeline] session_id={session_id} | Chunks created: {len(documents)}")
+        logger.info(f"[DEBUG BM25] Before update | existing_docs={len(getattr(bm25, 'all_documents', []))}")
 
+        # BM25 INDEX UPDATE
+        if not hasattr(bm25, "all_documents"):
+            bm25.all_documents = []
+        bm25.all_documents.extend(documents)
+
+        bm25.build_index(documents)
+        logger.info(f"[DEBUG BM25] After update | total_docs={len(bm25.all_documents)}")
+
+        
         # Step 3: Embedding handling
         text_docs = []
         pre_embedded_docs = []

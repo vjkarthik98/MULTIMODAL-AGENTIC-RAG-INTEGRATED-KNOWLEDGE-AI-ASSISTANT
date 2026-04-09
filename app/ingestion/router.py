@@ -13,7 +13,7 @@ def detect_modality(file_path: str):
     if ext in [".txt"]:
         return "text"
 
-    elif ext in [".pdf", ".docx", ".xlsx", ".xls"]:
+    elif ext in [".pdf", ".docx", ".xlsx", ".xls", ".doc"]:
         return "document"
 
     elif ext in [".jpg", ".jpeg", ".png"]:

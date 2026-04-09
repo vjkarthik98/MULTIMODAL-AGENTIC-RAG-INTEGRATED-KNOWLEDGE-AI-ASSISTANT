@@ -48,3 +48,6 @@ pymongo
 
 # Logging
 loguru
+
+pymupdf
+rank-bm25

@@ -18,7 +18,8 @@ class ModelLoader:
         "text_embedding": "all-MiniLM-L6-v2",
         "clip_text": "openai/clip-vit-large-patch14",
         "whisper": "base",
-        "blip": "Salesforce/blip-image-captioning-large"
+        "blip": "Salesforce/blip-image-captioning-large",
+        "reranker": "cross-encoder/ms-marco-MiniLM-L-6-v2"
     }
 
     def __init__(self):
@@ -27,7 +28,8 @@ class ModelLoader:
             "text_embedding": "all-MiniLM-L6-v2",
             "clip_text": "openai/clip-vit-large-patch14",
             "whisper": "base",
-            "blip": "Salesforce/blip-image-captioning-large"
+            "blip": "Salesforce/blip-image-captioning-large",
+            "reranker": "cross-encoder/ms-marco-MiniLM-L-6-v2"
         }
 
         self._llm = None
@@ -126,7 +128,7 @@ class ModelLoader:
         if self._reranker is None:
             logger.info("[ModelLoader] Loading Reranker...")
             self._reranker = CrossEncoder(
-                "cross-encoder/ms-marco-MiniLM-L-6-v2"
+                self.MODEL_CONFIG["reranker"]
             )
         return self._reranker
 
