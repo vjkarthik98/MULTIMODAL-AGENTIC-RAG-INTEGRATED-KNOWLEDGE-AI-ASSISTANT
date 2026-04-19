@@ -1,329 +1,276 @@
+import hashlib
 import os
-import docx
-import pdfplumber
-import pandas as pd
-import fitz
+import time
+import uuid
+from pathlib import Path
+from typing import Iterable, List
 
-from datetime import datetime
+from app.ingestion.image_ingest import ingest as image_ingest
 from app.ingestion.schema import IngestedDocument
-from app.utils.chunking import chunk_text
-from app.ingestion.frame_captioner import generate_caption 
 from app.utils.logger import get_logger
-from docx import Document
 
-# Logger
+
 logger = get_logger(__name__)
 
-# Table -> Text
-def table_to_text(df):
-    try:
-        columns = " | ".join([str(col) for col in df.columns])
-        rows = []
+MAX_FILE_SIZE_MB = 10
 
-        for i, row in df.iterrows():
-            row_text = " | ".join([str(cell) for cell in row])
-            rows.append(f"Row {i+1}: {row_text}")
 
-        table_text = "Table:\n"
-        table_text += f"Columns: {columns}\n"
-        table_text += "\n".join(rows)
+def _get_file_size_mb(file_path: str) -> float:
+    return os.path.getsize(file_path) / (1024 * 1024)
 
-        return table_text
-    
-    except Exception as e:
-        logger.error(f"[TableParser] Failed to convert table | error ={str(e)}")
-        return None
 
-def ingest(file_path: str):
-    ext = os.path.splitext(file_path)[1].lower()
-    source_type = ext.replace(".", "")
+def _generate_file_hash(file_path: str) -> str:
+    with open(file_path, "rb") as file_handle:
+        return hashlib.md5(file_handle.read()).hexdigest()
 
-    text = ""
-    structured_documents = []
+
+def _table_to_text(rows: Iterable[Iterable[object]]) -> str:
+    normalized_rows = []
+    for row in rows or []:
+        normalized_row = [str(cell or "").strip() for cell in row]
+        if any(normalized_row):
+            normalized_rows.append(normalized_row)
+
+    if not normalized_rows:
+        return ""
+
+    header = normalized_rows[0]
+    body = normalized_rows[1:]
 
     try:
-        logger.info(f"[DocumentIngest] Starting ingestion | file={file_path}")
+        import pandas as pd
 
-        # PDF
+        if body and header and len(set(header)) == len(header):
+            dataframe = pd.DataFrame(body, columns=header)
+        else:
+            dataframe = pd.DataFrame(normalized_rows)
+        return dataframe.fillna("").to_string(index=False)
+    except Exception:
+        return "\n".join("\t".join(row) for row in normalized_rows)
+
+
+def _make_document(
+    *,
+    text: str,
+    modality: str,
+    subtype: str,
+    source_type: str,
+    source: str,
+    doc_id: str,
+    session_id: str,
+    file_hash: str,
+    source_path: str,
+    structure: dict,
+) -> IngestedDocument:
+    return IngestedDocument(
+        text=text,
+        modality=modality,
+        subtype=subtype,
+        source_type=source_type,
+        source=source,
+        page=structure.get("page"),
+        chunk_id=structure.get("chunk_index"),
+        structure={
+            "doc_id": doc_id,
+            "session_id": session_id,
+            "file_hash": file_hash,
+            "source_path": source_path,
+            **structure,
+        },
+    )
+
+
+def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument]:
+    if not session_id:
+        raise ValueError("session_id is required")
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"{file_path} not found")
+
+    file_size = _get_file_size_mb(file_path)
+    if file_size > MAX_FILE_SIZE_MB:
+        raise ValueError(f"File too large: {file_size:.2f} MB")
+
+    start_time = time.time()
+    path = Path(file_path)
+    ext = path.suffix.lower()
+    source_name = path.name
+    source_path = str(path.resolve())
+    doc_id = str(uuid.uuid4())
+    file_hash = _generate_file_hash(file_path)
+    documents: List[IngestedDocument] = []
+
+    try:
+        logger.info("[DocumentIngest][START] session_id=%s | file=%s", session_id, file_path)
+
         if ext == ".pdf":
-            
+            import fitz
+            import pdfplumber
 
-            doc = fitz.open(file_path)
+            image_dir = Path("data/images") / doc_id
+            image_dir.mkdir(parents=True, exist_ok=True)
 
-            logger.info(
-                f"[PDFIngest] Opened PDf | file={file_path} | pages={len(doc)}"
-            )
-           
-            with pdfplumber.open(file_path) as pdf:
-
-                for page_index in range(len(doc)):
-                    page = doc[page_index]
-                    logger.debug(f"[PDFIngest] Processing page = {page_index}")
-                    
-                    # 1. EXTRACT TEXT 
-                    page_text = page.get_text()
-                    if page_text:
-                        text += page_text + "\n"
-                        
-
-                    # 2. EXTRACT IMAGES
-                    image_list = page.get_images(full=True)
-                    logger.info(
-                        f"[PDFIngest] page = {page_index} | images_found={len(image_list)}"
-                    )
-                    
-
-                    for img_index, img in enumerate(image_list):
-                        try:
-                            logger.debug(
-                                f"[PDFIngest] Extracting image | page={page_index} | img_index={img_index}"
+            with fitz.open(file_path) as pdf_document:
+                for page_index, page in enumerate(pdf_document, start=1):
+                    text = (page.get_text() or "").strip()
+                    if text:
+                        documents.append(
+                            _make_document(
+                                text=text,
+                                modality="text",
+                                subtype="page",
+                                source_type="pdf",
+                                source=source_name,
+                                doc_id=doc_id,
+                                session_id=session_id,
+                                file_hash=file_hash,
+                                source_path=source_path,
+                                structure={"page": page_index, "content_type": "page_text"},
                             )
-                            
-                            xref = img[0]
-                            base_image = doc.extract_image(xref)
+                        )
+
+                    for image_index, image_meta in enumerate(page.get_images(full=True)):
+                        try:
+                            xref = image_meta[0]
+                            base_image = pdf_document.extract_image(xref)
                             image_bytes = base_image["image"]
-                            
+                            image_path = image_dir / f"pdf_{page_index}_{image_index}.png"
 
-                            image_path = f"temp_pdf_image_{page_index}_{img_index}.png"
+                            with open(image_path, "wb") as image_handle:
+                                image_handle.write(image_bytes)
 
-                            with open(image_path, "wb") as f:
-                                f.write(image_bytes)
-
-                            # Caption using BLIP pipeline
-                            caption = generate_caption(image_path)
-
-                            if not caption:
-                                logger.warning(
-                                    f"[PDFIngest] Empty caption | page={page_index} | img_index={img_index}"
-                                )
-                                continue
-
-
-                            # CREATE IMAGE DOCUMENT
-                            structured_documents.append(
-                                IngestedDocument(
-                                    text=caption,
-                                    metadata={
-                                        "source": os.path.basename(file_path),
-                                        "source_type": source_type,
-                                        "modality": "image",
+                            image_docs = image_ingest(str(image_path), session_id=session_id)
+                            for image_doc in image_docs:
+                                structure = dict(image_doc.structure or {})
+                                structure.update(
+                                    {
+                                        "doc_id": doc_id,
+                                        "session_id": session_id,
+                                        "file_hash": file_hash,
                                         "page": page_index,
-                                        "chunk_id": None,
-                                        "element_index": img_index,
-                                        "ingestion_time": datetime.utcnow().isoformat(),
+                                        "source_path": source_path,
+                                        "asset_path": str(image_path),
+                                        "parent_source_type": "pdf",
+                                    }
+                                )
+                                image_doc.structure = structure
+                                image_doc.source = source_name
+                                image_doc.source_type = "pdf"
+                                image_doc.page = page_index
+                                documents.append(image_doc)
+                        except Exception as exc:
+                            logger.error("[DocumentIngest][PDF_IMAGE_FAIL] session_id=%s | error=%s", session_id, exc)
+
+            with pdfplumber.open(file_path) as pdf_plumber:
+                for page_index, page in enumerate(pdf_plumber.pages, start=1):
+                    tables = page.extract_tables() or []
+                    for table_index, table in enumerate(tables):
+                        table_text = _table_to_text(table)
+                        if table_text:
+                            documents.append(
+                                _make_document(
+                                    text=table_text,
+                                    modality="table",
+                                    subtype="structured",
+                                    source_type="pdf",
+                                    source=source_name,
+                                    doc_id=doc_id,
+                                    session_id=session_id,
+                                    file_hash=file_hash,
+                                    source_path=source_path,
+                                    structure={
+                                        "page": page_index,
+                                        "table_index": table_index,
+                                        "content_type": "table",
                                     },
                                 )
                             )
-                            logger.info(
-                                f"[PDFIngest] Image document created | page={page_index} | img_index={img_index}"
-                            )
-                            
-                        except Exception:
-                            logger.error(
-                                f"[PDFIngest] Image extraction failed | page={page_index} | img_index={img_index} | error={str(e)}"
-                            )
-                            continue
 
-                    # TABLES (PDF)
-                    try:
-                        page_plumber = pdf.pages[page_index]
-                        tables = page_plumber.extract_tables()
-
-                        if tables:
-                            logger.info(
-                                f"[PDFIngest] Tables found | page={page_index} | count={len(tables)}"
-                            )
-
-                        for table_index, table in enumerate(tables):
-                            try:
-                                df = pd.DataFrame(table[1:], columns=table[0])
-                                table_text = table_to_text(df)
-
-                                if table_text:
-                                    structured_documents.append(
-                                        IngestedDocument(
-                                            text=table_text,
-                                            metadata={
-                                                "source": os.path.basename(file_path),
-                                                "source_type": source_type,
-                                                "modality": "table",
-                                                "page": page_index,
-                                                "chunk_id": None,
-                                                "element_index": table_index,
-                                                "ingestion_time": datetime.utcnow().isoformat(),
-                                            },
-                                        )
-                                    )
-                                    logger.info(
-                                        f"[PDFIngest] Table doc created | page={page_index} | table_index={table_index}"
-                                    )
-                            except Exception as e:
-                                logger.error(
-                                    f"[PDFIngest] Table parsing failed | error={str(e)}"
-                                )
-                    except Exception:
-                        pass
-
-                                
-        # Word
         elif ext == ".docx":
+            import docx
 
-            doc = docx.Document(file_path)
+            document = docx.Document(file_path)
+            for paragraph_index, paragraph in enumerate(document.paragraphs):
+                text = (paragraph.text or "").strip()
+                if not text:
+                    continue
 
-            # Text
-            for para in doc.paragraphs:
-                text += para.text + "\n"
-
-            # Tables
-            for table_index, table in enumerate(doc.tables):
-                try:
-                    data = []
-                    for row in table.rows:
-                        data.append([cell.text.strip() for cell in row.cells])
-
-                    df = pd.DataFrame(data[1:], columns=data[0])
-                    table_text = table_to_text(df)
-
-                    if table_text:
-                        structured_documents.append(
-                            IngestedDocument(
-                                text=table_text,
-                                metadata={
-                                    "source": os.path.basename(file_path),
-                                    "source_type": source_type,
-                                    "modality": "table",
-                                    "page": None,
-                                    "chunk_id": None,
-                                    "element_index": table_index,
-                                    "ingestion_time": datetime.utcnow().isoformat(),
-                                },
-                            )
-                        )
-                        logger.info(
-                            f"[WordIngest] Table doc created | index={table_index}"
-                        )
-
-                except Exception as e:
-                    logger.error(f"[WordIngest] Table parsing failed | error = {str(e)}")
-            # WORD IMAGES
-            try:
-                rels = doc.part._rels
-                image_index = 0
-
-                for rel in rels:
-                    rel = rels[rel]
-
-                    if "image" in rel.target_ref:
-                        try:
-                            image_bytes = rel.target_part.blob
-                            
-                            image_path = f"temp_word_image_{image_index}.png"
-
-                            with open(image_path, "wb") as f:
-                                f.write(image_bytes)
-
-                            caption = generate_caption(image_path)
-
-                            if not caption:
-                                image_index += 1
-                                continue
-
-                            structured_documents.append(
-                                IngestedDocument(
-                                    text=caption,
-                                    metadata={
-                                        "source": os.path.basename(file_path),
-                                        "source_type": source_type,
-                                        "modality": "image",
-                                        "page": None,
-                                        "chunk_id": None,
-                                        "element_index": image_index,
-                                        "ingestion_time": datetime.utcnow().isoformat(),
-                                    },
-                                )
-                            )
-
-                            logger.info(
-                                f"[WordIngest] Image doc created | index={image_index}"
-                            )
-
-                            image_index +=1
-
-                        except Exception as e:
-                            logger.error(
-                                f"[WordIngest] Image extraction failed | error= {str(e)}"
-                            )
-            except Exception as e:
-                logger.error(
-                    f"[WordIngest] Image extraction block failed | error={str(e)}"
-                )
-
-        # Excel
-        elif ext in [".xlsx", ".xls"]:
-            try:
-                df = pd.read_excel(file_path, engine="openpyxl")
-            except Exception:
-                df = pd.read_excel(file_path)
-
-            table_text = table_to_text(df)
-
-            if table_text:
-                    structured_documents.append(
-                    IngestedDocument(
-                        text=table_text,
-                        metadata={
-                            "source": os.path.basename(file_path),
-                            "source_type": source_type,
-                            "modality": "table",
-                            "page": None,
-                            "chunk_id": None,
-                            "element_index": 0,
-                            "ingestion_time": datetime.utcnow().isoformat(),
+                subtype = "heading" if paragraph.style and paragraph.style.name.startswith("Heading") else "paragraph"
+                documents.append(
+                    _make_document(
+                        text=text,
+                        modality="text",
+                        subtype=subtype,
+                        source_type="word",
+                        source=source_name,
+                        doc_id=doc_id,
+                        session_id=session_id,
+                        file_hash=file_hash,
+                        source_path=source_path,
+                        structure={
+                            "paragraph_index": paragraph_index,
+                            "content_type": "paragraph",
                         },
                     )
                 )
-                    logger.info("[ExcelIngest] Table doc created")
-                    
+
+            for table_index, table in enumerate(document.tables):
+                table_text = _table_to_text(
+                    [[cell.text for cell in row.cells] for row in table.rows]
+                )
+                if table_text:
+                    documents.append(
+                        _make_document(
+                            text=table_text,
+                            modality="table",
+                            subtype="structured",
+                            source_type="word",
+                            source=source_name,
+                            doc_id=doc_id,
+                            session_id=session_id,
+                            file_hash=file_hash,
+                            source_path=source_path,
+                            structure={"table_index": table_index, "content_type": "table"},
+                        )
+                    )
+
+        elif ext in {".xlsx", ".xls"}:
+            import pandas as pd
+
+            workbook = pd.ExcelFile(file_path)
+            for sheet_name in workbook.sheet_names:
+                sheet = workbook.parse(sheet_name).fillna("")
+                table_text = sheet.to_string(index=False)
+                if table_text.strip():
+                    documents.append(
+                        _make_document(
+                            text=table_text,
+                            modality="table",
+                            subtype="structured",
+                            source_type="excel",
+                            source=source_name,
+                            doc_id=doc_id,
+                            session_id=session_id,
+                            file_hash=file_hash,
+                            source_path=source_path,
+                            structure={"sheet": sheet_name, "content_type": "sheet"},
+                        )
+                    )
+
         else:
-            logger.error(f"[DocumentIngest] Unsupported file type | file={file_path}")
-            raise ValueError("Unsupported document type")
+            raise ValueError(f"Unsupported document type: {ext}")
 
-    except Exception as e:
-        logger.error(f"[DocumentIngest] Parsing failed | file={file_path} | error={str(e)}")
-        raise ValueError(f"Document parsing failed: {str(e)}")
+        if not documents:
+            raise ValueError("No extractable content found in document")
 
-    # TEXT PROCESSING
-    if not text.strip():
-        logger.warning("[DocumentIngest] No text content extracted")
-    
-    metadata = {
-        "source": os.path.basename(file_path),
-        "source_type": source_type,
-        "modality": "document",
-        "page": None,
-        "ingestion_time": datetime.utcnow().isoformat()
-    }
-
-    # Chunking
-    chunks = chunk_text(text)
-
-    text_documents =  [
-        IngestedDocument(
-            text=chunk,
-            metadata={
-                **metadata,
-                  "chunk_id": i,
-                  "element_index": None
-            }
+        latency = time.time() - start_time
+        logger.info(
+            "[DocumentIngest][SUCCESS] session_id=%s | docs=%s | latency=%.2fs",
+            session_id,
+            len(documents),
+            latency,
         )
-        for i, chunk in enumerate(chunks)
-    ]
+        return documents
 
-    # Combine 
-    all_documents = text_documents + structured_documents
-
-    logger.info(
-        f"[DocumentIngest] Final documents | text={len(text_documents)} | structured={len(structured_documents)}"
-    )
-
-    return all_documents
+    except Exception as exc:
+        logger.error("[DocumentIngest][FAILED] session_id=%s | error=%s", session_id, exc)
+        raise

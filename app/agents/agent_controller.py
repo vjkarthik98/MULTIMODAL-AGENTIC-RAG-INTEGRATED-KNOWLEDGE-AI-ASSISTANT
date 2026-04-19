@@ -1,66 +1,71 @@
-"""
-agent_controller.py
+from typing import Dict, Any
+from app.utils.logger import get_logger
+from app.agents.agent_executor import AgentExecutor
+from app.core.model_loader import model_loader
 
-Handles decision-making for incoming queries.
-Determines which pipeline/path to use.
-"""
-
-from typing import Dict
-import logging
-
-logger = logging.getLogger(__name__)
+# Logger
+logger = get_logger(__name__)
 
 
 class AgentController:
-    """
-    Agent layer that decides how to process a user query.
-    """
-    def decide(self, query: str, session_id: str) -> Dict:
-        """
-        Decide which pipeline to use based on query.
+    def __init__(self):
+        self.executor = AgentExecutor()
 
-        Args:
-            query (str): user input
-            session_id (str): unique session identifier
-        
-        Returns:
-            dict with:
-            - action: "rag" | "memory" | "multimodal" | "direct"
-        """
+    # MAIN ENTRY
+    def handle(self, query: str, session_id: str) -> Dict[str, Any]:
 
         logger.info(
-            f"[AgentController] session_id={session_id} | Recieved query: {query}"
+            f"[AgentController][START] session_id={session_id} | query={query}"
         )
 
-        query_lower = query.lower()
+        try:
+            # STEP 1: Execute Agent
+            result = self.executor.run(query, session_id)
 
-        # Simple heuristics 
-        if any(word in query_lower for word in ["image", "photo", "diagram"]):
-            return {
-                "action": "multimodal",
-                "reason": "Image-related query detected"
-            }
-        
-        elif any(word in query_lower for word in ["previous", "earlier", "before"]):
-            return {
-                "action": "memory",
-                "reason": "Follow-up question detected"
-            }
-        
-        elif len(query.split()) > 12:
-            return {
-                "action": "rag",
-                "reason": "Complex query -> use retrieval"
-            }
-        
-        else:
-            decision =  {
-                "action": "rag",
-                "reason": "Default to RAG"
-            }
-        
-        logger.info(
-            f"[AgentController] session_id={session_id} | Decision: {decision['action']} | Reason: {decision['reason']}"
-        )
+            # STEP 2: Post Processing
+            response = self._format_response(result)
 
-        return decision 
+            logger.info(
+                f"[AgentController][SUCCESS] session_id={session_id}"
+            )
+
+            return response
+        
+        except Exception as e:
+            logger.error(
+                f"[AgentController][ERROR] session_id={session_id} | {str(e)}"
+            )
+
+            # Safe Fallback
+            return self._fallback_response(query)
+    
+    # RESPONSE FORMATTER
+    def _format_response(self, result: Dict[str, Any]) -> Dict[str, Any]:
+
+        return {
+            "response": result.get("response"),
+            "source": result.get("source"),
+            "decision": result.get("decision"),
+            "reason": result.get("reason"),
+            "metadata": result.get("metadata", {})
+        }
+    
+    # FALLBACK
+    def _fallback_response(self, query: str) -> Dict[str, Any]:
+
+        logger.warning("[AgentController] Using fallback LLM response")
+
+        response = model_loader.generate(query)
+
+        return {
+            "response": response,
+            "source": "fallback",
+            "decision": "direct",
+            "reason": "Controller fallback due to error",
+            "latency": None,
+            "metadata": {}
+        }
+
+
+
+    

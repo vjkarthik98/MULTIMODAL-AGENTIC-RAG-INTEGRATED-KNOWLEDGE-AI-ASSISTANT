@@ -1,62 +1,87 @@
-import cv2
+import math
 import os
-import logging
+import tempfile
+import time
+from pathlib import Path
 
-# Logger
-logger = logging.getLogger(__name__)
+from app.core.config import settings
+from app.utils.logger import get_logger
+
+try:
+    import cv2
+except ImportError:  # pragma: no cover - optional dependency
+    cv2 = None
 
 
-def extract_frames(video_path: str, output_dir: str = "temp_frames", interval: int = 30):
-    """
-    Extract frames every N frames
+logger = get_logger(__name__)
 
-    Args:
-        video_path: input video
-        output_dir: where frames will be saved
-        interval: extract every N frames
-    """
+
+def extract_frames(
+    video_path: str,
+    interval_sec: int = 2,
+    session_id: str = "default",
+):
+    if cv2 is None:
+        raise ImportError("opencv-python is required for video frame extraction")
+    if interval_sec <= 0:
+        raise ValueError("interval_sec must be greater than 0")
+    if not os.path.exists(video_path):
+        raise ValueError(f"{video_path} not found")
+
+    start_time = time.time()
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError("Failed to open video")
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if not fps or math.isnan(fps) or fps <= 0:
+        cap.release()
+        raise RuntimeError("Invalid FPS detected")
+
+    interval_frames = max(int(round(fps * interval_sec)), 1)
+    temp_root = settings.DATA_DIR / "temp_frames"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(tempfile.mkdtemp(prefix="frames_", dir=temp_root))
+
+    frames = []
+    frame_count = 0
+    saved_index = 0
 
     try:
-        logger.info(f"[VideoFrames] Starting extraction | video={video_path}")
-
-        os.makedirs(output_dir, exist_ok=True)
-
-        cap = cv2.VideoCapture(video_path)
-
-        frames = []
-        frame_count = 0
-        saved_count = 0
-
-        fps = cap.get(cv2.CAP_PROP_FPS)
-
         while True:
             success, frame = cap.read()
             if not success:
                 break
 
-            if frame_count % interval == 0:
-                timestamp = frame_count / fps if fps else 0
-                frame_path = os.path.join(output_dir, f"frame_{saved_count}.jpg")
+            if frame_count % interval_frames == 0:
+                timestamp = round(frame_count / fps, 2)
+                frame_path = temp_dir / f"frame_{saved_index}.jpg"
+                cv2.imwrite(str(frame_path), frame)
 
-                cv2.imwrite(frame_path, frame)
-
-                frames.append({
-                    "path": frame_path,
-                    "timestamp": timestamp
-                })
-
-                saved_count += 1
+                frames.append(
+                    {
+                        "path": str(frame_path),
+                        "timestamp": timestamp,
+                        "frame_index": saved_index,
+                        "temp_dir": str(temp_dir),
+                    }
+                )
+                saved_index += 1
 
             frame_count += 1
 
-        cap.release()
-
+        latency = time.time() - start_time
         logger.info(
-            f"[VideoFrames] Extraction completed | video={video_path} | frames_saved={saved_count}"
+            "[FrameExtract][SUCCESS] session_id=%s | frames=%s | latency=%.2fs",
+            session_id,
+            len(frames),
+            latency,
         )
-
         return frames
 
-    except Exception as e:
-        logger.error(f"[VideoFrames] Failed | video={video_path} | error={str(e)}")
+    except Exception as exc:
+        logger.error("[FrameExtract][ERROR] session_id=%s | error=%s", session_id, exc)
         raise
+
+    finally:
+        cap.release()

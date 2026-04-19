@@ -1,9 +1,10 @@
-from pymongo import MongoClient
+from pymongo import MongoClient, ASCENDING, DESCENDING
 from datetime import datetime
-import logging
+from typing import List, Dict, Optional
+from app.utils.logger import get_logger
 
 # Logger
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class MongoMemory:
@@ -12,52 +13,154 @@ class MongoMemory:
 
         self.client = MongoClient(uri)
         self.db = self.client["rag_memory"]
-        self.collection = self.db["chat_history"]
 
-        logger.info("[MongoMemory] Connection established")
+        # separate Collections
+        self.messages = self.db["messages"]
+        self.summaries = self.db["summaries"]
 
-    def store_message(self, session_id: str, role: str, content: str):
+        self._ensure_indexes()
+
+        logger.info("[MongoMemory] Initialized Successfully")
+
+    # INDEXES
+    def _ensure_indexes(self):
+        self.messages.create_index([("session_id", ASCENDING)])
+        self.messages.create_index([("timestamp", DESCENDING)])
+        self.messages.create_index([("importance", DESCENDING)])
+
+        self.summaries.create_index([("session_id", ASCENDING)])
+
+
+    # STORE MESSAGE
+    def store_message(
+            self, 
+            session_id: str,
+            role: str,
+            content: str,
+            embedding: Optional[List[float]] = None,
+            modality: str = "text",
+            importance: float = 1.0,
+            extra: Optional[Dict] = None
+    ):
         try:
-            logger.debug(f"[MongoMemory] session_id={session_id} | Storing message | role={role}")
-
-            self.collection.insert_one({
+            doc = {
                 "session_id": session_id,
                 "role": role,
                 "content": content,
-                "timestamp": datetime.utcnow()
-            })
+                "timestamp": datetime.utcnow(),
+                "modality": modality,
+                "importance": importance
+            }
+
+            if embedding:
+                doc["embedding"] = embedding
+
+            if extra:
+                doc["extra"] = extra
+
+            self.messages.insert_one(doc)
+
+            logger.debug(
+                f"[MongoMemory] Stored | session_id={session_id} | role={role}"
+            )
 
         except Exception as e:
             logger.error(
-                f"[MongoMemory] session_id={session_id} | Store failed | error={str(e)}"
+                f"[MongoMemory] Store failed | session_id={session_id} | {str(e)}"
             )
             raise
 
-    def get_history(self, session_id: str, limit: int = 50):
+    # STORE SUMMARY
+    def store_summary(
+        self,
+        session_id: str,
+        summary: str,
+        embedding: Optional[List[float]] = None
+    ):
+        
         try:
-            logger.debug(
-                f"[MongoMemory] session_id={session_id} | Fetching history | limit={limit}"
+            doc = {
+                "session_id": session_id,
+                "summary": summary,
+                "timestamp": datetime.utcnow()
+            }
+
+            if embedding:
+                doc["embedding"] = embedding
+
+            self.summaries.insert_one(doc)
+
+            logger.info(
+                f"[MongoMemory] Summary stored | session_id={session_id}"
             )
 
-            cursor = self.collection.find(
+        except Exception as e:
+            logger.error(
+                f"[MongoMemory] Summary failed | session_id={session_id} | {str(e)}"
+            )
+            raise
+
+    
+    # GET RECENT HISTORY
+    def get_recent_history(
+            self,
+            session_id: str,
+            limit: int = 20
+    ) -> List[Dict]:
+        try:
+            cursor = self.messages.find(
                 {"session_id": session_id}
-            ).sort("timestamp", -1).limit(limit)
+            ).sort("timestamp", DESCENDING).limit(limit)
 
             history = []
             for doc in reversed(list(cursor)):
                 history.append({
                     "role": doc["role"],
-                    "content": doc["content"]
+                    "content": doc["content"],
+                    "embedding": doc.get("embedding"),
+                    "modality": doc.get("modality")
                 })
 
-            logger.debug(
-                f"[MongoMemory] session_id={session_id} | History fetched | count={len(history)}"
+            return history
+        
+        except Exception as e:
+            logger.error(
+                f"[MongoMemory] Fetch recent failed | {str(e)}"
+            )
+            return []
+
+    # GET LATEST SUMMARY
+    def get_latest_summary(self, session_id: str) -> str:
+        try:
+            doc = self.summaries.find_one(
+                {"session_id": session_id},
+                sort=[("timestamp", DESCENDING)]
             )
 
-            return history
+            if doc:
+                return doc.get("summary", "")
+            
+            return ""
+        
+        except Exception as e:
+            logger.error(
+                f"[MongoMemory] Summary fetch failed | {str(e)}"
+            )
+            return ""
+        
+    # CLEAR MEMORY
+    def clear_memory(self, session_id: str):
+        try:
+            self.messages.delete_many({"session_id": session_id})
+            self.summaries.delete_many({"session_id": session_id})
+
+            logger.info(
+                f"[MongoMemory] Cleared | session_id={session_id}"
+            )
 
         except Exception as e:
             logger.error(
-                f"[MongoMemory] session_id={session_id} | Fetch failed | error={str(e)}"
+                f"[MongoMemory] Clear failed | {str(e)}"
+
             )
             raise
