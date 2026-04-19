@@ -329,3 +329,26 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Metadata Standardization
 
 
+# [v0.19.0] - Multimodal system Refactor & Architecture Strengthening
+### Features
+- Standardized multimodal ingestion across text, document, image, audio, video
+- Introduced structured document schema with doc_id, session_id, file_hash
+- Enabled modality-aware outputs (caption, OCR, speech, frame, tables)
+- Added enriched metadata(timestamps, pages, segments, source tracking)
+- Improved audio(Whisper) and video(audio + frame fusion) pipelines
+- Enhanced image pipeline with capiton + OCR dual representation
+- Introduced ModelLoader with lazy loading to initialize models only on first use
+- Added centralized caching to prevent redundant model loads across modules
+- Introduced Config for centralized Details of Important details
+
+### Improved
+- Refactored ingestion to produce structured blocks instead of flat text
+- Strengthened document parsing (PDF, WORD, Excel) with multimodal extraction
+- Aligned all modalities for consistent embedding + retrieval readiness
+- Upgraded memory filtering with embedding reuse + recency/role scoring
+- Improved pipeline modularity (ingestion vs query separation)
+- Standardized logging, error handling and session tracking across modules
+- Added validation and fallback handling in ingestion workdflows
+- Reduced startup latency by deffering heavy model initialization
+- Improved memory efficiency with on-demand model lifecycle management
+- Standardized model access across pipeline via unified loader interface

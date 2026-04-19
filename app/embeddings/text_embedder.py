@@ -1,56 +1,163 @@
-from sentence_transformers import SentenceTransformer
+import time
+
+from app.core.model_loader import model_loader
 from app.utils.logger import get_logger
-import torch
+
 
 logger = get_logger(__name__)
 
+MAX_BATCH_SIZE = 64
+MAX_TEXT_LENGTH = 5000
+
 
 class TextEmbedder:
-    def __init__(self, model_name: str):
+    def __init__(self):
+        self.model = model_loader.get_text_embedding_model()
 
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model_name = model_name
+    def _sanitize(self, text: str) -> str:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            raise ValueError("Empty text for embedding")
 
-        self.model = SentenceTransformer(
-            self.model_name,
-            device=self.device
-        )
+        if len(cleaned) > MAX_TEXT_LENGTH:
+            logger.warning(
+                "[TextEmbedder][TRUNCATE] length=%s -> %s",
+                len(cleaned),
+                MAX_TEXT_LENGTH,
+            )
+            cleaned = cleaned[:MAX_TEXT_LENGTH].strip()
+        return cleaned
 
-        logger.info(
-            f"[TextEmbedder] Model loaded: {self.model_name} | device={self.device}"
-        )
+    def _build_prefix(self, document) -> str:
+        structure = document.structure or {}
 
-    # Single Text
-    def embed_text(self, text: str):
-        embedding = self.model.encode(text)
+        if document.modality == "table":
+            return "Table data: "
 
-        logger.debug("[TextEmbedder] Single text embedded")
+        if document.modality == "image":
+            return "Extracted text from image: " if document.subtype == "ocr" else "Image description: "
 
-        return embedding.tolist()
+        if document.modality == "audio":
+            start = structure.get("start_time")
+            end = structure.get("end_time")
+            if start is not None and end is not None:
+                return f"Spoken content from {start}s to {end}s: "
+            return "Spoken audio content: "
 
-    # Document Embedding
-    def embed_documents(self, documents):
-        texts = [doc.text for doc in documents]
+        if document.modality == "video":
+            if document.subtype == "speech":
+                start = structure.get("start_time")
+                end = structure.get("end_time")
+                if start is not None and end is not None:
+                    return f"Video speech from {start}s to {end}s: "
+                return "Video spoken content: "
 
-        embeddings = self.model.encode(
-            texts,
-            batch_size=32,
-            show_progress_bar=True
-        )
+            if document.subtype == "frame":
+                timestamp = structure.get("timestamp")
+                if timestamp is not None:
+                    return f"Visual scene at {timestamp}s: "
+                return "Video visual content: "
 
-        for i, emb in enumerate(embeddings):
-            documents[i].embedding = emb.tolist()
+        if document.modality == "text" and document.subtype == "heading":
+            return "Section heading: "
 
-        logger.debug(
-            f"[TextEmbedder] Embedded documents count={len(documents)}"
-        )
+        return ""
 
-        return documents
+    def _enrich_text(self, document, clean_text: str) -> str:
+        context = []
+        if document.source_type:
+            context.append(f"[{document.source_type.upper()}]")
+        if document.modality:
+            context.append(f"[{document.modality.upper()}]")
+        if document.page:
+            context.append(f"[Page {document.page}]")
 
-    # Query Embedding
-    def embed_query(self, query: str):
-        embedding = self.model.encode(query)
+        prefix = self._build_prefix(document)
+        return "".join(context) + prefix + clean_text
 
-        logger.debug("[TextEmbedder] Query embedding generated")
+    def _embedding_to_list(self, embedding):
+        if hasattr(embedding, "tolist"):
+            return embedding.tolist()
+        return list(embedding)
 
-        return embedding.tolist()
+    def embed_text(self, text: str, session_id: str = "default"):
+        start_time = time.time()
+        if not session_id:
+            raise ValueError("session_id required")
+
+        try:
+            clean_text = self._sanitize(text)
+            embedding = self.model.encode(
+                clean_text,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            )
+            latency = time.time() - start_time
+            logger.info("[TextEmbedder][SINGLE] session_id=%s | latency=%.2fs", session_id, latency)
+            return self._embedding_to_list(embedding)
+        except Exception as exc:
+            logger.error("[TextEmbedder][FAILED] session_id=%s | error=%s", session_id, exc)
+            raise
+
+    def embed_documents(self, documents, session_id: str = "default"):
+        start_time = time.time()
+        if not session_id:
+            raise ValueError("session_id required")
+        if not documents:
+            return []
+
+        try:
+            valid_documents = []
+            texts = []
+
+            for document in documents:
+                try:
+                    clean_text = self._sanitize(document.text)
+                except ValueError:
+                    continue
+
+                texts.append(self._enrich_text(document, clean_text))
+                valid_documents.append(document)
+
+            if len(valid_documents) > MAX_BATCH_SIZE:
+                logger.warning(
+                    "[TextEmbedder][BATCH_LIMIT] reducing %s -> %s",
+                    len(valid_documents),
+                    MAX_BATCH_SIZE,
+                )
+                valid_documents = valid_documents[:MAX_BATCH_SIZE]
+                texts = texts[:MAX_BATCH_SIZE]
+
+            if not valid_documents:
+                logger.warning("[TextEmbedder][EMPTY] session_id=%s | No valid documents", session_id)
+                return []
+
+            embeddings = self.model.encode(
+                texts,
+                batch_size=min(32, len(texts)),
+                show_progress_bar=False,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            )
+
+            for document, embedding in zip(valid_documents, embeddings):
+                document.embedding = self._embedding_to_list(embedding)
+                structure = dict(document.structure or {})
+                structure["embedding_space"] = "text"
+                document.structure = structure
+
+            latency = time.time() - start_time
+            logger.info(
+                "[TextEmbedder][BATCH] session_id=%s | docs=%s | latency=%.2fs",
+                session_id,
+                len(valid_documents),
+                latency,
+            )
+            return valid_documents
+
+        except Exception as exc:
+            logger.error("[TextEmbedder][FAILED] session_id=%s | error=%s", session_id, exc)
+            raise
+
+    def embed_query(self, query: str, session_id: str = "default"):
+        return self.embed_text(query, session_id=session_id)

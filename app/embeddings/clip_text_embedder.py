@@ -1,24 +1,48 @@
-from transformers import CLIPProcessor, CLIPTextModelWithProjection
-import torch
+from app.core.model_loader import model_loader
+from app.utils.logger import get_logger
+
+try:
+    import torch
+    import torch.nn.functional as functional
+except ImportError:  # pragma: no cover - optional dependency
+    torch = None
+    functional = None
+
+
+logger = get_logger(__name__)
+
 
 class ClipTextEmbedder:
-    def __init__(self, model_name: str):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+    def __init__(self):
+        processor, model, device = model_loader.get_clip()
+        self.processor = processor
+        self.model = model
+        self.device = device
+        logger.info("[ClipTextEmbedder] CLIP model loaded")
 
-        self.model = CLIPTextModelWithProjection.from_pretrained(model_name).to(self.device)
-        
-        self.processor = CLIPProcessor.from_pretrained(model_name)
-    
     def embed(self, text: str):
-        # Tokenize
-        inputs = self.processor(text=[text], return_tensors="pt", padding=True).to(self.device)
+        clean_text = (text or "").strip()
+        if not clean_text:
+            raise ValueError("text cannot be empty")
+        if torch is None or functional is None:
+            raise ImportError("torch is required for CLIP text embeddings")
 
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-            
-            # This is now guaranteed to be 768
-            embedding = outputs.text_embeds[0]
+        try:
+            inputs = self.processor(
+                text=[clean_text],
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+            ).to(self.device)
 
-        
-        return embedding.cpu().numpy().tolist()
-   
+            with torch.no_grad():
+                text_features = self.model.get_text_features(**inputs)
+                text_features = functional.normalize(text_features, p=2, dim=-1)
+
+            embedding = text_features[0].detach().cpu().numpy()
+            logger.debug("[ClipTextEmbedder] embedding_dim=%s", len(embedding))
+            return embedding.tolist()
+
+        except Exception as exc:
+            logger.error("[ClipTextEmbedder][FAILED] error=%s", exc)
+            raise

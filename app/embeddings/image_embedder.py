@@ -1,41 +1,46 @@
-"""
-from transformers import CLIPProcessor, CLIPVisionModelWithProjection
-from app.core.model_loader import model_loader
-import torch
 from PIL import Image
-import logging
 
-# Logger
-logger = logging.getLogger(__name__)
+from app.core.model_loader import model_loader
+from app.utils.logger import get_logger
+
+try:
+    import torch
+    import torch.nn.functional as functional
+except ImportError:  # pragma: no cover - optional dependency
+    torch = None
+    functional = None
+
+
+logger = get_logger(__name__)
 
 
 class ImageEmbedder:
-
-    def __init__(self, model_name: str = "openai/clip-vit-large-patch14"):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        logger.info("[ImageEmbedder] Loading CLIP vision model...")
-
-        self.model = CLIPVisionModelWithProjection.from_pretrained(model_name).to(self.device)
-        self.processor = CLIPProcessor.from_pretrained(model_name)
+    def __init__(self):
+        processor, model, device = model_loader.get_clip()
+        self.processor = processor
+        self.model = model
+        self.device = device
+        logger.info("[ImageEmbedder] CLIP model loaded")
 
     def embed(self, image_path: str):
-        try:
-            logger.debug(f"[ImageEmbedder] Processing image: {image_path}")
+        if not image_path:
+            raise ValueError("image_path is required")
+        if torch is None or functional is None:
+            raise ImportError("torch is required for image embeddings")
 
-            image = Image.open(image_path).convert("RGB")
+        try:
+            with Image.open(image_path) as raw_image:
+                image = raw_image.convert("RGB")
 
             inputs = self.processor(images=image, return_tensors="pt").to(self.device)
-
             with torch.no_grad():
-                outputs = self.model(**inputs)
-                embedding = outputs.image_embeds[0]
+                image_features = self.model.get_image_features(**inputs)
+                image_features = functional.normalize(image_features, p=2, dim=-1)
 
-            logger.debug(f"[ImageEmbedder] Embedding generated, dim={len(embedding)}")
+            embedding = image_features[0].detach().cpu().numpy()
+            logger.debug("[ImageEmbedder] embedding_dim=%s", len(embedding))
+            return embedding.tolist()
 
-            return embedding.cpu().numpy().tolist()
-
-        except Exception as e:
-            logger.error(f"[ImageEmbedder] Error processing image: {str(e)}")
+        except Exception as exc:
+            logger.error("[ImageEmbedder][FAILED] image=%s | error=%s", image_path, exc)
             raise
-            """

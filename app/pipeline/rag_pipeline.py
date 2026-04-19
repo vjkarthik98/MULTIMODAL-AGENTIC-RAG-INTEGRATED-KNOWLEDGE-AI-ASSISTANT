@@ -1,13 +1,16 @@
+from typing import Dict, Any, List
+import time 
+
 from app.retrieval.retriever import Retriever
 from app.prompt.prompt_builder import PromptBuilder
 from app.core.model_loader import model_loader
-from app.memory.redis_memory import RedisMemory
+
 from app.memory.mongo_memory import MongoMemory
 from app.memory.memory_manager import MemoryManager
-import logging
+from app.utils.logger import get_logger
 
-# ✅ Logger
-logger = logging.getLogger(__name__)
+# Logger
+logger = get_logger(__name__)
 
 
 class RAGPipeline:
@@ -15,189 +18,245 @@ class RAGPipeline:
         self.retriever = Retriever()
         self.prompt_builder = PromptBuilder()
         self.llm = model_loader.get_llm()
-        self.memory_manager = MemoryManager(self.llm)
+        self.embedder = model_loader.get_embedder()
+        self.memory_manager = MemoryManager(self.llm, self.embedder)
         self.mongo_memory = MongoMemory()
+        
 
-    def run(self, query: str, session_id: str = "default"):
 
-        logger.info(f"[RAGPipeline] session_id={session_id} | Run started")
+    # MAIN RUN
+    def run(self, query: str, session_id: str = "default") -> Dict[str, Any]:
 
-        # Step 0: Load Memory
-        history = self.memory_manager.get_history(session_id)
+        start_time = time.time()
 
-        history_text = ""
-        for msg in history:
-            role = msg["role"]
-            content = msg["content"]
-            history_text += f"{role.upper()}: {content}\n"
+        logger.info(f"[RAGPipeline][START] session_id={session_id}")
 
-        # Step 1: Retrieval
-        docs = self.retriever.retrieval(query, top_k=5)
+        try:
+            # STEP 1: Load Memory
+            history = self.memory_manager.get_history(session_id)
 
-        logger.debug(f"[RAGPipeline] session_id={session_id} | Retrieved docs count={len(docs)}")
+            history_text = self._format_history(history)
 
-        # Normalize docs
-        normalized_docs = []
-        for doc in docs:
-            if isinstance(doc, dict):
-                normalized_docs.append(doc)
-            elif isinstance(doc, tuple):
-                normalized_docs.append({
-                    "text": doc[0],
-                    "metadata": doc[2] if len(doc) > 2 else {}
-                })
-        docs = normalized_docs
+            # STEP 2: Retrieval 
+            docs = self.retriever.retrieval(
+                query=query,
+                session_id=session_id,
+                top_k=6
+            )
 
-        # Remove duplicates
-        unique_docs = []
-        seen_texts = set()
+            logger.debug(f"[RAGPipeline] Retrieved docs={len(docs)}")
 
-        for doc in docs:
-            text = doc["text"]
-            if text not in seen_texts:
-                unique_docs.append(doc)
-                seen_texts.add(text)
+            if not docs:
+                return self._empty_response(start_time)
+            
+            # STEP 3: Normalization + Dedup
+            docs = self._normalize+docs(docs)
+            docs = self._deduplicate_docs(docs)
 
-        docs = unique_docs
+            # STEP 4: Multimodal Context Build
+            context = self._build_multimodal_context(docs)
 
-        if not docs:
-            logger.warning(f"[RAGPipeline] session_id={session_id} | No docs retrieved")
+            # STEP 5: Source Extraction
+            sources = self._extract_sources(docs)
+
+            # STEP 6: Role Adaptation
+            system_role = self._detect_role(docs)
+
+            # STEP 7: Prompt Build
+            prompt = self.prompt_builder.build_prompt(
+                query=query,
+                context=self._compose_context(
+                    system_role,
+                    history_text,
+                    context
+                )
+            )
+
+            # STEP 8: LLM Generation
+            answer = self.llm.generate(prompt)
+
+            # STEP 9: Memory Write
+            memory_result = self.memory_manager.add.interaction(
+                session_id,
+                query,
+                answer
+            )
+
+            if memory_result.get("summarized"):
+                logger.info(f"[RAGPipeline] Memory summarized")
+
+            self.mongo_memory.store_message(session_id, "user", query)
+            self.mongo_memory.store_message(session_id, "assistant", answer)
+
+
+            # STEP 10: Response
+            latency = round(time.time() - start_time, 2)
+
             return {
-                "answer": "I don't Know",
-                "sources": []
+                "answer": answer,
+                "sources": sources,
+                "metadata": {
+                    "retrieved_docs": len(docs),
+                    "latency": latency
+                }
             }
+        
+        except Exception as e:
+            logger.error(f"[RAGPipeline][ERROR] {str(e)}")
+            return {
+                "answer": "Something went wrong,",
+                "error": str(e)
+            }
+        
+    # STREAMING
+    def stream(self, query: str, session_id: str = "default"):
+        logger.info(f"[RAGPipeline][STREAM] session_id={session_id}")
 
-        # Step 2: Context Aggregation
-        audio_texts, frame_texts, other_texts = [], [], []
-
-        for doc in docs:
-            metadata = doc.get("metadata", {})
-            modality = metadata.get("modality", "text")
-
-            if modality in ["audio", "video_audio"]:
-                audio_texts.append(doc["text"])
-            elif modality == "video_frame":
-                frame_texts.append(doc["text"])
-            else:
-                other_texts.append(doc["text"])
-
-        context = f"""
-AUDIO CONTENT:
-{' '.join(audio_texts)}
-
-VISUAL CONTENT:
-{' '.join(frame_texts)}
-
-OTHER CONTENT:
-{' '.join(other_texts)}
-"""
-        context = context[:1200]
-
-        # Step 3: Sources
-        sources = list(set([
-            doc.get("metadata", {}).get("source", "unknown")
-            for doc in docs
-        ]))
-
-        # Step 4: Role Detection
-        modality_types = set([
-            doc.get("metadata", {}).get("modality", "text")
-            for doc in docs
-        ])
-
-        if "image" in modality_types:
-            system_role = "You are an AI assistant analyzing images."
-        elif "audio" in modality_types or "video_audio" in modality_types:
-            system_role = "You are an AI assistant analyzing audio content."
-        elif "video_frame" in modality_types:
-            system_role = "You are an AI assistant analyzing video content."
-        else:
-            system_role = "You are an AI assistant answering general knowledge questions."
-
-        # Step 5: Prompt
-        prompt = f"""
-{system_role}
-
-Conversation History:
-{history_text}
-
-Context:
-{context}
-
-Question: {query}
-
-TASK:
-- Use the provided context strictly
-- Do not hallucinate
-- Answer clearly and concisely
-- If unsure, say you don't know
-
-FINAL ANSWER:
-"""
-
-        logger.debug(f"[RAGPipeline] session_id={session_id} | Prompt built")
-
-        # Step 6: LLM
-        logger.info(f"[RAGPipeline] session_id={session_id} | Generating answer")
-        answer = self.llm.generate(prompt)
-
-        logger.info(f"[RAGPipeline] session_id={session_id} | Answer generated")
-
-        # Step 7: Memory
-        memory_result = self.memory_manager.add_interaction(
-            session_id,
-            query,
-            answer
+        docs = self.retriever.retrieval(
+            query=query,
+            session_id=session_id,
+            top_k=3
         )
 
-        if memory_result.get("summarized"):
-            logger.info(f"[RAGPipeline] session_id={session_id} | Memory summarized")
-
-        # Step 8: Mongo
-        self.mongo_memory.store_message(session_id, "user", query)
-        self.mongo_memory.store_message(session_id, "assistant", answer)
-
-        logger.info(f"[RAGPipeline] session_id={session_id} | Run completed")
-
-        return {
-            "answer": answer,
-            "sources": sources
-        }
-
-    def stream(self, query: str, session_id: str = "default"):
-
-        logger.info(f"[RAGPipeline] session_id={session_id} | Stream started")
-
-        docs = self.retriever.retrieval(query, top_k=3)
-
-        context_parts = []
-
-        for i, doc in enumerate(docs):
-            metadata = doc.get("metadata", {})
-            modality = metadata.get("modality", "text")
-
-            if modality in ["audio", "video_audio"]:
-                start = metadata.get("start_time", 0)
-                context_parts.append(
-                    f"[Source {i + 1} | Audio {start:.2f}s]\n{doc['text'][:150]}"
-                )
-            elif modality == "video_frame":
-                timestamp = metadata.get("timestamp", 0)
-                context_parts.append(
-                    f"[Source {i + 1} | Frame {timestamp:.2f}s]\n{doc['text'][:150]}"
-                )
-            else:
-                context_parts.append(
-                    f"[Source {i + 1}]\n{doc['text'][:150]}"
-                )
-
-        context = "\n\n".join(context_parts)
-        context = context[:2000]
+        context = self._build_stream_context(docs)
 
         prompt = self.prompt_builder.build_prompt(query, context)
 
         def generator():
             for token in self.llm.stream(prompt):
                 yield token + "\n"
-
+            
         return generator()
+    
+    # HELPERS
+
+    def _format_history(self, history: List[Dict]) -> str:
+        formatted = []
+        for msg in history:
+            role = msg.get("role", "user").upper()
+            content = msg.get("content", "")
+            formatted.append(f"{role}: {content}")
+        return "\n".join(formatted)[:1200]
+    
+    def _normalize_docs(self, docs: List[Any]) -> List[Dict]:
+        normalized  = []
+
+        for doc in docs:
+            if isinstance(doc, dict):
+                normalized.append(doc)
+            elif isinstance(doc, tuple):
+                normalized.append({
+                    "text": doc[0],
+                    "metadata": doc[2] if len(doc) > 2 else {}
+                })
+
+        return normalized
+    
+    def _deduplicate_docs(self, docs: List[Dict]) -> List[Dict]:
+        seen = set()
+        unique = []
+
+        for d in docs:
+            key = (
+                d.get("metadata", {}).get("doc_id"),
+                d.get("metadata", {}).get("chunk_id"),
+                d.get("text", "")[:100]
+            )
+
+            if key not in seen:
+                seen.add(key)
+                unique.append(d)
+
+        return unique
+    
+    def _build_multimodal_context(self, docs: List[Dict]) -> str:
+        audio, visual, text = [], [], []
+
+        for d in docs:
+            modality = d.get("metadata", {}).get("modality", "text")
+
+            if modality in ["audio", "video_audio"]:
+                audio.append(d["text"])
+            elif modality in ["image", "video_frame"]:
+                visual.append(d["text"])
+            else:
+                text.append(d["text"])
+
+        return f"""
+AUDIO:
+{' '.join(audio)[:600]}
+
+VISUAL:
+{' '.join(visual)[:600]}
+
+TEXT:
+{' '.join(text)[:800]}
+""".strip()
+    
+    def _detect_role(self, docs: List[Dict]) -> str:
+        modalities = set([
+            d.get("metadata", {}).get("modality", "text")
+            for d in docs
+        ])
+
+        if "image" in modalities:
+            return "You are an expert in visual understanding."
+        if "audio" in modalities:
+            return "You are an expert in audio understanding."
+        if "video" in modalities or "video_frame" in modalities:
+            return "You are an expert in video analysis."
+        return "You are a highly accurate knowledge assistant."
+    
+    def _compose_context(self, role: str, history: str, context: str) -> str:
+        return f"""
+{role}
+
+CONVERSATION HISTORY:
+{history}
+
+CONTEXT:
+{context}
+
+INSTRUCTIONS:
+- Use ONLY provided context
+- No hallucination
+- Be precise and concise
+"""
+    
+    def _extract_sources(self, docs: List[Dict]) -> List[str]:
+        sources = set()
+
+        for d in docs:
+            src = d.get("metadata", {}).get("source")
+
+            if src:
+                sources.add(src)
+
+            return list(sources)
+        
+    def _build_stream_context(self, docs: List[Dict]) -> str:
+        parts = []
+
+        for i, d in enumerate(docs):
+            metadata = d.get("metadata", {})
+            modality = metadata.get("modality", "text")
+
+            if modality in ["audio", "video_audio"]:
+                t = metadata.get("start_time", 0)
+                parts.append(f"[Audio {t:.2f}s]\n{d['text'][:150]}")
+
+            elif modality == "video_frame":
+                ts = metadata.get("timestamp", 0)
+                parts.append(f"[Frame {ts:.2f}s]\n{d['text'][:150]}")
+            else:
+                parts.append(d["text"][:150])
+
+        return "\n\n".join(parts)[:2000]
+    
+    def _empty_response(self, start_time):
+        return {
+            "answer": "I don't know based on available data.",
+            "sources": [],
+            "latency": round(time.time() - start_time, 2)
+        }
+    
