@@ -352,3 +352,37 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Reduced startup latency by deffering heavy model initialization
 - Improved memory efficiency with on-demand model lifecycle management
 - Standardized model access across pipeline via unified loader interface
+
+
+# [v0.20.0]- Deterministic Multimodal RAG Stabilization & Agent Control Hardening
+### Features
+- Strict grounding enforced (LLM answers only from retrieved context)
+- Multi-user session isolation across retrieval, memory, and vector store
+- Hybrid execution support (RAG + Search)
+- Intent-aware agent routing with multi-query handling
+- Parallel sub-query execution for complex queries
+- Structured API response (answer, sources, confidence, trace)
+- Modality-aware retrieval (text, image, audio, video)
+- Video frame-level retrieval integration
+- Fail-safe agent fallback hierarchy
+
+### Improved
+- Retrieval: Fixed BM25 flow, improved hybrid ranking, added score filtering
+- Agent: Reduced randomness, improved routing stability, added trace logging
+- RAG Pipeline: Better context filtering, reduced hallucination, optimized token usage
+- Ingestion: Improved chunking, standardized metadata, stronger validation
+- Multimodal: Enhanced captioning, transcription, and modality alignment
+- Memory: Strict session isolation, improved conversation handling
+- Prompting: Enforced context-only answers, improved structure
+- Model Loading: Centralized loading with retry and timeout handling
+- API & Logging: Structured responses, better error handling, improved observability
+
+### Fixed 
+- BM25 indexing and retrieval issues
+- Duplicate and low-quality chunk retrieval
+- Incorrect agent routing and fallback behavior
+- Metadata loss in multimodal ingestion
+- Context overflow and embedding inconsistencies
+- Session leakage across memory and retrieval
+- Hybrid retriever score normalization bug
+- Edge-case ingestion and pipeline failures

@@ -3,13 +3,14 @@ import os
 import tempfile
 import time
 from pathlib import Path
+from typing import List, Dict
 
 from app.core.config import settings
 from app.utils.logger import get_logger
 
 try:
     import cv2
-except ImportError:  # pragma: no cover - optional dependency
+except ImportError:
     cv2 = None
 
 
@@ -18,69 +19,117 @@ logger = get_logger(__name__)
 
 def extract_frames(
     video_path: str,
-    interval_sec: int = 2,
+    interval_sec: int = None,
     session_id: str = "default",
-):
-    if cv2 is None:
-        raise ImportError("opencv-python is required for video frame extraction")
-    if interval_sec <= 0:
-        raise ValueError("interval_sec must be greater than 0")
-    if not os.path.exists(video_path):
-        raise ValueError(f"{video_path} not found")
+) -> List[Dict]:
 
-    start_time = time.time()
+    if cv2 is None:
+        raise ImportError("opencv-python is required")
+
+    if not session_id:
+        raise ValueError("session_id required")
+
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"{video_path} not found")
+
+    # Config defaults
+    interval_sec = interval_sec or settings.VIDEO_FRAME_INTERVAL_SEC
+    max_frames = settings.MAX_VIDEO_FRAMES
+    max_duration = settings.MAX_VIDEO_DURATION_SEC
+
+    if interval_sec <= 0:
+        raise ValueError("interval_sec must be > 0")
+
+    start = time.time()
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError("Failed to open video")
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if not fps or math.isnan(fps) or fps <= 0:
-        cap.release()
-        raise RuntimeError("Invalid FPS detected")
-
-    interval_frames = max(int(round(fps * interval_sec)), 1)
-    temp_root = settings.DATA_DIR / "temp_frames"
-    temp_root.mkdir(parents=True, exist_ok=True)
-    temp_dir = Path(tempfile.mkdtemp(prefix="frames_", dir=temp_root))
-
-    frames = []
-    frame_count = 0
-    saved_index = 0
-
     try:
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not fps or math.isnan(fps) or fps <= 0:
+            logger.warning("[FrameExtract] invalid FPS, using fallback=25")
+            fps = 25.0
+            raise RuntimeError("Invalid FPS")
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = total_frames / fps if fps else 0
+
+        if duration > max_duration:
+            logger.warning("[FrameExtract] duration limit applied")
+
+        interval_frames = max(int(round(fps * interval_sec)), 1)
+
+        temp_root = settings.DATA_DIR / "temp_frames"
+        temp_root.mkdir(parents=True, exist_ok=True)
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="frames_", dir=temp_root))
+
+        frames = []
+        frame_count = 0
+        saved = 0
+
+        max_dim = getattr(settings, "MAX_IMAGE_DIM", 1024)
+
         while True:
             success, frame = cap.read()
             if not success:
                 break
 
+            timestamp = frame_count / fps
+
+            # Duration guard
+            if timestamp > max_duration:
+                logger.warning("[FrameExtract] duration cutoff reached")
+                break
+
             if frame_count % interval_frames == 0:
-                timestamp = round(frame_count / fps, 2)
-                frame_path = temp_dir / f"frame_{saved_index}.jpg"
+
+                # Frame limit guard
+                if saved >= max_frames:
+                    logger.warning("[FrameExtract] frame limit reached")
+                    break
+
+                # Resize frame 
+                h, w = frame.shape[:2]
+                scale = max(h, w) / max_dim if max(h, w) > max_dim else 1
+
+                if scale > 1:
+                    new_w = int(w / scale)
+                    new_h = int(h / scale)
+                    frame = cv2.resize(frame, (new_w, new_h))
+
+                frame_path = temp_dir / f"frame_{saved}.jpg"
+
                 cv2.imwrite(str(frame_path), frame)
 
                 frames.append(
                     {
                         "path": str(frame_path),
-                        "timestamp": timestamp,
-                        "frame_index": saved_index,
+                        "timestamp": round(timestamp, 2),
+                        "frame_index": saved,
                         "temp_dir": str(temp_dir),
                     }
                 )
-                saved_index += 1
+
+                saved += 1
 
             frame_count += 1
 
-        latency = time.time() - start_time
+        latency = round(time.time() - start, 2)
+
         logger.info(
-            "[FrameExtract][SUCCESS] session_id=%s | frames=%s | latency=%.2fs",
+            "[FrameExtract][SUCCESS] session_id=%s | frames=%s | latency=%ss",
             session_id,
             len(frames),
-            latency,
+            latency
         )
+
         return frames
 
-    except Exception as exc:
-        logger.error("[FrameExtract][ERROR] session_id=%s | error=%s", session_id, exc)
+    except Exception as e:
+        logger.error("[FrameExtract][FAILED] session_id=%s | error=%s", session_id, str(e))
         raise
 
     finally:

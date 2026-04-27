@@ -1,143 +1,127 @@
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-try:  # pragma: no branch - compatibility shim
-    from pydantic import field_validator
-
-    PYDANTIC_V2 = True
-except ImportError:  # pragma: no cover - pydantic v1 fallback
-    from pydantic import validator
-
-    PYDANTIC_V2 = False
+from app.core.config import settings
 
 
 ALLOWED_MODALITIES = {"text", "table", "image", "audio", "video"}
 
 
-def _validate_text_value(value: str) -> str:
-    cleaned = (value or "").strip()
-    if not cleaned:
-        raise ValueError("text cannot be empty")
-    return cleaned
-
-
-def _validate_modality_value(value: str) -> str:
-    normalized = (value or "").strip().lower()
-    if normalized not in ALLOWED_MODALITIES:
-        raise ValueError(f"Invalid modality: {value}")
-    return normalized
-
-
-def _validate_source_type_value(value: Optional[str]) -> str:
-    return (value or "file").strip() or "file"
-
-
-def _validate_structure_value(value: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    if value is None:
-        structure: Dict[str, Any] = {}
-    elif not isinstance(value, dict):
-        raise ValueError("structure must be a dictionary")
-    else:
-        structure = dict(value)
-
-    structure.setdefault("doc_id", str(uuid4()))
-    structure.setdefault("session_id", "default")
-    return structure
-
-
-def _validate_extra_metadata_value(value: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise ValueError("extra_metadata must be a dictionary")
-    return dict(value)
-
-
 class IngestedDocument(BaseModel):
-    text: str = Field(..., min_length=1)
-
+    text: str
     modality: str
     subtype: Optional[str] = None
 
     source_type: str = "file"
     source: Optional[str] = None
 
-    page: Optional[int] = Field(default=None, ge=1)
-    chunk_id: Optional[int] = Field(default=None, ge=0)
+    page: Optional[int] = None
+    chunk_id: Optional[int] = None
 
-    structure: Dict[str, Any] = Field(default_factory=dict)
-    extra_metadata: Dict[str, Any] = Field(default_factory=dict)
+    structure: Dict[str, Any] = {}
+    extra_metadata: Dict[str, Any] = {}
 
     embedding: Optional[List[float]] = None
 
-    if PYDANTIC_V2:
+    # NORMALIZATION 
 
-        @field_validator("text")
-        @classmethod
-        def validate_text(cls, value: str) -> str:
-            return _validate_text_value(value)
+    def normalize(self):
+        self.text = (self.text or "").strip()
 
-        @field_validator("modality")
-        @classmethod
-        def validate_modality(cls, value: str) -> str:
-            return _validate_modality_value(value)
+        if len(self.text) > settings.MAX_PROMPT_CHARS:
+            self.text = self.text[:settings.MAX_PROMPT_CHARS]
 
-        @field_validator("source_type", mode="before")
-        @classmethod
-        def validate_source_type(cls, value: Optional[str]) -> str:
-            return _validate_source_type_value(value)
+        self.modality = (self.modality or "").strip().lower()
 
-        @field_validator("structure", mode="before")
-        @classmethod
-        def validate_structure(cls, value: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-            return _validate_structure_value(value)
+        if self.subtype:
+            self.subtype = self.subtype.strip().lower()
 
-        @field_validator("extra_metadata", mode="before")
-        @classmethod
-        def validate_extra_metadata(cls, value: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-            return _validate_extra_metadata_value(value)
+        self.source_type = (self.source_type or "file").strip()
 
-    else:
+        if self.structure is None:
+            self.structure = {}
 
-        @validator("text")
-        def validate_text(cls, value: str) -> str:
-            return _validate_text_value(value)
+        if self.extra_metadata is None:
+            self.extra_metadata = {}
 
-        @validator("modality")
-        def validate_modality(cls, value: str) -> str:
-            return _validate_modality_value(value)
+        return self
 
-        @validator("source_type", pre=True, always=True)
-        def validate_source_type(cls, value: Optional[str]) -> str:
-            return _validate_source_type_value(value)
+    # VALIDATION 
 
-        @validator("structure", pre=True, always=True)
-        def validate_structure(cls, value: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-            return _validate_structure_value(value)
+    def validate(self):
+        if not self.text:
+            raise ValueError("text cannot be empty")
 
-        @validator("extra_metadata", pre=True, always=True)
-        def validate_extra_metadata(cls, value: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-            return _validate_extra_metadata_value(value)
+        if self.modality not in ALLOWED_MODALITIES:
+            raise ValueError(f"Invalid modality: {self.modality}")
+
+        if self.page is not None and self.page < 1:
+            raise ValueError("page must be >= 1")
+
+        if self.chunk_id is not None and self.chunk_id < 0:
+            raise ValueError("chunk_id must be >= 0")
+
+        # structure defaults
+        if not isinstance(self.structure, dict):
+            raise ValueError("structure must be dict")
+
+        self.structure.setdefault("doc_id", str(uuid4()))
+        self.structure.setdefault("session_id", "default")
+
+        # metadata validation
+        if not isinstance(self.extra_metadata, dict):
+            raise ValueError("extra_metadata must be dict")
+
+        # embedding validation
+        if self.embedding is not None:
+            if not isinstance(self.embedding, list):
+                raise ValueError("embedding must be list")
+
+            if len(self.embedding) not in (
+                settings.TEXT_EMBEDDING_DIM,
+                settings.VISION_EMBEDDING_DIM,
+            ):
+                # soft warning (not crash)
+                pass
+
+        return self
+
+    # FINALIZE 
+
+    def finalize(self):
+        self.normalize()
+        self.validate()
+        return self
+
+    # UTILITIES 
 
     def clone(self, **updates: Any) -> "IngestedDocument":
-        if hasattr(self, "model_copy"):
-            return self.model_copy(update=updates, deep=True)
-        return self.copy(update=updates, deep=True)
+        data = self.to_dict()
+        data.update(updates)
+        return IngestedDocument(**data).finalize()
 
     def to_dict(self) -> Dict[str, Any]:
-        if hasattr(self, "model_dump"):
-            return self.model_dump()
-        return self.dict()
+        return {
+            "text": self.text,
+            "modality": self.modality,
+            "subtype": self.subtype,
+            "source_type": self.source_type,
+            "source": self.source,
+            "page": self.page,
+            "chunk_id": self.chunk_id,
+            "structure": self.structure,
+            "extra_metadata": self.extra_metadata,
+            "embedding": self.embedding,
+        }
 
     def summary(self) -> Dict[str, Any]:
-        structure = self.structure or {}
         return {
             "modality": self.modality,
             "subtype": self.subtype,
             "source": self.source,
             "chunk_id": self.chunk_id,
-            "doc_id": structure.get("doc_id"),
-            "session_id": structure.get("session_id"),
+            "doc_id": self.structure.get("doc_id"),
+            "session_id": self.structure.get("session_id"),
         }

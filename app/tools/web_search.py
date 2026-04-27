@@ -1,57 +1,63 @@
-from tavily import TavilyClient
-from app.core.model_loader import model_loader
-from dotenv import load_dotenv
-import os
-from typing import Dict, Any, List
-from app.utils.logger import get_logger
 import time
+from typing import Dict, Any, List
 
-# Logger
+from tavily import TavilyClient
+
+from app.core.config import settings
+from app.core.model_loader import model_loader
+from app.utils.logger import get_logger
+
+
 logger = get_logger(__name__)
-
-load_dotenv()
 
 
 class WebSearchTool:
+
     def __init__(self):
-        logger.info("[WebSearchTool] Initializing Tavily client")
+        logger.info("[WebSearchTool] initializing")
 
-        api_key = os.getenv("TAVILY_API_KEY")
+        if not settings.TAVILY_API_KEY:
+            raise ValueError("TAVILY_API_KEY missing in config")
 
-        if not api_key:
-            raise ValueError("TAVILY_API_KEY not found in environment")
-        
-        self.client = TavilyClient(api_key=api_key)
+        self.client = TavilyClient(api_key=settings.TAVILY_API_KEY)
 
+        self.max_results = settings.WEB_MAX_RESULTS
+        self.max_docs = settings.WEB_MAX_DOCS
+        self.max_doc_chars = settings.WEB_DOC_MAX_CHARS
+        self.max_context_chars = settings.WEB_CONTEXT_MAX_CHARS
 
-        logger.info("[WebSearchTool] Tavily client initialized")
+        logger.info("[WebSearchTool] initialized")
 
-    # MAIN EXECUTION
+    # MAIN 
     def execute(
         self,
         query: str,
         context: Dict[str, Any] = None,
         session_id: str = None
     ) -> Dict[str, Any]:
-        
-        start_time = time.time()
+
+        start = time.time()
+
+        if not query or not query.strip():
+            return self._empty_response()
 
         try:
-            logger.info(f"[WebSearchTool] Search started | query={query}")
+            query = self._sanitize(query)
 
-            raw_results = self._search_api(query)
+            logger.info("[WebSearchTool] search started")
 
-            processed = self._process_results(raw_results)
+            raw = self._search_api(query)
+            processed = self._process_results(raw)
 
             if not processed["documents"]:
                 return self._empty_response()
-            
-            summary = self._summarize(query, processed["documents"])
 
-            latency = round(time.time() - start_time, 2)
+            answer = self._summarize(query, processed["documents"])
+
+            latency = round(time.time() - start, 2)
 
             return {
-                "answer": summary,
+                "answer": answer,
                 "sources": processed["sources"],
                 "confidence": 0.7,
                 "metadata": {
@@ -59,10 +65,9 @@ class WebSearchTool:
                     "latency": latency
                 }
             }
-        
-        except Exception as e:
 
-            logger.error(f"[WebSearchTool] Failed | {str(e)}")
+        except Exception as e:
+            logger.error("[WebSearchTool] failed | %s", str(e))
 
             return {
                 "answer": "Search failed. Please try again.",
@@ -70,24 +75,32 @@ class WebSearchTool:
                 "confidence": 0.2,
                 "metadata": {"error": str(e)}
             }
-    
-    # Api Call
+
+    # SANITIZE 
+    def _sanitize(self, query: str) -> str:
+        query = query.strip()
+
+        if len(query) > settings.MAX_PROMPT_CHARS:
+            query = query[:settings.MAX_PROMPT_CHARS]
+
+        return query
+
+    # API 
     def _search_api(self, query: str) -> Dict:
 
         return self.client.search(
             query=query,
-            search_depth="advanced",
-            max_results=7
+            search_depth=settings.WEB_SEARCH_DEPTH,
+            max_results=self.max_results
         )
-    
 
-    # Process Results
+    # PROCESS 
     def _process_results(self, response: Dict) -> Dict[str, List]:
 
         documents = []
         sources = []
 
-        for r in response.get("results", []): 
+        for r in response.get("results", []):
 
             content = r.get("content")
             url = r.get("url")
@@ -95,50 +108,64 @@ class WebSearchTool:
             if not content:
                 continue
 
-            documents.append(content[:400])
+            text = str(content)[:self.max_doc_chars]
+
+            documents.append(text)
 
             if url:
                 sources.append(url)
 
         return {
-            "documents": documents[:5],
-            "sources": list(set(sources))[:5]
+            "documents": documents[:self.max_docs],
+            "sources": list(set(sources))[:self.max_docs]
         }
-    
-    # Summarization
 
+    # SUMMARIZE 
     def _summarize(self, query: str, docs: List[str]) -> str:
 
-        combined = "\n\n".join(docs)[:2000]
+        combined = "\n\n".join(docs)
 
-        prompt = f"""
-You are a highly accurate AI assistant.
+        # Truncate context
+        combined = combined[:self.max_context_chars]
 
-Your task:
-- Answer the query using the search results
-- Focus on factual correctness
-- Prioritize recent and relevant information
-- Avoid speculation
+        prompt = (
+            "You are a highly accurate AI assistant.\n\n"
+            "Use ONLY the provided web results.\n"
+            "Do not hallucinate.\n\n"
 
-Search Results:
-{combined}
+            "WEB RESULTS:\n"
+            f"{combined}\n\n"
 
-User Query:
-{query}
+            "QUERY:\n"
+            f"{query}\n\n"
 
-Return:
-- Clear, concise answer
-- No fluff
-- No hallucination
+            "Return:\n"
+            "- Clear answer\n"
+            "- Fact-based\n"
+            "- Concise\n\n"
 
-Final Answer:
-"""
-        return model_loader.generate(prompt).strip()
-    
-    # Empty Response
+            "Answer:"
+        )
+
+        # Global safety
+        if len(prompt) > settings.MAX_PROMPT_CHARS:
+            logger.warning("[WebSearchTool] prompt truncated")
+            prompt = prompt[-settings.MAX_PROMPT_CHARS:]
+
+        try:
+            llm = model_loader.get_llm()
+
+            response = llm.generate(prompt)
+
+        except Exception as e:
+            logger.warning("[WebSearchTool] LLM unavailable | %s", str(e))
+
+            return "Summary unavailable due to model error"
+
+    # EMPTY 
     def _empty_response(self) -> Dict[str, Any]:
 
-        logger.warning("[WebSearchTool] No useful results found")
+        logger.warning("[WebSearchTool] no results")
 
         return {
             "answer": "No relevant search results found.",

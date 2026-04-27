@@ -1,68 +1,43 @@
 import re
+import time
+from typing import List
 
 import numpy as np
 
+from app.core.config import settings
 from app.utils.logger import get_logger
 
 try:
     from rank_bm25 import BM25Okapi
-except ImportError:  # pragma: no cover - lightweight fallback
-    class BM25Okapi:  # type: ignore[override]
-        def __init__(self, tokenized_corpus):
-            self.corpus = tokenized_corpus
-            self.avgdl = sum(len(document) for document in tokenized_corpus) / max(len(tokenized_corpus), 1)
-            self.doc_freqs = []
-            self.idf = {}
-            self.k1 = 1.5
-            self.b = 0.75
-
-            frequencies = {}
-            for document in tokenized_corpus:
-                doc_frequency = {}
-                for token in document:
-                    doc_frequency[token] = doc_frequency.get(token, 0) + 1
-                self.doc_freqs.append(doc_frequency)
-                for token in doc_frequency:
-                    frequencies[token] = frequencies.get(token, 0) + 1
-
-            total_documents = len(tokenized_corpus)
-            for token, frequency in frequencies.items():
-                self.idf[token] = np.log(1 + (total_documents - frequency + 0.5) / (frequency + 0.5))
-
-        def get_scores(self, query_tokens):
-            scores = np.zeros(len(self.corpus), dtype=float)
-            for index, document in enumerate(self.corpus):
-                doc_length = len(document) or 1
-                frequencies = self.doc_freqs[index]
-                for token in query_tokens:
-                    frequency = frequencies.get(token, 0)
-                    if not frequency:
-                        continue
-                    idf = self.idf.get(token, 0.0)
-                    numerator = frequency * (self.k1 + 1)
-                    denominator = frequency + self.k1 * (
-                        1 - self.b + self.b * doc_length / max(self.avgdl, 1.0)
-                    )
-                    scores[index] += idf * numerator / denominator
-            return scores
+except ImportError:
+    from rank_bm25 import BM25Okapi  
 
 
 logger = get_logger(__name__)
 
 
 class BM25Retriever:
+
     def __init__(self):
         self.documents = []
         self.tokenized_corpus = []
         self.bm25 = None
         self.modality_filter = None
 
-    def _tokenize(self, text: str):
-        normalized = re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())
-        return normalized.split()
+        self.max_docs = settings.BM25_MAX_DOCS
 
+    # TOKENIZATION 
+    def _tokenize(self, text: str):
+        text = str(text or "").lower()
+        text = re.sub(r"[^a-z0-9\s]", " ", text)
+        tokens = text.split()
+
+        return tokens[:settings.BM25_MAX_TOKENS]
+
+    # METADATA 
     def _doc_metadata(self, document):
         structure = dict(getattr(document, "structure", {}) or {})
+
         return {
             "modality": getattr(document, "modality", "text"),
             "subtype": getattr(document, "subtype", None),
@@ -76,105 +51,160 @@ class BM25Retriever:
             "embedding_space": structure.get("embedding_space", "text"),
             "content_type": structure.get("content_type"),
             "timestamp": structure.get("timestamp"),
-            "segment_index": structure.get("segment_index"),
-            "linked_segment_index": structure.get("linked_segment_index"),
-            "start_time": structure.get("start_time"),
-            "end_time": structure.get("end_time"),
         }
 
+    # FILTER 
     def set_modality_filter(self, modality: str):
         self.modality_filter = modality
 
-    def build_index(self, documents):
+    # BUILD INDEX 
+    def build_index(self, documents: List):
+
         if not documents:
-            logger.warning("[BM25] No documents provided")
+            logger.warning("[BM25] empty input")
             return
 
-        filtered_documents = []
+        start = time.time()
+
+        # RESET STATE
+        self.documents = []
+        self.tokenized_corpus = []
+        self.bm25 = None
+
+        filtered = []
         corpus = []
 
-        for document in documents:
-            text = getattr(document, "text", None)
-            structure = getattr(document, "structure", {}) or {}
-            embedding_space = structure.get("embedding_space", "text")
+        for doc in documents[:self.max_docs]:
+            try:
+                text = getattr(doc, "text", None)
+                structure = getattr(doc, "structure", {}) or {}
 
-            if embedding_space != "text" or not text:
+                if not text:
+                    continue
+
+                if structure.get("embedding_space", "text") != "text":
+                    continue
+
+                # Truncate text
+                text = str(text)[:settings.BM25_MAX_TEXT_CHARS]
+
+                tokens = self._tokenize(text)
+
+                if not tokens:
+                    continue
+
+                filtered.append(doc)
+                corpus.append(text)
+
+            except Exception:
                 continue
 
-            filtered_documents.append(document)
-            corpus.append(text)
-
         if not corpus:
-            logger.warning("[BM25] No valid text corpus after filtering")
+            logger.warning("[BM25] no valid corpus after filtering")
             return
 
-        self.documents = filtered_documents
-        self.tokenized_corpus = [self._tokenize(text) for text in corpus]
+        self.documents = filtered
+        self.tokenized_corpus = corpus
         self.bm25 = BM25Okapi(self.tokenized_corpus)
-        logger.info("[BM25] Index built | docs=%s", len(self.documents))
 
-    def search(self, query, session_id=None, top_k=10):
+        latency = round(time.time() - start, 2)
+
+        logger.info(
+            "[BM25] index built | docs=%s latency=%ss",
+            len(self.documents),
+            latency
+        )
+
+    # SEARCH 
+    def search(self, query: str, session_id: str = None, top_k: int = None):
+
         if not self.bm25:
-            logger.warning("[BM25] Index not built")
+            logger.warning("[BM25] search skipped (index not built)")
             return []
+
         if not query or not query.strip():
             raise ValueError("query cannot be empty")
 
-        scores = np.asarray(self.bm25.get_scores(self._tokenize(query)), dtype=float)
+        start = time.time()
+
+        top_k = top_k or settings.BM25_TOP_K
+
+        # Query safety
+        query = query[:settings.MAX_PROMPT_CHARS]
+
+        tokens = self._tokenize(query)
+
+        if not tokens:
+            logger.warning("[BM25] empty tokens for query")
+            return []
+
+        scores = np.asarray(self.bm25.get_scores(tokens), dtype=float)
+
         if scores.size == 0:
             return []
 
-        max_score = float(scores.max()) if scores.size else 1.0
-        if max_score <= 0:
-            max_score = 1.0
-        normalized_scores = scores / max_score
+        max_score = float(scores.max()) or 1.0
 
-        top_indices = np.argsort(normalized_scores)[::-1][: top_k * 3]
+
+        normalized = scores / (max_score + 1e-6)
+
+        indices = np.argsort(normalized)[::-1][: top_k * settings.BM25_CANDIDATE_MULTIPLIER]
+
         results = []
 
-        for index in top_indices:
-            document = self.documents[index]
-            metadata = self._doc_metadata(document)
+        for idx in indices:
+            doc = self.documents[idx]
+            metadata = self._doc_metadata(doc)
 
             if session_id and metadata.get("session_id") != session_id:
                 continue
+
             if self.modality_filter and metadata.get("modality") != self.modality_filter:
                 continue
 
-            score = float(normalized_scores[index])
-            modality = metadata.get("modality")
-            content_type = metadata.get("content_type")
-            chunk_index = metadata.get("structure", {}).get("chunk_index", 0)
-            timestamp = metadata.get("timestamp")
+            score = float(normalized[idx])
 
-            if modality == "audio":
-                score *= 1.05
-            elif modality == "image":
-                score *= 1.1 if metadata.get("subtype") == "caption" else 0.95
-            elif modality == "text" and metadata.get("subtype") == "heading":
-                score *= 1.1
-            elif modality == "video":
-                if content_type == "video_speech":
-                    score *= 1.15
-                elif content_type == "video_frame":
-                    score *= 1.05
-                if timestamp is not None and timestamp < 10:
-                    score *= 1.05
 
-            if chunk_index == 0:
-                score *= 1.05
+            # Config-driven modality boost
+            modality = metadata.get("modality", "text")
+            weights = getattr(settings, "BM25_MODALITY_WEIGHTS", {})
+
+            score *= weights.get(modality, 1.0)
 
             results.append(
                 {
-                    "id": f"bm25_{index}",
-                    "text": document.text,
+                    "id": f"bm25_{idx}",
+                    "text": doc.text[:settings.RAG_DOC_MAX_CHARS],
                     "score": score,
                     "metadata": metadata,
                 }
             )
 
-            if len(results) >= top_k:
-                break
+        # FALLBACK if session filter killed everything
+        if not results and session_id:
+            logger.warning("[BM25] fallback without session filter")
 
-        logger.info("[BM25] Retrieved | session_id=%s | results=%s", session_id, len(results))
-        return results
+            for idx in indices[:top_k]:
+                doc = self.documents[idx]
+                metadata = self._doc_metadata(doc)
+
+                results.append(
+                    {
+                        "id": f"bm25_{idx}",
+                        "text": doc.text[:settings.RAG_DOC_MAX_CHARS],
+                        "score": float(normalized[idx]),
+                        "metadata": metadata,
+                    }
+                )
+
+
+        latency = round(time.time() - start, 2)
+
+        logger.info(
+            "[BM25] retrieved | session_id=%s results=%s latency=%ss",
+            session_id,
+            len(results),
+            latency
+        )
+
+        return results[:top_k]

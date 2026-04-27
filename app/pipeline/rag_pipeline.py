@@ -1,15 +1,17 @@
 from typing import Dict, Any, List
-import time 
+import time
+
+from app.core.config import settings
+from app.utils.logger import get_logger
+from app.core.model_loader import model_loader
 
 from app.retrieval.retriever import Retriever
 from app.prompt.prompt_builder import PromptBuilder
-from app.core.model_loader import model_loader
 
 from app.memory.mongo_memory import MongoMemory
 from app.memory.memory_manager import MemoryManager
-from app.utils.logger import get_logger
 
-# Logger
+
 logger = get_logger(__name__)
 
 
@@ -17,79 +19,73 @@ class RAGPipeline:
     def __init__(self):
         self.retriever = Retriever()
         self.prompt_builder = PromptBuilder()
-        self.llm = model_loader.get_llm()
+
+        
+        try:
+            self.llm = model_loader.get_llm()
+        except Exception as e:
+            logger.warning("[RAGPipeline] LLM unavailable | %s", str(e))
+            self.llm = None
+            
         self.embedder = model_loader.get_embedder()
+
         self.memory_manager = MemoryManager(self.llm, self.embedder)
         self.mongo_memory = MongoMemory()
-        
 
-
-    # MAIN RUN
     def run(self, query: str, session_id: str = "default") -> Dict[str, Any]:
-
         start_time = time.time()
+
+        if not query or not query.strip():
+            return {
+                "answer": "Query cannot be empty.",
+                "error": "invalid_query"
+            }
 
         logger.info(f"[RAGPipeline][START] session_id={session_id}")
 
         try:
-            # STEP 1: Load Memory
             history = self.memory_manager.get_history(session_id)
-
             history_text = self._format_history(history)
 
-            # STEP 2: Retrieval 
             docs = self.retriever.retrieval(
                 query=query,
                 session_id=session_id,
-                top_k=6
+                top_k=settings.DEFAULT_TOP_K
             )
-
-            logger.debug(f"[RAGPipeline] Retrieved docs={len(docs)}")
 
             if not docs:
                 return self._empty_response(start_time)
-            
-            # STEP 3: Normalization + Dedup
-            docs = self._normalize+docs(docs)
+
+            docs = self._normalize_docs(docs)
             docs = self._deduplicate_docs(docs)
 
-            # STEP 4: Multimodal Context Build
             context = self._build_multimodal_context(docs)
-
-            # STEP 5: Source Extraction
             sources = self._extract_sources(docs)
 
-            # STEP 6: Role Adaptation
             system_role = self._detect_role(docs)
 
-            # STEP 7: Prompt Build
+            full_context = self._compose_context(
+                system_role,
+                history_text,
+                context
+            )
+
             prompt = self.prompt_builder.build_prompt(
                 query=query,
-                context=self._compose_context(
-                    system_role,
-                    history_text,
-                    context
-                )
+                context=full_context
             )
 
-            # STEP 8: LLM Generation
             answer = self.llm.generate(prompt)
 
-            # STEP 9: Memory Write
-            memory_result = self.memory_manager.add.interaction(
-                session_id,
-                query,
-                answer
+            self.memory_manager.add_interaction(
+                session_id=session_id,
+                query=query,
+                response=answer
             )
-
-            if memory_result.get("summarized"):
-                logger.info(f"[RAGPipeline] Memory summarized")
 
             self.mongo_memory.store_message(session_id, "user", query)
             self.mongo_memory.store_message(session_id, "assistant", answer)
 
-
-            # STEP 10: Response
             latency = round(time.time() - start_time, 2)
 
             return {
@@ -100,22 +96,22 @@ class RAGPipeline:
                     "latency": latency
                 }
             }
-        
+
         except Exception as e:
             logger.error(f"[RAGPipeline][ERROR] {str(e)}")
+
             return {
-                "answer": "Something went wrong,",
+                "answer": "Something went wrong.",
                 "error": str(e)
             }
-        
-    # STREAMING
+
     def stream(self, query: str, session_id: str = "default"):
         logger.info(f"[RAGPipeline][STREAM] session_id={session_id}")
 
         docs = self.retriever.retrieval(
             query=query,
             session_id=session_id,
-            top_k=3
+            top_k=min(3, settings.DEFAULT_TOP_K)
         )
 
         context = self._build_stream_context(docs)
@@ -125,21 +121,30 @@ class RAGPipeline:
         def generator():
             for token in self.llm.stream(prompt):
                 yield token + "\n"
-            
+
         return generator()
-    
-    # HELPERS
 
     def _format_history(self, history: List[Dict]) -> str:
+        max_chars = settings.MEMORY_MAX_CONTEXT_CHARS
+
         formatted = []
-        for msg in history:
+        total_len = 0
+
+        for msg in reversed(history):
             role = msg.get("role", "user").upper()
             content = msg.get("content", "")
-            formatted.append(f"{role}: {content}")
-        return "\n".join(formatted)[:1200]
-    
+
+            line = f"{role}: {content}"
+            if total_len + len(line) > max_chars:
+                break
+
+            formatted.append(line)
+            total_len += len(line)
+
+        return "\n".join(reversed(formatted))
+
     def _normalize_docs(self, docs: List[Any]) -> List[Dict]:
-        normalized  = []
+        normalized = []
 
         for doc in docs:
             if isinstance(doc, dict):
@@ -151,15 +156,15 @@ class RAGPipeline:
                 })
 
         return normalized
-    
+
     def _deduplicate_docs(self, docs: List[Dict]) -> List[Dict]:
         seen = set()
         unique = []
 
         for d in docs:
             key = (
-                d.get("metadata", {}).get("doc_id"),
-                d.get("metadata", {}).get("chunk_id"),
+                str(d.get("metadata", {}).get("doc_id")),
+                str(d.get("metadata", {}).get("chunk_id")),
                 d.get("text", "")[:100]
             )
 
@@ -168,7 +173,7 @@ class RAGPipeline:
                 unique.append(d)
 
         return unique
-    
+
     def _build_multimodal_context(self, docs: List[Dict]) -> str:
         audio, visual, text = [], [], []
 
@@ -192,12 +197,9 @@ VISUAL:
 TEXT:
 {' '.join(text)[:800]}
 """.strip()
-    
+
     def _detect_role(self, docs: List[Dict]) -> str:
-        modalities = set([
-            d.get("metadata", {}).get("modality", "text")
-            for d in docs
-        ])
+        modalities = {d.get("metadata", {}).get("modality", "text") for d in docs}
 
         if "image" in modalities:
             return "You are an expert in visual understanding."
@@ -205,8 +207,9 @@ TEXT:
             return "You are an expert in audio understanding."
         if "video" in modalities or "video_frame" in modalities:
             return "You are an expert in video analysis."
+
         return "You are a highly accurate knowledge assistant."
-    
+
     def _compose_context(self, role: str, history: str, context: str) -> str:
         return f"""
 {role}
@@ -222,22 +225,21 @@ INSTRUCTIONS:
 - No hallucination
 - Be precise and concise
 """
-    
+
     def _extract_sources(self, docs: List[Dict]) -> List[str]:
         sources = set()
 
         for d in docs:
             src = d.get("metadata", {}).get("source")
-
             if src:
                 sources.add(src)
 
-            return list(sources)
-        
+        return list(sources)
+
     def _build_stream_context(self, docs: List[Dict]) -> str:
         parts = []
 
-        for i, d in enumerate(docs):
+        for d in docs:
             metadata = d.get("metadata", {})
             modality = metadata.get("modality", "text")
 
@@ -251,12 +253,11 @@ INSTRUCTIONS:
             else:
                 parts.append(d["text"][:150])
 
-        return "\n\n".join(parts)[:2000]
-    
+        return "\n\n".join(parts)[:settings.MAX_PROMPT_CHARS]
+
     def _empty_response(self, start_time):
         return {
             "answer": "I don't know based on available data.",
             "sources": [],
             "latency": round(time.time() - start_time, 2)
         }
-    

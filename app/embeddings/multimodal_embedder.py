@@ -1,8 +1,10 @@
 import time
+from typing import List, Tuple
 
-from app.embeddings.image_embedder import ImageEmbedder
-from app.embeddings.text_embedder import TextEmbedder
+from app.core.config import settings
+from app.core.model_loader import model_loader
 from app.utils.logger import get_logger
+from pathlib import Path
 
 
 logger = get_logger(__name__)
@@ -10,71 +12,138 @@ logger = get_logger(__name__)
 
 class MultimodalEmbedder:
     def __init__(self):
-        self.text_embedder = TextEmbedder()
-        self.image_embedder = ImageEmbedder()
+        # Use ModelLoader 
+        self.text_embedder = model_loader.get_embedder()
+        self.image_embedder = model_loader.get_image_embedder()
 
-    def _resolve_asset_path(self, document) -> str | None:
-        structure = document.structure or {}
-        return (
+        self.batch_size = settings.EMBEDDING_BATCH_SIZE
+
+    def _resolve_asset_path(self, document) -> str:
+        structure = getattr(document, "structure", {}) or {}
+
+        path = (
             structure.get("asset_path")
             or structure.get("frame_path")
-            or structure.get("source_path")
-            or document.source
         )
 
-    def embed_documents(self, documents, session_id: str = "default"):
+        # STRICT VALIDATION 
+        if not path:
+            return None
+        
+        
+        p = Path(path)
+
+        if not p.exists():
+            logger.warning("[Embedder] missing file: %s", path)
+            return None
+        
+        return str(p)
+
+
+    def embed_documents(
+        self,
+        documents: List,
+        session_id: str = "default"
+    ) -> Tuple[List, List]:
+
+        if not documents:
+            return [], []
+
         if not session_id:
             raise ValueError("session_id required")
 
         start_time = time.time()
+
         text_documents = []
         vision_documents = []
 
-        for document in documents:
+        # ROUTING
+        for doc in documents:
             try:
-                if document.modality in {"text", "table", "audio"}:
-                    text_documents.append(document)
-                elif document.modality == "image":
-                    text_documents.append(document)
-                    if document.subtype == "caption":
-                        vision_documents.append(document)
-                elif document.modality == "video":
-                    if document.subtype == "speech":
-                        text_documents.append(document)
-                    elif document.subtype == "frame":
-                        vision_documents.append(document)
-            except Exception as exc:
-                logger.error("[MultimodalEmbedder][ROUTER_FAIL] error=%s", exc)
+                modality = getattr(doc, "modality", "text")
+                subtype = getattr(doc, "subtype", "")
 
-        embedded_text_documents = (
-            self.text_embedder.embed_documents(text_documents, session_id=session_id)
-            if text_documents
-            else []
-        )
+                if modality in {"text", "table", "audio"}:
+                    text_documents.append(doc)
 
+                elif modality == "image":
+                    text_documents.append(doc)
+                    if subtype == "caption":
+                        vision_documents.append(doc)
+
+                elif modality == "video":
+                    if subtype == "speech":
+                        text_documents.append(doc)
+                    elif subtype == "frame":
+                        vision_documents.append(doc)
+
+            except Exception as e:
+                logger.warning("[MultimodalEmbedder][ROUTING_FAIL] %s", str(e))
+
+        # TEXT EMBEDDING
+        embedded_text_documents = []
+        if text_documents:
+            try:
+                embedded_text_documents = self.text_embedder.embed_documents(
+                    text_documents,
+                    session_id=session_id
+                )
+            except Exception as e:
+                logger.error("[MultimodalEmbedder][TEXT_FAIL] %s", str(e))
+
+        # VISION EMBEDDING (BATCHED)
         embedded_vision_documents = []
-        for document in vision_documents:
+
+        for i in range(0, len(vision_documents), self.batch_size):
+            batch = vision_documents[i:i + self.batch_size]
+
+            paths = []
+            valid_docs = []
+
+            for doc in batch:
+                try:
+                    path = self._resolve_asset_path(doc)
+                    if not path:
+                        continue
+
+                    paths.append(path)
+                    valid_docs.append(doc)
+
+                except Exception as e:
+                    logger.warning("[MultimodalEmbedder][PATH_FAIL] %s", str(e))
+
+            if not paths:
+                continue
+
             try:
-                image_path = self._resolve_asset_path(document)
-                if not image_path:
-                    logger.warning("[MultimodalEmbedder][VISION_SKIP] missing image path")
-                    continue
+                embeddings = self.image_embedder.embed_batch(paths)
 
-                document.embedding = self.image_embedder.embed(image_path)
-                structure = dict(document.structure or {})
-                structure["embedding_space"] = "vision"
-                document.structure = structure
-                embedded_vision_documents.append(document)
+                for doc, emb in zip(valid_docs, embeddings):
+                    doc.embedding = emb
 
-            except Exception as exc:
-                logger.error("[MultimodalEmbedder][VISION_FAIL] error=%s", exc)
+                    structure = dict(getattr(doc, "structure", {}) or {})
+                    structure["embedding_space"] = "vision"
+                    doc.structure = structure
 
-        latency = time.time() - start_time
+                    if len(emb) != settings.VISION_EMBEDDING_DIM:
+                        logger.warning(
+                            "[MultimodalEmbedder] dim mismatch | expected=%s got=%s",
+                            settings.VISION_EMBEDDING_DIM,
+                            len(emb)
+                        )
+
+                    embedded_vision_documents.append(doc)
+
+            except Exception as e:
+                logger.error("[MultimodalEmbedder][VISION_FAIL] %s", str(e))
+
+        latency = round(time.time() - start_time, 2)
+
         logger.info(
-            "[MultimodalEmbedder][SUCCESS] text_docs=%s | vision_docs=%s | latency=%.2fs",
+            "[MultimodalEmbedder][SUCCESS] text=%s | vision=%s | latency=%ss",
             len(embedded_text_documents),
             len(embedded_vision_documents),
-            latency,
+            latency
         )
 
         return embedded_text_documents, embedded_vision_documents
