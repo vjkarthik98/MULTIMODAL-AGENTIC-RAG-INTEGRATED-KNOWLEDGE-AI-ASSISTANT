@@ -1,114 +1,132 @@
 from typing import List, Dict
 import numpy as np
 import time
+
+from app.core.config import settings
 from app.utils.logger import get_logger
 
-# Logger
+
 logger = get_logger(__name__)
 
 
-def cosine_similarity(vec1, vec2):
-    vec1 = np.array(vec1)
-    vec2 = np.array(vec2)
+def _cosine_similarity(vec1, vec2):
+    v1 = np.array(vec1)
+    v2 = np.array(vec2)
 
-    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2) + 1e-10)
+    denom = (np.linalg.norm(v1) * np.linalg.norm(v2)) + 1e-10
+    return float(np.dot(v1, v2) / denom)
 
-# WEIGHTING FUNCTIONS
+
 def _recency_weight(timestamp, current_time):
-
     if not timestamp:
         return 1.0
-    
+
     try:
         age = current_time - float(timestamp)
-        return 1.0 / (1.0 + age / 300)
-    
+        return 1.0 / (1.0 + age / settings.MEMORY_RECENCY_SCALE)
     except Exception:
         return 1.0
-    
+
+
 def _role_weight(role: str):
-    if role == "user":
-        return 1.3
-    elif role == "assistant":
-        return 1.0
-    elif role == "system":
-        return 1.2
-    return 1.0
+    weights = getattr(settings, "MEMORY_ROLE_WEIGHTS", {
+        "user": 1.3,
+        "assistant": 1.0,
+        "system": 1.2
+    })
+    return weights.get(role, 1.0)
+
 
 def _importance_weight(msg: Dict):
-    return msg.get("importance", 1.0)
+    return float(msg.get("importance", 1.0))
 
-# MAIN FILTER
+
 def filter_relevant_history(
     query: str,
     history: List[Dict],
     embedder,
-    top_k: int = 5,
-    threshold: float = 0.35
+    top_k: int = None,
+    threshold: float = None
 ) -> List[Dict]:
 
     if not history:
-        logger.debug("[MemoryFilter] Empty history received")
         return []
 
+    start = time.time()
+
+    top_k = top_k or settings.MEMORY_TOP_K
+    threshold = threshold or settings.MEMORY_SIM_THRESHOLD
+
+    # Limit history size
+    history = history[-settings.MAX_HISTORY_MESSAGES:]
+
     try:
-        start_time = time.time()
+        logger.debug("[MemoryFilter][START]")
 
-        logger.debug("[MemoryFilter][START] Filtering")
-
-        # Step 1: Embed query
+        # Query embedding
         query_vec = embedder.embed_query(query)
 
         current_time = time.time()
-    
-
         scored = []
 
-        # Step 2: Score each message
-
         for msg in history:
-            text = msg.get("content", "").strip()
-            role = msg.get("role", "unknown")
+            try:
+                text = str(msg.get("content", "")).strip()
+                role = msg.get("role", "unknown")
 
-            if not text:
+                if not text:
+                    continue
+
+                # Truncate text 
+                if len(text) > settings.MAX_PROMPT_CHARS:
+                    text = text[:settings.MAX_PROMPT_CHARS]
+
+                # Use existing embedding safely
+                msg_vec = msg.get("embedding")
+
+                if msg_vec is None:
+                    msg_vec = embedder.embed_query(text)
+
+                # Validate embedding dimension
+                if not isinstance(msg_vec, list):
+                    continue
+
+                if len(msg_vec) not in (
+                    settings.TEXT_EMBEDDING_DIM,
+                    settings.VISION_EMBEDDING_DIM,
+                ):
+                    continue
+
+                sim = _cosine_similarity(query_vec, msg_vec)
+
+                if sim < threshold:
+                    continue
+
+                recency = _recency_weight(msg.get("timestamp"), current_time)
+                role_w = _role_weight(role)
+                importance = _importance_weight(msg)
+
+                score = sim * recency * role_w * importance
+
+                scored.append((score, msg))
+
+            except Exception:
                 continue
-            
-            # Reuse embedding if available
-            if "embedding" in msg and msg["embedding"] is not None:
-                msg_vec = msg["embedding"]
 
-            else:
-                msg_vec = embedder.embed_query(text)
-                msg["embedding"] = msg_vec
-
-            sim = cosine_similarity(query_vec, msg_vec)
-
-            if sim < threshold:
-                continue
-        
-            # Mutli-Factor Scoring
-            recency = _recency_weight(msg.get("timestamp"), current_time)
-            role_w = _role_weight(role)
-            importance = _importance_weight(msg)
-
-            final_score = sim * recency * role_w * importance
-
-            scored.append((final_score, msg))
-
-
-        # Step 3: Sort by similarity
         scored.sort(key=lambda x: x[0], reverse=True)
 
-        # Step 4: Select top_k
         selected = [msg for _, msg in scored[:top_k]]
 
-        latency = time.time() - start_time
+        latency = round(time.time() - start, 2)
 
-        logger.info(
-            f"[MemoryFilter][SUCCESS] selected={len(selected)}")
+        logger.debug(
+            "[MemoryFilter][SUCCESS] selected=%s | latency=%ss",
+            len(selected),
+            latency
+        )
 
         return selected
 
     except Exception as e:
-        logger.error(f"[MemoryFilter][FAIL] | error={str(e)}")
+        logger.error("[MemoryFilter][FAILED] %s", str(e))
         return []

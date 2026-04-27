@@ -1,157 +1,175 @@
-from app.core.model_loader import model_loader
-from app.agents.agent_schema import AgentDecision
+from typing import Dict
 import json
 import re
+import time
+
+from app.core.config import settings
+from app.core.model_loader import model_loader
+from app.agents.agent_schema import AgentDecision
 from app.utils.logger import get_logger
 
-# Logger
+
 logger = get_logger(__name__)
 
 
 class AgentRouter:
 
-    # PUBLIC API
     def route(self, query: str, session_id: str) -> AgentDecision:
+        if not query or not query.strip():
+            return self._decision("direct", "empty_query")
 
-        logger.info(f"[AgentRouter][START] session_id={session_id}")
+        start = time.time()
 
-        # STEP 1: PRE-ANALYSIS 
+        logger.info("[AgentRouter][START] session_id=%s", session_id)
+
         signals = self._analyze_query(query)
 
-        # Hard Overrides
+        # Only strict override for RECENT queries
         if signals["is_recent"]:
             return self._decision("search", "Detected time-sensitive query")
-        
+
         if signals["is_memory"]:
             return self._decision("memory", "User referring to past conversation")
-        
-        # STEP 2: LLM DECISION(CONTROLLED)
+
         decision = self._llm_route(query, signals, session_id)
 
-        # STEP 3: POST VALIDATION
         validated = self._validate_decision(decision, signals)
 
         logger.info(
-            f"[AgentRouter][FINAL] session_id={session_id} | "
-            f"action= {validated.action} | reason={validated.reason}"
+            "[AgentRouter][FINAL] session_id=%s | action=%s | latency=%.2fs",
+            session_id,
+            validated.action,
+            time.time() - start
         )
 
         return validated
-    
-    #  QUERY ANALYSIS
-    def _analyze_query(self, query: str) -> dict:
+
+    def _analyze_query(self, query: str) -> Dict:
         query_lower = query.lower()
 
         return {
-            "is_recent": any(word in query_lower for word in [
+            "is_recent": any(w in query_lower for w in [
                 "latest", "today", "news", "recent", "current", "update"
-            ]), 
-            "is_memory": any(word in query_lower for word in [
+            ]),
+            "is_memory": any(w in query_lower for w in [
                 "earlier", "previous", "last time", "we discussed"
             ]),
             "is_complex": len(query.split()) > 15,
-            "has_multimodal_hint": any(word in query_lower for word in [
-                "text", "document","image", "audio", "video", "diagram", "chart"
+            "has_multimodal_hint": any(w in query_lower for w in [
+                "image", "photo", "picture", "audio", "video", "diagram", "chart"
             ])
         }
 
-    # LLM ROUTING
-    def _llm_route(self, query: str, signals: dict, session_id: str) -> AgentDecision:
+    def _llm_route(self, query: str, signals: dict, session_id: str):
+        try:
+            llm = model_loader.get_llm()
+        except Exception as e:
+            logger.warning(
+                "[AgentRouter] LLM unavailable → fallback to RAG | %s", str(e)
+            )
+            return self._decision("rag", "llm_unavailable")
 
         prompt = f"""
-You are an advanced AI agent router.
+You are an AI routing system.
 
-Your job is to decide the BEST strategy to answer a query.
+Choose the best action for answering a query.
 
-SYSTEM CAPABILITIES:
-- RAG -> internal documents (multimodal: text, document, image, audio, video)
-- SEARCH -> external real-time info
-- MEMORY -> past conversation context
-- DIRECT -> general LLM Knowledge
+Actions:
+- rag
+- search
+- direct
+- memory
+- hybrid
 
-AVAILABLE ACTIONS:
-- "rag"
-- "search"
-- "direct"
-- "memory"
-- "hybrid" (rag + memory)
+Rules:
+- search → recent info ONLY
+- memory → past conversation
+- rag → document-based (default)
+- hybrid → rag + memory
+- direct → general knowledge
 
-DECISION RULES:
-- Use "search" for recent/time-sensitive queries
-- Use "memory" if user refers to past conversation
-- Use "rag" for document-based queries
-- Use "hybrid" if both memory + knowledge needed
-- Use "direct" only if no external context needed
-
-SIGNALS:
+Signals:
 {signals}
 
 Return STRICT JSON:
-{{
-    "action": "...",
-    "reason": "..."
-}}
+{{"action": "...", "reason": "..."}}
 
 Query:
 {query}
 """
 
-        response = model_loader.generate(prompt)
+        prompt = prompt[:settings.MAX_PROMPT_CHARS]
 
-        return self._parse_response(response, session_id, signals)
-    
-    # RESPONSE PARSER
+        try:
+            response = llm.generate(
+                prompt,
+                max_tokens=100,
+                temperature=0.0,
+                top_p=1.0
+            )
+
+            return self._parse_response(response, session_id, signals)
+
+        except Exception as e:
+            logger.error(
+                "[AgentRouter][LLM_FAIL] session_id=%s | error=%s",
+                session_id,
+                str(e)
+            )
+            return self._decision("rag", "llm_failure_fallback")
+
     def _parse_response(self, text: str, session_id: str, signals: dict) -> AgentDecision:
-        
         try:
             cleaned = self._clean_json(text)
             data = json.loads(cleaned)
 
+            action = data.get("action", "").strip().lower()
+            reason = data.get("reason", "")
+
             return AgentDecision(
-                action=data.get("action"),
-                reason=data.get("reason"),
-                confidence=data.get("confidence", 0.8),
-                signals=signals 
+                action=action,
+                reason=reason,
+                confidence=0.8,
+                signals=signals
             )
-        
+
         except Exception as e:
             logger.error(
-                f"[AgentRouter][PARSE_FAIL] session_id={session_id} | {str(e)}"
+                "[AgentRouter][PARSE_FAIL] session_id=%s | error=%s",
+                session_id,
+                str(e)
             )
 
-            return self._decision("search", "Fallback due to parsing failure")
-        
-    # CLEAN JSON
+            # fallback to RAG instead of SEARCH
+            return self._decision("rag", "parse_failure")
+
     def _clean_json(self, text: str) -> str:
         if "```" in text:
-
-            text = text.split("```")[1]
+            parts = text.split("```")
+            text = parts[1] if len(parts) > 1 else text
 
         match = re.search(r"\{.*\}", text, re.DOTALL)
-
         if match:
             return match.group(0)
-        
+
         raise ValueError("No JSON found")
-    
 
-    # VALIDATION
     def _validate_decision(self, decision: AgentDecision, signals: dict) -> AgentDecision:
-
         allowed = {"rag", "search", "direct", "memory", "hybrid"}
 
         if decision.action not in allowed:
-            logger.warning("[AgentRouter] Invalid action, forcing safe fallback")
-            return self._decision("search", "Invalid action fallback")
-        
-        # Safety overrides
-        if signals["is_recent"]:
-            return self._decision("search", "override: recent query")
-        
-        return decision
-    
-    # HELPER
-    def _decision(self, action: str, reason:str) -> AgentDecision:
-        return AgentDecision(action=action, reason=reason)
+            logger.warning("[AgentRouter] Invalid action → fallback to RAG")
+            return self._decision("rag", "invalid_action")
 
-        
+        if signals["is_recent"]:
+            return self._decision("search", "override_recent")
+
+        return decision
+
+    def _decision(self, action: str, reason: str) -> AgentDecision:
+        return AgentDecision(
+            action=action,
+            reason=reason,
+            confidence=0.9,
+            signals={}
+        )

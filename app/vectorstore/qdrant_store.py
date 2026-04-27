@@ -1,8 +1,9 @@
 import uuid
+import time
+from typing import List
 
 from app.core.config import settings
 from app.utils.logger import get_logger
-
 
 try:
     from qdrant_client import QdrantClient
@@ -14,165 +15,173 @@ try:
         PointStruct,
         VectorParams,
     )
-except ImportError:  # pragma: no cover - handled at runtime
+except ImportError:
     QdrantClient = None
-    Distance = FieldCondition = Filter = MatchValue = PointStruct = VectorParams = None
 
 
 logger = get_logger(__name__)
 
 
 class QdrantVectorStore:
+
     def __init__(self):
         if QdrantClient is None:
-            raise ImportError("qdrant-client is required to use QdrantVectorStore")
+            raise ImportError("qdrant-client is required")
 
         if settings.QDRANT_URL:
-            self.client = QdrantClient(url=settings.QDRANT_URL, api_key=settings.QDRANT_API_KEY)
+            self.client = QdrantClient(
+                url=settings.QDRANT_URL,
+                api_key=settings.QDRANT_API_KEY,
+                timeout=settings.QDRANT_TIMEOUT
+            )
         else:
-            self.client = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
+            self.client = QdrantClient(
+                host=settings.QDRANT_HOST,
+                port=settings.QDRANT_PORT,
+                timeout=settings.QDRANT_TIMEOUT
+            )
 
-        self.TEXT_COLLECTION = settings.TEXT_COLLECTION_NAME
-        self.VISION_COLLECTION = settings.VISION_COLLECTION_NAME
+        self.text_collection = settings.TEXT_COLLECTION_NAME
+        self.vision_collection = settings.VISION_COLLECTION_NAME
+
+        self.batch_size = settings.QDRANT_BATCH_SIZE
+        self.max_docs = settings.QDRANT_MAX_DOCS
+
         self.modality_filter = None
 
-        logger.info("[QdrantStore] Initialized")
+        logger.info("[QdrantStore] initialized")
 
-    def create_collection(self, collection_name: str, vector_size: int):
-        logger.info("[QdrantStore] Creating collection=%s | dim=%s", collection_name, vector_size)
-        self.client.create_collection(
-            collection_name=collection_name,
-            vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+    # COLLECTION 
+    def _collection_exists(self, name: str) -> bool:
+        try:
+            collections = self.client.get_collections().collections
+            return any(c.name == name for c in collections)
+        except Exception as e:
+            logger.warning("[QdrantStore] collection check failed | %s", str(e))
+            return False
+
+    def _ensure_collection(self, name: str, dim: int):
+        if self._collection_exists(name):
+            return
+
+        logger.warning(
+            "[QdrantStore] creating collection=%s dim=%s",
+            name,
+            dim
         )
 
-    def _collection_exists(self, collection_name: str) -> bool:
-        collections = self.client.get_collections().collections
-        return collection_name in {collection.name for collection in collections}
+        self.client.create_collection(
+            collection_name=name,
+            vectors_config=VectorParams(
+                size=dim,
+                distance=Distance.COSINE
+            ),
+        )
 
-    def _ensure_collection(self, collection_name: str, vector_size: int):
-        if not self._collection_exists(collection_name):
-            logger.warning("[QdrantStore] Creating missing collection=%s", collection_name)
-            self.create_collection(collection_name, vector_size)
-
+    # VECTOR SIZE 
     def _get_vector_size(self, documents):
-        for document in documents:
-            embedding = getattr(document, "embedding", None)
-            if embedding:
-                return len(embedding)
+        for d in documents:
+            emb = getattr(d, "embedding", None)
+            if isinstance(emb, list):
+                return len(emb)
         return None
 
-    def _base_payload(self, document):
+    # PAYLOAD 
+    def _build_payload(self, document):
         structure = dict(document.structure or {})
+
+        text = str(document.text or "")[:settings.QDRANT_TEXT_MAX_CHARS]
+
         payload = {
-            "text": document.text,
-            "text_preview": document.text[:200] if document.text else "",
+            "text": text,
+            "text_preview": text[:200],
             "doc_id": structure.get("doc_id"),
             "chunk_id": document.chunk_id,
-            "total_chunks": structure.get("total_chunks", 1),
             "modality": document.modality,
-            "subtype": document.subtype,
-            "source": document.source,
-            "source_type": document.source_type,
-            "page": document.page,
-            "session_id": structure.get("session_id"),
-            "structure": structure,
-            "embedding_space": structure.get("embedding_space"),
             "content_type": structure.get("content_type"),
-            "start_time": structure.get("start_time"),
-            "end_time": structure.get("end_time"),
-            "duration": structure.get("duration"),
-            "segment_index": structure.get("segment_index"),
-            "frame_index": structure.get("frame_index"),
-            "timestamp": structure.get("timestamp"),
-            "linked_segment_index": structure.get("linked_segment_index"),
+            "session_id": structure.get("session_id"),
+            "embedding_space": structure.get("embedding_space", "text"),  # FIX
+            "structure": structure,
+            "source": document.source,
         }
+
         if document.extra_metadata:
             payload.update(document.extra_metadata)
+
         return payload
 
-    def set_modality_filter(self, modality: str):
-        self.modality_filter = modality
+    # INSERT 
+    def insert_documents(self, documents: List):
 
-    def insert_documents(self, documents):
         if not documents:
-            logger.warning("[QdrantStore] No documents to insert")
             return
 
-        vector_size = self._get_vector_size(documents)
-        if vector_size is None:
-            logger.warning("[QdrantStore] No text embeddings available for insert")
+        start = time.time()
+
+        documents = documents[:self.max_docs]
+
+        dim = self._get_vector_size(documents)
+        if not dim:
+            logger.warning("[QdrantStore] no embeddings")
             return
 
-        try:
-            self._ensure_collection(self.TEXT_COLLECTION, vector_size)
-            points = []
+        text_points = []
+        vision_points = []
 
-            for document in documents:
-                if not document.embedding or len(document.embedding) != vector_size:
-                    continue
+        for d in documents:
+            emb = getattr(d, "embedding", None)
 
-                payload = self._base_payload(document)
-                payload["embedding_space"] = "text"
-                points.append(
-                    PointStruct(
-                        id=str(uuid.uuid4()),
-                        vector=document.embedding,
-                        payload=payload,
+            if not isinstance(emb, list) or len(emb) != dim:
+                continue
+
+            payload = self._build_payload(d)
+            embedding_space = payload.get("embedding_space", "text")
+
+            point = PointStruct(
+                id=str(uuid.uuid4()),
+                vector=emb,
+                payload=payload,
+            )
+
+            if embedding_space == "vision":
+                vision_points.append(point)
+            else:
+                text_points.append(point)
+
+        # TEXT
+        if text_points:
+            self._ensure_collection(self.text_collection, dim)
+
+            for i in range(0, len(text_points), self.batch_size):
+                try:
+                    self.client.upsert(
+                        collection_name=self.text_collection,
+                        points=text_points[i:i + self.batch_size]
                     )
-                )
+                except Exception as e:
+                    logger.error("[QdrantStore] text insert failed | %s", str(e))
 
-            if not points:
-                logger.warning("[QdrantStore] No valid text points prepared")
-                return
+        # VISION
+        if vision_points:
+            self._ensure_collection(self.vision_collection, dim)
 
-            logger.info("[QdrantStore] Inserting TEXT points=%s", len(points))
-            self.client.upsert(collection_name=self.TEXT_COLLECTION, points=points)
-            logger.info("[QdrantStore] TEXT insert successful")
-
-        except Exception as exc:
-            logger.error("[QdrantStore] TEXT insert failed | error=%s", exc)
-            raise
-
-    def insert_vision_documents(self, documents):
-        if not documents:
-            logger.warning("[QdrantStore] No VISION documents to insert")
-            return
-
-        vector_size = self._get_vector_size(documents)
-        if vector_size is None:
-            logger.warning("[QdrantStore] No vision embeddings available for insert")
-            return
-
-        try:
-            self._ensure_collection(self.VISION_COLLECTION, vector_size)
-            points = []
-
-            for document in documents:
-                if not document.embedding or len(document.embedding) != vector_size:
-                    continue
-
-                payload = self._base_payload(document)
-                payload["embedding_space"] = "vision"
-                points.append(
-                    PointStruct(
-                        id=str(uuid.uuid4()),
-                        vector=document.embedding,
-                        payload=payload,
+            for i in range(0, len(vision_points), self.batch_size):
+                try:
+                    self.client.upsert(
+                        collection_name=self.vision_collection,
+                        points=vision_points[i:i + self.batch_size]
                     )
-                )
+                except Exception as e:
+                    logger.error("[QdrantStore] vision insert failed | %s", str(e))
 
-            if not points:
-                logger.warning("[QdrantStore] No valid vision points prepared")
-                return
+        logger.info(
+            "[QdrantStore] insert complete | text=%s vision=%s latency=%ss",
+            len(text_points),
+            len(vision_points),
+            round(time.time() - start, 2)
+        )
 
-            logger.info("[QdrantStore] Inserting VISION points=%s", len(points))
-            self.client.upsert(collection_name=self.VISION_COLLECTION, points=points)
-            logger.info("[QdrantStore] VISION insert successful")
-
-        except Exception as exc:
-            logger.error("[QdrantStore] VISION insert failed | error=%s", exc)
-            raise
-
+    # FILTER 
     def _build_filter(self, session_id=None):
         conditions = []
 
@@ -188,66 +197,69 @@ class QdrantVectorStore:
 
         return Filter(must=conditions) if conditions else None
 
-    def _query_collection(self, collection_name, query_vector, limit, query_filter):
-        if hasattr(self.client, "query_points"):
+    # SEARCH TEXT 
+    def search_text(self, query_vector, limit=None, session_id=None):
+
+        if not self._collection_exists(self.text_collection):
+            logger.warning("[QdrantStore] text collection missing → skipping")
+            return []
+
+        try:
             response = self.client.query_points(
-                collection_name=collection_name,
+                collection_name=self.text_collection,
                 query=query_vector,
-                limit=limit,
-                query_filter=query_filter,
+                limit=limit or settings.RAG_TOP_K,
+                query_filter=self._build_filter(session_id)
             )
-            return response.points
 
-        return self.client.search(
-            collection_name=collection_name,
-            query_vector=query_vector,
-            limit=limit,
-            query_filter=query_filter,
-        )
+            results = getattr(response, "points", [])
 
-    def search_text(self, query_vector, limit=5, session_id=None):
-        try:
-            if not self._collection_exists(self.TEXT_COLLECTION):
-                logger.warning("[QdrantStore] TEXT collection does not exist")
-                return []
-
-            results = self._query_collection(
-                self.TEXT_COLLECTION,
-                query_vector,
-                limit,
-                self._build_filter(session_id=session_id),
-            )
-            logger.info("[QdrantStore] TEXT results=%s | session_id=%s", len(results), session_id)
             return [
-                {"text": point.payload.get("text"), "score": point.score, "metadata": point.payload}
-                for point in results
+                {
+                    "text": r.payload.get("text"),
+                    "score": float(r.score),
+                    "metadata": r.payload
+                }
+                for r in results
             ]
 
-        except Exception as exc:
-            logger.error("[QdrantStore] TEXT search failed | error=%s", exc)
+        except Exception as e:
+            logger.error("[QdrantStore] text search failed | %s", str(e))
             return []
 
-    def search_vision(self, query_vector, limit=5, session_id=None):
-        try:
-            if not self._collection_exists(self.VISION_COLLECTION):
-                logger.warning("[QdrantStore] VISION collection does not exist")
-                return []
+    # SEARCH VISION 
+    def search_vision(self, query_vector, limit=None, session_id=None):
 
-            results = self._query_collection(
-                self.VISION_COLLECTION,
-                query_vector,
-                limit,
-                self._build_filter(session_id=session_id),
+        if not self._collection_exists(self.vision_collection):
+            logger.warning("[QdrantStore] vision collection missing → skipping")
+            return []
+
+        try:
+            response = self.client.query_points(
+                collection_name=self.vision_collection,
+                query=query_vector,
+                limit=limit or settings.RAG_TOP_K,
+                query_filter=self._build_filter(session_id)
             )
-            logger.info("[QdrantStore] VISION results=%s | session_id=%s", len(results), session_id)
+
+            results = getattr(response, "points", [])
+
             return [
-                {"text": point.payload.get("text"), "score": point.score, "metadata": point.payload}
-                for point in results
+                {
+                    "text": r.payload.get("text"),
+                    "score": float(r.score),
+                    "metadata": r.payload
+                }
+                for r in results
             ]
 
-        except Exception as exc:
-            logger.error("[QdrantStore] VISION search failed | error=%s", exc)
+        except Exception as e:
+            logger.error("[QdrantStore] vision search failed | %s", str(e))
             return []
+
+    # MODALITY FILTER 
+    def set_modality_filter(self, modality: str):
+        self.modality_filter = modality
 
     def get_client(self):
         return self.client

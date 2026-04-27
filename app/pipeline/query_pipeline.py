@@ -1,47 +1,80 @@
 from typing import Dict, Any, List
+import time
+
+from app.core.config import settings
 from app.utils.logger import get_logger
 from app.core.model_loader import model_loader
+
 from app.agents.agent_controller import AgentController
+
 from app.memory.redis_memory import RedisMemory
 from app.memory.memory_filter import filter_relevant_history
 from app.memory.memory_fusion import build_memory_context
 from app.memory.summarizer import summarize_conversation
+
 from app.retrieval.hybrid_retriever import HybridRetriever
 from app.retrieval.reranker import Reranker
 from app.retrieval.bm25_retriever import BM25Retriever
 from app.vectorstore.qdrant_store import QdrantVectorStore
+
 from app.reasoning.reasoning_engine import ReasoningEngine
 from app.reasoning.query_decomposer import QueryDecomposer
 from app.reasoning.result_fusion import ResultFusion
 
-import time
-import os
 
-# Logger
 logger = get_logger(__name__)
 
-# GLOBALS
-embedder = model_loader.get_embedder()
-llm = model_loader.get_llm()
 
-reasoning_engine = ReasoningEngine(llm)
-decomposer = QueryDecomposer(llm)
-fusion = ResultFusion(top_k=6)
-agent = AgentController()
-reranker = Reranker()
-bm25 = BM25Retriever()
-vector_store = QdrantVectorStore()
+# Lazy singletons
+_agent = AgentController()
+_bm25 = BM25Retriever()
+_vector_store = QdrantVectorStore()
+_reranker = Reranker()
+_fusion = ResultFusion()
 
 
-# MAIN PIPELINE
+# MODALITY-AWARE QUERY ENHANCEMENT
+def _enhance_query_for_modality(query: str) -> str:
+    q = query.lower()
+
+    vision_keywords = [
+        "image", "photo", "picture", "diagram",
+        "what is in", "describe", "shown", "visual"
+    ]
+
+    if any(k in q for k in vision_keywords):
+        enhanced = f"{query} visual description objects scene image content"
+        return enhanced[:settings.MAX_PROMPT_CHARS]
+
+    return query
+
+
+def _get_models():
+    llm = model_loader.get_llm()
+    embedder = model_loader.get_embedder()
+
+    reasoning_engine = ReasoningEngine(llm)
+    decomposer = QueryDecomposer(llm)
+
+    return llm, embedder, reasoning_engine, decomposer
+
+
 def query_pipeline(query: str, session_id: str = "default") -> Dict[str, Any]:
     start_time = time.time()
+
+    if not query or not query.strip():
+        return {
+            "answer": "Query cannot be empty.",
+            "error": "invalid_query"
+        }
 
     logger.info(f"[QueryPipeline][START] session_id={session_id}")
 
     try:
-        # STEP 1: Agent
-        agent_result = agent.handle(query, session_id)
+        llm, embedder, reasoning_engine, decomposer = _get_models()
+
+        # Agent Layer
+        agent_result = _agent.handle(query, session_id)
 
         if agent_result.get("source") in ["search", "direct", "memory"]:
             return _build_response(
@@ -50,50 +83,71 @@ def query_pipeline(query: str, session_id: str = "default") -> Dict[str, Any]:
                 trace={"agent_only": True},
                 start_time=start_time
             )
-        
-        # STEP 2: Memory
+
+        # Memory Layer
         memory = RedisMemory()
         history = memory.get_history(session_id)
-        
-        filtered_history = filter_relevant_history(query=query, history=history, embedder=embedder)
 
-        summary = ""
-        if len(history) > 6:
-            summary = summarize_conversation(llm, history)
-
-
-        memory_context = build_memory_context(summary, filtered_history)
-
-        # STEP 3: Query Decomposition
-        sub_queries = decomposer.decompose(query)
-
-        # STEP 4: Hybrid Retrieval
-        hybrid = HybridRetriever(
-            bm25_retriever=bm25,
-            vector_store=vector_store,
+        filtered_history = filter_relevant_history(
+            query=query,
+            history=history,
             embedder=embedder
         )
 
-        retrieval_batches: List[List[Dict]] = []
+        summary = ""
+        if len(history) >= settings.MEMORY_SUMMARY_THRESHOLD:
+            summary = summarize_conversation(llm, history)
+
+        memory_context = build_memory_context(summary, filtered_history)
+
+        # APPLY MODALITY ENHANCEMENT
+        enhanced_query = _enhance_query_for_modality(query)
+
+        # Query Decomposition
+        sub_queries = decomposer.decompose(enhanced_query)
+
+        # Retrieval
+        hybrid = HybridRetriever(
+            bm25_retriever=_bm25,
+            vector_store=_vector_store,
+            embedder=embedder
+        )
+
+        retrieval_results: List[Dict] = []
+
+        top_k = settings.DEFAULT_TOP_K
+        candidate_k = top_k * settings.HYBRID_CANDIDATES_MULTIPLIER
 
         for sub_q in sub_queries:
-            results = hybrid.search(query=sub_q, session_id=session_id, top_k=10)
-            
+            results = hybrid.search(
+                query=sub_q,
+                session_id=session_id,
+                top_k=candidate_k
+            )
+
             if results:
-                retrieval_batches.extend(results)
-        if not retrieval_batches:
+                retrieval_results.extend(results)
+
+        if not retrieval_results:
             return _build_response(
                 answer="I couldn't find relevant information.",
-                sources = [],
+                sources=[],
                 trace={"empty_retrieval": True},
                 start_time=start_time
             )
 
-        # STEP 5: Result Fusion
-        fused_results = fusion.fuse(retrieval_batches)
+        # Deduplication before fusion
+        retrieval_results = _deduplicate(retrieval_results)
 
-        # STEP 6: Rerank
-        reranked = reranker.rerank(query, fused_results, top_k=5)
+        # Fusion
+        fused_results = _fusion.fuse(retrieval_results)
+
+        # Rerank
+        reranked = _reranker.rerank(
+            query, 
+            fused_results,
+            top_k=settings.RERANK_TOP_K
+        )
 
         if not reranked:
             return _build_response(
@@ -102,27 +156,25 @@ def query_pipeline(query: str, session_id: str = "default") -> Dict[str, Any]:
                 trace={"empty_rerank": True},
                 start_time=start_time
             )
-        
-        # STEP 7: Final Context Build
+
+        # Context Build
         context = _build_context(memory_context, reranked)
 
-        # STEP 8: Reasoning
+        # Reasoning
         reasoning_output = reasoning_engine.generate_answer(
-            query=query,
+            query=query, 
             retrieved_docs=reranked,
             memory_context=context
         )
 
-        # reasoning_engine returns dict
         answer = reasoning_output.get("answer", "")
         confidence = reasoning_output.get("confidence", 0.5)
         sources_used = reasoning_output.get("sources_used", 0)
 
-        # STEP 9: Memory Write
+        # Memory Write
         memory.add_message(session_id, "user", query)
         memory.add_message(session_id, "assistant", answer)
 
-        # STEP 10: Final Response
         return {
             "answer": answer,
             "confidence": confidence,
@@ -130,53 +182,76 @@ def query_pipeline(query: str, session_id: str = "default") -> Dict[str, Any]:
             "trace": {
                 "sub_queries": sub_queries,
                 "retrieved_docs": len(reranked),
-                "memory_used": len(filtered_history) > 0,
+                "memory_used": bool(filtered_history),
                 "sources_used": sources_used
             },
             "latency": round(time.time() - start_time, 2)
         }
-    
+
     except Exception as e:
         logger.error(f"[QueryPipeline][ERROR] {str(e)}")
+
         return {
             "answer": "Something went wrong.",
             "error": str(e)
         }
-    
 
-# HELPERS
+
+def _deduplicate(docs: List[Dict]) -> List[Dict]:
+    seen = set()
+    unique = []
+
+    for d in docs:
+        key = (
+            d.get("text", "")[:200],
+            str(d.get("metadata", {}).get("doc_id")),
+            str(d.get("metadata", {}).get("chunk_id"))
+        )
+
+        if key not in seen:
+            seen.add(key)
+            unique.append(d)
+
+    return unique
+
+
 def _build_context(memory_context: str, docs: List[Dict]) -> str:
-    doc_texts = []
+    max_chars = settings.MAX_PROMPT_CHARS
+
+    parts = [memory_context.strip()] if memory_context else []
+    current_len = len(memory_context)
 
     for d in docs:
         text = d.get("text", "").strip()
-        if text:
-            doc_texts.append(text[:500])
+        if not text:
+            continue
 
-    knowledge = "\n\n".join(doc_texts)
+        chunk = text[:500]
 
-    return f"""
-{memory_context}
+        if current_len + len(chunk) > max_chars:
+            break
 
+        parts.append(chunk)
+        current_len += len(chunk)
 
-[RETRIEVED KNOWLEDGE]
-{knowledge}
-""".strip()
+    return "\n\n".join(parts)
+
 
 def _extract_sources(docs: List[Dict]) -> List[str]:
     sources = set()
 
     for d in docs:
-        metadata = d.get("metadata", {})
-        src = metadata.get("source")
+        src = d.get("metadata", {}).get("source")
         if src:
             sources.add(src)
 
     return list(sources)
+
 
 def _build_response(answer, sources, trace, start_time):
     return {
         "answer": answer,
         "sources": sources,
         "trace": trace,
-        "latency": round(time.time() - start_time, 2)}
+        "latency": round(time.time() - start_time, 2)
+    }

@@ -1,33 +1,35 @@
 import time
+from typing import List, Dict
 
-from app.embeddings.clip_text_embedder import ClipTextEmbedder
-from app.embeddings.text_embedder import TextEmbedder
+from app.core.config import settings
+from app.core.model_loader import model_loader
+
 from app.retrieval.bm25_retriever import BM25Retriever
 from app.retrieval.hybrid_retriever import HybridRetriever
 from app.retrieval.reranker import Reranker
-from app.utils.logger import get_logger
 from app.vectorstore.qdrant_store import QdrantVectorStore
+
+from app.ingestion.pipeline import pipeline 
+from app.utils.logger import get_logger
 
 
 logger = get_logger(__name__)
 
 
 class _NullVectorStore:
-    def search_text(self, query_vector, limit=5, session_id=None):
+    def search_text(self, *args, **kwargs):
         return []
 
-    def search_vision(self, query_vector, limit=5, session_id=None):
+    def search_vision(self, *args, **kwargs):
         return []
 
 
 class Retriever:
     def __init__(self):
         try:
-            from app.ingestion.pipeline import bm25 as shared_bm25
-            from app.ingestion.pipeline import vector_store as shared_vector_store
-
-            self.bm25 = shared_bm25
-            self.vector_store = shared_vector_store
+            self.bm25 = pipeline.bm25
+            logger.info(f"[Retriever INIT] BM25 docs={len(self.bm25.documents)}")
+            self.vector_store = pipeline.vector_store
         except Exception:
             self.bm25 = BM25Retriever()
             try:
@@ -35,9 +37,11 @@ class Retriever:
             except Exception:
                 self.vector_store = _NullVectorStore()
 
-        self.embedder = TextEmbedder()
-        self.clip_text_embedder = ClipTextEmbedder()
+        self.embedder = model_loader.get_embedder()
+        self.clip_text_embedder = model_loader.get_clip_text_embedder()
+
         self.reranker = Reranker()
+
         self.hybrid = HybridRetriever(
             self.bm25,
             self.vector_store,
@@ -45,202 +49,182 @@ class Retriever:
             self.clip_text_embedder,
         )
 
+    # QUERY REWRITE 
     def _rewrite_query(self, query: str) -> str:
         lowered = query.lower()
         hints = []
 
-        if "video about" in lowered:
-            hints.append("speech scenes explanation")
-        if "what is happening" in lowered:
-            hints.append("scene action activity visual description")
+        if "video" in lowered:
+            hints.append("speech scene action visual description")
         if "who" in lowered:
-            hints.append("person speaker individual face")
+            hints.append("person speaker individual")
         if "describe" in lowered:
-            hints.append("visual scene objects environment")
+            hints.append("visual objects environment")
         if "what did they say" in lowered or "speech" in lowered:
-            hints.append("spoken content transcript dialogue")
-        if "at what time" in lowered or "when" in lowered:
-            hints.append("timestamp event time moment")
-        if "show frame" in lowered or "image from video" in lowered:
-            hints.append("video frame snapshot")
+            hints.append("spoken content transcript")
+        if "when" in lowered:
+            hints.append("timestamp event time")
 
         if not hints:
             return query
-        return f"{query} {' '.join(hints)}"
 
-    def _rerank(self, query: str, results: list, top_k: int):
+        rewritten = f"{query} {' '.join(hints)}"
+        return rewritten[:settings.MAX_PROMPT_CHARS]
+
+    # RERANK 
+    def _rerank(self, query: str, results: List[Dict], top_k: int):
         if not results:
-            logger.warning("[Retriever] No results to rerank")
             return []
 
         try:
-            reranked = self.reranker.rerank(query, results, top_k=top_k)
-            return reranked[:top_k]
-        except Exception as exc:
-            logger.error("[Retriever] Rerank failed | error=%s", exc)
+            return self.reranker.rerank(query, results, top_k=top_k)
+        except Exception as e:
+            logger.warning("[Retriever] Rerank fallback | %s", str(e))
             return results[:top_k]
 
-    def _cross_modal_fusion(self, results):
-        fused_results = []
-        used_indices = set()
+    # DEDUP 
+    def _deduplicate(self, results: List[Dict]) -> List[Dict]:
+        seen = set()
+        unique = []
 
-        for index, result in enumerate(results):
-            if index in used_indices:
+        for r in results:
+            metadata = r.get("metadata", {})
+            key = (
+                r.get("text", "")[:300], 
+                str(metadata.get("doc_id")),
+                str(metadata.get("chunk_id")),
+            )
+
+            if key not in seen:
+                seen.add(key)
+                unique.append(r)
+
+        return unique
+
+    # FINAL NORMALIZATION 
+    def _normalize_scores(self, results: List[Dict]) -> List[Dict]:
+        if not results:
+            return results
+
+        max_score = max(r.get("score", 0.0) for r in results) or 1.0
+
+        for r in results:
+            r["score"] = r.get("score", 0.0) / (max_score + 1e-6)
+
+        return results
+
+    # CROSS MODAL FUSION 
+    def _cross_modal_fusion(self, results: List[Dict]) -> List[Dict]:
+        fused = []
+        used = set()
+
+        for i, r in enumerate(results):
+            if i in used:
                 continue
 
-            metadata = result.get("metadata", {})
+            metadata = r.get("metadata", {})
             modality = metadata.get("modality")
             content_type = metadata.get("content_type")
 
             if modality == "video" and content_type == "video_speech":
-                segment_index = metadata.get("segment_index")
-                combined_text = result["text"]
-                combined_score = result.get("score", 0.0)
+                segment = metadata.get("segment_index")
 
-                for other_index, other in enumerate(results):
-                    if other_index == index:
+                combined_text = r.get("text", "")
+                combined_score = r.get("score", 0.0)
+
+                for j, other in enumerate(results):
+                    if j == i:
                         continue
 
-                    other_metadata = other.get("metadata", {})
+                    other_meta = other.get("metadata", {})
+
                     if (
-                        other_metadata.get("modality") == "video"
-                        and other_metadata.get("content_type") == "video_frame"
-                        and other_metadata.get("linked_segment_index") == segment_index
+                        other_meta.get("modality") == "video"
+                        and other_meta.get("content_type") == "video_frame"
+                        and other_meta.get("linked_segment_index") == segment
                     ):
-                        combined_text += " | Visual: " + other["text"]
+                        combined_text += " | Visual: " + other.get("text", "")
                         combined_score = max(combined_score, other.get("score", 0.0))
-                        used_indices.add(other_index)
+                        used.add(j)
 
-                fused_results.append(
-                    {
-                        "text": combined_text,
-                        "metadata": metadata,
-                        "score": combined_score,
-                    }
-                )
-                used_indices.add(index)
+                fused.append({
+                    "text": combined_text,
+                    "metadata": metadata,  
+                    "score": combined_score
+                })
+                used.add(i)
+
             else:
-                fused_results.append(result)
+                fused.append(r)
 
-        return fused_results
+        return fused
 
-    def retrieval(self, query: str, session_id: str = "default", top_k: int = 5):
+    # MAIN 
+    def retrieval(
+        self,
+        query: str,
+        session_id: str = "default",
+        top_k: int = None
+    ) -> List[Dict]:
+        logger.info(f"[Retriever] BM25 docs at query={len(self.bm25.documents)}")
+
         if not query or not query.strip():
             raise ValueError("query cannot be empty")
+
         if not session_id:
             raise ValueError("session_id required")
 
-        start_time = time.time()
+        top_k = top_k or settings.DEFAULT_TOP_K
+        candidate_k = top_k * settings.HYBRID_CANDIDATES_MULTIPLIER
+
+        start = time.time()
 
         try:
-            logger.info("[Retriever][START] session_id=%s | query=%s", session_id, query)
+            logger.info("[Retriever][START] session_id=%s", session_id)
+
             rewritten_query = self._rewrite_query(query)
 
+            # HYBRID 
             results = self.hybrid.search(
                 query=rewritten_query,
                 session_id=session_id,
-                top_k=top_k * 3,
+                top_k=candidate_k
             )
+
             if not results:
-                logger.warning("[Retriever] No results from hybrid retrieval")
+                logger.warning("[Retriever] No hybrid results")
                 return []
 
-            unique_results = {}
-            for result in results:
-                metadata = result.get("metadata", {})
-                key = (
-                    result.get("text"),
-                    str(metadata.get("doc_id")),
-                    str(metadata.get("source")),
-                    str(metadata.get("chunk_id")),
-                    str(metadata.get("embedding_space")),
-                )
-                if key not in unique_results:
-                    unique_results[key] = result
+            logger.info("[Retriever] hybrid_results=%s", len(results))
 
-            results = list(unique_results.values())
-            scores = [result.get("score", 0.0) for result in results]
-            if scores:
-                max_score = max(scores) + 1e-6
-                for result in results:
-                    result["score"] = result.get("score", 0.0) / max_score
+            # DEDUP 
+            results = self._deduplicate(results)
 
+        
+            # RERANK 
             results = self._rerank(query, results, top_k=top_k * 2)
+
+            logger.info("[Retriever] after_rerank=%s", len(results))
+
+            # FUSION 
             results = self._cross_modal_fusion(results)
 
-            text_docs = []
-            image_docs = []
-            audio_docs = []
-            video_docs = []
+            # FINAL NORMALIZATION
+            results = self._normalize_scores(results)
 
-            for result in results:
-                modality = result.get("metadata", {}).get("modality", "text")
-                if modality == "video":
-                    video_docs.append(result)
-                elif modality == "image":
-                    image_docs.append(result)
-                elif modality == "audio":
-                    audio_docs.append(result)
-                else:
-                    text_docs.append(result)
+            final_results = results[:top_k]
 
-            def video_priority(document):
-                content_type = document.get("metadata", {}).get("content_type")
-                if content_type == "video_speech":
-                    return 2
-                if content_type == "video_frame":
-                    return 1
-                return 0
+            latency = round(time.time() - start, 2)
 
-            video_docs = sorted(video_docs, key=video_priority, reverse=True)
-
-            final_results = []
-            text_index = image_index = audio_index = video_index = 0
-
-            while len(final_results) < top_k:
-                appended = False
-
-                if video_index < len(video_docs):
-                    final_results.append(video_docs[video_index])
-                    video_index += 1
-                    appended = True
-                    if len(final_results) >= top_k:
-                        break
-
-                if text_index < len(text_docs):
-                    final_results.append(text_docs[text_index])
-                    text_index += 1
-                    appended = True
-                    if len(final_results) >= top_k:
-                        break
-
-                if audio_index < len(audio_docs):
-                    final_results.append(audio_docs[audio_index])
-                    audio_index += 1
-                    appended = True
-                    if len(final_results) >= top_k:
-                        break
-
-                if image_index < len(image_docs):
-                    final_results.append(image_docs[image_index])
-                    image_index += 1
-                    appended = True
-
-                if not appended:
-                    break
-
-            if not final_results:
-                final_results = results[:top_k]
-
-            latency = time.time() - start_time
             logger.info(
                 "[Retriever][SUCCESS] session_id=%s | results=%s | latency=%.2fs",
                 session_id,
                 len(final_results),
-                latency,
+                latency
             )
+
             return final_results
 
-        except Exception as exc:
-            logger.error("[Retriever][FAILED] session_id=%s | error=%s", session_id, exc)
+        except Exception as e:
+            logger.error("[Retriever][FAILED] session_id=%s | error=%s", session_id, str(e))
             return []

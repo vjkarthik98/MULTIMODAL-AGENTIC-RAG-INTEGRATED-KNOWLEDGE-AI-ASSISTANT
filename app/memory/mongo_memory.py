@@ -1,135 +1,175 @@
 from pymongo import MongoClient, ASCENDING, DESCENDING
 from datetime import datetime
 from typing import List, Dict, Optional
+
+from app.core.config import settings
 from app.utils.logger import get_logger
 
-# Logger
+
 logger = get_logger(__name__)
 
 
 class MongoMemory:
-    def __init__(self, uri="mongodb://localhost:27017"):
-        logger.info(f"[MongoMemory] Connecting to MongoDB | uri={uri}")
+    def __init__(self):
+        uri = settings.MONGO_URI
 
-        self.client = MongoClient(uri)
-        self.db = self.client["rag_memory"]
+        logger.info("[MongoMemory] Connecting")
 
-        # separate Collections
+        self.client = MongoClient(
+            uri,
+            serverSelectionTimeoutMS=settings.DB_TIMEOUT_MS,
+            maxPoolSize=settings.DB_MAX_POOL_SIZE,
+        )
+
+        self.db = self.client[settings.MONGO_DB_NAME]
+
         self.messages = self.db["messages"]
         self.summaries = self.db["summaries"]
 
         self._ensure_indexes()
 
-        logger.info("[MongoMemory] Initialized Successfully")
+        logger.info("[MongoMemory] initialized")
 
-    # INDEXES
     def _ensure_indexes(self):
-        self.messages.create_index([("session_id", ASCENDING)])
-        self.messages.create_index([("timestamp", DESCENDING)])
+        # Messages
+        self.messages.create_index(
+            [("session_id", ASCENDING), ("timestamp", DESCENDING)]
+        )
         self.messages.create_index([("importance", DESCENDING)])
 
-        self.summaries.create_index([("session_id", ASCENDING)])
+        # Summaries
+        self.summaries.create_index(
+            [("session_id", ASCENDING), ("timestamp", DESCENDING)]
+        )
 
-
-    # STORE MESSAGE
+    # STORE MESSAGE 
     def store_message(
-            self, 
-            session_id: str,
-            role: str,
-            content: str,
-            embedding: Optional[List[float]] = None,
-            modality: str = "text",
-            importance: float = 1.0,
-            extra: Optional[Dict] = None
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        embedding: Optional[List[float]] = None,
+        modality: str = "text",
+        importance: float = 1.0,
+        extra: Optional[Dict] = None
     ):
+        if not session_id or not content:
+            return
+
         try:
+            # Truncate content
+            if len(content) > settings.MAX_PROMPT_CHARS:
+                content = content[:settings.MAX_PROMPT_CHARS]
+
             doc = {
                 "session_id": session_id,
                 "role": role,
                 "content": content,
                 "timestamp": datetime.utcnow(),
                 "modality": modality,
-                "importance": importance
+                "importance": float(importance),
             }
 
-            if embedding:
-                doc["embedding"] = embedding
+            # Validate embedding
+            if embedding and isinstance(embedding, list):
+                if len(embedding) in (
+                    settings.TEXT_EMBEDDING_DIM,
+                    settings.VISION_EMBEDDING_DIM,
+                ):
+                    doc["embedding"] = embedding
 
-            if extra:
+            if extra and isinstance(extra, dict):
                 doc["extra"] = extra
 
             self.messages.insert_one(doc)
 
             logger.debug(
-                f"[MongoMemory] Stored | session_id={session_id} | role={role}"
+                "[MongoMemory] stored | session_id=%s | role=%s",
+                session_id,
+                role
             )
 
         except Exception as e:
             logger.error(
-                f"[MongoMemory] Store failed | session_id={session_id} | {str(e)}"
+                "[MongoMemory] store failed | session_id=%s | %s",
+                session_id,
+                str(e)
             )
-            raise
 
-    # STORE SUMMARY
+    #  STORE SUMMARY 
     def store_summary(
         self,
         session_id: str,
         summary: str,
         embedding: Optional[List[float]] = None
     ):
-        
+        if not session_id or not summary:
+            return
+
         try:
+            if len(summary) > settings.MEMORY_SUMMARY_MAX_CHARS:
+                summary = summary[:settings.MEMORY_SUMMARY_MAX_CHARS]
+
             doc = {
                 "session_id": session_id,
                 "summary": summary,
-                "timestamp": datetime.utcnow()
+                "timestamp": datetime.utcnow(),
             }
 
-            if embedding:
-                doc["embedding"] = embedding
+            if embedding and isinstance(embedding, list):
+                if len(embedding) in (
+                    settings.TEXT_EMBEDDING_DIM,
+                    settings.VISION_EMBEDDING_DIM,
+                ):
+                    doc["embedding"] = embedding
 
             self.summaries.insert_one(doc)
 
-            logger.info(
-                f"[MongoMemory] Summary stored | session_id={session_id}"
+            logger.debug(
+                "[MongoMemory] summary stored | session_id=%s",
+                session_id
             )
 
         except Exception as e:
             logger.error(
-                f"[MongoMemory] Summary failed | session_id={session_id} | {str(e)}"
+                "[MongoMemory] summary failed | session_id=%s | %s",
+                session_id,
+                str(e)
             )
-            raise
 
-    
-    # GET RECENT HISTORY
+    #  GET RECENT HISTORY 
     def get_recent_history(
-            self,
-            session_id: str,
-            limit: int = 20
+        self,
+        session_id: str,
+        limit: int = None
     ) -> List[Dict]:
+
+        limit = limit or settings.MAX_HISTORY_MESSAGES
+
         try:
             cursor = self.messages.find(
                 {"session_id": session_id}
             ).sort("timestamp", DESCENDING).limit(limit)
 
             history = []
+
             for doc in reversed(list(cursor)):
                 history.append({
-                    "role": doc["role"],
-                    "content": doc["content"],
+                    "role": doc.get("role"),
+                    "content": doc.get("content"),
                     "embedding": doc.get("embedding"),
-                    "modality": doc.get("modality")
+                    "modality": doc.get("modality"),
+                    "timestamp": doc.get("timestamp").timestamp()
+                    if doc.get("timestamp") else None
                 })
 
             return history
-        
+
         except Exception as e:
-            logger.error(
-                f"[MongoMemory] Fetch recent failed | {str(e)}"
-            )
+            logger.error("[MongoMemory] fetch failed | %s", str(e))
             return []
 
-    # GET LATEST SUMMARY
+    #  GET LATEST SUMMARY 
     def get_latest_summary(self, session_id: str) -> str:
         try:
             doc = self.summaries.find_one(
@@ -137,30 +177,22 @@ class MongoMemory:
                 sort=[("timestamp", DESCENDING)]
             )
 
-            if doc:
-                return doc.get("summary", "")
-            
-            return ""
-        
+            return doc.get("summary", "") if doc else ""
+
         except Exception as e:
-            logger.error(
-                f"[MongoMemory] Summary fetch failed | {str(e)}"
-            )
+            logger.error("[MongoMemory] summary fetch failed | %s", str(e))
             return ""
-        
-    # CLEAR MEMORY
+
+    #  CLEAR MEMORY 
     def clear_memory(self, session_id: str):
         try:
             self.messages.delete_many({"session_id": session_id})
             self.summaries.delete_many({"session_id": session_id})
 
             logger.info(
-                f"[MongoMemory] Cleared | session_id={session_id}"
+                "[MongoMemory] cleared | session_id=%s",
+                session_id
             )
 
         except Exception as e:
-            logger.error(
-                f"[MongoMemory] Clear failed | {str(e)}"
-
-            )
-            raise
+            logger.error("[MongoMemory] clear failed | %s", str(e))

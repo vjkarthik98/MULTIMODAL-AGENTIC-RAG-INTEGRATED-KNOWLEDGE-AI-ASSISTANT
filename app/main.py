@@ -1,54 +1,127 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from contextlib import asynccontextmanager
+import time
+import uuid
+
 from app.api.routes.rag_routes import router as rag_router
+from app.core.config import settings
 from app.utils.logger import get_logger
+from scripts.init_qdrant import initialize_qdrant
 
-# Logger
+
 logger = get_logger(__name__)
+initialize_qdrant() 
 
-# APP INIT
-app = FastAPI(
-    tile="Multimodal RAG Assistant",
-    version="0.19.0",
-    description = "Agent-based multimodal RAG system with memory and hybrid retrieval",
-)
 
-# ROUTES
-app.include_router(rag_router, prefix="/rag", tags=["RAG"])
+# LIFESPAN 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
 
-# STARTUP EVENT
-@app.on_event("startup")
-def start_event():
-    logger.info("[Startup] Application is starting...")
+    logger.info("[Startup] initializing application")
 
-    # Warmup LLM
+    # Warmup models
     try:
         from app.core.model_loader import model_loader
 
         llm = model_loader.get_llm()
+
         if hasattr(llm, "warmup"):
             llm.warmup()
 
-        logger.info("[Startup] Model Warmup completed")
+        logger.info("[Startup] model warmup completed")
 
     except Exception as e:
-        logger.warning(f"[Startup] Warmup skipped | {str(e)}")
+        logger.warning("[Startup] warmup skipped | %s", str(e))
 
-    logger.info("[Startup] Application ready")
+    logger.info("[Startup] application ready")
+
+    yield
+
+    logger.info("[Shutdown] shutting down application")
 
 
-# ROOT ENDPOINT
+# APP 
+app = FastAPI(
+    title=settings.APP_NAME,
+    version=settings.APP_VERSION,
+    description=settings.APP_DESCRIPTION,
+    lifespan=lifespan
+)
+
+
+# MIDDLEWARE 
+@app.middleware("http")
+async def request_logger(request: Request, call_next):
+    start = time.time()
+    request_id = str(uuid.uuid4())
+
+    try:
+        response = await call_next(request)
+
+        latency = round(time.time() - start, 2)
+
+        logger.info(
+            "[Request] id=%s method=%s path=%s status=%s latency=%ss",
+            request_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+            latency
+        )
+
+        response.headers["X-Request-ID"] = request_id
+
+        return response
+
+    except Exception as e:
+        logger.error(
+            "[Request][FAILED] id=%s path=%s | %s",
+            request_id,
+            request.url.path,
+            str(e)
+        )
+        raise
+
+
+# ROUTES 
+app.include_router(rag_router, prefix="/rag", tags=["RAG"])
+
+
+# ROOT 
 @app.get("/")
 def root():
     return {
-        "message": "Multimodal RAG API is running",
-        "version": "0.19.0",
-        "status": "healthy"
+        "message": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "status": "running"
     }
 
-# HEALTH CHECK
+
+# HEALTH 
 @app.get("/health")
 def health():
     return {
         "status": "ok",
-        "service": "rag-api"
+        "service": settings.APP_NAME
     }
+
+
+# READINESS 
+@app.get("/ready")
+def readiness():
+    try:
+        from app.core.model_loader import model_loader
+
+        llm = model_loader.get_llm()
+
+        return {
+            "status": "ready",
+            "model_loaded": llm is not None
+        }
+
+    except Exception as e:
+        logger.error("[Readiness] %s", str(e))
+        return {
+            "status": "not_ready",
+            "error": str(e)
+        }

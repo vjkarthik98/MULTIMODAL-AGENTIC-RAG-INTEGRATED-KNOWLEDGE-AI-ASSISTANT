@@ -1,33 +1,28 @@
 import time
 from typing import List
 
+from app.core.config import settings
 from app.ingestion.schema import IngestedDocument
 from app.utils.logger import get_logger
 
-
 try:
     from langchain_text_splitters import RecursiveCharacterTextSplitter
-except ImportError:  # pragma: no cover - optional dependency fallback
+except ImportError:
     RecursiveCharacterTextSplitter = None
 
 
 logger = get_logger(__name__)
 
-DEFAULT_CHUNK_SIZE = 500
-DEFAULT_CHUNK_OVERLAP = 100
-MAX_CHUNKS = 2000
 
+def get_text_splitter():
+    chunk_size = settings.CHUNK_SIZE
+    chunk_overlap = settings.CHUNK_OVERLAP
 
-def get_text_splitter(
-    chunk_size: int = DEFAULT_CHUNK_SIZE,
-    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
-):
     if chunk_size <= 0:
-        raise ValueError("chunk_size must be greater than 0")
-    if chunk_overlap < 0:
-        raise ValueError("chunk_overlap cannot be negative")
-    if chunk_overlap >= chunk_size:
-        raise ValueError("chunk_overlap must be smaller than chunk_size")
+        raise ValueError("CHUNK_SIZE must be > 0")
+
+    if chunk_overlap < 0 or chunk_overlap >= chunk_size:
+        raise ValueError("Invalid CHUNK_OVERLAP")
 
     if RecursiveCharacterTextSplitter is None:
         return None
@@ -39,22 +34,16 @@ def get_text_splitter(
     )
 
 
-def _fallback_chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
-    chunks: List[str] = []
+def _fallback_chunk_text(text: str) -> List[str]:
+    chunk_size = settings.CHUNK_SIZE
+    chunk_overlap = settings.CHUNK_OVERLAP
+
+    chunks = []
     start = 0
     text_length = len(text)
-    separators = ["\n\n", "\n", ". ", " "]
 
     while start < text_length:
         end = min(start + chunk_size, text_length)
-
-        if end < text_length:
-            search_start = max(start, end - max(chunk_size // 4, 50))
-            for separator in separators:
-                boundary = text.rfind(separator, search_start, end)
-                if boundary > start:
-                    end = boundary + len(separator)
-                    break
 
         chunk = text[start:end].strip()
         if chunk:
@@ -63,211 +52,155 @@ def _fallback_chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> List
         if end >= text_length:
             break
 
-        next_start = max(end - chunk_overlap, start + 1)
-        start = next_start
+        start = max(end - chunk_overlap, start + 1)
 
     return chunks
 
 
-def chunk_text(
-    text: str,
-    chunk_size: int = DEFAULT_CHUNK_SIZE,
-    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
-    max_chunks: int = MAX_CHUNKS,
-) -> List[str]:
+def chunk_text(text: str) -> List[str]:
     if not text or not text.strip():
         raise ValueError("Cannot chunk empty text")
 
-    splitter = get_text_splitter(chunk_size, chunk_overlap)
+    # Global safety truncation (critical)
+    if len(text) > settings.MAX_PROMPT_CHARS:
+        logger.warning(
+            "[Chunking][TRUNCATE] %s -> %s",
+            len(text),
+            settings.MAX_PROMPT_CHARS
+        )
+        text = text[:settings.MAX_PROMPT_CHARS]
+
+    splitter = get_text_splitter()
+
     chunks = (
         splitter.split_text(text)
-        if splitter is not None
-        else _fallback_chunk_text(text, chunk_size, chunk_overlap)
+        if splitter
+        else _fallback_chunk_text(text)
     )
 
     if not chunks:
-        raise ValueError("Chunking failed: no chunks generated")
+        raise ValueError("Chunking failed")
 
-    if len(chunks) > max_chunks:
+    if len(chunks) > settings.MAX_CHUNKS:
         logger.warning(
-            "[Chunking][LIMIT] Truncating chunks from %s to %s",
+            "[Chunking][LIMIT] %s -> %s",
             len(chunks),
-            max_chunks,
+            settings.MAX_CHUNKS
         )
-        chunks = chunks[:max_chunks]
+        chunks = chunks[:settings.MAX_CHUNKS]
 
-    logger.info(
-        "[Chunking][SUCCESS] chunks=%s | size=%s | overlap=%s",
-        len(chunks),
-        chunk_size,
-        chunk_overlap,
-    )
     return chunks
 
 
-def _single_chunk_document(
-    doc: IngestedDocument,
-    parent_modality: str,
-    content_type: str | None = None,
-    chunk_index: int | None = None,
-    total_chunks: int | None = None,
-) -> List[IngestedDocument]:
+def _single_chunk_document(doc: IngestedDocument, parent_modality: str, content_type=None):
     cloned = doc.clone()
+
     structure = dict(cloned.structure or {})
-    index = structure.get("chunk_index", 0)
-    total = structure.get("total_chunks", 1)
-
-    if chunk_index is not None:
-        index = chunk_index
-    if total_chunks is not None:
-        total = total_chunks
-
-    structure.update(
-        {
-            "chunk_index": index,
-            "total_chunks": total,
-            "parent_modality": parent_modality,
-        }
-    )
+    structure.update({
+        "chunk_index": structure.get("chunk_index", 0),
+        "total_chunks": structure.get("total_chunks", 1),
+        "parent_modality": parent_modality,
+    })
 
     if content_type:
         structure["content_type"] = content_type
 
     cloned.structure = structure
-    cloned.chunk_id = index
+    cloned.chunk_id = structure["chunk_index"]
+
     return [cloned]
 
 
 def _chunk_text_document(doc: IngestedDocument) -> List[IngestedDocument]:
     try:
         chunks = chunk_text(doc.text)
-        chunked_docs: List[IngestedDocument] = []
-        total_chunks = len(chunks)
+        total = len(chunks)
 
-        for index, chunk in enumerate(chunks):
-            structure = dict(doc.structure or {})
-            structure.update(
-                {
-                    "chunk_index": index,
-                    "total_chunks": total_chunks,
+        return [
+            doc.clone(
+                text=chunk,
+                chunk_id=i,
+                structure={
+                    **(doc.structure or {}),
+                    "chunk_index": i,
+                    "total_chunks": total,
                     "chunk_length": len(chunk),
                     "parent_modality": doc.modality,
-                }
+                },
             )
+            for i, chunk in enumerate(chunks)
+        ]
 
-            chunked_doc = doc.clone(
-                text=chunk,
-                chunk_id=index,
-                structure=structure,
-            )
-            chunked_docs.append(chunked_doc)
-
-        return chunked_docs
-
-    except Exception as exc:
-        logger.error("[Chunking][TEXT_FAIL] %s", exc)
+    except Exception as e:
+        logger.error("[Chunking][TEXT_FAIL] %s", str(e))
         return [doc]
 
 
-def _chunk_table_document(doc: IngestedDocument) -> List[IngestedDocument]:
-    return _single_chunk_document(doc, parent_modality="table")
-
-
 def _chunk_image_document(doc: IngestedDocument) -> List[IngestedDocument]:
-    if doc.subtype == "ocr" and len(doc.text) >= 300:
-        try:
-            chunks = chunk_text(doc.text)
-            total_chunks = len(chunks)
-            return [
-                doc.clone(
-                    text=chunk,
-                    chunk_id=index,
-                    structure={
-                        **dict(doc.structure or {}),
-                        "chunk_index": index,
-                        "total_chunks": total_chunks,
-                        "parent_modality": "image",
-                        "content_type": "ocr_chunk",
-                    },
-                )
-                for index, chunk in enumerate(chunks)
-            ]
-        except Exception as exc:
-            logger.error("[Chunking][IMAGE_FAIL] %s", exc)
-            return [doc]
+    if doc.subtype == "ocr" and len(doc.text) > settings.CHUNK_SIZE:
+        return _chunk_text_document(doc)
 
-    content_type = "ocr_short" if doc.subtype == "ocr" else "semantic_description"
-    return _single_chunk_document(doc, parent_modality="image", content_type=content_type)
+    return _single_chunk_document(doc, "image", "semantic_description")
 
 
-def _chunk_audio_document(doc: IngestedDocument) -> List[IngestedDocument]:
-    structure = dict(doc.structure or {})
+def _chunk_audio_document(doc: IngestedDocument):
+    structure = doc.structure or {}
+
     return _single_chunk_document(
         doc,
-        parent_modality="audio",
-        content_type="speech_segment",
-        chunk_index=structure.get("segment_index", 0),
-        total_chunks=structure.get("total_segments", 1),
+        "audio",
+        "speech_segment"
     )
 
 
-def _chunk_video_document(doc: IngestedDocument) -> List[IngestedDocument]:
-    structure = dict(doc.structure or {})
-
+def _chunk_video_document(doc: IngestedDocument):
     if doc.subtype == "speech":
-        return _single_chunk_document(
-            doc,
-            parent_modality="video",
-            content_type="video_speech",
-            chunk_index=structure.get("segment_index", 0),
-            total_chunks=structure.get("total_segments", 1),
-        )
+        return _single_chunk_document(doc, "video", "video_speech")
 
     if doc.subtype == "frame":
-        return _single_chunk_document(
-            doc,
-            parent_modality="video",
-            content_type="video_frame",
-            chunk_index=structure.get("frame_index", 0),
-            total_chunks=structure.get("total_frames", 1),
-        )
+        return _single_chunk_document(doc, "video", "video_frame")
 
-    return _single_chunk_document(doc, parent_modality="video")
+    return _single_chunk_document(doc, "video")
 
 
 def chunk_documents(documents: List[IngestedDocument]) -> List[IngestedDocument]:
     if not documents:
-        raise ValueError("No documents provided for chunking")
+        raise ValueError("No documents provided")
 
-    start_time = time.time()
+    start = time.time()
+
     handlers = {
         "text": _chunk_text_document,
-        "table": _chunk_table_document,
+        "table": _single_chunk_document,
         "image": _chunk_image_document,
         "audio": _chunk_audio_document,
         "video": _chunk_video_document,
     }
 
-    all_chunks: List[IngestedDocument] = []
+    output = []
 
     for doc in documents:
         handler = handlers.get(doc.modality)
-        if handler is None:
-            logger.warning("[Chunking][UNKNOWN_MODALITY] %s", doc.modality)
-            all_chunks.append(doc)
+
+        if not handler:
+            logger.warning("[Chunking][UNKNOWN] %s", doc.modality)
+            output.append(doc)
             continue
 
         try:
-            all_chunks.extend(handler(doc))
-        except Exception as exc:
-            logger.error("[Chunking][DOC_FAIL] %s", exc)
-            all_chunks.append(doc)
+            if doc.modality == "table":
+                output.extend(handler(doc, "table"))
+            else:
+                output.extend(handler(doc))
+        except Exception as e:
+            logger.error("[Chunking][FAIL] %s", str(e))
+            output.append(doc)
 
-    latency = time.time() - start_time
     logger.info(
-        "[Chunking][SUCCESS] input_docs=%s | output_chunks=%s | latency=%.2fs",
+        "[Chunking][SUCCESS] in=%s | out=%s | latency=%.2fs",
         len(documents),
-        len(all_chunks),
-        latency,
+        len(output),
+        time.time() - start
     )
-    return all_chunks
+
+    return output

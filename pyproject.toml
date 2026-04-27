@@ -1,28 +1,17 @@
 [project]
-name = "multimodal-rag-assitant"
-version = "0.19.0"
-description = "Production-grade multimodal RAG assitant using open-source LLMs and Qdrant"
-authors = [
-    {name = "VK"}
-]
-readme = "README.md"
-requires-python = ">3.9"
+name = "multimodal-rag-assistant"
+version = "0.20.0"
 
-dependencies = [
-    "torch",
-    "transformers",
-    "accelerate",
-    "sentence-transformers",
-    "langchain",
-    "langchain-community",
-    "qdrant-client",
-    "pydantic",
-    "python-dotenv",
-    "tqdm", 
-    "fastapi",
-    "uvicorn"
-]
-
-[build-system]
-requires = ["setuptool>=61.0"]
-build-backend = "setuptools.build_meta"
+[tool.poetry.dependencies] # or pip equivalent
+python = "^3.10"
+fastapi = "*"
+uvicorn = "*"
+qdrant-client = "*"
+sentence-transformers = "*"
+torch = "*"
+transformers = "*"
+python-docx = "*"
+opencv-python = "*"
+pillow = "*"
+redis = "*"
+pymongo = "*"

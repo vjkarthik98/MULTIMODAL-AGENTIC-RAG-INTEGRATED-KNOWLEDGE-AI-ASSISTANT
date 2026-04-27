@@ -1,105 +1,134 @@
-from app.utils.logger import get_logger
-from typing import List, Dict
 import time
+from typing import List, Dict
 
-#Logger
+from app.core.config import settings
+from app.utils.logger import get_logger
+
+
 logger = get_logger(__name__)
 
-# HELPERS
-def _format_conversation(history: List[Dict], max_chars: int = 4000) -> str:
+
+# FORMAT CONVERSATION 
+def _format_conversation(history: List[Dict]) -> str:
+    if not history:
+        return ""
+
+    max_chars = settings.MEMORY_SUMMARY_INPUT_CHARS
+    max_messages = settings.MAX_HISTORY_MESSAGES
+
     parts = []
     total_length = 0
 
-    # Reverse -> keep recent messages first
-    for msg in reversed(history):
-        role = msg.get("role", "unknown").upper()
-        content = msg.get("content", "").strip()
+    # Use recent messages only
+    history = history[-max_messages:]
 
-        if not content:
+    for msg in reversed(history):
+        try:
+            role = str(msg.get("role", "unknown")).upper()
+            content = str(msg.get("content", "")).strip()
+
+            if not content:
+                continue
+
+            # Truncate content per message
+            if len(content) > settings.MAX_PROMPT_CHARS:
+                content = content[:settings.MAX_PROMPT_CHARS]
+
+            line = f"{role}: {content}"
+            line_len = len(line)
+
+            if total_length + line_len > max_chars:
+                break
+
+            parts.append(line)
+            total_length += line_len
+
+        except Exception:
             continue
 
-        line = f"{role}: {content}"
-        line_len = len(line)
-
-        if total_length + line_len > max_chars:
-            break
-
-        parts.append(line)
-        total_length += line_len
-
-    # restore order
     return "\n".join(reversed(parts))
 
 
-# MAIN SUMMARIZER
-def summarize_conversation(llm, history: list[dict]) -> str:
+# VALIDATE SUMMARY 
+def _validate_summary(text: str) -> str:
+    if not text:
+        return ""
+
+    text = text.strip()
+
+    if len(text) < settings.MIN_SUMMARY_LENGTH:
+        return ""
+
+    if len(text) > settings.MEMORY_SUMMARY_MAX_CHARS:
+        text = text[:settings.MEMORY_SUMMARY_MAX_CHARS]
+
+    return text
+
+
+# MAIN 
+def summarize_conversation(llm, history: List[Dict]) -> str:
     if not history:
         return ""
- 
-    try:
-        start_time = time.time()
 
+    start_time = time.time()
+
+    try:
         logger.info("[Summarizer][START]")
 
-        # STEP 1: FORMAT CONVERSATION 
+        # STEP 1: FORMAT
         conversation_text = _format_conversation(history)
 
-        # STEP 2: STRUCTURED PROMPT
-        prompt = f"""
-You are a memory compression system for an AI assistant.
+        if not conversation_text:
+            return ""
 
-Your job is to extract ONLY important information and compress it into structured memory.
+        # STEP 2: PROMPT
+        prompt = (
+            "You are a memory compression system for an AI assistant.\n\n"
+            "Extract ONLY important information.\n\n"
+            "Ignore:\n"
+            "- greetings\n"
+            "- small talk\n"
+            "- repetition\n\n"
+            "Focus on:\n"
+            "- goals\n"
+            "- facts\n"
+            "- preferences\n"
+            "- tasks\n"
+            "- decisions\n\n"
+            "Conversation:\n"
+            f"{conversation_text}\n\n"
+            "Return format:\n"
+            "Key Facts:\n- ...\n\n"
+            "User Intent:\n- ...\n\n"
+            "Preferences:\n- ...\n\n"
+            "Tasks:\n- ...\n\n"
+            "Context:\n- ..."
+        )
 
+        # Global safety
+        if len(prompt) > settings.MAX_PROMPT_CHARS:
+            logger.warning("[Summarizer] prompt truncated")
+            prompt = prompt[-settings.MAX_PROMPT_CHARS:]
 
-Ignore:
-- small talk
-- greetings
-- redundant phrases
-
-Focus on:
-- user goals
-- facts
-- preferences
-- tasks
-- decisions
-
--------------------------
-Conversation:
-{conversation_text}
--------------------------
-
-Return STRICTLY in this format:
-
-Key Facts:
-- ...
-
-User Intent:
-- ...
-
-Preferences:
-- ...
-
-Tasks / Actions:
-- ...
-
-Context:
-- ...
-"""
-        
-        # STEP 3: GENERATE SUMMARY
+        # STEP 3: GENERATE
         summary = llm.generate(prompt)
 
-        if not summary or len(summary.strip()) < 10:
-            logger.warning("[Summarizer] Weak summary generated")
+        summary = _validate_summary(summary)
+
+        if not summary:
+            logger.warning("[Summarizer] weak or invalid summary")
             return ""
-        latency = time.time() - start_time
+
+        latency = round(time.time() - start_time, 2)
 
         logger.info(
-            f"[Summarizer][SUCCESS] length={len(summary)} latency={latency: .2f}s"
+            "[Summarizer][SUCCESS] length=%s latency=%ss",
+            len(summary),
+            latency
         )
-        return summary.strip()
-    
+
+        return summary
+
     except Exception as e:
-        logger.error(f"[Summarizer][FAIL] {str(e)}")
-        raise
-    
+        logger.error("[Summarizer][FAILED] %s", str(e))
+        return ""

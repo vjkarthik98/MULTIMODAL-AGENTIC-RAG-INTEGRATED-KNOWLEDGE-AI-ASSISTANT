@@ -1,21 +1,28 @@
 from typing import Dict, Any, Callable
+
+from app.core.config import settings
+from app.core.model_loader import model_loader
+
 from app.pipeline.rag_pipeline import RAGPipeline
 from app.tools.web_search import WebSearchTool
+
 from app.memory.redis_memory import RedisMemory
 from app.memory.memory_filter import filter_relevant_history
+
 from app.reasoning.query_decomposer import QueryDecomposer
 from app.reasoning.reasoning_engine import ReasoningEngine
 from app.reasoning.result_fusion import ResultFusion
-from app.core.model_loader import model_loader
+
 from app.utils.logger import get_logger
 
-# Logger
+
 logger = get_logger(__name__)
+
 
 class Tool:
     def __init__(
         self,
-        name:str,
+        name: str,
         description: str,
         handler: Callable,
         tool_type: str = "generic",
@@ -29,20 +36,30 @@ class Tool:
 
     def execute(self, query: str, context: Dict = None, session_id: str = None) -> Dict:
         try:
-            logger.info(f"[Tool:{self.name}] Execution started")
+            logger.info("[Tool:%s] start", self.name)
 
-            result = self.handler(query, context or {}, session_id)
+            if not query:
+                return {
+                    "tool": self.name,
+                    "result": None,
+                    "status": "error",
+                    "error": "empty_query"
+                }
 
-            logger.info(f"[Tool:{self.name}] Execution completed")
+            result = self.handler(
+                query[:settings.MAX_PROMPT_CHARS],
+                context or {},
+                session_id
+            )
 
             return {
                 "tool": self.name,
                 "result": result,
                 "status": "success"
             }
-        
+
         except Exception as e:
-            logger.error(f"[Tool:{self.name}] Failed | {str(e)}")
+            logger.error("[Tool:%s] failed | %s", self.name, str(e))
 
             return {
                 "tool": self.name,
@@ -50,38 +67,52 @@ class Tool:
                 "status": "error",
                 "error": str(e)
             }
-        
+
+
 class ToolRegistry:
     def __init__(self):
         self.tools: Dict[str, Tool] = {}
+
+        # Shared instances (important fix)
+        try:
+            self.rag_pipeline = RAGPipeline()
+        except Exception as e:
+            logger.warning("[ToolRegistry] RAG pipeline init failed | %s", str(e))
+            self.rag_pipeline = None
+
+        self.web_search = WebSearchTool()
+        self.memory = ()
+
+        
+        self.embedder = model_loader.get_embedder()
+        self.llm = model_loader.get_llm()
+
+        self.decomposer = QueryDecomposer(self.llm)
+        self.reasoning_engine = ReasoningEngine(self.llm)
+        self.fusion = ResultFusion()
+
         self._register_default_tools()
 
-    # Tool Registration
     def register(self, tool: Tool):
         self.tools[tool.name] = tool
-        logger.debug(f"[ToolRegistry] Registered tool: {tool.name}")
+        logger.debug("[ToolRegistry] registered=%s", tool.name)
 
     def get(self, tool_name: str) -> Tool:
-        if tool_name not in self.tools:
+        tool = self.tools.get(tool_name)
+        if not tool:
             raise ValueError(f"Tool not found: {tool_name}")
-        return self.tools[tool_name]
-    
-    def list_tools(self) -> Dict[str, str]:
-        return {
-            name: tool.description
-            for name, tool in self.tools.items()
-        }
-    
+        return tool
 
-    # Default Tools
+    def list_tools(self) -> Dict[str, str]:
+        return {name: tool.description for name, tool in self.tools.items()}
+
     def _register_default_tools(self):
 
-        # RAG TOOL
+        # RAG
         def rag_tool(query, context, session_id):
+            result = self.rag_pipeline.run(query, session_id=session_id)
+            return result
 
-            rag = RAGPipeline()
-            return rag.run(query, session_id=session_id)
-        
         self.register(
             Tool(
                 name="rag",
@@ -92,11 +123,10 @@ class ToolRegistry:
             )
         )
 
-        # Search Tool
+        # SEARCH
         def search_tool(query, context, session_id):
-            tool = WebSearchTool()
-            return tool.execute(query, context, session_id)
-        
+            return self.web_search.execute(query, context, session_id)
+
         self.register(
             Tool(
                 name="search",
@@ -107,41 +137,39 @@ class ToolRegistry:
             )
         )
 
-        # Memory Tool
+        # MEMORY
         def memory_tool(query, context, session_id):
-
-            memory = RedisMemory()
-            history = memory.get_history(session_id)
+            history = self.memory.get_history(session_id)
 
             if not history:
-                return "No relevant memory found."
-            
-            embedder = model_loader.get_embedder()
+                return ""
 
             filtered = filter_relevant_history(
                 query=query,
                 history=history,
-                embedder=embedder
+                embedder=self.embedder
             )
 
-            return "\n".join([m["content"] for m in filtered])
-        
+            texts = [m.get("content", "") for m in filtered if m.get("content")]
+
+            merged = "\n".join(texts)
+
+            return merged[:settings.MEMORY_MAX_CONTEXT_CHARS]
+
         self.register(
             Tool(
                 name="memory",
-                description = "Retriever relevant past conversation context",
+                description="Retrieve relevant past conversation context",
                 handler=memory_tool,
                 tool_type="memory",
                 cost="low"
             )
         )
-        
-        # Query Decomposer
+
+        # DECOMPOSE
         def decompose_tool(query, context, session_id):
-            
-            decomposer = QueryDecomposer(model_loader)
-            return decomposer.decompose(query)
-        
+            return self.decomposer.decompose(query)
+
         self.register(
             Tool(
                 name="decompose",
@@ -152,34 +180,29 @@ class ToolRegistry:
             )
         )
 
-        # Reasoning Engine
+        # REASON
         def reasoning_tool(query, context, session_id):
-
-            engine = ReasoningEngine(model_loader)
-
-            return engine.generate_answer(
+            return self.reasoning_engine.generate_answer(
                 query=query,
                 retrieved_docs=context.get("docs", []),
                 memory_context=context.get("memory", "")
             )
-        
+
         self.register(
             Tool(
                 name="reason",
                 description="Generate final answer using reasoning engine",
                 handler=reasoning_tool,
                 tool_type="reasoning",
-                cost = "high"
+                cost="high"
             )
         )
 
-        # Result Fusion
+        # FUSION
         def fusion_tool(query, context, session_id):
+            results = context.get("results", [])
+            return self.fusion.fuse(results)
 
-            fusion = ResultFusion()
-
-            return fusion.fuse(context.get("results", []))
-        
         self.register(
             Tool(
                 name="fusion",
@@ -190,7 +213,4 @@ class ToolRegistry:
             )
         )
 
-        logger.info("[ToolRegistry]  All tools registered successfully")
-            
-
-        
+        logger.info("[ToolRegistry] all tools registered")
