@@ -1,41 +1,53 @@
-from pydantic import BaseModel
-from typing import Optional, Dict, Any, List
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any, List, Literal
 
 from app.core.config import settings
 
 
-_ALLOWED_ACTIONS = {"rag", "search", "direct", "memory", "hybrid"}
+ActionType = Literal["rag", "search", "direct", "memory", "hybrid"]
 
 
 class AgentDecision(BaseModel):
-    action: str
+
+    action: ActionType
     reason: str
-    confidence: float = 0.8
-    signals: Optional[Dict[str, Any]] = None
-    suggested_tools: Optional[List[str]] = None
-    trace: Optional[Dict[str, Any]] = None
 
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+
+    signals: Dict[str, Any] = Field(default_factory=dict)
+    suggested_tools: List[str] = Field(default_factory=list)
+
+    trace: Dict[str, Any] = Field(default_factory=dict)
+
+    #  NORMALIZE 
     def normalize(self):
-        if self.action:
-            self.action = self.action.strip().lower()
 
-        if self.reason:
-            self.reason = self.reason.strip()
-
-        if self.signals is None:
-            self.signals = {}
-
-        if self.suggested_tools is None:
-            self.suggested_tools = []
-
-        if self.trace is None:
-            self.trace = {}
+        self.action = self.action.strip().lower()
+        self.reason = self.reason.strip()
 
         return self
 
-    def validate(self):
-        if not self.action or self.action not in _ALLOWED_ACTIONS:
-            self.action = "search"
+    #  STRICT VALIDATION 
+    def validate_strict(self):
+
+        if self.action not in {"rag", "search", "direct", "memory", "hybrid"}:
+            raise ValueError(f"Invalid action: {self.action}")
+
+        if not self.reason:
+            self.reason = "no_reason_provided"
+
+        if not isinstance(self.confidence, (int, float)):
+            self.confidence = 0.5
+
+        self.confidence = max(0.0, min(self.confidence, 1.0))
+
+        return self
+
+    #  SAFE VALIDATION
+    def validate_safe(self):
+
+        if self.action not in {"rag", "search", "direct", "memory", "hybrid"}:
+            self.action = "rag"
             self.reason = self.reason or "invalid_action_fallback"
 
         if not self.reason:
@@ -44,18 +56,21 @@ class AgentDecision(BaseModel):
         if not isinstance(self.confidence, (int, float)):
             self.confidence = 0.5
 
-        if self.confidence < 0.0:
-            self.confidence = 0.0
-        elif self.confidence > 1.0:
-            self.confidence = 1.0
+        self.confidence = max(0.0, min(self.confidence, 1.0))
 
         return self
 
-    def finalize(self):
+    #  FINALIZE 
+    def finalize(self, strict: bool = False):
+
         self.normalize()
-        self.validate()
-        return self
 
+        if strict:
+            return self.validate_strict()
+
+        return self.validate_safe()
+
+    #  DECISION INTELLIGENCE 
     def is_high_confidence(self) -> bool:
         threshold = getattr(settings, "AGENT_HIGH_CONFIDENCE", 0.7)
         return self.confidence >= threshold
@@ -64,12 +79,34 @@ class AgentDecision(BaseModel):
         threshold = getattr(settings, "AGENT_LOW_CONFIDENCE", 0.4)
         return self.confidence < threshold
 
-    def to_dict(self) -> Dict[str, Any]:
+    def is_retrieval(self) -> bool:
+        return self.action in {"rag", "search", "hybrid"}
+
+    def is_memory_based(self) -> bool:
+        return self.action == "memory"
+
+    def is_direct(self) -> bool:
+        return self.action == "direct"
+
+    #  TRACE ENRICHMENT 
+    def add_trace(self, key: str, value: Any):
+        self.trace[key] = value
+        return self
+
+    #  SERIALIZATION 
+    def to_dict(self, minimal: bool = False) -> Dict[str, Any]:
+
+        if minimal:
+            return {
+                "action": self.action,
+                "confidence": self.confidence
+            }
+
         return {
             "action": self.action,
             "reason": self.reason,
             "confidence": self.confidence,
-            "signals": self.signals or {},
-            "suggested_tools": self.suggested_tools or [],
-            "trace": self.trace or {}
+            "signals": self.signals,
+            "suggested_tools": self.suggested_tools,
+            "trace": self.trace
         }

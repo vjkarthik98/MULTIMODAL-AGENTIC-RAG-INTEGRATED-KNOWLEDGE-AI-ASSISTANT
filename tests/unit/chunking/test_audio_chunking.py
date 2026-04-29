@@ -1,5 +1,5 @@
 import pytest
-from app.ingestion.chunking import chunk_documents
+from app.chunking.chunker import chunk_documents
 from app.ingestion.schema import IngestedDocument
 
 

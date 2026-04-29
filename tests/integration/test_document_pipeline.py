@@ -1,7 +1,7 @@
 import os
 import pytest
 
-from app.ingestion.pipeline import process_file
+from app.pipeline.ingestion_pipeline import process_file
 
 def test_document_pipeline_excel(tmp_path):
     import pandas as pd

@@ -1,4 +1,4 @@
-from app.ingestion.pipeline import process_file
+from app.pipeline.ingestion_pipeline import process_file
 
 doc = process_file("sample.mp4")
 

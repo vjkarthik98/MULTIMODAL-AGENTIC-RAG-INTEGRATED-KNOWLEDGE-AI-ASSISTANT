@@ -1,17 +1,128 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+
+
+# PROJECT METADATA
 [project]
 name = "multimodal-rag-assistant"
 version = "0.20.0"
+description = "Production-grade multimodal RAG + Agent system"
+authors = [
+    { name = "Your Name" }
+]
+readme = "README.md"
+requires-python = ">=3.10"
 
-[tool.poetry.dependencies] # or pip equivalent
-python = "^3.10"
-fastapi = "*"
-uvicorn = "*"
-qdrant-client = "*"
-sentence-transformers = "*"
-torch = "*"
-transformers = "*"
-python-docx = "*"
-opencv-python = "*"
-pillow = "*"
-redis = "*"
-pymongo = "*"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+    "python-dotenv>=1.0",
+
+    # VECTOR DB
+    "qdrant-client>=1.9",
+
+    # LLM + EMBEDDINGS
+    "llama-cpp-python>=0.2.60",
+
+    # DATA PROCESSING
+    "numpy>=1.26",
+    "pandas>=2.2",
+
+    # FILE PROCESSING
+    "pillow>=10.2",
+    "pydub>=0.25",
+    "opencv-python>=4.9",
+
+    # WEB SEARCH
+    "tavily-python>=0.3",
+
+    # STORAGE / MEMORY
+    "redis>=5.0",
+    "pymongo>=4.6",
+
+    # HTTP
+    "httpx>=0.27",
+
+    # UTIL
+    "tenacity>=8.2"
+]
+
+
+
+# OPTIONAL DEPENDENCY GROUPS
+[project.optional-dependencies]
+
+dev = [
+    "pytest>=8.1",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+
+    "black>=24.3",
+    "ruff>=0.4",
+    "isort>=5.13",
+
+    "mypy>=1.9",
+    "pre-commit>=3.7"
+]
+
+
+
+# TOOL CONFIG: BLACK 
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+skip-string-normalization = true
+
+
+# TOOL CONFIG: RUFF (LINTER) 
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = [
+    "E", "F", "I", "B", "UP", "N", "C90"
+]
+ignore = [
+    "E501"  # handled by black
+]
+
+
+# TOOL CONFIG: ISORT 
+[tool.isort]
+profile = "black"
+line_length = 100
+
+
+# TOOL CONFIG: PYTEST 
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "--strict-markers --disable-warnings -q"
+testpaths = ["tests"]
+
+
+# TOOL CONFIG: MYPY (TYPE CHECKING) 
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+strict_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unused_configs = true
+
+
+# COVERAGE 
+[tool.coverage.run]
+branch = true
+source = ["app"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+
+
+# PROJECT SCRIPTS (CLI)
+[project.scripts]
+start-api = "app.main:app"
+init-qdrant = "scripts.init_qdrant:initialize_qdrant"

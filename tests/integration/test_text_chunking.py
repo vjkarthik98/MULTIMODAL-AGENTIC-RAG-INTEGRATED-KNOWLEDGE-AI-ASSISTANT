@@ -1,4 +1,4 @@
-from app.ingestion.chunking import chunk_text
+from app.chunking.chunker import chunk_text
 
 text = """
 Artificial intelligence is transforming industries at a rapid pace. 

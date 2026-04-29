@@ -9,6 +9,12 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+#  NORMALIZE QUERY 
+def _normalize_query(query: str) -> str:
+    return " ".join(query.strip().split())
+
+
+#  COSINE SIM 
 def _cosine_similarity(vec1, vec2):
     v1 = np.array(vec1)
     v2 = np.array(vec2)
@@ -17,6 +23,7 @@ def _cosine_similarity(vec1, vec2):
     return float(np.dot(v1, v2) / denom)
 
 
+#  RECENCY 
 def _recency_weight(timestamp, current_time):
     if not timestamp:
         return 1.0
@@ -28,6 +35,7 @@ def _recency_weight(timestamp, current_time):
         return 1.0
 
 
+#  ROLE 
 def _role_weight(role: str):
     weights = getattr(settings, "MEMORY_ROLE_WEIGHTS", {
         "user": 1.3,
@@ -37,10 +45,44 @@ def _role_weight(role: str):
     return weights.get(role, 1.0)
 
 
+#  IMPORTANCE 
 def _importance_weight(msg: Dict):
-    return float(msg.get("importance", 1.0))
+    try:
+        return max(0.0, min(float(msg.get("importance", 1.0)), 1.0))
+    except Exception:
+        return 0.5
 
 
+#  EMBEDDING VALIDATION 
+def _valid_embedding(vec):
+    return (
+        isinstance(vec, list) and
+        len(vec) in (
+            settings.TEXT_EMBEDDING_DIM,
+            settings.VISION_EMBEDDING_DIM
+        )
+    )
+
+
+#  DEDUP 
+def _deduplicate(history: List[Dict]) -> List[Dict]:
+    seen = set()
+    unique = []
+
+    for msg in history:
+        key = (
+            msg.get("role"),
+            str(msg.get("content"))[:200]
+        )
+
+        if key not in seen:
+            seen.add(key)
+            unique.append(msg)
+
+    return unique
+
+
+#  MAIN 
 def filter_relevant_history(
     query: str,
     history: List[Dict],
@@ -54,47 +96,39 @@ def filter_relevant_history(
 
     start = time.time()
 
+    query = _normalize_query(query)
+
     top_k = top_k or settings.MEMORY_TOP_K
     threshold = threshold or settings.MEMORY_SIM_THRESHOLD
 
-    # Limit history size
-    history = history[-settings.MAX_HISTORY_MESSAGES:]
+    # HARD LIMIT + DEDUP
+    history = _deduplicate(history[-settings.MAX_HISTORY_MESSAGES:])
 
     try:
         logger.debug("[MemoryFilter][START]")
 
-        # Query embedding
         query_vec = embedder.embed_query(query)
 
         current_time = time.time()
         scored = []
 
         for msg in history:
+
             try:
                 text = str(msg.get("content", "")).strip()
-                role = msg.get("role", "unknown")
+                role = msg.get("role", "user")
 
-                if not text:
+                if len(text) < 3:
                     continue
 
-                # Truncate text 
-                if len(text) > settings.MAX_PROMPT_CHARS:
-                    text = text[:settings.MAX_PROMPT_CHARS]
+                text = text[:settings.MAX_PROMPT_CHARS]
 
-                # Use existing embedding safely
                 msg_vec = msg.get("embedding")
 
-                if msg_vec is None:
+                if not _valid_embedding(msg_vec):
                     msg_vec = embedder.embed_query(text)
 
-                # Validate embedding dimension
-                if not isinstance(msg_vec, list):
-                    continue
-
-                if len(msg_vec) not in (
-                    settings.TEXT_EMBEDDING_DIM,
-                    settings.VISION_EMBEDDING_DIM,
-                ):
+                if not _valid_embedding(msg_vec):
                     continue
 
                 sim = _cosine_similarity(query_vec, msg_vec)
@@ -106,12 +140,25 @@ def filter_relevant_history(
                 role_w = _role_weight(role)
                 importance = _importance_weight(msg)
 
-                score = sim * recency * role_w * importance
+                # STABLE SCORING (WEIGHTED SUM)
+                score = (
+                    0.5 * sim +
+                    0.2 * recency +
+                    0.2 * role_w +
+                    0.1 * importance
+                )
 
                 scored.append((score, msg))
 
             except Exception:
                 continue
+
+        if not scored:
+            return []
+
+        # NORMALIZE SCORES
+        max_score = max(s for s, _ in scored) or 1.0
+        scored = [(s / max_score, m) for s, m in scored]
 
         scored.sort(key=lambda x: x[0], reverse=True)
 

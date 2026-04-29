@@ -28,13 +28,8 @@ class WebSearchTool:
 
         logger.info("[WebSearchTool] initialized")
 
-    # MAIN 
-    def execute(
-        self,
-        query: str,
-        context: Dict[str, Any] = None,
-        session_id: str = None
-    ) -> Dict[str, Any]:
+    #  MAIN 
+    def execute(self, query: str, context=None, session_id=None) -> Dict[str, Any]:
 
         start = time.time()
 
@@ -42,27 +37,36 @@ class WebSearchTool:
             return self._empty_response()
 
         try:
-            query = self._sanitize(query)
+            query = self._normalize(query)
 
-            logger.info("[WebSearchTool] search started")
-
+            #  SEARCH 
+            t_api = time.time()
             raw = self._search_api(query)
+            api_latency = round(time.time() - t_api, 2)
+
             processed = self._process_results(raw)
 
             if not processed["documents"]:
                 return self._empty_response()
 
+            #  SUMMARIZE 
+            t_llm = time.time()
             answer = self._summarize(query, processed["documents"])
+            llm_latency = round(time.time() - t_llm, 2)
+
+            confidence = self._compute_confidence(processed)
 
             latency = round(time.time() - start, 2)
 
             return {
                 "answer": answer,
                 "sources": processed["sources"],
-                "confidence": 0.7,
+                "confidence": confidence,
                 "metadata": {
                     "results_used": len(processed["documents"]),
-                    "latency": latency
+                    "api_latency": api_latency,
+                    "llm_latency": llm_latency,
+                    "total_latency": latency
                 }
             }
 
@@ -76,16 +80,11 @@ class WebSearchTool:
                 "metadata": {"error": str(e)}
             }
 
-    # SANITIZE 
-    def _sanitize(self, query: str) -> str:
-        query = query.strip()
+    #  NORMALIZE 
+    def _normalize(self, query: str) -> str:
+        return " ".join(query.strip().split())[:settings.MAX_PROMPT_CHARS]
 
-        if len(query) > settings.MAX_PROMPT_CHARS:
-            query = query[:settings.MAX_PROMPT_CHARS]
-
-        return query
-
-    # API 
+    #  API 
     def _search_api(self, query: str) -> Dict:
 
         return self.client.search(
@@ -94,21 +93,27 @@ class WebSearchTool:
             max_results=self.max_results
         )
 
-    # PROCESS 
+    #  PROCESS 
     def _process_results(self, response: Dict) -> Dict[str, List]:
 
         documents = []
         sources = []
+        seen = set()
 
         for r in response.get("results", []):
 
-            content = r.get("content")
-            url = r.get("url")
+            content = r.get("content", "")
+            url = r.get("url", "")
 
-            if not content:
+            if not content or len(content) < 30:
                 continue
 
-            text = str(content)[:self.max_doc_chars]
+            text = content.strip()[:self.max_doc_chars]
+
+            key = text[:100]
+            if key in seen:
+                continue
+            seen.add(key)
 
             documents.append(text)
 
@@ -120,52 +125,55 @@ class WebSearchTool:
             "sources": list(set(sources))[:self.max_docs]
         }
 
-    # SUMMARIZE 
+    #  SUMMARIZE 
     def _summarize(self, query: str, docs: List[str]) -> str:
 
-        combined = "\n\n".join(docs)
+        combined = "\n\n".join(docs)[:self.max_context_chars]
 
-        # Truncate context
-        combined = combined[:self.max_context_chars]
-
-        prompt = (
-            "You are a highly accurate AI assistant.\n\n"
-            "Use ONLY the provided web results.\n"
-            "Do not hallucinate.\n\n"
-
-            "WEB RESULTS:\n"
-            f"{combined}\n\n"
-
-            "QUERY:\n"
-            f"{query}\n\n"
-
-            "Return:\n"
-            "- Clear answer\n"
-            "- Fact-based\n"
-            "- Concise\n\n"
-
-            "Answer:"
+        instruction = (
+            "You are a highly reliable assistant.\n"
+            "Answer ONLY from provided web results.\n"
+            "If unsure, say 'I don't know'.\n\n"
         )
 
-        # Global safety
-        if len(prompt) > settings.MAX_PROMPT_CHARS:
-            logger.warning("[WebSearchTool] prompt truncated")
-            prompt = prompt[-settings.MAX_PROMPT_CHARS:]
+        body = f"WEB RESULTS:\n{combined}\n\nQUERY:\n{query}\n\n"
+
+        output = "Answer:"
+
+        # SAFE PROMPT BUILD
+        max_chars = settings.MAX_PROMPT_CHARS
+        available = max_chars - len(instruction) - len(output) - 50
+
+        body = body[:available]
+
+        prompt = instruction + body + output
 
         try:
             llm = model_loader.get_llm()
-
             response = llm.generate(prompt)
 
+            return response.strip() if response else "No answer generated."
+
         except Exception as e:
-            logger.warning("[WebSearchTool] LLM unavailable | %s", str(e))
+            logger.warning("[WebSearchTool] LLM failed | %s", str(e))
+            return "Summary unavailable due to model error."
 
-            return "Summary unavailable due to model error"
+    #  CONFIDENCE 
+    def _compute_confidence(self, processed: Dict) -> float:
 
-    # EMPTY 
+        doc_count = len(processed.get("documents", []))
+
+        if doc_count >= 5:
+            return 0.85
+        if doc_count >= 3:
+            return 0.7
+        if doc_count >= 1:
+            return 0.5
+
+        return 0.3
+
+    #  EMPTY 
     def _empty_response(self) -> Dict[str, Any]:
-
-        logger.warning("[WebSearchTool] no results")
 
         return {
             "answer": "No relevant search results found.",

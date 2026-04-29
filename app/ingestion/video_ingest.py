@@ -8,6 +8,9 @@ import uuid
 from pathlib import Path
 from typing import List
 
+import pytesseract
+from PIL import Image
+
 from app.core.config import settings
 from app.ingestion.audio_ingest import ingest as audio_ingest
 from app.ingestion.frame_captioner import generate_caption
@@ -19,6 +22,7 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+# GENERATE FILE HASH
 def _generate_file_hash(file_path: str) -> str:
     hash_md5 = hashlib.md5()
     with open(file_path, "rb") as f:
@@ -27,6 +31,7 @@ def _generate_file_hash(file_path: str) -> str:
     return hash_md5.hexdigest()
 
 
+# RESOLVE FFMPEG
 def _resolve_ffmpeg_path() -> str:
     configured = Path(settings.FFMPEG_PATH)
     if configured.exists():
@@ -36,23 +41,40 @@ def _resolve_ffmpeg_path() -> str:
     if discovered:
         return discovered
 
-    raise FileNotFoundError("ffmpeg not found")
+    raise FileNotFoundError("FFMPEG NOT FOUND")
 
 
+# SAFE OCR FOR FRAME
+def _extract_frame_text(image_path: str) -> str:
+    try:
+        img = Image.open(image_path).convert("RGB")
+        text = pytesseract.image_to_string(img) or ""
+        text = text.strip()
+
+        if len(text) < 10:
+            return ""
+
+        return text[:settings.MAX_PROMPT_CHARS]
+
+    except Exception:
+        return ""
+
+
+# MAIN INGEST FUNCTION
 def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument]:
 
+    # VALIDATION
     if not session_id:
-        raise ValueError("session_id required")
+        raise ValueError("SESSION_ID REQUIRED")
 
     path = Path(file_path)
 
     if not path.exists():
-        raise FileNotFoundError(f"{file_path} not found")
+        raise FileNotFoundError(f"{file_path} NOT FOUND")
 
-    # File size validation
     size_mb = path.stat().st_size / (1024 * 1024)
     if size_mb > settings.MAX_FILE_SIZE_MB:
-        raise ValueError(f"Video too large: {size_mb:.2f}MB")
+        raise ValueError(f"VIDEO TOO LARGE: {size_mb:.2f}MB")
 
     start = time.time()
 
@@ -70,7 +92,7 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
 
         documents: List[IngestedDocument] = []
 
-        # AUDIO EXTRACTION 
+        # AUDIO EXTRACTION
         fd, audio_path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
 
@@ -92,21 +114,28 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
         )
 
         if result.returncode != 0:
-            raise RuntimeError("FFmpeg audio extraction failed")
+            raise RuntimeError("FFMPEG AUDIO EXTRACTION FAILED")
 
-        # AUDIO INGEST 
+        # AUDIO INGEST
         audio_docs = audio_ingest(audio_path, session_id=session_id)
 
-        max_segments = settings.MAX_AUDIO_SEGMENTS
         speech_segments = []
 
-        for i, doc in enumerate(audio_docs[:max_segments]):
+        for i, doc in enumerate(audio_docs[:settings.MAX_AUDIO_SEGMENTS]):
 
             structure = dict(doc.structure or {})
             start_t = structure.get("start_time")
             end_t = structure.get("end_time")
 
-            speech_segments.append({"index": i, "start": start_t, "end": end_t})
+            # VALIDATE SEGMENT
+            if start_t is None or end_t is None or end_t <= start_t:
+                continue
+
+            speech_segments.append({
+                "index": i,
+                "start": start_t,
+                "end": end_t
+            })
 
             text = f"Video speech from {start_t}s to {end_t}s: {doc.text}"
             text = text[:settings.MAX_PROMPT_CHARS]
@@ -124,18 +153,15 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
                         "session_id": session_id,
                         "file_hash": file_hash,
                         "source_path": source_path,
-                        "segment_index": i,
                         "start_time": start_t,
                         "end_time": end_t,
-                        "parent_modality": "video",
                         "content_type": "video_speech",
                         "embedding_space": "text",
-                        "ingestion_time": time.time(),
                     },
                 ).finalize()
             )
 
-        # FRAME EXTRACTION 
+        # FRAME EXTRACTION
         try:
             frames = extract_frames(
                 file_path,
@@ -143,32 +169,34 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
                 session_id=session_id,
             )
         except Exception as e:
-            logger.warning("[VideoIngest] frame extraction failed | %s", str(e))
+            logger.warning("[VideoIngest] FRAME EXTRACTION FAILED | %s", str(e))
             frames = []
-        
 
         if frames:
             frame_temp_dir = frames[0].get("temp_dir")
 
-        max_frames = settings.MAX_VIDEO_FRAMES
-
-        for frame in frames[:max_frames]:
+        # PROCESS FRAMES
+        for frame in frames[:settings.MAX_VIDEO_FRAMES]:
 
             try:
-                caption = generate_caption(frame["path"], session_id=session_id)
-                if not caption:
-                    caption = "visual scene from video"
-                    
-
                 timestamp = frame.get("timestamp")
 
+                # CAPTION
+                caption = generate_caption(frame["path"], session_id=session_id)
+                if not caption:
+                    caption = f"Scene at {timestamp}s"
+
+                # OCR FROM FRAME
+                ocr_text = _extract_frame_text(frame["path"])
+
+                # LINK TO SPEECH
                 linked_segment = None
                 for seg in speech_segments:
                     if seg["start"] <= timestamp <= seg["end"]:
                         linked_segment = seg["index"]
                         break
 
-                text = f"Video frame at {timestamp}s shows: {caption}"
+                text = f"Frame at {timestamp}s shows: {caption}"
                 text = text[:settings.MAX_PROMPT_CHARS]
 
                 documents.append(
@@ -189,30 +217,43 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
                             "linked_segment_index": linked_segment,
                             "content_type": "video_frame",
                             "embedding_space": "vision",
-                            "ingestion_time": time.time(),
                         },
                     ).finalize()
                 )
+
+                # OCR DOCUMENT (OPTIONAL BUT IMPORTANT)
+                if ocr_text:
+                    documents.append(
+                        IngestedDocument(
+                            text=ocr_text,
+                            modality="video",
+                            subtype="ocr",
+                            source_type="video",
+                            source=source_name,
+                            structure={
+                                "doc_id": doc_id,
+                                "timestamp": timestamp,
+                                "content_type": "video_ocr",
+                            },
+                        ).finalize()
+                    )
 
             except Exception as e:
                 logger.warning("[VideoIngest][FRAME_FAIL] %s", str(e))
                 continue
 
-        # Global doc limit
+        # GLOBAL LIMIT
         if len(documents) > settings.MAX_INGESTED_DOCS:
-            logger.warning("[VideoIngest] doc limit applied")
             documents = documents[:settings.MAX_INGESTED_DOCS]
 
         if not documents:
-            raise ValueError("No content extracted")
-
-        latency = round(time.time() - start, 2)
+            raise ValueError("NO CONTENT EXTRACTED")
 
         logger.info(
-            "[VideoIngest][SUCCESS] session_id=%s | docs=%s | latency=%ss",
+            "[VideoIngest][SUCCESS] session_id=%s | docs=%s | latency=%.2fs",
             session_id,
             len(documents),
-            latency
+            time.time() - start
         )
 
         return documents
@@ -222,8 +263,9 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
         raise
 
     finally:
+        # CLEANUP TEMP FILES (CRITICAL)
         if audio_path and os.path.exists(audio_path):
             os.remove(audio_path)
 
         if frame_temp_dir and os.path.exists(frame_temp_dir):
-            """shutil.rmtree(frame_temp_dir, ignore_errors=True)"""
+            shutil.rmtree(frame_temp_dir, ignore_errors=True)
