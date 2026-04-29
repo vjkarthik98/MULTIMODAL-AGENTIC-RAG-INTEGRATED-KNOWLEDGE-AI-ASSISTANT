@@ -8,49 +8,48 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-def _truncate_text(text: str) -> str:
-    max_chars = settings.MAX_PROMPT_CHARS
+#  CLEAN TEXT 
+def _clean_text(text: str) -> str:
+    return " ".join(str(text or "").strip().split())
 
-    if not text:
-        return ""
 
-    text = text.strip()
-
+#  SAFE TRUNCATION 
+def _truncate_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
+    return text[:max_chars].rstrip() + "..."
 
-    return text[:max_chars] + "..."
 
-
+#  FORMAT MESSAGE 
 def _format_message(msg: Dict) -> str:
     try:
-        role = str(msg.get("role", "unknown")).upper()
-        content = str(msg.get("content", "")).strip()
+        role = str(msg.get("role", "user")).lower()
 
-        if not content:
+        # NORMALIZE ROLE
+        if role not in {"user", "assistant", "system"}:
+            role = "user"
+
+        content = _clean_text(msg.get("content", ""))
+
+        if len(content) < 3:
             return ""
 
         modality = msg.get("modality")
         timestamp = msg.get("timestamp")
 
-        meta_parts = []
+        meta = f"[{role.upper()}]"
 
         if modality:
-            meta_parts.append(str(modality))
+            meta += f" [{modality}]"
 
         if timestamp:
             try:
                 ts = int(timestamp)
-                meta_parts.append(f"t={ts}")
+                meta += f" [t={ts}]"
             except Exception:
                 pass
 
-        meta = f"[{role}]"
-        if meta_parts:
-            meta += " | " + " | ".join(meta_parts)
-        meta += "]"
-
-        content = _truncate_text(content)
+        content = _truncate_text(content, settings.MAX_PROMPT_CHARS // 4)
 
         return f"{meta}: {content}"
 
@@ -58,6 +57,22 @@ def _format_message(msg: Dict) -> str:
         return ""
 
 
+#  DEDUP 
+def _deduplicate(messages: List[Dict]) -> List[Dict]:
+    seen = set()
+    unique = []
+
+    for m in messages:
+        key = (m.get("role"), str(m.get("content"))[:200])
+
+        if key not in seen:
+            seen.add(key)
+            unique.append(m)
+
+    return unique
+
+
+#  MAIN FORMATTER 
 def format_history(
     history: List[Dict],
     max_messages: int = None,
@@ -72,10 +87,12 @@ def format_history(
 
     max_messages = max_messages or settings.MAX_HISTORY_MESSAGES
 
+    # DEDUP FIRST
+    history = _deduplicate(history)
+
     system_msgs = []
     normal_msgs = []
 
-    # Split messages
     for msg in history:
         if not isinstance(msg, dict):
             continue
@@ -85,36 +102,39 @@ def format_history(
         else:
             normal_msgs.append(msg)
 
-    # Take most recent messages
+    # TAKE MOST RECENT
     normal_msgs = normal_msgs[-max_messages:]
 
-    formatted_parts = []
-    formatted_parts.append("[Conversation Memory]")
+    parts = ["[Conversation Memory]"]
 
-    # System summary
+    #  SYSTEM 
     if include_system and system_msgs:
-        formatted_parts.append("\n[System Summary]")
+        parts.append("\n[System Summary]")
 
         for msg in system_msgs[-settings.MAX_SYSTEM_MESSAGES:]:
             fm = _format_message(msg)
             if fm:
-                formatted_parts.append(fm)
+                parts.append(fm)
 
-    # Normal conversation
+    #  CONVERSATION 
     if normal_msgs:
-        formatted_parts.append("\n[Recent Conversation]")
+        parts.append("\n[Recent Conversation]")
 
         for msg in normal_msgs:
             fm = _format_message(msg)
             if fm:
-                formatted_parts.append(fm)
+                parts.append(fm)
 
-    result = "\n".join(formatted_parts).strip()
+    result = "\n".join(parts).strip()
 
-    # Final safety truncation
+    #  SMART TRUNCATION 
     if len(result) > settings.MAX_PROMPT_CHARS:
-        logger.warning("[Formatter] truncating history")
-        result = result[-settings.MAX_PROMPT_CHARS:]
+        logger.warning("[Formatter] truncating history safely")
+
+        # KEEP SYSTEM + LAST PART
+        split_point = int(settings.MAX_PROMPT_CHARS * 0.7)
+
+        result = result[:split_point] + "\n...\n" + result[-(settings.MAX_PROMPT_CHARS - split_point):]
 
     latency = round(time.time() - start, 2)
 

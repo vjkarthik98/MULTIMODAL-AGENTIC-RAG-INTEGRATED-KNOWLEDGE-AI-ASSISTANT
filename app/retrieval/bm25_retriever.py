@@ -1,16 +1,12 @@
 import re
 import time
-from typing import List
+from typing import List, Dict, Set
 
 import numpy as np
+from rank_bm25 import BM25Okapi
 
 from app.core.config import settings
 from app.utils.logger import get_logger
-
-try:
-    from rank_bm25 import BM25Okapi
-except ImportError:
-    from rank_bm25 import BM25Okapi  
 
 
 logger = get_logger(__name__)
@@ -26,38 +22,44 @@ class BM25Retriever:
 
         self.max_docs = settings.BM25_MAX_DOCS
 
-    # TOKENIZATION 
-    def _tokenize(self, text: str):
+        # SIMPLE STOPWORDS (LIGHTWEIGHT)
+        self.stopwords = {
+            "the", "is", "and", "a", "an", "of", "to", "in", "on", "for"
+        }
+
+    #  TOKENIZATION 
+    def _tokenize(self, text: str) -> List[str]:
+
         text = str(text or "").lower()
-        text = re.sub(r"[^a-z0-9\s]", " ", text)
-        tokens = text.split()
+
+        # KEEP ALPHANUMERIC WORDS
+        tokens = re.findall(r"\b[a-z0-9]+\b", text)
+
+        # REMOVE STOPWORDS
+        tokens = [t for t in tokens if t not in self.stopwords]
 
         return tokens[:settings.BM25_MAX_TOKENS]
 
-    # METADATA 
+    #  METADATA 
     def _doc_metadata(self, document):
+
         structure = dict(getattr(document, "structure", {}) or {})
 
         return {
             "modality": getattr(document, "modality", "text"),
             "subtype": getattr(document, "subtype", None),
             "source": getattr(document, "source", None),
-            "source_type": getattr(document, "source_type", None),
-            "page": getattr(document, "page", None),
             "doc_id": structure.get("doc_id"),
             "chunk_id": getattr(document, "chunk_id", None),
             "session_id": structure.get("session_id"),
-            "structure": structure,
-            "embedding_space": structure.get("embedding_space", "text"),
             "content_type": structure.get("content_type"),
-            "timestamp": structure.get("timestamp"),
         }
 
-    # FILTER 
+    #  FILTER 
     def set_modality_filter(self, modality: str):
         self.modality_filter = modality
 
-    # BUILD INDEX 
+    #  BUILD INDEX 
     def build_index(self, documents: List):
 
         if not documents:
@@ -66,13 +68,11 @@ class BM25Retriever:
 
         start = time.time()
 
-        # RESET STATE
         self.documents = []
         self.tokenized_corpus = []
         self.bm25 = None
 
-        filtered = []
-        corpus = []
+        seen: Set[str] = set()
 
         for doc in documents[:self.max_docs]:
             try:
@@ -85,57 +85,56 @@ class BM25Retriever:
                 if structure.get("embedding_space", "text") != "text":
                     continue
 
-                # Truncate text
                 text = str(text)[:settings.BM25_MAX_TEXT_CHARS]
+
+                # DEDUPLICATION
+                key = text[:100]
+                if key in seen:
+                    continue
+                seen.add(key)
 
                 tokens = self._tokenize(text)
 
                 if not tokens:
                     continue
 
-                filtered.append(doc)
-                corpus.append(text)
+                self.documents.append(doc)
+                self.tokenized_corpus.append(tokens)
 
             except Exception:
                 continue
 
-        if not corpus:
-            logger.warning("[BM25] no valid corpus after filtering")
+        if not self.tokenized_corpus:
+            logger.warning("[BM25] no valid corpus")
             return
 
-        self.documents = filtered
-        self.tokenized_corpus = corpus
+        # FIX: PASS TOKENIZED CORPUS
         self.bm25 = BM25Okapi(self.tokenized_corpus)
-
-        latency = round(time.time() - start, 2)
 
         logger.info(
             "[BM25] index built | docs=%s latency=%ss",
             len(self.documents),
-            latency
+            round(time.time() - start, 2)
         )
 
-    # SEARCH 
+    #  SEARCH 
     def search(self, query: str, session_id: str = None, top_k: int = None):
 
         if not self.bm25:
-            logger.warning("[BM25] search skipped (index not built)")
+            logger.warning("[BM25] index not built")
             return []
 
         if not query or not query.strip():
-            raise ValueError("query cannot be empty")
+            return []
 
         start = time.time()
 
         top_k = top_k or settings.BM25_TOP_K
 
-        # Query safety
         query = query[:settings.MAX_PROMPT_CHARS]
-
         tokens = self._tokenize(query)
 
         if not tokens:
-            logger.warning("[BM25] empty tokens for query")
             return []
 
         scores = np.asarray(self.bm25.get_scores(tokens), dtype=float)
@@ -143,68 +142,50 @@ class BM25Retriever:
         if scores.size == 0:
             return []
 
-        max_score = float(scores.max()) or 1.0
+        # NORMALIZATION
+        max_score = max(scores.max(), 1e-6)
+        normalized = scores / max_score
 
-
-        normalized = scores / (max_score + 1e-6)
-
-        indices = np.argsort(normalized)[::-1][: top_k * settings.BM25_CANDIDATE_MULTIPLIER]
+        indices = np.argsort(normalized)[::-1]
 
         results = []
 
         for idx in indices:
+
+            if len(results) >= top_k:
+                break
+
             doc = self.documents[idx]
             metadata = self._doc_metadata(doc)
 
+            # EARLY FILTERING
             if session_id and metadata.get("session_id") != session_id:
                 continue
 
             if self.modality_filter and metadata.get("modality") != self.modality_filter:
                 continue
 
+            text = getattr(doc, "text", "").strip()
+            if not text:
+                continue
+
             score = float(normalized[idx])
 
-
-            # Config-driven modality boost
-            modality = metadata.get("modality", "text")
+            # MODALITY WEIGHT
             weights = getattr(settings, "BM25_MODALITY_WEIGHTS", {})
+            score *= weights.get(metadata.get("modality", "text"), 1.0)
 
-            score *= weights.get(modality, 1.0)
-
-            results.append(
-                {
-                    "id": f"bm25_{idx}",
-                    "text": doc.text[:settings.RAG_DOC_MAX_CHARS],
-                    "score": score,
-                    "metadata": metadata,
-                }
-            )
-
-        # FALLBACK if session filter killed everything
-        if not results and session_id:
-            logger.warning("[BM25] fallback without session filter")
-
-            for idx in indices[:top_k]:
-                doc = self.documents[idx]
-                metadata = self._doc_metadata(doc)
-
-                results.append(
-                    {
-                        "id": f"bm25_{idx}",
-                        "text": doc.text[:settings.RAG_DOC_MAX_CHARS],
-                        "score": float(normalized[idx]),
-                        "metadata": metadata,
-                    }
-                )
-
-
-        latency = round(time.time() - start, 2)
+            results.append({
+                "id": f"bm25_{idx}",
+                "text": text[:settings.RAG_DOC_MAX_CHARS],
+                "score": score,
+                "metadata": metadata,
+            })
 
         logger.info(
-            "[BM25] retrieved | session_id=%s results=%s latency=%ss",
-            session_id,
+            "[BM25] retrieved | results=%s latency=%ss",
             len(results),
-            latency
+            round(time.time() - start, 2)
         )
 
-        return results[:top_k]
+        return results

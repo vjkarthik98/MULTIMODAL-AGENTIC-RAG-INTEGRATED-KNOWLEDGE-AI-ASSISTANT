@@ -14,18 +14,23 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+# GET FILE SIZE
 def _get_file_size_mb(file_path: str) -> float:
     return os.path.getsize(file_path) / (1024 * 1024)
 
 
+# GENERATE FILE HASH
 def _generate_file_hash(file_path: str) -> str:
     hash_md5 = hashlib.md5()
+
     with open(file_path, "rb") as f:
         for chunk in iter(lambda: f.read(4096), b""):
             hash_md5.update(chunk)
+
     return hash_md5.hexdigest()
 
 
+# CONVERT TABLE TO TEXT
 def _table_to_text(rows: Iterable[Iterable[object]]) -> str:
     normalized = [
         [str(cell or "").strip() for cell in row]
@@ -43,21 +48,26 @@ def _table_to_text(rows: Iterable[Iterable[object]]) -> str:
         return "\n".join("\t".join(row) for row in normalized)
 
 
+# CREATE DOCUMENT OBJECT
 def _make_document(**kwargs) -> IngestedDocument:
     return IngestedDocument(**kwargs)
 
 
+# MAIN INGEST FUNCTION
 def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument]:
 
+    # VALIDATE SESSION
     if not session_id:
-        raise ValueError("session_id is required")
+        raise ValueError("SESSION_ID REQUIRED")
 
     if not os.path.exists(file_path):
-        raise FileNotFoundError(f"{file_path} not found")
+        raise FileNotFoundError(f"{file_path} NOT FOUND")
 
     file_size = _get_file_size_mb(file_path)
+
+    # FILE SIZE LIMIT
     if file_size > settings.MAX_FILE_SIZE_MB:
-        raise ValueError(f"File too large: {file_size:.2f} MB")
+        raise ValueError(f"FILE TOO LARGE: {file_size:.2f} MB")
 
     start = time.time()
 
@@ -72,15 +82,17 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
 
     documents: List[IngestedDocument] = []
 
-    # Config limits (critical)
+    # LIMIT CONFIG
     max_pages = getattr(settings, "MAX_PAGES", 200)
     max_tables = getattr(settings, "MAX_TABLES", 200)
     max_images = getattr(settings, "MAX_IMAGES", 200)
 
+    global_image_count = 0
+
     try:
         logger.info("[DocumentIngest][START] session_id=%s", session_id)
 
-        # PDF 
+        # PDF PROCESSING
         if ext == ".pdf":
             import fitz
             import pdfplumber
@@ -88,19 +100,21 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
             image_dir = settings.DATA_DIR / "images" / doc_id
             image_dir.mkdir(parents=True, exist_ok=True)
 
-            # TEXT + IMAGES
             with fitz.open(file_path) as pdf:
+
                 for page_idx, page in enumerate(pdf, start=1):
 
                     if page_idx > max_pages:
-                        logger.warning("[DocumentIngest] page limit reached")
+                        logger.warning("[DocumentIngest] PAGE LIMIT REACHED")
                         break
 
-                    text = (page.get_text() or "").strip()
-                    if text:
+                    page_text = (page.get_text() or "").strip()
+
+                    # ADD PAGE TEXT
+                    if page_text and len(page_text) > 20:
                         documents.append(
                             _make_document(
-                                text=text,
+                                text=page_text,
                                 modality="text",
                                 subtype="page",
                                 source_type="pdf",
@@ -117,10 +131,10 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
                             )
                         )
 
-                    # IMAGES
+                    # IMAGE EXTRACTION
                     for img_idx, img_meta in enumerate(page.get_images(full=True)):
 
-                        if img_idx > max_images:
+                        if global_image_count >= max_images:
                             break
 
                         try:
@@ -136,32 +150,41 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
                             image_docs = image_ingest(str(img_path), session_id=session_id)
 
                             for d in image_docs:
+
+                                # CONTEXTUAL LINKING (IMPORTANT)
                                 structure = dict(d.structure or {})
                                 structure.update({
                                     "doc_id": doc_id,
                                     "page": page_idx,
                                     "asset_path": str(img_path),
+                                    "context_text": page_text[:500],  # LINK TEXT CONTEXT
                                 })
+
                                 d.structure = structure
                                 d.source = source_name
+
                                 documents.append(d)
+
+                            global_image_count += 1
 
                         except Exception as e:
                             logger.warning("[DocumentIngest][IMG_FAIL] %s", str(e))
 
-            # TABLES
+            # TABLE EXTRACTION
             with pdfplumber.open(file_path) as pdf:
+
                 for page_idx, page in enumerate(pdf.pages, start=1):
 
                     tables = page.extract_tables() or []
 
                     for table_idx, table in enumerate(tables):
 
-                        if table_idx > max_tables:
+                        if table_idx >= max_tables:
                             break
 
                         text = _table_to_text(table)
-                        if text:
+
+                        if text and len(text) > 20:
                             documents.append(
                                 _make_document(
                                     text=text,
@@ -177,12 +200,13 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
                                         "source_path": source_path,
                                         "page": page_idx,
                                         "table_index": table_idx,
+                                        "context_text": (page.extract_text() or "")[:500],
                                         "content_type": "table",
                                     },
                                 )
                             )
 
-        # DOCX 
+        # DOCX PROCESSING
         elif ext == ".docx":
             import docx
 
@@ -190,6 +214,7 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
 
             for i, p in enumerate(doc.paragraphs):
                 text = (p.text or "").strip()
+
                 if not text:
                     continue
 
@@ -212,7 +237,7 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
                     )
                 )
 
-        # EXCEL 
+        # EXCEL PROCESSING
         elif ext in {".xlsx", ".xls"}:
             import pandas as pd
 
@@ -241,10 +266,11 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
                     )
 
         else:
-            raise ValueError(f"Unsupported type: {ext}")
+            raise ValueError(f"UNSUPPORTED FILE TYPE: {ext}")
 
+        # FINAL VALIDATION
         if not documents:
-            raise ValueError("No content extracted")
+            raise ValueError("NO CONTENT EXTRACTED")
 
         logger.info(
             "[DocumentIngest][SUCCESS] docs=%s | latency=%.2fs",

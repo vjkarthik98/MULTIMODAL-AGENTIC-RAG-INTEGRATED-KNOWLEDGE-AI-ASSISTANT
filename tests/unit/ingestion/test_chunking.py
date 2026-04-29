@@ -1,6 +1,6 @@
 import pytest
 
-from app.ingestion.chunking import (
+from app.chunking.chunker import (
     chunk_text,
     chunk_documents
 )

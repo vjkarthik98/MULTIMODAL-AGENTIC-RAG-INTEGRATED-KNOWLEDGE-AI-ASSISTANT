@@ -16,8 +16,9 @@ class ResultFusion:
     def __init__(self):
         self.top_k = settings.RERANK_TOP_K
         self.similarity_threshold = settings.FUSION_SIMILARITY_THRESHOLD
+        self.min_score = getattr(settings, "FUSION_MIN_SCORE", 0.05)
 
-    # MAIN 
+    #  MAIN 
     def fuse(self, results: List[Dict], session_id: str = "default") -> List[Dict]:
 
         if not results:
@@ -28,22 +29,28 @@ class ResultFusion:
         try:
             logger.info("[ResultFusion][START] input=%s", len(results))
 
-            # Limit input size 
+            # LIMIT INPUT
             results = results[:settings.FUSION_MAX_INPUT]
 
-            # Copy (avoid mutation)
+            # COPY
             results = [dict(r) for r in results]
 
+            # FILTER LOW QUALITY
+            results = self._filter_low_quality(results)
+
+            # NORMALIZE
             results = self._normalize_scores(results)
+
+            # ENRICH
             results = self._enrich_scores(results)
 
-            results = sorted(
-                results,
-                key=lambda x: x.get("final_score", 0),
-                reverse=True
-            )
+            # SORT
+            results.sort(key=lambda x: x.get("final_score", 0), reverse=True)
 
+            # DEDUP
             results = self._deduplicate(results)
+
+            # DIVERSITY
             results = self._diversity_filter(results)
 
             latency = round(time.time() - start, 2)
@@ -60,13 +67,17 @@ class ResultFusion:
             logger.error("[ResultFusion][FAILED] %s", str(e))
             return results[:self.top_k]
 
-    # NORMALIZE 
+    #  FILTER 
+    def _filter_low_quality(self, results: List[Dict]) -> List[Dict]:
+        return [
+            r for r in results
+            if r.get("text") and r.get("score", 0.0) > self.min_score
+        ]
+
+    #  NORMALIZE 
     def _normalize_scores(self, results: List[Dict]) -> List[Dict]:
 
-        scores = [
-            r.get("rerank_score", r.get("score", 0.0))
-            for r in results
-        ]
+        scores = [r.get("score", 0.0) for r in results]
 
         if not scores:
             return results
@@ -74,7 +85,7 @@ class ResultFusion:
         min_s, max_s = min(scores), max(scores)
 
         for r in results:
-            raw = r.get("rerank_score", r.get("score", 0.0))
+            raw = r.get("score", 0.0)
 
             if max_s - min_s > 1e-6:
                 r["norm_score"] = (raw - min_s) / (max_s - min_s)
@@ -83,18 +94,15 @@ class ResultFusion:
 
         return results
 
-    # ENRICH 
+    #  ENRICH 
     def _enrich_scores(self, results: List[Dict]) -> List[Dict]:
 
         for r in results:
+
             score = r.get("norm_score", 0.0)
 
-            text = str(r.get("text", ""))
-            text_len = len(text)
-
-            length_boost = min(text_len / settings.FUSION_MAX_TEXT_CHARS, 1.0)
-
-            modality = r.get("modality", "text")
+            metadata = r.get("metadata", {}) or {}
+            modality = metadata.get("modality", "text")
 
             modality_weights = getattr(settings, "FUSION_MODALITY_WEIGHTS", {
                 "text": 1.0,
@@ -105,15 +113,19 @@ class ResultFusion:
 
             modality_boost = modality_weights.get(modality, 1.0)
 
+            # LENGTH QUALITY (NOT JUST LENGTH)
+            text = str(r.get("text", ""))
+            quality = min(len(text) / settings.FUSION_MAX_TEXT_CHARS, 1.0)
+
             r["final_score"] = (
                 settings.FUSION_SCORE_WEIGHT * score +
-                settings.FUSION_LENGTH_WEIGHT * length_boost +
+                settings.FUSION_QUALITY_WEIGHT * quality +
                 settings.FUSION_MODALITY_WEIGHT * modality_boost
             )
 
         return results
 
-    # DEDUP 
+    #  DEDUP 
     def _deduplicate(self, results: List[Dict]) -> List[Dict]:
 
         seen = set()
@@ -121,33 +133,36 @@ class ResultFusion:
 
         for r in results:
             text = str(r.get("text", "")).strip().lower()
+            meta = r.get("metadata", {})
 
-            if not text:
-                continue
+            key = hashlib.md5(
+                (
+                    text[:200] +
+                    str(meta.get("doc_id")) +
+                    str(meta.get("chunk_id"))
+                ).encode()
+            ).hexdigest()
 
-            text = text[:settings.FUSION_HASH_CHARS]
-
-            h = hashlib.md5(text.encode()).hexdigest()
-
-            if h not in seen:
-                seen.add(h)
+            if key not in seen:
+                seen.add(key)
                 unique.append(r)
 
         return unique
 
-    # DIVERSITY 
+    #  DIVERSITY 
     def _diversity_filter(self, results: List[Dict]) -> List[Dict]:
 
         selected = []
 
         for candidate in results:
 
-            keep = True
             v1 = candidate.get("embedding")
 
             if not self._valid_embedding(v1):
                 selected.append(candidate)
                 continue
+
+            similarities = []
 
             for s in selected:
                 v2 = s.get("embedding")
@@ -156,27 +171,26 @@ class ResultFusion:
                     continue
 
                 sim = self._cosine_similarity(v1, v2)
+                similarities.append(sim)
 
-                if sim > self.similarity_threshold:
-                    keep = False
-                    break
+            if similarities and max(similarities) > self.similarity_threshold:
+                continue
 
-            if keep:
-                selected.append(candidate)
+            selected.append(candidate)
 
             if len(selected) >= self.top_k:
                 break
 
         return selected
 
-    # UTILS 
+    #  UTILS 
     def _valid_embedding(self, emb):
-        if not isinstance(emb, list):
-            return False
-
-        return len(emb) in (
-            settings.TEXT_EMBEDDING_DIM,
-            settings.VISION_EMBEDDING_DIM,
+        return (
+            isinstance(emb, list) and
+            len(emb) in (
+                settings.TEXT_EMBEDDING_DIM,
+                settings.VISION_EMBEDDING_DIM
+            )
         )
 
     def _cosine_similarity(self, v1, v2):

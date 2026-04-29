@@ -17,25 +17,35 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+# GENERATE FILE HASH
 def _generate_file_hash(file_path: str) -> str:
     hash_md5 = hashlib.md5()
+
     with open(file_path, "rb") as f:
         for chunk in iter(lambda: f.read(4096), b""):
             hash_md5.update(chunk)
+
     return hash_md5.hexdigest()
 
 
+# LOAD AND VALIDATE IMAGE
 def _load_image(path: Path) -> Image.Image:
+
     if not path.exists():
-        raise FileNotFoundError(f"{path} not found")
+        raise FileNotFoundError(f"{path} NOT FOUND")
 
     size_mb = path.stat().st_size / (1024 * 1024)
+
+    # FILE SIZE CHECK
     if size_mb > settings.MAX_FILE_SIZE_MB:
-        raise ValueError(f"Image too large: {size_mb:.2f}MB")
+        raise ValueError(f"IMAGE TOO LARGE: {size_mb:.2f}MB")
 
     with Image.open(path) as raw:
+
+        # FIX ORIENTATION + CONVERT RGB
         image = ImageOps.exif_transpose(raw).convert("RGB")
 
+        # RESIZE LARGE IMAGE
         max_dim = getattr(settings, "MAX_IMAGE_DIM", 1024)
         if max(image.size) > max_dim:
             image.thumbnail((max_dim, max_dim))
@@ -44,10 +54,12 @@ def _load_image(path: Path) -> Image.Image:
         return image.copy()
 
 
+# MAIN INGEST FUNCTION
 def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument]:
 
+    # VALIDATE SESSION
     if not session_id:
-        raise ValueError("session_id is required")
+        raise ValueError("SESSION_ID REQUIRED")
 
     path = Path(file_path)
 
@@ -56,6 +68,7 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
     try:
         logger.info("[ImageIngest][START] session_id=%s | file=%s", session_id, file_path)
 
+        # LOAD IMAGE
         image = _load_image(path)
 
         width, height = image.size
@@ -66,28 +79,40 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
         doc_id = str(uuid.uuid4())
         file_hash = _generate_file_hash(file_path)
 
-        # OCR
+        # OCR EXTRACTION
         ocr_text = ""
         try:
-            ocr_text = (pytesseract.image_to_string(image) or "").strip()
+            raw_ocr = pytesseract.image_to_string(image) or ""
+            ocr_text = raw_ocr.strip()
 
+            # FILTER NOISY OCR
+            if len(ocr_text) < 10:
+                ocr_text = ""
+
+            # TRUNCATE OCR
             if len(ocr_text) > settings.MAX_PROMPT_CHARS:
-                logger.warning("[ImageIngest] OCR truncated")
+                logger.warning("[ImageIngest] OCR TRUNCATED")
                 ocr_text = ocr_text[:settings.MAX_PROMPT_CHARS]
 
         except Exception as e:
             logger.warning("[ImageIngest][OCR_FAIL] %s", str(e))
 
-        # Caption
+        # CAPTION GENERATION
         try:
             caption = generate_caption(file_path, session_id=session_id)
         except Exception as e:
             logger.warning("[ImageIngest][CAPTION_FAIL] %s", str(e))
             caption = None
 
+        # FALLBACK CAPTION
         if not caption:
             caption = getattr(settings, "DEFAULT_IMAGE_CAPTION", "Image content")
 
+        # SAFETY TRUNCATION
+        if len(caption) > settings.MAX_PROMPT_CHARS:
+            caption = caption[:settings.MAX_PROMPT_CHARS]
+
+        # BASE METADATA STRUCTURE
         base_structure = {
             "doc_id": doc_id,
             "session_id": session_id,
@@ -102,10 +127,10 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
 
         documents: List[IngestedDocument] = []
 
-        # Caption document
+        # CAPTION DOCUMENT (PRIMARY SEMANTIC SIGNAL)
         documents.append(
             IngestedDocument(
-                text=caption[:settings.MAX_PROMPT_CHARS],
+                text=caption,
                 modality="image",
                 subtype="caption",
                 source_type="image",
@@ -114,10 +139,14 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
                     **base_structure,
                     "content_type": "semantic_description",
                 },
-            )
+                extra_metadata={
+                    "modality_weight": 1.0,
+                    "importance_score": 1.0,
+                },
+            ).finalize()
         )
 
-        # OCR document
+        # OCR DOCUMENT (SECONDARY SIGNAL)
         if ocr_text:
             documents.append(
                 IngestedDocument(
@@ -130,8 +159,16 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
                         **base_structure,
                         "content_type": "extracted_text",
                     },
-                )
+                    extra_metadata={
+                        "modality_weight": 0.9,
+                        "importance_score": 0.8,
+                    },
+                ).finalize()
             )
+
+        # FINAL VALIDATION
+        if not documents:
+            raise ValueError("NO VALID IMAGE DOCUMENTS CREATED")
 
         latency = round(time.time() - start, 2)
 

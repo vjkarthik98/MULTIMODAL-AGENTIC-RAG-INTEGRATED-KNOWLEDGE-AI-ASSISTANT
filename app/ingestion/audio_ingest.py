@@ -13,6 +13,7 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+# GENERATE FILE HASH
 def _generate_file_hash(file_path: str) -> str:
     hash_md5 = hashlib.md5()
 
@@ -23,17 +24,22 @@ def _generate_file_hash(file_path: str) -> str:
     return hash_md5.hexdigest()
 
 
+# MAIN INGEST FUNCTION
 def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument]:
-    if not session_id:
-        raise ValueError("session_id is required")
 
+    # VALIDATE SESSION
+    if not session_id:
+        raise ValueError("SESSION_ID REQUIRED")
+
+    # VALIDATE FILE
     if not os.path.exists(file_path):
-        raise ValueError(f"{file_path} not found")
+        raise FileNotFoundError(f"{file_path} NOT FOUND")
 
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
 
+    # FILE SIZE LIMIT
     if file_size_mb > settings.MAX_FILE_SIZE_MB:
-        raise ValueError(f"File too large ({file_size_mb:.2f}MB)")
+        raise ValueError(f"FILE TOO LARGE ({file_size_mb:.2f}MB)")
 
     start_time = time.time()
 
@@ -46,6 +52,7 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
     try:
         logger.info("[AudioIngest][START] session_id=%s | file=%s", session_id, file_path)
 
+        # LOAD WHISPER MODEL
         whisper_model = model_loader.get_whisper()
 
         segments_iter, info = whisper_model.transcribe(file_path)
@@ -59,22 +66,34 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
 
         for index, segment in enumerate(segments_iter):
 
+            # LIMIT SEGMENTS
             if index >= max_segments:
-                logger.warning("[AudioIngest] segment limit reached")
+                logger.warning("[AudioIngest] SEGMENT LIMIT REACHED")
                 break
 
-            text = (getattr(segment, "text", "") or "").strip()
-            if len(text) < 2:
+            raw_text = getattr(segment, "text", "") or ""
+            text = raw_text.strip()
+
+            # SKIP EMPTY OR LOW QUALITY TEXT
+            if not text or len(text) < 3:
                 continue
 
             start = round(float(getattr(segment, "start", 0.0)), 2)
             end = round(float(getattr(segment, "end", start)), 2)
 
+            # VALIDATE TIMESTAMPS
+            if end <= start:
+                continue
+
             if end > max_duration:
-                logger.warning("[AudioIngest] max duration reached")
+                logger.warning("[AudioIngest] MAX AUDIO DURATION REACHED")
                 break
 
-            duration = round(max(end - start, 0.0), 2)
+            duration = round(end - start, 2)
+
+            # FILTER VERY SHORT SEGMENTS (NOISE)
+            if duration < 0.3:
+                continue
 
             documents.append(
                 IngestedDocument(
@@ -83,6 +102,8 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
                     subtype="speech",
                     source_type="audio",
                     source=source_name,
+
+                    # STRUCTURED METADATA
                     structure={
                         "doc_id": doc_id,
                         "session_id": session_id,
@@ -98,12 +119,19 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
                         "content_type": "speech_segment",
                         "ingestion_time": time.time(),
                     },
-                )
+
+                    # EXTRA METADATA FOR SCORING
+                    extra_metadata={
+                        "modality_weight": 1.1,
+                        "importance_score": 1.0,
+                    },
+                ).finalize()
             )
 
+        # FINAL VALIDATION
         if not documents:
             logger.error("[AudioIngest][EMPTY] session_id=%s", session_id)
-            raise ValueError("No valid audio segments extracted")
+            raise ValueError("NO VALID AUDIO SEGMENTS EXTRACTED")
 
         latency = round(time.time() - start_time, 2)
 
@@ -117,5 +145,9 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
         return documents
 
     except Exception as exc:
-        logger.error("[AudioIngest][FAILED] session_id=%s | error=%s", session_id, str(exc))
-        raise RuntimeError(f"Audio ingestion failed: {exc}") from exc
+        logger.error(
+            "[AudioIngest][FAILED] session_id=%s | error=%s",
+            session_id,
+            str(exc)
+        )
+        raise RuntimeError(f"AUDIO INGESTION FAILED: {exc}") from exc

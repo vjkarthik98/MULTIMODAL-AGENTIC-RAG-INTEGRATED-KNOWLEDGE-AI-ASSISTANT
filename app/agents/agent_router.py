@@ -14,162 +14,194 @@ logger = get_logger(__name__)
 
 class AgentRouter:
 
+    #  NORMALIZE 
+    def _normalize(self, query: str) -> str:
+        return " ".join(query.strip().split())
+
+    #  MAIN 
     def route(self, query: str, session_id: str) -> AgentDecision:
+
         if not query or not query.strip():
-            return self._decision("direct", "empty_query")
+            return self._decision("direct", "empty_query", 0.0)
 
         start = time.time()
+        query = self._normalize(query)
 
         logger.info("[AgentRouter][START] session_id=%s", session_id)
 
         signals = self._analyze_query(query)
 
-        # Only strict override for RECENT queries
+        #  HARD RULES 
         if signals["is_recent"]:
-            return self._decision("search", "Detected time-sensitive query")
+            return self._decision("search", "recent_query", 0.95)
 
         if signals["is_memory"]:
-            return self._decision("memory", "User referring to past conversation")
+            return self._decision("memory", "memory_reference", 0.9)
 
+        #  LLM ROUTING 
         decision = self._llm_route(query, signals, session_id)
 
         validated = self._validate_decision(decision, signals)
 
+        latency = round(time.time() - start, 2)
+
         logger.info(
-            "[AgentRouter][FINAL] session_id=%s | action=%s | latency=%.2fs",
-            session_id,
+            "[AgentRouter][FINAL] action=%s confidence=%.2f latency=%ss",
             validated.action,
-            time.time() - start
+            validated.confidence,
+            latency
         )
 
         return validated
 
+    #  SIGNALS 
     def _analyze_query(self, query: str) -> Dict:
-        query_lower = query.lower()
+
+        q = query.lower()
 
         return {
-            "is_recent": any(w in query_lower for w in [
+            "is_recent": any(w in q for w in [
                 "latest", "today", "news", "recent", "current", "update"
             ]),
-            "is_memory": any(w in query_lower for w in [
+            "is_memory": any(w in q for w in [
                 "earlier", "previous", "last time", "we discussed"
             ]),
-            "is_complex": len(query.split()) > 15,
-            "has_multimodal_hint": any(w in query_lower for w in [
-                "image", "photo", "picture", "audio", "video", "diagram", "chart"
+            "is_complex": (
+                len(q.split()) > settings.DECOMPOSITION_MIN_WORDS or
+                any(k in q for k in ["compare", "difference", "process", "steps"])
+            ),
+            "is_reasoning": any(k in q for k in [
+                "why", "how", "explain", "reason"
+            ]),
+            "has_multimodal_hint": any(w in q for w in [
+                "image", "photo", "video", "diagram", "chart", "audio"
             ])
         }
 
+    #  SAFE PROMPT 
+    def _build_prompt(self, query: str, signals: dict) -> str:
+
+        instruction = (
+            "You are an AI routing system.\n\n"
+            "Choose best action:\n"
+            "- rag\n- search\n- direct\n- memory\n- hybrid\n\n"
+            "Rules:\n"
+            "- search → recent\n"
+            "- memory → past conversation\n"
+            "- rag → documents\n"
+            "- hybrid → rag + memory\n"
+            "- direct → general knowledge\n\n"
+        )
+
+        body = f"Signals:\n{signals}\n\nQuery:\n{query}\n\n"
+
+        format_block = '{"action":"...", "reason":"..."}'
+
+        max_chars = settings.MAX_PROMPT_CHARS
+        available = max_chars - len(instruction) - len(format_block) - 50
+
+        body = body[:available]
+
+        return instruction + body + format_block
+
+    #  LLM ROUTING 
     def _llm_route(self, query: str, signals: dict, session_id: str):
+
         try:
             llm = model_loader.get_llm()
-        except Exception as e:
-            logger.warning(
-                "[AgentRouter] LLM unavailable → fallback to RAG | %s", str(e)
-            )
-            return self._decision("rag", "llm_unavailable")
+        except Exception:
+            return self._decision("rag", "llm_unavailable", 0.5)
 
-        prompt = f"""
-You are an AI routing system.
-
-Choose the best action for answering a query.
-
-Actions:
-- rag
-- search
-- direct
-- memory
-- hybrid
-
-Rules:
-- search → recent info ONLY
-- memory → past conversation
-- rag → document-based (default)
-- hybrid → rag + memory
-- direct → general knowledge
-
-Signals:
-{signals}
-
-Return STRICT JSON:
-{{"action": "...", "reason": "..."}}
-
-Query:
-{query}
-"""
-
-        prompt = prompt[:settings.MAX_PROMPT_CHARS]
+        prompt = self._build_prompt(query, signals)
 
         try:
+            t = time.time()
+
             response = llm.generate(
                 prompt,
-                max_tokens=100,
+                max_tokens=80,
                 temperature=0.0,
                 top_p=1.0
             )
 
-            return self._parse_response(response, session_id, signals)
+            logger.debug("[AgentRouter] llm_latency=%.2fs", time.time() - t)
 
-        except Exception as e:
-            logger.error(
-                "[AgentRouter][LLM_FAIL] session_id=%s | error=%s",
-                session_id,
-                str(e)
-            )
-            return self._decision("rag", "llm_failure_fallback")
+            return self._parse_response(response, signals)
 
-    def _parse_response(self, text: str, session_id: str, signals: dict) -> AgentDecision:
+        except Exception:
+            return self._decision("rag", "llm_failure", 0.5)
+
+    #  PARSER 
+    def _parse_response(self, text: str, signals: dict) -> AgentDecision:
+
         try:
             cleaned = self._clean_json(text)
+
             data = json.loads(cleaned)
 
             action = data.get("action", "").strip().lower()
             reason = data.get("reason", "")
 
+            confidence = self._compute_confidence(action, signals)
+
             return AgentDecision(
                 action=action,
                 reason=reason,
-                confidence=0.8,
+                confidence=confidence,
                 signals=signals
             )
 
-        except Exception as e:
-            logger.error(
-                "[AgentRouter][PARSE_FAIL] session_id=%s | error=%s",
-                session_id,
-                str(e)
-            )
+        except Exception:
+            return self._decision("rag", "parse_failure", 0.6)
 
-            # fallback to RAG instead of SEARCH
-            return self._decision("rag", "parse_failure")
+    #  CONFIDENCE 
+    def _compute_confidence(self, action: str, signals: dict) -> float:
 
+        base = 0.6
+
+        if signals.get("is_recent") and action == "search":
+            base += 0.3
+
+        if signals.get("is_memory") and action == "memory":
+            base += 0.25
+
+        if signals.get("is_complex") and action in {"rag", "hybrid"}:
+            base += 0.2
+
+        return min(base, 0.95)
+
+    #  CLEAN JSON 
     def _clean_json(self, text: str) -> str:
+
+        text = text.strip()
+
         if "```" in text:
-            parts = text.split("```")
-            text = parts[1] if len(parts) > 1 else text
+            text = text.split("```")[1]
 
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if match:
             return match.group(0)
 
-        raise ValueError("No JSON found")
+        raise ValueError("Invalid JSON")
 
+    #  VALIDATE 
     def _validate_decision(self, decision: AgentDecision, signals: dict) -> AgentDecision:
+
         allowed = {"rag", "search", "direct", "memory", "hybrid"}
 
         if decision.action not in allowed:
-            logger.warning("[AgentRouter] Invalid action → fallback to RAG")
-            return self._decision("rag", "invalid_action")
+            return self._decision("rag", "invalid_action", 0.5)
 
         if signals["is_recent"]:
-            return self._decision("search", "override_recent")
+            return self._decision("search", "override_recent", 0.95)
 
         return decision
 
-    def _decision(self, action: str, reason: str) -> AgentDecision:
+    #  DECISION 
+    def _decision(self, action: str, reason: str, confidence: float) -> AgentDecision:
         return AgentDecision(
             action=action,
             reason=reason,
-            confidence=0.9,
+            confidence=confidence,
             signals={}
         )

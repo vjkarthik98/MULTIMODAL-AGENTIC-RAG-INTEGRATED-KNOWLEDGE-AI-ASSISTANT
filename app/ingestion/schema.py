@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.config import settings
 
@@ -10,6 +10,8 @@ ALLOWED_MODALITIES = {"text", "table", "image", "audio", "video"}
 
 
 class IngestedDocument(BaseModel):
+
+    # CORE FIELDS
     text: str
     modality: str
     subtype: Optional[str] = None
@@ -20,19 +22,22 @@ class IngestedDocument(BaseModel):
     page: Optional[int] = None
     chunk_id: Optional[int] = None
 
-    structure: Dict[str, Any] = {}
-    extra_metadata: Dict[str, Any] = {}
+    # SAFE DEFAULTS (CRITICAL FIX)
+    structure: Dict[str, Any] = Field(default_factory=dict)
+    extra_metadata: Dict[str, Any] = Field(default_factory=dict)
 
     embedding: Optional[List[float]] = None
 
-    # NORMALIZATION 
-
+    #  NORMALIZATION 
     def normalize(self):
+
+        # CLEAN TEXT
         self.text = (self.text or "").strip()
 
         if len(self.text) > settings.MAX_PROMPT_CHARS:
             self.text = self.text[:settings.MAX_PROMPT_CHARS]
 
+        # NORMALIZE MODALITY
         self.modality = (self.modality or "").strip().lower()
 
         if self.subtype:
@@ -40,6 +45,7 @@ class IngestedDocument(BaseModel):
 
         self.source_type = (self.source_type or "file").strip()
 
+        # ENSURE DICTS
         if self.structure is None:
             self.structure = {}
 
@@ -48,60 +54,68 @@ class IngestedDocument(BaseModel):
 
         return self
 
-    # VALIDATION 
-
+    #  VALIDATION 
     def validate(self):
-        if not self.text:
-            raise ValueError("text cannot be empty")
 
+        # TEXT VALIDATION
+        if not self.text or len(self.text.strip()) < 3:
+            raise ValueError("TEXT TOO SHORT OR EMPTY")
+
+        # MODALITY VALIDATION
         if self.modality not in ALLOWED_MODALITIES:
-            raise ValueError(f"Invalid modality: {self.modality}")
+            raise ValueError(f"INVALID MODALITY: {self.modality}")
 
+        # PAGE VALIDATION
         if self.page is not None and self.page < 1:
-            raise ValueError("page must be >= 1")
+            raise ValueError("PAGE MUST BE >= 1")
 
+        # CHUNK VALIDATION
         if self.chunk_id is not None and self.chunk_id < 0:
-            raise ValueError("chunk_id must be >= 0")
+            raise ValueError("CHUNK_ID MUST BE >= 0")
 
-        # structure defaults
+        # STRUCTURE VALIDATION
         if not isinstance(self.structure, dict):
-            raise ValueError("structure must be dict")
+            raise ValueError("STRUCTURE MUST BE DICT")
 
+        # REQUIRED STRUCTURE FIELDS
         self.structure.setdefault("doc_id", str(uuid4()))
         self.structure.setdefault("session_id", "default")
 
-        # metadata validation
-        if not isinstance(self.extra_metadata, dict):
-            raise ValueError("extra_metadata must be dict")
+        # STANDARDIZE OPTIONAL FIELDS
+        self.structure.setdefault("content_type", "unknown")
+        self.structure.setdefault("embedding_space", "text")
 
-        # embedding validation
+        # METADATA VALIDATION
+        if not isinstance(self.extra_metadata, dict):
+            raise ValueError("EXTRA_METADATA MUST BE DICT")
+
+        # EMBEDDING VALIDATION
         if self.embedding is not None:
+
             if not isinstance(self.embedding, list):
-                raise ValueError("embedding must be list")
+                raise ValueError("EMBEDDING MUST BE LIST")
 
             if len(self.embedding) not in (
                 settings.TEXT_EMBEDDING_DIM,
                 settings.VISION_EMBEDDING_DIM,
             ):
-                # soft warning (not crash)
-                pass
+                raise ValueError("INVALID EMBEDDING DIMENSION")
 
         return self
 
-    # FINALIZE 
-
+    #  FINALIZE 
     def finalize(self):
         self.normalize()
         self.validate()
         return self
 
-    # UTILITIES 
-
+    #  CLONE 
     def clone(self, **updates: Any) -> "IngestedDocument":
         data = self.to_dict()
         data.update(updates)
         return IngestedDocument(**data).finalize()
 
+    #  SERIALIZATION 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "text": self.text,
@@ -116,6 +130,7 @@ class IngestedDocument(BaseModel):
             "embedding": self.embedding,
         }
 
+    #  SUMMARY 
     def summary(self) -> Dict[str, Any]:
         return {
             "modality": self.modality,

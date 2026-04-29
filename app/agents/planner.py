@@ -9,20 +9,28 @@ logger = get_logger(__name__)
 
 
 class ExecutionStep:
-    def __init__(self, tool: str, description: str = ""):
+    def __init__(
+        self,
+        tool: str,
+        description: str = "",
+        optional: bool = False
+    ):
         self.tool = tool
         self.description = description
+        self.optional = optional
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "tool": self.tool,
-            "description": self.description
+            "description": self.description,
+            "optional": self.optional
         }
 
 
 class ExecutionPlan:
-    def __init__(self, steps: List[ExecutionStep]):
+    def __init__(self, steps: List[ExecutionStep], trace: Dict = None):
         self.steps = steps or []
+        self.trace = trace or {}
 
     def to_list(self) -> List[Dict[str, Any]]:
         return [step.to_dict() for step in self.steps]
@@ -38,63 +46,73 @@ class Planner:
 
         if not decision or not getattr(decision, "action", None):
             logger.warning("[Planner] Invalid decision → fallback")
-            return self._fallback_plan()
+            return self._fallback_plan("invalid_decision")
 
         action = str(decision.action).strip().lower()
         signals = decision.signals or {}
 
-        logger.info("[Planner] Creating plan | action=%s", action)
+        logger.info("[Planner] action=%s", action)
 
         try:
             if action == "direct":
-                return self._direct_plan()
+                return self._direct_plan(query)
 
             if action == "search":
-                return self._search_plan()
+                return self._search_plan(query)
 
             if action == "memory":
-                return self._memory_plan()
+                return self._memory_plan(query)
 
             if action == "rag":
-                return self._rag_plan(signals)
+                return self._rag_plan(query, signals)
 
             if action == "hybrid":
-                return self._hybrid_plan(signals)
+                return self._hybrid_plan(query, signals)
 
-            logger.warning("[Planner] Unknown action=%s → fallback", action)
-            return self._fallback_plan()
+            return self._fallback_plan("unknown_action")
 
         except Exception as e:
             logger.error("[Planner][ERROR] %s", str(e))
-            return self._fallback_plan()
+            return self._fallback_plan("planner_exception")
 
-    # PLAN TYPES
+    #  PLANS 
 
-    def _direct_plan(self) -> ExecutionPlan:
-        return ExecutionPlan([
-            ExecutionStep("reason", "Direct reasoning without retrieval")
-        ])
+    def _direct_plan(self, query: str) -> ExecutionPlan:
+        return ExecutionPlan(
+            steps=[
+                ExecutionStep("reason", "Direct reasoning")
+            ],
+            trace={"type": "direct"}
+        )
 
-    def _search_plan(self) -> ExecutionPlan:
-        return ExecutionPlan([
-            ExecutionStep("search", "Fetch external data"),
-            ExecutionStep("reason", "Summarize and answer")
-        ])
+    def _search_plan(self, query: str) -> ExecutionPlan:
+        return ExecutionPlan(
+            steps=[
+                ExecutionStep("search", "External retrieval"),
+                ExecutionStep("reason", "Answer generation")
+            ],
+            trace={"type": "search"}
+        )
 
-    def _memory_plan(self) -> ExecutionPlan:
-        return ExecutionPlan([
-            ExecutionStep("memory", "Fetch past context"),
-            ExecutionStep("reason", "Answer using memory")
-        ])
+    def _memory_plan(self, query: str) -> ExecutionPlan:
+        return ExecutionPlan(
+            steps=[
+                ExecutionStep("memory", "Fetch memory"),
+                ExecutionStep("reason", "Answer with memory")
+            ],
+            trace={"type": "memory"}
+        )
 
-    def _rag_plan(self, signals: Dict[str, Any]) -> ExecutionPlan:
+    def _rag_plan(self, query: str, signals: Dict) -> ExecutionPlan:
+
         steps: List[ExecutionStep] = []
 
-        is_complex = bool(signals.get("is_complex"))
+        is_complex = signals.get("is_complex", False)
+        is_reasoning = signals.get("is_reasoning", False)
 
-        if is_complex:
+        if is_complex or is_reasoning:
             steps.append(
-                ExecutionStep("decompose", "Break query into sub-queries")
+                ExecutionStep("decompose", "Break query", optional=True)
             )
 
         steps.append(
@@ -103,27 +121,32 @@ class Planner:
 
         if is_complex:
             steps.append(
-                ExecutionStep("fusion", "Merge retrieval results")
+                ExecutionStep("fusion", "Merge results", optional=True)
             )
 
         steps.append(
-            ExecutionStep("reason", "Generate final answer")
+            ExecutionStep("reason", "Final reasoning")
         )
 
-        return ExecutionPlan(self._limit_steps(steps))
+        return ExecutionPlan(
+            steps=self._optimize_steps(steps),
+            trace={"type": "rag", "complex": is_complex}
+        )
 
-    def _hybrid_plan(self, signals: Dict[str, Any]) -> ExecutionPlan:
+    def _hybrid_plan(self, query: str, signals: Dict) -> ExecutionPlan:
+
         steps: List[ExecutionStep] = []
 
-        is_complex = bool(signals.get("is_complex"))
+        is_complex = signals.get("is_complex", False)
+        is_reasoning = signals.get("is_reasoning", False)
 
         steps.append(
-            ExecutionStep("memory", "Fetch conversation context")
+            ExecutionStep("memory", "Fetch memory")
         )
 
-        if is_complex:
+        if is_complex or is_reasoning:
             steps.append(
-                ExecutionStep("decompose", "Split query")
+                ExecutionStep("decompose", "Split query", optional=True)
             )
 
         steps.append(
@@ -131,27 +154,48 @@ class Planner:
         )
 
         steps.append(
-            ExecutionStep("fusion", "Combine results")
+            ExecutionStep("fusion", "Combine results", optional=True)
         )
 
         steps.append(
-            ExecutionStep("reason", "Final reasoning with memory + knowledge")
+            ExecutionStep("reason", "Final reasoning")
         )
 
-        return ExecutionPlan(self._limit_steps(steps))
+        return ExecutionPlan(
+            steps=self._optimize_steps(steps),
+            trace={"type": "hybrid", "complex": is_complex}
+        )
 
-    # SAFETY
+    #  OPTIMIZATION 
+
+    def _optimize_steps(self, steps: List[ExecutionStep]) -> List[ExecutionStep]:
+
+        seen = set()
+        optimized = []
+
+        for step in steps:
+            if step.tool not in seen:
+                seen.add(step.tool)
+                optimized.append(step)
+
+        return self._limit_steps(optimized)
+
+    #  LIMIT 
 
     def _limit_steps(self, steps: List[ExecutionStep]) -> List[ExecutionStep]:
+
         max_steps = getattr(settings, "AGENT_MAX_STEPS", 10)
 
         if len(steps) > max_steps:
-            logger.warning("[Planner] Plan truncated to max_steps=%s", max_steps)
+            logger.warning("[Planner] truncated to max_steps=%s", max_steps)
             return steps[:max_steps]
 
         return steps
 
-    def _fallback_plan(self) -> ExecutionPlan:
-        return ExecutionPlan([
-            ExecutionStep("reason", "Fallback reasoning")
-        ])
+    #  FALLBACK 
+
+    def _fallback_plan(self, reason: str) -> ExecutionPlan:
+        return ExecutionPlan(
+            steps=[ExecutionStep("reason", "Fallback reasoning")],
+            trace={"fallback": reason}
+        )

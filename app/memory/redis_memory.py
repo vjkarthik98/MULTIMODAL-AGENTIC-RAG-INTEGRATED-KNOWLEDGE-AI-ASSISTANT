@@ -11,7 +11,9 @@ logger = get_logger(__name__)
 
 
 class RedisMemory:
+
     def __init__(self):
+
         logger.info("[RedisMemory] connecting")
 
         self.client = redis.Redis(
@@ -26,16 +28,45 @@ class RedisMemory:
 
         self.max_messages = settings.MAX_HISTORY_MESSAGES
         self.ttl = settings.REDIS_TTL_SECONDS
-
         self.key_prefix = getattr(settings, "REDIS_KEY_PREFIX", "chat")
+
+        self._validate_connection()
 
         logger.info("[RedisMemory] initialized")
 
-    # KEY 
+    #  CONNECTION CHECK 
+    def _validate_connection(self):
+        try:
+            self.client.ping()
+        except Exception as e:
+            logger.error("[RedisMemory] connection failed | %s", str(e))
+            raise
+
+    #  RETRY 
+    def _retry(self, fn, retries=2):
+        for i in range(retries):
+            try:
+                return fn()
+            except Exception as e:
+                if i == retries - 1:
+                    raise
+                logger.warning("[RedisMemory][RETRY] %s", str(e))
+                time.sleep(0.2)
+
+    #  CLEAN TEXT 
+    def _clean(self, text: str) -> str:
+        return " ".join(str(text or "").strip().split())
+
+    #  ROLE VALIDATION 
+    def _normalize_role(self, role: str) -> str:
+        role = str(role or "user").lower()
+        return role if role in {"user", "assistant", "system"} else "user"
+
+    #  KEY 
     def _get_key(self, session_id: str) -> str:
         return f"{self.key_prefix}:{session_id}"
 
-    # ADD MESSAGE 
+    #  ADD MESSAGE 
     def add_message(
         self,
         session_id: str,
@@ -45,13 +76,21 @@ class RedisMemory:
         modality: str = "text",
         extra: Optional[Dict] = None
     ):
+
         if not session_id or not content:
             return
 
         key = self._get_key(session_id)
 
         try:
-            # Truncate content
+            start = time.time()
+
+            role = self._normalize_role(role)
+            content = self._clean(content)
+
+            if len(content) < 2:
+                return
+
             if len(content) > settings.MAX_PROMPT_CHARS:
                 content = content[:settings.MAX_PROMPT_CHARS]
 
@@ -62,7 +101,7 @@ class RedisMemory:
                 "modality": modality,
             }
 
-            # Validate embedding
+            # EMBEDDING VALIDATION
             if embedding and isinstance(embedding, list):
                 if len(embedding) in (
                     settings.TEXT_EMBEDDING_DIM,
@@ -75,20 +114,24 @@ class RedisMemory:
 
             payload = json.dumps(message)
 
-            pipe = self.client.pipeline()
+            def _write():
+                pipe = self.client.pipeline()
 
-            pipe.rpush(key, payload)
-            pipe.ltrim(key, -self.max_messages, -1)
+                pipe.rpush(key, payload)
+                pipe.ltrim(key, -self.max_messages, -1)
 
-            if self.ttl:
-                pipe.expire(key, self.ttl)
+                if self.ttl:
+                    pipe.expire(key, self.ttl)
 
-            pipe.execute()
+                return pipe.execute()
+
+            self._retry(_write)
 
             logger.debug(
-                "[RedisMemory] added | session_id=%s | role=%s",
+                "[RedisMemory] added | session_id=%s | role=%s | latency=%.2fs",
                 session_id,
-                role
+                role,
+                time.time() - start
             )
 
         except Exception as e:
@@ -98,27 +141,35 @@ class RedisMemory:
                 str(e)
             )
 
-    # GET HISTORY 
+    #  GET HISTORY 
     def get_history(self, session_id: str) -> List[Dict]:
+
         key = self._get_key(session_id)
 
         try:
-            data = self.client.lrange(key, 0, -1)
+            start = time.time()
+
+            data = self._retry(lambda: self.client.lrange(key, 0, -1))
 
             history = []
 
             for item in data:
                 try:
                     parsed = json.loads(item)
+
                     if isinstance(parsed, dict):
+                        # CLEAN CONTENT
+                        parsed["content"] = self._clean(parsed.get("content", ""))
                         history.append(parsed)
+
                 except Exception:
                     continue
 
             logger.debug(
-                "[RedisMemory] fetched | session_id=%s | count=%s",
+                "[RedisMemory] fetched | session_id=%s | count=%s | latency=%.2fs",
                 session_id,
-                len(history)
+                len(history),
+                time.time() - start
             )
 
             return history
@@ -131,14 +182,14 @@ class RedisMemory:
             )
             return []
 
-    # GET LAST K 
+    #  GET LAST K 
     def get_last_k(self, session_id: str, k: int = None) -> List[Dict]:
-        key = self._get_key(session_id)
 
+        key = self._get_key(session_id)
         k = k or settings.MEMORY_TOP_K
 
         try:
-            data = self.client.lrange(key, -k, -1)
+            data = self._retry(lambda: self.client.lrange(key, -k, -1))
 
             result = []
 
@@ -155,17 +206,15 @@ class RedisMemory:
         except Exception:
             return []
 
-    # CLEAR MEMORY 
+    #  CLEAR MEMORY 
     def clear_memory(self, session_id: str):
+
         key = self._get_key(session_id)
 
         try:
-            self.client.delete(key)
+            self._retry(lambda: self.client.delete(key))
 
-            logger.info(
-                "[RedisMemory] cleared | session_id=%s",
-                session_id
-            )
+            logger.info("[RedisMemory] cleared | session_id=%s", session_id)
 
         except Exception as e:
             logger.error(
@@ -174,11 +223,12 @@ class RedisMemory:
                 str(e)
             )
 
-    # MEMORY SIZE 
+    #  MEMORY SIZE 
     def get_memory_size(self, session_id: str) -> int:
+
         key = self._get_key(session_id)
 
         try:
-            return self.client.llen(key)
+            return self._retry(lambda: self.client.llen(key))
         except Exception:
             return 0

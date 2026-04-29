@@ -14,7 +14,11 @@ class ReasoningEngine:
         self.llm = llm
         self.max_prompt_chars = settings.MAX_PROMPT_CHARS
 
-    # MAIN 
+    #  NORMALIZE 
+    def _normalize(self, text: str) -> str:
+        return " ".join(str(text or "").strip().split())
+
+    #  MAIN 
     def generate_answer(
         self,
         query: str,
@@ -28,27 +32,30 @@ class ReasoningEngine:
         try:
             logger.info("[ReasoningEngine][START]")
 
-            query = self._sanitize(query)
+            query = self._normalize(query)
 
             knowledge = self._prepare_knowledge(retrieved_docs)
             memory = self._prepare_memory(memory_context)
 
             prompt = self._build_prompt(query, knowledge, memory)
 
-            # Global safety
+            # SAFE PROMPT CONTROL
             if len(prompt) > self.max_prompt_chars:
-                logger.warning("[ReasoningEngine] truncating prompt")
-                prompt = prompt[-self.max_prompt_chars:]
+                prompt = self._safe_truncate(prompt)
 
+            #  LLM 
+            t_llm = time.time()
             response = self.llm.generate(prompt)
+            llm_latency = round(time.time() - t_llm, 2)
 
-            parsed = self._parse_response(response)
+            parsed = self._parse_response(response, retrieved_docs)
 
             latency = round(time.time() - start, 2)
 
             logger.info(
-                "[ReasoningEngine][SUCCESS] latency=%ss",
-                latency
+                "[ReasoningEngine][SUCCESS] latency=%ss llm=%ss",
+                latency,
+                llm_latency
             )
 
             return parsed
@@ -62,138 +69,145 @@ class ReasoningEngine:
                 "sources_used": 0
             }
 
-    # SANITIZE 
-    def _sanitize(self, text: str) -> str:
-        if not text:
-            return ""
+    #  SAFE TRUNCATION 
+    def _safe_truncate(self, prompt: str) -> str:
 
-        text = text.strip()
+        # KEEP SYSTEM INSTRUCTIONS
+        parts = prompt.split("KNOWLEDGE:")
 
-        if len(text) > self.max_prompt_chars:
-            text = text[:self.max_prompt_chars]
+        if len(parts) < 2:
+            return prompt[:self.max_prompt_chars]
 
-        return text
+        header = parts[0]
+        rest = "KNOWLEDGE:" + parts[1]
 
-    # KNOWLEDGE 
+        allowed = self.max_prompt_chars - len(header) - 20
+
+        return header + rest[:allowed]
+
+    #  KNOWLEDGE 
     def _prepare_knowledge(self, docs: List[Dict]) -> str:
+
         if not docs:
             return ""
 
         max_docs = settings.RAG_TOP_K
-        max_chars_per_doc = settings.RAG_DOC_MAX_CHARS
+        max_chars = settings.RAG_DOC_MAX_CHARS
 
-        selected = []
+        parts = []
+        seen = set()
 
         for d in docs[:max_docs]:
-            try:
-                text = str(d.get("text", "")).strip()
-                if not text:
-                    continue
 
-                source = d.get("source", "unknown")
-
-                text = text[:max_chars_per_doc]
-
-                selected.append(f"[Source: {source}] {text}")
-
-            except Exception:
+            text = self._normalize(d.get("text", ""))
+            if not text:
                 continue
 
-        return "\n\n".join(selected)
+            key = text[:100]
+            if key in seen:
+                continue
+            seen.add(key)
 
-    # MEMORY 
+            metadata = d.get("metadata", {}) or {}
+            source = metadata.get("source", "unknown")
+            modality = metadata.get("modality", "text")
+
+            text = text[:max_chars]
+
+            parts.append(f"[{modality.upper()} | {source}] {text}")
+
+        return "\n\n".join(parts)
+
+    #  MEMORY 
     def _prepare_memory(self, memory: str) -> str:
+
         if not memory:
             return ""
 
+        memory = self._normalize(memory)
+
         return memory[:settings.MEMORY_MAX_CONTEXT_CHARS]
 
-    # PROMPT 
+    #  PROMPT 
     def _build_prompt(self, query: str, knowledge: str, memory: str) -> str:
-        return (
+
+        instruction = (
             "You are a highly reliable AI assistant.\n\n"
-            "Rules:\n"
-            "- Answer ONLY from context\n"
+            "Strict Rules:\n"
+            "- Answer ONLY from provided context\n"
             "- Do NOT hallucinate\n"
-            '- If missing -> say "I don\'t know"\n\n'
-
-            "MEMORY:\n"
-            f"{memory}\n\n"
-
-            "KNOWLEDGE:\n"
-            f"{knowledge}\n\n"
-
-            "QUERY:\n"
-            f"{query}\n\n"
-
-            "OUTPUT:\n"
-            "Answer:\n"
-            "<final answer>\n\n"
-            "Confidence:\n"
-            "<0-1>\n\n"
-            "Sources Used:\n"
-            "<number>"
+            "- If information is missing say: I don't know\n"
+            "- Be precise and factual\n\n"
         )
 
-    # PARSER 
-    def _parse_response(self, text: str) -> Dict[str, Any]:
+        memory_block = f"MEMORY:\n{memory}\n\n" if memory else ""
+
+        knowledge_block = f"KNOWLEDGE:\n{knowledge}\n\n"
+
+        query_block = f"QUERY:\n{query}\n\n"
+
+        output_format = (
+            "OUTPUT FORMAT:\n"
+            "Answer: <final answer>\n"
+            "Confidence: <0-1>\n"
+            "Sources Used: <number>\n"
+        )
+
+        return instruction + memory_block + knowledge_block + query_block + output_format
+
+    #  PARSER 
+    def _parse_response(self, text: str, docs: List[Dict]) -> Dict[str, Any]:
 
         if not text:
-            return {
-                "answer": "",
-                "confidence": 0.5,
-                "sources_used": 0
-            }
+            return self._fallback()
 
         try:
-            answer = []
-            confidence = 0.7
+            answer = ""
+            confidence = 0.5
             sources = 0
 
             lines = text.split("\n")
-            capture_answer = False
 
             for line in lines:
-                line_clean = line.strip()
+                l = line.lower().strip()
 
-                if line_clean.lower().startswith("answer"):
-                    capture_answer = True
-                    continue
+                if l.startswith("answer"):
+                    answer = line.split(":", 1)[-1].strip()
 
-                if line_clean.lower().startswith("confidence"):
-                    capture_answer = False
+                elif l.startswith("confidence"):
                     try:
-                        confidence = float(line_clean.split(":")[1].strip())
-                    except Exception:
+                        confidence = float(line.split(":", 1)[-1].strip())
+                    except:
                         confidence = 0.5
-                    continue
 
-                if line_clean.lower().startswith("sources"):
+                elif l.startswith("sources"):
                     try:
-                        sources = int(line_clean.split(":")[1].strip())
-                    except Exception:
+                        sources = int(line.split(":", 1)[-1].strip())
+                    except:
                         sources = 0
-                    continue
 
-                if capture_answer and line_clean:
-                    answer.append(line_clean)
+            if not answer:
+                answer = text.strip()
 
-            final_answer = " ".join(answer).strip()
+            # CONFIDENCE CALIBRATION
+            confidence = max(0.0, min(confidence, 1.0))
 
-            if not final_answer:
-                final_answer = text.strip()
+            # SOURCE SAFETY
+            sources = min(sources, len(docs))
 
             return {
-                "answer": final_answer,
+                "answer": answer,
                 "confidence": confidence,
                 "sources_used": sources
             }
 
-        except Exception as e:
-            logger.error("[ReasoningEngine][PARSE_FAIL] %s", str(e))
+        except Exception:
+            return self._fallback(text)
 
-            return {
-                "answer": text.strip(),
-                "confidence": 0.5,
-                "sources_used": 0
-            }
+    #  FALLBACK 
+    def _fallback(self, text: str = "") -> Dict[str, Any]:
+        return {
+            "answer": text.strip() if text else "I couldn't generate a reliable answer.",
+            "confidence": 0.3,
+            "sources_used": 0
+        }

@@ -1,17 +1,10 @@
-# Core ML
 torch
 transformers
 sentence-transformers
 accelerate
 timm
-
-# LLM (GGUF)
 llama-cpp-python
-
-# Vector DB
 qdrant-client
-
-# Backend
 fastapi
 uvicorn
 python-dotenv
@@ -20,34 +13,27 @@ pydantic-settings
 aiofiles
 httpx
 orjson
-
-# LangChain (optional utilities)
+anyio
+python-multipart
+tenacity
+tavily-python
+numpy
+scikit-learn
 langchain
 langchain-community
-
-# Image / OCR
 pillow
 opencv-python
 pytesseract
-
-# Audio / Speech
 faster-whisper
-
-# Video
+pydub
 moviepy
-
-# Document ingestion
 pdfplumber
 python-docx
 pandas
 openpyxl
-
-# Databases
+pymupdf
 redis
 pymongo
-
-# Logging
-loguru
-
-pymupdf
 rank-bm25
+loguru
+psutil

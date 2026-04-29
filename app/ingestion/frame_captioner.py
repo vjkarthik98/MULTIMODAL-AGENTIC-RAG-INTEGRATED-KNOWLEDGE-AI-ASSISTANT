@@ -16,11 +16,14 @@ except ImportError:
 logger = get_logger(__name__)
 
 
+# CLEAN AND NORMALIZE CAPTION TEXT
 def _clean_caption(text: str) -> Optional[str]:
     cleaned = (text or "").strip()
+
     if not cleaned:
         return None
 
+    # REMOVE WEAK PREFIXES
     weak_prefixes = (
         "a blurry image of",
         "a close up of",
@@ -35,28 +38,38 @@ def _clean_caption(text: str) -> Optional[str]:
             break
 
     words = cleaned.split()
+
     if not words:
         return None
 
+    # LIMIT CAPTION LENGTH
     max_words = getattr(settings, "CAPTION_MAX_WORDS", 30)
     cleaned = " ".join(words[:max_words]).strip()
 
+    # CAPITALIZE FIRST LETTER
     cleaned = cleaned[:1].upper() + cleaned[1:]
+
+    # FINAL QUALITY CHECK
     return cleaned if len(cleaned) >= 3 else None
 
 
+# LOAD AND VALIDATE IMAGE
 def _load_image(image_path: str):
     path = Path(image_path)
 
     if not path.exists():
-        raise FileNotFoundError(f"{image_path} not found")
+        raise FileNotFoundError(f"{image_path} NOT FOUND")
 
+    # FILE SIZE CHECK
     if path.stat().st_size > settings.MAX_FILE_SIZE_MB * 1024 * 1024:
-        raise ValueError("Image too large")
+        raise ValueError("IMAGE TOO LARGE")
 
     with Image.open(path) as img:
+
+        # ENSURE RGB FORMAT
         img = img.convert("RGB")
 
+        # RESIZE IF TOO LARGE
         max_dim = getattr(settings, "MAX_IMAGE_DIM", 1024)
         if max(img.size) > max_dim:
             img.thumbnail((max_dim, max_dim))
@@ -64,13 +77,16 @@ def _load_image(image_path: str):
         return img.copy()
 
 
+# MAIN CAPTION GENERATION FUNCTION
 def generate_caption(image_path: str, session_id: str = "default") -> Optional[str]:
 
+    # VALIDATE SESSION
     if not session_id:
-        raise ValueError("session_id required")
+        raise ValueError("SESSION_ID REQUIRED")
 
+    # CHECK TORCH AVAILABILITY
     if torch is None:
-        logger.warning("[FrameCaptioner] torch not available")
+        logger.warning("[FrameCaptioner] TORCH NOT AVAILABLE")
         return None
 
     try:
@@ -80,8 +96,10 @@ def generate_caption(image_path: str, session_id: str = "default") -> Optional[s
             image_path
         )
 
+        # LOAD IMAGE
         image = _load_image(image_path)
 
+        # LOAD MODEL
         processor, model, device = model_loader.get_blip()
 
         inputs = processor(image, return_tensors="pt").to(device)
@@ -94,17 +112,24 @@ def generate_caption(image_path: str, session_id: str = "default") -> Optional[s
             )
 
         caption_raw = processor.decode(output[0], skip_special_tokens=True)
+
+        # CLEAN CAPTION
         caption = _clean_caption(caption_raw)
 
+        # VALIDATE CAPTION QUALITY
         if not caption:
-            logger.warning("[FrameCaptioner] weak caption")
+            logger.warning("[FrameCaptioner] WEAK OR EMPTY CAPTION")
             return None
 
-        # Final safety truncation
+        # GLOBAL SAFETY TRUNCATION
         if len(caption) > settings.MAX_PROMPT_CHARS:
             caption = caption[:settings.MAX_PROMPT_CHARS]
 
-        logger.debug("[FrameCaptioner][SUCCESS] session_id=%s", session_id)
+        logger.debug(
+            "[FrameCaptioner][SUCCESS] session_id=%s | caption_len=%s",
+            session_id,
+            len(caption)
+        )
 
         return caption
 
