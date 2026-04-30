@@ -6,7 +6,6 @@ from app.core.config import settings
 from app.core.model_loader import model_loader
 from app.utils.logger import get_logger
 
-
 logger = get_logger(__name__)
 
 
@@ -18,172 +17,119 @@ class HybridRetriever:
         self.embedder = embedder
         self.clip_text_embedder = clip_text_embedder
 
-        self.candidate_multiplier = settings.HYBRID_CANDIDATES_MULTIPLIER
+        self.candidate_multiplier = min(settings.HYBRID_CANDIDATES_MULTIPLIER, 3)
 
         self.w_bm25 = settings.HYBRID_WEIGHT_BM25
         self.w_vector = settings.HYBRID_WEIGHT_VECTOR
         self.w_vision = settings.HYBRID_WEIGHT_VISION
 
-    #  NORMALIZE QUERY 
+        # Embedding cache
+        self._query_embedding_cache = {}
+
     def _normalize_query(self, query: str) -> str:
         return " ".join(query.strip().split())
 
-    #  UNIQUE KEY 
     def _make_key(self, text: str, metadata: Dict) -> str:
         base = "|".join([
-            text[:200],
+            text[:150],
             str(metadata.get("doc_id")),
             str(metadata.get("chunk_id")),
-            str(metadata.get("source")),
-            str(metadata.get("embedding_space")),
         ])
         return hashlib.md5(base.encode()).hexdigest()
 
-    #  MODALITY BOOST (QUERY-AWARE) 
-    def _modality_boost(self, metadata: Dict, query: str) -> float:
-        modality = metadata.get("modality")
+    def _is_vision_query(self, query: str) -> bool:
+        q = query.lower()
+        return any(k in q for k in ["image", "photo", "diagram", "visual"])
 
-        if "image" in query.lower():
-            if modality == "image":
-                return 1.2
+    # Cached Embedding
+    def _get_query_embedding(self, query: str):
+        if query in self._query_embedding_cache:
+            return self._query_embedding_cache[query]
 
-        if "video" in query.lower():
-            if modality == "video":
-                return 1.2
+        vec = self.embedder.embed_query(query)
+        self._query_embedding_cache[query] = vec
+        return vec
 
-        if modality == "table":
-            return 1.1
-
-        return 1.0
-
-    #  GLOBAL NORMALIZATION 
-    def _global_normalize(self, results: List[Dict]):
-
-        if not results:
-            return results
-
-        max_score = max(r.get("score", 0.0) for r in results) or 1.0
-
-        for r in results:
-            r["norm_score"] = r.get("score", 0.0) / (max_score + 1e-6)
-
-        return results
-
-    #  SEARCH 
     def search(self, query: str, session_id: str, top_k: int = None) -> List[Dict]:
 
-        start = time.time()
-
-        if not query or not query.strip():
+        if not query or not session_id:
             return []
 
-        if not session_id:
-            raise ValueError("session_id required")
-
+        start = time.time()
         query = self._normalize_query(query)
 
         top_k = top_k or settings.DEFAULT_TOP_K
-        candidate_k = min(
-            top_k * self.candidate_multiplier,
-            settings.MAX_CHUNKS
-        )
+        candidate_k = min(top_k * self.candidate_multiplier, 15)
 
         try:
-            logger.info("[HybridRetriever][START]")
-
-            #  BM25 
-            t1 = time.time()
+            # BM25
             bm25_results = self.bm25.search(query, session_id, candidate_k)
-            logger.info("[HybridRetriever] bm25 latency=%.2fs", time.time() - t1)
 
-            #  VECTOR 
+            # VECTOR (cached embedding)
             text_vector_results = []
             try:
-                t2 = time.time()
-                q_vec = self.embedder.embed_query(query)
-
+                q_vec = self._get_query_embedding(query)
                 text_vector_results = self.vector_store.search_text(
                     q_vec, candidate_k, session_id
                 )
+            except Exception:
+                pass
 
-                logger.info("[HybridRetriever] vector latency=%.2fs", time.time() - t2)
-
-            except Exception as e:
-                logger.warning("[HybridRetriever] vector fail | %s", str(e))
-
-            #  VISION 
+            # VISION 
             vision_results = []
-            try:
-                t3 = time.time()
-                clip = self.clip_text_embedder or model_loader.get_clip_text_embedder()
-                v_vec = clip.embed_single(query)
+            if self._is_vision_query(query):
+                try:
+                    clip = self.clip_text_embedder or model_loader.get_clip_text_embedder()
+                    v_vec = clip.embed_single(query)
 
-                vision_results = self.vector_store.search_vision(
-                    v_vec, candidate_k, session_id
-                )
-
-                logger.info("[HybridRetriever] vision latency=%.2fs", time.time() - t3)
-
-            except Exception as e:
-                logger.warning("[HybridRetriever] vision fail | %s", str(e))
-
-            # COMBINE ALL FOR GLOBAL NORMALIZATION
-            all_results = bm25_results + text_vector_results + vision_results
-
-            if not all_results:
-                return []
-
-            all_results = self._global_normalize(all_results)
+                    vision_results = self.vector_store.search_vision(
+                        v_vec, candidate_k, session_id
+                    )
+                except Exception:
+                    pass
 
             combined = {}
 
-            for r in all_results:
+            def _add_results(results, weight):
+                for r in results:
+                    text = r.get("text")
+                    metadata = r.get("metadata", {})
 
-                text = r.get("text", "")
-                metadata = r.get("metadata", {})
+                    if not text:
+                        continue
 
-                if not text:
-                    continue
+                    key = self._make_key(text, metadata)
+                    score = r.get("score", 0.0) * weight
 
-                key = self._make_key(text, metadata)
+                    if key not in combined:
+                        combined[key] = {
+                            "text": text,
+                            "metadata": metadata,
+                            "score": score
+                        }
+                    else:
+                        combined[key]["score"] += score
 
-                boost = self._modality_boost(metadata, query)
+            _add_results(bm25_results, self.w_bm25)
+            _add_results(text_vector_results, self.w_vector)
 
-                score = r.get("norm_score", 0.0) * boost
-
-                if key not in combined:
-                    combined[key] = {
-                        "text": text,
-                        "metadata": metadata,
-                        "score": 0.0
-                    }
-
-                # WEIGHT BASED ON SOURCE
-                if r in bm25_results:
-                    score *= self.w_bm25
-                elif r in text_vector_results:
-                    score *= self.w_vector
-                else:
-                    score *= self.w_vision
-
-                combined[key]["score"] += score
+            if vision_results:
+                _add_results(vision_results, self.w_vision)
 
             results = list(combined.values())
 
-            # FILTER LOW QUALITY
-            results = [r for r in results if r["score"] > 0.05]
+            if not results:
+                return []
 
-            results.sort(key=lambda x: x["score"], reverse=True)
-
-            latency = round(time.time() - start, 2)
+            results = sorted(results, key=lambda x: x["score"], reverse=True)[:top_k]
 
             logger.info(
-                "[HybridRetriever][SUCCESS] results=%s latency=%ss",
+                "[HybridRetriever] results=%s latency=%.2fs",
                 len(results),
-                latency
+                time.time() - start
             )
 
-            return results[:top_k]
+            return results
 
         except Exception as e:
             logger.error("[HybridRetriever][FAILED] %s", str(e))
