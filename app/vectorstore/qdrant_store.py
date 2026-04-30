@@ -193,9 +193,9 @@ class QdrantVectorStore:
 
         start = time.time()
 
-        # SAFETY: COLLECTION EXISTS
-        if not self._collection_exists(collection):
-            logger.warning("[QdrantStore] collection missing=%s", collection)
+        # use cache instead of API call
+        if collection not in self._collection_cache:
+            logger.warning("[QdrantStore] collection not initialized=%s", collection)
             return []
 
         try:
@@ -209,14 +209,12 @@ class QdrantVectorStore:
             points = getattr(results, "points", [])
 
             if not points:
-                logger.info("[QdrantStore] empty results | collection=%s", collection)
                 return []
 
             output = []
 
             for r in points:
                 text = r.payload.get("text")
-
                 if not text:
                     continue
 
@@ -225,13 +223,6 @@ class QdrantVectorStore:
                     "score": float(r.score),
                     "metadata": r.payload
                 })
-
-            logger.info(
-                "[QdrantStore][SEARCH] collection=%s results=%s latency=%ss",
-                collection,
-                len(output),
-                round(time.time() - start, 2)
-            )
 
             return output
 

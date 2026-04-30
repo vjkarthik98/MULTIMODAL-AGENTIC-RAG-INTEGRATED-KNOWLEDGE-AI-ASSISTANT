@@ -146,7 +146,8 @@ class BM25Retriever:
         max_score = max(scores.max(), 1e-6)
         normalized = scores / max_score
 
-        indices = np.argsort(normalized)[::-1]
+        indices = np.argpartition(normalized, -top_k)[-top_k:]
+        indices = indices[np.argsort(normalized[indices])[::-1]]
 
         results = []
 
