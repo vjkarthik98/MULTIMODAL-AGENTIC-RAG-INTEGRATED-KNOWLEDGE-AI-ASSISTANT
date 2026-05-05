@@ -1,10 +1,8 @@
 import time
 
-from app.vectorstore.qdrant_store import QdrantVectorStore
 from app.core.config import settings
 from app.utils.logger import get_logger
 from app.core.infra_registry import infra
-
 
 logger = get_logger(__name__)
 
@@ -14,43 +12,43 @@ class QdrantInitializer:
     def __init__(self):
         self.store = infra.get_vector_store()
 
-        self.recreate_allowed = getattr(
-            settings,
-            "QDRANT_ALLOW_RECREATE",
-            False
-        )
+        self.recreate_allowed = getattr(settings, "QDRANT_ALLOW_RECREATE", False)
+        self.max_retries = getattr(settings, "QDRANT_INIT_RETRIES", 2)
+        self.retry_delay = getattr(settings, "QDRANT_RETRY_DELAY", 1)
 
-        self.max_retries = getattr(
-            settings,
-            "QDRANT_INIT_RETRIES",
-            2
-        )
+    # CONNECTION
+    def _ping(self):
+        try:
+            self.store.client.get_collections()
+        except Exception as e:
+            logger.error(event="qdrant_connection_failed", error=str(e))
+            raise
 
-    #  MAIN 
+    # MAIN
     def initialize(self):
 
         start = time.time()
 
-        logger.info("[QdrantInit] starting initialization")
+        logger.info(event="qdrant_init_start")
+
+        self._ping()
 
         for attempt in range(self.max_retries + 1):
 
             try:
-                self._ensure_collection(
+                self._ensure(
                     settings.TEXT_COLLECTION_NAME,
                     settings.TEXT_EMBEDDING_DIM,
-                    "text"
                 )
 
-                self._ensure_collection(
+                self._ensure(
                     settings.VISION_COLLECTION_NAME,
                     settings.VISION_EMBEDDING_DIM,
-                    "vision"
                 )
 
                 logger.info(
-                    "[QdrantInit] success | latency=%.2fs",
-                    time.time() - start
+                    event="qdrant_init_success",
+                    latency=round(time.time() - start, 2)
                 )
 
                 return True
@@ -58,76 +56,69 @@ class QdrantInitializer:
             except Exception as e:
 
                 logger.warning(
-                    "[QdrantInit] attempt %s failed | %s",
-                    attempt,
-                    str(e)
+                    event="qdrant_init_retry",
+                    attempt=attempt,
+                    error=str(e)
                 )
 
                 if attempt >= self.max_retries:
-                    logger.error("[QdrantInit] failed permanently")
+                    logger.error(event="qdrant_init_failed")
                     raise
 
-                time.sleep(1)
+                time.sleep(self.retry_delay)
 
-    #  ENSURE COLLECTION 
-    def _ensure_collection(self, name: str, dim: int, label: str):
-
-        logger.info("[QdrantInit] checking collection=%s", name)
+    # ENSURE
+    def _ensure(self, name: str, dim: int):
 
         try:
             info = self.store.client.get_collection(name)
-            existing_dim = (
-                info.config.params.vectors.size
-            )
+            existing_dim = info.config.params.vectors.size
 
             if existing_dim != dim:
 
                 logger.warning(
-                    "[QdrantInit] dimension mismatch | %s existing=%s expected=%s",
-                    name,
-                    existing_dim,
-                    dim
+                    event="qdrant_dim_mismatch",
+                    collection=name,
+                    existing=existing_dim,
+                    expected=dim
                 )
 
-                if self.recreate_allowed:
+                if not self.recreate_allowed:
+                    raise ValueError(f"DIMENSION_MISMATCH_{name}")
 
-                    logger.warning(
-                        "[QdrantInit] recreating collection=%s",
-                        name
-                    )
-
-                    self.store.client.delete_collection(name)
-
-                    self.store._ensure_collection(name, dim)
-
-                else:
-                    raise ValueError(
-                        f"Dimension mismatch for {name}"
-                    )
+                self._recreate(name, dim)
 
             else:
                 logger.info(
-                    "[QdrantInit] collection OK | %s dim=%s",
-                    name,
-                    dim
+                    event="qdrant_collection_ok",
+                    collection=name,
+                    dim=dim
                 )
 
         except Exception:
-
-            # COLLECTION DOES NOT EXIST → CREATE
             logger.info(
-                "[QdrantInit] creating collection=%s dim=%s",
-                name,
-                dim
+                event="qdrant_create_collection",
+                collection=name,
+                dim=dim
             )
 
             self.store._ensure_collection(name, dim)
 
+    # RECREATE
+    def _recreate(self, name: str, dim: int):
 
-#  ENTRYPOINT 
+        logger.warning(
+            event="qdrant_recreate_collection",
+            collection=name
+        )
+
+        self.store.client.delete_collection(name)
+        self.store._ensure_collection(name, dim)
+
+
+# ENTRY
 def initialize_qdrant():
-    initializer = QdrantInitializer()
-    return initializer.initialize()
+    return QdrantInitializer().initialize()
 
 
 if __name__ == "__main__":

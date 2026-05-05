@@ -1,11 +1,11 @@
+import hashlib
 import time
 from typing import List, Union, Dict
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from app.core.config import settings
-
 from app.utils.logger import get_logger
 
 try:
@@ -24,7 +24,7 @@ class ImageEmbedder:
     def __init__(self, model, processor, device):
 
         if torch is None or F is None:
-            raise ImportError("TORCH REQUIRED FOR IMAGE EMBEDDING")
+            raise ImportError("TORCH_REQUIRED")
 
         self.processor = processor
         self.model = model
@@ -32,32 +32,79 @@ class ImageEmbedder:
 
         self.max_image_size = getattr(settings, "MAX_IMAGE_DIM", 1024)
         self.expected_dim = settings.VISION_EMBEDDING_DIM
+        self.batch_size = getattr(settings, "INGESTION_BATCH_SIZE", 32)
 
-        logger.info("[ImageEmbedder] initialized | device=%s", self.device)
+        logger.info(
+            event="image_embedder_initialized",
+            device=device
+        )
 
-    # SINGLE EMBEDDING
+    #  HASH 
+    def _hash(self, path: Path) -> str:
+        return hashlib.sha256(str(path.resolve()).encode()).hexdigest()
+
+    #  VALIDATE 
+    def _valid_embedding(self, emb: List[float]) -> bool:
+        return isinstance(emb, list) and len(emb) == self.expected_dim
+
+    #  LOAD 
+    def _load_images(self, paths: List[Union[str, Path]]):
+
+        images = []
+        seen: Dict[str, bool] = {}
+
+        for p in paths:
+            try:
+                path = Path(p)
+
+                if not path.exists():
+                    continue
+
+                if path.stat().st_size > settings.MAX_FILE_SIZE_MB * 1024 * 1024:
+                    continue
+
+                h = self._hash(path)
+                if h in seen:
+                    continue
+                seen[h] = True
+
+                with Image.open(path) as img:
+                    img = ImageOps.exif_transpose(img).convert("RGB")
+
+                    if img.size[0] < 32 or img.size[1] < 32:
+                        continue
+
+                    if max(img.size) > self.max_image_size:
+                        img.thumbnail((self.max_image_size, self.max_image_size))
+
+                    images.append(img.copy())
+
+            except Exception as e:
+                logger.warning(event="image_load_failed", error=str(e))
+
+        if not images:
+            raise ValueError("NO_VALID_IMAGES")
+
+        limit = getattr(settings, "MAX_PARALLEL_REQUESTS", 100)
+        return images[:limit]
+
+    #  SINGLE 
     def embed(self, image_path: Union[str, Path]) -> List[float]:
         return self.embed_batch([image_path])[0]
 
-    # BATCH EMBEDDING (SAFE)
+    #  BATCH 
     def embed_batch(self, image_paths: List[Union[str, Path]]) -> List[List[float]]:
 
         start = time.time()
 
-        images, valid_paths = self._load_images(image_paths)
-
+        images = self._load_images(image_paths)
         results = []
 
-        # SAFE BATCH PROCESSING
-        for i in range(0, len(images), settings.INGESTION_BATCH_SIZE):
-
-            batch_images = images[i:i + settings.INGESTION_BATCH_SIZE]
+        for i in range(0, len(images), self.batch_size):
+            batch = images[i:i + self.batch_size]
 
             try:
-                inputs = self.processor(
-                    images=batch_images,
-                    return_tensors="pt"
-                ).to(self.device)
+                inputs = self.processor(images=batch, return_tensors="pt").to(self.device)
 
                 with torch.no_grad():
                     features = self.model.get_image_features(**inputs)
@@ -66,87 +113,19 @@ class ImageEmbedder:
                 embeddings = features.detach().cpu().numpy().tolist()
 
                 for emb in embeddings:
-                    if self._validate_embedding(emb):
+                    if self._valid_embedding(emb):
                         results.append(emb)
 
             except Exception as e:
-                logger.error("[ImageEmbedder][BATCH_FAIL] %s", str(e))
-                continue
+                logger.error(event="image_batch_failed", error=str(e))
 
         if not results:
-            raise ValueError("NO VALID IMAGE EMBEDDINGS")
+            raise ValueError("NO_EMBEDDINGS")
 
         logger.info(
-            "[ImageEmbedder][SUCCESS] count=%s | latency=%.2fs",
-            len(results),
-            time.time() - start
+            event="image_embed_success",
+            count=len(results),
+            latency=round(time.time() - start, 3)
         )
 
         return results
-
-    # VALIDATE EMBEDDING
-    def _validate_embedding(self, emb: List[float]) -> bool:
-
-        if not emb or not isinstance(emb, list):
-            return False
-
-        if len(emb) != self.expected_dim:
-            logger.warning(
-                "[ImageEmbedder] DIM MISMATCH expected=%s got=%s",
-                self.expected_dim,
-                len(emb)
-            )
-            return False
-
-        return True
-
-    # LOAD AND PREPROCESS IMAGES
-    def _load_images(self, image_paths: List[Union[str, Path]]):
-
-        loaded_images = []
-        valid_paths = []
-
-        seen: Dict[str, int] = {}
-
-        for path in image_paths:
-            try:
-                path = Path(path)
-
-                if not path.exists():
-                    logger.warning("[ImageEmbedder] NOT FOUND: %s", path)
-                    continue
-
-                # DEDUPLICATION
-                key = str(path.resolve())
-                if key in seen:
-                    continue
-                seen[key] = 1
-
-                # SIZE CHECK
-                if path.stat().st_size > settings.MAX_FILE_SIZE_MB * 1024 * 1024:
-                    logger.warning("[ImageEmbedder] TOO LARGE: %s", path)
-                    continue
-
-                with Image.open(path) as img:
-
-                    # NORMALIZE IMAGE
-                    img = img.convert("RGB")
-
-                    # RESIZE
-                    if max(img.size) > self.max_image_size:
-                        img.thumbnail((self.max_image_size, self.max_image_size))
-
-                    loaded_images.append(img.copy())
-                    valid_paths.append(str(path))
-
-            except Exception as e:
-                logger.warning("[ImageEmbedder] LOAD FAIL %s | %s", path, str(e))
-                continue
-
-        if not loaded_images:
-            raise ValueError("NO VALID IMAGES")
-
-        # HARD LIMIT
-        max_batch = getattr(settings, "MAX_PARALLEL_REQUESTS", 100)
-
-        return loaded_images[:max_batch], valid_paths[:max_batch]

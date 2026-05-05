@@ -1,11 +1,10 @@
+import hashlib
 import time
 from typing import List, Tuple, Dict
 from pathlib import Path
 
 from app.core.config import settings
-
 from app.utils.logger import get_logger
-
 
 logger = get_logger(__name__)
 
@@ -19,159 +18,144 @@ class MultimodalEmbedder:
         self.batch_size = settings.EMBEDDING_BATCH_SIZE
         self.max_docs = getattr(settings, "MAX_PARALLEL_REQUESTS", 100)
 
-    # RESOLVE IMAGE/FRAME PATH
-    def _resolve_asset_path(self, document) -> str:
-        structure = getattr(document, "structure", {}) or {}
+    #  HASH 
+    def _hash(self, text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    #  PATH 
+    def _resolve_asset_path(self, doc) -> str:
+        structure = getattr(doc, "structure", {}) or {}
 
         path = structure.get("asset_path") or structure.get("frame_path")
-
         if not path:
             return None
 
         p = Path(path)
-
         if not p.exists():
-            logger.warning("[Embedder] FILE NOT FOUND: %s", path)
+            logger.warning(event="asset_missing", path=str(path))
             return None
 
         return str(p)
 
-    # VALIDATE EMBEDDING
-    def _is_valid_embedding(self, emb, expected_dim):
-        return isinstance(emb, list) and len(emb) == expected_dim
+    #  VALID 
+    def _valid(self, emb, dim: int) -> bool:
+        return isinstance(emb, list) and len(emb) == dim
 
-    # ROUTING LOGIC (STRICT)
-    def _route_documents(self, documents):
+    #  ROUTE 
+    def _route(self, docs):
 
         text_docs = []
         vision_docs = []
 
-        for doc in documents:
+        for doc in docs:
             try:
-                modality = getattr(doc, "modality", "")
-                subtype = getattr(doc, "subtype", "")
+                m = getattr(doc, "modality", "")
+                st = getattr(doc, "subtype", "")
 
-                # TEXT SPACE
-                if modality in {"text", "table", "audio"}:
+                if m in {"text", "table", "audio"}:
                     text_docs.append(doc)
 
-                # IMAGE
-                elif modality == "image":
-                    text_docs.append(doc)  # caption + OCR → text space
-                    if subtype == "caption":
+                elif m == "image":
+                    text_docs.append(doc)  # caption + OCR
+                    if st == "caption":
                         vision_docs.append(doc)
 
-                # VIDEO
-                elif modality == "video":
-                    if subtype == "speech":
+                elif m == "video":
+                    if st == "speech":
                         text_docs.append(doc)
-                    elif subtype == "frame":
+                    elif st == "frame":
                         vision_docs.append(doc)
 
             except Exception as e:
-                logger.warning("[MultimodalEmbedder][ROUTE_FAIL] %s", str(e))
+                logger.warning(event="route_failed", error=str(e))
 
         return text_docs, vision_docs
 
-    # MAIN EMBEDDING FUNCTION
+    #  MAIN 
     def embed_documents(
         self,
         documents: List,
-        session_id: str = "default"
+        session_id: str
     ) -> Tuple[List, List]:
 
         if not documents:
             return [], []
 
         if not session_id:
-            raise ValueError("SESSION_ID REQUIRED")
+            raise ValueError("SESSION_ID_REQUIRED")
 
-        start_time = time.time()
+        start = time.time()
 
-        # GLOBAL LIMIT
-        documents = documents[:self.max_docs]
+        docs = documents[:self.max_docs]
 
-        # DEDUPLICATION
-        seen: Dict[str, int] = {}
+        # stable dedup
+        seen: Dict[str, bool] = {}
         unique_docs = []
 
-        for doc in documents:
-            key = getattr(doc, "text", "")[:100]
-
-            if key in seen:
+        for d in docs:
+            h = self._hash(getattr(d, "text", ""))
+            if h in seen:
                 continue
+            seen[h] = True
+            unique_docs.append(d)
 
-            seen[key] = 1
-            unique_docs.append(doc)
+        text_docs, vision_docs = self._route(unique_docs)
 
-        # ROUTE DOCUMENTS
-        text_documents, vision_documents = self._route_documents(unique_docs)
-
-        #  TEXT EMBEDDING 
-        embedded_text_documents = []
-
-        if text_documents:
+        #  TEXT 
+        embedded_text = []
+        if text_docs:
             try:
-                embedded_text_documents = self.text_embedder.embed_documents(
-                    text_documents,
+                embedded_text = self.text_embedder.embed_documents(
+                    text_docs,
                     session_id=session_id
                 )
             except Exception as e:
-                logger.error("[MultimodalEmbedder][TEXT_FAIL] %s", str(e))
+                logger.error(event="text_embed_failed", error=str(e))
 
-        #  VISION EMBEDDING 
-        embedded_vision_documents = []
+        #  VISION 
+        embedded_vision = []
 
-        for i in range(0, len(vision_documents), self.batch_size):
-
-            batch = vision_documents[i:i + self.batch_size]
+        for i in range(0, len(vision_docs), self.batch_size):
+            batch = vision_docs[i:i + self.batch_size]
 
             paths = []
             valid_docs = []
 
-            for doc in batch:
-                try:
-                    path = self._resolve_asset_path(doc)
+            for d in batch:
+                p = self._resolve_asset_path(d)
+                if not p:
+                    continue
 
-                    if not path:
-                        continue
-
-                    paths.append(path)
-                    valid_docs.append(doc)
-
-                except Exception as e:
-                    logger.warning("[MultimodalEmbedder][PATH_FAIL] %s", str(e))
+                paths.append(p)
+                valid_docs.append(d)
 
             if not paths:
                 continue
 
             try:
-                embeddings = self.image_embedder.embed_batch(paths)
+                embs = self.image_embedder.embed_batch(paths)
 
-                for doc, emb in zip(valid_docs, embeddings):
+                for doc, emb in zip(valid_docs, embs):
 
-                    if not self._is_valid_embedding(emb, settings.VISION_EMBEDDING_DIM):
+                    if not self._valid(emb, settings.VISION_EMBEDDING_DIM):
                         continue
 
                     doc.embedding = emb
 
-                    structure = dict(getattr(doc, "structure", {}) or {})
-                    structure["embedding_space"] = "vision"
-                    doc.structure = structure
+                    s = dict(doc.structure or {})
+                    s["embedding_space"] = "vision"
+                    doc.structure = s
 
-                    embedded_vision_documents.append(doc)
+                    embedded_vision.append(doc)
 
             except Exception as e:
-                logger.error("[MultimodalEmbedder][VISION_FAIL] %s", str(e))
-                continue
-
-        latency = round(time.time() - start_time, 2)
+                logger.error(event="vision_embed_failed", error=str(e))
 
         logger.info(
-            "[MultimodalEmbedder][SUCCESS] text=%s | vision=%s | latency=%ss",
-            len(embedded_text_documents),
-            len(embedded_vision_documents),
-            latency
+            event="multimodal_embed_success",
+            text=len(embedded_text),
+            vision=len(embedded_vision),
+            latency=round(time.time() - start, 3)
         )
 
-        return embedded_text_documents, embedded_vision_documents
+        return embedded_text, embedded_vision

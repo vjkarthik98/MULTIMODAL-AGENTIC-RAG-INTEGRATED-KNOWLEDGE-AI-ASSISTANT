@@ -1,17 +1,18 @@
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 
 from app.core.config import settings
 
 
 ALLOWED_MODALITIES = {"text", "table", "image", "audio", "video"}
+ALLOWED_EMBEDDING_SPACES = {"text", "vision"}
 
 
 class IngestedDocument(BaseModel):
 
-    # CORE FIELDS
+    #  CORE 
     text: str
     modality: str
     subtype: Optional[str] = None
@@ -22,30 +23,28 @@ class IngestedDocument(BaseModel):
     page: Optional[int] = None
     chunk_id: Optional[int] = None
 
-    # SAFE DEFAULTS (CRITICAL FIX)
+    #  STRUCTURE 
     structure: Dict[str, Any] = Field(default_factory=dict)
     extra_metadata: Dict[str, Any] = Field(default_factory=dict)
 
     embedding: Optional[List[float]] = None
 
     #  NORMALIZATION 
-    def normalize(self):
+    def normalize(self) -> "IngestedDocument":
 
-        # CLEAN TEXT
         self.text = (self.text or "").strip()
 
-        if len(self.text) > settings.MAX_PROMPT_CHARS:
-            self.text = self.text[:settings.MAX_PROMPT_CHARS]
+        # STRICT: NO BLIND TRUNCATION (critical fix)
+        if not self.text:
+            raise ValueError("EMPTY_TEXT")
 
-        # NORMALIZE MODALITY
         self.modality = (self.modality or "").strip().lower()
 
         if self.subtype:
             self.subtype = self.subtype.strip().lower()
 
-        self.source_type = (self.source_type or "file").strip()
+        self.source_type = (self.source_type or "file").strip().lower()
 
-        # ENSURE DICTS
         if self.structure is None:
             self.structure = {}
 
@@ -55,59 +54,66 @@ class IngestedDocument(BaseModel):
         return self
 
     #  VALIDATION 
-    def validate(self):
+    def validate(self) -> "IngestedDocument":
 
         # TEXT VALIDATION
-        if not self.text or len(self.text.strip()) < 3:
-            raise ValueError("TEXT TOO SHORT OR EMPTY")
+        if len(self.text) < 3:
+            raise ValueError("TEXT_TOO_SHORT")
 
-        # MODALITY VALIDATION
+        # MODALITY
         if self.modality not in ALLOWED_MODALITIES:
-            raise ValueError(f"INVALID MODALITY: {self.modality}")
+            raise ValueError(f"INVALID_MODALITY_{self.modality}")
 
-        # PAGE VALIDATION
+        # PAGE
         if self.page is not None and self.page < 1:
-            raise ValueError("PAGE MUST BE >= 1")
+            raise ValueError("INVALID_PAGE")
 
-        # CHUNK VALIDATION
+        # CHUNK
         if self.chunk_id is not None and self.chunk_id < 0:
-            raise ValueError("CHUNK_ID MUST BE >= 0")
+            raise ValueError("INVALID_CHUNK_ID")
 
-        # STRUCTURE VALIDATION
+        # STRUCTURE
         if not isinstance(self.structure, dict):
-            raise ValueError("STRUCTURE MUST BE DICT")
+            raise ValueError("INVALID_STRUCTURE")
 
-        # REQUIRED STRUCTURE FIELDS
+        # REQUIRED FIELDS
         self.structure.setdefault("doc_id", str(uuid4()))
         self.structure.setdefault("session_id", "default")
 
-        # STANDARDIZE OPTIONAL FIELDS
+        # STANDARD FIELDS
         self.structure.setdefault("content_type", "unknown")
         self.structure.setdefault("embedding_space", "text")
 
-        # METADATA VALIDATION
+        # VALIDATE EMBEDDING SPACE
+        if self.structure["embedding_space"] not in ALLOWED_EMBEDDING_SPACES:
+            raise ValueError("INVALID_EMBEDDING_SPACE")
+
+        # EXTRA METADATA
         if not isinstance(self.extra_metadata, dict):
-            raise ValueError("EXTRA_METADATA MUST BE DICT")
+            raise ValueError("INVALID_EXTRA_METADATA")
 
-        # EMBEDDING VALIDATION
+        self.extra_metadata.setdefault("importance_score", 1.0)
+        self.extra_metadata.setdefault("modality_weight", 1.0)
+        self.extra_metadata.setdefault("data_quality_score", 1.0)
+
+        # EMBEDDING
         if self.embedding is not None:
-
             if not isinstance(self.embedding, list):
-                raise ValueError("EMBEDDING MUST BE LIST")
+                raise ValueError("INVALID_EMBEDDING")
 
-            if len(self.embedding) not in (
+            dim = len(self.embedding)
+
+            if dim not in (
                 settings.TEXT_EMBEDDING_DIM,
                 settings.VISION_EMBEDDING_DIM,
             ):
-                raise ValueError("INVALID EMBEDDING DIMENSION")
+                raise ValueError("INVALID_EMBEDDING_DIM")
 
         return self
 
     #  FINALIZE 
-    def finalize(self):
-        self.normalize()
-        self.validate()
-        return self
+    def finalize(self) -> "IngestedDocument":
+        return self.normalize().validate()
 
     #  CLONE 
     def clone(self, **updates: Any) -> "IngestedDocument":
@@ -115,7 +121,7 @@ class IngestedDocument(BaseModel):
         data.update(updates)
         return IngestedDocument(**data).finalize()
 
-    #  SERIALIZATION 
+    #  SERIALIZE 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "text": self.text,
@@ -139,4 +145,5 @@ class IngestedDocument(BaseModel):
             "chunk_id": self.chunk_id,
             "doc_id": self.structure.get("doc_id"),
             "session_id": self.structure.get("session_id"),
+            "embedding_space": self.structure.get("embedding_space"),
         }

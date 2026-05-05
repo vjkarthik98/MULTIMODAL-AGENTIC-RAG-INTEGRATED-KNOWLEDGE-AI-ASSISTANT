@@ -4,42 +4,50 @@ import time
 import uuid
 from typing import List
 
+from pydub import AudioSegment, silence
+
 from app.core.config import settings
 from app.core.model_loader import model_loader
 from app.ingestion.schema import IngestedDocument
 from app.utils.logger import get_logger
 
-
 logger = get_logger(__name__)
 
 
-# GENERATE FILE HASH
+#  HASH 
 def _generate_file_hash(file_path: str) -> str:
-    hash_md5 = hashlib.md5()
-
+    h = hashlib.md5()
     with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            hash_md5.update(chunk)
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
-    return hash_md5.hexdigest()
+
+#  VALIDATION 
+def _validate_audio(file_path: str):
+    audio = AudioSegment.from_file(file_path)
+
+    if audio.duration_seconds <= 0:
+        raise ValueError("INVALID_AUDIO_DURATION")
+
+    if audio.frame_rate <= 0:
+        raise ValueError("INVALID_SAMPLE_RATE")
+
+    return audio
 
 
-# MAIN INGEST FUNCTION
-def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument]:
+#  MAIN 
+def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
-    # VALIDATE SESSION
     if not session_id:
-        raise ValueError("SESSION_ID REQUIRED")
+        raise ValueError("SESSION_ID_REQUIRED")
 
-    # VALIDATE FILE
     if not os.path.exists(file_path):
-        raise FileNotFoundError(f"{file_path} NOT FOUND")
+        raise FileNotFoundError(file_path)
 
-    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-
-    # FILE SIZE LIMIT
-    if file_size_mb > settings.MAX_FILE_SIZE_MB:
-        raise ValueError(f"FILE TOO LARGE ({file_size_mb:.2f}MB)")
+    size_mb = os.path.getsize(file_path) / (1024 * 1024)
+    if size_mb > settings.MAX_FILE_SIZE_MB:
+        raise ValueError("FILE_TOO_LARGE")
 
     start_time = time.time()
 
@@ -49,105 +57,121 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
     doc_id = str(uuid.uuid4())
     file_hash = _generate_file_hash(file_path)
 
+    logger.info(event="audio_ingest_start", file=file_path)
+
     try:
-        logger.info("[AudioIngest][START] session_id=%s | file=%s", session_id, file_path)
+        #  VALIDATE 
+        audio = _validate_audio(file_path)
 
-        # LOAD WHISPER MODEL
-        whisper_model = model_loader.get_whisper()
+        duration_total = audio.duration_seconds
 
-        segments_iter, info = whisper_model.transcribe(file_path)
+        #  SILENCE 
+        silent_ranges = silence.detect_silence(
+            audio,
+            min_silence_len=200,
+            silence_thresh=-40
+        )
+
+        #  MODEL 
+        whisper = model_loader.get_whisper()
+        segments_iter, info = whisper.transcribe(file_path)
 
         documents: List[IngestedDocument] = []
 
         language = getattr(info, "language", None)
 
         max_segments = getattr(settings, "MAX_AUDIO_SEGMENTS", 500)
-        max_duration = settings.MAX_AUDIO_DURATION_SEC
 
-        for index, segment in enumerate(segments_iter):
+        for idx, segment in enumerate(segments_iter):
 
-            # LIMIT SEGMENTS
-            if index >= max_segments:
-                logger.warning("[AudioIngest] SEGMENT LIMIT REACHED")
+            if idx >= max_segments:
+                logger.warning(event="audio_segment_limit")
                 break
 
-            raw_text = getattr(segment, "text", "") or ""
-            text = raw_text.strip()
+            text = (getattr(segment, "text", "") or "").strip()
+            start = float(getattr(segment, "start", 0.0))
+            end = float(getattr(segment, "end", start))
 
-            # SKIP EMPTY OR LOW QUALITY TEXT
-            if not text or len(text) < 3:
+            if not text or end <= start:
                 continue
 
-            start = round(float(getattr(segment, "start", 0.0)), 2)
-            end = round(float(getattr(segment, "end", start)), 2)
+            duration = end - start
 
-            # VALIDATE TIMESTAMPS
-            if end <= start:
-                continue
+            #  SILENCE CHECK 
+            inaudible = any(s <= start * 1000 <= e for s, e in silent_ranges)
 
-            if end > max_duration:
-                logger.warning("[AudioIngest] MAX AUDIO DURATION REACHED")
-                break
+            if inaudible:
+                text = "[INAUDIBLE]"
 
-            duration = round(end - start, 2)
+            #  CONFIDENCE 
+            avg_logprob = getattr(segment, "avg_logprob", None)
+            no_speech_prob = getattr(segment, "no_speech_prob", None)
 
-            # FILTER VERY SHORT SEGMENTS (NOISE)
-            if duration < 0.3:
-                continue
+            confidence = 1.0
+            if avg_logprob is not None:
+                confidence = max(0.0, min(1.0, 1 + avg_logprob))
 
-            documents.append(
-                IngestedDocument(
-                    text=f"Audio speech from {start}s to {end}s: {text}",
-                    modality="audio",
-                    subtype="speech",
-                    source_type="audio",
-                    source=source_name,
+            #  SPEECH RATE 
+            words = len(text.split())
+            wpm = (words / duration) * 60 if duration > 0 else 0
 
-                    # STRUCTURED METADATA
-                    structure={
-                        "doc_id": doc_id,
-                        "session_id": session_id,
-                        "file_hash": file_hash,
-                        "source_path": source_path,
-                        "segment_index": index,
-                        "start_time": start,
-                        "end_time": end,
-                        "duration": duration,
-                        "language": language,
-                        "model": settings.WHISPER_MODEL,
-                        "modality_source": "audio",
-                        "content_type": "speech_segment",
-                        "ingestion_time": time.time(),
-                    },
+            speed_flag = False
+            if wpm > 250 or wpm < 60:
+                speed_flag = True
 
-                    # EXTRA METADATA FOR SCORING
-                    extra_metadata={
-                        "modality_weight": 1.1,
-                        "importance_score": 1.0,
-                    },
-                ).finalize()
-            )
+            #  QUALITY 
+            hallucination_risk = "low"
+            if confidence < 0.5:
+                hallucination_risk = "high"
 
-        # FINAL VALIDATION
+            doc = IngestedDocument(
+                text=f"{text}",
+                modality="audio",
+                subtype="speech",
+                source_type="audio",
+                source=source_name,
+
+                structure={
+                    "doc_id": doc_id,
+                    "session_id": session_id,
+                    "file_hash": file_hash,
+                    "source_path": source_path,
+                    "segment_index": idx,
+                    "timestamp_start": round(start, 2),
+                    "timestamp_end": round(end, 2),
+                    "duration": round(duration, 2),
+                    "language": language,
+                    "confidence": confidence,
+                    "no_speech_prob": no_speech_prob,
+                    "avg_logprob": avg_logprob,
+                    "hallucination_risk": hallucination_risk,
+                    "speed_corrupted": speed_flag,
+                    "content_type": "speech_segment",
+                    "ingestion_time": time.time(),
+                },
+
+                extra_metadata={
+                    "modality_weight": 1.1,
+                    "importance_score": confidence,
+                    "data_quality_score": confidence,
+                },
+            ).finalize()
+
+            documents.append(doc)
+
         if not documents:
-            logger.error("[AudioIngest][EMPTY] session_id=%s", session_id)
-            raise ValueError("NO VALID AUDIO SEGMENTS EXTRACTED")
+            raise ValueError("NO_VALID_AUDIO")
 
         latency = round(time.time() - start_time, 2)
 
         logger.info(
-            "[AudioIngest][SUCCESS] session_id=%s | segments=%s | latency=%.2fs",
-            session_id,
-            len(documents),
-            latency
+            event="audio_ingest_success",
+            segments=len(documents),
+            latency=latency
         )
 
         return documents
 
-    except Exception as exc:
-        logger.error(
-            "[AudioIngest][FAILED] session_id=%s | error=%s",
-            session_id,
-            str(exc)
-        )
-        raise RuntimeError(f"AUDIO INGESTION FAILED: {exc}") from exc
+    except Exception as e:
+        logger.error(event="audio_ingest_failed", error=str(e))
+        raise

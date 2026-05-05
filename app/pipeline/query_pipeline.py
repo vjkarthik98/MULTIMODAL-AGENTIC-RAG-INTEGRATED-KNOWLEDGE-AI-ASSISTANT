@@ -1,6 +1,7 @@
 from typing import Dict, Any
 import time
 import json
+import hashlib
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -12,6 +13,7 @@ from app.memory.memory_filter import filter_relevant_history
 from app.memory.memory_fusion import build_memory_context
 
 from app.retrieval.hybrid_retriever import HybridRetriever
+from app.retrieval.reranker import Reranker
 
 from app.reasoning.reasoning_engine import ReasoningEngine
 from app.reasoning.query_decomposer import QueryDecomposer
@@ -19,97 +21,100 @@ from app.reasoning.result_fusion import ResultFusion
 
 from app.core.infra_registry import infra
 
-
 logger = get_logger(__name__)
 
 
-# GLOBAL SINGLETONS
+#  GLOBAL 
 _agent = AgentController()
 _bm25 = infra.get_bm25()
 _vector_store = infra.get_vector_store()
 _memory = infra.get_memory()
 
 _fusion = ResultFusion()
+_reranker = Reranker()
 
 _hybrid = None
-_reasoning_engine = None
+_reasoning = None
 _decomposer = None
 
 
-# CACHE
-def _get_cache_key(session_id: str, query: str) -> str:
-    return f"response_cache:{session_id}:{query.strip().lower()}"
+#  CACHE 
+def _cache_key(session_id: str, query: str):
+    base = f"{session_id}:{query.strip().lower()}"
+    return "resp:" + hashlib.sha256(base.encode()).hexdigest()
 
 
-def _get_cached_response(session_id: str, query: str):
+def _cache_get(session_id, query):
     try:
-        cached = _memory.client.get(_get_cache_key(session_id, query))
-        if cached:
-            logger.info("[Cache] HIT")
-            return json.loads(cached)
+        val = _memory.client.get(_cache_key(session_id, query))
+        return json.loads(val) if val else None
     except Exception:
-        pass
-    return None
+        return None
 
 
-def _set_cached_response(session_id: str, query: str, response: dict):
+def _cache_set(session_id, query, data):
     try:
         _memory.client.setex(
-            _get_cache_key(session_id, query),
+            _cache_key(session_id, query),
             settings.REDIS_TTL_SECONDS,
-            json.dumps(response)
+            json.dumps(data)
         )
     except Exception:
         pass
 
 
+#  SINGLETON 
 def _get_hybrid(embedder):
     global _hybrid
-    if _hybrid is None:
+    if not _hybrid:
         _hybrid = HybridRetriever(_bm25, _vector_store, embedder)
     return _hybrid
 
 
 def _get_reasoning(llm):
-    global _reasoning_engine, _decomposer
-    if _reasoning_engine is None:
-        _reasoning_engine = ReasoningEngine(llm)
-    if _decomposer is None:
+    global _reasoning, _decomposer
+    if not _reasoning:
+        _reasoning = ReasoningEngine(llm)
+    if not _decomposer:
         _decomposer = QueryDecomposer(llm)
-    return _reasoning_engine, _decomposer
+    return _reasoning, _decomposer
 
 
+#  MAIN 
 def query_pipeline(query: str, session_id: str = "default") -> Dict[str, Any]:
 
-    start_time = time.time()
+    start = time.time()
 
-    if not query.strip():
+    if not query or not query.strip():
         return {"answer": "Query cannot be empty."}
 
     query = " ".join(query.strip().split())
 
-    # CACHE
-    cached = _get_cached_response(session_id, query)
+    #  CACHE 
+    cached = _cache_get(session_id, query)
     if cached:
-        cached["latency"] = round(time.time() - start_time, 4)
+        cached["latency"] = round(time.time() - start, 3)
         return cached
 
     try:
         llm = model_loader.get_llm()
         embedder = model_loader.get_embedder()
-        reranker = model_loader.get_reranker()
 
-        reasoning_engine, decomposer = _get_reasoning(llm)
+        reasoning, decomposer = _get_reasoning(llm)
         hybrid = _get_hybrid(embedder)
 
-        # AGENT
-        agent_result = _agent.handle(query, session_id)
-        if agent_result.get("source") in ["search", "direct", "memory"]:
-            response = {"answer": agent_result.get("response")}
-            _set_cached_response(session_id, query, response)
-            return response
+        #  AGENT 
+        agent = _agent.handle(query, session_id)
 
-        # MEMORY 
+        if agent.get("decision") in {"direct", "search", "memory"}:
+            resp = {
+                "answer": agent.get("response", ""),
+                "latency": round(time.time() - start, 3)
+            }
+            _cache_set(session_id, query, resp)
+            return resp
+
+        #  MEMORY 
         memory_context = ""
         if len(query) > 25:
             history = _memory.get_history(session_id)
@@ -117,56 +122,60 @@ def query_pipeline(query: str, session_id: str = "default") -> Dict[str, Any]:
                 filtered = filter_relevant_history(query, history, embedder)
                 memory_context = build_memory_context("", filtered)
 
-        # SINGLE QUERY 
-        if len(query) > 50:
+        #  DECOMPOSE 
+        queries = [query]
+        if len(query) > 60:
             sub = decomposer.decompose(query)
-            query = sub[0] if sub else query
+            if sub:
+                queries = sub[:2]
 
-        # RETRIEVAL
-        retrieval_results = hybrid.search(query, session_id, top_k=5)
+        #  RETRIEVAL 
+        retrieved = []
 
-        if not retrieval_results:
+        for q in queries:
+            retrieved.extend(
+                hybrid.search(q, session_id=session_id, top_k=5)
+            )
+
+        if not retrieved:
             return {"answer": "No relevant information found."}
 
-        # LIMIT HARD
-        retrieval_results = retrieval_results[:5]
+        #  FUSION 
+        fused = _fusion.fuse(retrieved, session_id=session_id)
 
-        # FUSION
-        fused = _fusion.fuse(retrieval_results)[:4]
+        if not fused:
+            return {"answer": "No relevant information found."}
 
-        # RERANK ONLY IF NEEDED
-        if len(query) > 30:
-            pairs = [(query, doc["text"]) for doc in fused]
-            scores = reranker.predict(pairs)
+        #  RERANK 
+        reranked = _reranker.rerank(query, fused, top_k=5)
 
-            for doc, score in zip(fused, scores):
-                doc["score"] = float(score)
+        if not reranked:
+            return {"answer": "No relevant information found."}
 
-            reranked = sorted(fused, key=lambda x: x["score"], reverse=True)[:3]
-        else:
-            reranked = fused[:2]
+        #  FINAL CONTEXT 
+        final_docs = reranked[:settings.RAG_TOP_K]
 
-        # VERY SMALL CONTEXT
-        context = "\n\n".join(d["text"][:80] for d in reranked)
-
-        # LLM
-        output = reasoning_engine.generate_answer(
+        #  REASONING 
+        output = reasoning.generate_answer(
             query=query,
-            retrieved_docs=reranked,
-            memory_context=context
+            retrieved_docs=final_docs,
+            memory_context=memory_context,
+            session_id=session_id
         )
 
         answer = output.get("answer", "").strip() or "No answer generated."
 
         response = {
             "answer": answer,
-            "latency": round(time.time() - start_time, 2)
+            "confidence": output.get("confidence", 0.5),
+            "sources_used": output.get("sources_used", 0),
+            "latency": round(time.time() - start, 3)
         }
 
-        _set_cached_response(session_id, query, response)
+        _cache_set(session_id, query, response)
 
         return response
 
     except Exception as e:
-        logger.error("[QueryPipeline][ERROR] %s", str(e))
+        logger.error(event="query_pipeline_failed", error=str(e))
         return {"answer": "Something went wrong."}

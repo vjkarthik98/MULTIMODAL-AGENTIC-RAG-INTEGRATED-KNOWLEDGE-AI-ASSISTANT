@@ -1,7 +1,7 @@
 from typing import Optional
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from app.core.config import settings
 from app.core.model_loader import model_loader
@@ -16,60 +16,56 @@ except ImportError:
 logger = get_logger(__name__)
 
 
-# CLEAN AND NORMALIZE CAPTION TEXT
+#  CLEAN 
 def _clean_caption(text: str) -> Optional[str]:
-    cleaned = (text or "").strip()
-
-    if not cleaned:
+    if not text:
         return None
 
-    # REMOVE WEAK PREFIXES
-    weak_prefixes = (
+    text = text.strip()
+
+    weak_patterns = [
         "a blurry image of",
         "a close up of",
         "an image of",
         "a picture of",
-    )
+        "photo of",
+    ]
 
-    lowered = cleaned.lower()
-    for prefix in weak_prefixes:
-        if lowered.startswith(prefix):
-            cleaned = cleaned[len(prefix):].strip()
+    lower = text.lower()
+    for p in weak_patterns:
+        if lower.startswith(p):
+            text = text[len(p):].strip()
             break
 
-    words = cleaned.split()
+    words = text.split()
 
-    if not words:
+    if len(words) < 3:
         return None
 
-    # LIMIT CAPTION LENGTH
     max_words = getattr(settings, "CAPTION_MAX_WORDS", 30)
-    cleaned = " ".join(words[:max_words]).strip()
+    text = " ".join(words[:max_words])
 
-    # CAPITALIZE FIRST LETTER
-    cleaned = cleaned[:1].upper() + cleaned[1:]
+    text = text[0].upper() + text[1:] if text else text
 
-    # FINAL QUALITY CHECK
-    return cleaned if len(cleaned) >= 3 else None
+    return text if len(text) > 5 else None
 
 
-# LOAD AND VALIDATE IMAGE
-def _load_image(image_path: str):
+#  IMAGE 
+def _load_image(image_path: str) -> Image.Image:
     path = Path(image_path)
 
     if not path.exists():
-        raise FileNotFoundError(f"{image_path} NOT FOUND")
+        raise FileNotFoundError(image_path)
 
-    # FILE SIZE CHECK
     if path.stat().st_size > settings.MAX_FILE_SIZE_MB * 1024 * 1024:
-        raise ValueError("IMAGE TOO LARGE")
+        raise ValueError("IMAGE_TOO_LARGE")
 
     with Image.open(path) as img:
+        img = ImageOps.exif_transpose(img).convert("RGB")
 
-        # ENSURE RGB FORMAT
-        img = img.convert("RGB")
+        if img.size[0] < 32 or img.size[1] < 32:
+            raise ValueError("IMAGE_TOO_SMALL")
 
-        # RESIZE IF TOO LARGE
         max_dim = getattr(settings, "MAX_IMAGE_DIM", 1024)
         if max(img.size) > max_dim:
             img.thumbnail((max_dim, max_dim))
@@ -77,29 +73,21 @@ def _load_image(image_path: str):
         return img.copy()
 
 
-# MAIN CAPTION GENERATION FUNCTION
-def generate_caption(image_path: str, session_id: str = "default") -> Optional[str]:
+#  MAIN 
+def generate_caption(image_path: str, session_id: str) -> Optional[str]:
 
-    # VALIDATE SESSION
     if not session_id:
-        raise ValueError("SESSION_ID REQUIRED")
+        raise ValueError("SESSION_ID_REQUIRED")
 
-    # CHECK TORCH AVAILABILITY
     if torch is None:
-        logger.warning("[FrameCaptioner] TORCH NOT AVAILABLE")
+        logger.warning(event="torch_not_available")
         return None
 
     try:
-        logger.debug(
-            "[FrameCaptioner][START] session_id=%s | image=%s",
-            session_id,
-            image_path
-        )
+        logger.debug(event="caption_start", image=image_path)
 
-        # LOAD IMAGE
         image = _load_image(image_path)
 
-        # LOAD MODEL
         processor, model, device = model_loader.get_blip()
 
         inputs = processor(image, return_tensors="pt").to(device)
@@ -113,31 +101,19 @@ def generate_caption(image_path: str, session_id: str = "default") -> Optional[s
 
         caption_raw = processor.decode(output[0], skip_special_tokens=True)
 
-        # CLEAN CAPTION
         caption = _clean_caption(caption_raw)
 
-        # VALIDATE CAPTION QUALITY
         if not caption:
-            logger.warning("[FrameCaptioner] WEAK OR EMPTY CAPTION")
+            logger.warning(event="caption_rejected")
             return None
 
-        # GLOBAL SAFETY TRUNCATION
-        if len(caption) > settings.MAX_PROMPT_CHARS:
-            caption = caption[:settings.MAX_PROMPT_CHARS]
-
         logger.debug(
-            "[FrameCaptioner][SUCCESS] session_id=%s | caption_len=%s",
-            session_id,
-            len(caption)
+            event="caption_success",
+            length=len(caption)
         )
 
         return caption
 
     except Exception as e:
-        logger.error(
-            "[FrameCaptioner][FAILED] session_id=%s | image=%s | error=%s",
-            session_id,
-            image_path,
-            str(e)
-        )
+        logger.error(event="caption_failed", error=str(e))
         return None

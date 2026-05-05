@@ -1,119 +1,150 @@
-import logging
 import sys
 import time
+import logging
 from pathlib import Path
-from logging.handlers import RotatingFileHandler
 from contextvars import ContextVar
+from typing import Optional, Dict, Any
+
+import structlog
 
 from app.core.config import settings
 
 
-# CONTEXT VARIABLES
-request_id_ctx = ContextVar("request_id", default="-")
-session_id_ctx = ContextVar("session_id", default="-")
+#  CONTEXT VARS 
+request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
+session_id_ctx: ContextVar[str] = ContextVar("session_id", default="-")
+trace_id_ctx: ContextVar[str] = ContextVar("trace_id", default="-")
 
 
-_LOGGER_INITIALIZED = False
+#  INTERNAL STATE 
+_LOGGER_INITIALIZED: bool = False
 
 
-# CONTEXT FILTER
-class ContextFilter(logging.Filter):
-    def filter(self, record):
-        record.request_id = request_id_ctx.get()
-        record.session_id = session_id_ctx.get()
-        return True
+#  CONTEXT BINDER 
+def bind_request_context(
+    request_id: str = "-",
+    session_id: str = "-",
+    trace_id: Optional[str] = "-"
+) -> None:
+    """
+    Bind request-scoped context for structured logging.
+    """
+    request_id_ctx.set(request_id or "-")
+    session_id_ctx.set(session_id or "-")
+    trace_id_ctx.set(trace_id or "-")
 
 
-def _get_log_level():
+def _add_context(logger, method_name, event_dict):
+    """
+    Inject contextvars into every log record.
+    """
+    event_dict["request_id"] = request_id_ctx.get()
+    event_dict["session_id"] = session_id_ctx.get()
+    event_dict["trace_id"] = trace_id_ctx.get()
+    return event_dict
+
+
+#  LOGGER CONFIG 
+def _get_log_level() -> int:
     level = str(settings.LOG_LEVEL).upper()
     return getattr(logging, level, logging.INFO)
 
 
-# SAFE FORMATTER
-class SafeFormatter(logging.Formatter):
-    def format(self, record):
-        if not hasattr(record, "request_id"):
-            record.request_id = "-"
-        if not hasattr(record, "session_id"):
-            record.session_id = "-"
-        return super().format(record)
-
-
-def _get_formatter():
-    if settings.LOG_JSON:
-        return SafeFormatter()
-
-    return SafeFormatter(
-        "[%(asctime)s] | %(levelname)s | %(name)s | %(message)s | req=%(request_id)s | session=%(session_id)s",
-        "%Y-%m-%d %H:%M:%S"
-    )
-
-
-def _setup_root_logger():
+def _setup_logging() -> None:
     global _LOGGER_INITIALIZED
 
     if _LOGGER_INITIALIZED:
         return
 
     log_level = _get_log_level()
-    formatter = _get_formatter()
 
-    root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
-    root_logger.handlers.clear()
+    #  STANDARD LOGGING 
+    logging.basicConfig(
+        format="%(message)s",
+        stream=sys.stdout,
+        level=log_level,
+    )
 
-    context_filter = ContextFilter()
+    #  PROCESSORS 
+    shared_processors = [
+        structlog.contextvars.merge_contextvars,
+        _add_context,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+        structlog.processors.StackInfoRenderer(),
+    ]
 
-    # CONSOLE HANDLER
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(log_level)
-    console_handler.setFormatter(formatter)
-    console_handler.addFilter(context_filter)
+    if settings.LOG_JSON:
+        renderer = structlog.processors.JSONRenderer()
+    else:
+        renderer = structlog.dev.ConsoleRenderer()
 
-    root_logger.addHandler(console_handler)
+    structlog.configure(
+        processors=[
+            *shared_processors,
+            structlog.processors.format_exc_info,
+            renderer,
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(log_level),
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
 
-    # FILE HANDLER
+    #  FILE LOGGING 
     if settings.ENABLE_FILE_LOGGING:
         log_dir = Path(settings.LOG_DIR)
         log_dir.mkdir(parents=True, exist_ok=True)
 
-        file_handler = RotatingFileHandler(
+        file_handler = logging.handlers.RotatingFileHandler(
             log_dir / settings.LOG_FILE_NAME,
             maxBytes=settings.LOG_MAX_BYTES,
             backupCount=settings.LOG_BACKUP_COUNT,
-            encoding="utf-8"
+            encoding="utf-8",
         )
 
         file_handler.setLevel(log_level)
-        file_handler.setFormatter(formatter)
-        file_handler.addFilter(context_filter)
 
+        file_formatter = logging.Formatter("%(message)s")
+        file_handler.setFormatter(file_formatter)
+
+        root_logger = logging.getLogger()
         root_logger.addHandler(file_handler)
 
     _LOGGER_INITIALIZED = True
 
 
-def get_logger(name: str) -> logging.Logger:
-    _setup_root_logger()
-    return logging.getLogger(name)
+#  PUBLIC LOGGER 
+def get_logger(name: str):
+    """
+    Get structured logger instance.
+    """
+    _setup_logging()
+    return structlog.get_logger(name)
 
 
-# SET REQUEST CONTEXT 
-def set_request_context(request_id: str = "-", session_id: str = "-"):
-    request_id_ctx.set(request_id)
-    session_id_ctx.set(session_id)
-
-
-# LATENCY HELPER
-def log_latency(logger, label: str, start_time: float, extra: dict = None):
+#  LATENCY HELPER 
+def log_latency(
+    logger,
+    event: str,
+    start_time: float,
+    extra: Optional[Dict[str, Any]] = None
+) -> None:
+    """
+    Log latency with structured metadata.
+    """
     try:
-        latency = round(time.time() - start_time, 3)
-        payload = {"latency": latency}
+        latency = round(time.time() - start_time, 4)
+
+        payload = {
+            "event": event,
+            "latency_sec": latency,
+        }
 
         if extra:
             payload.update(extra)
 
-        logger.info(f"{label} | latency={latency}s | extra={payload}")
+        logger.info(**payload)
 
     except Exception:
-        logger.warning("LATENCY LOGGING FAILED")
+        logger.warning(event="latency_logging_failed")

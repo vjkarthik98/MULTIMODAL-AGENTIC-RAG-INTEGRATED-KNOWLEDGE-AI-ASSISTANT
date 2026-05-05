@@ -1,11 +1,11 @@
 import redis
 import json
 import time
+import hashlib
 from typing import List, Dict, Optional
 
 from app.core.config import settings
 from app.utils.logger import get_logger
-
 
 logger = get_logger(__name__)
 
@@ -13,33 +13,35 @@ logger = get_logger(__name__)
 class RedisMemory:
 
     def __init__(self):
+        try:
+            self.client = redis.Redis(
+                host=settings.REDIS_HOST,
+                port=settings.REDIS_PORT,
+                db=settings.REDIS_DB,
+                decode_responses=True,
+                socket_timeout=settings.REDIS_TIMEOUT,
+                socket_connect_timeout=settings.REDIS_TIMEOUT,
+                retry_on_timeout=True,
+            )
+            
+            self._ping()
 
-        logger.info("[RedisMemory] connecting")
-
-        self.client = redis.Redis(
-            host=settings.REDIS_HOST,
-            port=settings.REDIS_PORT,
-            db=settings.REDIS_DB,
-            decode_responses=True,
-            socket_timeout=settings.REDIS_TIMEOUT,
-            socket_connect_timeout=settings.REDIS_TIMEOUT,
-            retry_on_timeout=True,
-        )
+        except Exception as e:
+            logger.error(event="redis_disabled_runtime", error=str(e))
+            self.client = None 
 
         self.max_messages = settings.MAX_HISTORY_MESSAGES
         self.ttl = settings.REDIS_TTL_SECONDS
-        self.key_prefix = getattr(settings, "REDIS_KEY_PREFIX", "chat")
+        self.prefix = getattr(settings, "REDIS_KEY_PREFIX", "chat")
 
-        self._validate_connection()
+        
 
-        logger.info("[RedisMemory] initialized")
-
-    #  CONNECTION CHECK 
-    def _validate_connection(self):
+    #  CONNECTION 
+    def _ping(self):
         try:
             self.client.ping()
         except Exception as e:
-            logger.error("[RedisMemory] connection failed | %s", str(e))
+            logger.error(event="redis_connection_failed", error=str(e))
             raise
 
     #  RETRY 
@@ -50,23 +52,38 @@ class RedisMemory:
             except Exception as e:
                 if i == retries - 1:
                     raise
-                logger.warning("[RedisMemory][RETRY] %s", str(e))
+                logger.warning(event="redis_retry", error=str(e))
                 time.sleep(0.2)
 
-    #  CLEAN TEXT 
+    #  CLEAN 
     def _clean(self, text: str) -> str:
         return " ".join(str(text or "").strip().split())
 
-    #  ROLE VALIDATION 
-    def _normalize_role(self, role: str) -> str:
+    #  ROLE 
+    def _role(self, role: str) -> str:
         role = str(role or "user").lower()
         return role if role in {"user", "assistant", "system"} else "user"
 
     #  KEY 
-    def _get_key(self, session_id: str) -> str:
-        return f"{self.key_prefix}:{session_id}"
+    def _key(self, session_id: str) -> str:
+        return f"{self.prefix}:{session_id}"
 
-    #  ADD MESSAGE 
+    #  HASH 
+    def _hash(self, msg: Dict) -> str:
+        base = f"{msg.get('role')}|{str(msg.get('content'))[:200]}"
+        return hashlib.sha256(base.encode()).hexdigest()
+
+    #  EMBEDDING 
+    def _valid_embedding(self, emb):
+        return (
+            isinstance(emb, list) and
+            len(emb) in (
+                settings.TEXT_EMBEDDING_DIM,
+                settings.VISION_EMBEDDING_DIM
+            )
+        )
+
+    #  ADD 
     def add_message(
         self,
         session_id: str,
@@ -80,112 +97,83 @@ class RedisMemory:
         if not session_id or not content:
             return
 
-        key = self._get_key(session_id)
+        key = self._key(session_id)
 
         try:
-            start = time.time()
-
-            role = self._normalize_role(role)
             content = self._clean(content)
-
             if len(content) < 2:
                 return
 
-            if len(content) > settings.MAX_PROMPT_CHARS:
-                content = content[:settings.MAX_PROMPT_CHARS]
+            content = content[:settings.MAX_PROMPT_CHARS]
 
             message = {
-                "role": role,
+                "role": self._role(role),
                 "content": content,
                 "timestamp": time.time(),
                 "modality": modality,
             }
 
-            # EMBEDDING VALIDATION
-            if embedding and isinstance(embedding, list):
-                if len(embedding) in (
-                    settings.TEXT_EMBEDDING_DIM,
-                    settings.VISION_EMBEDDING_DIM,
-                ):
-                    message["embedding"] = embedding
+            if self._valid_embedding(embedding):
+                message["embedding"] = embedding
 
-            if extra and isinstance(extra, dict):
+            if isinstance(extra, dict):
                 message["extra"] = extra
 
             payload = json.dumps(message)
 
             def _write():
                 pipe = self.client.pipeline()
-
                 pipe.rpush(key, payload)
                 pipe.ltrim(key, -self.max_messages, -1)
-
                 if self.ttl:
                     pipe.expire(key, self.ttl)
-
                 return pipe.execute()
 
             self._retry(_write)
 
-            logger.debug(
-                "[RedisMemory] added | session_id=%s | role=%s | latency=%.2fs",
-                session_id,
-                role,
-                time.time() - start
-            )
-
         except Exception as e:
-            logger.error(
-                "[RedisMemory] add failed | session_id=%s | %s",
-                session_id,
-                str(e)
-            )
+            logger.error(event="redis_add_failed", error=str(e))
 
-    #  GET HISTORY 
+    #  FETCH 
     def get_history(self, session_id: str) -> List[Dict]:
 
-        key = self._get_key(session_id)
+        key = self._key(session_id)
 
         try:
-            start = time.time()
-
             data = self._retry(lambda: self.client.lrange(key, 0, -1))
 
-            history = []
+            out = []
+            seen = set()
 
             for item in data:
                 try:
                     parsed = json.loads(item)
 
-                    if isinstance(parsed, dict):
-                        # CLEAN CONTENT
-                        parsed["content"] = self._clean(parsed.get("content", ""))
-                        history.append(parsed)
+                    if not isinstance(parsed, dict):
+                        continue
+
+                    parsed["content"] = self._clean(parsed.get("content", ""))
+
+                    h = self._hash(parsed)
+                    if h in seen:
+                        continue
+                    seen.add(h)
+
+                    out.append(parsed)
 
                 except Exception:
                     continue
 
-            logger.debug(
-                "[RedisMemory] fetched | session_id=%s | count=%s | latency=%.2fs",
-                session_id,
-                len(history),
-                time.time() - start
-            )
-
-            return history
+            return out
 
         except Exception as e:
-            logger.error(
-                "[RedisMemory] fetch failed | session_id=%s | %s",
-                session_id,
-                str(e)
-            )
+            logger.error(event="redis_fetch_failed", error=str(e))
             return []
 
-    #  GET LAST K 
+    #  LAST K 
     def get_last_k(self, session_id: str, k: int = None) -> List[Dict]:
 
-        key = self._get_key(session_id)
+        key = self._key(session_id)
         k = k or settings.MEMORY_TOP_K
 
         try:
@@ -206,27 +194,20 @@ class RedisMemory:
         except Exception:
             return []
 
-    #  CLEAR MEMORY 
+    #  CLEAR 
     def clear_memory(self, session_id: str):
 
-        key = self._get_key(session_id)
+        key = self._key(session_id)
 
         try:
             self._retry(lambda: self.client.delete(key))
-
-            logger.info("[RedisMemory] cleared | session_id=%s", session_id)
-
         except Exception as e:
-            logger.error(
-                "[RedisMemory] clear failed | session_id=%s | %s",
-                session_id,
-                str(e)
-            )
+            logger.error(event="redis_clear_failed", error=str(e))
 
-    #  MEMORY SIZE 
+    #  SIZE 
     def get_memory_size(self, session_id: str) -> int:
 
-        key = self._get_key(session_id)
+        key = self._key(session_id)
 
         try:
             return self._retry(lambda: self.client.llen(key))

@@ -1,3 +1,4 @@
+import hashlib
 import time
 from typing import List, Union, Dict
 
@@ -20,86 +21,76 @@ class ClipTextEmbedder:
     def __init__(self, processor, model, device):
 
         if torch is None or F is None:
-            raise ImportError("TORCH REQUIRED FOR CLIP")
+            raise ImportError("TORCH_REQUIRED")
 
-    
         self.processor = processor
         self.model = model
         self.device = device
 
         self.max_length = getattr(settings, "CLIP_MAX_LENGTH", 77)
         self.expected_dim = settings.VISION_EMBEDDING_DIM
+        self.batch_size = getattr(settings, "INGESTION_BATCH_SIZE", 32)
 
-        logger.info("[ClipTextEmbedder] initialized | device=%s", self.device)
+        logger.info(
+            event="clip_text_embedder_initialized",
+            device=device
+        )
 
-    # NORMALIZE TEXT
+    #  HASH 
+    def _hash(self, text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    #  NORMALIZE 
     def _normalize(self, text: str) -> str:
         return " ".join(text.strip().split())
 
-    # PREPARE INPUTS
+    #  PREPARE 
     def _prepare_inputs(self, text: Union[str, List[str]]) -> List[str]:
 
         if isinstance(text, str):
             text = [text]
 
         cleaned = []
-        seen: Dict[str, int] = {}
+        seen: Dict[str, bool] = {}
 
         for t in text:
-            if not t or not str(t).strip():
+            t = str(t).strip()
+            if not t:
                 continue
 
-            t = self._normalize(str(t))
+            t = self._normalize(t)
 
-            # SAFE TRUNCATION
+            # soft limit
             if len(t) > settings.MAX_PROMPT_CHARS:
                 t = t[:settings.MAX_PROMPT_CHARS]
 
-            key = t[:100]
-
-            # DEDUPLICATION
-            if key in seen:
+            h = self._hash(t)
+            if h in seen:
                 continue
 
-            seen[key] = 1
+            seen[h] = True
             cleaned.append(t)
 
         if not cleaned:
-            raise ValueError("NO VALID TEXT INPUTS")
+            raise ValueError("NO_VALID_INPUT")
 
-        # HARD LIMIT
-        max_batch = getattr(settings, "MAX_PARALLEL_REQUESTS", 100)
-        return cleaned[:max_batch]
+        limit = getattr(settings, "MAX_PARALLEL_REQUESTS", 100)
+        return cleaned[:limit]
 
-    # VALIDATE EMBEDDING
-    def _validate_embedding(self, emb: List[float]) -> bool:
+    #  VALIDATE 
+    def _valid(self, emb: List[float]) -> bool:
+        return isinstance(emb, list) and len(emb) == self.expected_dim
 
-        if not emb or not isinstance(emb, list):
-            return False
-
-        if len(emb) != self.expected_dim:
-            logger.warning(
-                "[ClipTextEmbedder] DIM MISMATCH expected=%s got=%s",
-                self.expected_dim,
-                len(emb)
-            )
-            return False
-
-        return True
-
-    # MAIN EMBED FUNCTION
+    #  MAIN 
     def embed(self, text: Union[str, List[str]]) -> List[List[float]]:
 
         start = time.time()
 
         texts = self._prepare_inputs(text)
-
         results = []
 
-        # SAFE BATCH PROCESSING
-        for i in range(0, len(texts), settings.INGESTION_BATCH_SIZE):
-
-            batch = texts[i:i + settings.INGESTION_BATCH_SIZE]
+        for i in range(0, len(texts), self.batch_size):
+            batch = texts[i:i + self.batch_size]
 
             try:
                 inputs = self.processor(
@@ -117,24 +108,23 @@ class ClipTextEmbedder:
                 embeddings = features.detach().cpu().numpy().tolist()
 
                 for emb in embeddings:
-                    if self._validate_embedding(emb):
+                    if self._valid(emb):
                         results.append(emb)
 
             except Exception as e:
-                logger.error("[ClipTextEmbedder][BATCH_FAIL] %s", str(e))
-                continue
+                logger.error(event="clip_batch_failed", error=str(e))
 
         if not results:
-            raise ValueError("NO VALID EMBEDDINGS GENERATED")
+            raise ValueError("NO_EMBEDDINGS")
 
         logger.info(
-            "[ClipTextEmbedder][SUCCESS] count=%s | latency=%.2fs",
-            len(results),
-            time.time() - start
+            event="clip_embed_success",
+            count=len(results),
+            latency=round(time.time() - start, 3)
         )
 
         return results
 
-    # SINGLE EMBEDDING
+    #  SINGLE 
     def embed_single(self, text: str) -> List[float]:
         return self.embed(text)[0]

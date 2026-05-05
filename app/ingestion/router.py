@@ -1,3 +1,5 @@
+import hashlib
+import mimetypes
 import os
 import time
 from pathlib import Path
@@ -12,11 +14,10 @@ from app.ingestion.text_ingest import ingest as text_ingest
 from app.ingestion.video_ingest import ingest as video_ingest
 from app.utils.logger import get_logger
 
-
 logger = get_logger(__name__)
 
 
-# EXTENSION CONFIG
+#  EXTENSIONS 
 TEXT_EXTENSIONS = set(getattr(settings, "TEXT_EXTENSIONS", [".txt", ".md"]))
 DOCUMENT_EXTENSIONS = set(getattr(settings, "DOCUMENT_EXTENSIONS", [".pdf", ".docx", ".xlsx", ".xls"]))
 IMAGE_EXTENSIONS = set(getattr(settings, "IMAGE_EXTENSIONS", [".jpg", ".jpeg", ".png", ".bmp", ".webp"]))
@@ -24,7 +25,7 @@ AUDIO_EXTENSIONS = set(getattr(settings, "AUDIO_EXTENSIONS", [".mp3", ".wav", ".
 VIDEO_EXTENSIONS = set(getattr(settings, "VIDEO_EXTENSIONS", [".mp4", ".avi", ".mov", ".mkv"]))
 
 
-# HANDLER REGISTRY
+#  HANDLERS 
 INGESTION_HANDLERS: Dict[str, Callable[[str, str], List[IngestedDocument]]] = {
     "text": text_ingest,
     "document": document_ingest,
@@ -34,32 +35,48 @@ INGESTION_HANDLERS: Dict[str, Callable[[str, str], List[IngestedDocument]]] = {
 }
 
 
-# DETECT FILE MODALITY
+#  HASH 
+def _stable_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+#  MIME VALIDATION 
+def _validate_mime(path: Path):
+    mime, _ = mimetypes.guess_type(path.name)
+
+    if not mime:
+        return  # allow fallback
+
+    allowed = getattr(settings, "ALLOWED_MIME_TYPES", [])
+    if allowed and mime not in allowed:
+        raise ValueError(f"MIME_NOT_ALLOWED_{mime}")
+
+
+#  DETECT 
 def detect_modality(file_path: str) -> str:
 
-    if not file_path or not file_path.strip():
-        raise ValueError("FILE_PATH REQUIRED")
+    if not file_path:
+        raise ValueError("FILE_PATH_REQUIRED")
 
     path = Path(file_path)
 
     if not path.exists():
-        raise FileNotFoundError(f"{file_path} NOT FOUND")
+        raise FileNotFoundError(file_path)
 
-    # EMPTY FILE CHECK
     if path.stat().st_size == 0:
-        raise ValueError("EMPTY FILE")
+        raise ValueError("EMPTY_FILE")
 
-    # FILE SIZE CHECK
     size_mb = path.stat().st_size / (1024 * 1024)
     if size_mb > settings.MAX_FILE_SIZE_MB:
-        raise ValueError(f"FILE TOO LARGE: {size_mb:.2f}MB")
+        raise ValueError("FILE_TOO_LARGE")
+
+    _validate_mime(path)
 
     ext = path.suffix.lower()
 
-    # ENV-LEVEL VALIDATION
     allowed_types = getattr(settings, "ALLOWED_FILE_TYPES", [])
     if allowed_types and ext.replace(".", "") not in allowed_types:
-        raise ValueError(f"FILE TYPE NOT ALLOWED: {ext}")
+        raise ValueError(f"EXT_NOT_ALLOWED_{ext}")
 
     if ext in TEXT_EXTENSIONS:
         return "text"
@@ -72,63 +89,59 @@ def detect_modality(file_path: str) -> str:
     if ext in VIDEO_EXTENSIONS:
         return "video"
 
-    raise ValueError(f"UNSUPPORTED FILE TYPE: {ext}")
+    raise ValueError(f"UNSUPPORTED_TYPE_{ext}")
 
 
-# VALIDATE AND NORMALIZE DOCUMENTS
+#  VALIDATION 
 def _validate_documents(
     documents: List[IngestedDocument],
     session_id: str
 ) -> List[IngestedDocument]:
 
-    validated_documents: List[IngestedDocument] = []
-    seen_hashes: Set[str] = set()
+    validated: List[IngestedDocument] = []
+    seen: Set[str] = set()
 
-    for index, doc in enumerate(documents):
+    for i, doc in enumerate(documents):
         try:
-            # NORMALIZE INPUT TYPE
             if isinstance(doc, dict):
                 doc = IngestedDocument(**doc)
 
             if not isinstance(doc, IngestedDocument):
                 continue
 
-            # FORCE FINALIZATION (CRITICAL)
             doc = doc.finalize()
 
-            # ENSURE SESSION CONSISTENCY
+            # enforce session
             doc.structure["session_id"] = session_id
 
-            # DEDUPLICATION
-            content_hash = hash(doc.text)
+            # stable dedup
+            h = _stable_hash(doc.text)
 
-            if content_hash in seen_hashes:
+            if h in seen:
                 continue
 
-            seen_hashes.add(content_hash)
+            seen.add(h)
 
-            validated_documents.append(doc)
+            validated.append(doc)
 
-        except Exception as exc:
+        except Exception as e:
             logger.warning(
-                "[Router][VALIDATION_FAIL] session_id=%s | index=%s | error=%s",
-                session_id,
-                index,
-                str(exc),
+                event="doc_validation_failed",
+                index=i,
+                error=str(e)
             )
-            continue
 
-    return validated_documents
+    return validated
 
 
-# MAIN ROUTER
+#  ROUTER 
 def route_ingestion(
     file_path: str,
-    session_id: str = "default"
+    session_id: str
 ) -> List[IngestedDocument]:
 
     if not session_id:
-        raise ValueError("SESSION_ID REQUIRED")
+        raise ValueError("SESSION_ID_REQUIRED")
 
     start = time.time()
 
@@ -136,53 +149,43 @@ def route_ingestion(
         modality = detect_modality(file_path)
 
         logger.info(
-            "[Router][START] session_id=%s | modality=%s | file=%s",
-            session_id,
-            modality,
-            file_path
+            event="ingestion_start",
+            modality=modality,
+            file=file_path
         )
 
         handler = INGESTION_HANDLERS.get(modality)
 
         if not handler:
-            raise ValueError(f"NO HANDLER FOR MODALITY={modality}")
+            raise ValueError("HANDLER_NOT_FOUND")
 
-        # RUN INGESTION
-        documents = handler(file_path, session_id=session_id)
+        docs = handler(file_path, session_id)
 
-        # VALIDATE OUTPUT
-        validated_documents = _validate_documents(documents, session_id)
+        docs = _validate_documents(docs, session_id)
 
-        if not validated_documents:
-            raise ValueError("NO VALID DOCUMENTS AFTER VALIDATION")
+        if not docs:
+            raise ValueError("NO_VALID_DOCS")
 
-        # LIMIT OUTPUT
         max_docs = getattr(settings, "MAX_INGESTED_DOCS", 5000)
 
-        if len(validated_documents) > max_docs:
-            logger.warning(
-                "[Router] LIMITING DOCS %s -> %s",
-                len(validated_documents),
-                max_docs
-            )
-            validated_documents = validated_documents[:max_docs]
+        if len(docs) > max_docs:
+            docs = docs[:max_docs]
+            logger.warning(event="doc_limit_applied", limit=max_docs)
 
         latency = round(time.time() - start, 2)
 
         logger.info(
-            "[Router][SUCCESS] session_id=%s | docs=%s | latency=%ss",
-            session_id,
-            len(validated_documents),
-            latency
+            event="ingestion_success",
+            docs=len(docs),
+            latency=latency
         )
 
-        return validated_documents
+        return docs
 
-    except Exception as exc:
+    except Exception as e:
         logger.error(
-            "[Router][FAILED] session_id=%s | file=%s | error=%s",
-            session_id,
-            file_path,
-            str(exc)
+            event="ingestion_failed",
+            file=file_path,
+            error=str(e)
         )
-        raise RuntimeError(f"INGESTION ROUTING FAILED: {exc}") from exc
+        raise
