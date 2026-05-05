@@ -1,37 +1,44 @@
 from typing import List, Dict
 import time
+import hashlib
 
 from app.core.config import settings
 from app.memory.formatter import format_history
 from app.utils.logger import get_logger
 
-
 logger = get_logger(__name__)
 
 
-#  CLEAN TEXT 
+#  CLEAN 
 def _clean(text: str) -> str:
     return " ".join(str(text or "").strip().split())
 
 
-#  SAFE TRUNCATION 
-def _truncate(text: str, max_chars: int) -> str:
+#  TRUNCATE 
+def _truncate(text: str, limit: int) -> str:
     if not text:
         return ""
-    return text[:max_chars].rstrip() + ("..." if len(text) > max_chars else "")
+    return text[:limit]
+
+
+#  HASH 
+def _hash(text: str) -> str:
+    return hashlib.sha256(text[:200].encode()).hexdigest()
 
 
 #  DEDUP 
-def _deduplicate(summary: str, history: str):
+def _dedup(summary: str, history: str):
+
     if not summary or not history:
         return summary, history
 
-    if summary[:200] in history:
+    if _hash(summary) == _hash(history[:200]):
         history = history.replace(summary[:200], "")
 
     return summary, history
 
 
+#  MAIN 
 def build_memory_context(
     summary: str,
     filtered_history: List[Dict],
@@ -47,16 +54,15 @@ def build_memory_context(
         parts = []
 
         #  HEADER 
-        header = (
+        parts.append(
             "[MEMORY CONTEXT]\n"
-            "Use memory only when relevant.\n"
-            "Prefer recent context over older summaries."
+            "Use only if relevant.\n"
+            "Prefer recent interactions."
         )
 
-        parts.append(header)
-
-        #  CLEAN INPUT 
+        #  INPUT 
         summary = _clean(summary)
+
         history_str = format_history(
             filtered_history,
             max_messages=settings.MAX_HISTORY_MESSAGES,
@@ -67,78 +73,65 @@ def build_memory_context(
         history_str = _clean(history_str)
 
         #  DEDUP 
-        summary, history_str = _deduplicate(summary, history_str)
+        summary, history_str = _dedup(summary, history_str)
 
-        #  SMART BUDGET 
+        #  BUDGET 
         summary_budget = int(max_total_chars * 0.3)
         history_budget = int(max_total_chars * 0.6)
 
         #  SUMMARY 
         if summary:
-            summary_block = "[Long-Term Memory]\n" + _truncate(
-                summary,
-                summary_budget
+            parts.append(
+                "[Long-Term]\n" +
+                _truncate(summary, summary_budget)
             )
-            parts.append(summary_block)
 
         #  HISTORY 
         if history_str:
-            history_block = "[Recent Context]\n" + _truncate(
-                history_str,
-                history_budget
+            parts.append(
+                "[Recent]\n" +
+                _truncate(history_str, history_budget)
             )
-            parts.append(history_block)
 
         #  INSTRUCTION 
-        instruction = (
+        parts.append(
             "[Instruction]\n"
-            "- Use memory only if relevant\n"
-            "- Do not repeat verbatim\n"
-            "- Prefer recent context\n"
-            "- Respect user intent\n"
+            "- Use only if relevant\n"
+            "- Do not repeat\n"
+            "- Prefer recent\n"
         )
-
-        parts.append(instruction)
 
         result = "\n\n".join(parts).strip()
 
-        #  SAFE GLOBAL TRUNCATION 
+        #  SAFE TRUNCATION 
         if len(result) > settings.MAX_PROMPT_CHARS:
 
-            logger.warning("[MemoryFusion] safe truncation")
-
-            # KEEP HEADER + INSTRUCTION ALWAYS
-            header_part = parts[0]
-            instruction_part = parts[-1]
+            header = parts[0]
+            instruction = parts[-1]
 
             middle = "\n\n".join(parts[1:-1])
 
-            allowed_middle = (
+            allowed = (
                 settings.MAX_PROMPT_CHARS
-                - len(header_part)
-                - len(instruction_part)
+                - len(header)
+                - len(instruction)
                 - 20
             )
 
-            middle = _truncate(middle, allowed_middle)
+            middle = _truncate(middle, allowed)
 
-            result = "\n\n".join([
-                header_part,
-                middle,
-                instruction_part
-            ])
+            result = "\n\n".join([header, middle, instruction])
 
-        latency = round(time.time() - start, 2)
+            logger.warning(event="memory_truncated")
 
         logger.debug(
-            "[MemoryFusion][SUCCESS] session_id=%s | size=%s | latency=%ss",
-            session_id,
-            len(result),
-            latency
+            event="memory_fusion_success",
+            size=len(result),
+            latency=round(time.time() - start, 3)
         )
 
         return result
 
     except Exception as e:
-        logger.error("[MemoryFusion][FAILED] %s", str(e))
+        logger.error(event="memory_fusion_failed", error=str(e))
         return ""

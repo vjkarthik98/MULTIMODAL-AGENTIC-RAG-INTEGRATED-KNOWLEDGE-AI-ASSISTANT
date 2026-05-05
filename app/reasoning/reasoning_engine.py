@@ -1,9 +1,9 @@
 import time
+import hashlib
 from typing import List, Dict, Any
 
 from app.core.config import settings
 from app.utils.logger import get_logger
-
 
 logger = get_logger(__name__)
 
@@ -13,6 +13,10 @@ class ReasoningEngine:
     def __init__(self, llm):
         self.llm = llm
         self.max_prompt_chars = settings.MAX_PROMPT_CHARS
+
+    #  HASH 
+    def _hash(self, text: str) -> str:
+        return hashlib.sha256(text.encode()).hexdigest()
 
     #  NORMALIZE 
     def _normalize(self, text: str) -> str:
@@ -27,11 +31,12 @@ class ReasoningEngine:
         session_id: str = "default"
     ) -> Dict[str, Any]:
 
+        if not query:
+            return self._fallback()
+
         start = time.time()
 
         try:
-            logger.info("[ReasoningEngine][START]")
-
             query = self._normalize(query)
 
             knowledge = self._prepare_knowledge(retrieved_docs)
@@ -39,51 +44,42 @@ class ReasoningEngine:
 
             prompt = self._build_prompt(query, knowledge, memory)
 
-            # SAFE PROMPT CONTROL
             if len(prompt) > self.max_prompt_chars:
-                prompt = self._safe_truncate(prompt)
+                prompt = self._truncate(prompt)
 
             #  LLM 
             t_llm = time.time()
             response = self.llm.generate(prompt)
             llm_latency = round(time.time() - t_llm, 2)
 
-            parsed = self._parse_response(response, retrieved_docs)
-
-            latency = round(time.time() - start, 2)
+            parsed = self._parse(response, retrieved_docs)
 
             logger.info(
-                "[ReasoningEngine][SUCCESS] latency=%ss llm=%ss",
-                latency,
-                llm_latency
+                event="reasoning_success",
+                latency=round(time.time() - start, 2),
+                llm_latency=llm_latency
             )
 
             return parsed
 
         except Exception as e:
-            logger.error("[ReasoningEngine][FAILED] %s", str(e))
+            logger.error(event="reasoning_failed", error=str(e))
+            return self._fallback()
 
-            return {
-                "answer": "I couldn't generate a reliable answer.",
-                "confidence": 0.2,
-                "sources_used": 0
-            }
+    #  TRUNCATION 
+    def _truncate(self, prompt: str) -> str:
 
-    #  SAFE TRUNCATION 
-    def _safe_truncate(self, prompt: str) -> str:
-
-        # KEEP SYSTEM INSTRUCTIONS
         parts = prompt.split("KNOWLEDGE:")
 
         if len(parts) < 2:
             return prompt[:self.max_prompt_chars]
 
         header = parts[0]
-        rest = "KNOWLEDGE:" + parts[1]
+        body = "KNOWLEDGE:" + parts[1]
 
         allowed = self.max_prompt_chars - len(header) - 20
 
-        return header + rest[:allowed]
+        return header + body[:allowed]
 
     #  KNOWLEDGE 
     def _prepare_knowledge(self, docs: List[Dict]) -> str:
@@ -94,8 +90,8 @@ class ReasoningEngine:
         max_docs = settings.RAG_TOP_K
         max_chars = settings.RAG_DOC_MAX_CHARS
 
-        parts = []
         seen = set()
+        parts = []
 
         for d in docs[:max_docs]:
 
@@ -103,18 +99,19 @@ class ReasoningEngine:
             if not text:
                 continue
 
-            key = text[:100]
-            if key in seen:
+            h = self._hash(text[:200])
+            if h in seen:
                 continue
-            seen.add(key)
+            seen.add(h)
 
-            metadata = d.get("metadata", {}) or {}
-            source = metadata.get("source", "unknown")
-            modality = metadata.get("modality", "text")
+            meta = d.get("metadata", {}) or {}
 
-            text = text[:max_chars]
+            source = meta.get("source", "unknown")
+            modality = meta.get("modality", "text")
 
-            parts.append(f"[{modality.upper()} | {source}] {text}")
+            parts.append(
+                f"[{modality.upper()} | {source}] {text[:max_chars]}"
+            )
 
         return "\n\n".join(parts)
 
@@ -132,31 +129,29 @@ class ReasoningEngine:
     def _build_prompt(self, query: str, knowledge: str, memory: str) -> str:
 
         instruction = (
-            "You are a highly reliable AI assistant.\n\n"
-            "Strict Rules:\n"
-            "- Answer ONLY from provided context\n"
-            "- Do NOT hallucinate\n"
-            "- If information is missing say: I don't know\n"
-            "- Be precise and factual\n\n"
+            "You are a grounded AI system.\n"
+            "Rules:\n"
+            "- Use ONLY provided knowledge\n"
+            "- If missing → say 'I don't know'\n"
+            "- No hallucination\n"
+            "- Be concise and factual\n\n"
         )
 
         memory_block = f"MEMORY:\n{memory}\n\n" if memory else ""
-
         knowledge_block = f"KNOWLEDGE:\n{knowledge}\n\n"
-
         query_block = f"QUERY:\n{query}\n\n"
 
         output_format = (
-            "OUTPUT FORMAT:\n"
-            "Answer: <final answer>\n"
+            "FORMAT:\n"
+            "Answer: <text>\n"
             "Confidence: <0-1>\n"
-            "Sources Used: <number>\n"
+            "Sources Used: <int>\n"
         )
 
         return instruction + memory_block + knowledge_block + query_block + output_format
 
-    #  PARSER 
-    def _parse_response(self, text: str, docs: List[Dict]) -> Dict[str, Any]:
+    #  PARSE 
+    def _parse(self, text: str, docs: List[Dict]) -> Dict[str, Any]:
 
         if not text:
             return self._fallback()
@@ -166,9 +161,7 @@ class ReasoningEngine:
             confidence = 0.5
             sources = 0
 
-            lines = text.split("\n")
-
-            for line in lines:
+            for line in text.split("\n"):
                 l = line.lower().strip()
 
                 if l.startswith("answer"):
@@ -189,10 +182,7 @@ class ReasoningEngine:
             if not answer:
                 answer = text.strip()
 
-            # CONFIDENCE CALIBRATION
             confidence = max(0.0, min(confidence, 1.0))
-
-            # SOURCE SAFETY
             sources = min(sources, len(docs))
 
             return {

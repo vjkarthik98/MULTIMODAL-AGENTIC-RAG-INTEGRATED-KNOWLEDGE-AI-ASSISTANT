@@ -1,5 +1,6 @@
+import hashlib
 import time
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -15,238 +16,184 @@ class TextEmbedder:
         self.model = SentenceTransformer(model_name, device=device)
         self.batch_size = batch_size
 
-        self.max_text_length = settings.MAX_PROMPT_CHARS
         self.expected_dim = settings.TEXT_EMBEDDING_DIM
+        self.max_text_length = settings.MAX_PROMPT_CHARS
 
         logger.info(
-            "[TextEmbedder] initialized | model=%s | device=%s",
-            model_name,
-            device
+            event="text_embedder_initialized",
+            model=model_name,
+            device=device
         )
 
-    # SANITIZE TEXT
-    def _sanitize(self, text: str) -> str:
-        cleaned = (text or "").strip()
+    #  HASH 
+    def _hash(self, text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-        if not cleaned:
+    #  SANITIZE 
+    def _sanitize(self, text: str) -> Optional[str]:
+        text = (text or "").strip()
+
+        if not text:
             return None
 
-        if len(cleaned) > self.max_text_length:
-            logger.warning(
-                "[TextEmbedder][TRUNCATE] %s -> %s",
-                len(cleaned),
-                self.max_text_length
-            )
-            cleaned = cleaned[:self.max_text_length]
+        # SOFT LIMIT (no hard truncation loss)
+        if len(text) > self.max_text_length:
+            text = text[:self.max_text_length]
 
-        return cleaned
+        return text
 
-    # PREFIX BASED ON MODALITY
-    def _build_prefix(self, document) -> str:
+    #  PREFIX 
+    def _prefix(self, doc) -> str:
+        s = getattr(doc, "structure", {}) or {}
+        m = getattr(doc, "modality", "")
+        st = getattr(doc, "subtype", "")
 
-        structure = getattr(document, "structure", {}) or {}
-        modality = getattr(document, "modality", "")
-        subtype = getattr(document, "subtype", "")
-
-        if modality == "table":
-            return "Table data: "
-
-        if modality == "image":
-            return "Extracted text from image: " if subtype == "ocr" else "Image description: "
-
-        if modality == "audio":
-            start = structure.get("start_time")
-            end = structure.get("end_time")
-            if start is not None and end is not None:
-                return f"Audio {start}-{end}s: "
-            return "Audio content: "
-
-        if modality == "video":
-            if subtype == "speech":
-                return "Video speech: "
-            if subtype == "frame":
-                return "Video frame: "
-
-        if modality == "text" and subtype == "heading":
+        if m == "table":
+            return "Table: "
+        if m == "image":
+            return "OCR: " if st == "ocr" else "Image: "
+        if m == "audio":
+            return f"Audio {s.get('timestamp_start')}s: "
+        if m == "video":
+            return "Video speech: " if st == "speech" else "Video frame: "
+        if m == "text" and st == "heading":
             return "Heading: "
 
         return ""
 
-    # ENRICH TEXT SAFELY
-    def _enrich_text(self, document, clean_text: str) -> str:
+    #  ENRICH 
+    def _enrich(self, doc, text: str) -> str:
 
         context = []
 
-        if getattr(document, "source_type", None):
-            context.append(f"[{document.source_type.upper()}]")
+        if doc.source_type:
+            context.append(f"[{doc.source_type.upper()}]")
 
-        if getattr(document, "modality", None):
-            context.append(f"[{document.modality.upper()}]")
+        if doc.modality:
+            context.append(f"[{doc.modality.upper()}]")
 
-        if getattr(document, "page", None):
-            context.append(f"[Page {document.page}]")
+        if doc.page:
+            context.append(f"[Page {doc.page}]")
 
-        prefix = self._build_prefix(document)
+        enriched = " ".join(context) + " " + self._prefix(doc) + text
 
-        enriched = " ".join(context) + " " + prefix + clean_text
+        return enriched.strip()[:self.max_text_length]
 
-        # FINAL SAFETY TRUNCATION
-        if len(enriched) > self.max_text_length:
-            enriched = enriched[:self.max_text_length]
+    #  VALIDATE 
+    def _valid_embedding(self, emb: List[float]) -> bool:
+        return isinstance(emb, list) and len(emb) == self.expected_dim
 
-        return enriched
-
-    # STRICT EMBEDDING VALIDATION
-    def _validate_embedding(self, emb: List[float]):
-
-        if not emb or not isinstance(emb, list):
-            return False
-
-        if len(emb) != self.expected_dim:
-            logger.warning(
-                "[TextEmbedder] DIM MISMATCH expected=%s got=%s",
-                self.expected_dim,
-                len(emb)
-            )
-            return False
-
-        return True
-
-    # SINGLE EMBEDDING
-    def embed_text(self, text: str, session_id: str = "default") -> List[float]:
+    #  SINGLE 
+    def embed_text(self, text: str, session_id: str) -> List[float]:
 
         if not session_id:
-            raise ValueError("session_id required")
+            raise ValueError("SESSION_ID_REQUIRED")
 
         start = time.time()
 
-        try:
-            clean_text = self._sanitize(text)
-            if not clean_text:
-                raise ValueError("EMPTY TEXT")
+        clean = self._sanitize(text)
+        if not clean:
+            raise ValueError("EMPTY_TEXT")
 
-            emb = self.model.encode(
-                clean_text,
-                convert_to_numpy=True,
-                normalize_embeddings=True
-            )
+        emb = self.model.encode(
+            clean,
+            convert_to_numpy=True,
+            normalize_embeddings=True
+        ).tolist()
 
-            emb_list = emb.tolist()
+        if not self._valid_embedding(emb):
+            raise ValueError("INVALID_EMBEDDING")
 
-            if not self._validate_embedding(emb_list):
-                raise ValueError("INVALID EMBEDDING")
+        logger.info(
+            event="embed_single",
+            latency=round(time.time() - start, 3)
+        )
 
-            logger.info(
-                "[TextEmbedder][SINGLE] session_id=%s | latency=%.2fs",
-                session_id,
-                time.time() - start
-            )
+        return emb
 
-            return emb_list
-
-        except Exception as e:
-            logger.error(
-                "[TextEmbedder][FAILED] session_id=%s | error=%s",
-                session_id,
-                str(e)
-            )
-            raise
-
-    # BATCH EMBEDDING (PRODUCTION SAFE)
-    def embed_documents(self, documents, session_id: str = "default"):
+    #  BATCH 
+    def embed_documents(self, documents, session_id: str):
 
         if not session_id:
-            raise ValueError("session_id required")
+            raise ValueError("SESSION_ID_REQUIRED")
 
         if not documents:
             return []
 
         start = time.time()
 
-        valid_docs = []
         texts = []
-        seen: Dict[str, int] = {}
+        valid_docs = []
+        seen: Dict[str, bool] = {}
 
-        # PREPARE INPUT
         for doc in documents:
             try:
                 clean = self._sanitize(getattr(doc, "text", ""))
-
                 if not clean:
                     continue
 
-                enriched = self._enrich_text(doc, clean)
+                enriched = self._enrich(doc, clean)
 
-                key = enriched[:100]
-
-                # DEDUPLICATION
-                if key in seen:
+                h = self._hash(enriched)
+                if h in seen:
                     continue
 
-                seen[key] = 1
+                seen[h] = True
 
                 texts.append(enriched)
                 valid_docs.append(doc)
 
             except Exception as e:
-                logger.warning("[TextEmbedder][SKIP] %s", str(e))
-                continue
+                logger.warning(event="embed_skip", error=str(e))
 
         if not valid_docs:
             return []
 
-        # LIMIT SAFETY
-        max_batch = getattr(settings, "MAX_PARALLEL_REQUESTS", 100)
-        texts = texts[:max_batch]
-        valid_docs = valid_docs[:max_batch]
+        # limit safety
+        limit = getattr(settings, "MAX_PARALLEL_REQUESTS", 100)
+        texts = texts[:limit]
+        valid_docs = valid_docs[:limit]
 
-        embedded_docs = []
+        results = []
 
-        # SAFE BATCH PROCESSING
         for i in range(0, len(texts), self.batch_size):
-
             batch_texts = texts[i:i + self.batch_size]
             batch_docs = valid_docs[i:i + self.batch_size]
 
             try:
-                embeddings = self.model.encode(
+                embs = self.model.encode(
                     batch_texts,
                     batch_size=len(batch_texts),
-                    show_progress_bar=False,
                     convert_to_numpy=True,
-                    normalize_embeddings=True
+                    normalize_embeddings=True,
+                    show_progress_bar=False
                 )
 
-                for doc, emb in zip(batch_docs, embeddings):
-
+                for doc, emb in zip(batch_docs, embs):
                     emb_list = emb.tolist()
 
-                    if not self._validate_embedding(emb_list):
+                    if not self._valid_embedding(emb_list):
                         continue
 
                     doc.embedding = emb_list
 
-                    structure = dict(getattr(doc, "structure", {}) or {})
+                    structure = dict(doc.structure or {})
                     structure["embedding_space"] = "text"
                     doc.structure = structure
 
-                    embedded_docs.append(doc)
+                    results.append(doc)
 
             except Exception as e:
-                logger.error("[TextEmbedder][BATCH_FAIL] %s", str(e))
-                continue
-
-        latency = round(time.time() - start, 2)
+                logger.error(event="embed_batch_failed", error=str(e))
 
         logger.info(
-            "[TextEmbedder][SUCCESS] session_id=%s | embedded=%s | latency=%.2fs",
-            session_id,
-            len(embedded_docs),
-            latency
+            event="embed_success",
+            embedded=len(results),
+            latency=round(time.time() - start, 3)
         )
 
-        return embedded_docs
+        return results
 
-    # QUERY EMBEDDING
-    def embed_query(self, query: str, session_id: str = "default"):
+    #  QUERY 
+    def embed_query(self, query: str, session_id: str):
         return self.embed_text(query, session_id)

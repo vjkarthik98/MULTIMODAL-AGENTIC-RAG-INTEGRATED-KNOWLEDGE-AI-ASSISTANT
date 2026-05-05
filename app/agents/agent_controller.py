@@ -1,11 +1,10 @@
-from typing import Dict, Any
 import time
+from typing import Dict, Any
 
 from app.core.config import settings
 from app.utils.logger import get_logger
 from app.agents.agent_executor import AgentExecutor
 from app.core.model_loader import model_loader
-
 
 logger = get_logger(__name__)
 
@@ -14,84 +13,69 @@ class AgentController:
 
     def __init__(self):
         self.executor = AgentExecutor()
-        self.timeout = getattr(settings, "AGENT_TIMEOUT", 10)
+        self.timeout = getattr(settings, "AGENT_TIMEOUT_SEC", 10)
 
     #  NORMALIZE 
-    def _normalize(self, query: str) -> str:
-        return " ".join(query.strip().split())
+    def _normalize(self, q: str) -> str:
+        return " ".join(q.strip().split())
 
     #  MAIN 
     def handle(self, query: str, session_id: str) -> Dict[str, Any]:
 
-        if not query or not query.strip():
-            return {
-                "response": "Query cannot be empty.",
-                "source": "validation",
-                "decision": "reject",
-                "reason": "empty_query",
-                "confidence": 0.0,
-                "metadata": {}
-            }
+        if not query:
+            return self._reject("empty_query")
 
         start = time.time()
-
         query = self._normalize(query)[:settings.MAX_PROMPT_CHARS]
 
-        logger.info("[AgentController][START] session_id=%s", session_id)
-
         try:
-            #  SAFE EXECUTION 
+            logger.info(event="agent_start", session_id=session_id)
+
             t_agent = time.time()
+            result = self._execute_with_timeout(query, session_id)
+            agent_latency = round(time.time() - t_agent, 3)
 
-            result = self._safe_execute(query, session_id)
+            if not self._validate(result):
+                raise ValueError("INVALID_AGENT_OUTPUT")
 
-            agent_latency = round(time.time() - t_agent, 2)
+            response = self._format(result)
 
-            #  VALIDATION 
-            validated = self._validate_result(result)
+            response.update({
+                "latency": round(time.time() - start, 3),
+                "agent_latency": agent_latency,
+                "confidence": self._confidence(result),
+            })
 
-            if not validated:
-                raise ValueError("Invalid agent output")
-
-            response = self._format_response(result)
-
-            response["latency"] = round(time.time() - start, 2)
-            response["agent_latency"] = agent_latency
-            response["confidence"] = self._compute_confidence(result)
-
-            logger.info("[AgentController][SUCCESS] session_id=%s", session_id)
+            logger.info(event="agent_success", session_id=session_id)
 
             return response
 
         except Exception as e:
-            logger.error(
-                "[AgentController][ERROR] session_id=%s | error=%s",
-                session_id,
-                str(e)
-            )
+            logger.error(event="agent_failed", error=str(e))
+            return self._fallback(query, start)
 
-            return self._fallback_response(query, start)
+    #  TIMEOUT EXEC 
+    def _execute_with_timeout(self, query: str, session_id: str):
 
-    #  SAFE EXECUTION 
-    def _safe_execute(self, query: str, session_id: str):
+        start = time.time()
 
-        try:
-            return self.executor.run(query, session_id)
-        except Exception as e:
-            logger.warning("[AgentController][EXEC_FAIL] %s", str(e))
-            raise
+        result = self.executor.run(query, session_id)
+
+        if time.time() - start > self.timeout:
+            raise TimeoutError("AGENT_TIMEOUT")
+
+        return result
 
     #  VALIDATION 
-    def _validate_result(self, result: Dict[str, Any]) -> bool:
+    def _validate(self, result: Dict[str, Any]) -> bool:
 
         if not isinstance(result, dict):
             return False
 
-        required_fields = ["response", "source", "decision"]
+        required = {"response", "source", "decision"}
 
-        for f in required_fields:
-            if f not in result:
-                return False
+        if not required.issubset(result.keys()):
+            return False
 
         if not result.get("response"):
             return False
@@ -99,59 +83,65 @@ class AgentController:
         return True
 
     #  CONFIDENCE 
-    def _compute_confidence(self, result: Dict[str, Any]) -> float:
+    def _confidence(self, result: Dict[str, Any]) -> float:
 
         decision = result.get("decision")
 
-        if decision == "direct":
-            return 0.7
-        if decision == "tool":
-            return 0.8
-        if decision == "memory":
-            return 0.75
+        mapping = {
+            "direct": 0.7,
+            "tool": 0.85,
+            "memory": 0.75,
+        }
 
-        return 0.5
+        return mapping.get(decision, 0.5)
 
     #  FORMAT 
-    def _format_response(self, result: Dict[str, Any]) -> Dict[str, Any]:
+    def _format(self, result: Dict[str, Any]) -> Dict[str, Any]:
+
         return {
             "response": result.get("response", ""),
             "source": result.get("source", "unknown"),
             "decision": result.get("decision", "unknown"),
             "reason": result.get("reason", ""),
-            "metadata": result.get("metadata", {})
+            "metadata": result.get("metadata", {}),
+        }
+
+    #  REJECT 
+    def _reject(self, reason: str) -> Dict[str, Any]:
+        return {
+            "response": "Invalid query.",
+            "source": "validation",
+            "decision": "reject",
+            "reason": reason,
+            "confidence": 0.0,
+            "metadata": {},
         }
 
     #  FALLBACK 
-    def _fallback_response(self, query: str, start_time: float) -> Dict[str, Any]:
-
-        logger.warning("[AgentController] fallback triggered")
+    def _fallback(self, query: str, start_time: float) -> Dict[str, Any]:
 
         try:
             llm = model_loader.get_llm()
 
-            safe_prompt = (
-                "Answer the following question clearly and concisely:\n\n"
-                f"{query}"
-            )
+            prompt = f"Answer clearly:\n{query}"
 
             response = llm.generate(
-                safe_prompt,
+                prompt,
                 max_tokens=settings.LLM_MAX_TOKENS,
-                temperature=0.3,  # safer
+                temperature=0.2,
                 top_p=settings.LLM_TOP_P,
             )
 
         except Exception as e:
-            logger.error("[AgentController][FALLBACK_FAIL] %s", str(e))
-            response = "I'm unable to process your request right now."
+            logger.error(event="fallback_failed", error=str(e))
+            response = "Unable to process request."
 
         return {
             "response": response,
             "source": "fallback",
             "decision": "direct",
-            "reason": "controller_error_fallback",
+            "reason": "controller_failure",
             "confidence": 0.3,
-            "latency": round(time.time() - start_time, 2),
-            "metadata": {}
+            "latency": round(time.time() - start_time, 3),
+            "metadata": {},
         }

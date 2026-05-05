@@ -10,7 +10,6 @@ from app.agents.tool_registry import ToolRegistry
 
 from app.utils.logger import get_logger
 
-
 logger = get_logger(__name__)
 
 
@@ -22,6 +21,7 @@ class AgentExecutor:
         self.registry = ToolRegistry()
 
         self.max_steps = getattr(settings, "AGENT_MAX_STEPS", 10)
+        self.step_timeout = getattr(settings, "AGENT_STEP_TIMEOUT_SEC", 5)
 
     #  NORMALIZE 
     def _normalize(self, query: str) -> str:
@@ -30,55 +30,46 @@ class AgentExecutor:
     #  MAIN 
     def run(self, query: str, session_id: str) -> Dict[str, Any]:
 
-        if not query or not query.strip():
+        if not query:
             return self._reject()
 
         start_time = time.time()
         query = self._normalize(query)[:settings.MAX_PROMPT_CHARS]
 
-        logger.info("[AgentExecutor][START] session_id=%s", session_id)
-
         try:
-            #  ROUTER 
+            logger.info(event="agent_exec_start", session_id=session_id)
+
+            #  ROUTING 
             decision = self.router.route(query, session_id)
 
-            logger.info(
-                "[AgentExecutor][ROUTE] action=%s | reason=%s",
-                decision.action,
-                decision.reason
-            )
-
-            #  PLAN 
+            #  PLANNING 
             plan = self.planner.create_plan(decision, query)
 
             if not plan or not getattr(plan, "steps", None):
-                raise ValueError("Invalid execution plan")
+                raise ValueError("INVALID_PLAN")
 
             steps = plan.steps[:self.max_steps]
-
-            logger.info("[AgentExecutor] Plan=%s", [s.tool for s in steps])
 
             context: Dict[str, Any] = {}
             final_output = None
 
             #  EXECUTION 
-            for idx, step in enumerate(steps):
+            for step in steps:
 
                 step_start = time.time()
-
-                logger.info("[AgentExecutor] Step=%s", step.tool)
 
                 try:
                     tool = self.registry.get(step.tool)
 
-                    result = self._safe_tool_execute(
+                    result = self._execute_step(
                         tool,
                         query,
                         context,
-                        session_id
+                        session_id,
+                        step_start
                     )
 
-                    if not self._validate_tool_result(result):
+                    if not self._valid_result(result):
                         continue
 
                     output = result.get("result")
@@ -88,53 +79,38 @@ class AgentExecutor:
                     if step.tool == "reason":
                         final_output = output
 
-                    logger.info(
-                        "[AgentExecutor][STEP_SUCCESS] tool=%s latency=%.2fs",
-                        step.tool,
-                        time.time() - step_start
-                    )
-
                 except Exception as e:
-                    logger.error(
-                        "[AgentExecutor][STEP_FAIL] tool=%s | error=%s",
-                        step.tool,
-                        str(e)
-                    )
+                    logger.warning(event="step_failed", tool=step.tool, error=str(e))
                     continue
 
-            #  FINAL OUTPUT 
+            #  FINAL 
             if not final_output:
-                logger.warning("[AgentExecutor] fallback triggered")
                 final_output = self._fallback_llm(query)
 
-            latency = round(time.time() - start_time, 2)
+            latency = round(time.time() - start_time, 3)
 
-            return self._format_output(
-                final_output,
-                decision,
-                latency
-            )
+            return self._format(final_output, decision, latency)
 
         except Exception as e:
-            logger.error(
-                "[AgentExecutor][FAILED] session_id=%s | error=%s",
-                session_id,
-                str(e)
-            )
-
+            logger.error(event="agent_exec_failed", error=str(e))
             return self._fallback(query, start_time)
 
-    #  SAFE TOOL EXECUTION 
-    def _safe_tool_execute(self, tool, query, context, session_id):
+    #  STEP EXEC 
+    def _execute_step(self, tool, query, context, session_id, start_time):
 
-        return tool.execute(
+        result = tool.execute(
             query=query,
             context=self._truncate_context(context),
             session_id=session_id
         )
 
-    #  VALIDATE TOOL RESULT 
-    def _validate_tool_result(self, result: Dict[str, Any]) -> bool:
+        if time.time() - start_time > self.step_timeout:
+            raise TimeoutError("STEP_TIMEOUT")
+
+        return result
+
+    #  VALIDATION 
+    def _valid_result(self, result: Dict[str, Any]) -> bool:
 
         if not isinstance(result, dict):
             return False
@@ -147,33 +123,29 @@ class AgentExecutor:
 
         return True
 
-    # CONTEXT UPDATE
+    #  CONTEXT 
     def _update_context(self, tool: str, context: Dict, output):
 
-        if tool == "memory":
-            context["memory"] = output
+        try:
+            if tool == "memory":
+                context["memory"] = output
 
-        elif tool == "rag":
-            if isinstance(output, list):
-                context["docs"] = output[:settings.MAX_CHUNKS]
-            else:
-                logger.warning("[AgentExecutor] rag output not list, skipping")
-                context["docs"] = []
+            elif tool == "rag":
+                context["docs"] = output[:settings.MAX_CHUNKS] if isinstance(output, list) else []
 
-        elif tool == "decompose":
-            context["sub_queries"] = output if isinstance(output, list) else []
+            elif tool == "decompose":
+                context["sub_queries"] = output if isinstance(output, list) else []
 
-        elif tool == "fusion":
-            if isinstance(output, list):
-                context["results"] = output[:settings.MAX_CHUNKS]
-            else:
-                logger.warning("[AgentExecutor] fusion output not list, skipping")
-                context["results"] = []
+            elif tool == "fusion":
+                context["results"] = output[:settings.MAX_CHUNKS] if isinstance(output, list) else []
 
-        elif tool == "search":
-            context["search"] = output
-            
-    #  TRUNCATE CONTEXT 
+            elif tool == "search":
+                context["search"] = output
+
+        except Exception as e:
+            logger.warning(event="context_update_failed", error=str(e))
+
+    #  CONTEXT LIMIT 
     def _truncate_context(self, context: Dict) -> Dict:
 
         truncated = {}
@@ -186,19 +158,17 @@ class AgentExecutor:
 
         return truncated
 
-    #  FORMAT OUTPUT 
-    def _format_output(self, final_output, decision, latency):
+    #  FORMAT 
+    def _format(self, output, decision, latency):
 
-        if isinstance(final_output, dict):
-
-            answer = final_output.get("answer", "")
+        if isinstance(output, dict):
+            answer = output.get("answer", "")
             metadata = {
-                "confidence": final_output.get("confidence", 0.5),
-                "sources_used": final_output.get("sources_used", 0)
+                "confidence": output.get("confidence", 0.5),
+                "sources_used": output.get("sources_used", 0)
             }
-
         else:
-            answer = str(final_output)
+            answer = str(output)
             metadata = {}
 
         return {
@@ -210,21 +180,18 @@ class AgentExecutor:
             "metadata": metadata
         }
 
-    #  FALLBACK LLM 
+    #  FALLBACK 
     def _fallback_llm(self, query: str):
 
         llm = model_loader.get_llm()
 
-        safe_prompt = f"Answer clearly:\n\n{query}"
-
         return llm.generate(
-            safe_prompt,
+            f"Answer clearly:\n{query}",
             max_tokens=settings.LLM_MAX_TOKENS,
-            temperature=0.3,
+            temperature=0.2,
             top_p=settings.LLM_TOP_P,
         )
 
-    #  FULL FALLBACK 
     def _fallback(self, query: str, start_time: float):
 
         response = self._fallback_llm(query)
@@ -234,7 +201,7 @@ class AgentExecutor:
             "source": "fallback",
             "decision": "fallback",
             "reason": "executor_failure",
-            "latency": round(time.time() - start_time, 2),
+            "latency": round(time.time() - start_time, 3),
             "metadata": {}
         }
 

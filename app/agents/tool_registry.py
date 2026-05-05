@@ -16,7 +16,6 @@ from app.core.infra_registry import infra
 
 from app.utils.logger import get_logger
 
-
 logger = get_logger(__name__)
 
 
@@ -36,7 +35,7 @@ class Tool:
         self.tool_type = tool_type
         self.cost = cost
 
-    #  SAFE EXECUTION 
+    #  EXECUTION 
     def execute(self, query: str, context: Dict = None, session_id: str = None) -> Dict:
 
         start = time.time()
@@ -52,7 +51,7 @@ class Tool:
             if result is None:
                 return self._error("empty_result")
 
-            latency = round(time.time() - start, 2)
+            latency = round(time.time() - start, 3)
 
             return {
                 "tool": self.name,
@@ -62,7 +61,7 @@ class Tool:
             }
 
         except Exception as e:
-            logger.error("[Tool:%s] failed | %s", self.name, str(e))
+            logger.error(event="tool_failed", tool=self.name, error=str(e))
             return self._error(str(e))
 
     def _error(self, msg):
@@ -80,15 +79,15 @@ class ToolRegistry:
 
         self.tools: Dict[str, Tool] = {}
 
-        #  SAFE INIT 
+        #  INIT 
         try:
             self.rag_pipeline = RAGPipeline()
         except Exception as e:
-            logger.warning("[ToolRegistry] RAG init failed | %s", str(e))
+            logger.warning(event="rag_init_failed", error=str(e))
             self.rag_pipeline = None
 
         self.web_search = WebSearchTool()
-        self.memory = infra.get_memory()  
+        self.memory = infra.get_memory()
 
         self.embedder = model_loader.get_embedder()
         self.llm = model_loader.get_llm()
@@ -97,37 +96,36 @@ class ToolRegistry:
         self.reasoning_engine = ReasoningEngine(self.llm)
         self.fusion = ResultFusion()
 
-        self._register_default_tools()
+        self._register()
 
-    #  REGISTRATION 
+    #  REGISTER 
     def register(self, tool: Tool):
         self.tools[tool.name] = tool
-        logger.debug("[ToolRegistry] registered=%s", tool.name)
 
     def get(self, tool_name: str) -> Tool:
         tool = self.tools.get(tool_name)
         if not tool:
-            raise ValueError(f"Tool not found: {tool_name}")
+            raise ValueError(f"TOOL_NOT_FOUND_{tool_name}")
         return tool
 
     #  TOOLS 
-    def _register_default_tools(self):
+    def _register(self):
 
-        #  RAG 
+        # RAG
         def rag_tool(query, context, session_id):
             if not self.rag_pipeline:
                 return []
             return self.rag_pipeline.run(query, session_id=session_id)
 
-        self.register(Tool("rag", "Retrieve from knowledge base", rag_tool, "retrieval"))
+        self.register(Tool("rag", "Retrieve knowledge", rag_tool, "retrieval"))
 
-        #  SEARCH 
+        # SEARCH
         def search_tool(query, context, session_id):
             return self.web_search.execute(query, context, session_id)
 
         self.register(Tool("search", "External search", search_tool, "external", "high"))
 
-        #  MEMORY 
+        # MEMORY
         def memory_tool(query, context, session_id):
 
             history = self.memory.get_history(session_id)
@@ -135,37 +133,36 @@ class ToolRegistry:
             if not history:
                 return []
 
-            filtered = filter_relevant_history(
+            return filter_relevant_history(
                 query=query,
                 history=history,
                 embedder=self.embedder
             )
 
-            return filtered 
-
         self.register(Tool("memory", "Fetch memory", memory_tool, "memory", "low"))
 
-        #  DECOMPOSE 
+        # DECOMPOSE
         def decompose_tool(query, context, session_id):
             return self.decomposer.decompose(query)
 
         self.register(Tool("decompose", "Query decomposition", decompose_tool))
 
-        #  FUSION 
+        # FUSION
         def fusion_tool(query, context, session_id):
-            return self.fusion.fuse(context.get("results", []))
+            return self.fusion.fuse(context.get("results", []), session_id=session_id)
 
         self.register(Tool("fusion", "Result fusion", fusion_tool))
 
-        #  REASON 
+        # REASON
         def reasoning_tool(query, context, session_id):
 
             return self.reasoning_engine.generate_answer(
                 query=query,
                 retrieved_docs=context.get("docs", []),
-                memory_context=context.get("memory", "")
+                memory_context=context.get("memory", ""),
+                session_id=session_id
             )
 
         self.register(Tool("reason", "Final reasoning", reasoning_tool, "reasoning", "high"))
 
-        logger.info("[ToolRegistry] tools registered")
+        logger.info(event="tools_registered", count=len(self.tools))

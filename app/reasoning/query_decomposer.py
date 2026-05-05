@@ -1,10 +1,10 @@
 import re
 import time
+import hashlib
 from typing import List
 
 from app.core.config import settings
 from app.utils.logger import get_logger
-
 
 logger = get_logger(__name__)
 
@@ -15,118 +15,102 @@ class QueryDecomposer:
         self.llm = llm
         self.max_subqueries = settings.MAX_SUBQUERIES
 
+    #  HASH 
+    def _hash(self, text: str) -> str:
+        return hashlib.sha256(text.lower().strip().encode()).hexdigest()
+
     #  NORMALIZE 
-    def _normalize(self, query: str) -> str:
-        return " ".join(query.strip().split())
+    def _normalize(self, q: str) -> str:
+        return " ".join(q.strip().split())
 
-    #  COMPLEXITY CHECK (IMPROVED) 
-    def _is_complex(self, query: str) -> bool:
+    #  COMPLEXITY 
+    def _is_complex(self, q: str) -> bool:
 
-        q = query.lower()
+        ql = q.lower()
+        words = ql.split()
 
-        if len(q.split()) > settings.DECOMPOSITION_MIN_WORDS:
+        if len(words) > settings.DECOMPOSITION_MIN_WORDS:
             return True
 
         keywords = getattr(settings, "DECOMPOSITION_KEYWORDS", [
-            "and", "compare", "difference", "vs",
-            "multiple", "steps", "process", "how"
+            "compare", "difference", "vs", "process", "steps", "multiple"
         ])
 
-        if any(k in q for k in keywords):
+        if any(k in ql for k in keywords):
             return True
 
-        # MULTI-INTENT DETECTION
-        if "?" in q and q.count("?") > 1:
+        if q.count("?") > 1:
             return True
 
         return False
 
-    #  SAFE PROMPT 
+    #  PROMPT 
     def _build_prompt(self, query: str) -> str:
 
         instruction = (
-            "You are an expert query planner.\n\n"
-            "Break the query into independent retrieval questions.\n\n"
-            "Rules:\n"
-            f"- Max {self.max_subqueries} questions\n"
-            "- No overlap\n"
-            "- Preserve intent\n"
-            "- Each query must be standalone\n"
-            "- No explanation\n\n"
+            "Break into independent retrieval queries.\n"
+            f"Max {self.max_subqueries}. No explanation.\n"
+            "Each must be standalone.\n\n"
         )
 
-        format_block = (
-            "Format:\n"
-            "1. Question\n"
-            "2. Question\n\n"
-        )
-
-        body = f"Query:\n{query}"
+        format_block = "1. Query\n2. Query\n\n"
 
         max_chars = settings.MAX_PROMPT_CHARS
 
-        available = max_chars - len(instruction) - len(format_block) - 50
-        body = body[:available]
+        body_limit = max_chars - len(instruction) - len(format_block) - 50
+        query = query[:body_limit]
 
-        return instruction + format_block + body
+        return f"{instruction}{format_block}Query:\n{query}"
 
-    #  ROBUST PARSER 
-    def _parse_response(self, text: str) -> List[str]:
+    #  PARSE 
+    def _parse(self, text: str) -> List[str]:
 
         if not text:
             return []
 
-        try:
-            lines = text.split("\n")
+        lines = text.split("\n")
+        out = []
 
-            queries = []
+        for line in lines:
+            line = line.strip()
 
-            for line in lines:
-                line = line.strip()
+            line = re.sub(r"^\d+[\.\)]\s*", "", line)
+            line = re.sub(r"^[-•]\s*", "", line)
 
-                # HANDLE MULTIPLE FORMATS
-                line = re.sub(r"^\d+[\.\)]\s*", "", line)
-                line = re.sub(r"^[-•]\s*", "", line)
+            if len(line) < 5:
+                continue
 
-                if len(line) < 5:
-                    continue
+            if not line.endswith("?"):
+                line += "?"
 
-                # ENSURE QUESTION-LIKE
-                if not line.endswith("?"):
-                    line = line + "?"
+            out.append(line)
 
-                queries.append(line)
-
-            return queries
-
-        except Exception:
-            return []
+        return out
 
     #  FILTER 
-    def _filter_queries(self, queries: List[str]) -> List[str]:
+    def _filter(self, queries: List[str]) -> List[str]:
 
-        filtered = []
         seen = set()
+        out = []
 
         for q in queries:
+            norm = q.lower().strip()
 
-            q_norm = q.lower().strip()
-
-            if len(q_norm.split()) < 3:
+            if len(norm.split()) < 3:
                 continue
 
-            if q_norm in seen:
+            h = self._hash(norm)
+            if h in seen:
                 continue
 
-            seen.add(q_norm)
-            filtered.append(q.strip())
+            seen.add(h)
+            out.append(q.strip())
 
-        return filtered[:self.max_subqueries]
+        return out[:self.max_subqueries]
 
     #  FALLBACK 
     def _fallback(self, query: str) -> List[str]:
 
-        # SIMPLE SPLIT HEURISTIC
         parts = re.split(r"\band\b|\bthen\b|\balso\b", query)
 
         parts = [p.strip() for p in parts if len(p.strip()) > 5]
@@ -139,14 +123,12 @@ class QueryDecomposer:
     #  MAIN 
     def decompose(self, query: str) -> List[str]:
 
-        if not query or not query.strip():
+        if not query:
             return []
 
         start = time.time()
 
         try:
-            logger.info("[QueryDecomposer][START]")
-
             query = self._normalize(query)
 
             if not self._is_complex(query):
@@ -154,33 +136,34 @@ class QueryDecomposer:
 
             prompt = self._build_prompt(query)
 
-            #  LLM 
+            # latency guard
             t_llm = time.time()
             response = self.llm.generate(prompt)
-            llm_latency = round(time.time() - t_llm, 2)
+            llm_latency = time.time() - t_llm
 
-            parsed = self._parse_response(response)
+            if llm_latency > settings.MODEL_TIMEOUT_SEC:
+                logger.warning(event="decompose_timeout")
+                return self._fallback(query)
+
+            parsed = self._parse(response)
 
             if not parsed:
-                logger.warning("[QueryDecomposer] fallback triggered")
                 return self._fallback(query)
 
-            sub_queries = self._filter_queries(parsed)
+            filtered = self._filter(parsed)
 
-            if not sub_queries:
+            if not filtered:
                 return self._fallback(query)
-
-            latency = round(time.time() - start, 2)
 
             logger.info(
-                "[QueryDecomposer][SUCCESS] count=%s latency=%ss llm=%ss",
-                len(sub_queries),
-                latency,
-                llm_latency
+                event="decompose_success",
+                count=len(filtered),
+                latency=round(time.time() - start, 2),
+                llm_latency=round(llm_latency, 2)
             )
 
-            return sub_queries
+            return filtered
 
         except Exception as e:
-            logger.error("[QueryDecomposer][FAILED] %s", str(e))
+            logger.error(event="decompose_failed", error=str(e))
             return [query]

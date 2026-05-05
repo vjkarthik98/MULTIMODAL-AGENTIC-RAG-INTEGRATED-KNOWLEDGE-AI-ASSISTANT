@@ -7,20 +7,18 @@ from llama_cpp import Llama
 from app.core.config import settings
 from app.utils.logger import get_logger
 
-
 logger = get_logger(__name__)
 
 
 class GGUFModel:
 
-    def __init__(self, model_path: str = None):
+    def __init__(self, model_path: str = None, n_gpu_layers: int = 0):
         self._model_path = model_path or settings.LLM_MODEL_PATH
         self._llm = None
         self._lock = threading.RLock()
 
+        self.n_gpu_layers = n_gpu_layers
         self.max_prompt_chars = settings.MAX_PROMPT_CHARS
-
-        logger.info(f"[GGUFModel] initialized | path={self._model_path}")
 
     #  NORMALIZE 
     def _normalize(self, text: str) -> str:
@@ -29,21 +27,18 @@ class GGUFModel:
     #  LOAD 
     def _load(self):
 
-        if self._llm is not None:
+        if self._llm:
             return self._llm
 
         with self._lock:
-            if self._llm is not None:
+
+            if self._llm:
                 return self._llm
 
             if not os.path.exists(self._model_path):
-                raise FileNotFoundError(
-                    f"[GGUFModel] model not found at {self._model_path}"
-                )
+                raise FileNotFoundError("MODEL_NOT_FOUND")
 
             start = time.time()
-
-            logger.info("[GGUFModel] loading model")
 
             try:
                 self._llm = Llama(
@@ -51,21 +46,22 @@ class GGUFModel:
                     n_ctx=settings.CONTEXT_MAX_TOKENS,
                     n_threads=max(os.cpu_count() // 2, 2),
                     n_batch=512,
+                    n_gpu_layers=self.n_gpu_layers,
                     verbose=False,
                 )
 
                 logger.info(
-                    "[GGUFModel] loaded | latency=%.2fs",
-                    time.time() - start
+                    event="gguf_loaded",
+                    latency=round(time.time() - start, 2)
                 )
 
             except Exception as e:
-                logger.error("[GGUFModel] load failed | %s", str(e))
+                logger.error(event="gguf_load_failed", error=str(e))
                 raise
 
         return self._llm
 
-    #  SAFE GENERATE 
+    #  GENERATE 
     def generate(
         self,
         prompt: str,
@@ -81,7 +77,6 @@ class GGUFModel:
             return ""
 
         if len(prompt) > self.max_prompt_chars:
-            logger.warning("[GGUFModel] prompt truncated")
             prompt = prompt[:self.max_prompt_chars]
 
         llm = self._load()
@@ -91,7 +86,7 @@ class GGUFModel:
             try:
                 start = time.time()
 
-                response = llm(
+                res = llm(
                     prompt,
                     max_tokens=max_tokens or settings.LLM_MAX_TOKENS,
                     temperature=temperature or settings.LLM_TEMPERATURE,
@@ -99,25 +94,23 @@ class GGUFModel:
                     stop=["</s>"],
                 )
 
-                latency = round(time.time() - start, 2)
-
-                text = response["choices"][0]["text"]
+                text = res["choices"][0]["text"]
 
                 if not text or len(text.strip()) < 2:
-                    raise ValueError("empty_response")
+                    raise ValueError("EMPTY_RESPONSE")
 
                 logger.debug(
-                    "[GGUFModel] generate success | latency=%ss",
-                    latency
+                    event="gguf_generate",
+                    latency=round(time.time() - start, 3)
                 )
 
                 return text.strip()
 
             except Exception as e:
                 logger.warning(
-                    "[GGUFModel] generation attempt %s failed | %s",
-                    attempt,
-                    str(e)
+                    event="gguf_retry",
+                    attempt=attempt,
+                    error=str(e)
                 )
 
                 if attempt >= retries:
@@ -162,13 +155,12 @@ class GGUFModel:
                     yield token
 
             logger.debug(
-                "[GGUFModel] stream completed | latency=%.2fs",
-                time.time() - start
+                event="gguf_stream_complete",
+                latency=round(time.time() - start, 2)
             )
 
         except Exception as e:
-            logger.error("[GGUFModel] streaming failed | %s", str(e))
-            return
+            logger.error(event="gguf_stream_failed", error=str(e))
 
     #  WARMUP 
     def warmup(self):
@@ -178,16 +170,15 @@ class GGUFModel:
 
             self._load()
 
-            # minimal token generation to warm cache
             try:
                 self.generate("Hello", max_tokens=5)
             except Exception:
                 pass
 
             logger.info(
-                "[GGUFModel] warmup completed | latency=%.2fs",
-                time.time() - start
+                event="gguf_warmup",
+                latency=round(time.time() - start, 2)
             )
 
         except Exception as e:
-            logger.warning("[GGUFModel] warmup failed | %s", str(e))
+            logger.warning(event="gguf_warmup_failed", error=str(e))

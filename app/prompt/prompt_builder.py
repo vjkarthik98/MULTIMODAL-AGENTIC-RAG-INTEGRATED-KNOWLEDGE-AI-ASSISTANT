@@ -3,7 +3,6 @@ import time
 from app.core.config import settings
 from app.utils.logger import get_logger
 
-
 logger = get_logger(__name__)
 
 
@@ -12,77 +11,60 @@ class PromptBuilder:
     def __init__(self):
         self.max_chars = settings.MAX_PROMPT_CHARS
 
-    # CLEAN
+    #  CLEAN 
     def _clean(self, text: str) -> str:
         return " ".join(str(text or "").strip().split())
 
-    # SAFE TRUNCATION
+    #  TRUNCATE 
     def _truncate(self, text: str, limit: int) -> str:
         if not text:
             return ""
-        return text[:limit].rstrip() + ("..." if len(text) > limit else "")
+        return text[:limit]
 
-    # DEDUP
+    #  DEDUP 
     def _deduplicate(self, memory: str, context: str):
 
         if not memory or not context:
             return memory, context
 
-        if memory[:200] in context:
-            context = context.replace(memory[:200], "")
+        key = memory[:200]
+        if key and key in context:
+            context = context.replace(key, "")
 
         return memory, context
 
-    # DETECT STRUCTURED QUERY
-    def _is_structured_query(self, query: str) -> bool:
+    #  MODE 
+    def _is_structured(self, query: str) -> bool:
 
         q = query.lower()
 
-        keywords = [
-            "table of contents",
-            "toc",
-            "which page",
-            "page number",
-            "how many",
-            "which section",
-            "table",
-            "row",
-            "column"
-        ]
+        return any(k in q for k in [
+            "table", "row", "column",
+            "page number", "which page",
+            "toc", "section"
+        ])
 
-        return any(k in q for k in keywords)
-
-    # BUILD SYSTEM PROMPT
-    def _build_system_block(self, structured: bool) -> str:
+    #  SYSTEM 
+    def _system(self, structured: bool) -> str:
 
         if structured:
             return (
-                "<s>[INST]\n\n"
-                "You are a precise information extraction system.\n\n"
-                "STRICT RULES:\n"
-                "- Extract ONLY from provided context\n"
-                "- Do NOT generate or infer beyond context\n"
-                "- Identify correct row and column alignment\n"
-                "- Return ONLY the exact value\n"
-                "- Do NOT explain\n"
-                "- Do NOT include extra text\n"
-                "- If not found, return: I don't know\n\n"
+                "You are a strict extraction system.\n"
+                "- Use ONLY context\n"
+                "- Return exact value\n"
+                "- No explanation\n"
+                "- If missing → I don't know\n\n"
             )
 
         return (
-            "<s>[INST]\n\n"
-            "You are a highly reliable AI assistant.\n\n"
-            "STRICT RULES:\n"
-            "- Answer ONLY from provided context\n"
-            "- NEVER hallucinate\n"
-            "- If information is missing say: I don't know\n"
-            "- Do NOT assume facts\n"
-            "- Be precise and factual\n"
-            "- Avoid repetition\n"
-            "- Prefer grounded evidence\n\n"
+            "You are a grounded assistant.\n"
+            "- Use ONLY context\n"
+            "- No hallucination\n"
+            "- If unsure → I don't know\n"
+            "- Be precise\n\n"
         )
 
-    # MAIN
+    #  MAIN 
     def build_prompt(
         self,
         query: str,
@@ -94,125 +76,63 @@ class PromptBuilder:
         start = time.time()
 
         try:
-            # NORMALIZE
             query = self._clean(query)
             context = self._clean(context)
             memory = self._clean(memory)
 
             if not query:
-                raise ValueError("query cannot be empty")
+                raise ValueError("EMPTY_QUERY")
 
-            # DETECT MODE
-            structured = self._is_structured_query(query)
+            structured = self._is_structured(query)
 
-            # DEDUP
+            # dedup
             memory, context = self._deduplicate(memory, context)
 
-            # SMART BUDGET
-            memory_budget = int(self.max_chars * 0.25)
-            context_budget = int(self.max_chars * 0.5)
+            # budgets
+            mem_budget = int(self.max_chars * 0.25)
+            ctx_budget = int(self.max_chars * 0.5)
 
-            memory = self._truncate(memory, memory_budget)
-            context = self._truncate(context, context_budget)
+            memory = self._truncate(memory, mem_budget)
+            context = self._truncate(context, ctx_budget)
 
-            # SYSTEM BLOCK
-            system_block = self._build_system_block(structured)
+            # blocks
+            system = self._system(structured)
 
-            # MEMORY
-            memory_block = ""
-            if memory:
-                memory_block = (
-                    "=====\n"
-                    "MEMORY\n"
-                    "=====\n"
-                    f"{memory}\n\n"
-                )
+            mem_block = f"MEMORY:\n{memory}\n\n" if memory else ""
+            ctx_block = f"CONTEXT:\n{context}\n\n" if context else ""
 
-            # CONTEXT
-            context_block = ""
-            if context:
-                context_block = (
-                    "=====\n"
-                    "CONTEXT\n"
-                    "=====\n"
-                    f"{context}\n\n"
-                )
-
-            # QUERY
             if structured:
-                query_block = (
-                    "=====\n"
-                    "TASK\n"
-                    "=====\n"
-                    "Find the exact value from the structured data.\n"
-                    f"Query: {query}\n\n"
-                )
+                query_block = f"TASK:\n{query}\n\n"
+                output_block = "OUTPUT:\n<exact answer>"
             else:
-                query_block = (
-                    "=====\n"
-                    "USER QUERY\n"
-                    "=====\n"
-                    f"{query}\n\n"
-                )
-
-            # OUTPUT FORMAT
-            if structured:
+                query_block = f"QUERY:\n{query}\n\n"
                 output_block = (
-                    "=====\n"
-                    "OUTPUT\n"
-                    "=====\n"
-                    "<exact answer only>\n\n"
-                    "[/INST]"
-                )
-            else:
-                output_block = (
-                    "=====\n"
-                    "OUTPUT FORMAT\n"
-                    "=====\n"
-                    "Answer:\n"
-                    "<final answer>\n\n"
-                    "Confidence:\n"
-                    "<0 to 1>\n\n"
-                    "[/INST]"
+                    "FORMAT:\n"
+                    "Answer:\n<text>\n"
+                    "Confidence:\n<0-1>"
                 )
 
-            # COMPOSE
-            prompt = (
-                system_block +
-                memory_block +
-                context_block +
-                query_block +
-                output_block
-            )
+            prompt = system + mem_block + ctx_block + query_block + output_block
 
-            # SAFE GLOBAL TRUNCATION
+            # final guard
             if len(prompt) > self.max_chars:
 
-                logger.warning("[PromptBuilder] safe truncation applied")
+                fixed = system + query_block + output_block
+                allowed = self.max_chars - len(fixed) - 20
 
-                fixed_parts = system_block + query_block + output_block
-                allowed_middle = self.max_chars - len(fixed_parts) - 20
+                middle = (mem_block + ctx_block)[:allowed]
+                prompt = system + middle + query_block + output_block
 
-                middle = (memory_block + context_block)[:allowed_middle]
-
-                prompt = system_block + middle + query_block + output_block
-
-            latency = round(time.time() - start, 2)
+                logger.warning(event="prompt_truncated")
 
             logger.debug(
-                "[PromptBuilder][SUCCESS] session_id=%s | structured=%s | size=%s | latency=%ss",
-                session_id,
-                structured,
-                len(prompt),
-                latency
+                event="prompt_built",
+                size=len(prompt),
+                latency=round(time.time() - start, 3)
             )
 
             return prompt
 
         except Exception as e:
-            logger.error(
-                "[PromptBuilder][FAILED] session_id=%s | %s",
-                session_id,
-                str(e)
-            )
+            logger.error(event="prompt_failed", error=str(e))
             raise

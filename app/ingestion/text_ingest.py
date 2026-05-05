@@ -4,92 +4,119 @@ import uuid
 from pathlib import Path
 from typing import List
 
+import chardet
+
 from app.core.config import settings
 from app.chunking.chunker import chunk_text
 from app.ingestion.schema import IngestedDocument
 from app.utils.logger import get_logger
 
-
 logger = get_logger(__name__)
 
 
-# GENERATE FILE HASH FOR DEDUPLICATION
+#  HASH 
 def _generate_file_hash(file_path: str) -> str:
     hash_md5 = hashlib.md5()
 
     with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
+        for chunk in iter(lambda: f.read(8192), b""):
             hash_md5.update(chunk)
 
     return hash_md5.hexdigest()
 
 
-# LOAD TEXT WITH SAFE ENCODING HANDLING
+#  ENCODING 
+def _detect_encoding(file_path: Path) -> str:
+    with open(file_path, "rb") as f:
+        raw = f.read(10000)
+
+    result = chardet.detect(raw)
+    return result.get("encoding") or "utf-8"
+
+
 def _load_text(file_path: Path) -> str:
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        encoding = _detect_encoding(file_path)
+
+        with open(file_path, "r", encoding=encoding, errors="ignore") as f:
+            text = f.read()
+
+        return text
+
+    except Exception:
+        logger.warning(event="encoding_fallback_latin1")
+
+        with open(file_path, "r", encoding="latin-1", errors="ignore") as f:
             return f.read()
 
-    except UnicodeDecodeError:
-        logger.warning("[TextIngest] ENCODING FALLBACK TO LATIN-1")
 
-        with open(file_path, "r", encoding="latin-1") as f:
-            return f.read()
+#  CLEAN 
+def _normalize_text(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
-# MAIN INGEST FUNCTION
-def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument]:
+#  QUALITY 
+def _compute_quality_score(text: str) -> float:
+    length = len(text)
 
-    # VALIDATE SESSION ID
+    if length < 50:
+        return 0.2
+
+    if length < 200:
+        return 0.5
+
+    return 1.0
+
+
+#  MAIN 
+def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
+
     if not session_id:
-        raise ValueError("SESSION_ID REQUIRED")
+        raise ValueError("SESSION_ID_REQUIRED")
 
     path = Path(file_path)
 
-    # VALIDATE FILE EXISTENCE
     if not path.exists():
         raise FileNotFoundError(f"{file_path} NOT FOUND")
 
     start = time.time()
 
     try:
-        logger.info("[TextIngest][START] session_id=%s | file=%s", session_id, file_path)
+        logger.info(event="text_ingest_start", file=str(path), session_id=session_id)
 
-        # VALIDATE FILE SIZE
+        # FILE SIZE VALIDATION
         size_mb = path.stat().st_size / (1024 * 1024)
 
         if size_mb > settings.MAX_FILE_SIZE_MB:
-            raise ValueError(f"FILE TOO LARGE: {size_mb:.2f}MB")
+            raise ValueError(f"FILE_TOO_LARGE_{size_mb:.2f}MB")
 
-        # LOAD FILE CONTENT
-        text = _load_text(path)
+        # LOAD TEXT
+        raw_text = _load_text(path)
+        text = _normalize_text(raw_text)
 
-        # VALIDATE EMPTY CONTENT
-        if not text or not text.strip():
-            raise ValueError("EMPTY TEXT FILE")
+        if not text:
+            raise ValueError("EMPTY_TEXT")
 
-        # GLOBAL TEXT TRUNCATION (SAFETY LIMIT)
-        if len(text) > settings.MAX_PROMPT_CHARS:
-            logger.warning("[TextIngest] TEXT TRUNCATED DUE TO SIZE LIMIT")
-            text = text[:settings.MAX_PROMPT_CHARS]
+        # CRITICAL FIX: NO TRUNCATION HERE
+        if len(text) < 50:
+            raise ValueError("TEXT_TOO_SHORT")
 
-        # GENERATE IDENTIFIERS
+        # IDS
         file_hash = _generate_file_hash(file_path)
         doc_id = str(uuid.uuid4())
 
-        # APPLY CHUNKING
+        # CHUNKING
         chunks = chunk_text(text)
 
-        # VALIDATE CHUNKS
         if not chunks:
-            raise ValueError("NO CHUNKS GENERATED")
+            raise ValueError("NO_CHUNKS")
 
-        # ENFORCE MAX CHUNK LIMIT
+        # LIMIT
         if len(chunks) > settings.MAX_CHUNKS:
             logger.warning(
-                "[TextIngest] CHUNK LIMIT APPLIED %s -> %s",
-                len(chunks),
-                settings.MAX_CHUNKS
+                event="chunk_limit_applied",
+                original=len(chunks),
+                limited=settings.MAX_CHUNKS
             )
             chunks = chunks[:settings.MAX_CHUNKS]
 
@@ -98,12 +125,13 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
 
         documents: List[IngestedDocument] = []
 
-        # BUILD DOCUMENT OBJECTS
         for i, chunk in enumerate(chunks):
 
-            # SKIP EMPTY CHUNKS
-            if not chunk.strip():
+            chunk = chunk.strip()
+            if not chunk:
                 continue
+
+            quality_score = _compute_quality_score(chunk)
 
             doc = IngestedDocument(
                 text=chunk,
@@ -113,7 +141,6 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
                 source=source_name,
                 chunk_id=i,
 
-                # STRUCTURED METADATA
                 structure={
                     "doc_id": doc_id,
                     "session_id": session_id,
@@ -126,35 +153,34 @@ def ingest(file_path: str, session_id: str = "default") -> List[IngestedDocument
                     "ingestion_time": time.time(),
                 },
 
-                # EXTRA METADATA FOR RETRIEVAL SCORING
                 extra_metadata={
                     "modality_weight": 1.0,
-                    "importance_score": 1.0,
+                    "importance_score": quality_score,
+                    "data_quality_score": quality_score,
                 },
             ).finalize()
 
             documents.append(doc)
 
-        # FINAL VALIDATION
         if not documents:
-            raise ValueError("NO VALID DOCUMENTS CREATED")
+            raise ValueError("NO_VALID_DOCUMENTS")
 
         latency = round(time.time() - start, 2)
 
         logger.info(
-            "[TextIngest][SUCCESS] session_id=%s | docs=%s | latency=%ss",
-            session_id,
-            len(documents),
-            latency
+            event="text_ingest_success",
+            session_id=session_id,
+            docs=len(documents),
+            latency=latency
         )
 
         return documents
 
     except Exception as e:
         logger.error(
-            "[TextIngest][FAILED] session_id=%s | file=%s | error=%s",
-            session_id,
-            file_path,
-            str(e)
+            event="text_ingest_failed",
+            session_id=session_id,
+            file=file_path,
+            error=str(e)
         )
         raise

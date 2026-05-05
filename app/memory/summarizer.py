@@ -1,42 +1,53 @@
 import time
+import hashlib
 from typing import List, Dict
 
 from app.core.config import settings
 from app.utils.logger import get_logger
 
-
 logger = get_logger(__name__)
 
 
-#  CLEAN TEXT 
+#  CLEAN 
 def _clean(text: str) -> str:
     return " ".join(str(text or "").strip().split())
 
 
+#  HASH 
+def _hash(msg: Dict) -> str:
+    base = f"{msg.get('role')}|{str(msg.get('content'))[:200]}"
+    return hashlib.sha256(base.encode()).hexdigest()
+
+
 #  DEDUP 
-def _deduplicate(history: List[Dict]) -> List[Dict]:
+def _dedup(history: List[Dict]) -> List[Dict]:
+
     seen = set()
-    unique = []
+    out = []
 
     for msg in history:
-        key = (msg.get("role"), str(msg.get("content"))[:200])
-        if key not in seen:
-            seen.add(key)
-            unique.append(msg)
+        try:
+            h = _hash(msg)
+            if h in seen:
+                continue
+            seen.add(h)
+            out.append(msg)
+        except Exception:
+            continue
 
-    return unique
+    return out
 
 
-#  FORMAT CONVERSATION 
-def _format_conversation(history: List[Dict]) -> str:
+#  FORMAT 
+def _format(history: List[Dict]) -> str:
 
     max_chars = settings.MEMORY_SUMMARY_INPUT_CHARS
-    max_messages = settings.MAX_HISTORY_MESSAGES
+    max_msgs = settings.MAX_HISTORY_MESSAGES
 
-    history = _deduplicate(history[-max_messages:])
+    history = _dedup(history[-max_msgs:])
 
     parts = []
-    total_length = 0
+    total = 0
 
     for msg in reversed(history):
 
@@ -50,13 +61,13 @@ def _format_conversation(history: List[Dict]) -> str:
             content = content[:settings.MAX_PROMPT_CHARS]
 
             line = f"{role}: {content}"
-            line_len = len(line)
+            length = len(line)
 
-            if total_length + line_len > max_chars:
+            if total + length > max_chars:
                 break
 
             parts.append(line)
-            total_length += line_len
+            total += length
 
         except Exception:
             continue
@@ -64,51 +75,40 @@ def _format_conversation(history: List[Dict]) -> str:
     return "\n".join(reversed(parts))
 
 
-#  VALIDATE SUMMARY 
-def _validate_summary(text: str) -> str:
+#  VALIDATE 
+def _validate(summary: str) -> str:
 
-    if not text:
+    if not summary:
         return ""
 
-    text = _clean(text)
+    summary = _clean(summary)
 
-    if len(text) < settings.MIN_SUMMARY_LENGTH:
+    if len(summary) < settings.MIN_SUMMARY_LENGTH:
         return ""
 
-    if len(text) > settings.MEMORY_SUMMARY_MAX_CHARS:
-        text = text[:settings.MEMORY_SUMMARY_MAX_CHARS]
+    summary = summary[:settings.MEMORY_SUMMARY_MAX_CHARS]
 
-    # BASIC STRUCTURE CHECK
-    required_sections = ["Key Facts", "User Intent"]
+    required = ["Key Facts", "User Intent"]
 
-    if not any(section in text for section in required_sections):
+    if not any(r in summary for r in required):
         return ""
 
-    return text
+    return summary
 
 
-#  SAFE PROMPT BUILDER 
-def _build_prompt(conversation_text: str) -> str:
+#  PROMPT 
+def _prompt(conv: str) -> str:
 
     instruction = (
-        "You are a memory compression system for an AI assistant.\n\n"
-        "Extract ONLY important information.\n\n"
-        "Ignore:\n"
-        "- greetings\n"
-        "- small talk\n"
-        "- repetition\n\n"
-        "Focus on:\n"
-        "- goals\n"
-        "- facts\n"
-        "- preferences\n"
-        "- tasks\n"
-        "- decisions\n\n"
+        "Compress conversation memory.\n"
+        "- Keep only important info\n"
+        "- No hallucination\n"
+        "- No filler\n\n"
     )
 
-    body = f"Conversation:\n{conversation_text}\n\n"
+    body = f"Conversation:\n{conv}\n\n"
 
     format_block = (
-        "Return format:\n"
         "Key Facts:\n- ...\n\n"
         "User Intent:\n- ...\n\n"
         "Preferences:\n- ...\n\n"
@@ -116,14 +116,10 @@ def _build_prompt(conversation_text: str) -> str:
         "Context:\n- ..."
     )
 
-    # SAFE COMPOSITION
     max_chars = settings.MAX_PROMPT_CHARS
-
     available = max_chars - len(instruction) - len(format_block) - 50
 
-    body = body[:available]
-
-    return instruction + body + format_block
+    return instruction + body[:available] + format_block
 
 
 #  MAIN 
@@ -132,44 +128,32 @@ def summarize_conversation(llm, history: List[Dict]) -> str:
     if not history:
         return ""
 
-    start_time = time.time()
+    start = time.time()
 
     try:
-        logger.info("[Summarizer][START]")
+        conv = _format(history)
 
-        # STEP 1: FORMAT
-        t1 = time.time()
-        conversation_text = _format_conversation(history)
-
-        if not conversation_text:
+        if not conv:
             return ""
 
-        # STEP 2: PROMPT
-        prompt = _build_prompt(conversation_text)
+        prompt = _prompt(conv)
 
-        # STEP 3: GENERATE
-        t2 = time.time()
         summary = llm.generate(prompt)
 
-        # STEP 4: VALIDATE
-        summary = _validate_summary(summary)
+        summary = _validate(summary)
 
         if not summary:
-            logger.warning("[Summarizer] invalid summary")
+            logger.warning(event="summary_invalid")
             return ""
 
-        latency = round(time.time() - start_time, 2)
-
         logger.info(
-            "[Summarizer][SUCCESS] len=%s latency=%ss format=%.2fs llm=%.2fs",
-            len(summary),
-            latency,
-            t2 - t1,
-            time.time() - t2
+            event="summary_success",
+            length=len(summary),
+            latency=round(time.time() - start, 2)
         )
 
         return summary
 
     except Exception as e:
-        logger.error("[Summarizer][FAILED] %s", str(e))
+        logger.error(event="summary_failed", error=str(e))
         return ""

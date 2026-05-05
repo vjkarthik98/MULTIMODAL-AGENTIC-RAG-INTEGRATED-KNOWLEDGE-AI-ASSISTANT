@@ -11,110 +11,123 @@ logger = get_logger(__name__)
 
 class HybridRetriever:
 
-    def __init__(self, bm25_retriever, vector_store, embedder, clip_text_embedder=None):
-        self.bm25 = bm25_retriever
+    def __init__(self, bm25, vector_store, embedder, clip_text_embedder=None):
+        self.bm25 = bm25
         self.vector_store = vector_store
         self.embedder = embedder
         self.clip_text_embedder = clip_text_embedder
-
-        self.candidate_multiplier = min(settings.HYBRID_CANDIDATES_MULTIPLIER, 3)
 
         self.w_bm25 = settings.HYBRID_WEIGHT_BM25
         self.w_vector = settings.HYBRID_WEIGHT_VECTOR
         self.w_vision = settings.HYBRID_WEIGHT_VISION
 
-        # Embedding cache
-        self._query_embedding_cache = {}
+        self.candidate_multiplier = min(settings.HYBRID_CANDIDATES_MULTIPLIER, 3)
 
-    def _normalize_query(self, query: str) -> str:
-        return " ".join(query.strip().split())
+        # embedding cache
+        self._cache: Dict[str, List[float]] = {}
 
-    def _make_key(self, text: str, metadata: Dict) -> str:
-        base = "|".join([
-            text[:150],
-            str(metadata.get("doc_id")),
-            str(metadata.get("chunk_id")),
-        ])
-        return hashlib.md5(base.encode()).hexdigest()
+    #  HASH 
+    def _hash(self, text: str, meta: Dict) -> str:
+        base = f"{text[:200]}|{meta.get('doc_id')}|{meta.get('chunk_id')}"
+        return hashlib.sha256(base.encode()).hexdigest()
 
-    def _is_vision_query(self, query: str) -> bool:
-        q = query.lower()
-        return any(k in q for k in ["image", "photo", "diagram", "visual"])
+    #  QUERY 
+    def _normalize(self, q: str) -> str:
+        return " ".join(q.strip().split())
 
-    # Cached Embedding
-    def _get_query_embedding(self, query: str):
-        if query in self._query_embedding_cache:
-            return self._query_embedding_cache[query]
+    def _is_vision(self, q: str) -> bool:
+        q = q.lower()
+        return any(k in q for k in ["image", "photo", "diagram", "visual", "figure"])
 
-        vec = self.embedder.embed_query(query)
-        self._query_embedding_cache[query] = vec
+    #  EMBEDDING 
+    def _embed_query(self, q: str):
+
+        if q in self._cache:
+            return self._cache[q]
+
+        vec = self.embedder.embed_query(q)
+        self._cache[q] = vec
         return vec
 
+    #  SCORE NORMALIZATION 
+    def _normalize_scores(self, results: List[Dict]):
+
+        if not results:
+            return results
+
+        max_score = max(r.get("score", 0.0) for r in results) or 1e-6
+
+        for r in results:
+            r["score"] = r.get("score", 0.0) / max_score
+
+        return results
+
+    #  SEARCH 
     def search(self, query: str, session_id: str, top_k: int = None) -> List[Dict]:
 
         if not query or not session_id:
             return []
 
         start = time.time()
-        query = self._normalize_query(query)
 
+        query = self._normalize(query)
         top_k = top_k or settings.DEFAULT_TOP_K
-        candidate_k = min(top_k * self.candidate_multiplier, 15)
+        candidate_k = min(top_k * self.candidate_multiplier, 20)
 
         try:
-            # BM25
-            bm25_results = self.bm25.search(query, session_id, candidate_k)
+            #  BM25 
+            bm25_res = self.bm25.search(query, session_id, candidate_k)
+            bm25_res = self._normalize_scores(bm25_res)
 
-            # VECTOR (cached embedding)
-            text_vector_results = []
+            #  VECTOR 
+            vec_res = []
             try:
-                q_vec = self._get_query_embedding(query)
-                text_vector_results = self.vector_store.search_text(
-                    q_vec, candidate_k, session_id
-                )
-            except Exception:
-                pass
+                q_vec = self._embed_query(query)
+                vec_res = self.vector_store.search_text(q_vec, candidate_k, session_id)
+                vec_res = self._normalize_scores(vec_res)
+            except Exception as e:
+                logger.warning(event="vector_failed", error=str(e))
 
-            # VISION 
-            vision_results = []
-            if self._is_vision_query(query):
+            #  VISION 
+            vis_res = []
+            if self._is_vision(query):
                 try:
                     clip = self.clip_text_embedder or model_loader.get_clip_text_embedder()
                     v_vec = clip.embed_single(query)
 
-                    vision_results = self.vector_store.search_vision(
-                        v_vec, candidate_k, session_id
-                    )
-                except Exception:
-                    pass
+                    vis_res = self.vector_store.search_vision(v_vec, candidate_k, session_id)
+                    vis_res = self._normalize_scores(vis_res)
+                except Exception as e:
+                    logger.warning(event="vision_failed", error=str(e))
 
+            #  FUSION 
             combined = {}
 
-            def _add_results(results, weight):
+            def add(results, weight):
                 for r in results:
                     text = r.get("text")
-                    metadata = r.get("metadata", {})
+                    meta = r.get("metadata", {})
 
                     if not text:
                         continue
 
-                    key = self._make_key(text, metadata)
+                    h = self._hash(text, meta)
                     score = r.get("score", 0.0) * weight
 
-                    if key not in combined:
-                        combined[key] = {
+                    if h not in combined:
+                        combined[h] = {
                             "text": text,
-                            "metadata": metadata,
-                            "score": score
+                            "metadata": meta,
+                            "score": score,
                         }
                     else:
-                        combined[key]["score"] += score
+                        combined[h]["score"] += score
 
-            _add_results(bm25_results, self.w_bm25)
-            _add_results(text_vector_results, self.w_vector)
+            add(bm25_res, self.w_bm25)
+            add(vec_res, self.w_vector)
 
-            if vision_results:
-                _add_results(vision_results, self.w_vision)
+            if vis_res:
+                add(vis_res, self.w_vision)
 
             results = list(combined.values())
 
@@ -124,13 +137,13 @@ class HybridRetriever:
             results = sorted(results, key=lambda x: x["score"], reverse=True)[:top_k]
 
             logger.info(
-                "[HybridRetriever] results=%s latency=%.2fs",
-                len(results),
-                time.time() - start
+                event="hybrid_success",
+                results=len(results),
+                latency=round(time.time() - start, 3)
             )
 
             return results
 
         except Exception as e:
-            logger.error("[HybridRetriever][FAILED] %s", str(e))
+            logger.error(event="hybrid_failed", error=str(e))
             return []

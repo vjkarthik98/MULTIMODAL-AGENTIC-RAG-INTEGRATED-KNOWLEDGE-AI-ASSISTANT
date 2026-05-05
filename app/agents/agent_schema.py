@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any, List, Literal
+from pydantic import BaseModel, Field, validator
+from typing import Dict, Any, List, Literal
 
 from app.core.config import settings
 
@@ -16,49 +16,51 @@ class AgentDecision(BaseModel):
 
     signals: Dict[str, Any] = Field(default_factory=dict)
     suggested_tools: List[str] = Field(default_factory=list)
-
     trace: Dict[str, Any] = Field(default_factory=dict)
 
     #  NORMALIZE 
     def normalize(self):
 
-        self.action = self.action.strip().lower()
-        self.reason = self.reason.strip()
-
-        return self
-
-    #  STRICT VALIDATION 
-    def validate_strict(self):
-
-        if self.action not in {"rag", "search", "direct", "memory", "hybrid"}:
-            raise ValueError(f"Invalid action: {self.action}")
+        self.action = str(self.action).strip().lower()
+        self.reason = (self.reason or "").strip()
 
         if not self.reason:
             self.reason = "no_reason_provided"
 
-        if not isinstance(self.confidence, (int, float)):
-            self.confidence = 0.5
+        return self
 
-        self.confidence = max(0.0, min(self.confidence, 1.0))
+    #  VALIDATION 
+    def validate_strict(self):
+
+        allowed = {"rag", "search", "direct", "memory", "hybrid"}
+
+        if self.action not in allowed:
+            raise ValueError(f"INVALID_ACTION_{self.action}")
+
+        self._normalize_confidence()
 
         return self
 
-    #  SAFE VALIDATION
     def validate_safe(self):
 
-        if self.action not in {"rag", "search", "direct", "memory", "hybrid"}:
+        allowed = {"rag", "search", "direct", "memory", "hybrid"}
+
+        if self.action not in allowed:
             self.action = "rag"
             self.reason = self.reason or "invalid_action_fallback"
 
-        if not self.reason:
-            self.reason = "no_reason_provided"
+        self._normalize_confidence()
+
+        return self
+
+    #  CONFIDENCE 
+    def _normalize_confidence(self):
 
         if not isinstance(self.confidence, (int, float)):
             self.confidence = 0.5
 
+        self.confidence = float(self.confidence)
         self.confidence = max(0.0, min(self.confidence, 1.0))
-
-        return self
 
     #  FINALIZE 
     def finalize(self, strict: bool = False):
@@ -70,14 +72,12 @@ class AgentDecision(BaseModel):
 
         return self.validate_safe()
 
-    #  DECISION INTELLIGENCE 
+    #  DECISION LOGIC 
     def is_high_confidence(self) -> bool:
-        threshold = getattr(settings, "AGENT_HIGH_CONFIDENCE", 0.7)
-        return self.confidence >= threshold
+        return self.confidence >= getattr(settings, "AGENT_HIGH_CONFIDENCE", 0.7)
 
     def requires_fallback(self) -> bool:
-        threshold = getattr(settings, "AGENT_LOW_CONFIDENCE", 0.4)
-        return self.confidence < threshold
+        return self.confidence < getattr(settings, "AGENT_LOW_CONFIDENCE", 0.4)
 
     def is_retrieval(self) -> bool:
         return self.action in {"rag", "search", "hybrid"}
@@ -88,9 +88,12 @@ class AgentDecision(BaseModel):
     def is_direct(self) -> bool:
         return self.action == "direct"
 
-    #  TRACE ENRICHMENT 
+    #  TRACE 
     def add_trace(self, key: str, value: Any):
-        self.trace[key] = value
+        try:
+            self.trace[key] = value
+        except Exception:
+            pass
         return self
 
     #  SERIALIZATION 

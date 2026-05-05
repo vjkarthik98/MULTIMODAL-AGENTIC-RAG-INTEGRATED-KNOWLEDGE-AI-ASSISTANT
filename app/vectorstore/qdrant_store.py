@@ -1,6 +1,6 @@
 import uuid
 import time
-from typing import List
+from typing import List, Dict, Any, Optional
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -20,7 +20,6 @@ logger = get_logger(__name__)
 
 class QdrantVectorStore:
 
-    # INIT
     def __init__(self):
 
         self.client = (
@@ -43,75 +42,64 @@ class QdrantVectorStore:
         self.batch_size = settings.QDRANT_BATCH_SIZE
         self.max_docs = settings.QDRANT_MAX_DOCS
 
+        self.text_dim = settings.TEXT_EMBEDDING_DIM
+        self.vision_dim = settings.VISION_EMBEDDING_DIM
+
         self._collection_cache = set()
-        self.modality_filter = None
+        self.modality_filter: Optional[str] = None
 
-        logger.info("[QdrantStore] initialized")
+        logger.info(event="qdrant_initialized")
 
-    # RETRY
-    def _retry(self, fn, retries=2):
+    #  RETRY 
+    def _retry(self, fn, retries=3):
         for i in range(retries):
             try:
                 return fn()
             except Exception as e:
                 if i == retries - 1:
                     raise
-                logger.warning("[QdrantStore][RETRY] %s", str(e))
-                time.sleep(0.5)
+                logger.warning(event="qdrant_retry", error=str(e))
+                time.sleep(0.5 * (i + 1))
 
-    # CHECK COLLECTION EXISTS
+    #  COLLECTION 
     def _collection_exists(self, name: str) -> bool:
         try:
-            collections = self.client.get_collections().collections
-            return any(c.name == name for c in collections)
-        except Exception as e:
-            logger.error("[QdrantStore] collection check failed | %s", str(e))
+            return any(c.name == name for c in self.client.get_collections().collections)
+        except Exception:
             return False
 
-    # ENSURE COLLECTION
     def _ensure_collection(self, name: str, dim: int):
 
         if name in self._collection_cache:
             return
 
-        try:
-            exists = self._collection_exists(name)
+        if not self._collection_exists(name):
+            logger.warning(event="create_collection", name=name)
 
-            if not exists:
-                logger.warning("[QdrantStore] creating collection=%s", name)
+            self.client.create_collection(
+                collection_name=name,
+                vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+            )
 
-                self.client.create_collection(
-                    collection_name=name,
-                    vectors_config=VectorParams(
-                        size=dim,
-                        distance=Distance.COSINE
-                    ),
-                )
+        self._collection_cache.add(name)
 
-            self._collection_cache.add(name)
+    #  PAYLOAD 
+    def _payload(self, d) -> Dict[str, Any]:
 
-        except Exception as e:
-            logger.error("[QdrantStore] collection ensure failed | %s", str(e))
-            raise
-
-    # BUILD PAYLOAD
-    def _build_payload(self, d):
-
-        structure = dict(d.structure or {})
-        text = str(d.text or "")[:settings.QDRANT_TEXT_MAX_CHARS]
+        s = dict(d.structure or {})
 
         return {
-            "text": text,
-            "doc_id": structure.get("doc_id"),
+            "text": str(d.text or "")[:settings.QDRANT_TEXT_MAX_CHARS],
+            "doc_id": s.get("doc_id"),
             "chunk_id": d.chunk_id,
             "modality": d.modality,
-            "content_type": structure.get("content_type"),
-            "session_id": structure.get("session_id"),
-            "embedding_space": structure.get("embedding_space", "text"),
+            "content_type": s.get("content_type"),
+            "session_id": s.get("session_id"),
+            "embedding_space": s.get("embedding_space", "text"),
             "source": d.source,
         }
 
-    # INSERT DOCUMENTS
+    #  INSERT 
     def insert_documents(self, documents: List):
 
         if not documents:
@@ -120,59 +108,61 @@ class QdrantVectorStore:
         start = time.time()
         documents = documents[:self.max_docs]
 
-        dim = len(documents[0].embedding) if documents[0].embedding else None
-
-        if not dim:
-            logger.warning("[QdrantStore] no embeddings")
-            return
-
         text_points, vision_points = [], []
 
         for d in documents:
             emb = getattr(d, "embedding", None)
-
-            if not isinstance(emb, list) or len(emb) != dim:
+            if not isinstance(emb, list):
                 continue
 
-            payload = self._build_payload(d)
+            space = (d.structure or {}).get("embedding_space", "text")
+
+            if space == "vision":
+                if len(emb) != self.vision_dim:
+                    continue
+                collection = "vision"
+            else:
+                if len(emb) != self.text_dim:
+                    continue
+                collection = "text"
 
             point = PointStruct(
                 id=str(uuid.uuid4()),
                 vector=emb,
-                payload=payload,
+                payload=self._payload(d),
             )
 
-            if payload.get("embedding_space") == "vision":
+            if collection == "vision":
                 vision_points.append(point)
             else:
                 text_points.append(point)
 
-        def _insert(collection, points):
+        def _insert(collection_name, points):
             for i in range(0, len(points), self.batch_size):
                 batch = points[i:i + self.batch_size]
 
                 self._retry(lambda: self.client.upsert(
-                    collection_name=collection,
+                    collection_name=collection_name,
                     points=batch
                 ))
 
         if text_points:
-            self._ensure_collection(self.text_collection, dim)
+            self._ensure_collection(self.text_collection, self.text_dim)
             _insert(self.text_collection, text_points)
 
         if vision_points:
-            self._ensure_collection(self.vision_collection, dim)
+            self._ensure_collection(self.vision_collection, self.vision_dim)
             _insert(self.vision_collection, vision_points)
 
         logger.info(
-            "[QdrantStore] insert | text=%s vision=%s latency=%ss",
-            len(text_points),
-            len(vision_points),
-            round(time.time() - start, 2)
+            event="qdrant_insert",
+            text=len(text_points),
+            vision=len(vision_points),
+            latency=round(time.time() - start, 2)
         )
 
-    # FILTER
-    def _build_filter(self, session_id=None):
+    #  FILTER 
+    def _filter(self, session_id=None):
 
         conditions = []
 
@@ -188,49 +178,36 @@ class QdrantVectorStore:
 
         return Filter(must=conditions) if conditions else None
 
-    # SAFE SEARCH CORE
-    def _search(self, collection, query_vector, limit, session_id):
+    #  SEARCH 
+    def _search(self, collection, vector, limit, session_id):
 
-        start = time.time()
-
-        # use cache instead of API call
         if collection not in self._collection_cache:
-            logger.warning("[QdrantStore] collection not initialized=%s", collection)
             return []
 
         try:
-            results = self._retry(lambda: self.client.query_points(
+            res = self._retry(lambda: self.client.query_points(
                 collection_name=collection,
-                query=query_vector,
+                query=vector,
                 limit=limit,
-                query_filter=self._build_filter(session_id)
+                query_filter=self._filter(session_id)
             ))
 
-            points = getattr(results, "points", [])
+            points = getattr(res, "points", [])
 
-            if not points:
-                return []
-
-            output = []
-
-            for r in points:
-                text = r.payload.get("text")
-                if not text:
-                    continue
-
-                output.append({
-                    "text": text,
-                    "score": float(r.score),
-                    "metadata": r.payload
-                })
-
-            return output
+            return [
+                {
+                    "text": p.payload.get("text"),
+                    "score": float(p.score),
+                    "metadata": p.payload,
+                }
+                for p in points if p.payload.get("text")
+            ]
 
         except Exception as e:
-            logger.error("[QdrantStore] search failed | %s", str(e))
+            logger.error(event="qdrant_search_failed", error=str(e))
             return []
 
-    # SEARCH TEXT
+    #  PUBLIC 
     def search_text(self, query_vector, limit=None, session_id=None):
         return self._search(
             self.text_collection,
@@ -239,7 +216,6 @@ class QdrantVectorStore:
             session_id
         )
 
-    # SEARCH VISION
     def search_vision(self, query_vector, limit=None, session_id=None):
         return self._search(
             self.vision_collection,
@@ -248,6 +224,5 @@ class QdrantVectorStore:
             session_id
         )
 
-    # MODALITY FILTER
     def set_modality_filter(self, modality: str):
         self.modality_filter = modality

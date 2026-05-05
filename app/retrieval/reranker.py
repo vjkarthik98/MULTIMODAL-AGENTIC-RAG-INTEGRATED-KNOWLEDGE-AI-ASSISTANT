@@ -1,4 +1,5 @@
 import time
+import hashlib
 from typing import List, Dict
 
 import numpy as np
@@ -6,7 +7,6 @@ import numpy as np
 from app.core.config import settings
 from app.core.model_loader import model_loader
 from app.utils.logger import get_logger
-
 
 logger = get_logger(__name__)
 
@@ -20,35 +20,37 @@ class Reranker:
         self.max_inputs = settings.RERANK_MAX_INPUT
         self.context_chars = settings.RERANK_CONTEXT_MAX_CHARS
 
-        self.score_weight = settings.RERANK_MODEL_WEIGHT
-        self.fusion_weight = settings.RERANK_FUSION_WEIGHT
+        self.w_model = settings.RERANK_MODEL_WEIGHT
+        self.w_fusion = settings.RERANK_FUSION_WEIGHT
 
         self.modality_weights = getattr(settings, "RERANK_MODALITY_WEIGHTS", {})
 
-        logger.info("[Reranker] initialized")
+        logger.info(event="reranker_initialized")
 
-    #  NORMALIZE QUERY 
-    def _normalize_query(self, query: str) -> str:
-        return " ".join(query.strip().split())
+    #  HASH 
+    def _hash(self, doc: Dict) -> str:
+        meta = doc.get("metadata", {}) or {}
+        base = f"{meta.get('doc_id')}|{meta.get('chunk_id')}|{doc.get('text')[:200]}"
+        return hashlib.sha256(base.encode()).hexdigest()
 
-    #  CLEAN CONTEXT 
-    def _clean_text(self, text: str) -> str:
+    #  NORMALIZE 
+    def _normalize_query(self, q: str) -> str:
+        return " ".join(q.strip().split())
+
+    def _clean(self, text: str) -> str:
         return " ".join(text.split())
 
-    #  BUILD CONTEXT 
-    def _build_context(self, document: Dict) -> str:
+    #  CONTEXT 
+    def _context(self, doc: Dict) -> str:
 
-        metadata = document.get("metadata", {}) or {}
-        structure = metadata.get("structure", {}) or {}
+        meta = doc.get("metadata", {}) or {}
+        structure = meta.get("structure", {}) or {}
 
-        modality = metadata.get("modality", "text")
-        source = metadata.get("source_type") or metadata.get("source")
+        modality = meta.get("modality", "text")
+        source = meta.get("source") or meta.get("source_type")
 
-        content_type = metadata.get("content_type", structure.get("content_type"))
-        embedding_space = metadata.get(
-            "embedding_space",
-            structure.get("embedding_space", "text")
-        )
+        content_type = meta.get("content_type", structure.get("content_type"))
+        emb_space = meta.get("embedding_space", structure.get("embedding_space", "text"))
 
         header = []
 
@@ -61,24 +63,39 @@ class Reranker:
         if content_type:
             header.append(f"[{content_type.upper()}]")
 
-        if embedding_space == "vision":
+        if emb_space == "vision":
             header.append("[VISION]")
 
-        text = self._clean_text(document.get("text", ""))[:self.context_chars]
+        text = self._clean(doc.get("text", ""))[:self.context_chars]
 
         return " ".join(header) + " " + text
 
-    #  FILTER LOW QUALITY 
-    def _filter_candidates(self, docs: List[Dict]) -> List[Dict]:
-        return [d for d in docs if d.get("score", 0.0) > 0.02 and d.get("text")]
+    #  FILTER 
+    def _filter(self, docs: List[Dict]) -> List[Dict]:
+        return [
+            d for d in docs
+            if d.get("text") and d.get("score", 0.0) > 0.01
+        ]
+
+    #  NORMALIZE SCORES 
+    def _normalize_scores(self, scores: np.ndarray):
+
+        if scores.size == 0:
+            return scores
+
+        scores = np.nan_to_num(scores, nan=0.0, posinf=1.0, neginf=0.0)
+
+        min_s, max_s = scores.min(), scores.max()
+
+        if max_s - min_s > 1e-6:
+            return (scores - min_s) / (max_s - min_s)
+
+        return np.clip(scores, 0.0, 1.0)
 
     #  MAIN 
     def rerank(self, query: str, documents: List[Dict], top_k: int = None):
 
-        if not query or not query.strip():
-            raise ValueError("query cannot be empty")
-
-        if not documents:
+        if not query or not documents:
             return []
 
         start = time.time()
@@ -87,24 +104,21 @@ class Reranker:
         try:
             query = self._normalize_query(query)
 
-            documents = self._filter_candidates(documents)
-            documents = documents[:self.max_inputs]
+            docs = self._filter(documents)[:self.max_inputs]
 
             pairs = []
             valid_docs = []
 
-            for doc in documents:
-                context = self._build_context(doc)
-
-                if not context:
+            for d in docs:
+                ctx = self._context(d)
+                if not ctx:
                     continue
 
                 pairs.append((
                     query[:settings.MAX_PROMPT_CHARS],
-                    context[:self.context_chars]
+                    ctx
                 ))
-
-                valid_docs.append(doc)
+                valid_docs.append(d)
 
             if not pairs:
                 return []
@@ -113,57 +127,44 @@ class Reranker:
             t_model = time.time()
 
             scores = np.asarray(self.model.predict(pairs)).reshape(-1)
+            scores = self._normalize_scores(scores)
 
             model_latency = round(time.time() - t_model, 2)
 
-            if not np.isfinite(scores).all():
-                scores = np.nan_to_num(scores, nan=0.0, posinf=1.0, neginf=0.0)
-
             if scores.size != len(valid_docs):
-                scores = scores[: len(valid_docs)]
-                valid_docs = valid_docs[: len(scores)]
+                min_len = min(len(scores), len(valid_docs))
+                scores = scores[:min_len]
+                valid_docs = valid_docs[:min_len]
 
-            #  NORMALIZATION 
-            min_s, max_s = scores.min(), scores.max()
-
-            if max_s - min_s > 1e-6:
-                scores = (scores - min_s) / (max_s - min_s)
-            else:
-                scores = np.clip(scores, 0.0, 1.0)
-
+            #  FUSION 
             results = []
 
-            for doc, score in zip(valid_docs, scores):
+            for d, s in zip(valid_docs, scores):
 
-                metadata = doc.get("metadata", {}) or {}
-                structure = metadata.get("structure", {}) or {}
+                meta = d.get("metadata", {}) or {}
+                structure = meta.get("structure", {}) or {}
 
-                modality = metadata.get("modality", "text")
-                chunk_index = structure.get("chunk_index", 0)
+                modality = meta.get("modality", "text")
+                chunk_idx = structure.get("chunk_index", 0)
 
-                fusion_score = float(doc.get("score", 0.0))
-
-                # BALANCED FUSION (CLIPPED)
-                fusion_score = min(fusion_score, 1.0)
+                fusion_score = min(float(d.get("score", 0.0)), 1.0)
 
                 position_boost = 1.0 + (
-                    settings.RERANK_POSITION_WEIGHT / (chunk_index + 2)
+                    settings.RERANK_POSITION_WEIGHT / (chunk_idx + 2)
                 )
 
                 modality_boost = self.modality_weights.get(modality, 1.0)
 
                 final_score = (
-                    self.score_weight * float(score) +
-                    self.fusion_weight * fusion_score
+                    self.w_model * float(s) +
+                    self.w_fusion * fusion_score
                 ) * position_boost * modality_boost
 
-                results.append(
-                    {
-                        "text": doc["text"][:settings.RAG_DOC_MAX_CHARS],
-                        "metadata": metadata,
-                        "score": float(final_score),
-                    }
-                )
+                results.append({
+                    "text": d["text"][:settings.RAG_DOC_MAX_CHARS],
+                    "metadata": meta,
+                    "score": float(final_score),
+                })
 
             results.sort(key=lambda x: x["score"], reverse=True)
 
@@ -172,39 +173,29 @@ class Reranker:
             seen = set()
 
             for r in results:
-                meta = r["metadata"]
-
-                key = (
-                    meta.get("doc_id"),
-                    meta.get("chunk_id"),
-                    meta.get("source"),
-                    r["text"][:200],
-                )
-
-                if key in seen:
+                h = self._hash(r)
+                if h in seen:
                     continue
 
-                seen.add(key)
+                seen.add(h)
                 final.append(r)
 
                 if len(final) >= top_k:
                     break
 
-            latency = round(time.time() - start, 2)
-
             logger.info(
-                "[Reranker] success | output=%s latency=%ss model=%ss",
-                len(final),
-                latency,
-                model_latency
+                event="rerank_success",
+                output=len(final),
+                latency=round(time.time() - start, 2),
+                model_latency=model_latency
             )
 
             return final
 
         except Exception as e:
-            logger.error("[Reranker] failed | %s", str(e))
+            logger.error(event="rerank_failed", error=str(e))
 
-            # SMART FALLBACK (SORT BY ORIGINAL SCORE)
+            # fallback
             fallback = sorted(
                 documents,
                 key=lambda x: x.get("score", 0.0),

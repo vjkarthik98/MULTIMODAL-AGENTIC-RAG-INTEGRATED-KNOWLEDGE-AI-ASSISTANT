@@ -23,24 +23,28 @@ UPLOAD_DIR = settings.DATA_DIR / "raw"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# REQUEST MODEL
+#  REQUEST MODEL 
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1)
     session_id: str = Field(default="default")
 
 
-# UTIL
+#  CLEAN 
 def _clean(text: str) -> str:
-    return " ".join(text.strip().split())
+    return " ".join(str(text or "").strip().split())
 
 
-# HEALTH
+#  HEALTH 
 @router.get("/health")
 def health_check():
-    return {"status": "ok", "service": "rag-api"}
+    return {
+        "status": "ok",
+        "service": "rag-api",
+        "timestamp": time.time()
+    }
 
 
-# QUERY
+#  QUERY 
 @router.post("/query")
 def query_rag(request: QueryRequest):
 
@@ -48,12 +52,6 @@ def query_rag(request: QueryRequest):
     request_id = str(uuid.uuid4())
 
     try:
-        logger.info(
-            "[RAGRoute][QUERY] request_id=%s session_id=%s",
-            request_id,
-            request.session_id
-        )
-
         query = _clean(request.query)
 
         if not query:
@@ -66,14 +64,16 @@ def query_rag(request: QueryRequest):
             session_id=request.session_id
         )
 
-        if not result:
-            raise RuntimeError("Empty response from query pipeline")
+        if not isinstance(result, dict) or "answer" not in result:
+            raise RuntimeError("Invalid pipeline response")
+
+        latency = round(time.time() - start, 3)
 
         return {
             "request_id": request_id,
             "status": "success",
             "data": result,
-            "latency": round(time.time() - start, 2)
+            "latency": latency
         }
 
     except HTTPException:
@@ -81,9 +81,9 @@ def query_rag(request: QueryRequest):
 
     except Exception as e:
         logger.error(
-            "[RAGRoute][QUERY_FAIL] request_id=%s error=%s",
-            request_id,
-            str(e)
+            event="api_query_failed",
+            request_id=request_id,
+            error=str(e)
         )
 
         raise HTTPException(
@@ -92,19 +92,13 @@ def query_rag(request: QueryRequest):
         )
 
 
-# STREAM
+#  STREAM 
 @router.post("/query/stream")
 def stream_query(request: QueryRequest):
 
     request_id = str(uuid.uuid4())
 
     try:
-        logger.info(
-            "[RAGRoute][STREAM] request_id=%s session_id=%s",
-            request_id,
-            request.session_id
-        )
-
         query = _clean(request.query)
 
         if not query:
@@ -121,9 +115,9 @@ def stream_query(request: QueryRequest):
                     yield f"data: {token}\n\n"
             except Exception as e:
                 logger.error(
-                    "[RAGRoute][STREAM_FAIL] request_id=%s error=%s",
-                    request_id,
-                    str(e)
+                    event="api_stream_failed",
+                    request_id=request_id,
+                    error=str(e)
                 )
                 yield "data: [Stream interrupted]\n\n"
 
@@ -134,9 +128,9 @@ def stream_query(request: QueryRequest):
 
     except Exception as e:
         logger.error(
-            "[RAGRoute][STREAM_ERROR] request_id=%s error=%s",
-            request_id,
-            str(e)
+            event="api_stream_error",
+            request_id=request_id,
+            error=str(e)
         )
 
         raise HTTPException(
@@ -145,7 +139,7 @@ def stream_query(request: QueryRequest):
         )
 
 
-# UPLOAD
+#  UPLOAD 
 @router.post("/upload")
 async def upload_file(
     request: Request,
@@ -159,18 +153,14 @@ async def upload_file(
     file_path = None
 
     try:
-        logger.info(
-            "[RAGRoute][UPLOAD] request_id=%s session_id=%s file=%s",
-            request_id,
-            session_id,
-            file.filename
-        )
-
         if not file.filename:
             raise HTTPException(status_code=400, detail="Invalid file")
 
-        # FILE TYPE CHECK
-        allowed_ext = {".pdf", ".txt", ".png", ".jpg", ".jpeg", ".mp3", ".wav", ".mp4"}
+        allowed_ext = {
+            ".pdf", ".txt", ".png", ".jpg",
+            ".jpeg", ".mp3", ".wav", ".mp4"
+        }
+
         ext = Path(file.filename).suffix.lower()
 
         if ext not in allowed_ext:
@@ -180,29 +170,30 @@ async def upload_file(
         file_path = UPLOAD_DIR / f"{uuid.uuid4()}_{filename}"
 
         size = 0
+        max_size = settings.MAX_FILE_SIZE_MB * 1024 * 1024
 
-        # SAVE FILE
+        #  SAVE FILE 
         with open(file_path, "wb") as f:
             while chunk := await file.read(settings.UPLOAD_CHUNK_SIZE):
                 size += len(chunk)
 
-                if size > settings.MAX_FILE_SIZE_MB * 1024 * 1024:
+                if size > max_size:
                     raise HTTPException(status_code=400, detail="File too large")
 
                 f.write(chunk)
 
-        # PROCESS FILE
+        #  INGEST 
         result = process_file(str(file_path), session_id=session_id)
 
         if not result or result.get("status") != "success":
-            raise RuntimeError("Ingestion pipeline failed")
+            raise RuntimeError("Ingestion failed")
 
         chunks = result.get("chunks", 0)
 
-        if chunks == 0:
-            raise RuntimeError("No chunks generated from file")
+        if chunks <= 0:
+            raise RuntimeError("No usable content extracted")
 
-        latency = round(time.time() - start, 2)
+        latency = round(time.time() - start, 3)
 
         return {
             "request_id": request_id,
@@ -217,24 +208,24 @@ async def upload_file(
 
     except Exception as e:
         logger.error(
-            "[RAGRoute][UPLOAD_FAIL] request_id=%s error=%s",
-            request_id,
-            str(e)
+            event="api_upload_failed",
+            request_id=request_id,
+            error=str(e)
         )
 
         raise HTTPException(
             status_code=500,
-            detail=f"File upload failed: {str(e)}"
+            detail="File upload failed"
         )
 
     finally:
-        # CLEANUP (ALWAYS REMOVE TEMP FILE)
+        #  CLEANUP 
         if file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
             except Exception as e:
                 logger.warning(
-                    "[RAGRoute][CLEANUP_FAIL] request_id=%s error=%s",
-                    request_id,
-                    str(e)
+                    event="api_cleanup_failed",
+                    request_id=request_id,
+                    error=str(e)
                 )

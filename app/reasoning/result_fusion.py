@@ -7,7 +7,6 @@ import numpy as np
 from app.core.config import settings
 from app.utils.logger import get_logger
 
-
 logger = get_logger(__name__)
 
 
@@ -15,8 +14,13 @@ class ResultFusion:
 
     def __init__(self):
         self.top_k = settings.RERANK_TOP_K
-        self.similarity_threshold = settings.FUSION_SIMILARITY_THRESHOLD
+        self.sim_threshold = settings.FUSION_SIMILARITY_THRESHOLD
         self.min_score = getattr(settings, "FUSION_MIN_SCORE", 0.05)
+
+    #  HASH 
+    def _hash(self, text: str, meta: Dict) -> str:
+        base = f"{text[:200]}|{meta.get('doc_id')}|{meta.get('chunk_id')}"
+        return hashlib.sha256(base.encode()).hexdigest()
 
     #  MAIN 
     def fuse(self, results: List[Dict], session_id: str = "default") -> List[Dict]:
@@ -27,98 +31,81 @@ class ResultFusion:
         start = time.time()
 
         try:
-            logger.info("[ResultFusion][START] input=%s", len(results))
-
-            # LIMIT INPUT
             results = results[:settings.FUSION_MAX_INPUT]
-
-            # COPY
             results = [dict(r) for r in results]
 
-            # FILTER LOW QUALITY
-            results = self._filter_low_quality(results)
+            results = self._filter(results)
+            results = self._normalize(results)
+            results = self._score(results)
 
-            # NORMALIZE
-            results = self._normalize_scores(results)
+            results.sort(key=lambda x: x["final_score"], reverse=True)
 
-            # ENRICH
-            results = self._enrich_scores(results)
-
-            # SORT
-            results.sort(key=lambda x: x.get("final_score", 0), reverse=True)
-
-            # DEDUP
-            results = self._deduplicate(results)
-
-            # DIVERSITY
-            results = self._diversity_filter(results)
-
-            latency = round(time.time() - start, 2)
+            results = self._dedup(results)
+            results = self._diversity(results)
 
             logger.info(
-                "[ResultFusion][SUCCESS] output=%s latency=%ss",
-                len(results),
-                latency
+                event="fusion_success",
+                output=len(results),
+                latency=round(time.time() - start, 2)
             )
 
             return results[:self.top_k]
 
         except Exception as e:
-            logger.error("[ResultFusion][FAILED] %s", str(e))
+            logger.error(event="fusion_failed", error=str(e))
             return results[:self.top_k]
 
     #  FILTER 
-    def _filter_low_quality(self, results: List[Dict]) -> List[Dict]:
+    def _filter(self, results: List[Dict]) -> List[Dict]:
         return [
             r for r in results
             if r.get("text") and r.get("score", 0.0) > self.min_score
         ]
 
     #  NORMALIZE 
-    def _normalize_scores(self, results: List[Dict]) -> List[Dict]:
+    def _normalize(self, results: List[Dict]):
 
-        scores = [r.get("score", 0.0) for r in results]
+        scores = np.array([r.get("score", 0.0) for r in results], dtype=float)
 
-        if not scores:
+        if scores.size == 0:
             return results
 
-        min_s, max_s = min(scores), max(scores)
+        scores = np.nan_to_num(scores, nan=0.0, posinf=1.0, neginf=0.0)
 
-        for r in results:
-            raw = r.get("score", 0.0)
+        min_s, max_s = scores.min(), scores.max()
 
+        for i, r in enumerate(results):
             if max_s - min_s > 1e-6:
-                r["norm_score"] = (raw - min_s) / (max_s - min_s)
+                r["norm_score"] = (scores[i] - min_s) / (max_s - min_s)
             else:
                 r["norm_score"] = 0.5
 
         return results
 
-    #  ENRICH 
-    def _enrich_scores(self, results: List[Dict]) -> List[Dict]:
+    #  SCORE 
+    def _score(self, results: List[Dict]):
+
+        modality_weights = getattr(settings, "FUSION_MODALITY_WEIGHTS", {
+            "text": 1.0,
+            "image": 0.9,
+            "audio": 1.1,
+            "video": 1.15,
+        })
 
         for r in results:
 
-            score = r.get("norm_score", 0.0)
+            base = r.get("norm_score", 0.0)
 
-            metadata = r.get("metadata", {}) or {}
-            modality = metadata.get("modality", "text")
-
-            modality_weights = getattr(settings, "FUSION_MODALITY_WEIGHTS", {
-                "text": 1.0,
-                "image": 0.9,
-                "audio": 1.1,
-                "video": 1.15,
-            })
+            meta = r.get("metadata", {}) or {}
+            modality = meta.get("modality", "text")
 
             modality_boost = modality_weights.get(modality, 1.0)
 
-            # LENGTH QUALITY (NOT JUST LENGTH)
             text = str(r.get("text", ""))
             quality = min(len(text) / settings.FUSION_MAX_TEXT_CHARS, 1.0)
 
             r["final_score"] = (
-                settings.FUSION_SCORE_WEIGHT * score +
+                settings.FUSION_SCORE_WEIGHT * base +
                 settings.FUSION_QUALITY_WEIGHT * quality +
                 settings.FUSION_MODALITY_WEIGHT * modality_boost
             )
@@ -126,57 +113,43 @@ class ResultFusion:
         return results
 
     #  DEDUP 
-    def _deduplicate(self, results: List[Dict]) -> List[Dict]:
+    def _dedup(self, results: List[Dict]):
 
         seen = set()
         unique = []
 
         for r in results:
-            text = str(r.get("text", "")).strip().lower()
-            meta = r.get("metadata", {})
+            h = self._hash(r.get("text", ""), r.get("metadata", {}))
 
-            key = hashlib.md5(
-                (
-                    text[:200] +
-                    str(meta.get("doc_id")) +
-                    str(meta.get("chunk_id"))
-                ).encode()
-            ).hexdigest()
+            if h in seen:
+                continue
 
-            if key not in seen:
-                seen.add(key)
-                unique.append(r)
+            seen.add(h)
+            unique.append(r)
 
         return unique
 
     #  DIVERSITY 
-    def _diversity_filter(self, results: List[Dict]) -> List[Dict]:
+    def _diversity(self, results: List[Dict]):
 
         selected = []
 
-        for candidate in results:
+        for r in results:
 
-            v1 = candidate.get("embedding")
+            v1 = r.get("embedding")
 
-            if not self._valid_embedding(v1):
-                selected.append(candidate)
+            if not self._valid(v1):
+                selected.append(r)
                 continue
 
-            similarities = []
-
-            for s in selected:
-                v2 = s.get("embedding")
-
-                if not self._valid_embedding(v2):
-                    continue
-
-                sim = self._cosine_similarity(v1, v2)
-                similarities.append(sim)
-
-            if similarities and max(similarities) > self.similarity_threshold:
+            if any(
+                self._cosine(v1, s.get("embedding")) > self.sim_threshold
+                for s in selected
+                if self._valid(s.get("embedding"))
+            ):
                 continue
 
-            selected.append(candidate)
+            selected.append(r)
 
             if len(selected) >= self.top_k:
                 break
@@ -184,7 +157,7 @@ class ResultFusion:
         return selected
 
     #  UTILS 
-    def _valid_embedding(self, emb):
+    def _valid(self, emb):
         return (
             isinstance(emb, list) and
             len(emb) in (
@@ -193,7 +166,7 @@ class ResultFusion:
             )
         )
 
-    def _cosine_similarity(self, v1, v2):
+    def _cosine(self, v1, v2):
         v1 = np.array(v1)
         v2 = np.array(v2)
 

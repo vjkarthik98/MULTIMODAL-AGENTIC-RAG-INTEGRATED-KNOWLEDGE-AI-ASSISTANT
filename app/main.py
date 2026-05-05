@@ -12,47 +12,47 @@ from app.utils.logger import get_logger
 from scripts.init_qdrant import initialize_qdrant
 from app.core.infra_registry import infra
 
-
 logger = get_logger(__name__)
 
 
-# CONCURRENCY CONTROL 
+# CONCURRENCY
 semaphore = asyncio.Semaphore(settings.MAX_PARALLEL_REQUESTS)
-
 
 
 # LIFESPAN
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
-    logger.info("[Startup] environment=%s", settings.ENV)
+    logger.info(event="startup_begin", env=settings.ENV)
 
-    # QDRANT INIT
+    yield
+
+    logger.info(event="shutdown")
+
+    #  VECTOR DB INIT 
     try:
         initialize_qdrant()
-        logger.info("[Startup] qdrant initialized")
+        logger.info(event="qdrant_ready")
     except Exception as e:
-        logger.warning("[Startup] qdrant init failed | %s", str(e))
+        logger.warning(event="qdrant_init_failed", error=str(e))
 
-    # MODEL WARMUP
+    #  MODEL + INFRA WARMUP 
     try:
         from app.core.model_loader import model_loader
 
         model_loader.warmup()
-
         infra.warmup()
 
-        logger.info("[Startup] model warmup completed")
+        logger.info(event="warmup_complete")
 
     except Exception as e:
-        logger.warning("[Startup] model warmup failed | %s", str(e))
+        logger.warning(event="warmup_failed", error=str(e))
 
-    logger.info("[Startup] application ready")
+    logger.info(event="app_ready")
 
     yield
 
-    logger.info("[Shutdown] application shutting down")
-
+    logger.info(event="shutdown")
 
 
 # APP
@@ -64,29 +64,23 @@ app = FastAPI(
 )
 
 
-
-# GLOBAL ERROR HANDLER
+# GLOBAL ERROR
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
 
-    logger.error("[GlobalError] %s", str(exc))
+    logger.error(
+        event="global_error",
+        path=request.url.path,
+        error=str(exc)
+    )
 
     return JSONResponse(
         status_code=500,
         content={
             "status": "error",
-            "message": "Internal server error",
+            "message": "Internal server error"
         }
     )
-
-
-
-# CONCURRENCY LIMIT MIDDLEWARE
-@app.middleware("http")
-async def limit_concurrency(request: Request, call_next):
-    async with semaphore:
-        return await call_next(request)
-
 
 
 # REQUEST LOGGER
@@ -99,24 +93,21 @@ async def request_logger(request: Request, call_next):
     try:
         response = await call_next(request)
 
-        latency = round(time.time() - start, 2)
+        latency = round(time.time() - start, 3)
 
-        if latency > 2:
-            logger.warning(
-                "[SlowRequest] id=%s path=%s latency=%ss",
-                request_id,
-                request.url.path,
-                latency
-            )
+        log_data = {
+            "event": "request",
+            "id": request_id,
+            "method": request.method,
+            "path": request.url.path,
+            "status": response.status_code,
+            "latency": latency
+        }
+
+        if latency > settings.SLOW_REQUEST_THRESHOLD:
+            logger.warning(**log_data)
         else:
-            logger.info(
-                "[Request] id=%s method=%s path=%s status=%s latency=%ss",
-                request_id,
-                request.method,
-                request.url.path,
-                response.status_code,
-                latency
-            )
+            logger.info(**log_data)
 
         response.headers["X-Request-ID"] = request_id
 
@@ -124,18 +115,24 @@ async def request_logger(request: Request, call_next):
 
     except Exception as e:
         logger.error(
-            "[Request][FAILED] id=%s path=%s | %s",
-            request_id,
-            request.url.path,
-            str(e)
+            event="request_failed",
+            id=request_id,
+            path=request.url.path,
+            error=str(e)
         )
         raise
 
 
+# CONCURRENCY LIMIT
+@app.middleware("http")
+async def limit_concurrency(request: Request, call_next):
+
+    async with semaphore:
+        return await call_next(request)
+
 
 # ROUTES
 app.include_router(rag_router, prefix="/rag", tags=["RAG"])
-
 
 
 # ROOT
@@ -148,7 +145,6 @@ def root():
     }
 
 
-
 # HEALTH
 @app.get("/health")
 def health():
@@ -158,10 +154,10 @@ def health():
     }
 
 
-
 # READINESS
 @app.get("/ready")
 def readiness():
+
     try:
         from app.core.model_loader import model_loader
 
@@ -173,7 +169,7 @@ def readiness():
         }
 
     except Exception as e:
-        logger.error("[Readiness] %s", str(e))
+        logger.error(event="readiness_failed", error=str(e))
         return {
             "status": "not_ready",
             "error": str(e)

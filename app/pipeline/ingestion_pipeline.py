@@ -1,5 +1,6 @@
 from typing import Dict, List
 import time
+import hashlib
 
 from app.core.config import settings
 from app.core.model_loader import model_loader
@@ -8,219 +9,190 @@ from app.ingestion.router import route_ingestion
 from app.utils.logger import get_logger
 from app.core.infra_registry import infra
 
-
 logger = get_logger(__name__)
 
 
-# FALLBACK VECTOR STORE
+#  FALLBACK VECTOR STORE 
 class _UnavailableVectorStore:
     def insert_documents(self, documents):
-        raise RuntimeError("VECTOR STORE UNAVAILABLE")
+        raise RuntimeError("VECTOR_STORE_UNAVAILABLE")
 
 
+#  HASH 
+def _hash(text: str, doc_id: str, chunk_id: str):
+    base = f"{text[:100]}|{doc_id}|{chunk_id}"
+    return hashlib.sha256(base.encode()).hexdigest()
 
-# BATCHED EMBEDDING
+
+#  BATCHED EMBEDDING 
 def _batched_embedding(embedder, docs, session_id):
-    batch_size = 16  
 
+    batch_size = settings.INGESTION_BATCH_SIZE
     results = []
 
     for i in range(0, len(docs), batch_size):
         batch = docs[i:i + batch_size]
 
         try:
-            embedded = embedder.embed_documents(batch, session_id=session_id)
-            results.extend(embedded)
+            # PASS DOCS 
+            embedded_docs = embedder.embed_documents(batch, session_id=session_id)
+
+            if not embedded_docs:
+                continue
+
+            results.extend(embedded_docs)
+
         except Exception as e:
-            logger.warning("[Embedding][BatchFailed] %s", str(e))
+            logger.warning(event="embedding_batch_failed", error=str(e))
 
     return results
 
-
-# INGESTION PIPELINE
+#  PIPELINE 
 class IngestionPipeline:
 
     def __init__(self):
 
-        # SHARED INFRA
         try:
             self.vector_store = infra.get_vector_store()
         except Exception as e:
-            logger.warning("[IngestionPipeline] VECTOR STORE UNAVAILABLE | %s", str(e))
+            logger.warning(event="vector_store_unavailable", error=str(e))
             self.vector_store = _UnavailableVectorStore()
 
         self.bm25 = infra.get_bm25()
 
-        # CONFIG
         self.max_chunks = settings.MAX_CHUNKS
         self.batch_size = settings.INGESTION_BATCH_SIZE
 
-    
-    # DEDUPLICATION
-    def _deduplicate(self, documents: List):
+    #  DEDUP 
+    def _deduplicate(self, docs: List):
+
         seen = set()
         unique = []
 
-        for d in documents:
-            key = (
-                getattr(d, "text", "")[:100],
-                str(getattr(d, "structure", {}).get("doc_id")),
-                str(getattr(d, "chunk_id", "")),
+        for d in docs:
+            text = getattr(d, "text", "")
+            structure = getattr(d, "structure", {}) or {}
+
+            h = _hash(
+                text,
+                structure.get("doc_id"),
+                str(getattr(d, "chunk_id", ""))
             )
 
-            if key not in seen:
-                seen.add(key)
-                unique.append(d)
+            if h in seen:
+                continue
+
+            seen.add(h)
+            unique.append(d)
 
         return unique
 
-    
-    # FILTER EMPTY CHUNKS
-    def _filter_valid_chunks(self, documents: List):
-        return [d for d in documents if getattr(d, "text", "").strip()]
+    #  FILTER 
+    def _valid_chunks(self, docs: List):
+        return [d for d in docs if getattr(d, "text", "").strip()]
 
-    
-    # VALIDATE EMBEDDINGS
-    def _validate_embeddings(self, docs):
+    #  EMB VALID 
+    def _valid_embeddings(self, docs):
+
         valid = []
         invalid = 0
 
         for d in docs:
             emb = getattr(d, "embedding", None)
 
-            if isinstance(emb, list) and len(emb) > 0:
+            if isinstance(emb, list) and len(emb) == settings.TEXT_EMBEDDING_DIM:
                 valid.append(d)
             else:
                 invalid += 1
 
-        if invalid > 0:
-            logger.warning("[IngestionPipeline] INVALID EMBEDDINGS SKIPPED=%s", invalid)
+        if invalid:
+            logger.warning(event="invalid_embeddings", count=invalid)
 
         return valid
-
-    
-    # MAIN PIPELINE
+    #  MAIN 
     def process_file(self, file_path: str, session_id: str = "default") -> Dict:
 
         if not session_id:
-            raise ValueError("SESSION_ID REQUIRED")
+            raise ValueError("SESSION_ID_REQUIRED")
 
         start = time.time()
 
-        logger.info(
-            "[IngestionPipeline][START] session_id=%s | file=%s",
-            session_id,
-            file_path
-        )
-
         try:
-            # STEP 1: INGESTION
-            documents = route_ingestion(file_path, session_id=session_id)
+            #  INGEST 
+            docs = route_ingestion(file_path, session_id=session_id)
 
-            if not documents:
-                raise ValueError("NO DOCUMENTS FROM INGESTION")
+            if not docs:
+                raise ValueError("INGESTION_EMPTY")
 
-            logger.info("[IngestionPipeline] INGESTED=%s", len(documents))
+            #  CHUNK 
+            chunks = chunk_documents(docs)
+            chunks = self._valid_chunks(chunks)
 
-            # STEP 2: CHUNKING
-            chunked_documents = chunk_documents(documents)
-            chunked_documents = self._filter_valid_chunks(chunked_documents)
+            if not chunks:
+                raise ValueError("NO_VALID_CHUNKS")
 
-            if not chunked_documents:
-                raise ValueError("CHUNKING FAILED: NO VALID CHUNKS")
+            if len(chunks) > self.max_chunks:
+                chunks = chunks[:self.max_chunks]
+                logger.warning(event="chunk_limit_applied")
 
-            if len(chunked_documents) > self.max_chunks:
-                logger.warning(
-                    "[IngestionPipeline] CHUNK LIMIT %s -> %s",
-                    len(chunked_documents),
-                    self.max_chunks
-                )
-                chunked_documents = chunked_documents[:self.max_chunks]
+            chunks = self._deduplicate(chunks)
 
-            chunked_documents = self._deduplicate(chunked_documents)
-
-            logger.info("[IngestionPipeline] CHUNKED=%s", len(chunked_documents))
-
-            # STEP 3: EMBEDDING 
+            #  EMBED 
             embedder = model_loader.get_embedder()
 
-            embedded_docs = _batched_embedding(
-                embedder,
-                chunked_documents,
-                session_id
-            )
+            embedded = _batched_embedding(embedder, chunks, session_id)
+            embedded = self._valid_embeddings(embedded)
 
-            embedded_docs = self._validate_embeddings(embedded_docs)
+            if not embedded:
+                raise ValueError("NO_VALID_EMBEDDINGS")
 
-            if not embedded_docs:
-                raise ValueError("EMBEDDING FAILED: NO VALID EMBEDDINGS")
-
-            logger.info("[IngestionPipeline] EMBEDDINGS=%s", len(embedded_docs))
-
-            # STEP 4: BM25 
+            #  BM25 
             try:
-                if chunked_documents:
-                    # use incremental update instead of overwrite
-                    if hasattr(self.bm25, "add_documents"):
-                        self.bm25.add_documents(chunked_documents)
-                    else:
-                        # fallback 
-                        logger.warning("[IngestionPipeline] BM25 fallback to build_index")
-                        self.bm25.build_index(chunked_documents)
-
-                    logger.info("[IngestionPipeline] BM25 UPDATED | docs=%s", len(chunked_documents))
-
+                if hasattr(self.bm25, "add_documents"):
+                    self.bm25.add_documents(chunks)
                 else:
-                    logger.warning("[IngestionPipeline] BM25 skipped (no docs)")
-
+                    self.bm25.build_index(chunks)
             except Exception as e:
-                logger.error("[IngestionPipeline] BM25 FAILED | %s", str(e))
+                logger.error(event="bm25_failed", error=str(e))
 
-            # STEP 5: STORE IN QDRANT
-            total_inserted = 0
+            #  STORE 
+            total = 0
 
-            for i in range(0, len(embedded_docs), self.batch_size):
-                batch = embedded_docs[i:i + self.batch_size]
+            for i in range(0, len(embedded), self.batch_size):
+                batch = embedded[i:i + self.batch_size]
 
                 try:
                     self.vector_store.insert_documents(batch)
-                    total_inserted += len(batch)
+                    total += len(batch)
                 except Exception as e:
-                    logger.error("[IngestionPipeline] INSERT FAILED | %s", str(e))
-                    raise RuntimeError("VECTOR STORE INSERT FAILED")
+                    logger.error(event="vector_insert_failed", error=str(e))
+                    raise RuntimeError("VECTOR_INSERT_FAILED")
 
             latency = round(time.time() - start, 2)
 
             logger.info(
-                "[IngestionPipeline][SUCCESS] session_id=%s | stored=%s | latency=%ss",
-                session_id,
-                total_inserted,
-                latency
+                event="ingestion_success",
+                chunks=len(chunks),
+                stored=total,
+                latency=latency
             )
 
             return {
-                "chunks": len(chunked_documents),
                 "status": "success",
-                "details": {
-                    "session_id": session_id,
-                    "stored": total_inserted,
-                    "latency": latency,
-                }
+                "chunks": len(chunks),
+                "stored": total,
+                "latency": latency,
+                "session_id": session_id
             }
 
         except Exception as e:
-            logger.error(
-                "[IngestionPipeline][FAILED] session_id=%s | error=%s",
-                session_id,
-                str(e)
-            )
-            raise RuntimeError(f"Ingestion failed: {str(e)}")
+            logger.error(event="ingestion_failed", error=str(e))
+            raise RuntimeError(f"INGESTION_FAILED: {str(e)}")
 
 
-# SINGLETON
+#  SINGLETON 
 pipeline = IngestionPipeline()
 
 
 def process_file(file_path: str, session_id: str = "default"):
     return pipeline.process_file(file_path, session_id)
-
