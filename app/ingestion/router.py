@@ -3,9 +3,10 @@ import mimetypes
 import os
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Set
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from app.core.config import settings
+from app.core.response import ErrorCode, Severity, UniversalErrorResponse, Modality
 from app.ingestion.audio_ingest import ingest as audio_ingest
 from app.ingestion.document_ingest import ingest as document_ingest
 from app.ingestion.image_ingest import ingest as image_ingest
@@ -17,42 +18,73 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-#  EXTENSIONS 
-TEXT_EXTENSIONS = set(getattr(settings, "TEXT_EXTENSIONS", [".txt", ".md"]))
-DOCUMENT_EXTENSIONS = set(getattr(settings, "DOCUMENT_EXTENSIONS", [".pdf", ".docx", ".xlsx", ".xls"]))
-IMAGE_EXTENSIONS = set(getattr(settings, "IMAGE_EXTENSIONS", [".jpg", ".jpeg", ".png", ".bmp", ".webp"]))
-AUDIO_EXTENSIONS = set(getattr(settings, "AUDIO_EXTENSIONS", [".mp3", ".wav", ".m4a", ".flac"]))
-VIDEO_EXTENSIONS = set(getattr(settings, "VIDEO_EXTENSIONS", [".mp4", ".avi", ".mov", ".mkv"]))
+# EXTENSION MAPS
 
+TEXT_EXTENSIONS: Set[str]     = {".txt", ".md"}
+DOCUMENT_EXTENSIONS: Set[str] = {".pdf", ".docx", ".xlsx", ".xls"}
+IMAGE_EXTENSIONS: Set[str]    = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+AUDIO_EXTENSIONS: Set[str]    = {".mp3", ".wav", ".m4a", ".flac", ".ogg"}
+VIDEO_EXTENSIONS: Set[str]    = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 
-#  HANDLERS 
-INGESTION_HANDLERS: Dict[str, Callable[[str, str], List[IngestedDocument]]] = {
-    "text": text_ingest,
-    "document": document_ingest,
-    "image": image_ingest,
-    "audio": audio_ingest,
-    "video": video_ingest,
+EXT_TO_MODALITY: Dict[str, str] = {
+    **{ext: "text"     for ext in TEXT_EXTENSIONS},
+    **{ext: "document" for ext in DOCUMENT_EXTENSIONS},
+    **{ext: "image"    for ext in IMAGE_EXTENSIONS},
+    **{ext: "audio"    for ext in AUDIO_EXTENSIONS},
+    **{ext: "video"    for ext in VIDEO_EXTENSIONS},
 }
 
+# MODALITY TO RESPONSE MODALITY
+MODALITY_LABEL: Dict[str, str] = {
+    "text":     Modality.TEXT,
+    "document": Modality.PDF,
+    "image":    Modality.IMAGE,
+    "audio":    Modality.AUDIO,
+    "video":    Modality.VIDEO,
+}
 
-#  HASH 
+# PER-MODALITY FILE SIZE LIMITS (bytes)
+MODALITY_SIZE_LIMITS: Dict[str, int] = {
+    "text":     settings.MAX_FILE_SIZE_TEXT,
+    "document": settings.MAX_FILE_SIZE_PDF,
+    "image":    settings.MAX_FILE_SIZE_IMAGE,
+    "audio":    settings.MAX_FILE_SIZE_AUDIO,
+    "video":    settings.MAX_FILE_SIZE_VIDEO,
+}
+
+# INGESTION HANDLERS
+INGESTION_HANDLERS: Dict[str, Callable[[str, str], List[IngestedDocument]]] = {
+    "text":     text_ingest,
+    "document": document_ingest,
+    "image":    image_ingest,
+    "audio":    audio_ingest,
+    "video":    video_ingest,
+}
+
+MAX_INGESTED_DOCS: int = 5000
+
+
+# HASH
+
 def _stable_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-#  MIME VALIDATION 
-def _validate_mime(path: Path):
-    mime, _ = mimetypes.guess_type(path.name)
+# MIME DETECTION
 
-    if not mime:
-        return  # allow fallback
+def _detect_mime(path: Path) -> Tuple[Optional[str], Optional[str]]:
+    mime, encoding = mimetypes.guess_type(path.name)
+    return mime, encoding
 
-    allowed = getattr(settings, "ALLOWED_MIME_TYPES", [])
-    if allowed and mime not in allowed:
+
+def _validate_mime(path: Path, mime: Optional[str]) -> None:
+    allowed = settings.ALLOWED_MIME_TYPES
+    if allowed and mime and mime not in allowed:
         raise ValueError(f"MIME_NOT_ALLOWED_{mime}")
 
 
-#  DETECT 
+# MODALITY DETECTION
+
 def detect_modality(file_path: str) -> str:
 
     if not file_path:
@@ -61,45 +93,49 @@ def detect_modality(file_path: str) -> str:
     path = Path(file_path)
 
     if not path.exists():
-        raise FileNotFoundError(file_path)
+        raise FileNotFoundError(f"FILE_NOT_FOUND: {file_path}")
 
-    if path.stat().st_size == 0:
+    stat = path.stat()
+
+    if stat.st_size == 0:
         raise ValueError("EMPTY_FILE")
 
-    size_mb = path.stat().st_size / (1024 * 1024)
-    if size_mb > settings.MAX_FILE_SIZE_MB:
-        raise ValueError("FILE_TOO_LARGE")
+    ext      = path.suffix.lower()
+    modality = EXT_TO_MODALITY.get(ext)
 
-    _validate_mime(path)
+    if not modality:
+        raise ValueError(f"UNSUPPORTED_TYPE_{ext}")
 
-    ext = path.suffix.lower()
+    # PER-MODALITY SIZE CHECK
+    limit = MODALITY_SIZE_LIMITS.get(modality, settings.MAX_FILE_SIZE_MB * 1024 * 1024)
+    if stat.st_size > limit:
+        raise ValueError(
+            f"FILE_TOO_LARGE: {stat.st_size} bytes exceeds {limit} bytes for {modality}"
+        )
 
-    allowed_types = getattr(settings, "ALLOWED_FILE_TYPES", [])
-    if allowed_types and ext.replace(".", "") not in allowed_types:
+    # ALLOWED FILE TYPES CHECK
+    allowed_types = settings.ALLOWED_FILE_TYPES
+    if allowed_types and ext.lstrip(".") not in allowed_types:
         raise ValueError(f"EXT_NOT_ALLOWED_{ext}")
 
-    if ext in TEXT_EXTENSIONS:
-        return "text"
-    if ext in DOCUMENT_EXTENSIONS:
-        return "document"
-    if ext in IMAGE_EXTENSIONS:
-        return "image"
-    if ext in AUDIO_EXTENSIONS:
-        return "audio"
-    if ext in VIDEO_EXTENSIONS:
-        return "video"
+    # MIME VALIDATION
+    mime, _ = _detect_mime(path)
+    _validate_mime(path, mime)
 
-    raise ValueError(f"UNSUPPORTED_TYPE_{ext}")
+    return modality
 
 
-#  VALIDATION 
+# DOCUMENT VALIDATION
+
 def _validate_documents(
     documents: List[IngestedDocument],
-    session_id: str
+    session_id: str,
+    modality: str,
 ) -> List[IngestedDocument]:
 
     validated: List[IngestedDocument] = []
-    seen: Set[str] = set()
+    seen: Set[str]                    = set()
+    skipped: int                      = 0
 
     for i, doc in enumerate(documents):
         try:
@@ -107,41 +143,54 @@ def _validate_documents(
                 doc = IngestedDocument(**doc)
 
             if not isinstance(doc, IngestedDocument):
+                skipped += 1
                 continue
 
             doc = doc.finalize()
 
-            # enforce session
+            # ENFORCE SESSION
             doc.structure["session_id"] = session_id
 
-            # stable dedup
+            # STABLE DEDUP
             h = _stable_hash(doc.text)
-
             if h in seen:
                 continue
 
             seen.add(h)
-
             validated.append(doc)
 
         except Exception as e:
+            skipped += 1
             logger.warning(
                 event="doc_validation_failed",
                 index=i,
-                error=str(e)
+                modality=modality,
+                error=str(e),
             )
+
+    if skipped:
+        logger.warning(
+            event="docs_skipped",
+            skipped=skipped,
+            accepted=len(validated),
+            modality=modality,
+        )
 
     return validated
 
 
-#  ROUTER 
+# ROUTE INGESTION
+
 def route_ingestion(
     file_path: str,
-    session_id: str
+    session_id: str,
 ) -> List[IngestedDocument]:
 
     if not session_id:
         raise ValueError("SESSION_ID_REQUIRED")
+
+    if not file_path:
+        raise ValueError("FILE_PATH_REQUIRED")
 
     start = time.time()
 
@@ -151,33 +200,41 @@ def route_ingestion(
         logger.info(
             event="ingestion_start",
             modality=modality,
-            file=file_path
+            file=os.path.basename(file_path),
+            session_id=session_id,
         )
 
         handler = INGESTION_HANDLERS.get(modality)
 
         if not handler:
-            raise ValueError("HANDLER_NOT_FOUND")
+            raise ValueError(f"HANDLER_NOT_FOUND_{modality}")
 
         docs = handler(file_path, session_id)
 
-        docs = _validate_documents(docs, session_id)
+        if not docs:
+            raise ValueError("NO_DOCS_RETURNED")
+
+        docs = _validate_documents(docs, session_id, modality)
 
         if not docs:
             raise ValueError("NO_VALID_DOCS")
 
-        max_docs = getattr(settings, "MAX_INGESTED_DOCS", 5000)
-
-        if len(docs) > max_docs:
-            docs = docs[:max_docs]
-            logger.warning(event="doc_limit_applied", limit=max_docs)
+        if len(docs) > MAX_INGESTED_DOCS:
+            docs = docs[:MAX_INGESTED_DOCS]
+            logger.warning(
+                event="doc_limit_applied",
+                limit=MAX_INGESTED_DOCS,
+                modality=modality,
+            )
 
         latency = round(time.time() - start, 2)
 
         logger.info(
             event="ingestion_success",
+            modality=modality,
             docs=len(docs),
-            latency=latency
+            latency=latency,
+            session_id=session_id,
         )
 
         return docs
@@ -185,7 +242,9 @@ def route_ingestion(
     except Exception as e:
         logger.error(
             event="ingestion_failed",
-            file=file_path,
-            error=str(e)
+            file=os.path.basename(file_path),
+            session_id=session_id,
+            error=str(e),
+            latency=round(time.time() - start, 2),
         )
         raise

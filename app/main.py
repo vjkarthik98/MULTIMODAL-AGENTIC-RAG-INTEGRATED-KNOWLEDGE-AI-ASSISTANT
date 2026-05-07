@@ -25,9 +25,6 @@ async def lifespan(app: FastAPI):
 
     logger.info(event="startup_begin", env=settings.ENV)
 
-    yield
-
-    logger.info(event="shutdown")
 
     #  VECTOR DB INIT 
     try:
@@ -40,8 +37,9 @@ async def lifespan(app: FastAPI):
     try:
         from app.core.model_loader import model_loader
 
-        model_loader.warmup()
-        infra.warmup()
+        logger.info(event="warmup_complete")
+
+        model_loader.get_embedder()
 
         logger.info(event="warmup_complete")
 
