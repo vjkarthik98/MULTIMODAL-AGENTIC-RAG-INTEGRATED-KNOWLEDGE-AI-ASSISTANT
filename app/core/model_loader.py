@@ -1,75 +1,70 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
-from typing import Optional, Tuple, Dict, Any
+from typing import Any, Dict, Optional, Tuple
 
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 try:
     import torch
 except ImportError:
     torch = None
 
-from transformers import CLIPModel, CLIPProcessor
-from transformers import BlipProcessor, BlipForConditionalGeneration
 from faster_whisper import WhisperModel
 from sentence_transformers import CrossEncoder
+from transformers import BlipForConditionalGeneration, BlipProcessor, CLIPModel, CLIPProcessor
 
-from app.llm.gguf_model import GGUFModel
-from app.embeddings.text_embedder import TextEmbedder
+from app.core.config import settings
 from app.embeddings.clip_text_embedder import ClipTextEmbedder
 from app.embeddings.image_embedder import ImageEmbedder
 from app.embeddings.multimodal_embedder import MultimodalEmbedder
-
-from app.core.config import settings
+from app.embeddings.text_embedder import TextEmbedder
+from app.llm.gguf_model import GGUFModel
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 class ModelLoader:
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._device = "cuda" if torch and torch.cuda.is_available() else "cpu"
 
+    def __init__(self) -> None:
+        self._lock    = threading.RLock()
+        self._device  = "cuda" if torch and torch.cuda.is_available() else "cpu"
         self._executor = ThreadPoolExecutor(max_workers=settings.THREAD_POOL_SIZE)
 
-        # models
-        self._llm: Optional[GGUFModel] = None
-        self._text_embedder: Optional[TextEmbedder] = None
+        self._llm: Optional[GGUFModel]                   = None
+        self._text_embedder: Optional[TextEmbedder]      = None
         self._clip_text_embedder: Optional[ClipTextEmbedder] = None
-        self._image_embedder: Optional[ImageEmbedder] = None
-        self._whisper: Optional[WhisperModel] = None
-        self._blip_processor = None
-        self._blip_model = None
-        self._reranker: Optional[CrossEncoder] = None
-        self._clip_model = None
-        self._clip_processor = None
-        self._multimodal: Optional[MultimodalEmbedder] = None
+        self._image_embedder: Optional[ImageEmbedder]    = None
+        self._multimodal: Optional[MultimodalEmbedder]   = None
+        self._whisper: Optional[WhisperModel]            = None
+        self._reranker: Optional[CrossEncoder]           = None
+        self._clip_model                                 = None
+        self._clip_processor                             = None
+        self._blip_model                                 = None
+        self._blip_processor                             = None
 
         self._initialized = False
 
         logger.info(event="model_loader_initialized", device=self._device)
 
-    #  SAFE LOAD 
+    # SAFE LOAD
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(min=2, max=10),
         retry=retry_if_exception_type((TimeoutError, RuntimeError)),
-        reraise=True
+        reraise=True,
     )
     def _safe_load(self, load_fn, name: str):
-        start = time.time()
-
+        start  = time.time()
         future = self._executor.submit(load_fn)
-        obj = future.result(timeout=settings.MODEL_TIMEOUT_SEC)
-
-        latency = round(time.time() - start, 2)
-        logger.info(event="model_loaded", model=name, latency=latency)
-
+        obj    = future.result(timeout=settings.MODEL_TIMEOUT_SEC)
+        logger.info(event="model_loaded", model=name, latency=round(time.time() - start, 2))
         return obj
 
-    #  WARMUP 
+    # WARMUP
+
     def warmup(self) -> None:
         if self._initialized:
             logger.info(event="warmup_skipped")
@@ -91,12 +86,16 @@ class ModelLoader:
             ]
 
             for f in futures:
-                f.result()
+                try:
+                    f.result()
+                except Exception as e:
+                    logger.warning(event="warmup_model_failed", error=str(e))
 
             self._initialized = True
             logger.info(event="warmup_completed")
 
-    #  LLM 
+    # LLM
+
     def get_llm(self) -> GGUFModel:
         if self._llm:
             return self._llm
@@ -106,17 +105,18 @@ class ModelLoader:
                 if not settings.LLM_MODEL_PATH:
                     raise RuntimeError("LLM_MODEL_PATH missing")
 
-                def load():
-                    return GGUFModel(
+                self._llm = self._safe_load(
+                    lambda: GGUFModel(
                         settings.LLM_MODEL_PATH,
-                        n_gpu_layers=settings.LLM_GPU_LAYERS
-                    )
-
-                self._llm = self._safe_load(load, "LLM")
+                        n_gpu_layers=settings.LLM_GPU_LAYERS,
+                    ),
+                    "LLM",
+                )
 
         return self._llm
 
-    #  EMBEDDER 
+    # TEXT EMBEDDER
+
     def get_embedder(self) -> TextEmbedder:
         if self._text_embedder:
             return self._text_embedder
@@ -127,14 +127,15 @@ class ModelLoader:
                     lambda: TextEmbedder(
                         model_name=settings.EMBEDDING_MODEL,
                         batch_size=settings.EMBEDDING_BATCH_SIZE,
-                        device=self._device
+                        device=self._device,
                     ),
-                    "TextEmbedder"
+                    "TextEmbedder",
                 )
 
         return self._text_embedder
 
-    #  CLIP 
+    # CLIP
+
     def get_clip(self) -> Tuple:
         if self._clip_model:
             return self._clip_processor, self._clip_model, self._device
@@ -142,19 +143,19 @@ class ModelLoader:
         with self._lock:
             if not self._clip_model:
 
-                def load():
+                def _load():
                     processor = CLIPProcessor.from_pretrained(settings.CLIP_MODEL)
-                    model = CLIPModel.from_pretrained(settings.CLIP_MODEL)
-
+                    model     = CLIPModel.from_pretrained(settings.CLIP_MODEL)
                     model.to(self._device)
                     model.eval()
                     return processor, model
 
-                self._clip_processor, self._clip_model = self._safe_load(load, "CLIP")
+                self._clip_processor, self._clip_model = self._safe_load(_load, "CLIP")
 
         return self._clip_processor, self._clip_model, self._device
 
-    #  IMAGE EMBEDDER 
+    # IMAGE EMBEDDER
+
     def get_image_embedder(self) -> ImageEmbedder:
         if self._image_embedder:
             return self._image_embedder
@@ -162,15 +163,15 @@ class ModelLoader:
         with self._lock:
             if not self._image_embedder:
                 processor, model, device = self.get_clip()
-
                 self._image_embedder = self._safe_load(
                     lambda: ImageEmbedder(model, processor, device),
-                    "ImageEmbedder"
+                    "ImageEmbedder",
                 )
 
         return self._image_embedder
 
-    #  CLIP TEXT 
+    # CLIP TEXT EMBEDDER
+
     def get_clip_text_embedder(self) -> ClipTextEmbedder:
         if self._clip_text_embedder:
             return self._clip_text_embedder
@@ -178,29 +179,30 @@ class ModelLoader:
         with self._lock:
             if not self._clip_text_embedder:
                 processor, model, device = self.get_clip()
-
                 self._clip_text_embedder = self._safe_load(
                     lambda: ClipTextEmbedder(processor, model, device),
-                    "ClipTextEmbedder"
+                    "ClipTextEmbedder",
                 )
 
         return self._clip_text_embedder
 
-    #  MULTIMODAL 
+    # MULTIMODAL EMBEDDER
+
     def get_multimodal_embedder(self) -> MultimodalEmbedder:
         if self._multimodal:
             return self._multimodal
 
         with self._lock:
             if not self._multimodal:
-                text = self.get_embedder()
-                image = self.get_image_embedder()
-
-                self._multimodal = MultimodalEmbedder(text, image)
+                self._multimodal = MultimodalEmbedder(
+                    self.get_embedder(),
+                    self.get_image_embedder(),
+                )
 
         return self._multimodal
 
-    #  WHISPER 
+    # WHISPER
+
     def get_whisper(self) -> WhisperModel:
         if self._whisper:
             return self._whisper
@@ -208,19 +210,19 @@ class ModelLoader:
         with self._lock:
             if not self._whisper:
                 compute_type = "float16" if self._device == "cuda" else "int8"
-
                 self._whisper = self._safe_load(
                     lambda: WhisperModel(
                         settings.WHISPER_MODEL,
                         device=self._device,
-                        compute_type=compute_type
+                        compute_type=compute_type,
                     ),
-                    "Whisper"
+                    "Whisper",
                 )
 
         return self._whisper
 
-    #  BLIP 
+    # BLIP
+
     def get_blip(self) -> Tuple:
         if self._blip_model:
             return self._blip_processor, self._blip_model, self._device
@@ -228,19 +230,19 @@ class ModelLoader:
         with self._lock:
             if not self._blip_model:
 
-                def load():
+                def _load():
                     processor = BlipProcessor.from_pretrained(settings.BLIP_MODEL)
-                    model = BlipForConditionalGeneration.from_pretrained(settings.BLIP_MODEL)
-
+                    model     = BlipForConditionalGeneration.from_pretrained(settings.BLIP_MODEL)
                     model.to(self._device)
                     model.eval()
                     return processor, model
 
-                self._blip_processor, self._blip_model = self._safe_load(load, "BLIP")
+                self._blip_processor, self._blip_model = self._safe_load(_load, "BLIP")
 
         return self._blip_processor, self._blip_model, self._device
 
-    #  RERANKER 
+    # RERANKER
+
     def get_reranker(self) -> CrossEncoder:
         if self._reranker:
             return self._reranker
@@ -249,37 +251,48 @@ class ModelLoader:
             if not self._reranker:
                 self._reranker = self._safe_load(
                     lambda: CrossEncoder(settings.RERANKER_MODEL, device=self._device),
-                    "Reranker"
+                    "Reranker",
                 )
 
         return self._reranker
 
-    #  HEALTH 
-    def health_check(self) -> Dict[str, bool]:
+    # HEALTH CHECK
+
+    def health_check(self) -> Dict[str, Any]:
         return {
-            "llm": self._llm is not None,
-            "embedder": self._text_embedder is not None,
-            "clip": self._clip_model is not None,
-            "whisper": self._whisper is not None,
-            "reranker": self._reranker is not None,
+            "llm":              self._llm is not None,
+            "embedder":         self._text_embedder is not None,
+            "clip":             self._clip_model is not None,
+            "clip_text":        self._clip_text_embedder is not None,
+            "image_embedder":   self._image_embedder is not None,
+            "multimodal":       self._multimodal is not None,
+            "whisper":          self._whisper is not None,
+            "blip":             self._blip_model is not None,
+            "reranker":         self._reranker is not None,
+            "device":           self._device,
+            "initialized":      self._initialized,
         }
 
-    #  RESET 
+    # RESET
+
     def reset(self) -> None:
         with self._lock:
-            self._llm = None
-            self._text_embedder = None
+            self._llm                = None
+            self._text_embedder      = None
             self._clip_text_embedder = None
-            self._image_embedder = None
-            self._whisper = None
-            self._blip_model = None
-            self._reranker = None
-            self._clip_model = None
-            self._multimodal = None
-            self._initialized = False
+            self._image_embedder     = None
+            self._multimodal         = None
+            self._whisper            = None
+            self._reranker           = None
+            self._clip_model         = None
+            self._clip_processor     = None
+            self._blip_model         = None
+            self._blip_processor     = None
+            self._initialized        = False
 
             logger.warning(event="models_reset")
 
 
 # SINGLETON
+
 model_loader = ModelLoader()
