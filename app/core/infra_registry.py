@@ -76,6 +76,7 @@ class InfraRegistry:
         tasks = [
             asyncio.to_thread(self.get_vector_store),
             asyncio.to_thread(self.get_bm25),
+            asyncio.to_thread(self.get_memory),
             asyncio.to_thread(self.get_mongo),
         ]
 
@@ -132,10 +133,7 @@ class InfraRegistry:
     # REDIS
 
     def get_memory(self) -> Optional[RedisMemory]:
-        if not settings.USE_REDIS:
-            logger.warning(event="redis_disabled")
-            return None
-
+    
         if self._memory:
             return self._memory
 

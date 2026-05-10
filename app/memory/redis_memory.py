@@ -17,6 +17,7 @@ class _InMemoryStore:
     def __init__(self, maxsize: int = 1000) -> None:
         self._store:   OrderedDict = OrderedDict()
         self._maxsize: int         = maxsize
+        self._cache: Dict[str, str] = {}
 
     def rpush(self, key: str, value: str) -> None:
         if key not in self._store:
@@ -39,6 +40,7 @@ class _InMemoryStore:
         if end == -1:
             return lst[start:]
         return lst[start:end + 1]
+    
 
     def llen(self, key: str) -> int:
         return len(self._store.get(key, []))

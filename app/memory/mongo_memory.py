@@ -135,7 +135,10 @@ class MongoMemory:
             logger.info(event="mongo_indexes_created")
 
         except Exception as e:
-            logger.warning(event="mongo_index_creation_failed", error=str(e))
+            if "already exists" in str(e) or "IndexOptionsConflict" in str(e):
+                logger.info(event="mongo_index_verified_existing")
+            else:
+                logger.warning(event="mongo_index_creation_failed", error=str(e))
 
     # STORE MESSAGE
 

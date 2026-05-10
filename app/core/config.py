@@ -79,9 +79,9 @@ class Settings:
     LOG_BACKUP_COUNT: int     = _get_int("LOG_BACKUP_COUNT", 5)
 
     # PERFORMANCE
-    THREAD_POOL_SIZE: int         = _get_int("THREAD_POOL_SIZE", 4)
-    MAX_PARALLEL_REQUESTS: int    = _get_int("MAX_PARALLEL_REQUESTS", 20)
-    REQUEST_TIMEOUT_SEC: int      = _get_int("REQUEST_TIMEOUT_SEC", 60)
+    THREAD_POOL_SIZE: int         = _get_int("THREAD_POOL_SIZE", 2)
+    MAX_PARALLEL_REQUESTS: int    = _get_int("MAX_PARALLEL_REQUESTS", 3)
+    REQUEST_TIMEOUT_SEC: int      = _get_int("REQUEST_TIMEOUT_SEC", 120)
     RETRIEVAL_TIMEOUT: int        = _get_int("RETRIEVAL_TIMEOUT", 10)
     EMBEDDING_TIMEOUT: int        = _get_int("EMBEDDING_TIMEOUT", 15)
     VECTOR_DB_TIMEOUT: int        = _get_int("VECTOR_DB_TIMEOUT", 10)
@@ -96,7 +96,7 @@ class Settings:
     LLM_TOP_P: float        = _get_float("LLM_TOP_P", 0.9)
     MAX_PROMPT_CHARS: int   = _get_int("MAX_PROMPT_CHARS", 8000)
     LLM_GPU_LAYERS: int     = _get_int("LLM_GPU_LAYERS", 0)
-    LLM_THREADS: int        = _get_int("LLM_THREADS", 8)
+    LLM_THREADS: int        = _get_int("LLM_THREADS", 6)
     LLM_N_BATCH: int        = _get_int("LLM_N_BATCH", 512)
 
     # EMBEDDINGS
@@ -171,7 +171,7 @@ class Settings:
     REDIS_QUERY_CACHE_TTL: int     = _get_int("REDIS_QUERY_CACHE_TTL", 3600)
     REDIS_EMBEDDING_CACHE_TTL: int = _get_int("REDIS_EMBEDDING_CACHE_TTL", 86400)
     REDIS_KEY_PREFIX: str          = _get_str("REDIS_KEY_PREFIX", "rag")
-    USE_REDIS: bool                = _get_bool("USE_REDIS", False)
+    USE_REDIS: bool                = _get_bool("USE_REDIS", True)
 
     # MONGODB
     MONGO_URI: str        = _get_str("MONGO_URI", "mongodb://localhost:27017")
