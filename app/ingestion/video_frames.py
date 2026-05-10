@@ -223,4 +223,5 @@ def extract_frames(
         raise
 
     finally:
-        cap.release()
+        if 'cap' in locals() and cap is not None:
+            cap.release()

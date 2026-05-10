@@ -232,8 +232,8 @@ class Retriever:
                 bm25_res.extend(b_results)
 
             # NORMALIZE BEFORE MERGE
-            vector_res = self._normalize_scores(vector_res)
-            bm25_res   = self._normalize_scores(bm25_res)
+            # vector_res = self._normalize_scores(vector_res)
+            # bm25_res   = self._normalize_scores(bm25_res)
 
             merged = self._merge(vector_res, bm25_res)
 

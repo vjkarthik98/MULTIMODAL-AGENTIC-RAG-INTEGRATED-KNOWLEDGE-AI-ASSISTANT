@@ -34,8 +34,6 @@ class BM25Retriever:
             "at", "by", "with", "from", "this", "that", "it", "be", "as",
         }
 
-        # LOAD PERSISTED INDEX ON STARTUP
-        self._load_index()
 
     # HASH
 
@@ -258,6 +256,9 @@ class BM25Retriever:
         top_k: Optional[int] = None,
     ) -> List[Dict]:
 
+        if not self.bm25:
+            self._load_index()
+            
         if not self.bm25:
             logger.warning(event="bm25_not_ready", session_id=session_id)
             return []

@@ -74,20 +74,22 @@ class ModelLoader:
             if self._initialized:
                 return
 
-            logger.info(event="warmup_started")
+            logger.info(event="warmup_started_staggered")
 
-            futures = [
-                self._executor.submit(self.get_llm),
-                self._executor.submit(self.get_embedder),
-                self._executor.submit(self.get_clip),
-                self._executor.submit(self.get_whisper),
-                self._executor.submit(self.get_blip),
-                self._executor.submit(self.get_reranker),
+            load_functions = [
+                self.get_llm,
+                self.get_embedder,
+                self.get_clip,
+                self.get_whisper,
+                self.get_blip,
+                self.get_reranker,
             ]
 
-            for f in futures:
+            for load_fn in load_functions:
                 try:
-                    f.result()
+                    future = self._executor.submit(load_fn)
+                    future.result()
+                    time.sleep(2.0)
                 except Exception as e:
                     logger.warning(event="warmup_model_failed", error=str(e))
 
