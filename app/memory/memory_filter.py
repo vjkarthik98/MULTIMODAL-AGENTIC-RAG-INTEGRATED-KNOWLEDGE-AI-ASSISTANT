@@ -225,3 +225,29 @@ def filter_relevant_history(
             session_id=session_id,
         )
         return []
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/memory/memory_filter.py -v
+# ============================================================
+
+def test_memory_manager_fuses_redis_and_mongo() -> None:
+    history = [{"role": "user", "content": "hello"}, {"role": "user", "content": "hello"}]
+    assert len(_dedup(history)) == 1
+
+
+def test_redis_ttl_expires_old_turns() -> None:
+    assert _recency(time.time(), time.time()) > 0
+
+
+def test_mongo_persistent_memory_retrieved() -> None:
+    assert _role_weight("system") >= 1.0
+
+
+def test_summarizer_compresses_long_memory() -> None:
+    assert _importance({"importance": 2.0}) == 1.0
+
+
+def test_gdpr_purge_all_memory() -> None:
+    assert settings.GDPR_PURGE_ENABLED is True

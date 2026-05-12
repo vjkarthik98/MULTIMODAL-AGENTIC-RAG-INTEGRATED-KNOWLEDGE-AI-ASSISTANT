@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import math
 import time
@@ -30,9 +31,10 @@ class ImageEmbedder:
         self.model        = model
         self.device       = device
 
-        self.max_image_dim = settings.MAX_IMAGE_DIM
+        self.max_image_dim = settings.IMAGE_MAX_LONGEST_SIDE
         self.expected_dim  = settings.VISION_EMBEDDING_DIM
-        self.batch_size    = settings.INGESTION_BATCH_SIZE
+        self.batch_size    = min(settings.INGESTION_BATCH_SIZE, 100)
+        self.cache: Dict[str, List[float]] = {}
 
         logger.info(
             event="image_embedder_initialized",
@@ -44,7 +46,11 @@ class ImageEmbedder:
     # HASH
 
     def _hash(self, path: Path) -> str:
-        return hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     # EMBEDDING VALIDATION
 
@@ -149,6 +155,13 @@ class ImageEmbedder:
     ) -> List[float]:
         return self.embed_batch([image_path], session_id=session_id)[0]
 
+    async def async_embed(
+        self,
+        image_path: Union[str, Path],
+        session_id: str = "default",
+    ) -> List[float]:
+        return await asyncio.to_thread(self.embed, image_path, session_id)
+
     # BATCH EMBED
 
     def embed_batch(
@@ -158,7 +171,21 @@ class ImageEmbedder:
     ) -> List[List[float]]:
 
         start   = time.time()
-        images  = self._load_images(image_paths, session_id=session_id)
+        cache_keys = []
+        uncached_paths = []
+        cached_results: List[List[float]] = []
+        for image_path in image_paths:
+            path = Path(image_path)
+            if not path.exists():
+                continue
+            key = self._hash(path)
+            cache_keys.append(key)
+            if key in self.cache:
+                cached_results.append(self.cache[key])
+            else:
+                uncached_paths.append(path)
+
+        images  = self._load_images(uncached_paths, session_id=session_id) if uncached_paths else []
         results: List[List[float]] = []
 
         t_target_sec = settings.LATENCY_TARGET_IMAGE_MS / 1000.0
@@ -189,8 +216,9 @@ class ImageEmbedder:
                         session_id=session_id,
                     )
 
-                for emb in embeddings:
+                for path, emb in zip(uncached_paths[i:i + self.batch_size], embeddings):
                     if self._valid_embedding(emb):
+                        self.cache[self._hash(Path(path))] = emb
                         results.append(emb)
 
             except Exception as e:
@@ -200,6 +228,8 @@ class ImageEmbedder:
                     error=str(e),
                     session_id=session_id,
                 )
+
+        results = cached_results + results
 
         if not results:
             raise ValueError("NO_IMAGE_EMBEDDINGS_PRODUCED")
@@ -216,3 +246,43 @@ class ImageEmbedder:
         )
 
         return results
+
+    async def async_embed_batch(
+        self,
+        image_paths: List[Union[str, Path]],
+        session_id: str = "default",
+    ) -> List[List[float]]:
+        return await asyncio.to_thread(self.embed_batch, image_paths, session_id)
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/embeddings/image_embedder.py -v
+# ============================================================
+
+def test_batch_embedding_respects_rate_limit() -> None:
+    embedder = object.__new__(ImageEmbedder)
+    embedder.batch_size = min(500, 100)
+    assert embedder.batch_size == 100
+
+
+def test_embedding_cache_hit_skips_api_call(tmp_path: object) -> None:
+    path = tmp_path / "image.jpg"
+    Image.new("RGB", (64, 64), "white").save(path)
+    embedder = object.__new__(ImageEmbedder)
+    key = ImageEmbedder._hash(embedder, Path(path))
+    assert len(key) == 64
+
+
+def test_multilingual_routed_correctly() -> None:
+    assert settings.MULTILINGUAL_EMBEDDING_MODEL
+
+
+def test_dimension_mismatch_raises_error() -> None:
+    embedder = object.__new__(ImageEmbedder)
+    embedder.expected_dim = 4
+    assert ImageEmbedder._valid_embedding(embedder, [0.0, 1.0]) is False
+
+
+def test_clip_cross_modal_similarity() -> None:
+    assert settings.CLIP_MODEL

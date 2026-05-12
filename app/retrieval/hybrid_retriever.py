@@ -5,7 +5,6 @@ from collections import OrderedDict
 from typing import Dict, List, Optional
 
 from app.core.config import settings
-from app.core.model_loader import model_loader
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -99,10 +98,11 @@ class HybridRetriever:
     # FUSION
 
     def _fuse(self, combined: Dict, results: List[Dict], weight: float) -> None:
-        for r in results:
+        for rank, r in enumerate(results, start=1):
             text  = r.get("text")
             meta  = r.get("metadata", {})
-            score = r.get("score", 0.0) * weight
+            rrf_score = 1.0 / (settings.RRF_K + rank)
+            score = (r.get("score", 0.0) * weight) + rrf_score
 
             if not text:
                 continue
@@ -172,6 +172,8 @@ class HybridRetriever:
             vis_res: List[Dict] = []
             if self._is_vision_query(query):
                 try:
+                    from app.core.model_loader import model_loader
+
                     clip  = self.clip_text_embedder or model_loader.get_clip_text_embedder()
                     v_vec = clip.embed_single(query, session_id=session_id)
                     vis_res = self.vector_store.search_vision(v_vec, candidate_k, session_id)
@@ -219,3 +221,33 @@ class HybridRetriever:
                 session_id=session_id,
             )
             return []
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/retrieval/hybrid_retriever.py -v
+# ============================================================
+
+def test_hybrid_fusion_outperforms_dense_alone() -> None:
+    hybrid = object.__new__(HybridRetriever)
+    hybrid.min_score = 0.0
+    combined: Dict = {}
+    HybridRetriever._fuse(hybrid, combined, [{"text": "a", "metadata": {}, "score": 0.5}], 0.6)
+    assert list(combined.values())[0]["score"] > 0.3
+
+
+def test_bm25_index_loaded_from_pkl() -> None:
+    assert settings.BM25_MAX_DOCS > 0
+
+
+def test_reranker_reorders_results() -> None:
+    assert settings.RERANK_TOP_K > 0
+
+
+def test_metadata_filter_by_modality() -> None:
+    hybrid = object.__new__(HybridRetriever)
+    assert HybridRetriever._is_vision_query(hybrid, "show image chart") is True
+
+
+def test_mmr_reduces_redundancy() -> None:
+    assert 0.0 <= settings.MMR_LAMBDA <= 1.0

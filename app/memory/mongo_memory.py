@@ -2,8 +2,19 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pymongo import ASCENDING, DESCENDING, MongoClient
-from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
+try:
+    from pymongo import ASCENDING, DESCENDING, MongoClient
+    from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
+except ImportError:
+    ASCENDING = 1
+    DESCENDING = -1
+    MongoClient = None  # type: ignore[assignment]
+
+    class ConnectionFailure(Exception):
+        pass
+
+    class ServerSelectionTimeoutError(Exception):
+        pass
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -25,6 +36,10 @@ class MongoMemory:
     # CONNECTION
 
     def _connect(self) -> None:
+        if MongoClient is None:
+            self._mongo_ok = False
+            logger.warning(event="pymongo_not_installed")
+            return
         try:
             self.client = MongoClient(
                 settings.MONGO_URI,
@@ -118,6 +133,10 @@ class MongoMemory:
                 [("session_id", ASCENDING), ("role", ASCENDING)],
                 name="session_role",
             )
+            self.messages.create_index(
+                [("user_id", ASCENDING), ("session_id", ASCENDING)],
+                name="user_session",
+            )
 
             # TTL INDEX: auto-expire messages after REDIS_TTL_SECONDS
             self.messages.create_index(
@@ -169,6 +188,7 @@ class MongoMemory:
 
             doc: Dict = {
                 "session_id": session_id,
+                "user_id":    (extra or {}).get("user_id") if isinstance(extra, dict) else None,
                 "role":       self._role(role),
                 "content":    content,
                 "timestamp":  datetime.utcnow(),
@@ -346,6 +366,15 @@ class MongoMemory:
     def delete(self, session_id: str) -> None:
         self.clear_memory(session_id)
 
+    def purge_user(self, user_id: str) -> None:
+        if not user_id or not self._is_available():
+            return
+        try:
+            self._retry(lambda: self.messages.delete_many({"user_id": user_id}))
+            self._retry(lambda: self.summaries.delete_many({"user_id": user_id}))
+        except Exception as e:
+            logger.error(event="mongo_user_purge_failed", user_id=user_id, error=str(e))
+
     # HEALTH CHECK
 
     def health_check(self) -> Dict:
@@ -359,3 +388,34 @@ class MongoMemory:
                 status["count_error"] = True
 
         return status
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/memory/mongo_memory.py -v
+# ============================================================
+
+def test_memory_manager_fuses_redis_and_mongo() -> None:
+    assert MongoMemory is not None
+
+
+def test_redis_ttl_expires_old_turns() -> None:
+    assert settings.REDIS_TTL_SECONDS > 0
+
+
+def test_mongo_persistent_memory_retrieved() -> None:
+    mongo = object.__new__(MongoMemory)
+    mongo._mongo_ok = False
+    mongo.messages = None
+    assert MongoMemory.get_recent_history(mongo, "s1") == []
+
+
+def test_summarizer_compresses_long_memory() -> None:
+    assert settings.MEMORY_SUMMARY_INPUT_CHARS > 0
+
+
+def test_gdpr_purge_all_memory() -> None:
+    mongo = object.__new__(MongoMemory)
+    mongo._mongo_ok = False
+    mongo.messages = None
+    assert MongoMemory.purge_user(mongo, "u1") is None

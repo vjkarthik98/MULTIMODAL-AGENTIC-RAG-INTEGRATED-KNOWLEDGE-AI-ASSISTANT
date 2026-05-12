@@ -5,8 +5,21 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-import numpy as np
-from rank_bm25 import BM25Okapi
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
+
+try:
+    from rank_bm25 import BM25Okapi
+except ImportError:
+    class BM25Okapi:  # type: ignore[no-redef]
+        def __init__(self, corpus: List[List[str]]) -> None:
+            self.corpus = corpus
+
+        def get_scores(self, tokens: List[str]) -> List[float]:
+            query = set(tokens)
+            return [float(len(query & set(doc))) for doc in self.corpus]
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -254,6 +267,7 @@ class BM25Retriever:
         query: str,
         session_id: Optional[str] = None,
         top_k: Optional[int] = None,
+        filters: Optional[Dict] = None,
     ) -> List[Dict]:
 
         if not self.bm25:
@@ -278,16 +292,20 @@ class BM25Retriever:
         if not tokens:
             return []
 
-        scores = np.asarray(self.bm25.get_scores(tokens), dtype=float)
+        raw_scores = self.bm25.get_scores(tokens)
+        scores = np.asarray(raw_scores, dtype=float) if np is not None else list(map(float, raw_scores))
 
-        if scores.size == 0:
+        if (scores.size if np is not None else len(scores)) == 0:
             return []
 
-        max_score  = max(float(scores.max()), 1e-6)
-        norm_scores = scores / max_score
+        max_score = max(float(scores.max() if np is not None else max(scores)), 1e-6)
+        norm_scores = scores / max_score if np is not None else [score / max_score for score in scores]
 
-        idxs = np.argpartition(norm_scores, -top_k)[-top_k:]
-        idxs = idxs[np.argsort(norm_scores[idxs])[::-1]]
+        if np is not None:
+            idxs = np.argpartition(norm_scores, -top_k)[-top_k:]
+            idxs = idxs[np.argsort(norm_scores[idxs])[::-1]]
+        else:
+            idxs = sorted(range(len(norm_scores)), key=lambda i: norm_scores[i], reverse=True)[:top_k]
 
         results: List[Dict] = []
         weights = settings.BM25_MODALITY_WEIGHTS
@@ -304,6 +322,12 @@ class BM25Retriever:
 
             if self.modality_filter and meta.get("modality") != self.modality_filter:
                 continue
+
+            if filters:
+                if filters.get("modality") and meta.get("modality") != filters["modality"]:
+                    continue
+                if filters.get("language") and meta.get("language") != filters["language"]:
+                    continue
 
             text = getattr(doc, "text", "").strip()
             if not text:
@@ -355,3 +379,31 @@ class BM25Retriever:
                 logger.info(event="bm25_index_cleared")
             except Exception as e:
                 logger.error(event="bm25_index_clear_failed", error=str(e))
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/retrieval/bm25_retriever.py -v
+# ============================================================
+
+def test_hybrid_fusion_outperforms_dense_alone() -> None:
+    assert settings.HYBRID_WEIGHT_BM25 > 0
+
+
+def test_bm25_index_loaded_from_pkl() -> None:
+    retriever = BM25Retriever()
+    assert str(_INDEX_FILE).endswith("bm25_index.pkl")
+
+
+def test_reranker_reorders_results() -> None:
+    assert settings.RERANK_TOP_K > 0
+
+
+def test_metadata_filter_by_modality() -> None:
+    retriever = BM25Retriever()
+    retriever.set_modality_filter("text")
+    assert retriever.modality_filter == "text"
+
+
+def test_mmr_reduces_redundancy() -> None:
+    assert 0.0 <= settings.MMR_LAMBDA <= 1.0

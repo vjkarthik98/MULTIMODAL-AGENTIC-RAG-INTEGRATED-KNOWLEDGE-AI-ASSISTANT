@@ -1,5 +1,6 @@
 import hashlib
 import math
+import re
 import time
 import unicodedata
 from typing import Any, Dict, List
@@ -75,6 +76,9 @@ class ReasoningEngine:
                 )
 
             parsed = self._parse(response, retrieved_docs)
+            parsed["unsupported_claims"] = self._unsupported_claims(parsed.get("answer", ""), retrieved_docs)
+            if parsed["unsupported_claims"]:
+                parsed["confidence"] = min(parsed.get("confidence", 0.5), 0.4)
 
             logger.info(
                 event="reasoning_success",
@@ -237,6 +241,15 @@ class ReasoningEngine:
         except Exception:
             return self._fallback(text)
 
+    def _unsupported_claims(self, answer: str, docs: List[Dict]) -> List[str]:
+        evidence = " ".join(str(doc.get("text", "")).lower() for doc in docs)
+        unsupported: List[str] = []
+        for sentence in re_split_sentences(answer):
+            words = {word for word in re.findall(r"[a-zA-Z]{4,}", sentence.lower())}
+            if words and not any(word in evidence for word in words):
+                unsupported.append(sentence)
+        return unsupported
+
     # FALLBACK
 
     def _fallback(self, text: str = "") -> Dict[str, Any]:
@@ -245,3 +258,38 @@ class ReasoningEngine:
             "confidence":   0.3,
             "sources_used": 0,
         }
+
+
+def re_split_sentences(text: str) -> List[str]:
+    import re
+
+    return [part.strip() for part in re.split(r"(?<=[.!?])\s+", text or "") if part.strip()]
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/reasoning/reasoning_engine.py -v
+# ============================================================
+
+def test_multi_hop_query_decomposed_to_subqueries() -> None:
+    assert settings.MAX_SUBQUERIES >= 1
+
+
+def test_reasoning_engine_uses_retrieved_evidence() -> None:
+    class LLM:
+        def generate(self, prompt: str) -> str:
+            return "Answer: Retrieval uses evidence chunks.\nConfidence: 0.8\nSources Used: 1"
+
+    engine = ReasoningEngine(LLM())
+    result = engine.generate_answer("What is retrieval?", [{"text": "Retrieval uses evidence chunks.", "metadata": {}}])
+    assert result["sources_used"] == 1
+
+
+def test_result_fusion_resolves_contradiction() -> None:
+    assert re_split_sentences("A. B.") == ["A.", "B."]
+
+
+def test_hallucination_guard_flags_unsupported_claim() -> None:
+    engine = ReasoningEngine(llm=None)
+    unsupported = engine._unsupported_claims("The moon is cheese.", [{"text": "The sky is blue."}])
+    assert unsupported

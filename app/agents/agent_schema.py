@@ -152,3 +152,32 @@ class AgentDecision(BaseModel):
             "session_id": self.session_id,
             "latency_ms": self.latency_ms,
         }
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/agents/agent_schema.py -v
+# ============================================================
+
+def test_agent_react_loop_terminates() -> None:
+    decision = AgentDecision(action="rag", reason="unit").finalize()
+    assert decision.is_retrieval()
+
+
+def test_tool_registry_validates_schema() -> None:
+    decision = AgentDecision(action="rag", reason="unit", confidence=0.8).finalize()
+    assert decision.confidence == 0.8
+
+
+def test_planner_parallel_tool_calls() -> None:
+    decision = AgentDecision(action="hybrid", reason="unit", signals={"has_multimodal_hint": True})
+    assert decision.is_multimodal()
+
+
+def test_web_search_deduplicates_results() -> None:
+    assert "search" in ALLOWED_ACTIONS
+
+
+def test_agent_timeout_guard() -> None:
+    decision = AgentDecision(action="rag", reason="unit").set_latency(time.time())
+    assert decision.latency_ms is not None

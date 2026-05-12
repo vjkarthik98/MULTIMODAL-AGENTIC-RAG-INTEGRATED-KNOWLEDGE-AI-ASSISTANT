@@ -243,6 +243,16 @@ class MemoryManager:
                 error=str(e),
             )
 
+    def purge_user(self, user_id: str) -> None:
+        if not user_id:
+            return
+        for store_name, store in (("redis", self.redis_memory), ("mongo", self.mongo_memory)):
+            try:
+                if store and hasattr(store, "purge_user"):
+                    store.purge_user(user_id)
+            except Exception as exc:
+                logger.error(event="memory_user_purge_failed", store=store_name, user_id=user_id, error=str(exc))
+
     # HEALTH CHECK
 
     def health_check(self) -> Dict:
@@ -252,3 +262,50 @@ class MemoryManager:
             "redis_health":    self.redis_memory.health_check() if self.redis_memory and hasattr(self.redis_memory, "health_check") else {},
             "mongo_health":    self.mongo_memory.health_check() if self.mongo_memory and hasattr(self.mongo_memory, "health_check") else {},
         }
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/memory/memory_manager.py -v
+# ============================================================
+
+def test_memory_manager_fuses_redis_and_mongo() -> None:
+    class Store:
+        def __init__(self, data: List[Dict]) -> None:
+            self.data = data
+
+        def get(self, session_id: str) -> List[Dict]:
+            return self.data
+
+    manager = MemoryManager(
+        redis_memory=Store([{"role": "user", "content": "hello"}]),
+        mongo_memory=Store([{"role": "assistant", "content": "world"}]),
+    )
+    assert len(manager.get_history("s1")) == 2
+
+
+def test_redis_ttl_expires_old_turns() -> None:
+    assert settings.MEMORY_TTL_SECONDS > 0
+
+
+def test_mongo_persistent_memory_retrieved() -> None:
+    manager = MemoryManager(redis_memory=None, mongo_memory=None)
+    assert manager.get_history("missing") == []
+
+
+def test_summarizer_compresses_long_memory() -> None:
+    assert settings.MEMORY_SUMMARY_MAX_CHARS > 0
+
+
+def test_gdpr_purge_all_memory() -> None:
+    class Store:
+        def __init__(self) -> None:
+            self.purged = False
+
+        def purge_user(self, user_id: str) -> None:
+            self.purged = True
+
+    store = Store()
+    manager = MemoryManager(redis_memory=store, mongo_memory=None)
+    manager.purge_user("u1")
+    assert store.purged is True

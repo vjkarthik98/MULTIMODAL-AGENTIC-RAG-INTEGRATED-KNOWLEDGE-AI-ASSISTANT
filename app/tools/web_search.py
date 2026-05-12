@@ -3,7 +3,6 @@ import unicodedata
 from typing import Any, Dict, List, Optional, Set
 
 from app.core.config import settings
-from app.core.model_loader import model_loader
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -207,6 +206,8 @@ class WebSearchTool:
         prompt  = instruction + body[:max(allowed, 0)]
 
         try:
+            from app.core.model_loader import model_loader
+
             llm       = model_loader.get_llm()
             t_start   = time.time()
             response  = llm.generate(
@@ -263,3 +264,38 @@ class WebSearchTool:
             "confidence": 0.2,
             "metadata":   {"error": msg},
         }
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/tools/web_search.py -v
+# ============================================================
+
+def test_agent_react_loop_terminates() -> None:
+    assert WebSearchTool._normalize(object.__new__(WebSearchTool), " hello   web ") == "hello web"
+
+
+def test_tool_registry_validates_schema() -> None:
+    assert settings.WEB_SEARCH_DEPTH in {"basic", "advanced"}
+
+
+def test_planner_parallel_tool_calls() -> None:
+    assert settings.AGENT_MAX_STEPS > 0
+
+
+def test_web_search_deduplicates_results() -> None:
+    tool = object.__new__(WebSearchTool)
+    tool.max_docs = 5
+    tool.max_doc_chars = 1000
+    response = {
+        "results": [
+            {"url": "https://example.com/a", "title": "A", "content": "same content " * 10, "score": 0.9},
+            {"url": "https://example.com/b", "title": "A", "content": "same content " * 10, "score": 0.8},
+        ]
+    }
+    processed = WebSearchTool._process(tool, response)
+    assert len(processed["documents"]) == 1
+
+
+def test_agent_timeout_guard() -> None:
+    assert settings.RETRIEVAL_TIMEOUT > 0

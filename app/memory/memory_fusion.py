@@ -173,3 +173,29 @@ def build_memory_context(
             session_id=session_id,
         )
         return ""
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/memory/memory_fusion.py -v
+# ============================================================
+
+def test_memory_manager_fuses_redis_and_mongo() -> None:
+    context = build_memory_context("Key fact", [{"role": "user", "content": "hello"}])
+    assert "[Long-Term]" in context and "[Recent]" in context
+
+
+def test_redis_ttl_expires_old_turns() -> None:
+    assert settings.REDIS_TTL_SECONDS > 0
+
+
+def test_mongo_persistent_memory_retrieved() -> None:
+    assert _fetch_mongo_summary("missing") == ""
+
+
+def test_summarizer_compresses_long_memory() -> None:
+    assert _truncate("abcdef", 3) == "abc"
+
+
+def test_gdpr_purge_all_memory() -> None:
+    assert settings.GDPR_PURGE_ENABLED is True

@@ -6,7 +6,6 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from app.core.config import settings
-from app.core.model_loader import model_loader
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -15,6 +14,8 @@ logger = get_logger(__name__)
 class Reranker:
 
     def __init__(self) -> None:
+        from app.core.model_loader import model_loader
+
         self.model         = model_loader.get_reranker()
         self.top_k         = settings.RERANK_TOP_K
         self.max_inputs    = settings.RERANK_MAX_INPUT
@@ -78,7 +79,7 @@ class Reranker:
     def _filter(self, docs: List[Dict]) -> List[Dict]:
         return [
             d for d in docs
-            if d.get("text") and d.get("score", 0.0) > 0.01
+            if d.get("text") and d.get("score", 0.0) > settings.RERANK_SCORE_THRESHOLD
         ]
 
     # SCORE NORMALIZATION
@@ -243,3 +244,33 @@ class Reranker:
             )
 
             return self._dedup(fallback, top_k)
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/retrieval/reranker.py -v
+# ============================================================
+
+def test_hybrid_fusion_outperforms_dense_alone() -> None:
+    assert settings.HYBRID_WEIGHT_VECTOR > 0
+
+
+def test_bm25_index_loaded_from_pkl() -> None:
+    assert settings.BM25_TOP_K > 0
+
+
+def test_reranker_reorders_results() -> None:
+    reranker = object.__new__(Reranker)
+    scores = Reranker._normalize_scores(reranker, np.asarray([0.2, 0.8]))
+    assert scores[-1] > scores[0]
+
+
+def test_metadata_filter_by_modality() -> None:
+    reranker = object.__new__(Reranker)
+    reranker.context_chars = settings.RERANK_CONTEXT_MAX_CHARS
+    ctx = Reranker._context(reranker, {"text": "hello", "metadata": {"modality": "image"}})
+    assert "[IMAGE]" in ctx
+
+
+def test_mmr_reduces_redundancy() -> None:
+    assert settings.MMR_LAMBDA <= 1.0

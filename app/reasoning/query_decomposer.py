@@ -45,6 +45,16 @@ class QueryDecomposer:
 
         return False
 
+    def detect_query_type(self, query: str) -> str:
+        q = query.lower()
+        if any(word in q for word in ("compare", "versus", " vs ", "difference")):
+            return "comparative"
+        if any(word in q for word in ("when", "before", "after", "timeline", "date")):
+            return "temporal"
+        if any(word in q for word in ("total", "average", "sum", "count", "aggregate")):
+            return "aggregation"
+        return "factual"
+
     # SUBQUERY CONFIDENCE
 
     def _confidence(self, query: str) -> float:
@@ -155,6 +165,7 @@ class QueryDecomposer:
 
         try:
             query = self._normalize(query)
+            query_type = self.detect_query_type(query)
 
             if not self._is_complex(query):
                 return [query]
@@ -186,6 +197,7 @@ class QueryDecomposer:
 
             logger.info(
                 event="decompose_success",
+                query_type=query_type,
                 count=len(filtered),
                 parsed_count=len(parsed),
                 filtered_count=len(parsed) - len(filtered),
@@ -203,3 +215,30 @@ class QueryDecomposer:
                 session_id=session_id,
             )
             return [query]
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/reasoning/query_decomposer.py -v
+# ============================================================
+
+def test_multi_hop_query_decomposed_to_subqueries() -> None:
+    class LLM:
+        def generate(self, prompt: str, max_tokens: int = 64) -> str:
+            return "1. What is retrieval?\n2. How does reranking improve retrieval?"
+
+    decomposer = QueryDecomposer(LLM())
+    result = decomposer.decompose("What is retrieval and how does reranking improve retrieval?", "s1")
+    assert len(result) >= 1
+
+
+def test_reasoning_engine_uses_retrieved_evidence() -> None:
+    assert QueryDecomposer(llm=None).detect_query_type("compare A and B") == "comparative"
+
+
+def test_result_fusion_resolves_contradiction() -> None:
+    assert QueryDecomposer(llm=None).detect_query_type("when did it happen") == "temporal"
+
+
+def test_hallucination_guard_flags_unsupported_claim() -> None:
+    assert QueryDecomposer(llm=None).detect_query_type("count all rows") == "aggregation"

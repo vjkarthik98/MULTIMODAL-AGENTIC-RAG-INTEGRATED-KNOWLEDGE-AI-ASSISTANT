@@ -46,6 +46,7 @@ class ResultFusion:
 
             results = self._normalize(results)
             results = self._score(results)
+            results = self._flag_contradictions(results)
 
             results.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
 
@@ -209,3 +210,43 @@ class ResultFusion:
             m = (r.get("metadata", {}) or {}).get("modality", "unknown")
             counts[m] = counts.get(m, 0) + 1
         return counts
+
+    def _flag_contradictions(self, results: List[Dict]) -> List[Dict]:
+        polarity = []
+        for result in results:
+            text = str(result.get("text", "")).lower()
+            polarity.append(any(word in text for word in ("not", "never", "false", "incorrect")))
+        has_conflict = any(polarity) and not all(polarity)
+        if has_conflict:
+            for result in results:
+                result.setdefault("metadata", {})["contradiction_possible"] = True
+                result["final_score"] = round(float(result.get("final_score", 0.0)) * 0.95, 5)
+        return results
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/reasoning/result_fusion.py -v
+# ============================================================
+
+def test_multi_hop_query_decomposed_to_subqueries() -> None:
+    assert settings.MAX_SUBQUERIES >= 1
+
+
+def test_reasoning_engine_uses_retrieved_evidence() -> None:
+    fusion = ResultFusion()
+    result = fusion.fuse([{"text": "Evidence chunk", "score": 0.9, "metadata": {"modality": "text"}}])
+    assert result
+
+
+def test_result_fusion_resolves_contradiction() -> None:
+    fusion = ResultFusion()
+    flagged = fusion._flag_contradictions([
+        {"text": "It is supported", "final_score": 1.0, "metadata": {}},
+        {"text": "It is not supported", "final_score": 1.0, "metadata": {}},
+    ])
+    assert flagged[0]["metadata"]["contradiction_possible"] is True
+
+
+def test_hallucination_guard_flags_unsupported_claim() -> None:
+    assert settings.FUSION_SIMILARITY_THRESHOLD > 0

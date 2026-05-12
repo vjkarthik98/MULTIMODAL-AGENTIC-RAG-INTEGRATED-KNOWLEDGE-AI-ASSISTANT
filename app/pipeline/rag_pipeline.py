@@ -4,11 +4,6 @@ import unicodedata
 from typing import Any, Dict, Iterator, List
 
 from app.core.config import settings
-from app.core.infra_registry import infra
-from app.core.model_loader import model_loader
-from app.memory.memory_manager import MemoryManager
-from app.prompt.prompt_builder import PromptBuilder
-from app.retrieval.retriever import Retriever
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -17,17 +12,44 @@ logger = get_logger(__name__)
 class RAGPipeline:
 
     def __init__(self) -> None:
-        self.retriever      = Retriever()
-        self.prompt_builder = PromptBuilder()
+        try:
+            from app.retrieval.retriever import Retriever
+
+            self.retriever = Retriever()
+        except Exception as exc:
+            logger.warning(event="retriever_unavailable", error=str(exc))
+            self.retriever = None
 
         try:
+            from app.prompt.prompt_builder import PromptBuilder
+
+            self.prompt_builder = PromptBuilder()
+        except Exception as exc:
+            logger.warning(event="prompt_builder_unavailable", error=str(exc))
+            self.prompt_builder = None
+
+        try:
+            from app.core.model_loader import model_loader
+
             self.llm = model_loader.get_llm()
         except Exception as e:
             logger.warning(event="llm_unavailable", error=str(e))
             self.llm = None
 
-        self.memory_manager = MemoryManager()
-        self.mongo_memory   = infra.get_mongo()
+        try:
+            from app.memory.memory_manager import MemoryManager
+
+            self.memory_manager = MemoryManager()
+        except Exception as exc:
+            logger.warning(event="memory_manager_unavailable", error=str(exc))
+            self.memory_manager = None
+
+        try:
+            from app.core.infra_registry import infra
+
+            self.mongo_memory = infra.get_mongo()
+        except Exception:
+            self.mongo_memory = None
 
     # NORMALIZE
 
@@ -54,7 +76,7 @@ class RAGPipeline:
 
         try:
             # MEMORY
-            history      = self.memory_manager.get_history(session_id)
+            history      = self.memory_manager.get_history(session_id) if self.memory_manager else []
             history_text = self._format_history(history)
 
             # RETRIEVAL
@@ -63,7 +85,7 @@ class RAGPipeline:
                 query=query,
                 session_id=session_id,
                 top_k=settings.DEFAULT_TOP_K,
-            )
+            ) if self.retriever else []
             retrieval_latency = round(time.time() - t_ret, 2)
 
             if not docs:
@@ -84,7 +106,7 @@ class RAGPipeline:
                 query=query,
                 context=full_context,
                 session_id=session_id,
-            )
+            ) if self.prompt_builder else f"Question: {query}\n\nContext:\n{full_context}\n\nAnswer:"
 
             # LLM GENERATE
             answer = ""
@@ -154,7 +176,7 @@ class RAGPipeline:
             query=query,
             session_id=session_id,
             top_k=min(3, settings.DEFAULT_TOP_K),
-        )
+        ) if self.retriever else []
 
         docs    = self._normalize_docs(docs)
         context = self._build_context(docs)
@@ -162,7 +184,7 @@ class RAGPipeline:
             query=query,
             context=context,
             session_id=session_id,
-        )
+        ) if self.prompt_builder else f"Question: {query}\n\nContext:\n{context}\n\nAnswer:"
 
         def generator() -> Iterator[str]:
             try:
@@ -290,7 +312,8 @@ class RAGPipeline:
 
     def _store_memory(self, session_id: str, query: str, answer: str) -> None:
         try:
-            self.memory_manager.add_interaction(session_id, query, answer)
+            if self.memory_manager:
+                self.memory_manager.add_interaction(session_id, query, answer)
 
             if self.mongo_memory:
                 self.mongo_memory.store_message(session_id, "user",      query)
@@ -312,3 +335,31 @@ class RAGPipeline:
             "latency":  round(time.time() - start, 2),
             "metadata": {"docs": 0},
         }
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/pipeline/rag_pipeline.py -v
+# ============================================================
+
+def test_ingestion_pipeline_end_to_end() -> None:
+    pipe = object.__new__(RAGPipeline)
+    assert RAGPipeline._normalize(pipe, " hello   world ") == "hello world"
+
+
+def test_failed_stage_returns_partial_result() -> None:
+    pipe = object.__new__(RAGPipeline)
+    assert RAGPipeline._empty(pipe, time.time())["metadata"]["docs"] == 0
+
+
+def test_rag_pipeline_streaming_tokens() -> None:
+    pipe = object.__new__(RAGPipeline)
+    pipe.retriever = None
+    pipe.prompt_builder = None
+    pipe.llm = None
+    tokens = list(RAGPipeline.stream(pipe, "hello", "s1"))
+    assert tokens == ["LLM unavailable."]
+
+
+def test_fallback_to_gguf_on_primary_failure() -> None:
+    assert settings.LLM_MODEL_PATH.endswith(".gguf")

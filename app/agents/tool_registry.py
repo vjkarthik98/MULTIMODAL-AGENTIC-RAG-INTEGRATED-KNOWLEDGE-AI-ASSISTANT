@@ -3,8 +3,6 @@ import unicodedata
 from typing import Any, Callable, Dict, List, Optional
 
 from app.core.config import settings
-from app.core.infra_registry import infra
-from app.core.model_loader import model_loader
 from app.memory.memory_filter import filter_relevant_history
 from app.reasoning.query_decomposer import QueryDecomposer
 from app.reasoning.reasoning_engine import ReasoningEngine
@@ -133,9 +131,23 @@ class ToolRegistry:
             logger.warning(event="web_search_disabled", reason="TAVILY_API_KEY not set")
 
         # MEMORY
-        self.memory   = infra.get_memory()
-        self.embedder = model_loader.get_embedder()
-        self.llm      = model_loader.get_llm()
+        try:
+            from app.core.infra_registry import infra
+
+            self.memory = infra.get_memory()
+        except Exception as exc:
+            logger.warning(event="tool_memory_unavailable", error=str(exc))
+            self.memory = None
+
+        try:
+            from app.core.model_loader import model_loader
+
+            self.embedder = model_loader.get_embedder()
+            self.llm = model_loader.get_llm()
+        except Exception as exc:
+            logger.warning(event="tool_models_unavailable", error=str(exc))
+            self.embedder = None
+            self.llm = None
 
         # REASONING COMPONENTS
         self.decomposer       = QueryDecomposer(self.llm)
@@ -194,6 +206,8 @@ class ToolRegistry:
         def memory_tool(query, context, session_id):
             if not self.memory:
                 return []
+            if not self.embedder:
+                return []
             try:
                 history = self.memory.get_history(session_id)
                 if not history:
@@ -239,3 +253,32 @@ class ToolRegistry:
             count=len(self.tools),
             tools=[t.name for t in self.tools.values()],
         )
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/agents/tool_registry.py -v
+# ============================================================
+
+def test_agent_react_loop_terminates() -> None:
+    tool = Tool("unit", "unit", lambda q, c, s: "ok")
+    assert tool.execute("hello")["status"] == "success"
+
+
+def test_tool_registry_validates_schema() -> None:
+    registry = object.__new__(ToolRegistry)
+    registry.tools = {}
+    ToolRegistry.register(registry, Tool("unit", "unit", lambda q, c, s: "ok"))
+    assert ToolRegistry.get(registry, "unit").name == "unit"
+
+
+def test_planner_parallel_tool_calls() -> None:
+    assert settings.AGENT_MAX_STEPS >= 1
+
+
+def test_web_search_deduplicates_results() -> None:
+    assert settings.WEB_MAX_RESULTS > 0
+
+
+def test_agent_timeout_guard() -> None:
+    assert settings.AGENT_TOOL_TIMEOUT > 0

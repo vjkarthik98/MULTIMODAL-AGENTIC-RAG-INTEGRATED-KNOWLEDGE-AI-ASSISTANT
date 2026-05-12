@@ -1,6 +1,8 @@
 import hashlib
+import re
 import time
-from typing import Dict, List, Set
+import uuid
+from typing import Dict, List, Optional, Set
 
 from app.core.config import settings
 from app.ingestion.schema import IngestedDocument
@@ -53,6 +55,34 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def _token_windows(words: List[str], max_tokens: int, overlap_ratio: float) -> List[str]:
+    if not words:
+        return []
+    max_words = max(1, int(max_tokens * 0.75))
+    overlap = max(0, int(max_words * overlap_ratio))
+    step = max(1, max_words - overlap)
+    return [" ".join(words[i:i + max_words]) for i in range(0, len(words), step)]
+
+
+def _fingerprint(text: str) -> int:
+    bits = settings.SIMHASH_BITS
+    vector = [0] * bits
+    for token in re.findall(r"\w+", text.lower()):
+        value = hash(token)
+        for i in range(bits):
+            vector[i] += 1 if value & (1 << i) else -1
+    fp = 0
+    for i, score in enumerate(vector):
+        if score > 0:
+            fp |= 1 << i
+    return fp
+
+
+def _near_duplicate(left: int, right: int) -> bool:
+    similarity = 1.0 - ((left ^ right).bit_count() / max(1, settings.SIMHASH_BITS))
+    return similarity >= settings.NEAR_DUPLICATE_THRESHOLD
+
+
 # STRUCTURED LINE DETECTION
 
 def _is_structured(line: str) -> bool:
@@ -86,17 +116,9 @@ def _is_structured(line: str) -> bool:
 # FALLBACK SPLITTER (no langchain)
 
 def _fallback(text: str) -> List[str]:
-    size    = settings.CHUNK_SIZE
-    overlap = settings.CHUNK_OVERLAP
-    step    = max(size - overlap, 1)
-
-    chunks = []
-    for i in range(0, len(text), step):
-        chunk = text[i:i + size].strip()
-        if _valid(chunk):
-            chunks.append(chunk)
-
-    return chunks
+    words = text.split()
+    token_chunks = _token_windows(words, settings.CHUNK_MAX_TOKENS, settings.CHUNK_OVERLAP_RATIO)
+    return [chunk for chunk in token_chunks if _valid(chunk)]
 
 
 # TEXT CHUNKING
@@ -135,10 +157,13 @@ def chunk_text(text: str) -> List[str]:
 
 def _single(doc: IngestedDocument, content_type: str = None) -> List[IngestedDocument]:
     s = dict(doc.structure or {})
+    parent_id = s.get("parent_id") or s.get("doc_id") or str(uuid.uuid4())
     s.update({
         "chunk_index":    0,
         "total_chunks":   1,
         "chunk_length":   len(doc.text),
+        "token_estimate": _estimate_tokens(doc.text),
+        "parent_id":      parent_id,
         "parent_modality": doc.modality,
     })
 
@@ -157,6 +182,7 @@ def _text_doc(doc: IngestedDocument) -> List[IngestedDocument]:
     try:
         chunks = chunk_text(doc.text)
         total  = len(chunks)
+        parent_id = (doc.structure or {}).get("doc_id") or str(uuid.uuid4())
 
         return [
             doc.clone(
@@ -164,10 +190,12 @@ def _text_doc(doc: IngestedDocument) -> List[IngestedDocument]:
                 chunk_id=i,
                 structure={
                     **(doc.structure or {}),
+                    "parent_id":       parent_id,
                     "chunk_index":    i,
                     "total_chunks":   total,
                     "chunk_length":   len(c),
                     "token_estimate": _estimate_tokens(c),
+                    "overlap_ratio":   settings.CHUNK_OVERLAP_RATIO,
                     "parent_modality": doc.modality,
                 },
             )
@@ -184,7 +212,11 @@ def _text_doc(doc: IngestedDocument) -> List[IngestedDocument]:
 def _image_doc(doc: IngestedDocument) -> List[IngestedDocument]:
     if doc.subtype == "ocr" and len(doc.text) > settings.CHUNK_SIZE:
         return _text_doc(doc)
-    return _single(doc, "image_semantic")
+    chunks = _single(doc, "image_semantic")
+    for chunk in chunks:
+        if (doc.structure or {}).get("context_text"):
+            chunk.structure["cross_modal_link"] = (doc.structure or {}).get("doc_id")
+    return chunks
 
 
 # AUDIO HANDLER
@@ -226,15 +258,20 @@ def chunk_documents(docs: List[IngestedDocument]) -> List[IngestedDocument]:
     start = time.time()
 
     handlers = {
-        "text":  _text_doc,
-        "table": _text_doc,
-        "image": _image_doc,
-        "audio": _audio_doc,
-        "video": _video_doc,
+        "text":     _text_doc,
+        "pdf":      _text_doc,
+        "word":     _text_doc,
+        "excel":    _text_doc,
+        "document": _text_doc,
+        "table":    _text_doc,
+        "image":    _image_doc,
+        "audio":    _audio_doc,
+        "video":    _video_doc,
     }
 
     output: List[IngestedDocument] = []
     seen:   Set[str]               = set()
+    seen_fp: List[int]             = []
     skipped = 0
 
     for doc in docs:
@@ -253,8 +290,12 @@ def chunk_documents(docs: List[IngestedDocument]) -> List[IngestedDocument]:
 
                 if h in seen:
                     continue
+                fp = _fingerprint(c.text)
+                if any(_near_duplicate(fp, existing) for existing in seen_fp):
+                    continue
 
                 seen.add(h)
+                seen_fp.append(fp)
                 output.append(c)
 
         except Exception as e:
@@ -282,3 +323,43 @@ def chunk_documents(docs: List[IngestedDocument]) -> List[IngestedDocument]:
     )
 
     return output
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/chunking/chunker.py -v
+# ============================================================
+
+def test_hierarchical_chunks_have_parent_id() -> None:
+    doc = IngestedDocument(text="Heading\n\n" + "retrieval metadata chunking " * 80, modality="text").finalize()
+    chunks = chunk_documents([doc])
+    assert chunks
+    assert all("parent_id" in chunk.structure for chunk in chunks)
+
+
+def test_cross_modal_chunks_linked() -> None:
+    doc = IngestedDocument(
+        text="A useful image caption for retrieval",
+        modality="image",
+        subtype="caption",
+        structure={"doc_id": "image-parent", "context_text": "nearby text"},
+    ).finalize()
+    chunks = chunk_documents([doc])
+    assert chunks[0].structure.get("cross_modal_link") == "image-parent"
+
+
+def test_overlap_within_token_budget() -> None:
+    chunks = _fallback("word " * 2000)
+    assert chunks
+    assert all(_estimate_tokens(chunk) <= settings.CHUNK_MAX_TOKENS + 5 for chunk in chunks)
+
+
+def test_near_duplicate_chunks_skipped() -> None:
+    text = "retrieval metadata chunking quality " * 80
+    docs = [
+        IngestedDocument(text=text, modality="text").finalize(),
+        IngestedDocument(text=text, modality="text").finalize(),
+    ]
+    chunks = chunk_documents(docs)
+    assert len(chunks) >= 1
+    assert len(chunks) < len(docs) * 3
