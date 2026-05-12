@@ -188,6 +188,8 @@ line_length = 100
 # PYTEST
 
 [tool.pytest.ini_options]
+aysncio_mode = "auto"
+pythonpath = ["."]
 minversion = "8.0"
 addopts    = "--strict-markers --disable-warnings -q --tb=short"
 testpaths  = ["tests"]

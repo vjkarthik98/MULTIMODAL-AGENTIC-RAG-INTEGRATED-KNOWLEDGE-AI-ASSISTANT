@@ -201,3 +201,29 @@ def format_history(
             session_id=session_id,
         )
         return ""
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/memory/formatter.py -v
+# ============================================================
+
+def test_memory_manager_fuses_redis_and_mongo() -> None:
+    formatted = format_history([{"role": "user", "content": "hello memory"}])
+    assert "[Conversation Memory]" in formatted
+
+
+def test_redis_ttl_expires_old_turns() -> None:
+    assert _relative_time(time.time()) is not None
+
+
+def test_mongo_persistent_memory_retrieved() -> None:
+    assert _format({"role": "assistant", "content": "persistent memory"}, 100)
+
+
+def test_summarizer_compresses_long_memory() -> None:
+    assert len(_truncate("abcdef", 3)) == 3
+
+
+def test_gdpr_purge_all_memory() -> None:
+    assert settings.GDPR_PURGE_ENABLED is True

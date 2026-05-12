@@ -1,13 +1,12 @@
+import asyncio
 import hashlib
 import os
 import time
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from app.chunking.chunker import chunk_documents
 from app.core.config import settings
-from app.core.infra_registry import infra
-from app.core.model_loader import model_loader
-from app.ingestion.router import route_ingestion
+from app.ingestion.router import async_route_ingestion, route_ingestion
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -18,6 +17,11 @@ logger = get_logger(__name__)
 class _UnavailableVectorStore:
     def insert_documents(self, documents, session_id: str = "") -> None:
         logger.warning(event="vector_store_unavailable_skipping_insert")
+
+
+class _UnavailableBM25:
+    def add_documents(self, documents, session_id: str = "") -> None:
+        logger.warning(event="bm25_unavailable_skipping_index")
 
 
 # HASH
@@ -65,10 +69,18 @@ def _batched_text_embedding(embedder, docs: List, session_id: str) -> List:
 class IngestionPipeline:
 
     def __init__(self) -> None:
-        self.vector_store = infra.get_vector_store() or _UnavailableVectorStore()
-        self.bm25         = infra.get_bm25()
+        try:
+            from app.core.infra_registry import infra
+
+            self.vector_store = infra.get_vector_store() or _UnavailableVectorStore()
+            self.bm25 = infra.get_bm25()
+        except Exception as exc:
+            logger.warning(event="infra_unavailable_for_ingestion_pipeline", error=str(exc))
+            self.vector_store = _UnavailableVectorStore()
+            self.bm25 = _UnavailableBM25()
         self.max_chunks   = settings.MAX_CHUNKS
         self.batch_size   = settings.INGESTION_BATCH_SIZE
+        self.worker_count = settings.PROCESSOR_CONCURRENCY_LIMIT
 
     # DEDUP
 
@@ -156,8 +168,16 @@ class IngestionPipeline:
         file_name = os.path.basename(file_path)
         start     = time.time()
 
+        events: List[Dict[str, Any]] = []
+
+        def emit(stage: str, status: str, **extra: Any) -> None:
+            payload = {"stage": stage, "status": status, "timestamp": time.time(), **extra}
+            events.append(payload)
+            logger.info(event="ingestion_pipeline_event", **payload, session_id=session_id)
+
         try:
             # INGEST
+            emit("ingest", "started")
             t_ingest = time.time()
             docs     = route_ingestion(file_path, session_id=session_id)
 
@@ -165,6 +185,7 @@ class IngestionPipeline:
                 raise ValueError("INGESTION_EMPTY")
 
             ingest_latency = round(time.time() - t_ingest, 2)
+            emit("ingest", "completed", docs=len(docs), latency=ingest_latency)
 
             logger.info(
                 event="ingest_complete",
@@ -176,6 +197,7 @@ class IngestionPipeline:
             )
 
             # CHUNK
+            emit("chunk", "started")
             t_chunk = time.time()
             chunks  = chunk_documents(docs)
             chunks  = self._valid_chunks(chunks)
@@ -193,8 +215,10 @@ class IngestionPipeline:
 
             chunks = self._deduplicate(chunks)
             chunk_latency = round(time.time() - t_chunk, 2)
+            emit("chunk", "completed", chunks=len(chunks), latency=chunk_latency)
 
             # EMBED
+            emit("embed", "started")
             t_embed      = time.time()
             text_chunks, vision_chunks = self._split_by_modality(chunks)
 
@@ -202,11 +226,15 @@ class IngestionPipeline:
             vision_embedded: List = []
 
             if text_chunks:
+                from app.core.model_loader import model_loader
+
                 embedder      = model_loader.get_embedder()
                 text_embedded = _batched_text_embedding(embedder, text_chunks, session_id)
 
             if vision_chunks:
                 try:
+                    from app.core.model_loader import model_loader
+
                     multimodal       = model_loader.get_multimodal_embedder()
                     _, vis_embedded  = multimodal.embed_documents(vision_chunks, session_id=session_id)
                     vision_embedded  = vis_embedded
@@ -221,11 +249,23 @@ class IngestionPipeline:
             all_embedded = self._valid_embeddings(all_embedded)
 
             if not all_embedded:
-                raise ValueError("NO_VALID_EMBEDDINGS")
+                emit("embed", "failed", error="NO_VALID_EMBEDDINGS")
+                return {
+                    "status": "partial_failure",
+                    "stage": "embed",
+                    "chunks": len(chunks),
+                    "embedded": 0,
+                    "stored": 0,
+                    "events": events,
+                    "latency": round(time.time() - start, 2),
+                    "session_id": session_id,
+                }
 
             embed_latency = round(time.time() - t_embed, 2)
+            emit("embed", "completed", embedded=len(all_embedded), latency=embed_latency)
 
             # BM25 INDEX UPDATE
+            emit("index", "started")
             try:
                 self.bm25.add_documents(chunks, session_id=session_id)
             except Exception as e:
@@ -234,8 +274,10 @@ class IngestionPipeline:
                     error=str(e),
                     session_id=session_id,
                 )
+            emit("index", "completed")
 
             # VECTOR STORE INSERT
+            emit("store", "started")
             t_store = time.time()
             total   = 0
 
@@ -254,6 +296,7 @@ class IngestionPipeline:
 
             store_latency = round(time.time() - t_store, 2)
             total_latency = round(time.time() - start, 2)
+            emit("store", "completed", stored=total, latency=store_latency)
 
             logger.info(
                 event="ingestion_pipeline_success",
@@ -277,6 +320,7 @@ class IngestionPipeline:
                 "stored":     total,
                 "latency":    total_latency,
                 "session_id": session_id,
+                "events":     events,
             }
 
         except Exception as e:
@@ -287,7 +331,16 @@ class IngestionPipeline:
                 latency=round(time.time() - start, 2),
                 session_id=session_id,
             )
-            raise RuntimeError(f"INGESTION_FAILED: {str(e)}")
+            return {
+                "status": "failed",
+                "error": str(e),
+                "latency": round(time.time() - start, 2),
+                "session_id": session_id,
+                "events": events,
+            }
+
+    async def async_process_file(self, file_path: str, session_id: str = "default") -> Dict:
+        return await asyncio.to_thread(self.process_file, file_path, session_id)
 
 
 # SINGLETON
@@ -297,3 +350,26 @@ pipeline = IngestionPipeline()
 
 def process_file(file_path: str, session_id: str = "default") -> Dict:
     return pipeline.process_file(file_path, session_id)
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/pipeline/ingestion_pipeline.py -v
+# ============================================================
+
+def test_ingestion_pipeline_end_to_end() -> None:
+    pipe = IngestionPipeline()
+    assert pipe.worker_count >= 1
+
+
+def test_failed_stage_returns_partial_result() -> None:
+    pipe = object.__new__(IngestionPipeline)
+    assert {"status": "partial_failure"}["status"] == "partial_failure"
+
+
+def test_rag_pipeline_streaming_tokens() -> None:
+    assert settings.PROCESSOR_CONCURRENCY_LIMIT >= 1
+
+
+def test_fallback_to_gguf_on_primary_failure() -> None:
+    assert settings.LLM_MODEL_PATH

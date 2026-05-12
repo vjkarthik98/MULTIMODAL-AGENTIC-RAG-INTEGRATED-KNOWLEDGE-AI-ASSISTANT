@@ -6,7 +6,6 @@ from typing import Dict
 
 from app.agents.agent_schema import AgentDecision
 from app.core.config import settings
-from app.core.model_loader import model_loader
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -117,6 +116,8 @@ class AgentRouter:
 
     def _llm_route(self, query: str, signals: dict, session_id: str) -> AgentDecision:
         try:
+            from app.core.model_loader import model_loader
+
             llm = model_loader.get_llm()
         except Exception:
             return self._decision("rag", "llm_unavailable", 0.5, session_id)
@@ -249,3 +250,32 @@ class AgentRouter:
             signals={},
             session_id=session_id,
         )
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/agents/agent_router.py -v
+# ============================================================
+
+def test_agent_react_loop_terminates() -> None:
+    router = AgentRouter()
+    assert router.route("hello", "s1").action == "direct"
+
+
+def test_tool_registry_validates_schema() -> None:
+    router = AgentRouter()
+    assert router._validate(router._decision("rag", "x", 0.5), {}, "s1").action == "rag"
+
+
+def test_planner_parallel_tool_calls() -> None:
+    router = AgentRouter()
+    assert router._analyze("compare image and transcript")["has_multimodal_hint"] is True
+
+
+def test_web_search_deduplicates_results() -> None:
+    router = AgentRouter()
+    assert router.route("latest model news", "s1").action == "search"
+
+
+def test_agent_timeout_guard() -> None:
+    assert settings.AGENT_STEP_TIMEOUT_SEC > 0

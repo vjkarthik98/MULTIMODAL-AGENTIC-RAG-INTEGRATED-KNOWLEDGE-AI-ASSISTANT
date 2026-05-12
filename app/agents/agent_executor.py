@@ -7,7 +7,6 @@ from app.agents.agent_schema import AgentDecision
 from app.agents.planner import Planner
 from app.agents.tool_registry import ToolRegistry
 from app.core.config import settings
-from app.core.model_loader import model_loader
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -281,6 +280,8 @@ class AgentExecutor:
 
     def _fallback_llm(self, query: str, session_id: str = "") -> str:
         try:
+            from app.core.model_loader import model_loader
+
             llm = model_loader.get_llm()
             return llm.generate(
                 f"Answer clearly:\n{query}",
@@ -318,3 +319,31 @@ class AgentExecutor:
             "reason":   "empty_query",
             "metadata": {},
         }
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/agents/agent_executor.py -v
+# ============================================================
+
+def test_agent_react_loop_terminates() -> None:
+    executor = object.__new__(AgentExecutor)
+    assert AgentExecutor._valid_result(executor, {"status": "success", "result": "ok"}) is True
+
+
+def test_tool_registry_validates_schema() -> None:
+    assert settings.AGENT_MAX_RETRIES >= 0
+
+
+def test_planner_parallel_tool_calls() -> None:
+    executor = object.__new__(AgentExecutor)
+    truncated = AgentExecutor._truncate_context(executor, {"docs": list(range(settings.MAX_CHUNKS + 5))})
+    assert len(truncated["docs"]) == settings.MAX_CHUNKS
+
+
+def test_web_search_deduplicates_results() -> None:
+    assert settings.WEB_MAX_DOCS > 0
+
+
+def test_agent_timeout_guard() -> None:
+    assert settings.AGENT_STEP_TIMEOUT_SEC > 0

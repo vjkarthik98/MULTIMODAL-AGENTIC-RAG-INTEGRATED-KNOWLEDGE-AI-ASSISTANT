@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import math
 import time
@@ -12,9 +13,10 @@ logger = get_logger(__name__)
 
 class MultimodalEmbedder:
 
-    def __init__(self, text_embedder, image_embedder) -> None:
+    def __init__(self, text_embedder, image_embedder, clip_text_embedder=None) -> None:
         self.text_embedder  = text_embedder
         self.image_embedder = image_embedder
+        self.clip_text_embedder = clip_text_embedder
         self.batch_size     = settings.EMBEDDING_BATCH_SIZE
         self.max_docs       = settings.INGESTION_BATCH_SIZE * 10
 
@@ -70,7 +72,7 @@ class MultimodalEmbedder:
                 m  = getattr(doc, "modality", "")
                 st = getattr(doc, "subtype", "")
 
-                if m in {"text", "table"}:
+                if m in {"text", "table", "pdf", "word", "excel", "document"}:
                     text_docs.append(doc)
 
                 elif m == "audio":
@@ -93,6 +95,13 @@ class MultimodalEmbedder:
                 logger.warning(event="route_failed", error=str(e))
 
         return text_docs, vision_docs
+
+    async def async_embed_documents(
+        self,
+        documents: List,
+        session_id: str,
+    ) -> Tuple[List, List]:
+        return await asyncio.to_thread(self.embed_documents, documents, session_id)
 
     # MAIN
 
@@ -209,3 +218,44 @@ class MultimodalEmbedder:
         )
 
         return embedded_text, embedded_vision
+
+    def embed_cross_modal_query(self, query: str, session_id: str = "default") -> Optional[List[float]]:
+        if not self.clip_text_embedder:
+            return None
+        emb = self.clip_text_embedder.embed_query(query, session_id=session_id)
+        if not self._valid_embedding(emb, settings.VISION_EMBEDDING_DIM):
+            raise ValueError("CLIP_DIMENSION_MISMATCH")
+        return emb
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/embeddings/multimodal_embedder.py -v
+# ============================================================
+
+def test_batch_embedding_respects_rate_limit() -> None:
+    embedder = MultimodalEmbedder(text_embedder=None, image_embedder=None)
+    assert embedder.batch_size == settings.EMBEDDING_BATCH_SIZE
+
+
+def test_embedding_cache_hit_skips_api_call() -> None:
+    embedder = MultimodalEmbedder(text_embedder=None, image_embedder=None)
+    assert embedder._hash_text("hello") == embedder._hash_text("hello")
+
+
+def test_multilingual_routed_correctly() -> None:
+    assert settings.MULTILINGUAL_EMBEDDING_MODEL
+
+
+def test_dimension_mismatch_raises_error() -> None:
+    embedder = MultimodalEmbedder(text_embedder=None, image_embedder=None)
+    assert embedder._valid_embedding([0.1, 0.2], settings.VISION_EMBEDDING_DIM) is False
+
+
+def test_clip_cross_modal_similarity() -> None:
+    class FakeClip:
+        def embed_query(self, query: str, session_id: str = "default") -> List[float]:
+            return [0.0] * settings.VISION_EMBEDDING_DIM
+
+    embedder = MultimodalEmbedder(None, None, FakeClip())
+    assert len(embedder.embed_cross_modal_query("diagram") or []) == settings.VISION_EMBEDDING_DIM

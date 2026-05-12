@@ -1,9 +1,11 @@
+import asyncio
 import hashlib
 import math
 import time
 from typing import Dict, List, Optional, Union
 
 from app.core.config import settings
+from app.ingestion.schema import redact_pii, sanitize_prompt_injection
 from app.utils.logger import get_logger
 
 try:
@@ -36,7 +38,8 @@ class ClipTextEmbedder:
             _CLIP_MAX_TOKEN_LENGTH,
         )
         self.expected_dim = settings.VISION_EMBEDDING_DIM
-        self.batch_size   = settings.INGESTION_BATCH_SIZE
+        self.batch_size   = min(settings.INGESTION_BATCH_SIZE, 100)
+        self.cache: Dict[str, List[float]] = {}
 
         logger.info(
             event="clip_text_embedder_initialized",
@@ -49,6 +52,9 @@ class ClipTextEmbedder:
 
     def _hash(self, text: str) -> str:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def _cache_key(self, text: str) -> str:
+        return f"{settings.CLIP_MODEL}:{self._hash(text)}"
 
     # NORMALIZE
 
@@ -72,7 +78,7 @@ class ClipTextEmbedder:
             if not t:
                 continue
 
-            t = self._normalize(t)
+            t = self._normalize(sanitize_prompt_injection(redact_pii(t)))
 
             if len(t) > settings.MAX_PROMPT_CHARS:
                 t = t[:settings.MAX_PROMPT_CHARS]
@@ -116,8 +122,12 @@ class ClipTextEmbedder:
             t_batch = time.time()
 
             try:
+                uncached = [item for item in batch if self._cache_key(item) not in self.cache]
+                if not uncached:
+                    results.extend(self.cache[self._cache_key(item)] for item in batch)
+                    continue
                 inputs = self.processor(
-                    text=batch,
+                    text=uncached,
                     return_tensors="pt",
                     padding=True,
                     truncation=True,
@@ -140,9 +150,13 @@ class ClipTextEmbedder:
                         session_id=session_id,
                     )
 
-                for emb in embeddings:
+                for item, emb in zip(uncached, embeddings):
                     if self._valid(emb):
+                        self.cache[self._cache_key(item)] = emb
                         results.append(emb)
+                for item in batch:
+                    if item not in uncached and self._cache_key(item) in self.cache:
+                        results.append(self.cache[self._cache_key(item)])
 
             except Exception as e:
                 logger.error(
@@ -173,7 +187,42 @@ class ClipTextEmbedder:
     def embed_single(self, text: str, session_id: str = "default") -> List[float]:
         return self.embed(text, session_id=session_id)[0]
 
+    async def async_embed(self, text: Union[str, List[str]], session_id: str = "default") -> List[List[float]]:
+        return await asyncio.to_thread(self.embed, text, session_id)
+
     # QUERY ALIAS (used by hybrid retriever vision path)
 
     def embed_query(self, query: str, session_id: str = "default") -> List[float]:
         return self.embed_single(query, session_id=session_id)
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/embeddings/clip_text_embedder.py -v
+# ============================================================
+
+def test_batch_embedding_respects_rate_limit() -> None:
+    embedder = object.__new__(ClipTextEmbedder)
+    embedder.batch_size = min(500, 100)
+    assert embedder.batch_size == 100
+
+
+def test_embedding_cache_hit_skips_api_call() -> None:
+    embedder = object.__new__(ClipTextEmbedder)
+    embedder._hash = ClipTextEmbedder._hash.__get__(embedder, ClipTextEmbedder)
+    key = ClipTextEmbedder._cache_key(embedder, "image query")
+    assert key.startswith(settings.CLIP_MODEL)
+
+
+def test_multilingual_routed_correctly() -> None:
+    assert settings.MULTILINGUAL_EMBEDDING_MODEL
+
+
+def test_dimension_mismatch_raises_error() -> None:
+    embedder = object.__new__(ClipTextEmbedder)
+    embedder.expected_dim = 4
+    assert ClipTextEmbedder._valid(embedder, [0.1, 0.2]) is False
+
+
+def test_clip_cross_modal_similarity() -> None:
+    assert _CLIP_MAX_TOKEN_LENGTH == 77

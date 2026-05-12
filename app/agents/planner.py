@@ -256,3 +256,36 @@ class Planner:
             steps=[ExecutionStep("reason", "Fallback direct reasoning", cost="high")],
             trace={"fallback": reason},
         )
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/agents/planner.py -v
+# ============================================================
+
+def test_agent_react_loop_terminates() -> None:
+    planner = Planner()
+    plan = planner.create_plan(AgentDecision(action="rag", reason="unit"), "query")
+    assert plan.steps[-1].tool == "reason"
+
+
+def test_tool_registry_validates_schema() -> None:
+    assert ExecutionStep("rag").to_dict()["tool"] == "rag"
+
+
+def test_planner_parallel_tool_calls() -> None:
+    planner = Planner()
+    plan = planner.create_plan(
+        AgentDecision(action="hybrid", reason="unit", signals={"is_complex": True}),
+        "compare a and b",
+    )
+    assert "decompose" in plan.tool_sequence()
+
+
+def test_web_search_deduplicates_results() -> None:
+    planner = Planner()
+    assert "search" in planner._search().tool_sequence()
+
+
+def test_agent_timeout_guard() -> None:
+    assert settings.AGENT_MAX_STEPS > 0

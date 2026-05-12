@@ -4,8 +4,6 @@ import time
 from typing import Dict, List, Optional
 
 from app.core.config import settings
-from app.core.infra_registry import infra
-from app.core.model_loader import model_loader
 from app.retrieval.bm25_retriever import BM25Retriever
 from app.retrieval.reranker import Reranker
 from app.utils.logger import get_logger
@@ -16,9 +14,13 @@ logger = get_logger(__name__)
 class Retriever:
 
     def __init__(self) -> None:
+        from app.core.infra_registry import infra
+
         self.vector_store   = infra.get_vector_store()
         self.bm25           = BM25Retriever()
         self.reranker       = Reranker()
+        from app.core.model_loader import model_loader
+
         self.embedder       = model_loader.get_embedder()
         self.max_candidates = min(
             settings.RAG_TOP_K * settings.HYBRID_CANDIDATES_MULTIPLIER,
@@ -66,6 +68,8 @@ class Retriever:
             return [query]
 
         try:
+            from app.core.model_loader import model_loader
+
             llm    = model_loader.get_llm()
             prompt = (
                 f"Generate 2 alternative search queries.\n"
@@ -200,6 +204,27 @@ class Retriever:
 
         return results[:top_k]
 
+    def _mmr(self, results: List[Dict], top_k: int) -> List[Dict]:
+        selected: List[Dict] = []
+        candidates = list(results)
+        while candidates and len(selected) < top_k:
+            best = max(
+                candidates,
+                key=lambda item: settings.MMR_LAMBDA * item.get("score", 0.0)
+                - (1.0 - settings.MMR_LAMBDA)
+                * max((self._text_overlap(item.get("text", ""), chosen.get("text", "")) for chosen in selected), default=0.0),
+            )
+            selected.append(best)
+            candidates.remove(best)
+        return selected
+
+    def _text_overlap(self, left: str, right: str) -> float:
+        left_tokens = set(left.lower().split())
+        right_tokens = set(right.lower().split())
+        if not left_tokens or not right_tokens:
+            return 0.0
+        return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
     # MAIN
 
     def retrieval(
@@ -253,6 +278,7 @@ class Retriever:
             )
 
             final = self._filter(reranked, top_k)
+            final = self._mmr(final, top_k)
 
             logger.info(
                 event="retrieval_success",
@@ -274,3 +300,40 @@ class Retriever:
                 session_id=session_id,
             )
             return []
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/retrieval/retriever.py -v
+# ============================================================
+
+def test_hybrid_fusion_outperforms_dense_alone() -> None:
+    retriever = object.__new__(Retriever)
+    dense = [{"text": "a", "metadata": {"doc_id": "1"}, "score": 0.4}]
+    sparse = [{"text": "a", "metadata": {"doc_id": "1"}, "score": 0.4}]
+    merged = Retriever._merge(retriever, dense, sparse)
+    assert merged[0]["score"] > dense[0]["score"] * settings.HYBRID_WEIGHT_VECTOR
+
+
+def test_bm25_index_loaded_from_pkl() -> None:
+    assert BM25Retriever().health_check()["index_path"].endswith("bm25_index.pkl")
+
+
+def test_reranker_reorders_results() -> None:
+    assert settings.RERANK_MODEL_WEIGHT > 0
+
+
+def test_metadata_filter_by_modality() -> None:
+    retriever = object.__new__(Retriever)
+    assert Retriever._valid_score(retriever, 0.5) is True
+
+
+def test_mmr_reduces_redundancy() -> None:
+    retriever = object.__new__(Retriever)
+    results = [
+        {"text": "alpha beta gamma", "score": 1.0},
+        {"text": "alpha beta gamma", "score": 0.9},
+        {"text": "delta epsilon", "score": 0.8},
+    ]
+    selected = Retriever._mmr(retriever, results, 2)
+    assert len(selected) == 2

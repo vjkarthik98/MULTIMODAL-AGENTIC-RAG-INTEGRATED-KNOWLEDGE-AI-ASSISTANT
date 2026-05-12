@@ -1,30 +1,54 @@
+import asyncio
 import hashlib
 import mimetypes
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
+import magic
+import structlog
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+from prometheus_client import Counter, Histogram
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 from app.core.config import settings
-from app.core.response import ErrorCode, Severity, UniversalErrorResponse, Modality
+from app.core.response import ErrorCode, Modality, Severity, UniversalErrorResponse
 from app.ingestion.audio_ingest import ingest as audio_ingest
 from app.ingestion.document_ingest import ingest as document_ingest
 from app.ingestion.image_ingest import ingest as image_ingest
 from app.ingestion.schema import IngestedDocument
 from app.ingestion.text_ingest import ingest as text_ingest
 from app.ingestion.video_ingest import ingest as video_ingest
-from app.utils.logger import get_logger
 
-logger = get_logger(__name__)
+logger = structlog.get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
+# PROMETHEUS METRICS
+_ingestion_duration = Histogram(
+    "file_ingestion_duration_seconds",
+    "Ingestion duration by modality",
+    ["modality"],
+)
+_ingestion_errors = Counter(
+    "file_ingestion_errors_total",
+    "Ingestion errors by modality and error type",
+    ["modality", "error_type"],
+)
+_ingestion_docs = Histogram(
+    "chunk_count_per_file",
+    "Chunks produced per file",
+    ["modality"],
+)
 
 # EXTENSION MAPS
-
-TEXT_EXTENSIONS: Set[str]     = {".txt", ".md"}
-DOCUMENT_EXTENSIONS: Set[str] = {".pdf", ".docx", ".xlsx", ".xls"}
-IMAGE_EXTENSIONS: Set[str]    = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-AUDIO_EXTENSIONS: Set[str]    = {".mp3", ".wav", ".m4a", ".flac", ".ogg"}
-VIDEO_EXTENSIONS: Set[str]    = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+TEXT_EXTENSIONS: Set[str]     = {".txt", ".md", ".rst", ".csv", ".log", ".json", ".yaml", ".yml"}
+DOCUMENT_EXTENSIONS: Set[str] = {".pdf", ".docx", ".doc", ".xlsx", ".xls"}
+IMAGE_EXTENSIONS: Set[str]    = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif", ".heic", ".heif", ".gif", ".svg"}
+AUDIO_EXTENSIONS: Set[str]    = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma", ".aiff", ".opus"}
+VIDEO_EXTENSIONS: Set[str]    = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".ts"}
 
 EXT_TO_MODALITY: Dict[str, str] = {
     **{ext: "text"     for ext in TEXT_EXTENSIONS},
@@ -34,7 +58,47 @@ EXT_TO_MODALITY: Dict[str, str] = {
     **{ext: "video"    for ext in VIDEO_EXTENSIONS},
 }
 
-# MODALITY TO RESPONSE MODALITY
+# MAGIC-BYTE MIME TO MODALITY MAP
+MIME_TO_MODALITY: Dict[str, str] = {
+    "text/plain":                  "text",
+    "text/markdown":               "text",
+    "text/csv":                    "text",
+    "text/x-rst":                  "text",
+    "application/json":            "text",
+    "application/x-yaml":          "text",
+    "application/pdf":             "document",
+    "application/msword":          "document",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "document",
+    "application/vnd.ms-excel":    "document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":       "document",
+    "image/jpeg":                  "image",
+    "image/png":                   "image",
+    "image/gif":                   "image",
+    "image/webp":                  "image",
+    "image/tiff":                  "image",
+    "image/bmp":                   "image",
+    "image/heic":                  "image",
+    "image/heif":                  "image",
+    "image/svg+xml":               "image",
+    "audio/mpeg":                  "audio",
+    "audio/wav":                   "audio",
+    "audio/x-wav":                 "audio",
+    "audio/flac":                  "audio",
+    "audio/ogg":                   "audio",
+    "audio/aac":                   "audio",
+    "audio/mp4":                   "audio",
+    "audio/x-m4a":                 "audio",
+    "audio/opus":                  "audio",
+    "video/mp4":                   "video",
+    "video/x-msvideo":             "video",
+    "video/quicktime":             "video",
+    "video/x-matroska":            "video",
+    "video/webm":                  "video",
+    "video/x-flv":                 "video",
+    "video/x-ms-wmv":              "video",
+    "video/mp2t":                  "video",
+}
+
 MODALITY_LABEL: Dict[str, str] = {
     "text":     Modality.TEXT,
     "document": Modality.PDF,
@@ -43,7 +107,6 @@ MODALITY_LABEL: Dict[str, str] = {
     "video":    Modality.VIDEO,
 }
 
-# PER-MODALITY FILE SIZE LIMITS (bytes)
 MODALITY_SIZE_LIMITS: Dict[str, int] = {
     "text":     settings.MAX_FILE_SIZE_TEXT,
     "document": settings.MAX_FILE_SIZE_PDF,
@@ -52,8 +115,7 @@ MODALITY_SIZE_LIMITS: Dict[str, int] = {
     "video":    settings.MAX_FILE_SIZE_VIDEO,
 }
 
-# INGESTION HANDLERS
-INGESTION_HANDLERS: Dict[str, Callable[[str, str], List[IngestedDocument]]] = {
+INGESTION_HANDLERS: Dict[str, Callable] = {
     "text":     text_ingest,
     "document": document_ingest,
     "image":    image_ingest,
@@ -63,34 +125,143 @@ INGESTION_HANDLERS: Dict[str, Callable[[str, str], List[IngestedDocument]]] = {
 
 MAX_INGESTED_DOCS: int = 5000
 
+# SEMAPHORE — CAP CONCURRENT INGESTION WORKERS
+_semaphore = asyncio.Semaphore(5)
 
-# HASH
+
+# SHA-256 HASH
 
 def _stable_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-# MIME DETECTION
+# FILE SHA-256 FOR DEDUP CHECK
 
-def _detect_mime(path: Path) -> Tuple[Optional[str], Optional[str]]:
-    mime, encoding = mimetypes.guess_type(path.name)
-    return mime, encoding
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
-def _validate_mime(path: Path, mime: Optional[str]) -> None:
+# MAGIC-BYTE MIME DETECTION — NEVER TRUST EXTENSION
+
+def _detect_mime_magic(path: Path) -> str:
+    try:
+        mime = magic.from_file(str(path), mime=True)
+        return mime or ""
+    except Exception as exc:
+        logger.warning("mime_magic_failed", path=str(path), error=str(exc))
+        # FALLBACK TO MIMETYPES STDLIB
+        guessed, _ = mimetypes.guess_type(path.name)
+        return guessed or "application/octet-stream"
+
+
+# MIME VALIDATION AGAINST ALLOWLIST
+
+def _validate_mime(path: Path, mime: str) -> None:
     allowed = settings.ALLOWED_MIME_TYPES
     if allowed and mime and mime not in allowed:
-        raise ValueError(f"MIME_NOT_ALLOWED_{mime}")
+        raise ValueError(f"MIME_NOT_ALLOWED: {mime}")
 
 
-# MODALITY DETECTION
+# NULL-BYTE DETECTION
 
-def detect_modality(file_path: str) -> str:
+def _check_null_bytes(path: Path) -> int:
+    count = 0
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                count += chunk.count(b"\x00")
+    except Exception:
+        pass
+    return count
 
+
+# PATH TRAVERSAL GUARD
+
+def _guard_path(file_path: str) -> Path:
+
+    resolved = Path(file_path).expanduser().resolve()
+
+    print("DEBUG RESOLVED:", resolved)
+
+    allowed_roots = [
+        Path(settings.UPLOAD_STAGING_DIR).resolve(),
+        Path(settings.DATA_DIR).resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+        Path("C:/temp").resolve(),
+    ]
+
+   
+
+    for root in allowed_roots:
+        root = root.resolve()
+
+        try:
+            resolved.relative_to(root)
+            return resolved
+        except ValueError:
+            pass
+
+    raise ValueError(f"PATH_TRAVERSAL_DETECTED: {file_path}")
+
+
+# DISK SPACE GUARD
+
+def _check_disk_space(path: Path) -> None:
+    try:
+        import shutil
+        min_free_mb = getattr(settings, "MIN_FREE_DISK_MB", 500)
+        stat = shutil.disk_usage(str(path.parent))
+        free_mb = stat.free / (1024 * 1024)
+        if free_mb < min_free_mb:
+            raise IOError(
+                f"INSUFFICIENT_DISK_SPACE: {free_mb:.1f} MB free, "
+                f"minimum required {min_free_mb} MB"
+            )
+    except IOError:
+        raise
+    except Exception as exc:
+        logger.warning("disk_space_check_failed", error=str(exc))
+
+
+# CLAMAV MALWARE SCAN — PHASE 25
+
+def _clamav_scan(path: Path) -> None:
+    if not getattr(settings, "CLAMAV_ENABLED", False):
+        return
+    try:
+        import clamd
+        host    = getattr(settings, "CLAMAV_HOST", "localhost")
+        port    = getattr(settings, "CLAMAV_PORT", 3310)
+        timeout = getattr(settings, "CLAMAV_TIMEOUT", 30)
+        cd      = clamd.ClamdNetworkSocket(host=host, port=port, timeout=timeout)
+        result  = cd.scan(str(path))
+        if result:
+            status = result.get(str(path), ("OK", ""))[0]
+            if status == "FOUND":
+                virus = result[str(path)][1]
+                raise ValueError(f"MALWARE_DETECTED: {virus} in {path.name}")
+    except ValueError:
+        raise
+    except Exception as exc:
+        logger.warning("clamav_scan_failed", path=str(path), error=str(exc))
+
+
+# MODALITY DETECTION — MAGIC-BYTE FIRST, EXTENSION FALLBACK
+
+def detect_modality(file_path: str) -> Tuple[str, str]:
+    """
+    Returns (modality, mime_type).
+    Uses magic-byte MIME detection as primary source.
+    Extension used only as fallback when MIME is ambiguous.
+    """
     if not file_path:
         raise ValueError("FILE_PATH_REQUIRED")
 
-    path = Path(file_path)
+    path = _guard_path(file_path)
 
     if not path.exists():
         raise FileNotFoundError(f"FILE_NOT_FOUND: {file_path}")
@@ -100,29 +271,39 @@ def detect_modality(file_path: str) -> str:
     if stat.st_size == 0:
         raise ValueError("EMPTY_FILE")
 
-    ext      = path.suffix.lower()
-    modality = EXT_TO_MODALITY.get(ext)
+    # DISK SPACE CHECK BEFORE ANY PROCESSING
+    _check_disk_space(path)
+
+    # MAGIC-BYTE MIME DETECTION
+    mime     = _detect_mime_magic(path)
+    modality = MIME_TO_MODALITY.get(mime)
 
     if not modality:
-        raise ValueError(f"UNSUPPORTED_TYPE_{ext}")
+        # FALLBACK: EXTENSION-BASED DETECTION
+        ext      = path.suffix.lower()
+        modality = EXT_TO_MODALITY.get(ext)
+
+    if not modality:
+        raise ValueError(f"UNSUPPORTED_TYPE: mime={mime}, ext={path.suffix.lower()}")
 
     # PER-MODALITY SIZE CHECK
     limit = MODALITY_SIZE_LIMITS.get(modality, settings.MAX_FILE_SIZE_MB * 1024 * 1024)
     if stat.st_size > limit:
         raise ValueError(
-            f"FILE_TOO_LARGE: {stat.st_size} bytes exceeds {limit} bytes for {modality}"
+            f"FILE_TOO_LARGE: {stat.st_size} bytes exceeds "
+            f"{limit} bytes for {modality}"
         )
 
-    # ALLOWED FILE TYPES CHECK
+    # ALLOWED EXTENSIONS CHECK
     allowed_types = settings.ALLOWED_FILE_TYPES
+    ext           = path.suffix.lower()
     if allowed_types and ext.lstrip(".") not in allowed_types:
-        raise ValueError(f"EXT_NOT_ALLOWED_{ext}")
+        raise ValueError(f"EXT_NOT_ALLOWED: {ext}")
 
-    # MIME VALIDATION
-    mime, _ = _detect_mime(path)
+    # MIME ALLOWLIST CHECK
     _validate_mime(path, mime)
 
-    return modality
+    return modality, mime
 
 
 # DOCUMENT VALIDATION
@@ -134,8 +315,8 @@ def _validate_documents(
 ) -> List[IngestedDocument]:
 
     validated: List[IngestedDocument] = []
-    seen: Set[str]                    = set()
-    skipped: int                      = 0
+    seen:      Set[str]               = set()
+    skipped    = 0
 
     for i, doc in enumerate(documents):
         try:
@@ -147,11 +328,8 @@ def _validate_documents(
                 continue
 
             doc = doc.finalize()
-
-            # ENFORCE SESSION
             doc.structure["session_id"] = session_id
 
-            # STABLE DEDUP
             h = _stable_hash(doc.text)
             if h in seen:
                 continue
@@ -159,18 +337,18 @@ def _validate_documents(
             seen.add(h)
             validated.append(doc)
 
-        except Exception as e:
+        except Exception as exc:
             skipped += 1
             logger.warning(
-                event="doc_validation_failed",
+                "doc_validation_failed",
                 index=i,
                 modality=modality,
-                error=str(e),
+                error=str(exc),
             )
 
     if skipped:
         logger.warning(
-            event="docs_skipped",
+            "docs_skipped",
             skipped=skipped,
             accepted=len(validated),
             modality=modality,
@@ -179,9 +357,10 @@ def _validate_documents(
     return validated
 
 
-# ROUTE INGESTION
 
-def route_ingestion(
+# MAIN ASYNC ROUTE INGESTION
+
+async def route_ingestion(
     file_path: str,
     session_id: str,
 ) -> List[IngestedDocument]:
@@ -193,58 +372,144 @@ def route_ingestion(
         raise ValueError("FILE_PATH_REQUIRED")
 
     start = time.time()
+    path  = Path(file_path)
 
-    try:
-        modality = detect_modality(file_path)
+    with tracer.start_as_current_span("route_ingestion") as span:
+        span.set_attribute("file.name", path.name)
+        span.set_attribute("session.id", session_id)
 
-        logger.info(
-            event="ingestion_start",
-            modality=modality,
-            file=os.path.basename(file_path),
-            session_id=session_id,
-        )
+        try:
+            async with _semaphore:
 
-        handler = INGESTION_HANDLERS.get(modality)
+                # MALWARE SCAN — BEFORE ANYTHING ELSE
+                await asyncio.get_event_loop().run_in_executor(
+                    None, _clamav_scan, path
+                )
 
-        if not handler:
-            raise ValueError(f"HANDLER_NOT_FOUND_{modality}")
+                # NULL BYTE CHECK
+                null_count = await asyncio.get_event_loop().run_in_executor(
+                    None, _check_null_bytes, path
+                )
+                if null_count:
+                    logger.warning(
+                        "null_bytes_detected",
+                        count=null_count,
+                        file=path.name,
+                        session_id=session_id,
+                    )
 
-        docs = handler(file_path, session_id)
+                # SHA-256 DEDUP CHECK
+                checksum = await asyncio.get_event_loop().run_in_executor(
+                    None, _file_sha256, path
+                )
+                span.set_attribute("file.sha256", checksum)
 
-        if not docs:
-            raise ValueError("NO_DOCS_RETURNED")
+                # MODALITY + MIME DETECTION
+                modality, mime = await asyncio.get_event_loop().run_in_executor(
+                    None, detect_modality, file_path
+                )
 
-        docs = _validate_documents(docs, session_id, modality)
+                span.set_attribute("file.modality", modality)
+                span.set_attribute("file.mime", mime)
 
-        if not docs:
-            raise ValueError("NO_VALID_DOCS")
+                logger.info(
+                    "ingestion_start",
+                    modality=modality,
+                    mime=mime,
+                    file=path.name,
+                    checksum=checksum,
+                    session_id=session_id,
+                )
 
-        if len(docs) > MAX_INGESTED_DOCS:
-            docs = docs[:MAX_INGESTED_DOCS]
-            logger.warning(
-                event="doc_limit_applied",
-                limit=MAX_INGESTED_DOCS,
-                modality=modality,
+                handler = INGESTION_HANDLERS.get(modality)
+                if not handler:
+                    raise ValueError(f"HANDLER_NOT_FOUND: {modality}")
+
+                # RUN HANDLER WITH RETRY IN THREAD POOL
+                docs = await handler(file_path, session_id)
+
+                if not docs:
+                    raise ValueError("NO_DOCS_RETURNED")
+
+                docs = _validate_documents(docs, session_id, modality)
+
+                if not docs:
+                    raise ValueError("NO_VALID_DOCS")
+
+                if len(docs) > MAX_INGESTED_DOCS:
+                    docs = docs[:MAX_INGESTED_DOCS]
+                    logger.warning(
+                        "doc_limit_applied",
+                        limit=MAX_INGESTED_DOCS,
+                        modality=modality,
+                    )
+
+                latency = round(time.time() - start, 2)
+
+                # PROMETHEUS
+                _ingestion_duration.labels(modality=modality).observe(latency)
+                _ingestion_docs.labels(modality=modality).observe(len(docs))
+
+                span.set_attribute("docs.count", len(docs))
+                span.set_status(Status(StatusCode.OK))
+
+                logger.info(
+                    "ingestion_success",
+                    modality=modality,
+                    docs=len(docs),
+                    latency=latency,
+                    session_id=session_id,
+                )
+
+                return docs
+
+        except Exception as exc:
+            latency   = round(time.time() - start, 2)
+            error_type = type(exc).__name__
+            modality_label = "unknown"
+
+            try:
+                modality_label = detect_modality(file_path)[0]
+            except Exception:
+                pass
+
+            _ingestion_errors.labels(
+                modality=modality_label,
+                error_type=error_type,
+            ).inc()
+
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            span.record_exception(exc)
+
+            logger.error(
+                "ingestion_failed",
+                file=path.name,
+                session_id=session_id,
+                error=str(exc),
+                error_type=error_type,
+                latency=latency,
             )
+            raise
 
-        latency = round(time.time() - start, 2)
 
-        logger.info(
-            event="ingestion_success",
-            modality=modality,
-            docs=len(docs),
-            latency=latency,
-            session_id=session_id,
-        )
+# SYNC WRAPPER FOR BACKWARD COMPATIBILITY WITH SYNC CALLERS
 
-        return docs
+def route_ingestion_sync(
+    file_path: str,
+    session_id: str,
+) -> List[IngestedDocument]:
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future = pool.submit(
+                    asyncio.run,
+                    route_ingestion(file_path, session_id),
+                )
+                return future.result()
+        return loop.run_until_complete(route_ingestion(file_path, session_id))
+    except RuntimeError:
+        return asyncio.run(route_ingestion(file_path, session_id))
 
-    except Exception as e:
-        logger.error(
-            event="ingestion_failed",
-            file=os.path.basename(file_path),
-            session_id=session_id,
-            error=str(e),
-            latency=round(time.time() - start, 2),
-        )
-        raise
+

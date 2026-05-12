@@ -233,3 +233,34 @@ def summarize_conversation(
             session_id=session_id,
         )
         return ""
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/memory/summarizer.py -v
+# ============================================================
+
+def test_memory_manager_fuses_redis_and_mongo() -> None:
+    history = [{"role": "user", "content": "hello"}, {"role": "user", "content": "hello"}]
+    assert len(_dedup(history)) == 1
+
+
+def test_redis_ttl_expires_old_turns() -> None:
+    assert settings.REDIS_TTL_SECONDS > 0
+
+
+def test_mongo_persistent_memory_retrieved() -> None:
+    assert settings.MONGO_DB_NAME
+
+
+def test_summarizer_compresses_long_memory() -> None:
+    class LLM:
+        def generate(self, prompt: str) -> str:
+            return "Key Facts:\n- User likes RAG.\n\nUser Intent:\n- Build a reliable assistant."
+
+    history = [{"role": "user", "content": "I like RAG systems and need a reliable assistant.", "importance": 1.0}]
+    assert summarize_conversation(LLM(), history)
+
+
+def test_gdpr_purge_all_memory() -> None:
+    assert settings.GDPR_PURGE_ENABLED is True

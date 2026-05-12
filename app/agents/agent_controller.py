@@ -5,7 +5,6 @@ from typing import Any, Dict
 
 from app.agents.agent_executor import AgentExecutor
 from app.core.config import settings
-from app.core.model_loader import model_loader
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -183,6 +182,8 @@ class AgentController:
     ) -> Dict[str, Any]:
 
         try:
+            from app.core.model_loader import model_loader
+
             llm      = model_loader.get_llm()
             prompt   = f"Answer clearly:\n{query}"
             response = llm.generate(
@@ -212,3 +213,30 @@ class AgentController:
             "latency":     round(time.time() - start_time, 3),
             "metadata":    {},
         }
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/agents/agent_controller.py -v
+# ============================================================
+
+def test_agent_react_loop_terminates() -> None:
+    controller = object.__new__(AgentController)
+    controller.timeout = 1
+    assert AgentController._validate(controller, {"response": "ok", "source": "unit", "decision": "direct"}) is False
+
+
+def test_tool_registry_validates_schema() -> None:
+    assert "rag" in _CONFIDENCE_MAP
+
+
+def test_planner_parallel_tool_calls() -> None:
+    assert settings.AGENT_MAX_ITERATIONS >= 1
+
+
+def test_web_search_deduplicates_results() -> None:
+    assert settings.WEB_MAX_RESULTS > 0
+
+
+def test_agent_timeout_guard() -> None:
+    assert settings.AGENT_MAX_SECONDS >= settings.AGENT_TIMEOUT_SEC

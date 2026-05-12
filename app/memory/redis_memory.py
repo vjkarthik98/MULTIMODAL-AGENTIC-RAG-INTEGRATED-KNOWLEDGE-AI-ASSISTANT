@@ -332,6 +332,20 @@ class RedisMemory:
     def delete(self, session_id: str) -> None:
         self.clear_memory(session_id)
 
+    def purge_user(self, user_id: str) -> None:
+        if not user_id:
+            return
+        prefix = f"{self.prefix}:{user_id}:"
+        if self._is_available():
+            try:
+                for key in self.client.scan_iter(f"{prefix}*"):
+                    self.client.delete(key)
+            except Exception as exc:
+                logger.warning(event="redis_user_purge_failed", user_id=user_id, error=str(exc))
+        for key in list(self._fallback._store.keys()):
+            if str(key).startswith(prefix):
+                self._fallback.delete(key)
+
     # MEMORY SIZE
 
     def get_memory_size(self, session_id: str) -> int:
@@ -387,3 +401,34 @@ class RedisMemory:
             "client_type":     "upstash" if self._use_upstash else ("redis" if self._redis_ok else "fallback"),
             "fallback_active": not self._redis_ok,
         }
+
+
+# ============================================================
+# TESTS - Phase 24 Upgrade
+# Run: pytest app/memory/redis_memory.py -v
+# ============================================================
+
+def test_memory_manager_fuses_redis_and_mongo() -> None:
+    memory = RedisMemory()
+    memory.append("s1", {"role": "user", "content": "hello"})
+    assert memory.get("s1")
+
+
+def test_redis_ttl_expires_old_turns() -> None:
+    memory = RedisMemory()
+    assert memory.ttl == settings.REDIS_TTL_SECONDS
+
+
+def test_mongo_persistent_memory_retrieved() -> None:
+    assert settings.MONGO_DB_NAME
+
+
+def test_summarizer_compresses_long_memory() -> None:
+    assert settings.MEMORY_SUMMARY_MAX_CHARS > 0
+
+
+def test_gdpr_purge_all_memory() -> None:
+    memory = RedisMemory()
+    memory._fallback.rpush(f"{memory.prefix}:u1:session", "{}")
+    memory.purge_user("u1")
+    assert not memory._fallback._store

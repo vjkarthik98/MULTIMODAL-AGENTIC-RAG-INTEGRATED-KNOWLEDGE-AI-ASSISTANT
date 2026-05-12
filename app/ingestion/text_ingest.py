@@ -1,71 +1,205 @@
+import asyncio
 import hashlib
 import time
 import uuid
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import chardet
+import structlog
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+from prometheus_client import Counter, Histogram
+from tenacity import retry, stop_after_attempt, wait_exponential
 
-from app.chunking.chunker import chunk_text
 from app.core.config import settings
 from app.ingestion.schema import IngestedDocument
-from app.utils.logger import get_logger
 
-logger = get_logger(__name__)
+logger = structlog.get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
+# PROMETHEUS METRICS
+_ingest_duration = Histogram(
+    "text_ingest_duration_seconds",
+    "Text ingestion duration",
+    ["status"],
+)
+_ingest_errors = Counter(
+    "text_ingest_errors_total",
+    "Text ingestion errors by type",
+    ["error_type"],
+)
+_pii_redacted = Counter(
+    "pii_entities_redacted_total",
+    "PII entities redacted during text ingestion",
+    ["entity_type"],
+)
 
 # SUPPORTED EXTENSIONS
+SUPPORTED_TEXT_EXTENSIONS = {
+    ".txt", ".md", ".rst", ".csv", ".log",
+    ".json", ".yaml", ".yml",
+}
 
-SUPPORTED_TEXT_EXTENSIONS = {".txt", ".md", ".rst", ".csv", ".log", ".json", ".yaml", ".yml"}
+# BINARY MAGIC BYTES — REJECT IF FOUND AT FILE START
+BINARY_MAGIC_SIGNATURES = [
+    b"\x89PNG",
+    b"\xff\xd8\xff",
+    b"GIF8",
+    b"%PDF",
+    b"PK\x03\x04",
+    b"\x1f\x8b",
+    b"BM",
+    b"ID3",
+    b"\x00\x00\x00",
+    b"RIFF",
+    b"\x7fELF",
+]
+
+# SEMAPHORE — CAP CONCURRENT TEXT INGESTION
+_semaphore = asyncio.Semaphore(5)
 
 
-# HASH
+# SHA-256 HASH
 
-def _file_hash(file_path: str) -> str:
-    h = hashlib.md5()
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def _hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# SIMHASH FOR NEAR-DEDUP
+
+def _simhash(text: str) -> int:
+    tokens = text.lower().split()
+    v = [0] * 64
+    for token in tokens:
+        h = int(hashlib.md5(token.encode()).hexdigest(), 16)
+        for i in range(64):
+            if h & (1 << i):
+                v[i] += 1
+            else:
+                v[i] -= 1
+    fingerprint = 0
+    for i in range(64):
+        if v[i] > 0:
+            fingerprint |= (1 << i)
+    return fingerprint
+
+
+def _simhash_distance(h1: int, h2: int) -> int:
+    x = h1 ^ h2
+    count = 0
+    while x:
+        count += x & 1
+        x >>= 1
+    return count
+
+
+# BINARY FILE DETECTION VIA MAGIC BYTES
+
+def _is_binary(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            header = f.read(16)
+        for sig in BINARY_MAGIC_SIGNATURES:
+            if header.startswith(sig):
+                return True
+        # NULL BYTE CHECK — STRONG BINARY INDICATOR
+        if b"\x00" in header:
+            return True
+        return False
+    except Exception:
+        return False
+
+
+# BOM DETECTION AND STRIPPING
+
+def _strip_bom(text: str) -> str:
+    boms = ["\ufeff", "\ufffe", "\ufeff"]
+    for bom in boms:
+        if text.startswith(bom):
+            return text[len(bom):]
+    return text
+
+
+# NULL BYTE STRIPPING
+
+def _strip_null_bytes(text: str) -> Tuple[str, int]:
+    count = text.count("\x00")
+    return text.replace("\x00", ""), count
 
 
 # ENCODING DETECTION
 
-def _detect_encoding(file_path: Path) -> Tuple[str, float]:
-    with open(file_path, "rb") as f:
-        raw = f.read(10_000)
-
+def _detect_encoding(path: Path) -> Tuple[str, float]:
+    with open(path, "rb") as f:
+        raw = f.read(32768)
     result     = chardet.detect(raw)
     encoding   = result.get("encoding") or "utf-8"
     confidence = float(result.get("confidence") or 0.0)
-
     return encoding, confidence
 
 
-# TEXT LOADING
+# TEXT LOADING WITH ENCODING FALLBACK
 
-def _load_text(file_path: Path) -> str:
-    encoding, confidence = _detect_encoding(file_path)
+def _load_text(path: Path) -> str:
+    encoding, confidence = _detect_encoding(path)
 
     if confidence < 0.7:
         logger.warning(
-            event="encoding_low_confidence",
+            "encoding_low_confidence",
             encoding=encoding,
-            confidence=confidence,
-            file=file_path.name,
+            confidence=round(confidence, 3),
+            file=path.name,
         )
 
     try:
-        with open(file_path, "r", encoding=encoding, errors="ignore") as f:
+        with open(path, "r", encoding=encoding, errors="ignore") as f:
             return f.read()
-
     except Exception:
-        logger.warning(event="encoding_fallback_latin1", file=file_path.name)
-        with open(file_path, "r", encoding="latin-1", errors="ignore") as f:
+        logger.warning("encoding_fallback_latin1", file=path.name)
+        with open(path, "r", encoding="latin-1", errors="ignore") as f:
             return f.read()
 
 
-# NORMALIZE
+# STREAMING LOAD FOR LARGE FILES — LINE BY LINE
+
+def _load_text_streaming(path: Path, max_bytes: int) -> str:
+    encoding, _ = _detect_encoding(path)
+    parts: List[str] = []
+    total = 0
+    try:
+        with open(path, "r", encoding=encoding, errors="ignore") as f:
+            for line in f:
+                # SPLIT LINES EXCEEDING 100K CHARS AT WORD BOUNDARY
+                if len(line) > 100_000:
+                    words = line.split(" ")
+                    chunk = ""
+                    for word in words:
+                        if len(chunk) + len(word) > 100_000:
+                            parts.append(chunk)
+                            total += len(chunk)
+                            chunk = word + " "
+                        else:
+                            chunk += word + " "
+                    if chunk:
+                        parts.append(chunk)
+                        total += len(chunk)
+                else:
+                    parts.append(line)
+                    total += len(line)
+                if total >= max_bytes:
+                    logger.warning(
+                        "streaming_truncated_at_limit",
+                        file=path.name,
+                        bytes_read=total,
+                    )
+                    break
+    except Exception as exc:
+        logger.warning("streaming_load_failed", file=path.name, error=str(exc))
+    return "".join(parts)
+
+
+# UNICODE NORMALIZATION
 
 def _normalize_text(text: str) -> str:
     import unicodedata
@@ -74,34 +208,148 @@ def _normalize_text(text: str) -> str:
     return text.strip()
 
 
-# LANGUAGE DETECTION
+# LANGUAGE DETECTION — ENSEMBLE
 
 def _detect_language(text: str) -> Optional[str]:
+    sample = text[:3000]
+    results: List[str] = []
+
+    # LANGDETECT
     try:
         from langdetect import detect
-        return detect(text[:2000])
+        results.append(detect(sample))
     except Exception:
+        pass
+
+    # LINGUA
+    try:
+        from lingua import LanguageDetectorBuilder
+        detector = LanguageDetectorBuilder.from_all_languages().build()
+        lang     = detector.detect_language_of(sample)
+        if lang:
+            results.append(lang.iso_code_639_1.name.lower())
+    except Exception:
+        pass
+
+    if not results:
         return None
 
+    # RETURN MOST COMMON RESULT
+    from collections import Counter as _Counter
+    return _Counter(results).most_common(1)[0][0]
 
-# SUBTYPE DETECTION
+
+# RTL LANGUAGE DETECTION
+
+def _is_rtl(language: Optional[str]) -> bool:
+    RTL_LANGS = {"ar", "he", "fa", "ur", "yi", "dv", "ku", "ps"}
+    return (language or "").lower() in RTL_LANGS
+
+
+# PII REDACTION — PRESIDIO
+
+def _redact_pii(text: str) -> Tuple[str, Dict[str, int]]:
+    if not settings.PII_DETECTION_ENABLED:
+        return text, {}
+
+    entity_counts: Dict[str, int] = {}
+
+    try:
+        from presidio_analyzer import AnalyzerEngine
+        from presidio_anonymizer import AnonymizerEngine
+
+        entities = getattr(settings, "PII_ENTITIES", [
+            "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER",
+            "US_SSN", "CREDIT_CARD", "LOCATION", "IP_ADDRESS",
+        ])
+
+        analyzer   = AnalyzerEngine()
+        anonymizer = AnonymizerEngine()
+
+        results = analyzer.analyze(text=text, entities=entities, language="en")
+
+        for r in results:
+            entity_counts[r.entity_type] = entity_counts.get(r.entity_type, 0) + 1
+
+        if results:
+            text = anonymizer.anonymize(text=text, analyzer_results=results).text
+
+    except ImportError:
+        logger.warning("presidio_not_installed", hint="pip install presidio-analyzer presidio-anonymizer")
+    except Exception as exc:
+        logger.warning("pii_redaction_failed", error=str(exc))
+
+    return text, entity_counts
+
+
+# HEADING DETECTION
 
 def _detect_subtype(chunk: str) -> str:
-    lines      = [l.strip() for l in chunk.split("\n") if l.strip()]
+    lines = [l.strip() for l in chunk.split("\n") if l.strip()]
     if not lines:
         return "paragraph"
-
-    first_line = lines[0]
-
-    # MARKDOWN HEADING
-    if first_line.startswith("#"):
+    first = lines[0]
+    if first.startswith("#"):
         return "heading"
-
-    # SHORT SINGLE-LINE LIKELY HEADING
-    if len(lines) == 1 and len(first_line.split()) <= 8 and not first_line.endswith("."):
+    if len(lines) == 1 and len(first.split()) <= 8 and not first.endswith("."):
         return "heading"
-
     return "paragraph"
+
+
+# HEADING HIERARCHY H1-H3
+
+def _extract_heading_level(line: str) -> Optional[int]:
+    import re
+    match = re.match(r"^(#{1,3})\s", line)
+    if match:
+        return len(match.group(1))
+    return None
+
+
+# KEYWORD EXTRACTION — YAKE
+
+def _extract_keywords(text: str, max_keywords: int = 5) -> List[str]:
+    try:
+        import yake
+        kw_extractor = yake.KeywordExtractor(top=max_keywords, stopwords=None)
+        keywords     = kw_extractor.extract_keywords(text)
+        return [kw for kw, _ in keywords]
+    except ImportError:
+        pass
+
+    # KEYBERT FALLBACK
+    try:
+        from keybert import KeyBERT
+        kb       = KeyBERT()
+        keywords = kb.extract_keywords(text, top_n=max_keywords)
+        return [kw for kw, _ in keywords]
+    except ImportError:
+        pass
+
+    return []
+
+
+# READABILITY SCORE — FLESCH-KINCAID
+
+def _readability_score(text: str) -> float:
+    try:
+        import textstat
+        return float(textstat.flesch_reading_ease(text))
+    except ImportError:
+        pass
+
+    # MANUAL APPROXIMATION
+    try:
+        sentences = max(text.count(".") + text.count("!") + text.count("?"), 1)
+        words     = max(len(text.split()), 1)
+        syllables = sum(
+            max(1, sum(1 for ch in w.lower() if ch in "aeiou"))
+            for w in text.split()
+        )
+        score = 206.835 - 1.015 * (words / sentences) - 84.6 * (syllables / words)
+        return round(max(0.0, min(score, 100.0)), 2)
+    except Exception:
+        return 0.0
 
 
 # QUALITY SCORE
@@ -109,22 +357,47 @@ def _detect_subtype(chunk: str) -> str:
 def _quality_score(chunk: str) -> float:
     length     = len(chunk)
     word_count = len(chunk.split())
-
     if length < settings.CHUNK_MIN_SIZE:
         return 0.1
-
     if length < 100 or word_count < 10:
         return 0.3
-
     if length < 300 or word_count < 30:
         return 0.6
-
     return 1.0
 
 
-# MAIN
+# CHUNKING — SEMANTIC BOUNDARY AWARE
 
-def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
+def _chunk_text(text: str) -> List[str]:
+    # TRY LANGCHAIN SEMANTIC SPLITTER
+    try:
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=settings.CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP,
+            separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""],
+        )
+        chunks = splitter.split_text(text)
+        if chunks:
+            return [c.strip() for c in chunks if c.strip()]
+    except Exception:
+        pass
+
+    # FALLBACK — SLIDING WINDOW
+    size    = settings.CHUNK_SIZE
+    overlap = settings.CHUNK_OVERLAP
+    step    = max(size - overlap, 1)
+    chunks  = []
+    for i in range(0, len(text), step):
+        chunk = text[i:i + size].strip()
+        if chunk:
+            chunks.append(chunk)
+    return chunks
+
+
+# MAIN ASYNC INGEST
+
+async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
     if not session_id:
         raise ValueError("SESSION_ID_REQUIRED")
@@ -134,10 +407,7 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
     if not path.exists():
         raise FileNotFoundError(f"FILE_NOT_FOUND: {file_path}")
 
-    ext = path.suffix.lower()
-    if ext and ext not in SUPPORTED_TEXT_EXTENSIONS:
-        logger.warning(event="text_ingest_unknown_ext", ext=ext, file=path.name)
-
+    ext       = path.suffix.lower()
     file_size = path.stat().st_size
 
     if file_size == 0:
@@ -145,123 +415,406 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
     if file_size > settings.MAX_FILE_SIZE_TEXT:
         raise ValueError(
-            f"FILE_TOO_LARGE: {file_size} bytes exceeds {settings.MAX_FILE_SIZE_TEXT} bytes"
+            f"FILE_TOO_LARGE: {file_size} bytes exceeds "
+            f"{settings.MAX_FILE_SIZE_TEXT} bytes"
         )
 
-    start = time.time()
+    with tracer.start_as_current_span("text_ingest") as span:
+        span.set_attribute("file.name", path.name)
+        span.set_attribute("file.size", file_size)
+        span.set_attribute("session.id", session_id)
 
-    logger.info(
-        event="text_ingest_start",
-        file=path.name,
-        size=file_size,
-        session_id=session_id,
-    )
+        start = time.time()
 
+        async with _semaphore:
+            try:
+                logger.info(
+                    "text_ingest_start",
+                    file=path.name,
+                    size=file_size,
+                    session_id=session_id,
+                )
+
+                # BINARY MAGIC BYTE CHECK — REJECT NON-TEXT
+                is_bin = await asyncio.get_event_loop().run_in_executor(
+                    None, _is_binary, path
+                )
+                if is_bin:
+                    raise ValueError(
+                        f"BINARY_FILE_DISGUISED_AS_TEXT: {path.name}"
+                    )
+
+                # LOAD — STREAMING FOR LARGE FILES
+                stream_threshold = 5 * 1024 * 1024  # 5 MB
+                if file_size > stream_threshold:
+                    raw_text = await asyncio.get_event_loop().run_in_executor(
+                        None, _load_text_streaming, path, settings.MAX_FILE_SIZE_TEXT
+                    )
+                else:
+                    raw_text = await asyncio.get_event_loop().run_in_executor(
+                        None, _load_text, path
+                    )
+
+                # BOM STRIP
+                raw_text = _strip_bom(raw_text)
+
+                # NULL BYTE STRIP
+                raw_text, null_count = _strip_null_bytes(raw_text)
+                if null_count:
+                    logger.warning(
+                        "null_bytes_stripped",
+                        count=null_count,
+                        file=path.name,
+                    )
+
+                # NORMALIZE
+                text = _normalize_text(raw_text)
+
+                if not text or text.isspace():
+                    raise ValueError("EMPTY_CONTENT_AFTER_NORMALIZE")
+
+                if len(text) < 50:
+                    raise ValueError("TEXT_TOO_SHORT")
+
+                # METADATA
+                file_hash   = _hash(text[:10000])
+                doc_id      = str(uuid.uuid4())
+                source_name = path.name
+                source_path = str(path.resolve())
+                line_count  = text.count("\n") + 1
+                word_count  = len(text.split())
+
+                # LANGUAGE DETECTION
+                language = await asyncio.get_event_loop().run_in_executor(
+                    None, _detect_language, text
+                )
+                is_rtl = _is_rtl(language)
+
+                # PII REDACTION
+                text, pii_counts = await asyncio.get_event_loop().run_in_executor(
+                    None, _redact_pii, text
+                )
+                for entity_type, count in pii_counts.items():
+                    _pii_redacted.labels(entity_type=entity_type).inc(count)
+
+                # CHUNKING
+                chunks = await asyncio.get_event_loop().run_in_executor(
+                    None, _chunk_text, text
+                )
+
+                if not chunks:
+                    raise ValueError("NO_CHUNKS_PRODUCED")
+
+                if len(chunks) > settings.MAX_CHUNKS:
+                    logger.warning(
+                        "chunk_limit_applied",
+                        original=len(chunks),
+                        limited=settings.MAX_CHUNKS,
+                        file=path.name,
+                    )
+                    chunks = chunks[:settings.MAX_CHUNKS]
+
+                total_chunks = len(chunks)
+                documents:   List[IngestedDocument] = []
+
+                # NEAR-DEDUP VIA SIMHASH
+                seen_hashes:    set = set()
+                seen_simhashes: List[int] = []
+
+                for i, chunk in enumerate(chunks):
+                    chunk = chunk.strip()
+                    if not chunk:
+                        continue
+                    if len(chunk) < settings.CHUNK_MIN_SIZE:
+                        continue
+
+                    # EXACT DEDUP
+                    exact_h = _hash(chunk)
+                    if exact_h in seen_hashes:
+                        continue
+                    seen_hashes.add(exact_h)
+
+                    # NEAR DEDUP VIA SIMHASH
+                    sh = _simhash(chunk)
+                    too_similar = any(
+                        _simhash_distance(sh, prev) <= 3
+                        for prev in seen_simhashes
+                    )
+                    if too_similar:
+                        continue
+                    seen_simhashes.append(sh)
+
+                    quality   = _quality_score(chunk)
+                    subtype   = _detect_subtype(chunk)
+                    keywords  = _extract_keywords(chunk)
+                    fk_score  = _readability_score(chunk)
+
+                    heading_level: Optional[int] = None
+                    first_line    = chunk.split("\n")[0]
+                    heading_level = _extract_heading_level(first_line)
+
+                    doc = IngestedDocument(
+                        text=chunk,
+                        modality="text",
+                        subtype=subtype,
+                        source_type="file",
+                        source=source_name,
+                        chunk_id=i,
+                        structure={
+                            "doc_id":           doc_id,
+                            "session_id":       session_id,
+                            "file_hash":        file_hash,
+                            "source_path":      source_path,
+                            "chunk_index":      i,
+                            "total_chunks":     total_chunks,
+                            "chunk_length":     len(chunk),
+                            "language":         language,
+                            "is_rtl":           is_rtl,
+                            "heading_level":    heading_level,
+                            "readability_score": fk_score,
+                            "tags":             keywords,
+                            "pii_redacted":     bool(pii_counts),
+                            "content_type":     "text_chunk",
+                            "ingestion_time":   time.time(),
+                        },
+                        extra_metadata={
+                            "modality_weight":    1.0,
+                            "importance_score":   quality,
+                            "data_quality_score": quality,
+                        },
+                    ).finalize()
+
+                    documents.append(doc)
+
+                if not documents:
+                    raise ValueError("NO_VALID_DOCUMENTS_AFTER_FILTERING")
+
+                latency = round(time.time() - start, 2)
+
+                _ingest_duration.labels(status="success").observe(latency)
+
+                span.set_attribute("docs.count", len(documents))
+                span.set_attribute("language", language or "unknown")
+                span.set_status(Status(StatusCode.OK))
+
+                logger.info(
+                    "text_ingest_success",
+                    file=path.name,
+                    docs=len(documents),
+                    total_chunks=total_chunks,
+                    language=language,
+                    is_rtl=is_rtl,
+                    word_count=word_count,
+                    line_count=line_count,
+                    latency=latency,
+                    session_id=session_id,
+                )
+
+                return documents
+
+            except Exception as exc:
+                latency    = round(time.time() - start, 2)
+                error_type = type(exc).__name__
+
+                _ingest_duration.labels(status="error").observe(latency)
+                _ingest_errors.labels(error_type=error_type).inc()
+
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                span.record_exception(exc)
+
+                logger.error(
+                    "text_ingest_failed",
+                    file=path.name,
+                    session_id=session_id,
+                    error=str(exc),
+                    error_type=error_type,
+                    latency=latency,
+                )
+                raise
+
+
+# SYNC WRAPPER FOR BACKWARD COMPATIBILITY
+
+def ingest_sync(file_path: str, session_id: str) -> List[IngestedDocument]:
     try:
-        # LOAD AND NORMALIZE
-        raw_text = _load_text(path)
-        text     = _normalize_text(raw_text)
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future = pool.submit(asyncio.run, ingest(file_path, session_id))
+                return future.result()
+        return loop.run_until_complete(ingest(file_path, session_id))
+    except RuntimeError:
+        return asyncio.run(ingest(file_path, session_id))
 
-        if not text:
-            raise ValueError("EMPTY_TEXT_AFTER_NORMALIZE")
 
-        if len(text) < 50:
-            raise ValueError("TEXT_TOO_SHORT")
+# TESTS
 
-        # METADATA
-        file_hash   = _file_hash(file_path)
-        doc_id      = str(uuid.uuid4())
-        source_name = path.name
-        source_path = str(path.resolve())
-        line_count  = text.count("\n") + 1
-        word_count  = len(text.split())
-        language    = _detect_language(text)
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
 
-        # CHUNKING
-        chunks = chunk_text(text)
 
-        if not chunks:
-            raise ValueError("NO_CHUNKS_PRODUCED")
+class TestTextIngest:
 
-        if len(chunks) > settings.MAX_CHUNKS:
-            logger.warning(
-                event="chunk_limit_applied",
-                original=len(chunks),
-                limited=settings.MAX_CHUNKS,
-                file=path.name,
-            )
-            chunks = chunks[:settings.MAX_CHUNKS]
+    @pytest.mark.asyncio
+    async def test_happy_path_returns_chunks_and_metadata(self, tmp_path):
+        f = tmp_path / "test.txt"
+        f.write_text("This is a valid document with sufficient content for ingestion testing purposes.")
+        with patch("app.ingestion.text_ingest._is_binary", return_value=False), \
+             patch("app.ingestion.text_ingest._detect_language", return_value="en"), \
+             patch("app.ingestion.text_ingest._redact_pii", return_value=("same text", {})):
+            docs = await ingest(str(f), "session-1")
+        assert len(docs) >= 1
+        assert all(d.modality == "text" for d in docs)
+        assert all(d.structure.get("language") == "en" for d in docs)
 
-        total_chunks = len(chunks)
-        documents: List[IngestedDocument] = []
+    @pytest.mark.asyncio
+    async def test_empty_file_raises_empty_content_error(self, tmp_path):
+        f = tmp_path / "empty.txt"
+        f.write_bytes(b"")
+        with pytest.raises(ValueError, match="EMPTY_FILE"):
+            await ingest(str(f), "session-1")
 
-        for i, chunk in enumerate(chunks):
-            chunk = chunk.strip()
+    @pytest.mark.asyncio
+    async def test_all_whitespace_raises(self, tmp_path):
+        f = tmp_path / "blank.txt"
+        f.write_text("   \n\n\t  \n  ")
+        with patch("app.ingestion.text_ingest._is_binary", return_value=False):
+            with pytest.raises(ValueError, match="EMPTY_CONTENT_AFTER_NORMALIZE"):
+                await ingest(str(f), "session-1")
 
-            if not chunk:
-                continue
+    @pytest.mark.asyncio
+    async def test_binary_file_raises_mime_error(self, tmp_path):
+        f = tmp_path / "fake.txt"
+        f.write_bytes(b"\x89PNG\r\n\x1a\nbinary content here that looks like image")
+        with pytest.raises(ValueError, match="BINARY_FILE_DISGUISED_AS_TEXT"):
+            await ingest(str(f), "session-1")
 
-            if len(chunk) < settings.CHUNK_MIN_SIZE:
-                continue
+    @pytest.mark.asyncio
+    async def test_pii_redacted_from_chunks(self, tmp_path):
+        f = tmp_path / "pii.txt"
+        f.write_text("Contact John Doe at john@example.com or call 555-123-4567 for details.")
+        with patch("app.ingestion.text_ingest._is_binary", return_value=False), \
+             patch("app.ingestion.text_ingest._detect_language", return_value="en"), \
+             patch("app.ingestion.text_ingest._redact_pii", return_value=("Contact [REDACTED] at [REDACTED]", {"EMAIL_ADDRESS": 1, "PERSON": 1})) as mock_pii:
+            docs = await ingest(str(f), "session-1")
+        mock_pii.assert_called()
+        assert any(d.structure.get("pii_redacted") for d in docs)
 
-            quality  = _quality_score(chunk)
-            subtype  = _detect_subtype(chunk)
+    @pytest.mark.asyncio
+    async def test_duplicate_chunk_skipped_via_simhash(self, tmp_path):
+        repeated = ("The quick brown fox jumps over the lazy dog. " * 10 + "\n") * 20
+        f = tmp_path / "dup.txt"
+        f.write_text(repeated)
+        with patch("app.ingestion.text_ingest._is_binary", return_value=False), \
+             patch("app.ingestion.text_ingest._detect_language", return_value="en"), \
+             patch("app.ingestion.text_ingest._redact_pii", return_value=(repeated, {})):
+            docs = await ingest(str(f), "session-1")
+        assert len(docs) < 20
 
-            doc = IngestedDocument(
-                text=chunk,
-                modality="text",
-                subtype=subtype,
-                source_type="file",
-                source=source_name,
-                chunk_id=i,
-                structure={
-                    "doc_id":          doc_id,
-                    "session_id":      session_id,
-                    "file_hash":       file_hash,
-                    "source_path":     source_path,
-                    "chunk_index":     i,
-                    "total_chunks":    total_chunks,
-                    "chunk_length":    len(chunk),
-                    "language":        language,
-                    "content_type":    "text_chunk",
-                    "ingestion_time":  time.time(),
-                },
-                extra_metadata={
-                    "modality_weight":    1.0,
-                    "importance_score":   quality,
-                    "data_quality_score": quality,
-                },
-            ).finalize()
+    @pytest.mark.asyncio
+    async def test_rtl_language_flag_in_metadata(self, tmp_path):
+        f = tmp_path / "arabic.txt"
+        f.write_text("مرحبا بالعالم. هذا نص عربي للاختبار.")
+        with patch("app.ingestion.text_ingest._is_binary", return_value=False), \
+             patch("app.ingestion.text_ingest._detect_language", return_value="ar"), \
+             patch("app.ingestion.text_ingest._redact_pii", side_effect=lambda t: (t, {})):
+            docs = await ingest(str(f), "session-1")
+        assert all(d.structure.get("is_rtl") is True for d in docs)
 
-            documents.append(doc)
+    @pytest.mark.asyncio
+    async def test_streaming_large_file_no_oom(self, tmp_path):
+        f = tmp_path / "large.txt"
+        content = ("word " * 200 + "\n") * 500
+        f.write_text(content)
+        with patch("app.ingestion.text_ingest._is_binary", return_value=False), \
+             patch("app.ingestion.text_ingest._detect_language", return_value="en"), \
+             patch("app.ingestion.text_ingest._redact_pii", return_value=(content[:1000], {})):
+            docs = await ingest(str(f), "session-1")
+        assert isinstance(docs, list)
 
-        if not documents:
-            raise ValueError("NO_VALID_DOCUMENTS_AFTER_FILTERING")
+    @pytest.mark.asyncio
+    async def test_bom_stripped_correctly(self, tmp_path):
+        f = tmp_path / "bom.txt"
+        f.write_bytes(b"\xef\xbb\xbfThis text has a UTF-8 BOM at the start and is valid content.")
+        with patch("app.ingestion.text_ingest._is_binary", return_value=False), \
+             patch("app.ingestion.text_ingest._detect_language", return_value="en"), \
+             patch("app.ingestion.text_ingest._redact_pii", return_value=("This text has a UTF-8 BOM at the start and is valid content.", {})):
+            docs = await ingest(str(f), "session-1")
+        assert all(not d.text.startswith("\ufeff") for d in docs)
 
-        avg_chunk_length = round(sum(len(d.text) for d in documents) / len(documents), 1)
-        latency          = round(time.time() - start, 2)
+    @pytest.mark.asyncio
+    async def test_no_session_id_raises(self, tmp_path):
+        f = tmp_path / "test.txt"
+        f.write_text("some content here")
+        with pytest.raises(ValueError, match="SESSION_ID_REQUIRED"):
+            await ingest(str(f), "")
 
-        logger.info(
-            event="text_ingest_success",
-            file=path.name,
-            docs=len(documents),
-            total_chunks=total_chunks,
-            avg_chunk_length=avg_chunk_length,
-            line_count=line_count,
-            word_count=word_count,
-            language=language,
-            latency=latency,
-            session_id=session_id,
-        )
+    @pytest.mark.asyncio
+    async def test_file_not_found_raises(self):
+        with pytest.raises(FileNotFoundError):
+            await ingest("/nonexistent/path/file.txt", "session-1")
 
-        return documents
+    def test_simhash_identical_texts_zero_distance(self):
+        h1 = _simhash("the quick brown fox")
+        h2 = _simhash("the quick brown fox")
+        assert _simhash_distance(h1, h2) == 0
 
-    except Exception as e:
-        logger.error(
-            event="text_ingest_failed",
-            file=path.name,
-            session_id=session_id,
-            error=str(e),
-            latency=round(time.time() - start, 2),
-        )
-        raise
+    def test_simhash_different_texts_nonzero_distance(self):
+        h1 = _simhash("the quick brown fox jumps")
+        h2 = _simhash("completely different content here now")
+        assert _simhash_distance(h1, h2) > 3
+
+    def test_strip_bom_removes_utf8_bom(self):
+        text = "\ufeffHello world"
+        assert _strip_bom(text) == "Hello world"
+
+    def test_strip_null_bytes_returns_count(self):
+        text       = "hello\x00world\x00"
+        cleaned, n = _strip_null_bytes(text)
+        assert n == 2
+        assert "\x00" not in cleaned
+
+    def test_is_binary_detects_png(self, tmp_path):
+        f = tmp_path / "fake.txt"
+        f.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+        assert _is_binary(f) is True
+
+    def test_is_binary_false_for_plain_text(self, tmp_path):
+        f = tmp_path / "real.txt"
+        f.write_text("This is plain text content without binary markers.")
+        assert _is_binary(f) is False
+
+    def test_quality_score_short_text_low(self):
+        assert _quality_score("hi") < 0.5
+
+    def test_quality_score_long_text_high(self):
+        text = "word " * 100
+        assert _quality_score(text) >= 0.6
+
+    def test_detect_subtype_heading(self):
+        assert _detect_subtype("## Introduction") == "heading"
+
+    def test_detect_subtype_paragraph(self):
+        text = "This is a normal paragraph with multiple sentences and enough words."
+        assert _detect_subtype(text) == "paragraph"
+
+    def test_metadata_schema_populated(self, tmp_path):
+        f = tmp_path / "meta.txt"
+        f.write_text("Metadata test content with sufficient words for a valid chunk result.")
+
+        async def _run():
+            with patch("app.ingestion.text_ingest._is_binary", return_value=False), \
+                 patch("app.ingestion.text_ingest._detect_language", return_value="en"), \
+                 patch("app.ingestion.text_ingest._redact_pii", return_value=("Metadata test content with sufficient words for a valid chunk result.", {})):
+                return await ingest(str(f), "session-meta")
+
+        import asyncio as _asyncio
+        docs = _asyncio.run(_run())
+        assert len(docs) >= 1
+        s = docs[0].structure
+        assert "doc_id" in s
+        assert "language" in s
+        assert "ingestion_time" in s
+        assert "tags" in s
+        assert "readability_score" in s
