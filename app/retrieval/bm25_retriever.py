@@ -1,18 +1,31 @@
+from __future__ import annotations
+
+import asyncio
 import hashlib
 import pickle
 import re
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
+
+from app.core.config import settings
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 try:
     import numpy as np
+    _NP_AVAILABLE = True
 except ImportError:
     np = None  # type: ignore[assignment]
+    _NP_AVAILABLE = False
 
 try:
     from rank_bm25 import BM25Okapi
+    _BM25_AVAILABLE = True
 except ImportError:
+    _BM25_AVAILABLE = False
+
     class BM25Okapi:  # type: ignore[no-redef]
         def __init__(self, corpus: List[List[str]]) -> None:
             self.corpus = corpus
@@ -21,32 +34,48 @@ except ImportError:
             query = set(tokens)
             return [float(len(query & set(doc))) for doc in self.corpus]
 
-from app.core.config import settings
-from app.utils.logger import get_logger
+try:
+    import pybreaker
+    _breaker = pybreaker.CircuitBreaker(
+        fail_max=settings.CIRCUIT_BREAKER_MAX_FAILURES,
+        reset_timeout=settings.CIRCUIT_BREAKER_RESET_TIMEOUT,
+    )
+    _PYBREAKER_AVAILABLE = True
+except ImportError:
+    _PYBREAKER_AVAILABLE = False
 
-logger = get_logger(__name__)
+    class _DummyBreaker:
+        def __call__(self, fn):
+            return fn
+
+    _breaker = _DummyBreaker()  # type: ignore[assignment]
 
 
-# INDEX PERSISTENCE PATH
-
-_INDEX_DIR  = settings.DATA_DIR / "bm25_index"
+# INDEX PATHS
+_INDEX_DIR = Path(settings.BM25_INDEX_DIR) if hasattr(settings, "BM25_INDEX_DIR") else settings.DATA_DIR / "bm25_index"
 _INDEX_FILE = _INDEX_DIR / "bm25_index.pkl"
+
+# STOPWORDS
+_STOPWORDS: Set[str] = {
+    "the", "is", "and", "a", "an", "of", "to", "in", "on", "for",
+    "at", "by", "with", "from", "this", "that", "it", "be", "as",
+    "are", "was", "were", "has", "have", "had", "do", "does", "did",
+    "but", "or", "not", "so", "if", "its", "our", "we", "he", "she",
+    "they", "you", "i", "me", "my", "your", "their", "what", "which",
+    "who", "when", "where", "how", "all", "been", "will", "would",
+    "could", "should", "may", "might", "can", "any", "some", "no",
+}
 
 
 class BM25Retriever:
 
     def __init__(self) -> None:
-        self.documents:         List      = []
-        self.tokenized_corpus:  List      = []
-        self.bm25:              Optional[BM25Okapi] = None
-        self.modality_filter:   Optional[str]       = None
-        self.max_docs:          int       = settings.BM25_MAX_DOCS
-
-        self.stopwords: Set[str] = {
-            "the", "is", "and", "a", "an", "of", "to", "in", "on", "for",
-            "at", "by", "with", "from", "this", "that", "it", "be", "as",
-        }
-
+        self.documents: List[Any] = []
+        self.tokenized_corpus: List[List[str]] = []
+        self.bm25: Optional[BM25Okapi] = None
+        self.modality_filter: Optional[str] = None
+        self.max_docs: int = settings.BM25_MAX_DOCS
+        self._index_loaded: bool = False
 
     # HASH
 
@@ -56,70 +85,80 @@ class BM25Retriever:
     # TOKENIZE
 
     def _tokenize(self, text: str) -> List[str]:
-        text   = str(text or "").lower()
+        text = str(text or "").lower()
         tokens = re.findall(r"\b[a-z0-9]+\b", text)
-        tokens = [t for t in tokens if t not in self.stopwords and len(t) > 1]
+        tokens = [t for t in tokens if t not in _STOPWORDS and len(t) > 1]
         return tokens[:settings.BM25_MAX_TOKENS]
 
-    # METADATA
+    # METADATA EXTRACTION
 
-    def _metadata(self, doc) -> Dict:
+    def _metadata(self, doc: Any) -> Dict[str, Any]:
         s = dict(getattr(doc, "structure", {}) or {})
-
         return {
-            "modality":     getattr(doc, "modality", "text"),
-            "subtype":      getattr(doc, "subtype", None),
-            "source":       getattr(doc, "source", None),
-            "source_type":  getattr(doc, "source_type", None),
-            "doc_id":       s.get("doc_id"),
-            "chunk_id":     getattr(doc, "chunk_id", None),
-            "session_id":   s.get("session_id"),
+            "modality": getattr(doc, "modality", "text"),
+            "subtype": getattr(doc, "subtype", None),
+            "source": getattr(doc, "source", None),
+            "source_type": getattr(doc, "source_type", None),
+            "doc_id": s.get("doc_id"),
+            "chunk_id": getattr(doc, "chunk_id", None),
+            "session_id": s.get("session_id"),
             "content_type": s.get("content_type"),
-            "page":         getattr(doc, "page", None),
+            "page": getattr(doc, "page", None),
+            "language": s.get("language"),
+            "timestamp_start": s.get("timestamp_start"),
+            "ingestion_time": s.get("ingestion_time"),
+            "checksum_sha256": s.get("checksum_sha256"),
         }
 
-    # MODALITY FILTER
+    # MODALITY FILTER SETTER
 
     def set_modality_filter(self, modality: Optional[str]) -> None:
         self.modality_filter = modality
 
-    # PERSISTENCE: SAVE
+    # CIRCUIT-BROKEN SAVE
 
     def _save_index(self) -> None:
-        try:
+        def _do_save() -> None:
             _INDEX_DIR.mkdir(parents=True, exist_ok=True)
-
             payload = {
-                "documents":        self.documents,
+                "documents": self.documents,
                 "tokenized_corpus": self.tokenized_corpus,
+                "saved_at": time.time(),
+                "doc_count": len(self.documents),
             }
-
-            with open(_INDEX_FILE, "wb") as f:
+            tmp_path = _INDEX_FILE.with_suffix(".tmp")
+            with open(tmp_path, "wb") as f:
                 pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
-
+            tmp_path.replace(_INDEX_FILE)
             logger.info(
                 event="bm25_index_saved",
                 path=str(_INDEX_FILE),
                 docs=len(self.documents),
             )
 
-        except Exception as e:
-            logger.error(event="bm25_index_save_failed", error=str(e))
+        try:
+            if _PYBREAKER_AVAILABLE:
+                _breaker(_do_save)()
+            else:
+                _do_save()
+        except Exception as exc:
+            logger.error(event="bm25_index_save_failed", error=str(exc))
 
-    # PERSISTENCE: LOAD
+    # CIRCUIT-BROKEN LOAD
 
     def _load_index(self) -> None:
+        if self._index_loaded:
+            return
+
         if not _INDEX_FILE.exists():
             logger.info(event="bm25_no_saved_index")
             return
 
-        try:
+        def _do_load() -> None:
             with open(_INDEX_FILE, "rb") as f:
                 payload = pickle.load(f)
-
-            self.documents        = payload.get("documents", [])
+            self.documents = payload.get("documents", [])
             self.tokenized_corpus = payload.get("tokenized_corpus", [])
-
             if self.tokenized_corpus:
                 self.bm25 = BM25Okapi(self.tokenized_corpus)
                 logger.info(
@@ -129,33 +168,35 @@ class BM25Retriever:
                 )
             else:
                 logger.warning(event="bm25_saved_index_empty")
+            self._index_loaded = True
 
-        except Exception as e:
-            logger.error(event="bm25_index_load_failed", error=str(e))
-            # RESET TO CLEAN STATE ON CORRUPT INDEX
-            self.documents        = []
+        try:
+            if _PYBREAKER_AVAILABLE:
+                _breaker(_do_load)()
+            else:
+                _do_load()
+        except Exception as exc:
+            logger.error(event="bm25_index_load_failed", error=str(exc))
+            self.documents = []
             self.tokenized_corpus = []
-            self.bm25             = None
+            self.bm25 = None
 
-    # BUILD INDEX (full rebuild)
+    # BUILD INDEX — FULL REBUILD
 
-    def build_index(self, documents: List) -> None:
-
+    def build_index(self, documents: List[Any]) -> None:
         if not documents:
             logger.warning(event="bm25_empty_input")
             return
 
         start = time.time()
-
-        self.documents        = []
+        self.documents = []
         self.tokenized_corpus = []
-        self.bm25             = None
-
+        self.bm25 = None
         seen: Set[str] = set()
 
         for doc in documents[:self.max_docs]:
             try:
-                text      = getattr(doc, "text", "")
+                text = getattr(doc, "text", "")
                 structure = getattr(doc, "structure", {}) or {}
 
                 if not text:
@@ -165,7 +206,7 @@ class BM25Retriever:
                     continue
 
                 text = text[:settings.BM25_MAX_TEXT_CHARS]
-                h    = self._hash(text)
+                h = self._hash(text)
 
                 if h in seen:
                     continue
@@ -178,16 +219,14 @@ class BM25Retriever:
                 self.documents.append(doc)
                 self.tokenized_corpus.append(tokens)
 
-            except Exception as e:
-                logger.warning(event="bm25_doc_skip", error=str(e))
+            except Exception as exc:
+                logger.warning(event="bm25_doc_skip", error=str(exc))
 
         if not self.tokenized_corpus:
             logger.warning(event="bm25_no_corpus")
             return
 
         self.bm25 = BM25Okapi(self.tokenized_corpus)
-
-        # PERSIST TO DISK
         self._save_index()
 
         logger.info(
@@ -196,15 +235,15 @@ class BM25Retriever:
             latency=round(time.time() - start, 2),
         )
 
-    # ADD DOCUMENTS (incremental — used by ingestion_pipeline)
+    # ADD DOCUMENTS — INCREMENTAL
 
-    def add_documents(self, documents: List, session_id: str = "") -> None:
-
+    def add_documents(self, documents: List[Any], session_id: str = "") -> None:
         if not documents:
             return
 
-        start    = time.time()
-        added    = 0
+        start = time.time()
+        added = 0
+
         seen_existing: Set[str] = {
             self._hash(getattr(d, "text", "")[:settings.BM25_MAX_TEXT_CHARS])
             for d in self.documents
@@ -212,7 +251,7 @@ class BM25Retriever:
 
         for doc in documents:
             try:
-                text      = getattr(doc, "text", "")
+                text = getattr(doc, "text", "")
                 structure = getattr(doc, "structure", {}) or {}
 
                 if not text:
@@ -222,7 +261,7 @@ class BM25Retriever:
                     continue
 
                 text = text[:settings.BM25_MAX_TEXT_CHARS]
-                h    = self._hash(text)
+                h = self._hash(text)
 
                 if h in seen_existing:
                     continue
@@ -237,19 +276,20 @@ class BM25Retriever:
                 added += 1
 
                 if len(self.documents) >= self.max_docs:
-                    logger.warning(event="bm25_max_docs_reached", max=self.max_docs)
+                    logger.warning(
+                        event="bm25_max_docs_reached",
+                        max=self.max_docs,
+                        session_id=session_id,
+                    )
                     break
 
-            except Exception as e:
-                logger.warning(event="bm25_add_doc_skip", error=str(e))
+            except Exception as exc:
+                logger.warning(event="bm25_add_doc_skip", error=str(exc))
 
         if added == 0:
             return
 
-        # REBUILD BM25 WITH NEW DOCUMENTS
         self.bm25 = BM25Okapi(self.tokenized_corpus)
-
-        # PERSIST UPDATED INDEX
         self._save_index()
 
         logger.info(
@@ -260,6 +300,60 @@ class BM25Retriever:
             session_id=session_id,
         )
 
+    # SCORE NORMALIZATION
+
+    def _normalize_scores(self, raw_scores: Any) -> Any:
+        if _NP_AVAILABLE:
+            scores = np.asarray(raw_scores, dtype=float)
+            scores = np.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
+            max_s = float(scores.max()) if scores.size > 0 else 1e-6
+            if max_s > 1e-6:
+                scores = scores / max_s
+            return scores
+        else:
+            scores = [float(s) for s in raw_scores]
+            max_s = max(scores) if scores else 1e-6
+            if max_s > 1e-6:
+                scores = [s / max_s for s in scores]
+            return scores
+
+    # TOP-K INDICES
+
+    def _topk_indices(self, norm_scores: Any, top_k: int) -> List[int]:
+        if _NP_AVAILABLE:
+            if len(norm_scores) <= top_k:
+                idxs = list(range(len(norm_scores)))
+            else:
+                idxs = list(np.argpartition(norm_scores, -top_k)[-top_k:])
+            idxs = sorted(idxs, key=lambda i: norm_scores[i], reverse=True)
+            return idxs
+        else:
+            idxs = sorted(range(len(norm_scores)), key=lambda i: norm_scores[i], reverse=True)
+            return idxs[:top_k]
+
+    # FILTER APPLY
+
+    def _passes_filters(
+        self,
+        meta: Dict[str, Any],
+        session_id: Optional[str],
+        filters: Optional[Dict[str, Any]],
+    ) -> bool:
+        if self.modality_filter and meta.get("modality") != self.modality_filter:
+            return False
+
+        if filters:
+            if filters.get("modality") and meta.get("modality") != filters["modality"]:
+                return False
+            if filters.get("language") and meta.get("language") != filters["language"]:
+                return False
+            if filters.get("source_type") and meta.get("source_type") != filters["source_type"]:
+                return False
+            if filters.get("session_id") and meta.get("session_id") != filters["session_id"]:
+                return False
+
+        return True
+
     # SEARCH
 
     def search(
@@ -267,12 +361,12 @@ class BM25Retriever:
         query: str,
         session_id: Optional[str] = None,
         top_k: Optional[int] = None,
-        filters: Optional[Dict] = None,
-    ) -> List[Dict]:
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
 
         if not self.bm25:
             self._load_index()
-            
+
         if not self.bm25:
             logger.warning(event="bm25_not_ready", session_id=session_id)
             return []
@@ -280,130 +374,141 @@ class BM25Retriever:
         if not query:
             return []
 
-        start  = time.time()
-        top_k  = min(top_k or settings.BM25_TOP_K, len(self.documents))
+        start = time.time()
+        top_k = min(top_k or settings.BM25_TOP_K, len(self.documents))
 
         if top_k <= 0:
             return []
 
-        query  = query[:settings.MAX_PROMPT_CHARS]
+        query = query[:settings.MAX_PROMPT_CHARS]
         tokens = self._tokenize(query)
 
         if not tokens:
             return []
 
-        raw_scores = self.bm25.get_scores(tokens)
-        scores = np.asarray(raw_scores, dtype=float) if np is not None else list(map(float, raw_scores))
-
-        if (scores.size if np is not None else len(scores)) == 0:
+        try:
+            raw_scores = self.bm25.get_scores(tokens)
+        except Exception as exc:
+            logger.error(event="bm25_score_failed", error=str(exc), session_id=session_id)
             return []
 
-        max_score = max(float(scores.max() if np is not None else max(scores)), 1e-6)
-        norm_scores = scores / max_score if np is not None else [score / max_score for score in scores]
+        norm_scores = self._normalize_scores(raw_scores)
+        idxs = self._topk_indices(norm_scores, top_k)
 
-        if np is not None:
-            idxs = np.argpartition(norm_scores, -top_k)[-top_k:]
-            idxs = idxs[np.argsort(norm_scores[idxs])[::-1]]
-        else:
-            idxs = sorted(range(len(norm_scores)), key=lambda i: norm_scores[i], reverse=True)[:top_k]
-
-        results: List[Dict] = []
-        weights = settings.BM25_MODALITY_WEIGHTS
+        results: List[Dict[str, Any]] = []
+        modality_weights: Dict[str, float] = getattr(settings, "BM25_MODALITY_WEIGHTS", {
+            "text": 1.0, "table": 1.1, "image": 0.9,
+            "audio": 1.0, "video": 1.0,
+        })
 
         for idx in idxs:
             if len(results) >= top_k:
                 break
 
-            doc  = self.documents[idx]
+            if idx >= len(self.documents):
+                continue
+
+            doc = self.documents[idx]
             meta = self._metadata(doc)
 
-            if session_id and meta.get("session_id") != session_id:
+            if not self._passes_filters(meta, session_id, filters):
                 continue
-
-            if self.modality_filter and meta.get("modality") != self.modality_filter:
-                continue
-
-            if filters:
-                if filters.get("modality") and meta.get("modality") != filters["modality"]:
-                    continue
-                if filters.get("language") and meta.get("language") != filters["language"]:
-                    continue
 
             text = getattr(doc, "text", "").strip()
             if not text:
                 continue
 
-            score = float(norm_scores[idx])
-            score *= weights.get(meta.get("modality", "text"), 1.0)
+            if _NP_AVAILABLE:
+                raw_score = float(norm_scores[idx])
+            else:
+                raw_score = float(norm_scores[idx])
 
-            if score < settings.BM25_MIN_SCORE:
+            modality_boost = modality_weights.get(meta.get("modality", "text"), 1.0)
+            final_score = raw_score * modality_boost
+
+            if final_score < settings.BM25_MIN_SCORE:
                 continue
 
             results.append({
-                "id":       f"bm25_{idx}",
-                "text":     text[:settings.RAG_DOC_MAX_CHARS],
-                "score":    round(score, 5),
+                "id": f"bm25_{idx}",
+                "text": text[:settings.RAG_DOC_MAX_CHARS],
+                "score": round(final_score, 5),
                 "metadata": meta,
             })
 
         logger.info(
             event="bm25_search_success",
+            query_len=len(query),
             results=len(results),
+            top_k=top_k,
             latency=round(time.time() - start, 3),
             session_id=session_id,
         )
 
         return results
 
+    # ASYNC SEARCH WRAPPER
+
+    async def async_search(
+        self,
+        query: str,
+        session_id: Optional[str] = None,
+        top_k: Optional[int] = None,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        return await asyncio.to_thread(self.search, query, session_id, top_k, filters)
+
+    # GDPR PURGE — REMOVE ALL DOCS BY SESSION OR USER
+
+    def purge_by_session(self, session_id: str) -> int:
+        before = len(self.documents)
+        filtered_docs = []
+        filtered_corpus = []
+        for doc, tokens in zip(self.documents, self.tokenized_corpus):
+            s = getattr(doc, "structure", {}) or {}
+            if s.get("session_id") != session_id:
+                filtered_docs.append(doc)
+                filtered_corpus.append(tokens)
+        self.documents = filtered_docs
+        self.tokenized_corpus = filtered_corpus
+        removed = before - len(self.documents)
+        if removed > 0:
+            self.bm25 = BM25Okapi(self.tokenized_corpus) if self.tokenized_corpus else None
+            self._save_index()
+            logger.info(
+                event="bm25_purge_session",
+                session_id=session_id,
+                removed=removed,
+            )
+        return removed
+
     # HEALTH CHECK
 
-    def health_check(self) -> Dict:
+    def health_check(self) -> Dict[str, Any]:
         return {
-            "ready":       self.bm25 is not None,
-            "doc_count":   len(self.documents),
-            "index_size":  _INDEX_FILE.stat().st_size if _INDEX_FILE.exists() else 0,
-            "index_path":  str(_INDEX_FILE),
+            "ready": self.bm25 is not None,
+            "doc_count": len(self.documents),
+            "index_exists": _INDEX_FILE.exists(),
+            "index_size_bytes": _INDEX_FILE.stat().st_size if _INDEX_FILE.exists() else 0,
+            "index_path": str(_INDEX_FILE),
             "modality_filter": self.modality_filter,
+            "bm25_available": _BM25_AVAILABLE,
+            "numpy_available": _NP_AVAILABLE,
+            "circuit_breaker": _PYBREAKER_AVAILABLE,
         }
 
     # CLEAR
 
     def clear(self) -> None:
-        self.documents        = []
+        self.documents = []
         self.tokenized_corpus = []
-        self.bm25             = None
-
+        self.bm25 = None
+        self._index_loaded = False
         if _INDEX_FILE.exists():
             try:
                 _INDEX_FILE.unlink()
                 logger.info(event="bm25_index_cleared")
-            except Exception as e:
-                logger.error(event="bm25_index_clear_failed", error=str(e))
+            except Exception as exc:
+                logger.error(event="bm25_index_clear_failed", error=str(exc))
 
 
-# ============================================================
-# TESTS - Phase 24 Upgrade
-# Run: pytest app/retrieval/bm25_retriever.py -v
-# ============================================================
-
-def test_hybrid_fusion_outperforms_dense_alone() -> None:
-    assert settings.HYBRID_WEIGHT_BM25 > 0
-
-
-def test_bm25_index_loaded_from_pkl() -> None:
-    retriever = BM25Retriever()
-    assert str(_INDEX_FILE).endswith("bm25_index.pkl")
-
-
-def test_reranker_reorders_results() -> None:
-    assert settings.RERANK_TOP_K > 0
-
-
-def test_metadata_filter_by_modality() -> None:
-    retriever = BM25Retriever()
-    retriever.set_modality_filter("text")
-    assert retriever.modality_filter == "text"
-
-
-def test_mmr_reduces_redundancy() -> None:
-    assert 0.0 <= settings.MMR_LAMBDA <= 1.0

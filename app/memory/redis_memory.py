@@ -1,49 +1,87 @@
+from __future__ import annotations
+
+import asyncio
 import hashlib
 import json
 import time
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+
 from app.core.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+try:
+    import pybreaker
+    _redis_breaker = pybreaker.CircuitBreaker(
+        fail_max=settings.CIRCUIT_BREAKER_MAX_FAILURES,
+        reset_timeout=settings.CIRCUIT_BREAKER_RESET_TIMEOUT,
+    )
+    _PYBREAKER_AVAILABLE = True
+except ImportError:
+    _PYBREAKER_AVAILABLE = False
 
-# IN-MEMORY FALLBACK STORE
+    class _DummyBreaker:
+        def __call__(self, fn):
+            return fn
+
+    _redis_breaker = _DummyBreaker()  # type: ignore[assignment]
+
+
+# VALID ROLES
+_VALID_ROLES = {"user", "assistant", "system"}
+
+# VALID MODALITIES
+_VALID_MODALITIES = {"text", "image", "audio", "video", "table", "document"}
+
+
+# IN-MEMORY LRU FALLBACK STORE
 
 class _InMemoryStore:
 
     def __init__(self, maxsize: int = 1000) -> None:
-        self._store:   OrderedDict = OrderedDict()
-        self._maxsize: int         = maxsize
-        self._cache: Dict[str, str] = {}
+        self._store: OrderedDict = OrderedDict()
+        self._maxsize: int = maxsize
+
+    def _evict(self) -> None:
+        while len(self._store) > self._maxsize:
+            self._store.popitem(last=False)
 
     def rpush(self, key: str, value: str) -> None:
         if key not in self._store:
             self._store[key] = []
         self._store[key].append(value)
         self._store.move_to_end(key)
-        if len(self._store) > self._maxsize:
-            self._store.popitem(last=False)
+        self._evict()
 
     def ltrim(self, key: str, start: int, end: int) -> None:
-        if key in self._store:
-            lst = self._store[key]
-            if end == -1:
-                self._store[key] = lst[start:]
-            else:
-                self._store[key] = lst[start:end + 1]
+        if key not in self._store:
+            return
+        lst = self._store[key]
+        if end == -1:
+            self._store[key] = lst[start:]
+        else:
+            self._store[key] = lst[start: end + 1]
 
     def lrange(self, key: str, start: int, end: int) -> List[str]:
         lst = self._store.get(key, [])
+        if not isinstance(lst, list):
+            return []
         if end == -1:
             return lst[start:]
-        return lst[start:end + 1]
-    
+        return lst[start: end + 1]
 
     def llen(self, key: str) -> int:
-        return len(self._store.get(key, []))
+        lst = self._store.get(key, [])
+        return len(lst) if isinstance(lst, list) else 0
 
     def delete(self, key: str) -> None:
         self._store.pop(key, None)
@@ -51,54 +89,65 @@ class _InMemoryStore:
     def setex(self, key: str, ttl: int, value: str) -> None:
         self._store[key] = value
         self._store.move_to_end(key)
-        if len(self._store) > self._maxsize:
-            self._store.popitem(last=False)
+        self._evict()
 
     def get(self, key: str) -> Optional[str]:
-        return self._store.get(key)
+        val = self._store.get(key)
+        if isinstance(val, str):
+            self._store.move_to_end(key)
+            return val
+        return None
+
+    def keys_with_prefix(self, prefix: str) -> List[str]:
+        return [k for k in self._store.keys() if str(k).startswith(prefix)]
+
+    def flush(self) -> None:
+        self._store.clear()
 
 
 class RedisMemory:
 
     def __init__(self) -> None:
-        self.client          = None
-        self._use_upstash    = False
-        self._fallback       = _InMemoryStore(maxsize=settings.LRU_CACHE_MAXSIZE)
-        self._redis_ok       = False
+        self.client = None
+        self._use_upstash: bool = False
+        self._redis_ok: bool = False
+        self._fallback = _InMemoryStore(maxsize=settings.LRU_CACHE_MAXSIZE)
 
-        self.max_messages    = settings.MAX_HISTORY_MESSAGES
-        self.ttl             = settings.REDIS_TTL_SECONDS
-        self.query_cache_ttl = settings.REDIS_QUERY_CACHE_TTL
-        self.embed_cache_ttl = settings.REDIS_EMBEDDING_CACHE_TTL
-        self.prefix          = settings.REDIS_KEY_PREFIX
+        self.max_messages: int = settings.MAX_HISTORY_MESSAGES
+        self.ttl: int = settings.REDIS_TTL_SECONDS
+        self.query_cache_ttl: int = settings.REDIS_QUERY_CACHE_TTL
+        self.embed_cache_ttl: int = settings.REDIS_EMBEDDING_CACHE_TTL
+        self.prefix: str = settings.REDIS_KEY_PREFIX
 
         self._connect()
 
     # CONNECTION
 
     def _connect(self) -> None:
-
-        # UPSTASH REST CLIENT (cloud priority)
+        # UPSTASH REST CLIENT — CLOUD PRIORITY
         if settings.REDIS_URL and settings.REDIS_TOKEN:
             try:
                 from upstash_redis import Redis as UpstashRedis
-                self.client       = UpstashRedis(
+                self.client = UpstashRedis(
                     url=settings.REDIS_URL,
                     token=settings.REDIS_TOKEN,
                 )
                 self._use_upstash = True
-                self._redis_ok    = True
-                logger.info(event="redis_upstash_connected", url=settings.REDIS_URL)
+                self._redis_ok = True
+                logger.info(
+                    event="redis_upstash_connected",
+                    url=settings.REDIS_URL[:40],
+                )
                 return
             except ImportError:
                 logger.warning(
                     event="upstash_redis_not_installed",
                     hint="pip install upstash-redis",
                 )
-            except Exception as e:
-                logger.warning(event="upstash_redis_failed", error=str(e))
+            except Exception as exc:
+                logger.warning(event="upstash_connect_failed", error=str(exc))
 
-        # STANDARD REDIS (local or remote socket)
+        # STANDARD REDIS — LOCAL OR REMOTE
         try:
             import redis as redis_lib
 
@@ -109,10 +158,10 @@ class RedisMemory:
                 decode_responses=True,
                 socket_timeout=settings.REDIS_TIMEOUT,
                 socket_connect_timeout=settings.REDIS_TIMEOUT,
-                max_connections=20,
+                max_connections=settings.REDIS_MAX_CONNECTIONS,
                 retry_on_timeout=True,
             )
-            self.client    = redis_lib.Redis(connection_pool=pool)
+            self.client = redis_lib.Redis(connection_pool=pool)
             self.client.ping()
             self._redis_ok = True
 
@@ -120,57 +169,82 @@ class RedisMemory:
                 event="redis_connected",
                 host=settings.REDIS_HOST,
                 port=settings.REDIS_PORT,
+                db=settings.REDIS_DB,
             )
 
-        except Exception as e:
-            self.client    = None
+        except Exception as exc:
+            self.client = None
             self._redis_ok = False
             logger.warning(
                 event="redis_unavailable_using_fallback",
-                error=str(e),
-                hint="Set REDIS_URL + REDIS_TOKEN for Upstash cloud Redis, or ensure local Redis is running",
+                error=str(exc),
+                hint="Set REDIS_URL + REDIS_TOKEN for Upstash, or ensure local Redis is running",
             )
 
-    # AVAILABILITY CHECK
+    # AVAILABILITY
 
     def _is_available(self) -> bool:
         return self._redis_ok and self.client is not None
 
-    # RETRY
+    # TENACITY RETRY WRAPPER
 
-    def _retry(self, fn, retries: int = 2):
-        for i in range(retries):
-            try:
-                return fn()
-            except Exception as e:
-                if i == retries - 1:
-                    self._redis_ok = False
-                    logger.error(event="redis_retry_exhausted", error=str(e))
-                    raise
-                logger.warning(event="redis_retry", attempt=i + 1, error=str(e))
-                time.sleep(0.2 * (i + 1))
+    @retry(
+        stop=stop_after_attempt(settings.RETRY_MAX_ATTEMPTS),
+        wait=wait_exponential(
+            min=settings.RETRY_WAIT_MIN_SEC,
+            max=settings.RETRY_WAIT_MAX_SEC,
+        ),
+        retry=retry_if_exception_type((ConnectionError, TimeoutError, OSError)),
+        reraise=True,
+    )
+    def _retry(self, fn):
+        def _do():
+            return fn()
+
+        if _PYBREAKER_AVAILABLE:
+            return _redis_breaker(_do)()
+        return _do()
 
     # HELPERS
 
     def _clean(self, text: str) -> str:
-        return " ".join(str(text or "").strip().split())
+        import unicodedata
+        text = unicodedata.normalize("NFC", str(text or ""))
+        return " ".join(text.strip().split())
 
     def _role(self, role: str) -> str:
-        role = str(role or "user").lower()
-        return role if role in {"user", "assistant", "system"} else "user"
+        role = str(role or "user").lower().strip()
+        return role if role in _VALID_ROLES else "user"
+
+    def _modality(self, modality: str) -> str:
+        m = str(modality or "text").lower().strip()
+        return m if m in _VALID_MODALITIES else "text"
 
     def _key(self, session_id: str) -> str:
         return f"{self.prefix}:{session_id}"
 
-    def _hash(self, msg: Dict) -> str:
-        base = f"{msg.get('role')}|{str(msg.get('content'))[:200]}"
+    def _hash_msg(self, msg: Dict) -> str:
+        base = f"{msg.get('role')}|{str(msg.get('content', ''))[:200]}"
         return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
-    def _valid_embedding(self, emb) -> bool:
+    def _valid_embedding(self, emb: Any) -> bool:
         return (
-            isinstance(emb, list) and
-            len(emb) in (settings.TEXT_EMBEDDING_DIM, settings.VISION_EMBEDDING_DIM)
+            isinstance(emb, list)
+            and len(emb) in (settings.TEXT_EMBEDDING_DIM, settings.VISION_EMBEDDING_DIM)
         )
+
+    # PIPELINE WRITE — RPUSH + LTRIM + EXPIRE
+
+    def _pipeline_write(self, key: str, payload: str) -> None:
+        def _do():
+            pipe = self.client.pipeline()
+            pipe.rpush(key, payload)
+            pipe.ltrim(key, -self.max_messages, -1)
+            if self.ttl:
+                pipe.expire(key, self.ttl)
+            pipe.execute()
+
+        self._retry(_do)
 
     # ADD MESSAGE
 
@@ -181,9 +255,9 @@ class RedisMemory:
         content: str,
         embedding: Optional[List[float]] = None,
         modality: str = "text",
-        extra: Optional[Dict] = None,
+        importance: float = 1.0,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> None:
-
         if not session_id or not content:
             return
 
@@ -192,159 +266,137 @@ class RedisMemory:
             return
 
         content = content[:settings.MAX_PROMPT_CHARS]
-        key     = self._key(session_id)
+        key = self._key(session_id)
 
-        message: Dict = {
-            "role":      self._role(role),
-            "content":   content,
+        message: Dict[str, Any] = {
+            "role": self._role(role),
+            "content": content,
             "timestamp": time.time(),
-            "modality":  modality,
+            "modality": self._modality(modality),
+            "importance": max(0.0, min(float(importance), 1.0)),
         }
 
         if self._valid_embedding(embedding):
             message["embedding"] = embedding
 
-        if isinstance(extra, dict):
+        if isinstance(extra, dict) and extra:
             message["extra"] = extra
 
-        payload = json.dumps(message)
+        payload = json.dumps(message, ensure_ascii=False)
 
         if self._is_available():
             try:
-                def _write():
-                    pipe = self.client.pipeline()
-                    pipe.rpush(key, payload)
-                    pipe.ltrim(key, -self.max_messages, -1)
-                    if self.ttl:
-                        pipe.expire(key, self.ttl)
-                    return pipe.execute()
-
-                self._retry(_write)
+                self._pipeline_write(key, payload)
                 return
-
-            except Exception as e:
+            except Exception as exc:
                 logger.warning(
                     event="redis_add_failed_using_fallback",
-                    error=str(e),
+                    error=str(exc),
                     session_id=session_id,
                 )
+                self._redis_ok = False
 
         # FALLBACK
         self._fallback.rpush(key, payload)
         self._fallback.ltrim(key, -self.max_messages, -1)
 
-    # APPEND ALIAS (used by memory_manager)
+    # APPEND ALIAS — USED BY MEMORY MANAGER
 
-    def append(self, session_id: str, message: Dict) -> None:
+    def append(self, session_id: str, message: Dict[str, Any]) -> None:
         self.add_message(
             session_id=session_id,
             role=message.get("role", "user"),
             content=message.get("content", ""),
             modality=message.get("modality", "text"),
+            importance=message.get("importance", 1.0),
         )
 
     # GET HISTORY
 
-    def get_history(self, session_id: str) -> List[Dict]:
+    def get_history(self, session_id: str) -> List[Dict[str, Any]]:
         key = self._key(session_id)
 
         if self._is_available():
             try:
-                data = self._retry(lambda: self.client.lrange(key, 0, -1))
+                def _do():
+                    return self.client.lrange(key, 0, -1)
+
+                data = self._retry(_do)
                 return self._parse_messages(data)
-            except Exception as e:
+            except Exception as exc:
                 logger.warning(
                     event="redis_fetch_failed_using_fallback",
-                    error=str(e),
+                    error=str(exc),
                     session_id=session_id,
                 )
+                self._redis_ok = False
 
         data = self._fallback.lrange(key, 0, -1)
         return self._parse_messages(data)
 
-    # GET ALIAS (used by memory_manager)
+    # GET ALIAS — USED BY MEMORY MANAGER
 
-    def get(self, session_id: str) -> List[Dict]:
+    def get(self, session_id: str) -> List[Dict[str, Any]]:
         return self.get_history(session_id)
 
-    # PARSE MESSAGES
+    # GET LAST K MESSAGES
 
-    def _parse_messages(self, data: List[str]) -> List[Dict]:
-        out:  List[Dict] = []
-        seen: set        = set()
+    def get_last_k(
+        self,
+        session_id: str,
+        k: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        k = k or settings.MEMORY_TOP_K
+        key = self._key(session_id)
+
+        if self._is_available():
+            try:
+                def _do():
+                    return self.client.lrange(key, -k, -1)
+
+                data = self._retry(_do)
+                return self._parse_messages(data)
+            except Exception as exc:
+                logger.warning(
+                    event="redis_get_last_k_fallback",
+                    error=str(exc),
+                    session_id=session_id,
+                )
+
+        data = self._fallback.lrange(key, -k, -1)
+        return self._parse_messages(data)
+
+    # PARSE MESSAGES — DEDUP + VALIDATE
+
+    def _parse_messages(self, data: List[Any]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        seen: set = set()
 
         for item in data:
             try:
+                if isinstance(item, bytes):
+                    item = item.decode("utf-8", errors="replace")
+
                 parsed = json.loads(item)
 
                 if not isinstance(parsed, dict):
                     continue
 
                 parsed["content"] = self._clean(parsed.get("content", ""))
-                h = self._hash(parsed)
+                if not parsed["content"]:
+                    continue
 
+                h = self._hash_msg(parsed)
                 if h in seen:
                     continue
 
                 seen.add(h)
                 out.append(parsed)
 
-            except Exception:
+            except (json.JSONDecodeError, Exception):
                 continue
 
         return out
-
-    # GET LAST K
-
-    def get_last_k(self, session_id: str, k: Optional[int] = None) -> List[Dict]:
-        key = self._key(session_id)
-        k   = k or settings.MEMORY_TOP_K
-
-        if self._is_available():
-            try:
-                data = self._retry(lambda: self.client.lrange(key, -k, -1))
-                return self._parse_messages(data)
-            except Exception:
-                pass
-
-        data = self._fallback.lrange(key, -k, -1)
-        return self._parse_messages(data)
-
-    # CLEAR MEMORY
-
-    def clear_memory(self, session_id: str) -> None:
-        key = self._key(session_id)
-
-        if self._is_available():
-            try:
-                self._retry(lambda: self.client.delete(key))
-            except Exception as e:
-                logger.warning(
-                    event="redis_clear_failed",
-                    error=str(e),
-                    session_id=session_id,
-                )
-
-        self._fallback.delete(key)
-
-    # DELETE ALIAS (used by memory_manager)
-
-    def delete(self, session_id: str) -> None:
-        self.clear_memory(session_id)
-
-    def purge_user(self, user_id: str) -> None:
-        if not user_id:
-            return
-        prefix = f"{self.prefix}:{user_id}:"
-        if self._is_available():
-            try:
-                for key in self.client.scan_iter(f"{prefix}*"):
-                    self.client.delete(key)
-            except Exception as exc:
-                logger.warning(event="redis_user_purge_failed", user_id=user_id, error=str(exc))
-        for key in list(self._fallback._store.keys()):
-            if str(key).startswith(prefix):
-                self._fallback.delete(key)
 
     # MEMORY SIZE
 
@@ -353,36 +405,131 @@ class RedisMemory:
 
         if self._is_available():
             try:
-                return self._retry(lambda: self.client.llen(key))
+                def _do():
+                    return self.client.llen(key)
+
+                return int(self._retry(_do))
             except Exception:
                 pass
 
         return self._fallback.llen(key)
 
-    # QUERY RESULT CACHE
+    # CLEAR MEMORY
 
-    def cache_set(self, cache_key: str, value: Any, ttl: Optional[int] = None) -> None:
-        ttl     = ttl or self.query_cache_ttl
-        payload = json.dumps(value)
+    def clear_memory(self, session_id: str) -> None:
+        key = self._key(session_id)
 
         if self._is_available():
             try:
-                self._retry(lambda: self.client.setex(cache_key, ttl, payload))
+                def _do():
+                    return self.client.delete(key)
+
+                self._retry(_do)
+            except Exception as exc:
+                logger.warning(
+                    event="redis_clear_failed",
+                    error=str(exc),
+                    session_id=session_id,
+                )
+
+        self._fallback.delete(key)
+
+        logger.debug(
+            event="redis_memory_cleared",
+            session_id=session_id,
+        )
+
+    # DELETE ALIAS — USED BY MEMORY MANAGER
+
+    def delete(self, session_id: str) -> None:
+        self.clear_memory(session_id)
+
+    # GDPR PURGE — ALL DATA FOR USER_ID PREFIX
+
+    def purge_user(self, user_id: str) -> None:
+        if not user_id:
+            return
+
+        prefix = f"{self.prefix}:{user_id}:"
+        purged = 0
+
+        if self._is_available():
+            try:
+                def _scan():
+                    return list(self.client.scan_iter(f"{prefix}*"))
+
+                keys = self._retry(_scan)
+                for key in keys:
+                    try:
+                        def _del(k=key):
+                            return self.client.delete(k)
+                        self._retry(_del)
+                        purged += 1
+                    except Exception as exc:
+                        logger.warning(
+                            event="redis_purge_key_failed",
+                            key=str(key),
+                            error=str(exc),
+                        )
+            except Exception as exc:
+                logger.warning(
+                    event="redis_purge_scan_failed",
+                    user_id=user_id,
+                    error=str(exc),
+                )
+
+        # FALLBACK PURGE
+        fallback_keys = self._fallback.keys_with_prefix(prefix)
+        for key in fallback_keys:
+            self._fallback.delete(key)
+            purged += 1
+
+        logger.info(
+            event="redis_user_purged",
+            user_id=user_id,
+            keys_deleted=purged,
+        )
+
+    # QUERY RESULT CACHE
+
+    def cache_set(
+        self,
+        cache_key: str,
+        value: Any,
+        ttl: Optional[int] = None,
+    ) -> None:
+        ttl = ttl or self.query_cache_ttl
+
+        try:
+            payload = json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            logger.warning(event="cache_serialize_failed", error=str(exc))
+            return
+
+        if self._is_available():
+            try:
+                def _do():
+                    return self.client.setex(cache_key, ttl, payload)
+
+                self._retry(_do)
                 return
-            except Exception as e:
-                logger.warning(event="redis_cache_set_failed", error=str(e))
+            except Exception as exc:
+                logger.warning(event="redis_cache_set_failed", error=str(exc))
 
         self._fallback.setex(cache_key, ttl, payload)
 
     def cache_get(self, cache_key: str) -> Optional[Any]:
         if self._is_available():
             try:
-                raw = self._retry(lambda: self.client.get(cache_key))
+                def _do():
+                    return self.client.get(cache_key)
+
+                raw = self._retry(_do)
                 if raw:
                     return json.loads(raw)
                 return None
-            except Exception as e:
-                logger.warning(event="redis_cache_get_failed", error=str(e))
+            except Exception as exc:
+                logger.warning(event="redis_cache_get_failed", error=str(exc))
 
         raw = self._fallback.get(cache_key)
         if raw:
@@ -392,43 +539,73 @@ class RedisMemory:
                 return None
         return None
 
+    def cache_delete(self, cache_key: str) -> None:
+        if self._is_available():
+            try:
+                def _do():
+                    return self.client.delete(cache_key)
+                self._retry(_do)
+            except Exception as exc:
+                logger.warning(event="redis_cache_delete_failed", error=str(exc))
+        self._fallback.delete(cache_key)
+
+    # EMBEDDING CACHE
+
+    def embedding_cache_set(
+        self,
+        text_hash: str,
+        embedding: List[float],
+    ) -> None:
+        if not self._valid_embedding(embedding):
+            return
+        key = f"{self.prefix}:emb:{text_hash}"
+        self.cache_set(key, embedding, ttl=self.embed_cache_ttl)
+
+    def embedding_cache_get(self, text_hash: str) -> Optional[List[float]]:
+        key = f"{self.prefix}:emb:{text_hash}"
+        result = self.cache_get(key)
+        if isinstance(result, list) and self._valid_embedding(result):
+            return result
+        return None
+
+    # ASYNC WRAPPERS
+
+    async def async_add_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        modality: str = "text",
+        importance: float = 1.0,
+    ) -> None:
+        await asyncio.to_thread(
+            self.add_message,
+            session_id, role, content, None, modality, importance,
+        )
+
+    async def async_get_history(self, session_id: str) -> List[Dict[str, Any]]:
+        return await asyncio.to_thread(self.get_history, session_id)
+
+    async def async_clear_memory(self, session_id: str) -> None:
+        await asyncio.to_thread(self.clear_memory, session_id)
+
+    async def async_purge_user(self, user_id: str) -> None:
+        await asyncio.to_thread(self.purge_user, user_id)
+
     # HEALTH CHECK
 
-    def health_check(self) -> Dict:
+    def health_check(self) -> Dict[str, Any]:
         return {
-            "redis_ok":        self._redis_ok,
-            "use_upstash":     self._use_upstash,
-            "client_type":     "upstash" if self._use_upstash else ("redis" if self._redis_ok else "fallback"),
+            "redis_ok": self._redis_ok,
+            "use_upstash": self._use_upstash,
+            "client_type": (
+                "upstash" if self._use_upstash
+                else ("redis" if self._redis_ok else "fallback")
+            ),
             "fallback_active": not self._redis_ok,
+            "fallback_size": len(self._fallback._store),
+            "circuit_breaker": _PYBREAKER_AVAILABLE,
+            "max_messages": self.max_messages,
+            "ttl_seconds": self.ttl,
         }
 
-
-# ============================================================
-# TESTS - Phase 24 Upgrade
-# Run: pytest app/memory/redis_memory.py -v
-# ============================================================
-
-def test_memory_manager_fuses_redis_and_mongo() -> None:
-    memory = RedisMemory()
-    memory.append("s1", {"role": "user", "content": "hello"})
-    assert memory.get("s1")
-
-
-def test_redis_ttl_expires_old_turns() -> None:
-    memory = RedisMemory()
-    assert memory.ttl == settings.REDIS_TTL_SECONDS
-
-
-def test_mongo_persistent_memory_retrieved() -> None:
-    assert settings.MONGO_DB_NAME
-
-
-def test_summarizer_compresses_long_memory() -> None:
-    assert settings.MEMORY_SUMMARY_MAX_CHARS > 0
-
-
-def test_gdpr_purge_all_memory() -> None:
-    memory = RedisMemory()
-    memory._fallback.rpush(f"{memory.prefix}:u1:session", "{}")
-    memory.purge_user("u1")
-    assert not memory._fallback._store

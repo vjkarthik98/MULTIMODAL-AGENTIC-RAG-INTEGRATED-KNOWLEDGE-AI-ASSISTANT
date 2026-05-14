@@ -1,34 +1,81 @@
+# APP/MAIN.PY — PHASE 24 UPGRADE
+# FASTAPI APPLICATION ENTRY POINT — WIRES EVERYTHING TOGETHER
+# SECTION 4.6 — LIFESPAN, MIDDLEWARE, OTEL, PROMETHEUS, CORS, RATE LIMIT
+
+from __future__ import annotations
+
 import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
+from typing import Any, Dict
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
-from app.api.api_routes import router as rag_router
 from app.core.config import settings
-from app.core.infra_registry import infra
 from app.utils.logger import get_logger, bind_request_context
 
 logger = get_logger(__name__)
 
-# CONCURRENCY SEMAPHORE
+# CONCURRENCY SEMAPHORE — SECTION 2.1
 semaphore = asyncio.Semaphore(settings.MAX_PARALLEL_REQUESTS)
 
 
-# LIFESPAN
+# PROMETHEUS SETUP — SECTION 6
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+def _setup_prometheus() -> None:
+    if not settings.PROMETHEUS_ENABLED:
+        return
+    try:
+        from prometheus_client import start_http_server
+        start_http_server(settings.PROMETHEUS_PORT)
+        logger.info(
+            event="prometheus_started",
+            port=settings.PROMETHEUS_PORT,
+        )
+    except Exception as e:
+        logger.warning(event="prometheus_start_failed", error=str(e))
 
-    startup_start = time.time()
 
-    logger.info(event="startup_begin", env=settings.ENV, version=settings.APP_VERSION)
+# OPENTELEMETRY SETUP — SECTION 2.1
 
-    # QDRANT INIT
+def _setup_otel() -> None:
+    if not settings.OTEL_ENABLED:
+        return
+    try:
+        from opentelemetry import trace
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
+
+        resource = Resource.create({"service.name": settings.OTEL_SERVICE_NAME})
+        sampler  = TraceIdRatioBased(settings.OTEL_SAMPLING_RATIO)
+        provider = TracerProvider(resource=resource, sampler=sampler)
+
+        exporter  = OTLPSpanExporter(endpoint=settings.OTEL_EXPORTER_OTLP_ENDPOINT)
+        processor = BatchSpanProcessor(exporter)
+        provider.add_span_processor(processor)
+
+        trace.set_tracer_provider(provider)
+
+        logger.info(
+            event="otel_initialized",
+            endpoint=settings.OTEL_EXPORTER_OTLP_ENDPOINT,
+            service=settings.OTEL_SERVICE_NAME,
+            sampling_ratio=settings.OTEL_SAMPLING_RATIO,
+        )
+    except Exception as e:
+        logger.warning(event="otel_init_failed", error=str(e))
+
+
+# QDRANT INIT
+
+def _init_qdrant() -> None:
     try:
         from scripts.init_qdrant import initialize_qdrant
         initialize_qdrant()
@@ -36,14 +83,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(event="qdrant_init_failed", error=str(e))
 
-    # INFRA WARMUP (Qdrant + BM25 + Mongo)
+
+# INFRA WARMUP
+
+async def _warmup_infra() -> None:
     try:
+        from app.core.infra_registry import infra
         await infra.warmup()
         logger.info(event="infra_warmup_complete")
     except Exception as e:
         logger.warning(event="infra_warmup_failed", error=str(e))
 
-    # EMBEDDER WARMUP (minimum required for query path)
+
+# MODEL WARMUP — EMBEDDER MINIMUM REQUIRED FOR QUERY PATH
+
+def _warmup_embedder() -> None:
     try:
         from app.core.model_loader import model_loader
         model_loader.get_embedder()
@@ -51,29 +105,103 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(event="embedder_warmup_failed", error=str(e))
 
+
+# AUDIT LOG SETUP — SECTION 5
+
+def _setup_audit_log() -> None:
+    try:
+        settings.AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if not settings.AUDIT_LOG_PATH.exists():
+            settings.AUDIT_LOG_PATH.touch()
+        logger.info(event="audit_log_ready", path=str(settings.AUDIT_LOG_PATH))
+    except Exception as e:
+        logger.warning(event="audit_log_setup_failed", error=str(e))
+
+
+# TEMP DIR CLEANUP ON STARTUP — SECTION 5
+
+def _cleanup_temp_dirs() -> None:
+    try:
+        import shutil
+        for temp_dir in (settings.TEMP_DIR, settings.VIDEO_FRAMES_DIR):
+            if temp_dir.exists():
+                for item in temp_dir.iterdir():
+                    try:
+                        if item.is_file():
+                            item.unlink()
+                        elif item.is_dir():
+                            shutil.rmtree(item, ignore_errors=True)
+                    except Exception:
+                        pass
+        logger.info(event="temp_dirs_cleaned")
+    except Exception as e:
+        logger.warning(event="temp_dir_cleanup_failed", error=str(e))
+
+
+# LIFESPAN — SECTION 4.6
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+
+    startup_start = time.time()
+
+    logger.info(
+        event="startup_begin",
+        env=settings.ENV,
+        version=settings.APP_VERSION,
+        app=settings.APP_NAME,
+    )
+
+    # CLEANUP LEFTOVER TEMP FILES FROM PREVIOUS RUN — SECTION 5
+    _cleanup_temp_dirs()
+
+    # AUDIT LOG — SECTION 5
+    _setup_audit_log()
+
+    # OPENTELEMETRY — SECTION 2.1
+    _setup_otel()
+
+    # PROMETHEUS — SECTION 6
+    _setup_prometheus()
+
+    # QDRANT COLLECTIONS INIT
+    _init_qdrant()
+
+    # INFRA WARMUP (Qdrant + BM25 + Redis + Mongo)
+    await _warmup_infra()
+
+    # EMBEDDER WARMUP — MINIMUM FOR QUERY PATH
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _warmup_embedder)
+
     startup_latency = round(time.time() - startup_start, 2)
-    logger.info(event="app_ready", startup_latency=startup_latency)
+    logger.info(
+        event="app_ready",
+        startup_latency=startup_latency,
+        version=settings.APP_VERSION,
+    )
 
     yield
 
-    # SHUTDOWN
+    # SHUTDOWN — SECTION 5 TEMP FILE CLEANUP
     logger.info(event="shutdown_begin")
+    _cleanup_temp_dirs()
     logger.info(event="shutdown_complete")
 
 
-# APP
+# FASTAPI APP
 
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     description=settings.APP_DESCRIPTION,
     lifespan=lifespan,
-    docs_url="/docs"    if settings.ENV != "production" else None,
-    redoc_url="/redoc"  if settings.ENV != "production" else None,
+    docs_url="/docs"   if settings.ENV != "production" else None,
+    redoc_url="/redoc" if settings.ENV != "production" else None,
 )
 
 
-# CORS
+# CORS MIDDLEWARE — SECTION 5
 
 app.add_middleware(
     CORSMiddleware,
@@ -84,59 +212,78 @@ app.add_middleware(
 )
 
 
-# GZIP
+# GZIP MIDDLEWARE
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
-# GLOBAL ERROR HANDLER
+# GLOBAL EXCEPTION HANDLER
 
 @app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
     logger.error(
         event="global_error",
-        path=request.url.path,
+        path=str(request.url.path),
+        method=request.method,
         error=str(exc),
         error_type=type(exc).__name__,
+        request_id=request_id,
     )
     return JSONResponse(
         status_code=500,
         content={
-            "status":  "error",
-            "message": "Internal server error",
+            "status":     "error",
+            "message":    "Internal server error",
+            "request_id": request_id,
         },
     )
 
 
-# REQUEST LOGGER MIDDLEWARE
+# REQUEST LOGGER + CORRELATION ID MIDDLEWARE — SECTION 2.1
 
 @app.middleware("http")
-async def request_logger(request: Request, call_next):
+async def request_logger(request: Request, call_next) -> Response:
 
     start      = time.time()
-    request_id = str(uuid.uuid4())
+    request_id = request.headers.get(
+        settings.CORRELATION_ID_HEADER,
+        str(uuid.uuid4()),
+    )
+    request.state.request_id = request_id
 
-    # BIND CONTEXT FOR STRUCTURED LOGGING
+    # BIND STRUCTURED LOG CONTEXT
     bind_request_context(request_id=request_id)
 
-    # CLIENT IP (proxy-aware)
+    # CLIENT IP — PROXY AWARE
     forwarded_for = request.headers.get("X-Forwarded-For")
-    client_ip     = forwarded_for.split(",")[0].strip() if forwarded_for else (
-        request.client.host if request.client else "unknown"
+    client_ip     = (
+        forwarded_for.split(",")[0].strip()
+        if forwarded_for
+        else (request.client.host if request.client else "unknown")
     )
+
+    # AUDIT LOGGING — SECTION 5
+    if settings.AUDIT_LOG_ENABLED:
+        _write_audit_log(
+            request_id=request_id,
+            method=request.method,
+            path=str(request.url.path),
+            client_ip=client_ip,
+        )
 
     try:
         response = await call_next(request)
         latency  = round(time.time() - start, 3)
 
         log_kwargs = dict(
-            event=  "http_request",
-            id=     request_id,
-            method= request.method,
-            path=   request.url.path,
-            status= response.status_code,
-            latency=latency,
-            ip=     client_ip,
+            event=   "http_request",
+            id=      request_id,
+            method=  request.method,
+            path=    str(request.url.path),
+            status=  response.status_code,
+            latency= latency,
+            ip=      client_ip,
         )
 
         if latency > settings.SLOW_REQUEST_THRESHOLD:
@@ -144,52 +291,134 @@ async def request_logger(request: Request, call_next):
         else:
             logger.info(**log_kwargs)
 
-        response.headers["X-Request-ID"] = request_id
+        response.headers[settings.CORRELATION_ID_HEADER] = request_id
+        response.headers["X-Request-ID"]                 = request_id
         return response
 
     except Exception as e:
         logger.error(
             event="request_failed",
             id=    request_id,
-            path=  request.url.path,
+            path=  str(request.url.path),
             error= str(e),
         )
         raise
 
 
-# CONCURRENCY LIMIT MIDDLEWARE
+# CONCURRENCY LIMIT + REQUEST TIMEOUT MIDDLEWARE — SECTION 2.1
 
 @app.middleware("http")
-async def limit_concurrency(request: Request, call_next):
-    # Wrap the request handling in a helper function
-    async def _handle_request():
+async def limit_concurrency(request: Request, call_next) -> Response:
+
+    async def _handle() -> Response:
         async with semaphore:
             return await call_next(request)
 
     try:
-        # Use the older, backward-compatible wait_for method
-        return await asyncio.wait_for(_handle_request(), timeout=settings.REQUEST_TIMEOUT_SEC)
+        return await asyncio.wait_for(
+            _handle(),
+            timeout=settings.REQUEST_TIMEOUT_SEC,
+        )
     except asyncio.TimeoutError:
+        request_id = getattr(request.state, "request_id", "unknown")
         logger.warning(
             event="request_timeout",
-            path=request.url.path,
+            path=str(request.url.path),
             timeout=settings.REQUEST_TIMEOUT_SEC,
+            request_id=request_id,
         )
         return JSONResponse(
             status_code=503,
-            content={"status": "error", "message": "Server busy, please retry"},
+            content={
+                "status":     "error",
+                "message":    "Server busy — please retry",
+                "request_id": request_id,
+            },
         )
+
+
+# RATE LIMIT MIDDLEWARE — SECTION 5
+
+_rate_limit_store: Dict[str, Any] = {}
+
+
+@app.middleware("http")
+async def rate_limit(request: Request, call_next) -> Response:
+    if not settings.RATE_LIMIT_RPM:
+        return await call_next(request)
+
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    client_ip     = (
+        forwarded_for.split(",")[0].strip()
+        if forwarded_for
+        else (request.client.host if request.client else "unknown")
+    )
+
+    now    = time.time()
+    window = 60.0
+    key    = f"ratelimit:{client_ip}"
+
+    entry = _rate_limit_store.get(key, {"count": 0, "window_start": now})
+
+    if now - entry["window_start"] > window:
+        entry = {"count": 0, "window_start": now}
+
+    entry["count"] += 1
+    _rate_limit_store[key] = entry
+
+    if entry["count"] > settings.RATE_LIMIT_RPM:
+        request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+        logger.warning(
+            event="rate_limit_exceeded",
+            client_ip=client_ip,
+            count=entry["count"],
+            limit=settings.RATE_LIMIT_RPM,
+        )
+        return JSONResponse(
+            status_code=429,
+            content={
+                "status":     "error",
+                "message":    "Rate limit exceeded — please slow down",
+                "request_id": request_id,
+            },
+        )
+
+    return await call_next(request)
+
+
+# AUDIT LOG WRITER — SECTION 5
+
+def _write_audit_log(
+    request_id: str,
+    method:     str,
+    path:       str,
+    client_ip:  str,
+) -> None:
+    try:
+        import json
+        entry = json.dumps({
+            "request_id": request_id,
+            "method":     method,
+            "path":       path,
+            "client_ip":  client_ip,
+            "timestamp":  time.time(),
+        })
+        with open(settings.AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(entry + "\n")
+    except Exception as e:
+        logger.warning(event="audit_log_write_failed", error=str(e))
 
 
 # ROUTES
 
+from app.api.api_routes import router as rag_router
 app.include_router(rag_router, prefix="/rag", tags=["RAG"])
 
 
 # ROOT
 
 @app.get("/", tags=["System"])
-def root():
+def root() -> Dict[str, Any]:
     return {
         "message": settings.APP_NAME,
         "version": settings.APP_VERSION,
@@ -198,27 +427,29 @@ def root():
     }
 
 
-# HEALTH
+# HEALTH — SECTION 6
 
 @app.get("/health", tags=["System"])
-def health():
+def health() -> Dict[str, Any]:
     return {
         "status":  "ok",
         "service": settings.APP_NAME,
         "version": settings.APP_VERSION,
+        "env":     settings.ENV,
     }
 
 
-# READINESS
+# READINESS — SECTION 6
 
 @app.get("/ready", tags=["System"])
-def readiness():
+def readiness() -> Dict[str, Any]:
     try:
         from app.core.model_loader import model_loader
-        models = model_loader.health_check()
-        infra_status = infra.health_check()
+        from app.core.infra_registry import infra
 
-        all_ready = models.get("embedder", False)
+        models       = model_loader.health_check()
+        infra_status = infra.health_check()
+        all_ready    = models.get("embedder", False)
 
         return {
             "status": "ready" if all_ready else "degraded",
@@ -234,19 +465,113 @@ def readiness():
         }
 
 
-# METRICS STUB
+# METRICS — SECTION 6
 
 @app.get("/metrics", tags=["System"])
-def metrics():
+def metrics() -> Dict[str, Any]:
     if not settings.PROMETHEUS_ENABLED:
-        return {"status": "disabled", "message": "Set PROMETHEUS_ENABLED=true to enable metrics"}
+        return {
+            "status":  "disabled",
+            "message": "Set PROMETHEUS_ENABLED=true to enable metrics",
+        }
 
     try:
         from app.core.model_loader import model_loader
+        from app.core.infra_registry import infra
+
         return {
-            "status":  "ok",
-            "models":  model_loader.health_check(),
-            "infra":   infra.health_check(),
+            "status": "ok",
+            "models": model_loader.health_check(),
+            "infra":  infra.health_check(),
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+# GDPR PURGE ENDPOINT — SECTION 5
+
+@app.delete("/gdpr/purge/{user_id}", tags=["Compliance"])
+async def gdpr_purge(user_id: str, request: Request) -> Dict[str, Any]:
+    if not user_id or len(user_id.strip()) < 3:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "message": "Invalid user_id"},
+        )
+
+    request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+
+    logger.info(
+        event="gdpr_purge_requested",
+        user_id=user_id,
+        request_id=request_id,
+    )
+
+    try:
+        from app.memory.memory_manager import MemoryManager
+        mgr    = MemoryManager()
+        result = await mgr.gdpr_purge_async(user_id)
+
+        # QDRANT PURGE — SECTION 4.4
+        try:
+            from app.core.infra_registry import infra
+            vs = infra.get_vector_store()
+            if vs and hasattr(vs, "delete_by_session"):
+                vs.delete_by_session(user_id)
+                result["qdrant"] = True
+        except Exception as e:
+            result["qdrant"] = False
+            result.setdefault("errors", []).append(f"qdrant: {e}")
+
+        return {
+            "status":     "ok",
+            "result":     result,
+            "request_id": request_id,
+        }
+
+    except Exception as e:
+        logger.error(
+            event="gdpr_purge_failed",
+            user_id=user_id,
+            error=str(e),
+            request_id=request_id,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status":     "error",
+                "message":    "GDPR purge failed",
+                "request_id": request_id,
+            },
+        )
+
+
+# INFRA HEALTH — SECTION 6
+
+@app.get("/infra/health", tags=["System"])
+def infra_health() -> Dict[str, Any]:
+    try:
+        from app.core.infra_registry import infra
+        return {
+            "status": "ok",
+            "infra":  infra.health_check(),
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+# TOOLS LIST — SECTION 4.9
+
+@app.get("/tools", tags=["Agents"])
+def list_tools() -> Dict[str, Any]:
+    try:
+        from app.agents.tool_registry import ToolRegistry
+        registry = ToolRegistry()
+        return {
+            "status": "ok",
+            "tools":  registry.list_tools(),
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": str(e)},
+        )

@@ -1,156 +1,351 @@
+import asyncio
 import hashlib
 import re
 import time
 import unicodedata
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+import structlog
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+from prometheus_client import Counter, Histogram
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
-from app.utils.logger import get_logger
 
-logger = get_logger(__name__)
+logger = structlog.get_logger(__name__)
+tracer = trace.get_tracer(__name__)
+
+# PROMETHEUS METRICS
+_decompose_duration = Histogram(
+    "query_decomposer_duration_seconds",
+    "Query decomposer duration",
+    ["status"],
+)
+_decompose_errors = Counter(
+    "query_decomposer_errors_total",
+    "Query decomposer errors by type",
+    ["error_type"],
+)
+_subquery_count = Histogram(
+    "query_decomposer_subquery_count",
+    "Number of subqueries produced per decomposition",
+)
+
+# SEMAPHORE
+_semaphore = asyncio.Semaphore(5)
+
+# QUERY TYPE LABELS
+QUERY_TYPE_FACTUAL      = "factual"
+QUERY_TYPE_COMPARATIVE  = "comparative"
+QUERY_TYPE_TEMPORAL     = "temporal"
+QUERY_TYPE_AGGREGATION  = "aggregation"
+QUERY_TYPE_MULTIHOP     = "multihop"
+QUERY_TYPE_SIMPLE       = "simple"
+
+# COMPARATIVE KEYWORDS
+_COMPARATIVE_KEYWORDS = {
+    "compare", "difference", "vs", "versus", "contrast",
+    "better", "worse", "pros", "cons", "advantages", "disadvantages",
+    "similar", "unlike", "whereas",
+}
+
+# TEMPORAL KEYWORDS
+_TEMPORAL_KEYWORDS = {
+    "when", "before", "after", "during", "since", "until",
+    "latest", "recent", "current", "today", "yesterday",
+    "history", "timeline", "trend", "evolution",
+}
+
+# AGGREGATION KEYWORDS
+_AGGREGATION_KEYWORDS = {
+    "how many", "count", "total", "sum", "average", "list all",
+    "enumerate", "all the", "every", "each",
+}
+
+# MULTIHOP INDICATORS
+_MULTIHOP_KEYWORDS = {
+    "and then", "subsequently", "after which", "as a result",
+    "therefore", "because of", "due to", "leading to",
+}
+
+
+# SHA-256 HASH FOR DEDUP
+
+def _hash(text: str) -> str:
+    return hashlib.sha256(text.lower().strip().encode("utf-8")).hexdigest()
+
+
+# NORMALIZE QUERY
+
+def _normalize(q: str) -> str:
+    q = unicodedata.normalize("NFC", str(q or ""))
+    return " ".join(q.strip().split())
+
+
+# QUERY TYPE DETECTION
+
+def detect_query_type(query: str) -> str:
+    q      = query.lower()
+    tokens = set(q.split())
+
+    if bool(tokens & _COMPARATIVE_KEYWORDS):
+        return QUERY_TYPE_COMPARATIVE
+
+    if bool(tokens & _TEMPORAL_KEYWORDS):
+        return QUERY_TYPE_TEMPORAL
+
+    if any(kw in q for kw in _AGGREGATION_KEYWORDS):
+        return QUERY_TYPE_AGGREGATION
+
+    if any(kw in q for kw in _MULTIHOP_KEYWORDS):
+        return QUERY_TYPE_MULTIHOP
+
+    if query.count("?") > 1:
+        return QUERY_TYPE_MULTIHOP
+
+    word_count = len(q.split())
+    if word_count > settings.DECOMPOSITION_MIN_WORDS:
+        if any(k in q for k in settings.DECOMPOSITION_KEYWORDS):
+            return QUERY_TYPE_MULTIHOP
+
+    return QUERY_TYPE_FACTUAL
+
+
+# COMPLEXITY CHECK
+
+def _is_complex(query: str) -> bool:
+    ql    = query.lower()
+    words = ql.split()
+
+    if len(words) > settings.DECOMPOSITION_MIN_WORDS:
+        return True
+
+    if any(k in ql for k in settings.DECOMPOSITION_KEYWORDS):
+        return True
+
+    if query.count("?") > 1:
+        return True
+
+    query_type = detect_query_type(query)
+    if query_type in (
+        QUERY_TYPE_COMPARATIVE,
+        QUERY_TYPE_MULTIHOP,
+        QUERY_TYPE_AGGREGATION,
+    ):
+        return True
+
+    return False
+
+
+# SUBQUERY CONFIDENCE SCORING
+
+def _confidence(query: str) -> float:
+    words = query.split()
+    n     = len(words)
+
+    if n < 4:
+        return 0.2
+
+    if n < 6:
+        return 0.5
+
+    if query.endswith("?"):
+        return min(0.6 + (n / 20.0), 1.0)
+
+    return min(0.5 + (n / 20.0), 1.0)
+
+
+# PROMPT BUILDER — QUERY-TYPE AWARE
+
+def _build_prompt(query: str, query_type: str, max_subqueries: int) -> str:
+
+    type_hint = {
+        QUERY_TYPE_COMPARATIVE: (
+            "This is a COMPARATIVE query. "
+            "Create separate queries for each entity being compared."
+        ),
+        QUERY_TYPE_TEMPORAL: (
+            "This is a TEMPORAL query. "
+            "Create queries for each time period or event sequence."
+        ),
+        QUERY_TYPE_AGGREGATION: (
+            "This is an AGGREGATION query. "
+            "Create queries that retrieve the individual facts needed."
+        ),
+        QUERY_TYPE_MULTIHOP: (
+            "This is a MULTI-HOP query. "
+            "Create sequential queries where each builds on the previous."
+        ),
+        QUERY_TYPE_FACTUAL: (
+            "This is a FACTUAL query. "
+            "Create focused sub-queries targeting different aspects."
+        ),
+    }.get(query_type, "")
+
+    instruction = (
+        f"{type_hint}\n"
+        f"Break into {max_subqueries} independent retrieval queries.\n"
+        "Rules:\n"
+        "- Each query must be self-contained and specific\n"
+        "- No explanations — queries only\n"
+        "- End each with a question mark\n\n"
+    )
+
+    format_block = "\n".join(f"{i + 1}. <query>" for i in range(max_subqueries)) + "\n\n"
+
+    max_chars  = settings.MAX_PROMPT_CHARS
+    body_limit = max_chars - len(instruction) - len(format_block) - 50
+    query_trunc = query[:max(body_limit, 0)]
+
+    return f"{instruction}{format_block}Query:\n{query_trunc}"
+
+
+# PARSE LLM RESPONSE INTO SUBQUERY LIST
+
+def _parse(text: str) -> List[str]:
+    if not text:
+        return []
+
+    lines: List[str] = []
+
+    for line in text.split("\n"):
+        line = line.strip()
+        line = re.sub(r"^\d+[\.\)]\s*", "", line)
+        line = re.sub(r"^[-•]\s*",       "", line)
+        line = line.strip()
+
+        if len(line) < 5:
+            continue
+
+        if not line.endswith("?"):
+            line += "?"
+
+        lines.append(line)
+
+    return lines
+
+
+# FILTER SUBQUERIES — DEDUP + CONFIDENCE THRESHOLD
+
+def _filter(
+    queries: List[str],
+    min_confidence: float,
+    max_subqueries: int,
+) -> List[str]:
+    seen: set        = set()
+    out:  List[str]  = []
+
+    for q in queries:
+        norm = q.lower().strip()
+
+        if len(norm.split()) < 4:
+            continue
+
+        conf = _confidence(q)
+        if conf < min_confidence:
+            continue
+
+        h = _hash(norm)
+        if h in seen:
+            continue
+
+        seen.add(h)
+        out.append(q.strip())
+
+    return out[:max_subqueries]
+
+
+# RULE-BASED FALLBACK — NO LLM NEEDED
+
+def _rule_based_fallback(query: str, max_subqueries: int) -> List[str]:
+    # SPLIT ON CONJUNCTIONS
+    pattern = r"\band\b|\bthen\b|\balso\b|\bbut also\b|\bas well as\b|\bin addition to\b"
+    parts   = re.split(pattern, query, flags=re.IGNORECASE)
+    parts   = [p.strip() for p in parts if len(p.strip()) > 5]
+
+    if len(parts) > 1:
+        result = []
+        for p in parts[:max_subqueries]:
+            if not p.endswith("?"):
+                p += "?"
+            result.append(p)
+        return result
+
+    # COMPARATIVE SPLIT
+    for kw in ("vs", "versus", "compared to", "difference between"):
+        if kw in query.lower():
+            idx   = query.lower().find(kw)
+            left  = query[:idx].strip()
+            right = query[idx + len(kw):].strip()
+            subs  = []
+            if left:
+                subs.append(f"What is {left}?")
+            if right:
+                subs.append(f"What is {right}?")
+            subs.append(f"What are the differences between {left} and {right}?")
+            return subs[:max_subqueries]
+
+    return [query if query.endswith("?") else query + "?"]
+
+
+# DEDUPLICATE AGAINST ORIGINAL QUERY
+
+def _dedup_against_original(
+    subqueries: List[str],
+    original: str,
+) -> List[str]:
+    orig_hash = _hash(original)
+    return [
+        q for q in subqueries
+        if _hash(q) != orig_hash
+    ]
 
 
 class QueryDecomposer:
 
-    def __init__(self, llm) -> None:
+    def __init__(self, llm: Any) -> None:
         self.llm            = llm
         self.max_subqueries = settings.MAX_SUBQUERIES
         self.min_confidence = settings.DECOMPOSITION_CONFIDENCE_THRESHOLD
 
-    # HASH
+    # LLM CALL WITH RETRY
 
-    def _hash(self, text: str) -> str:
-        return hashlib.sha256(text.lower().strip().encode("utf-8")).hexdigest()
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=4),
+        reraise=False,
+    )
+    def _call_llm(self, prompt: str, session_id: str) -> Optional[str]:
+        try:
+            t_start  = time.time()
+            response = self.llm.generate(
+                prompt,
+                max_tokens=settings.SUBQUERY_MAX_TOKENS,
+                temperature=0.0,
+                session_id=session_id,
+            )
+            elapsed = time.time() - t_start
 
-    # NORMALIZE
+            if elapsed > settings.MODEL_TIMEOUT_SEC:
+                logger.warning(
+                    "decomposer_llm_timeout",
+                    elapsed=round(elapsed, 2),
+                    session_id=session_id,
+                )
+                return None
 
-    def _normalize(self, q: str) -> str:
-        q = unicodedata.normalize("NFC", str(q or ""))
-        return " ".join(q.strip().split())
+            return response
 
-    # COMPLEXITY CHECK
+        except Exception as exc:
+            logger.warning(
+                "decomposer_llm_failed",
+                error=str(exc),
+                session_id=session_id,
+            )
+            return None
 
-    def _is_complex(self, q: str) -> bool:
-        ql    = q.lower()
-        words = ql.split()
-
-        if len(words) > settings.DECOMPOSITION_MIN_WORDS:
-            return True
-
-        if any(k in ql for k in settings.DECOMPOSITION_KEYWORDS):
-            return True
-
-        if q.count("?") > 1:
-            return True
-
-        return False
-
-    def detect_query_type(self, query: str) -> str:
-        q = query.lower()
-        if any(word in q for word in ("compare", "versus", " vs ", "difference")):
-            return "comparative"
-        if any(word in q for word in ("when", "before", "after", "timeline", "date")):
-            return "temporal"
-        if any(word in q for word in ("total", "average", "sum", "count", "aggregate")):
-            return "aggregation"
-        return "factual"
-
-    # SUBQUERY CONFIDENCE
-
-    def _confidence(self, query: str) -> float:
-        words = query.split()
-        n     = len(words)
-
-        if n < 4:
-            return 0.2
-
-        if n < 6:
-            return 0.5
-
-        if query.endswith("?"):
-            return min(0.6 + (n / 20.0), 1.0)
-
-        return min(0.5 + (n / 20.0), 1.0)
-
-    # PROMPT
-
-    def _build_prompt(self, query: str) -> str:
-        instruction = (
-            "Break into independent retrieval queries.\n"
-            f"Max {self.max_subqueries}. No explanation.\n"
-            "Each must be standalone and specific.\n\n"
-        )
-
-        format_block = "1. Query\n2. Query\n\n"
-
-        max_chars  = settings.MAX_PROMPT_CHARS
-        body_limit = max_chars - len(instruction) - len(format_block) - 50
-        query      = query[:max(body_limit, 0)]
-
-        return f"{instruction}{format_block}Query:\n{query}"
-
-    # PARSE
-
-    def _parse(self, text: str) -> List[str]:
-        if not text:
-            return []
-
-        lines: List[str] = []
-
-        for line in text.split("\n"):
-            line = line.strip()
-            line = re.sub(r"^\d+[\.\)]\s*", "", line)
-            line = re.sub(r"^[-•]\s*", "",   line)
-            line = line.strip()
-
-            if len(line) < 5:
-                continue
-
-            if not line.endswith("?"):
-                line += "?"
-
-            lines.append(line)
-
-        return lines
-
-    # FILTER
-
-    def _filter(self, queries: List[str]) -> List[str]:
-        seen: set       = set()
-        out:  List[str] = []
-
-        for q in queries:
-            norm = q.lower().strip()
-
-            if len(norm.split()) < 4:
-                continue
-
-            conf = self._confidence(q)
-            if conf < self.min_confidence:
-                continue
-
-            h = self._hash(norm)
-            if h in seen:
-                continue
-
-            seen.add(h)
-            out.append(q.strip())
-
-        return out[:self.max_subqueries]
-
-    # FALLBACK
-
-    def _fallback(self, query: str) -> List[str]:
-        pattern = r"\band\b|\bthen\b|\balso\b|\bbut also\b|\bas well as\b|\bin addition to\b"
-        parts   = re.split(pattern, query, flags=re.IGNORECASE)
-        parts   = [p.strip() for p in parts if len(p.strip()) > 5]
-
-        if len(parts) > 1:
-            return parts[:self.max_subqueries]
-
-        return [query]
-
-    # MAIN
+    # MAIN SYNC DECOMPOSE
 
     def decompose(
         self,
@@ -163,82 +358,106 @@ class QueryDecomposer:
 
         start = time.time()
 
-        try:
-            query = self._normalize(query)
-            query_type = self.detect_query_type(query)
+        with tracer.start_as_current_span("query_decompose") as span:
+            span.set_attribute("query.length", len(query))
+            span.set_attribute("session.id", session_id)
 
-            if not self._is_complex(query):
+            try:
+                query = _normalize(query)
+
+                if not _is_complex(query):
+                    span.set_attribute("decompose.skipped", True)
+                    span.set_status(Status(StatusCode.OK))
+                    return [query]
+
+                query_type = detect_query_type(query)
+                span.set_attribute("query.type", query_type)
+
+                prompt   = _build_prompt(query, query_type, self.max_subqueries)
+                response = self._call_llm(prompt, session_id)
+
+                if not response:
+                    logger.warning(
+                        "decomposer_llm_no_response",
+                        session_id=session_id,
+                    )
+                    fallback = _rule_based_fallback(query, self.max_subqueries)
+                    span.set_attribute("decompose.fallback", True)
+                    span.set_status(Status(StatusCode.OK))
+                    return fallback
+
+                parsed   = _parse(response)
+                filtered = _filter(parsed, self.min_confidence, self.max_subqueries)
+
+                if not filtered:
+                    logger.warning(
+                        "decomposer_no_valid_subqueries",
+                        parsed_count=len(parsed),
+                        session_id=session_id,
+                    )
+                    fallback = _rule_based_fallback(query, self.max_subqueries)
+                    span.set_attribute("decompose.fallback", True)
+                    span.set_status(Status(StatusCode.OK))
+                    return fallback
+
+                # REMOVE SUBQUERIES IDENTICAL TO ORIGINAL
+                filtered = _dedup_against_original(filtered, query)
+
+                if not filtered:
+                    span.set_status(Status(StatusCode.OK))
+                    return [query]
+
+                latency = round(time.time() - start, 2)
+
+                _decompose_duration.labels(status="success").observe(latency)
+                _subquery_count.observe(len(filtered))
+
+                span.set_attribute("subqueries.count", len(filtered))
+                span.set_attribute("query.type", query_type)
+                span.set_status(Status(StatusCode.OK))
+
+                logger.info(
+                    "decompose_success",
+                    count=len(filtered),
+                    query_type=query_type,
+                    parsed_count=len(parsed),
+                    filtered_count=len(parsed) - len(filtered),
+                    latency=latency,
+                    session_id=session_id,
+                )
+
+                return filtered
+
+            except Exception as exc:
+                latency    = round(time.time() - start, 2)
+                error_type = type(exc).__name__
+
+                _decompose_duration.labels(status="error").observe(latency)
+                _decompose_errors.labels(error_type=error_type).inc()
+
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                span.record_exception(exc)
+
+                logger.error(
+                    "decompose_failed",
+                    error=str(exc),
+                    error_type=error_type,
+                    session_id=session_id,
+                )
                 return [query]
 
-            prompt = self._build_prompt(query)
+    # ASYNC WRAPPER
 
-            t_llm       = time.time()
-            response    = self.llm.generate(prompt, max_tokens=settings.SUBQUERY_MAX_TOKENS)
-            llm_latency = time.time() - t_llm
+    async def decompose_async(
+        self,
+        query: str,
+        session_id: str = "default",
+    ) -> List[str]:
 
-            if llm_latency > settings.MODEL_TIMEOUT_SEC:
-                logger.warning(
-                    event="decompose_timeout",
-                    llm_latency=round(llm_latency, 2),
-                    session_id=session_id,
-                )
-                return self._fallback(query)
-
-            parsed   = self._parse(response)
-            filtered = self._filter(parsed)
-
-            if not filtered:
-                logger.warning(
-                    event="decompose_no_valid_subqueries",
-                    parsed_count=len(parsed),
-                    session_id=session_id,
-                )
-                return self._fallback(query)
-
-            logger.info(
-                event="decompose_success",
-                query_type=query_type,
-                count=len(filtered),
-                parsed_count=len(parsed),
-                filtered_count=len(parsed) - len(filtered),
-                llm_latency=round(llm_latency, 2),
-                latency=round(time.time() - start, 2),
-                session_id=session_id,
+        async with _semaphore:
+            return await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.decompose(query, session_id),
             )
 
-            return filtered
 
-        except Exception as e:
-            logger.error(
-                event="decompose_failed",
-                error=str(e),
-                session_id=session_id,
-            )
-            return [query]
-
-
-# ============================================================
-# TESTS - Phase 24 Upgrade
-# Run: pytest app/reasoning/query_decomposer.py -v
-# ============================================================
-
-def test_multi_hop_query_decomposed_to_subqueries() -> None:
-    class LLM:
-        def generate(self, prompt: str, max_tokens: int = 64) -> str:
-            return "1. What is retrieval?\n2. How does reranking improve retrieval?"
-
-    decomposer = QueryDecomposer(LLM())
-    result = decomposer.decompose("What is retrieval and how does reranking improve retrieval?", "s1")
-    assert len(result) >= 1
-
-
-def test_reasoning_engine_uses_retrieved_evidence() -> None:
-    assert QueryDecomposer(llm=None).detect_query_type("compare A and B") == "comparative"
-
-
-def test_result_fusion_resolves_contradiction() -> None:
-    assert QueryDecomposer(llm=None).detect_query_type("when did it happen") == "temporal"
-
-
-def test_hallucination_guard_flags_unsupported_claim() -> None:
-    assert QueryDecomposer(llm=None).detect_query_type("count all rows") == "aggregation"

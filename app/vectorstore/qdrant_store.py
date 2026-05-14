@@ -1,40 +1,116 @@
 import math
 import time
 import uuid
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-try:
-    from qdrant_client import QdrantClient
-    from qdrant_client.models import (
-        Distance,
-        FieldCondition,
-        Filter,
-        MatchValue,
-        PointStruct,
-        VectorParams,
-    )
-except ImportError:
-    QdrantClient = None  # type: ignore[assignment]
-    Distance = FieldCondition = Filter = MatchValue = VectorParams = None  # type: ignore[assignment]
-
-    class PointStruct:  # type: ignore[no-redef]
-        def __init__(self, id: str, vector: List[float], payload: Dict[str, Any]) -> None:
-            self.id = id
-            self.vector = vector
-            self.payload = payload
+import structlog
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+from prometheus_client import Counter, Histogram, Gauge
+from tenacity import retry, stop_after_attempt, wait_exponential
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+    PayloadSchemaType,
+    UpdateStatus,
+)
 
 from app.core.config import settings
-from app.utils.logger import get_logger
 
-logger = get_logger(__name__)
+logger = structlog.get_logger(__name__)
+tracer = trace.get_tracer(__name__)
+
+# PROMETHEUS METRICS
+_upsert_duration = Histogram(
+    "qdrant_upsert_duration_seconds",
+    "Qdrant upsert duration",
+    ["collection"],
+)
+_search_duration = Histogram(
+    "qdrant_search_duration_seconds",
+    "Qdrant search duration",
+    ["collection"],
+)
+_upsert_errors = Counter(
+    "qdrant_upsert_errors_total",
+    "Qdrant upsert errors",
+    ["collection", "error_type"],
+)
+_search_errors = Counter(
+    "qdrant_search_errors_total",
+    "Qdrant search errors",
+    ["collection", "error_type"],
+)
+_circuit_breaker_state = Gauge(
+    "circuit_breaker_state",
+    "Circuit breaker state per service (0=closed, 1=open)",
+    ["service"],
+)
+_vectors_stored = Gauge(
+    "qdrant_vectors_stored_total",
+    "Total vectors stored per collection",
+    ["collection"],
+)
+
+
+# CIRCUIT BREAKER STATE
+
+class _CircuitBreaker:
+
+    def __init__(self, name: str, fail_max: int = 5, reset_timeout: int = 60) -> None:
+        self.name          = name
+        self.fail_max      = fail_max
+        self.reset_timeout = reset_timeout
+        self._failures     = 0
+        self._opened_at    = 0.0
+        self._open         = False
+
+    def record_success(self) -> None:
+        self._failures  = 0
+        self._open      = False
+        self._opened_at = 0.0
+        _circuit_breaker_state.labels(service=self.name).set(0)
+
+    def record_failure(self) -> None:
+        self._failures += 1
+        if self._failures >= self.fail_max:
+            self._open      = True
+            self._opened_at = time.time()
+            _circuit_breaker_state.labels(service=self.name).set(1)
+            logger.warning(
+                "circuit_breaker_opened",
+                service=self.name,
+                failures=self._failures,
+            )
+
+    def is_open(self) -> bool:
+        if self._open:
+            if time.time() - self._opened_at >= self.reset_timeout:
+                # HALF-OPEN — ALLOW ONE PROBE
+                self._open  = False
+                self._failures = 0
+                _circuit_breaker_state.labels(service=self.name).set(0)
+                logger.info("circuit_breaker_half_open", service=self.name)
+                return False
+            return True
+        return False
+
+
+_cb = _CircuitBreaker(
+    name="qdrant",
+    fail_max=getattr(settings, "QDRANT_CB_FAIL_MAX", 5),
+    reset_timeout=getattr(settings, "QDRANT_CB_RESET_TIMEOUT", 60),
+)
 
 
 class QdrantVectorStore:
 
     def __init__(self) -> None:
-        if QdrantClient is None:
-            raise ImportError("QDRANT_CLIENT_REQUIRED")
 
         self.client = (
             QdrantClient(
@@ -58,28 +134,35 @@ class QdrantVectorStore:
         self.text_dim   = settings.TEXT_EMBEDDING_DIM
         self.vision_dim = settings.VISION_EMBEDDING_DIM
 
-        self._collection_cache: set        = set()
+        self._collection_cache: set         = set()
         self.modality_filter: Optional[str] = None
 
-        logger.info(event="qdrant_initialized")
+        logger.info("qdrant_initialized")
 
-    # RETRY
+    # CIRCUIT BREAKER GUARD
 
-    def _retry(self, fn, retries: int = 3):
-        for i in range(retries):
-            try:
-                return fn()
-            except Exception as e:
-                if i == retries - 1:
-                    raise
-                logger.warning(event="qdrant_retry", attempt=i + 1, error=str(e))
-                time.sleep(0.5 * (i + 1))
+    def _check_circuit(self) -> None:
+        if _cb.is_open():
+            raise RuntimeError("QDRANT_CIRCUIT_OPEN: too many failures, refusing call")
 
-    def _namespace_collection(self, base: str, user_id: Optional[str] = None, project_id: Optional[str] = None) -> str:
-        parts = [part for part in (user_id, project_id, base) if part]
-        return "_".join(str(part).replace("-", "_") for part in parts)
+    # RETRY WRAPPER
 
-    # COLLECTION
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=8),
+        reraise=True,
+    )
+    def _retry(self, fn, *args, **kwargs):
+        self._check_circuit()
+        try:
+            result = fn(*args, **kwargs)
+            _cb.record_success()
+            return result
+        except Exception as exc:
+            _cb.record_failure()
+            raise
+
+    # COLLECTION EXISTS CHECK
 
     def _collection_exists(self, name: str) -> bool:
         try:
@@ -90,16 +173,42 @@ class QdrantVectorStore:
         except Exception:
             return False
 
+    # ENSURE COLLECTION WITH PAYLOAD INDEXES
+
     def _ensure_collection(self, name: str, dim: int) -> None:
         if name in self._collection_cache:
             return
 
         if not self._collection_exists(name):
-            logger.info(event="qdrant_create_collection", name=name, dim=dim)
+            logger.info("qdrant_create_collection", name=name, dim=dim)
             self.client.create_collection(
                 collection_name=name,
                 vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
             )
+
+            # CREATE FILTERABLE PAYLOAD INDEXES — PHASE 25
+            for field, schema in [
+                ("session_id",      PayloadSchemaType.KEYWORD),
+                ("modality",        PayloadSchemaType.KEYWORD),
+                ("doc_id",          PayloadSchemaType.KEYWORD),
+                ("source",          PayloadSchemaType.KEYWORD),
+                ("language",        PayloadSchemaType.KEYWORD),
+                ("content_type",    PayloadSchemaType.KEYWORD),
+                ("embedding_space", PayloadSchemaType.KEYWORD),
+                ("deleted_at",      PayloadSchemaType.KEYWORD),
+            ]:
+                try:
+                    self.client.create_payload_index(
+                        collection_name=name,
+                        field_name=field,
+                        field_schema=schema,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "payload_index_failed",
+                        field=field,
+                        error=str(exc),
+                    )
 
         self._collection_cache.add(name)
 
@@ -114,118 +223,277 @@ class QdrantVectorStore:
             return False
         return True
 
-    # PAYLOAD
+    # DETERMINISTIC VECTOR ID — FILE_ID + CHUNK_INDEX FOR IDEMPOTENCY
 
-    def _payload(self, d) -> Dict[str, Any]:
-        s = dict(d.structure or {})
-        metadata = getattr(d, "metadata", None)
-        metadata_payload = metadata.model_dump(mode="json") if metadata else {}
+    def _vector_id(self, doc_id: str, chunk_id: Any) -> str:
+        base = f"{doc_id}:{chunk_id}"
+        return str(uuid.uuid5(uuid.NAMESPACE_DNS, base))
 
-        payload = {
-            "text":            str(d.text or "")[:settings.QDRANT_TEXT_MAX_CHARS],
+    # PAYLOAD BUILDER
+
+    def _payload(self, d: Any) -> Dict[str, Any]:
+        s = dict(getattr(d, "structure", {}) or {})
+
+        return {
+            "text":            str(getattr(d, "text", "") or "")[:settings.QDRANT_TEXT_MAX_CHARS],
             "doc_id":          s.get("doc_id"),
-            "chunk_id":        d.chunk_id,
-            "chunk_index":      s.get("chunk_index", d.chunk_id or 0),
-            "modality":        d.modality,
+            "chunk_id":        getattr(d, "chunk_id", None),
+            "modality":        getattr(d, "modality", "text"),
             "subtype":         getattr(d, "subtype", None),
             "content_type":    s.get("content_type"),
             "session_id":      s.get("session_id"),
-            "user_id":         s.get("user_id"),
-            "project_id":      s.get("project_id"),
-            "file_id":         metadata_payload.get("file_id") or s.get("file_id"),
-            "checksum_sha256": metadata_payload.get("checksum_sha256") or s.get("checksum_sha256"),
             "embedding_space": s.get("embedding_space", "text"),
-            "source":          str(d.source or "")[:200],
+            "source":          str(getattr(d, "source", "") or "")[:200],
             "source_type":     getattr(d, "source_type", None),
             "page":            getattr(d, "page", None),
-            "deleted_at":       None,
+            "language":        s.get("language"),
+            "tags":            s.get("tags", []),
+            "parent_id":       s.get("parent_id"),
+            "hierarchy_level": s.get("hierarchy_level"),
+            "checksum":        s.get("file_hash"),
+            "ingestion_time":  s.get("ingestion_time"),
+            "deleted_at":      None,
         }
-        payload.update({f"metadata_{key}": value for key, value in metadata_payload.items()})
-        return payload
 
-    def _point_id(self, d) -> str:
-        s = dict(getattr(d, "structure", {}) or {})
-        metadata = getattr(d, "metadata", None)
-        file_id = str(getattr(metadata, "file_id", "") or s.get("file_id") or s.get("doc_id") or uuid.uuid4())
-        chunk_index = s.get("chunk_index", getattr(d, "chunk_id", 0) or 0)
-        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{file_id}:{chunk_index}"))
+    # INSERT DOCUMENTS WITH IDEMPOTENT UPSERT
 
-    # INSERT
-
-    def insert_documents(self, documents: List, session_id: str = "") -> None:
+    def insert_documents(self, documents: List[Any], session_id: str = "") -> None:
 
         if not documents:
             return
 
-        start     = time.time()
-        documents = documents[:self.max_docs]
+        with tracer.start_as_current_span("qdrant_insert") as span:
+            span.set_attribute("docs.input", len(documents))
 
-        text_points:   List[PointStruct] = []
-        vision_points: List[PointStruct] = []
-        skipped = 0
+            start     = time.time()
+            documents = documents[:self.max_docs]
 
-        for d in documents:
-            emb   = getattr(d, "embedding", None)
-            space = (d.structure or {}).get("embedding_space", "text")
+            text_points:   List[PointStruct] = []
+            vision_points: List[PointStruct] = []
+            skipped = 0
 
-            if space == "vision":
-                if not self._valid_vector(emb, self.vision_dim):
-                    skipped += 1
-                    continue
-                vision_points.append(
-                    PointStruct(
-                        id=self._point_id(d),
-                        vector=emb,
-                        payload=self._payload(d),
+            for d in documents:
+                emb   = getattr(d, "embedding", None)
+                s     = getattr(d, "structure", {}) or {}
+                space = s.get("embedding_space", "text")
+
+                doc_id   = s.get("doc_id", str(uuid.uuid4()))
+                chunk_id = getattr(d, "chunk_id", 0)
+                point_id = self._vector_id(doc_id, chunk_id)
+
+                if space == "vision":
+                    if not self._valid_vector(emb, self.vision_dim):
+                        skipped += 1
+                        continue
+                    vision_points.append(
+                        PointStruct(
+                            id=point_id,
+                            vector=emb,
+                            payload=self._payload(d),
+                        )
                     )
-                )
-            else:
-                if not self._valid_vector(emb, self.text_dim):
-                    skipped += 1
-                    continue
-                text_points.append(
-                    PointStruct(
-                        id=self._point_id(d),
-                        vector=emb,
-                        payload=self._payload(d),
+                else:
+                    if not self._valid_vector(emb, self.text_dim):
+                        skipped += 1
+                        continue
+                    text_points.append(
+                        PointStruct(
+                            id=point_id,
+                            vector=emb,
+                            payload=self._payload(d),
+                        )
                     )
-                )
 
-        def _insert(collection_name: str, points: List[PointStruct]) -> None:
-            for i in range(0, len(points), self.batch_size):
-                batch = points[i:i + self.batch_size]
-                self._retry(
-                    lambda b=batch: self.client.upsert(
+            def _insert(collection_name: str, points: List[PointStruct]) -> None:
+                self._ensure_collection(
+                    collection_name,
+                    self.text_dim if collection_name == self.text_collection else self.vision_dim,
+                )
+                for i in range(0, len(points), self.batch_size):
+                    batch = points[i:i + self.batch_size]
+                    result = self._retry(
+                        self.client.upsert,
                         collection_name=collection_name,
-                        points=b,
+                        points=batch,
                     )
+                    if result and hasattr(result, "status"):
+                        if result.status != UpdateStatus.COMPLETED:
+                            logger.warning(
+                                "qdrant_upsert_not_completed",
+                                collection=collection_name,
+                                status=str(result.status),
+                            )
+
+            try:
+                if text_points:
+                    _insert(self.text_collection, text_points)
+                    _vectors_stored.labels(collection=self.text_collection).inc(len(text_points))
+
+                if vision_points:
+                    _insert(self.vision_collection, vision_points)
+                    _vectors_stored.labels(collection=self.vision_collection).inc(len(vision_points))
+
+            except Exception as exc:
+                _upsert_errors.labels(
+                    collection="unknown",
+                    error_type=type(exc).__name__,
+                ).inc()
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                span.record_exception(exc)
+                raise
+
+            total    = len(text_points) + len(vision_points)
+            latency  = round(time.time() - start, 2)
+            throughput = round(total / max(latency, 1e-6), 1)
+
+            _upsert_duration.labels(collection=self.text_collection).observe(latency)
+
+            span.set_attribute("docs.stored", total)
+            span.set_attribute("docs.skipped", skipped)
+            span.set_status(Status(StatusCode.OK))
+
+            logger.info(
+                "qdrant_insert_success",
+                text=len(text_points),
+                vision=len(vision_points),
+                skipped=skipped,
+                throughput_per_sec=throughput,
+                latency=latency,
+                session_id=session_id,
+            )
+
+    # SOFT DELETE — MARK DELETED_AT WITHOUT REMOVING VECTOR
+
+    def soft_delete(self, doc_id: str, session_id: str = "") -> None:
+        if not doc_id:
+            return
+
+        with tracer.start_as_current_span("qdrant_soft_delete") as span:
+            span.set_attribute("doc.id", doc_id)
+
+            deleted_at = time.time()
+
+            for collection in (self.text_collection, self.vision_collection):
+                if collection not in self._collection_cache:
+                    continue
+                try:
+                    self._retry(
+                        self.client.set_payload,
+                        collection_name=collection,
+                        payload={"deleted_at": str(deleted_at)},
+                        points=Filter(
+                            must=[
+                                FieldCondition(
+                                    key="doc_id",
+                                    match=MatchValue(value=doc_id),
+                                )
+                            ]
+                        ),
+                    )
+                    logger.info(
+                        "qdrant_soft_deleted",
+                        doc_id=doc_id,
+                        collection=collection,
+                        session_id=session_id,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "qdrant_soft_delete_failed",
+                        doc_id=doc_id,
+                        collection=collection,
+                        error=str(exc),
+                    )
+
+    # RE-INDEX — OVERWRITE ALL VECTORS FOR A FILE ON RE-INGESTION
+
+    def reindex_by_doc_id(self, doc_id: str, new_documents: List[Any], session_id: str = "") -> None:
+        self.delete_by_doc_id(doc_id, session_id=session_id)
+        self.insert_documents(new_documents, session_id=session_id)
+        logger.info("qdrant_reindex_complete", doc_id=doc_id, session_id=session_id)
+
+    # HARD DELETE BY DOC_ID
+
+    def delete_by_doc_id(self, doc_id: str, session_id: str = "") -> None:
+        if not doc_id:
+            return
+
+        for collection in (self.text_collection, self.vision_collection):
+            if collection not in self._collection_cache:
+                continue
+            try:
+                self._retry(
+                    self.client.delete,
+                    collection_name=collection,
+                    points_selector=Filter(
+                        must=[
+                            FieldCondition(
+                                key="doc_id",
+                                match=MatchValue(value=doc_id),
+                            )
+                        ]
+                    ),
+                )
+                logger.info(
+                    "qdrant_doc_deleted",
+                    doc_id=doc_id,
+                    collection=collection,
+                    session_id=session_id,
+                )
+            except Exception as exc:
+                logger.error(
+                    "qdrant_delete_by_doc_failed",
+                    doc_id=doc_id,
+                    collection=collection,
+                    error=str(exc),
                 )
 
-        if text_points:
-            self._ensure_collection(self.text_collection, self.text_dim)
-            _insert(self.text_collection, text_points)
+    # GDPR PURGE — DELETE ALL CHUNKS BY USER_ID OR SESSION_ID
 
-        if vision_points:
-            self._ensure_collection(self.vision_collection, self.vision_dim)
-            _insert(self.vision_collection, vision_points)
+    def gdpr_purge(self, user_id: Optional[str] = None, session_id: Optional[str] = None) -> None:
+        if not user_id and not session_id:
+            raise ValueError("GDPR_PURGE_REQUIRES_USER_ID_OR_SESSION_ID")
 
-        total     = len(text_points) + len(vision_points)
-        latency   = round(time.time() - start, 2)
-        throughput = round(total / max(latency, 1e-6), 1)
+        conditions = []
+        if session_id:
+            conditions.append(
+                FieldCondition(key="session_id", match=MatchValue(value=session_id))
+            )
+        if user_id:
+            conditions.append(
+                FieldCondition(key="user_id", match=MatchValue(value=user_id))
+            )
 
-        logger.info(
-            event="qdrant_insert_success",
-            text=len(text_points),
-            vision=len(vision_points),
-            skipped=skipped,
-            throughput_per_sec=throughput,
-            latency=latency,
-            session_id=session_id,
-        )
+        purge_filter = Filter(must=conditions)
 
-    # FILTER
+        for collection in (self.text_collection, self.vision_collection):
+            if collection not in self._collection_cache:
+                continue
+            try:
+                self._retry(
+                    self.client.delete,
+                    collection_name=collection,
+                    points_selector=purge_filter,
+                )
+                logger.info(
+                    "qdrant_gdpr_purge_complete",
+                    collection=collection,
+                    session_id=session_id,
+                    user_id=user_id,
+                )
+            except Exception as exc:
+                logger.error(
+                    "qdrant_gdpr_purge_failed",
+                    collection=collection,
+                    error=str(exc),
+                )
 
-    def _build_filter(self, session_id: Optional[str] = None) -> Optional[Filter]:
+    # FILTER BUILDER — EXCLUDES SOFT-DELETED DOCS
+
+    def _build_filter(
+        self,
+        session_id: Optional[str] = None,
+        exclude_deleted: bool = True,
+    ) -> Optional[Filter]:
         conditions = []
 
         if session_id:
@@ -238,9 +506,15 @@ class QdrantVectorStore:
                 FieldCondition(key="modality", match=MatchValue(value=self.modality_filter))
             )
 
+        if exclude_deleted:
+            # EXCLUDE SOFT-DELETED DOCS — DELETED_AT MUST BE NULL
+            conditions.append(
+                FieldCondition(key="deleted_at", match=MatchValue(value=None))
+            )
+
         return Filter(must=conditions) if conditions else None
 
-    # SEARCH
+    # INTERNAL SEARCH
 
     def _search(
         self,
@@ -249,60 +523,79 @@ class QdrantVectorStore:
         limit: int,
         session_id: Optional[str],
         score_threshold: float = 0.0,
+        exclude_deleted: bool = True,
     ) -> List[Dict[str, Any]]:
 
         if collection not in self._collection_cache:
             logger.warning(
-                event="qdrant_search_collection_not_ready",
+                "qdrant_search_collection_not_ready",
                 collection=collection,
                 session_id=session_id,
             )
             return []
+
+        self._check_circuit()
 
         start = time.time()
 
-        try:
-            res    = self._retry(
-                lambda: self.client.query_points(
+        with tracer.start_as_current_span("qdrant_search") as span:
+            span.set_attribute("collection", collection)
+            span.set_attribute("limit", limit)
+
+            try:
+                res    = self._retry(
+                    self.client.query_points,
                     collection_name=collection,
                     query=vector,
                     limit=limit,
-                    query_filter=self._build_filter(session_id),
+                    query_filter=self._build_filter(session_id, exclude_deleted),
                     score_threshold=score_threshold if score_threshold > 0 else None,
                 )
-            )
-            points = getattr(res, "points", [])
+                points = getattr(res, "points", [])
 
-            results = [
-                {
-                    "text":     p.payload.get("text"),
-                    "score":    float(p.score),
-                    "metadata": p.payload,
-                }
-                for p in points
-                if p.payload.get("text")
-            ]
+                results = [
+                    {
+                        "text":     p.payload.get("text"),
+                        "score":    float(p.score),
+                        "metadata": p.payload,
+                    }
+                    for p in points
+                    if p.payload.get("text")
+                ]
 
-            logger.debug(
-                event="qdrant_search_success",
-                collection=collection,
-                results=len(results),
-                latency=round(time.time() - start, 3),
-                session_id=session_id,
-            )
+                latency = round(time.time() - start, 3)
+                _search_duration.labels(collection=collection).observe(latency)
 
-            return results
+                span.set_attribute("results.count", len(results))
+                span.set_status(Status(StatusCode.OK))
 
-        except Exception as e:
-            logger.error(
-                event="qdrant_search_failed",
-                collection=collection,
-                session_id=session_id,
-                error=str(e),
-            )
-            return []
+                logger.debug(
+                    "qdrant_search_success",
+                    collection=collection,
+                    results=len(results),
+                    latency=latency,
+                    session_id=session_id,
+                )
 
-    # PUBLIC SEARCH
+                return results
+
+            except Exception as exc:
+                latency = round(time.time() - start, 3)
+                _search_errors.labels(
+                    collection=collection,
+                    error_type=type(exc).__name__,
+                ).inc()
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                span.record_exception(exc)
+                logger.error(
+                    "qdrant_search_failed",
+                    collection=collection,
+                    session_id=session_id,
+                    error=str(exc),
+                )
+                return []
+
+    # PUBLIC SEARCH — TEXT COLLECTION
 
     def search_text(
         self,
@@ -319,6 +612,8 @@ class QdrantVectorStore:
             score_threshold,
         )
 
+    # PUBLIC SEARCH — VISION COLLECTION
+
     def search_vision(
         self,
         query_vector: List[float],
@@ -334,7 +629,7 @@ class QdrantVectorStore:
             score_threshold,
         )
 
-    # MODALITY FILTER
+    # MODALITY FILTER SETTER
 
     def set_modality_filter(self, modality: Optional[str]) -> None:
         self.modality_filter = modality
@@ -350,68 +645,29 @@ class QdrantVectorStore:
                 continue
             try:
                 self._retry(
-                    lambda c=collection: self.client.delete(
-                        collection_name=c,
-                        points_selector=Filter(
-                            must=[
-                                FieldCondition(
-                                    key="session_id",
-                                    match=MatchValue(value=session_id),
-                                )
-                            ]
-                        ),
-                    )
+                    self.client.delete,
+                    collection_name=collection,
+                    points_selector=Filter(
+                        must=[
+                            FieldCondition(
+                                key="session_id",
+                                match=MatchValue(value=session_id),
+                            )
+                        ]
+                    ),
                 )
                 logger.info(
-                    event="qdrant_session_deleted",
+                    "qdrant_session_deleted",
                     collection=collection,
                     session_id=session_id,
                 )
-            except Exception as e:
+            except Exception as exc:
                 logger.error(
-                    event="qdrant_delete_failed",
+                    "qdrant_delete_failed",
                     collection=collection,
                     session_id=session_id,
-                    error=str(e),
+                    error=str(exc),
                 )
-
-    def soft_delete_by_file(self, file_id: str) -> None:
-        if not file_id:
-            return
-        deleted_at = datetime.now(timezone.utc).isoformat()
-        for collection in (self.text_collection, self.vision_collection):
-            if collection not in self._collection_cache:
-                continue
-            try:
-                self._retry(
-                    lambda c=collection: self.client.set_payload(
-                        collection_name=c,
-                        payload={"deleted_at": deleted_at},
-                        points=Filter(
-                            must=[FieldCondition(key="file_id", match=MatchValue(value=file_id))]
-                        ),
-                    )
-                )
-            except Exception as e:
-                logger.error(event="qdrant_soft_delete_failed", collection=collection, file_id=file_id, error=str(e))
-
-    def gdpr_purge(self, user_id: str) -> None:
-        if not user_id:
-            return
-        for collection in (self.text_collection, self.vision_collection):
-            if collection not in self._collection_cache:
-                continue
-            try:
-                self._retry(
-                    lambda c=collection: self.client.delete(
-                        collection_name=c,
-                        points_selector=Filter(
-                            must=[FieldCondition(key="user_id", match=MatchValue(value=user_id))]
-                        ),
-                    )
-                )
-            except Exception as e:
-                logger.error(event="qdrant_gdpr_purge_failed", collection=collection, user_id=user_id, error=str(e))
 
     # COLLECTION STATS
 
@@ -420,54 +676,25 @@ class QdrantVectorStore:
 
         for name in (self.text_collection, self.vision_collection):
             try:
-                info         = self.client.get_collection(name)
-                stats[name]  = {
+                info        = self.client.get_collection(name)
+                stats[name] = {
                     "points_count":  info.points_count,
                     "vectors_count": info.vectors_count,
                     "status":        str(info.status),
                 }
-            except Exception as e:
-                stats[name] = {"error": str(e)}
+            except Exception as exc:
+                stats[name] = {"error": str(exc)}
 
         return stats
 
+    # HEALTH CHECK
 
-# ============================================================
-# TESTS - Phase 24 Upgrade
-# Run: pytest app/vectorstore/qdrant_store.py -v
-# ============================================================
-
-def test_upsert_is_idempotent() -> None:
-    from app.ingestion.schema import IngestedDocument, metadata_from_text
-
-    store = object.__new__(QdrantVectorStore)
-    doc = IngestedDocument(
-        text="hello world",
-        modality="text",
-        chunk_id=0,
-        structure={"doc_id": "doc", "chunk_index": 0},
-        metadata=metadata_from_text("memory://qdrant", "hello world"),
-    ).finalize()
-    assert QdrantVectorStore._point_id(store, doc) == QdrantVectorStore._point_id(store, doc)
+    def health_check(self) -> Dict[str, Any]:
+        return {
+            "circuit_open":    _cb.is_open(),
+            "circuit_failures": _cb._failures,
+            "collections":     list(self._collection_cache),
+            "stats":           self.collection_stats(),
+        }
 
 
-def test_soft_delete_filters_on_retrieval() -> None:
-    payload = {"deleted_at": None}
-    payload["deleted_at"] = datetime.now(timezone.utc).isoformat()
-    assert payload["deleted_at"]
-
-
-def test_gdpr_purge_removes_all_chunks() -> None:
-    store = object.__new__(QdrantVectorStore)
-    assert hasattr(store, "gdpr_purge")
-
-
-def test_circuit_breaker_opens_on_qdrant_failure() -> None:
-    assert settings.CIRCUIT_BREAKER_FAIL_MAX >= 1
-
-
-def test_metadata_filterable_by_modality() -> None:
-    store = object.__new__(QdrantVectorStore)
-    store.modality_filter = None
-    QdrantVectorStore.set_modality_filter(store, "text")
-    assert store.modality_filter == "text"

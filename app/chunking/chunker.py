@@ -1,365 +1,475 @@
+from __future__ import annotations
+
+import asyncio
 import hashlib
-import re
+import math
 import time
-import uuid
-from typing import Dict, List, Optional, Set
+import unicodedata
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import settings
-from app.ingestion.schema import IngestedDocument
 from app.utils.logger import get_logger
-
-try:
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-except ImportError:
-    RecursiveCharacterTextSplitter = None
 
 logger = get_logger(__name__)
 
-
-# SPLITTER
-
-def get_text_splitter() -> object:
-    if RecursiveCharacterTextSplitter is None:
-        return None
-
-    return RecursiveCharacterTextSplitter(
-        chunk_size=settings.CHUNK_SIZE,
-        chunk_overlap=settings.CHUNK_OVERLAP,
-        separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""],
+try:
+    import pybreaker
+    _fusion_breaker = pybreaker.CircuitBreaker(
+        fail_max=settings.CIRCUIT_BREAKER_MAX_FAILURES,
+        reset_timeout=settings.CIRCUIT_BREAKER_RESET_TIMEOUT,
     )
+    _PYBREAKER_AVAILABLE = True
+except ImportError:
+    _PYBREAKER_AVAILABLE = False
+
+    class _DummyBreaker:
+        def __call__(self, fn):
+            return fn
+
+    _fusion_breaker = _DummyBreaker()  # type: ignore[assignment]
 
 
-# HASH
+# BUDGET RATIOS
+_SUMMARY_RATIO = 0.30
+_HISTORY_RATIO = 0.55
+_VECTOR_RATIO  = 0.15
 
-def _hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+# MODALITY RECENCY WEIGHTS
+_MODALITY_WEIGHTS: Dict[str, float] = {
+    "text":     1.0,
+    "image":    1.05,
+    "audio":    1.1,
+    "video":    1.1,
+    "table":    1.0,
+    "document": 1.0,
+}
+
+# ROLE WEIGHTS FOR IMPORTANCE SCORING
+_ROLE_WEIGHTS: Dict[str, float] = {
+    "system":    1.5,
+    "assistant": 1.2,
+    "user":      1.0,
+}
 
 
-# NORMALIZE
+# NORMALIZE TEXT
 
 def _normalize(text: str) -> str:
-    import unicodedata
-    text = unicodedata.normalize("NFC", text)
-    return text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = unicodedata.normalize("NFC", str(text or ""))
+    return " ".join(text.strip().split())
 
 
-# VALID
+# TRUNCATE
 
-def _valid(text: str) -> bool:
-    return bool(text and len(text.strip()) >= settings.CHUNK_MIN_SIZE)
-
-
-# TOKEN ESTIMATE
-
-def _estimate_tokens(text: str) -> int:
-    return max(1, len(text) // 4)
-
-
-def _token_windows(words: List[str], max_tokens: int, overlap_ratio: float) -> List[str]:
-    if not words:
-        return []
-    max_words = max(1, int(max_tokens * 0.75))
-    overlap = max(0, int(max_words * overlap_ratio))
-    step = max(1, max_words - overlap)
-    return [" ".join(words[i:i + max_words]) for i in range(0, len(words), step)]
-
-
-def _fingerprint(text: str) -> int:
-    bits = settings.SIMHASH_BITS
-    vector = [0] * bits
-    for token in re.findall(r"\w+", text.lower()):
-        value = hash(token)
-        for i in range(bits):
-            vector[i] += 1 if value & (1 << i) else -1
-    fp = 0
-    for i, score in enumerate(vector):
-        if score > 0:
-            fp |= 1 << i
-    return fp
-
-
-def _near_duplicate(left: int, right: int) -> bool:
-    similarity = 1.0 - ((left ^ right).bit_count() / max(1, settings.SIMHASH_BITS))
-    return similarity >= settings.NEAR_DUPLICATE_THRESHOLD
-
-
-# STRUCTURED LINE DETECTION
-
-def _is_structured(line: str) -> bool:
-    stripped = line.strip()
-    if not stripped:
-        return False
-
-    tokens = stripped.split()
-
-    # NUMBERED LIST: "1. Item" or "1) Item"
-    if tokens and tokens[0].rstrip(".):").isdigit():
-        return True
-
-    # TABLE OF CONTENTS: starts with digit, ends with digit (page number)
-    if len(tokens) >= 3 and tokens[0].isdigit() and tokens[-1].isdigit():
-        return True
-
-    lower = stripped.lower()
-
-    # SECTION / CHAPTER HEADERS
-    if any(lower.startswith(kw) for kw in ("section", "chapter", "appendix", "part ")):
-        return True
-
-    # MARKDOWN HEADING
-    if stripped.startswith("#"):
-        return True
-
-    return False
-
-
-# FALLBACK SPLITTER (no langchain)
-
-def _fallback(text: str) -> List[str]:
-    words = text.split()
-    token_chunks = _token_windows(words, settings.CHUNK_MAX_TOKENS, settings.CHUNK_OVERLAP_RATIO)
-    return [chunk for chunk in token_chunks if _valid(chunk)]
-
-
-# TEXT CHUNKING
-
-def chunk_text(text: str) -> List[str]:
-
+def _truncate(text: str, limit: int) -> str:
     if not text:
-        raise ValueError("EMPTY_TEXT")
-
-    text  = _normalize(text)
-    lines = text.split("\n")
-
-    structured = [l for l in lines if _is_structured(l)]
-    main_lines = [l for l in lines if not _is_structured(l)]
-    main       = "\n".join(main_lines)
-
-    splitter = get_text_splitter()
-    chunks   = splitter.split_text(main) if splitter and main.strip() else _fallback(main)
-
-    # APPEND STRUCTURED LINES AS INDIVIDUAL CHUNKS
-    chunks.extend(structured)
-
-    chunks = [c.strip() for c in chunks if _valid(c)]
-
-    if not chunks:
-        raise ValueError("NO_CHUNKS_PRODUCED")
-
-    if len(chunks) > settings.MAX_CHUNKS:
-        chunks = chunks[:settings.MAX_CHUNKS]
-        logger.warning(event="chunk_limit_applied", limit=settings.MAX_CHUNKS)
-
-    return chunks
+        return ""
+    return text[:max(limit, 0)]
 
 
-# SINGLE CHUNK WRAPPER
+# HASH MESSAGE
 
-def _single(doc: IngestedDocument, content_type: str = None) -> List[IngestedDocument]:
-    s = dict(doc.structure or {})
-    parent_id = s.get("parent_id") or s.get("doc_id") or str(uuid.uuid4())
-    s.update({
-        "chunk_index":    0,
-        "total_chunks":   1,
-        "chunk_length":   len(doc.text),
-        "token_estimate": _estimate_tokens(doc.text),
-        "parent_id":      parent_id,
-        "parent_modality": doc.modality,
-    })
-
-    if content_type:
-        s["content_type"] = content_type
-
-    cloned            = doc.clone(structure=s)
-    cloned.chunk_id   = 0
-
-    return [cloned]
+def _hash_msg(msg: Dict[str, Any]) -> str:
+    base = f"{msg.get('role', '')}|{str(msg.get('content', ''))[:200]}"
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 
-# TEXT DOC HANDLER
+# HASH TEXT PREFIX
 
-def _text_doc(doc: IngestedDocument) -> List[IngestedDocument]:
+def _hash_prefix(text: str, length: int = 200) -> str:
+    return hashlib.sha256(text[:length].encode("utf-8")).hexdigest()
+
+
+# RECENCY SCORE
+
+def _recency_score(ts: Any, now: float) -> float:
     try:
-        chunks = chunk_text(doc.text)
-        total  = len(chunks)
-        parent_id = (doc.structure or {}).get("doc_id") or str(uuid.uuid4())
-
-        return [
-            doc.clone(
-                text=c,
-                chunk_id=i,
-                structure={
-                    **(doc.structure or {}),
-                    "parent_id":       parent_id,
-                    "chunk_index":    i,
-                    "total_chunks":   total,
-                    "chunk_length":   len(c),
-                    "token_estimate": _estimate_tokens(c),
-                    "overlap_ratio":   settings.CHUNK_OVERLAP_RATIO,
-                    "parent_modality": doc.modality,
-                },
-            )
-            for i, c in enumerate(chunks)
-        ]
-
-    except Exception as e:
-        logger.error(event="text_chunk_failed", modality=doc.modality, error=str(e))
-        return [doc]
+        if ts is None:
+            return 1.0
+        age = max(now - float(ts), 0.0)
+        scale = getattr(settings, "MEMORY_RECENCY_SCALE", 3600)
+        return 1.0 / (1.0 + age / scale)
+    except Exception:
+        return 1.0
 
 
-# IMAGE HANDLER
+# IMPORTANCE SCORE
 
-def _image_doc(doc: IngestedDocument) -> List[IngestedDocument]:
-    if doc.subtype == "ocr" and len(doc.text) > settings.CHUNK_SIZE:
-        return _text_doc(doc)
-    chunks = _single(doc, "image_semantic")
-    for chunk in chunks:
-        if (doc.structure or {}).get("context_text"):
-            chunk.structure["cross_modal_link"] = (doc.structure or {}).get("doc_id")
-    return chunks
-
-
-# AUDIO HANDLER
-
-def _audio_doc(doc: IngestedDocument) -> List[IngestedDocument]:
-    if len(doc.text) > settings.CHUNK_SIZE:
-        return _text_doc(doc)
-    return _single(doc, "audio_speech_segment")
+def _importance_score(msg: Dict[str, Any]) -> float:
+    try:
+        val = float(msg.get("importance", 0.5))
+        if math.isnan(val) or math.isinf(val):
+            return 0.5
+        return max(0.0, min(val, 1.0))
+    except Exception:
+        return 0.5
 
 
-# VIDEO HANDLER
+# MODALITY WEIGHT
 
-def _video_doc(doc: IngestedDocument) -> List[IngestedDocument]:
-    if doc.subtype == "speech":
-        return _single(doc, "video_speech")
-    if doc.subtype == "frame":
-        return _single(doc, "video_frame")
-    if doc.subtype == "ocr":
-        return _text_doc(doc)
-    return _single(doc)
+def _modality_weight(msg: Dict[str, Any]) -> float:
+    return _MODALITY_WEIGHTS.get(str(msg.get("modality", "text")).lower(), 1.0)
 
 
-# MODALITY STATS
+# ROLE WEIGHT
 
-def _modality_stats(docs: List[IngestedDocument]) -> Dict[str, int]:
-    stats: Dict[str, int] = {}
-    for d in docs:
-        stats[d.modality] = stats.get(d.modality, 0) + 1
-    return stats
+def _role_weight(msg: Dict[str, Any]) -> float:
+    return _ROLE_WEIGHTS.get(str(msg.get("role", "user")).lower(), 1.0)
 
 
-# MAIN
+# COMPOSITE SCORE
 
-def chunk_documents(docs: List[IngestedDocument]) -> List[IngestedDocument]:
+def _composite_score(msg: Dict[str, Any], now: float) -> float:
+    recency = _recency_score(msg.get("timestamp"), now)
+    importance = _importance_score(msg)
+    modality = _modality_weight(msg)
+    role = _role_weight(msg)
 
-    if not docs:
-        raise ValueError("NO_DOCUMENTS_PROVIDED")
-
-    start = time.time()
-
-    handlers = {
-        "text":     _text_doc,
-        "pdf":      _text_doc,
-        "word":     _text_doc,
-        "excel":    _text_doc,
-        "document": _text_doc,
-        "table":    _text_doc,
-        "image":    _image_doc,
-        "audio":    _audio_doc,
-        "video":    _video_doc,
-    }
-
-    output: List[IngestedDocument] = []
-    seen:   Set[str]               = set()
-    seen_fp: List[int]             = []
-    skipped = 0
-
-    for doc in docs:
-        handler = handlers.get(doc.modality)
-
-        if not handler:
-            logger.warning(event="unknown_modality_skipped", modality=doc.modality)
-            skipped += 1
-            continue
-
-        try:
-            chunks = handler(doc)
-
-            for c in chunks:
-                h = _hash(c.text)
-
-                if h in seen:
-                    continue
-                fp = _fingerprint(c.text)
-                if any(_near_duplicate(fp, existing) for existing in seen_fp):
-                    continue
-
-                seen.add(h)
-                seen_fp.append(fp)
-                output.append(c)
-
-        except Exception as e:
-            logger.error(
-                event="chunking_error",
-                modality=doc.modality,
-                source=doc.source,
-                error=str(e),
-            )
-            skipped += 1
-
-    if not output:
-        raise ValueError("NO_CHUNKS_PRODUCED_FROM_DOCUMENTS")
-
-    total_tokens = sum(_estimate_tokens(d.text) for d in output)
-
-    logger.info(
-        event="chunking_success",
-        input=len(docs),
-        output=len(output),
-        skipped=skipped,
-        total_tokens_est=total_tokens,
-        modality_breakdown=_modality_stats(output),
-        latency=round(time.time() - start, 2),
+    score = (
+        0.40 * recency +
+        0.30 * importance +
+        0.20 * role +
+        0.10 * modality
     )
 
-    return output
+    if math.isnan(score) or math.isinf(score):
+        return 0.0
+
+    return round(score, 5)
 
 
-# ============================================================
-# TESTS - Phase 24 Upgrade
-# Run: pytest app/chunking/chunker.py -v
-# ============================================================
+# DEDUP MESSAGES
 
-def test_hierarchical_chunks_have_parent_id() -> None:
-    doc = IngestedDocument(text="Heading\n\n" + "retrieval metadata chunking " * 80, modality="text").finalize()
-    chunks = chunk_documents([doc])
-    assert chunks
-    assert all("parent_id" in chunk.structure for chunk in chunks)
+def _dedup_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen: set = set()
+    out: List[Dict[str, Any]] = []
 
+    for msg in messages:
+        try:
+            content = str(msg.get("content", "")).strip()
+            if not content or len(content) < 2:
+                continue
+            h = _hash_msg(msg)
+            if h in seen:
+                continue
+            seen.add(h)
+            out.append(msg)
+        except Exception:
+            continue
 
-def test_cross_modal_chunks_linked() -> None:
-    doc = IngestedDocument(
-        text="A useful image caption for retrieval",
-        modality="image",
-        subtype="caption",
-        structure={"doc_id": "image-parent", "context_text": "nearby text"},
-    ).finalize()
-    chunks = chunk_documents([doc])
-    assert chunks[0].structure.get("cross_modal_link") == "image-parent"
-
-
-def test_overlap_within_token_budget() -> None:
-    chunks = _fallback("word " * 2000)
-    assert chunks
-    assert all(_estimate_tokens(chunk) <= settings.CHUNK_MAX_TOKENS + 5 for chunk in chunks)
+    return out
 
 
-def test_near_duplicate_chunks_skipped() -> None:
-    text = "retrieval metadata chunking quality " * 80
-    docs = [
-        IngestedDocument(text=text, modality="text").finalize(),
-        IngestedDocument(text=text, modality="text").finalize(),
+# DEDUP SUMMARY VS HISTORY — REMOVE OVERLAPPING PREFIX
+
+def _dedup_summary_history(summary: str, history: str) -> Tuple[str, str]:
+    if not summary or not history:
+        return summary, history
+
+    if _hash_prefix(summary) == _hash_prefix(history):
+        history = history.replace(summary[:200], "").strip()
+
+    return summary, history
+
+
+# FORMAT SINGLE MESSAGE
+
+def _format_message(msg: Dict[str, Any], char_limit: int) -> str:
+    try:
+        role = str(msg.get("role", "user")).lower()
+        if role not in {"user", "assistant", "system"}:
+            role = "user"
+
+        content = _normalize(msg.get("content", ""))
+        if len(content) < 2:
+            return ""
+
+        modality = str(msg.get("modality", "text")).lower()
+        ts = msg.get("timestamp")
+
+        label = f"[{role.upper()}]"
+
+        if modality and modality != "text":
+            label += f"[{modality.upper()}]"
+
+        if ts:
+            try:
+                age = time.time() - float(ts)
+                if age < 60:
+                    label += f"[{int(age)}s ago]"
+                elif age < 3600:
+                    label += f"[{int(age // 60)}m ago]"
+                elif age < 86400:
+                    label += f"[{int(age // 3600)}h ago]"
+                else:
+                    label += f"[{int(age // 86400)}d ago]"
+            except Exception:
+                pass
+
+        line = f"{label}: {content}"
+        return _truncate(line, char_limit)
+
+    except Exception:
+        return ""
+
+
+# FORMAT HISTORY LIST
+
+def _format_history(
+    messages: List[Dict[str, Any]],
+    max_chars: int,
+    max_messages: int,
+) -> str:
+    if not messages:
+        return ""
+
+    now = time.time()
+
+    # DEDUP
+    messages = _dedup_messages(messages)
+
+    # SCORE AND SORT
+    scored = [
+        (_composite_score(m, now), m)
+        for m in messages
     ]
-    chunks = chunk_documents(docs)
-    assert len(chunks) >= 1
-    assert len(chunks) < len(docs) * 3
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    # TAKE TOP BY SCORE BUT CAP AT MAX_MESSAGES
+    top = [m for _, m in scored[:max_messages]]
+
+    # RESTORE CHRONOLOGICAL ORDER FOR READABILITY
+    top_sorted = sorted(
+        top,
+        key=lambda m: float(m.get("timestamp", 0) or 0),
+    )
+
+    per_msg_limit = max(max_chars // max(len(top_sorted), 1), 100)
+
+    parts: List[str] = []
+    total = 0
+
+    for msg in top_sorted:
+        line = _format_message(msg, per_msg_limit)
+        if not line:
+            continue
+        if total + len(line) > max_chars:
+            break
+        parts.append(line)
+        total += len(line)
+
+    return "\n".join(parts)
+
+
+# FETCH MONGO SUMMARY — SAFE
+
+def _fetch_mongo_summary(session_id: str) -> str:
+    try:
+        from app.core.infra_registry import infra
+        mongo = infra.get_mongo()
+        if mongo and hasattr(mongo, "get_latest_summary"):
+            def _do():
+                return mongo.get_latest_summary(session_id) or ""
+            if _PYBREAKER_AVAILABLE:
+                return _fusion_breaker(_do)()
+            return _do()
+    except Exception as exc:
+        logger.debug(
+            event="memory_fusion_mongo_fetch_failed",
+            error=str(exc),
+            session_id=session_id,
+        )
+    return ""
+
+
+# FORMAT VECTOR MEMORIES
+
+def _format_vector_memories(
+    vector_memories: List[Dict[str, Any]],
+    max_chars: int,
+) -> str:
+    if not vector_memories:
+        return ""
+
+    parts: List[str] = []
+    total = 0
+    seen: set = set()
+
+    for mem in vector_memories:
+        text = _normalize(str(mem.get("text", "") or mem.get("content", "")))
+        if not text or len(text) < 5:
+            continue
+
+        h = hashlib.sha256(text[:200].encode()).hexdigest()
+        if h in seen:
+            continue
+        seen.add(h)
+
+        score = mem.get("score", 0.0)
+        modality = (mem.get("metadata", {}) or {}).get("modality", "text")
+        label = f"[MEM|{modality.upper()}|score:{round(float(score), 2)}]"
+        line = f"{label}: {text}"
+
+        if total + len(line) > max_chars:
+            break
+
+        parts.append(line)
+        total += len(line)
+
+    return "\n".join(parts)
+
+
+# MAIN BUILD MEMORY CONTEXT
+
+def build_memory_context(
+    summary: str,
+    filtered_history: List[Dict[str, Any]],
+    vector_memories: Optional[List[Dict[str, Any]]] = None,
+    max_total_chars: Optional[int] = None,
+    session_id: str = "default",
+) -> str:
+    start = time.time()
+    max_total_chars = max_total_chars or settings.MEMORY_MAX_CONTEXT_CHARS
+    vector_memories = vector_memories or []
+
+    try:
+        # NORMALIZE SUMMARY
+        summary = _normalize(summary or "")
+
+        # FETCH FROM MONGO IF NOT PROVIDED
+        if not summary:
+            summary = _normalize(_fetch_mongo_summary(session_id))
+
+        # FORMAT HISTORY
+        history_str = _format_history(
+            filtered_history,
+            max_chars=int(max_total_chars * _HISTORY_RATIO),
+            max_messages=settings.MAX_HISTORY_MESSAGES,
+        )
+
+        # FORMAT VECTOR MEMORIES
+        vector_str = _format_vector_memories(
+            vector_memories,
+            max_chars=int(max_total_chars * _VECTOR_RATIO),
+        )
+
+        # EARLY EXIT
+        if not summary and not history_str and not vector_str:
+            logger.debug(
+                event="memory_fusion_empty",
+                session_id=session_id,
+            )
+            return ""
+
+        # DEDUP SUMMARY VS HISTORY
+        summary, history_str = _dedup_summary_history(summary, history_str)
+
+        # BUDGET ALLOCATION
+        summary_budget = int(max_total_chars * _SUMMARY_RATIO)
+        history_budget = int(max_total_chars * _HISTORY_RATIO)
+        vector_budget  = int(max_total_chars * _VECTOR_RATIO)
+
+        # ASSEMBLE PARTS
+        parts: List[str] = []
+
+        # HEADER
+        parts.append(
+            "[MEMORY CONTEXT]\n"
+            "Use only if relevant to the current query.\n"
+            "Prefer recent interactions over older ones."
+        )
+
+        # LONG-TERM SUMMARY
+        if summary:
+            parts.append(
+                "[Long-Term Summary]\n" +
+                _truncate(summary, summary_budget)
+            )
+
+        # VECTOR-RETRIEVED MEMORIES
+        if vector_str:
+            parts.append(
+                "[Retrieved Memories]\n" +
+                _truncate(vector_str, vector_budget)
+            )
+
+        # RECENT CONVERSATION
+        if history_str:
+            parts.append(
+                "[Recent Conversation]\n" +
+                _truncate(history_str, history_budget)
+            )
+
+        # INSTRUCTION FOOTER
+        parts.append(
+            "[Instructions]\n"
+            "- Use memory only if directly relevant\n"
+            "- Do not repeat memory verbatim\n"
+            "- Prefer recent context over older\n"
+            "- Never fabricate memory content"
+        )
+
+        result = "\n\n".join(parts).strip()
+
+        # OVERFLOW GUARD
+        if len(result) > settings.MAX_PROMPT_CHARS:
+            header = parts[0]
+            footer = parts[-1]
+            fixed_len = len(header) + len(footer) + 20
+            allowed = max(settings.MAX_PROMPT_CHARS - fixed_len, 0)
+
+            middle_parts = parts[1:-1]
+            middle = "\n\n".join(middle_parts)
+            middle = _truncate(middle, allowed)
+
+            result = "\n\n".join([header, middle, footer])
+
+            logger.warning(
+                event="memory_context_truncated",
+                original_size=len("\n\n".join(parts)),
+                truncated_size=len(result),
+                session_id=session_id,
+            )
+
+        logger.debug(
+            event="memory_fusion_success",
+            size=len(result),
+            has_summary=bool(summary),
+            has_history=bool(history_str),
+            has_vector=bool(vector_str),
+            history_messages=len(filtered_history),
+            vector_memories=len(vector_memories),
+            latency=round(time.time() - start, 3),
+            session_id=session_id,
+        )
+
+        return result
+
+    except Exception as exc:
+        logger.error(
+            event="memory_fusion_failed",
+            error=str(exc),
+            session_id=session_id,
+        )
+        return ""
+
+
+# ASYNC WRAPPER
+
+async def async_build_memory_context(
+    summary: str,
+    filtered_history: List[Dict[str, Any]],
+    vector_memories: Optional[List[Dict[str, Any]]] = None,
+    max_total_chars: Optional[int] = None,
+    session_id: str = "default",
+) -> str:
+    return await asyncio.to_thread(
+        build_memory_context,
+        summary,
+        filtered_history,
+        vector_memories,
+        max_total_chars,
+        session_id,
+    )
+
+

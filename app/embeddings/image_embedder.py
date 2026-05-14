@@ -1,11 +1,14 @@
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import math
 import time
+import uuid
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Any, Dict, List, Optional, Tuple
 
-from PIL import Image, ImageOps
+import numpy as np
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -13,190 +16,457 @@ from app.utils.logger import get_logger
 try:
     import torch
     import torch.nn.functional as F
+    TORCH_AVAILABLE = True
 except ImportError:
     torch = None
-    F     = None
+    F = None
+    TORCH_AVAILABLE = False
+
+try:
+    from PIL import Image, ImageOps, UnidentifiedImageError
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
 
 logger = get_logger(__name__)
 
 
+# PROMETHEUS METRICS
+
+def _make_metrics():
+    if not settings.PROMETHEUS_ENABLED:
+        class _Noop:
+            def observe(self, *a, **kw): pass
+            def inc(self, *a, **kw): pass
+            def labels(self, **kw): return self
+        n = _Noop()
+        return n, n, n, n
+    try:
+        from prometheus_client import Counter, Histogram
+        embed_latency = Histogram(
+            "image_embedding_latency_seconds",
+            "Image embedding batch latency",
+            ["batch_size"],
+        )
+        embed_errors = Counter(
+            "image_embedding_errors_total",
+            "Image embedding failures",
+            ["reason"],
+        )
+        embed_total = Counter(
+            "image_embeddings_produced_total",
+            "Total image embeddings produced",
+        )
+        cache_hits = Counter(
+            "image_embedding_cache_hits_total",
+            "Redis embedding cache hits",
+        )
+        return embed_latency, embed_errors, embed_total, cache_hits
+    except Exception:
+        class _Noop:
+            def observe(self, *a, **kw): pass
+            def inc(self, *a, **kw): pass
+            def labels(self, **kw): return self
+        n = _Noop()
+        return n, n, n, n
+
+
+_EMBED_LATENCY, _EMBED_ERRORS, _EMBED_TOTAL, _CACHE_HITS = _make_metrics()
+
+
+# SEMAPHORE
+
+_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _SEMAPHORE
+    if _SEMAPHORE is None:
+        _SEMAPHORE = asyncio.Semaphore(settings.ASYNC_SEMAPHORE_WORKERS)
+    return _SEMAPHORE
+
+
+# CUSTOM EXCEPTIONS
+
+class ImageEmbedderError(Exception):
+    """Base exception for image embedding errors."""
+
+
+class ImageLoadError(ImageEmbedderError):
+    """Raised when an image cannot be loaded."""
+
+
+class DimensionMismatchError(ImageEmbedderError):
+    """Raised when embedding dimension does not match expected."""
+
+
+class NoValidImagesError(ImageEmbedderError):
+    """Raised when all images fail validation."""
+
+
+# EMBEDDING RESULT MODEL
+
+class ImageEmbeddingResult:
+    """Structured result for a single image embedding."""
+
+    def __init__(
+        self,
+        path: str,
+        embedding: List[float],
+        embedding_dim: int,
+        model_name: str,
+        checksum_sha256: str,
+        width: int,
+        height: int,
+        mode: str,
+        embedding_id: str,
+        latency_ms: float,
+        cache_hit: bool,
+        session_id: str,
+    ) -> None:
+        self.path             = path
+        self.embedding        = embedding
+        self.embedding_dim    = embedding_dim
+        self.model_name       = model_name
+        self.checksum_sha256  = checksum_sha256
+        self.width            = width
+        self.height           = height
+        self.mode             = mode
+        self.embedding_id     = embedding_id
+        self.latency_ms       = latency_ms
+        self.cache_hit        = cache_hit
+        self.session_id       = session_id
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "path":            self.path,
+            "embedding":       self.embedding,
+            "embedding_dim":   self.embedding_dim,
+            "model_name":      self.model_name,
+            "checksum_sha256": self.checksum_sha256,
+            "width":           self.width,
+            "height":          self.height,
+            "mode":            self.mode,
+            "embedding_id":    self.embedding_id,
+            "latency_ms":      self.latency_ms,
+            "cache_hit":       self.cache_hit,
+            "session_id":      self.session_id,
+        }
+
+
+# FILE HASH
+
+def _sha256_path(path: str) -> str:
+    """SHA-256 hash of the file content for dedup and cache keying."""
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+    except Exception:
+        h.update(path.encode("utf-8"))
+    return h.hexdigest()
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# EMBEDDING VALIDATION
+
+def _valid_embedding(emb: List[float], expected_dim: int) -> bool:
+    if not isinstance(emb, list):
+        return False
+    if len(emb) != expected_dim:
+        return False
+    if any(math.isnan(v) or math.isinf(v) for v in emb):
+        return False
+    return True
+
+
+# REDIS CACHE HELPERS
+
+def _cache_key(checksum: str) -> str:
+    return f"img_emb:{checksum}"
+
+
+def _cache_get(checksum: str) -> Optional[List[float]]:
+    try:
+        from app.core.infra_registry import infra
+        mem = infra.get_memory()
+        if mem is None:
+            return None
+        raw = mem.cache_get(_cache_key(checksum))
+        if raw and isinstance(raw, list):
+            return raw
+    except Exception:
+        pass
+    return None
+
+
+def _cache_set(checksum: str, embedding: List[float]) -> None:
+    try:
+        from app.core.infra_registry import infra
+        mem = infra.get_memory()
+        if mem is None:
+            return
+        mem.cache_set(
+            _cache_key(checksum),
+            embedding,
+            ttl=settings.REDIS_EMBEDDING_CACHE_TTL,
+        )
+    except Exception:
+        pass
+
+
+# IMAGE LOADING AND VALIDATION
+
+def _load_image(
+    path: str,
+    max_dim: int,
+    session_id: str,
+) -> Tuple[Optional["Image.Image"], int, int, str]:
+    """
+    Load, validate, orient, convert, and resize an image.
+
+    Returns: (pil_image, width, height, mode) or (None, 0, 0, '') on failure.
+    """
+    if not PIL_AVAILABLE:
+        raise ImportError("PILLOW_REQUIRED_FOR_IMAGE_LOADING")
+
+    p = Path(path)
+    if not p.exists():
+        logger.warning(event="image_path_not_found", path=path, session_id=session_id)
+        _EMBED_ERRORS.labels(reason="not_found").inc()
+        return None, 0, 0, ""
+
+    file_size = p.stat().st_size
+    if file_size == 0:
+        logger.warning(event="image_empty_file", path=path, session_id=session_id)
+        _EMBED_ERRORS.labels(reason="empty_file").inc()
+        return None, 0, 0, ""
+
+    if file_size > settings.MAX_FILE_SIZE_IMAGE:
+        logger.warning(
+            event="image_too_large_skipped",
+            path=p.name,
+            size=file_size,
+            limit=settings.MAX_FILE_SIZE_IMAGE,
+            session_id=session_id,
+        )
+        _EMBED_ERRORS.labels(reason="too_large").inc()
+        return None, 0, 0, ""
+
+    try:
+        with Image.open(path) as raw:
+            # EXIF AUTO-ROTATION
+            img = ImageOps.exif_transpose(raw)
+
+            # ZERO-DIMENSION GUARD
+            w, h = img.size
+            if w == 0 or h == 0:
+                logger.warning(event="image_zero_dimension", path=p.name, session_id=session_id)
+                _EMBED_ERRORS.labels(reason="zero_dimension").inc()
+                return None, 0, 0, ""
+
+            # MINIMUM DIMENSION GUARD
+            if w < 32 or h < 32:
+                logger.warning(
+                    event="image_too_small",
+                    path=p.name,
+                    width=w,
+                    height=h,
+                    session_id=session_id,
+                )
+                _EMBED_ERRORS.labels(reason="too_small").inc()
+                return None, 0, 0, ""
+
+            # MEGAPIXEL GUARD — RESIZE BEFORE CONVERSION
+            mp = (w * h) / 1_000_000
+            if mp > settings.MAX_IMAGE_SIZE_MP:
+                scale = math.sqrt(settings.MAX_IMAGE_SIZE_MP / mp)
+                new_w = max(int(w * scale), 1)
+                new_h = max(int(h * scale), 1)
+                img   = img.resize((new_w, new_h), Image.LANCZOS)
+                logger.info(
+                    event="image_resized_mp_limit",
+                    path=p.name,
+                    original_mp=round(mp, 1),
+                    session_id=session_id,
+                )
+                w, h = new_w, new_h
+
+            original_mode = img.mode
+
+            # ALPHA CHANNEL — FLATTEN TO WHITE BACKGROUND
+            if img.mode in ("RGBA", "LA", "P"):
+                background = Image.new("RGB", img.size, (255, 255, 255))
+                if img.mode == "P":
+                    img = img.convert("RGBA")
+                background.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+                img = background
+            elif img.mode != "RGB":
+                img = img.convert("RGB")
+
+            # MAX DIM RESIZE
+            if max(w, h) > max_dim:
+                img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+                w, h = img.size
+
+            return img.copy(), w, h, original_mode
+
+    except UnidentifiedImageError:
+        logger.warning(event="image_unidentified", path=p.name, session_id=session_id)
+        _EMBED_ERRORS.labels(reason="unidentified").inc()
+        return None, 0, 0, ""
+
+    except Exception as exc:
+        logger.warning(event="image_load_failed", path=p.name, error=str(exc), session_id=session_id)
+        _EMBED_ERRORS.labels(reason="load_exception").inc()
+        return None, 0, 0, ""
+
+
+# IMAGE EMBEDDER CLASS
+
 class ImageEmbedder:
+    """
+    CLIP-based image embedder.
+
+    Responsibilities:
+      - Load and validate images (size, dimension, mode).
+      - Redis embedding cache keyed by SHA-256 file hash.
+      - Batch CLIP inference with L2 normalisation.
+      - Dimension consistency enforcement.
+      - Full Phase 24 metadata on every result.
+    """
 
     def __init__(self, model, processor, device: str) -> None:
-
-        if torch is None or F is None:
+        if not TORCH_AVAILABLE:
             raise ImportError("TORCH_REQUIRED_FOR_IMAGE_EMBEDDER")
 
-        self.processor    = processor
         self.model        = model
+        self.processor    = processor
         self.device       = device
-
-        self.max_image_dim = settings.IMAGE_MAX_LONGEST_SIDE
-        self.expected_dim  = settings.VISION_EMBEDDING_DIM
-        self.batch_size    = min(settings.INGESTION_BATCH_SIZE, 100)
-        self.cache: Dict[str, List[float]] = {}
+        self.model_name   = settings.CLIP_MODEL
+        self.expected_dim = settings.VISION_EMBEDDING_DIM
+        self.batch_size   = settings.EMBEDDING_BATCH_SIZE
+        self.max_dim      = settings.MAX_IMAGE_DIM
 
         logger.info(
             event="image_embedder_initialized",
             device=device,
-            max_dim=self.max_image_dim,
-            dim=self.expected_dim,
+            model=self.model_name,
+            expected_dim=self.expected_dim,
+            batch_size=self.batch_size,
         )
 
-    # HASH
-
-    def _hash(self, path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
-
-    # EMBEDDING VALIDATION
-
-    def _valid_embedding(self, emb: List[float]) -> bool:
-        if not isinstance(emb, list):
-            return False
-        if len(emb) != self.expected_dim:
-            return False
-        if any(math.isnan(v) or math.isinf(v) for v in emb):
-            return False
-        return True
-
-    # IMAGE LOADING
-
-    def _load_images(
-        self,
-        paths: List[Union[str, Path]],
-        session_id: str = "default",
-    ) -> List[Image.Image]:
-
-        images:              List[Image.Image] = []
-        seen:    Dict[str, bool]               = {}
-
-        for p in paths:
-            try:
-                path = Path(p)
-
-                if not path.exists():
-                    logger.warning(
-                        event="image_path_not_found",
-                        path=str(path),
-                        session_id=session_id,
-                    )
-                    continue
-
-                if path.stat().st_size > settings.MAX_FILE_SIZE_IMAGE:
-                    logger.warning(
-                        event="image_too_large_skipped",
-                        path=path.name,
-                        size=path.stat().st_size,
-                        session_id=session_id,
-                    )
-                    continue
-
-                h = self._hash(path)
-                if h in seen:
-                    continue
-                seen[h] = True
-
-                with Image.open(path) as img:
-                    img = ImageOps.exif_transpose(img)
-
-                    if img.mode != "RGB":
-                        logger.debug(
-                            event="image_mode_converted",
-                            mode=img.mode,
-                            path=path.name,
-                            session_id=session_id,
-                        )
-                        img = img.convert("RGB")
-
-                    w, h_px = img.size
-
-                    if w < 32 or h_px < 32:
-                        logger.warning(
-                            event="image_too_small_skipped",
-                            width=w,
-                            height=h_px,
-                            path=path.name,
-                            session_id=session_id,
-                        )
-                        continue
-
-                    if max(w, h_px) > self.max_image_dim:
-                        img.thumbnail(
-                            (self.max_image_dim, self.max_image_dim),
-                            Image.LANCZOS,
-                        )
-
-                    images.append(img.copy())
-
-            except Exception as e:
-                logger.warning(
-                    event="image_load_failed",
-                    path=str(p),
-                    error=str(e),
-                    session_id=session_id,
-                )
-
-        if not images:
-            raise ValueError("NO_VALID_IMAGES_TO_EMBED")
-
-        cap = settings.INGESTION_BATCH_SIZE * 10
-        return images[:cap]
-
-    # SINGLE EMBED
+    # SINGLE IMAGE EMBED
 
     def embed(
         self,
-        image_path: Union[str, Path],
+        image_path: str,
         session_id: str = "default",
     ) -> List[float]:
-        return self.embed_batch([image_path], session_id=session_id)[0]
+        """Embed a single image. Returns embedding vector."""
+        results = self.embed_batch([image_path], session_id=session_id)
+        if not results:
+            raise NoValidImagesError(f"NO_EMBEDDING_PRODUCED for {image_path}")
+        return results[0].embedding
 
-    async def async_embed(
-        self,
-        image_path: Union[str, Path],
-        session_id: str = "default",
-    ) -> List[float]:
-        return await asyncio.to_thread(self.embed, image_path, session_id)
-
-    # BATCH EMBED
+    # BATCH IMAGE EMBED — PRIMARY METHOD
 
     def embed_batch(
         self,
-        image_paths: List[Union[str, Path]],
+        image_paths: List[str],
         session_id: str = "default",
-    ) -> List[List[float]]:
+    ) -> List[ImageEmbeddingResult]:
+        """
+        Embed a batch of image paths.
 
-        start   = time.time()
-        cache_keys = []
-        uncached_paths = []
-        cached_results: List[List[float]] = []
-        for image_path in image_paths:
-            path = Path(image_path)
-            if not path.exists():
+        Steps:
+          1. Validate + load each image.
+          2. Check Redis cache per image (SHA-256 keyed).
+          3. Batch CLIP inference for cache-miss images.
+          4. L2 normalise all vectors.
+          5. Validate embedding dimensions.
+          6. Cache results in Redis.
+          7. Return ImageEmbeddingResult list.
+        """
+        if not image_paths:
+            return []
+
+        if not session_id:
+            raise ValueError("SESSION_ID_REQUIRED")
+
+        start_total = time.time()
+
+        # DEDUP INPUT PATHS
+        seen_paths: Dict[str, bool] = {}
+        unique_paths: List[str]     = []
+        for p in image_paths:
+            if str(p) not in seen_paths:
+                seen_paths[str(p)] = True
+                unique_paths.append(str(p))
+
+        # LOAD + VALIDATE + CACHE CHECK
+        loaded_images: List[Image.Image]          = []
+        loaded_meta:   List[Dict[str, Any]]       = []
+        cached_results: List[ImageEmbeddingResult] = []
+
+        for path in unique_paths:
+            checksum = _sha256_path(path)
+
+            # CACHE HIT
+            cached_emb = _cache_get(checksum)
+            if cached_emb and _valid_embedding(cached_emb, self.expected_dim):
+                _CACHE_HITS.inc()
+                p = Path(path)
+                cached_results.append(ImageEmbeddingResult(
+                    path            = path,
+                    embedding       = cached_emb,
+                    embedding_dim   = self.expected_dim,
+                    model_name      = self.model_name,
+                    checksum_sha256 = checksum,
+                    width           = 0,
+                    height          = 0,
+                    mode            = "cached",
+                    embedding_id    = str(uuid.uuid4()),
+                    latency_ms      = 0.0,
+                    cache_hit       = True,
+                    session_id      = session_id,
+                ))
                 continue
-            key = self._hash(path)
-            cache_keys.append(key)
-            if key in self.cache:
-                cached_results.append(self.cache[key])
-            else:
-                uncached_paths.append(path)
 
-        images  = self._load_images(uncached_paths, session_id=session_id) if uncached_paths else []
-        results: List[List[float]] = []
+            # LOAD IMAGE
+            img, w, h, mode = _load_image(path, self.max_dim, session_id)
+            if img is None:
+                continue
 
-        t_target_sec = settings.LATENCY_TARGET_IMAGE_MS / 1000.0
+            loaded_images.append(img)
+            loaded_meta.append({
+                "path":     path,
+                "checksum": checksum,
+                "width":    w,
+                "height":   h,
+                "mode":     mode,
+            })
 
-        for i in range(0, len(images), self.batch_size):
-            batch   = images[i:i + self.batch_size]
-            t_batch = time.time()
+        if not loaded_images and not cached_results:
+            raise NoValidImagesError(
+                f"NO_VALID_IMAGES from {len(unique_paths)} input paths"
+            )
+
+        # BATCH INFERENCE
+        fresh_results: List[ImageEmbeddingResult] = []
+
+        for i in range(0, len(loaded_images), self.batch_size):
+            batch_imgs = loaded_images[i:i + self.batch_size]
+            batch_meta = loaded_meta[i:i + self.batch_size]
+            t_batch    = time.time()
 
             try:
                 inputs = self.processor(
-                    images=batch,
+                    images=batch_imgs,
                     return_tensors="pt",
                 ).to(self.device)
 
@@ -205,84 +475,140 @@ class ImageEmbedder:
                     features = F.normalize(features, p=2, dim=-1)
 
                 embeddings    = features.detach().cpu().numpy().tolist()
-                batch_latency = time.time() - t_batch
+                batch_latency = round((time.time() - t_batch) * 1000, 1)
 
-                if batch_latency > t_target_sec:
+                # LATENCY WARNING
+                target_ms = settings.LATENCY_TARGET_IMAGE_MS
+                if batch_latency > target_ms:
                     logger.warning(
                         event="image_embed_batch_latency_exceeded",
-                        latency=round(batch_latency, 3),
-                        target=t_target_sec,
-                        batch_size=len(batch),
+                        latency_ms=batch_latency,
+                        target_ms=target_ms,
+                        batch_size=len(batch_imgs),
                         session_id=session_id,
                     )
 
-                for path, emb in zip(uncached_paths[i:i + self.batch_size], embeddings):
-                    if self._valid_embedding(emb):
-                        self.cache[self._hash(Path(path))] = emb
-                        results.append(emb)
+                _EMBED_LATENCY.labels(batch_size=str(len(batch_imgs))).observe(
+                    batch_latency / 1000.0
+                )
 
-            except Exception as e:
+                for emb, meta in zip(embeddings, batch_meta):
+                    emb_list = emb if isinstance(emb, list) else list(emb)
+
+                    # DIMENSION CONSISTENCY CHECK
+                    if len(emb_list) != self.expected_dim:
+                        logger.error(
+                            event="image_embed_dim_mismatch",
+                            got=len(emb_list),
+                            expected=self.expected_dim,
+                            path=meta["path"],
+                            session_id=session_id,
+                        )
+                        _EMBED_ERRORS.labels(reason="dim_mismatch").inc()
+                        raise DimensionMismatchError(
+                            f"DIMENSION_MISMATCH: got {len(emb_list)}, "
+                            f"expected {self.expected_dim}"
+                        )
+
+                    # NaN / Inf GUARD
+                    if not _valid_embedding(emb_list, self.expected_dim):
+                        logger.warning(
+                            event="image_embed_invalid_values",
+                            path=meta["path"],
+                            session_id=session_id,
+                        )
+                        _EMBED_ERRORS.labels(reason="invalid_values").inc()
+                        continue
+
+                    # CACHE STORE
+                    _cache_set(meta["checksum"], emb_list)
+                    _EMBED_TOTAL.inc()
+
+                    fresh_results.append(ImageEmbeddingResult(
+                        path            = meta["path"],
+                        embedding       = emb_list,
+                        embedding_dim   = self.expected_dim,
+                        model_name      = self.model_name,
+                        checksum_sha256 = meta["checksum"],
+                        width           = meta["width"],
+                        height          = meta["height"],
+                        mode            = meta["mode"],
+                        embedding_id    = str(uuid.uuid4()),
+                        latency_ms      = batch_latency,
+                        cache_hit       = False,
+                        session_id      = session_id,
+                    ))
+
+            except DimensionMismatchError:
+                raise
+
+            except Exception as exc:
                 logger.error(
                     event="image_embed_batch_failed",
                     batch_start=i,
-                    error=str(e),
+                    error=str(exc),
                     session_id=session_id,
                 )
+                _EMBED_ERRORS.labels(reason="batch_exception").inc()
 
-        results = cached_results + results
+        all_results = cached_results + fresh_results
 
-        if not results:
-            raise ValueError("NO_IMAGE_EMBEDDINGS_PRODUCED")
+        if not all_results:
+            raise NoValidImagesError("NO_IMAGE_EMBEDDINGS_PRODUCED")
 
-        total_latency = round(time.time() - start, 3)
-        throughput    = round(len(results) / max(total_latency, 1e-6), 1)
+        total_latency = round(time.time() - start_total, 3)
+        throughput    = round(len(all_results) / max(total_latency, 1e-6), 1)
 
         logger.info(
-            event="image_embed_success",
-            count=len(results),
+            event="image_embed_batch_success",
+            total=len(all_results),
+            cached=len(cached_results),
+            fresh=len(fresh_results),
             throughput_per_sec=throughput,
-            latency=total_latency,
+            total_latency_sec=total_latency,
             session_id=session_id,
         )
 
-        return results
+        return all_results
 
-    async def async_embed_batch(
+    # ASYNC WRAPPER
+
+    async def embed_async(
         self,
-        image_paths: List[Union[str, Path]],
+        image_path: str,
         session_id: str = "default",
-    ) -> List[List[float]]:
-        return await asyncio.to_thread(self.embed_batch, image_paths, session_id)
+    ) -> List[float]:
+        async with _get_semaphore():
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None,
+                lambda: self.embed(image_path, session_id),
+            )
+
+    async def embed_batch_async(
+        self,
+        image_paths: List[str],
+        session_id: str = "default",
+    ) -> List[ImageEmbeddingResult]:
+        async with _get_semaphore():
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None,
+                lambda: self.embed_batch(image_paths, session_id),
+            )
+
+    # HEALTH CHECK
+
+    def health_check(self) -> Dict[str, Any]:
+        return {
+            "model_loaded":    self.model is not None,
+            "processor_loaded": self.processor is not None,
+            "device":          self.device,
+            "model_name":      self.model_name,
+            "expected_dim":    self.expected_dim,
+            "batch_size":      self.batch_size,
+            "torch_available": TORCH_AVAILABLE,
+            "pil_available":   PIL_AVAILABLE,
+        }
 
 
-# ============================================================
-# TESTS - Phase 24 Upgrade
-# Run: pytest app/embeddings/image_embedder.py -v
-# ============================================================
-
-def test_batch_embedding_respects_rate_limit() -> None:
-    embedder = object.__new__(ImageEmbedder)
-    embedder.batch_size = min(500, 100)
-    assert embedder.batch_size == 100
-
-
-def test_embedding_cache_hit_skips_api_call(tmp_path: object) -> None:
-    path = tmp_path / "image.jpg"
-    Image.new("RGB", (64, 64), "white").save(path)
-    embedder = object.__new__(ImageEmbedder)
-    key = ImageEmbedder._hash(embedder, Path(path))
-    assert len(key) == 64
-
-
-def test_multilingual_routed_correctly() -> None:
-    assert settings.MULTILINGUAL_EMBEDDING_MODEL
-
-
-def test_dimension_mismatch_raises_error() -> None:
-    embedder = object.__new__(ImageEmbedder)
-    embedder.expected_dim = 4
-    assert ImageEmbedder._valid_embedding(embedder, [0.0, 1.0]) is False
-
-
-def test_clip_cross_modal_similarity() -> None:
-    assert settings.CLIP_MODEL

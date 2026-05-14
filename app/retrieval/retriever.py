@@ -1,75 +1,177 @@
+import asyncio
 import hashlib
 import math
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
+
+import structlog
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+from prometheus_client import Counter, Histogram
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
+from app.core.infra_registry import infra
+from app.core.model_loader import model_loader
 from app.retrieval.bm25_retriever import BM25Retriever
 from app.retrieval.reranker import Reranker
-from app.utils.logger import get_logger
 
-logger = get_logger(__name__)
+logger = structlog.get_logger(__name__)
+tracer = trace.get_tracer(__name__)
+
+# PROMETHEUS METRICS
+_retrieval_duration = Histogram(
+    "retrieval_latency_seconds",
+    "Retrieval latency by retriever type",
+    ["retriever_type"],
+)
+_retrieval_errors = Counter(
+    "retrieval_errors_total",
+    "Retrieval errors by retriever type and error type",
+    ["retriever_type", "error_type"],
+)
+_retrieval_results = Histogram(
+    "retrieval_results_count",
+    "Number of results returned per retrieval",
+    ["retriever_type"],
+)
+
+# SEMAPHORE — CAP CONCURRENT RETRIEVAL WORKERS
+_semaphore = asyncio.Semaphore(5)
+
+
+# SHA-256 HASH
+
+def _hash(text: str, meta: Dict) -> str:
+    base = f"{text[:150]}|{meta.get('doc_id')}|{meta.get('chunk_id')}"
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()
+
+
+# NORMALIZE QUERY
+
+def _normalize(q: str) -> str:
+    import unicodedata
+    q = unicodedata.normalize("NFC", str(q or ""))
+    return " ".join(q.strip().split())
+
+
+# SCORE VALID CHECK
+
+def _valid_score(score: float) -> bool:
+    return not (math.isnan(score) or math.isinf(score))
+
+
+# SCORE NORMALIZATION
+
+def _normalize_scores(results: List[Dict]) -> List[Dict]:
+    if not results:
+        return results
+    scores    = [r.get("score", 0.0) for r in results]
+    max_score = max(scores) if scores else 0.0
+    if max_score <= 0.0:
+        return results
+    for r in results:
+        r["score"] = r.get("score", 0.0) / max_score
+    return results
+
+
+# MMR — MAXIMAL MARGINAL RELEVANCE FOR DIVERSITY
+
+def _mmr(
+    results: List[Dict],
+    top_k: int,
+    lambda_param: float = None,
+) -> List[Dict]:
+    """
+    SELECTS DIVERSE RESULTS BY PENALISING SIMILARITY TO ALREADY-SELECTED ITEMS.
+    LAMBDA=1 → PURE RELEVANCE. LAMBDA=0 → PURE DIVERSITY.
+    """
+    if not results:
+        return []
+
+    lam = lambda_param if lambda_param is not None else getattr(settings, "MMR_LAMBDA", 0.5)
+
+    import numpy as np
+
+    def _cosine(v1: List[float], v2: List[float]) -> float:
+        a     = np.nan_to_num(np.array(v1, dtype=float))
+        b     = np.nan_to_num(np.array(v2, dtype=float))
+        denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-8
+        return float(np.dot(a, b) / denom)
+
+    def _has_embedding(r: Dict) -> bool:
+        emb = r.get("embedding") or (r.get("metadata", {}) or {}).get("embedding")
+        return isinstance(emb, list) and len(emb) > 0
+
+    def _get_embedding(r: Dict) -> Optional[List[float]]:
+        emb = r.get("embedding")
+        if not emb:
+            emb = (r.get("metadata", {}) or {}).get("embedding")
+        return emb
+
+    # IF NO EMBEDDINGS AVAILABLE FALL BACK TO SCORE-BASED SELECTION
+    if not any(_has_embedding(r) for r in results):
+        return results[:top_k]
+
+    selected:   List[Dict] = []
+    candidates: List[Dict] = list(results)
+
+    while candidates and len(selected) < top_k:
+        best_score = -float("inf")
+        best_idx   = 0
+
+        for i, cand in enumerate(candidates):
+            relevance = cand.get("score", 0.0)
+
+            if not selected:
+                mmr_score = relevance
+            else:
+                cand_emb = _get_embedding(cand)
+                if cand_emb is None:
+                    mmr_score = relevance
+                else:
+                    max_sim = max(
+                        _cosine(cand_emb, _get_embedding(s))
+                        for s in selected
+                        if _get_embedding(s) is not None
+                    ) if selected else 0.0
+
+                    mmr_score = lam * relevance - (1.0 - lam) * max_sim
+
+            if mmr_score > best_score:
+                best_score = mmr_score
+                best_idx   = i
+
+        selected.append(candidates.pop(best_idx))
+
+    return selected
 
 
 class Retriever:
 
     def __init__(self) -> None:
-        from app.core.infra_registry import infra
-
         self.vector_store   = infra.get_vector_store()
         self.bm25           = BM25Retriever()
         self.reranker       = Reranker()
-        from app.core.model_loader import model_loader
-
         self.embedder       = model_loader.get_embedder()
         self.max_candidates = min(
             settings.RAG_TOP_K * settings.HYBRID_CANDIDATES_MULTIPLIER,
             50,
         )
 
-    # HASH
+    # QUERY EXPANSION VIA LLM
 
-    def _hash(self, text: str, meta: Dict) -> str:
-        base = f"{text[:150]}|{meta.get('doc_id')}|{meta.get('chunk_id')}"
-        return hashlib.sha256(base.encode("utf-8")).hexdigest()
-
-    # NORMALIZE
-
-    def _normalize(self, q: str) -> str:
-        return " ".join(q.strip().split())
-
-    # SCORE VALID
-
-    def _valid_score(self, score: float) -> bool:
-        return not (math.isnan(score) or math.isinf(score))
-
-    # SCORE NORMALIZATION
-
-    def _normalize_scores(self, results: List[Dict]) -> List[Dict]:
-        if not results:
-            return results
-
-        scores    = [r.get("score", 0.0) for r in results]
-        max_score = max(scores) if scores else 0.0
-
-        if max_score <= 0.0:
-            return results
-
-        for r in results:
-            r["score"] = r.get("score", 0.0) / max_score
-
-        return results
-
-    # QUERY EXPANSION
-
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=4),
+        reraise=False,
+    )
     def _expand_query(self, query: str, session_id: str) -> List[str]:
 
         if not settings.AGENT_QUERY_EXPANSION_ENABLED:
             return [query]
 
         try:
-            from app.core.model_loader import model_loader
-
             llm    = model_loader.get_llm()
             prompt = (
                 f"Generate 2 alternative search queries.\n"
@@ -83,7 +185,7 @@ class Retriever:
 
             if elapsed > settings.MODEL_TIMEOUT_SEC:
                 logger.warning(
-                    event="query_expansion_timeout",
+                    "query_expansion_timeout",
                     elapsed=round(elapsed, 2),
                     session_id=session_id,
                 )
@@ -95,9 +197,8 @@ class Retriever:
                 if v.strip() and len(v.strip()) > 5
             ]
 
-            # DEDUP EXPANDED QUERIES
-            seen:    set        = {query.lower()}
-            unique:  List[str]  = [query]
+            seen:   set       = {query.lower()}
+            unique: List[str] = [query]
 
             for v in variations[:2]:
                 if v.lower() not in seen:
@@ -106,22 +207,27 @@ class Retriever:
 
             return unique
 
-        except Exception as e:
+        except Exception as exc:
             logger.warning(
-                event="query_expand_failed",
-                error=str(e),
+                "query_expand_failed",
+                error=str(exc),
                 session_id=session_id,
             )
             return [query]
 
-    # BM25 CHECK
+    # BM25 INDEX CHECK
 
     def _ensure_bm25(self, session_id: str) -> None:
         if not getattr(self.bm25, "documents", None):
-            logger.warning(event="bm25_index_empty", session_id=session_id)
+            logger.warning("bm25_index_empty", session_id=session_id)
 
-    # VECTOR SEARCH
+    # VECTOR SEARCH WITH RETRY
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=6),
+        reraise=True,
+    )
     def _vector_search(self, q: str, session_id: str) -> List[Dict]:
         try:
             vec = self.embedder.embed_query(q, session_id=session_id)
@@ -130,16 +236,21 @@ class Retriever:
                 session_id=session_id,
                 limit=self.max_candidates,
             )
-        except Exception as e:
+        except Exception as exc:
             logger.error(
-                event="vector_search_failed",
-                error=str(e),
+                "vector_search_failed",
+                error=str(exc),
                 session_id=session_id,
             )
             return []
 
-    # BM25 SEARCH
+    # BM25 SEARCH WITH RETRY
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=6),
+        reraise=True,
+    )
     def _bm25_search(self, q: str, session_id: str) -> List[Dict]:
         try:
             return self.bm25.search(
@@ -147,18 +258,99 @@ class Retriever:
                 session_id=session_id,
                 top_k=self.max_candidates,
             )
-        except Exception as e:
+        except Exception as exc:
             logger.error(
-                event="bm25_search_failed",
-                error=str(e),
+                "bm25_search_failed",
+                error=str(exc),
                 session_id=session_id,
             )
             return []
 
-    # MERGE
+    # METADATA FILTER — BY MODALITY, DATE RANGE, LANGUAGE
 
-    def _merge(self, vector_res: List[Dict], bm25_res: List[Dict]) -> List[Dict]:
-        combined: Dict = {}
+    def _apply_metadata_filter(
+        self,
+        results: List[Dict],
+        modality: Optional[str] = None,
+        language: Optional[str] = None,
+        date_from: Optional[float] = None,
+        date_to: Optional[float] = None,
+    ) -> List[Dict]:
+        filtered = []
+        for r in results:
+            meta = r.get("metadata", {}) or {}
+
+            if modality and meta.get("modality") != modality:
+                continue
+
+            if language and meta.get("language") and meta.get("language") != language:
+                continue
+
+            if date_from:
+                ingestion = meta.get("ingestion_time")
+                if ingestion and float(ingestion) < date_from:
+                    continue
+
+            if date_to:
+                ingestion = meta.get("ingestion_time")
+                if ingestion and float(ingestion) > date_to:
+                    continue
+
+            filtered.append(r)
+
+        return filtered
+
+    # MERGE VECTOR + BM25 RESULTS — RECIPROCAL RANK FUSION
+
+    def _rrf_merge(
+        self,
+        vector_res: List[Dict],
+        bm25_res: List[Dict],
+        k: int = 60,
+    ) -> List[Dict]:
+        """
+        RECIPROCAL RANK FUSION — COMBINES DENSE AND SPARSE RANKINGS.
+        SCORE(D) = SUM_OVER_LISTS(1 / (K + RANK(D)))
+        """
+        combined: Dict[str, Dict] = {}
+
+        def _add(results: List[Dict], weight: float) -> None:
+            for rank, r in enumerate(results, start=1):
+                text  = r.get("text")
+                meta  = r.get("metadata", {})
+                score = weight * (1.0 / (k + rank))
+
+                if not text:
+                    continue
+
+                if not _valid_score(score):
+                    continue
+
+                h = _hash(text, meta)
+
+                if h not in combined:
+                    combined[h] = {
+                        "text":      text,
+                        "metadata":  meta,
+                        "score":     score,
+                        "embedding": r.get("embedding"),
+                    }
+                else:
+                    combined[h]["score"] += score
+
+        _add(vector_res, settings.HYBRID_WEIGHT_VECTOR)
+        _add(bm25_res,   settings.HYBRID_WEIGHT_BM25)
+
+        return list(combined.values())
+
+    # WEIGHTED SCORE MERGE — FALLBACK WHEN RRF NOT PREFERRED
+
+    def _merge(
+        self,
+        vector_res: List[Dict],
+        bm25_res: List[Dict],
+    ) -> List[Dict]:
+        combined: Dict[str, Dict] = {}
 
         def _add(results: List[Dict], weight: float) -> None:
             for r in results:
@@ -169,16 +361,17 @@ class Retriever:
                 if not text:
                     continue
 
-                if not self._valid_score(score):
+                if not _valid_score(score):
                     continue
 
-                h = self._hash(text, meta)
+                h = _hash(text, meta)
 
                 if h not in combined:
                     combined[h] = {
-                        "text":     text,
-                        "metadata": meta,
-                        "score":    score,
+                        "text":      text,
+                        "metadata":  meta,
+                        "score":     score,
+                        "embedding": r.get("embedding"),
                     }
                 else:
                     combined[h]["score"] += score
@@ -188,7 +381,7 @@ class Retriever:
 
         return list(combined.values())
 
-    # FILTER
+    # FILTER BY SCORE THRESHOLD
 
     def _filter(self, results: List[Dict], top_k: int) -> List[Dict]:
         if not results:
@@ -201,37 +394,21 @@ class Retriever:
         ]
 
         results = sorted(results, key=lambda x: x["score"], reverse=True)
-
         return results[:top_k]
 
-    def _mmr(self, results: List[Dict], top_k: int) -> List[Dict]:
-        selected: List[Dict] = []
-        candidates = list(results)
-        while candidates and len(selected) < top_k:
-            best = max(
-                candidates,
-                key=lambda item: settings.MMR_LAMBDA * item.get("score", 0.0)
-                - (1.0 - settings.MMR_LAMBDA)
-                * max((self._text_overlap(item.get("text", ""), chosen.get("text", "")) for chosen in selected), default=0.0),
-            )
-            selected.append(best)
-            candidates.remove(best)
-        return selected
-
-    def _text_overlap(self, left: str, right: str) -> float:
-        left_tokens = set(left.lower().split())
-        right_tokens = set(right.lower().split())
-        if not left_tokens or not right_tokens:
-            return 0.0
-        return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
-
-    # MAIN
+    # MAIN SYNC RETRIEVAL
 
     def retrieval(
         self,
         query: str,
         session_id: str = "default",
         top_k: int = 5,
+        modality: Optional[str] = None,
+        language: Optional[str] = None,
+        date_from: Optional[float] = None,
+        date_to: Optional[float] = None,
+        use_mmr: bool = True,
+        use_rrf: bool = True,
     ) -> List[Dict]:
 
         if not query:
@@ -239,101 +416,166 @@ class Retriever:
 
         start = time.time()
 
-        try:
-            query = self._normalize(query)
+        with tracer.start_as_current_span("retrieval") as span:
+            span.set_attribute("query.length", len(query))
+            span.set_attribute("session.id", session_id)
+            span.set_attribute("top_k", top_k)
 
-            self._ensure_bm25(session_id)
+            try:
+                query = _normalize(query)
 
-            queries = self._expand_query(query, session_id)
+                self._ensure_bm25(session_id)
 
-            vector_res: List[Dict] = []
-            bm25_res:   List[Dict] = []
+                queries = self._expand_query(query, session_id)
 
-            for q in queries:
-                v_results = self._vector_search(q, session_id)
-                b_results = self._bm25_search(q, session_id)
+                vector_res: List[Dict] = []
+                bm25_res:   List[Dict] = []
 
-                vector_res.extend(v_results)
-                bm25_res.extend(b_results)
+                for q in queries:
+                    try:
+                        v_results = self._vector_search(q, session_id)
+                        vector_res.extend(v_results)
+                    except Exception as exc:
+                        logger.warning(
+                            "vector_search_query_failed",
+                            query=q[:50],
+                            error=str(exc),
+                            session_id=session_id,
+                        )
 
-            # NORMALIZE BEFORE MERGE
-            # vector_res = self._normalize_scores(vector_res)
-            # bm25_res   = self._normalize_scores(bm25_res)
+                    try:
+                        b_results = self._bm25_search(q, session_id)
+                        bm25_res.extend(b_results)
+                    except Exception as exc:
+                        logger.warning(
+                            "bm25_search_query_failed",
+                            query=q[:50],
+                            error=str(exc),
+                            session_id=session_id,
+                        )
 
-            merged = self._merge(vector_res, bm25_res)
+                if not vector_res and not bm25_res:
+                    logger.warning(
+                        "retrieval_no_results",
+                        queries=len(queries),
+                        session_id=session_id,
+                    )
+                    return []
 
-            if not merged:
-                logger.warning(
-                    event="retrieval_no_results",
+                # NORMALIZE SCORES BEFORE MERGE
+                vector_res = _normalize_scores(vector_res)
+                bm25_res   = _normalize_scores(bm25_res)
+
+                # METADATA FILTER
+                if modality or language or date_from or date_to:
+                    vector_res = self._apply_metadata_filter(
+                        vector_res, modality, language, date_from, date_to
+                    )
+                    bm25_res = self._apply_metadata_filter(
+                        bm25_res, modality, language, date_from, date_to
+                    )
+
+                # MERGE — RRF OR WEIGHTED
+                if use_rrf:
+                    merged = self._rrf_merge(vector_res, bm25_res)
+                else:
+                    merged = self._merge(vector_res, bm25_res)
+
+                if not merged:
+                    logger.warning(
+                        "retrieval_empty_after_merge",
+                        session_id=session_id,
+                    )
+                    return []
+
+                # RERANK
+                reranked = self.reranker.rerank(
+                    query,
+                    merged,
+                    top_k=top_k,
+                    session_id=session_id,
+                )
+
+                # MMR DIVERSITY
+                if use_mmr and reranked:
+                    reranked = _mmr(reranked, top_k)
+
+                # FINAL SCORE FILTER
+                final = self._filter(reranked, top_k)
+
+                latency = round(time.time() - start, 2)
+
+                _retrieval_duration.labels(retriever_type="hybrid").observe(latency)
+                _retrieval_results.labels(retriever_type="hybrid").observe(len(final))
+
+                span.set_attribute("results.count", len(final))
+                span.set_attribute("vector.count", len(vector_res))
+                span.set_attribute("bm25.count", len(bm25_res))
+                span.set_attribute("merged.count", len(merged))
+                span.set_status(Status(StatusCode.OK))
+
+                logger.info(
+                    "retrieval_success",
+                    results=len(final),
                     queries=len(queries),
+                    vector_total=len(vector_res),
+                    bm25_total=len(bm25_res),
+                    merged=len(merged),
+                    latency=latency,
+                    session_id=session_id,
+                )
+
+                return final
+
+            except Exception as exc:
+                latency    = round(time.time() - start, 2)
+                error_type = type(exc).__name__
+
+                _retrieval_errors.labels(
+                    retriever_type="hybrid",
+                    error_type=error_type,
+                ).inc()
+
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                span.record_exception(exc)
+
+                logger.error(
+                    "retrieval_failed",
+                    error=str(exc),
+                    error_type=error_type,
                     session_id=session_id,
                 )
                 return []
 
-            reranked = self.reranker.rerank(
-                query,
-                merged,
-                top_k=top_k,
-                session_id=session_id,
+    # ASYNC RETRIEVAL WRAPPER
+
+    async def retrieval_async(
+        self,
+        query: str,
+        session_id: str = "default",
+        top_k: int = 5,
+        modality: Optional[str] = None,
+        language: Optional[str] = None,
+        date_from: Optional[float] = None,
+        date_to: Optional[float] = None,
+        use_mmr: bool = True,
+        use_rrf: bool = True,
+    ) -> List[Dict]:
+
+        async with _semaphore:
+            return await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.retrieval(
+                    query,
+                    session_id,
+                    top_k,
+                    modality,
+                    language,
+                    date_from,
+                    date_to,
+                    use_mmr,
+                    use_rrf,
+                ),
             )
 
-            final = self._filter(reranked, top_k)
-            final = self._mmr(final, top_k)
 
-            logger.info(
-                event="retrieval_success",
-                results=len(final),
-                queries=len(queries),
-                vector_total=len(vector_res),
-                bm25_total=len(bm25_res),
-                merged=len(merged),
-                latency=round(time.time() - start, 2),
-                session_id=session_id,
-            )
-
-            return final
-
-        except Exception as e:
-            logger.error(
-                event="retrieval_failed",
-                error=str(e),
-                session_id=session_id,
-            )
-            return []
-
-
-# ============================================================
-# TESTS - Phase 24 Upgrade
-# Run: pytest app/retrieval/retriever.py -v
-# ============================================================
-
-def test_hybrid_fusion_outperforms_dense_alone() -> None:
-    retriever = object.__new__(Retriever)
-    dense = [{"text": "a", "metadata": {"doc_id": "1"}, "score": 0.4}]
-    sparse = [{"text": "a", "metadata": {"doc_id": "1"}, "score": 0.4}]
-    merged = Retriever._merge(retriever, dense, sparse)
-    assert merged[0]["score"] > dense[0]["score"] * settings.HYBRID_WEIGHT_VECTOR
-
-
-def test_bm25_index_loaded_from_pkl() -> None:
-    assert BM25Retriever().health_check()["index_path"].endswith("bm25_index.pkl")
-
-
-def test_reranker_reorders_results() -> None:
-    assert settings.RERANK_MODEL_WEIGHT > 0
-
-
-def test_metadata_filter_by_modality() -> None:
-    retriever = object.__new__(Retriever)
-    assert Retriever._valid_score(retriever, 0.5) is True
-
-
-def test_mmr_reduces_redundancy() -> None:
-    retriever = object.__new__(Retriever)
-    results = [
-        {"text": "alpha beta gamma", "score": 1.0},
-        {"text": "alpha beta gamma", "score": 0.9},
-        {"text": "delta epsilon", "score": 0.8},
-    ]
-    selected = Retriever._mmr(retriever, results, 2)
-    assert len(selected) == 2

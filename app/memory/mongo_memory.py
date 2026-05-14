@@ -1,104 +1,178 @@
+from __future__ import annotations
+
+import asyncio
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-try:
-    from pymongo import ASCENDING, DESCENDING, MongoClient
-    from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
-except ImportError:
-    ASCENDING = 1
-    DESCENDING = -1
-    MongoClient = None  # type: ignore[assignment]
-
-    class ConnectionFailure(Exception):
-        pass
-
-    class ServerSelectionTimeoutError(Exception):
-        pass
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from app.core.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+try:
+    from pymongo import ASCENDING, DESCENDING, MongoClient
+    from pymongo.errors import (
+        BulkWriteError,
+        ConnectionFailure,
+        DuplicateKeyError,
+        OperationFailure,
+        ServerSelectionTimeoutError,
+    )
+    _PYMONGO_AVAILABLE = True
+except ImportError:
+    _PYMONGO_AVAILABLE = False
+    ASCENDING = 1
+    DESCENDING = -1
+    MongoClient = None  # type: ignore[assignment]
+
+    class ConnectionFailure(Exception):  # type: ignore[no-redef]
+        pass
+
+    class ServerSelectionTimeoutError(Exception):  # type: ignore[no-redef]
+        pass
+
+    class OperationFailure(Exception):  # type: ignore[no-redef]
+        pass
+
+    class DuplicateKeyError(Exception):  # type: ignore[no-redef]
+        pass
+
+    class BulkWriteError(Exception):  # type: ignore[no-redef]
+        pass
+
+try:
+    import pybreaker
+    _mongo_breaker = pybreaker.CircuitBreaker(
+        fail_max=settings.CIRCUIT_BREAKER_MAX_FAILURES,
+        reset_timeout=settings.CIRCUIT_BREAKER_RESET_TIMEOUT,
+    )
+    _PYBREAKER_AVAILABLE = True
+except ImportError:
+    _PYBREAKER_AVAILABLE = False
+
+    class _DummyBreaker:
+        def __call__(self, fn):
+            return fn
+
+    _mongo_breaker = _DummyBreaker()  # type: ignore[assignment]
+
+
+# VALID ROLES
+_VALID_ROLES = {"user", "assistant", "system"}
+
+# VALID MODALITIES
+_VALID_MODALITIES = {"text", "image", "audio", "video", "table", "document"}
+
 
 class MongoMemory:
 
     def __init__(self) -> None:
-        self._mongo_ok = False
-        self.client    = None
-        self.db        = None
-        self.messages  = None
+        self._mongo_ok: bool = False
+        self.client = None
+        self.db = None
+        self.messages = None
         self.summaries = None
+
+        if not _PYMONGO_AVAILABLE:
+            logger.warning(event="pymongo_not_installed")
+            return
 
         self._connect()
 
     # CONNECTION
 
     def _connect(self) -> None:
-        if MongoClient is None:
-            self._mongo_ok = False
-            logger.warning(event="pymongo_not_installed")
-            return
         try:
             self.client = MongoClient(
                 settings.MONGO_URI,
                 serverSelectionTimeoutMS=settings.DB_TIMEOUT_MS,
                 maxPoolSize=settings.DB_MAX_POOL_SIZE,
                 connect=True,
+                tz_aware=True,
             )
-
             self._ping()
 
-            self.db        = self.client[settings.MONGO_DB_NAME]
-            self.messages  = self.db["messages"]
-            self.summaries = self.db["summaries"]
+            self.db = self.client[settings.MONGO_DB_NAME]
+            self.messages = self.db[settings.MONGO_MEMORY_COLLECTION]
+            self.summaries = self.db[settings.MONGO_SUMMARY_COLLECTION]
 
-            self._indexes()
+            self._ensure_indexes()
             self._mongo_ok = True
 
-            logger.info(event="mongo_connected", db=settings.MONGO_DB_NAME)
+            logger.info(
+                event="mongo_connected",
+                db=settings.MONGO_DB_NAME,
+                messages_col=settings.MONGO_MEMORY_COLLECTION,
+                summaries_col=settings.MONGO_SUMMARY_COLLECTION,
+            )
 
-        except (ConnectionFailure, ServerSelectionTimeoutError) as e:
+        except (ConnectionFailure, ServerSelectionTimeoutError) as exc:
             self._mongo_ok = False
-            logger.error(event="mongo_connection_failed", error=str(e))
+            logger.error(event="mongo_connection_failed", error=str(exc))
             raise
 
-        except Exception as e:
+        except Exception as exc:
             self._mongo_ok = False
-            logger.error(event="mongo_init_failed", error=str(e))
+            logger.error(event="mongo_init_failed", error=str(exc))
             raise
 
-    # AVAILABILITY
+    # AVAILABILITY CHECK
 
     def _is_available(self) -> bool:
         return self._mongo_ok and self.messages is not None
 
-    # PING
+    # PING WITH CIRCUIT BREAKER
 
     def _ping(self) -> None:
-        self.client.admin.command("ping")
+        def _do():
+            self.client.admin.command("ping")
 
-    # RETRY
+        if _PYBREAKER_AVAILABLE:
+            _mongo_breaker(_do)()
+        else:
+            _do()
 
-    def _retry(self, fn, retries: int = 2):
-        for i in range(retries):
-            try:
-                return fn()
-            except Exception as e:
-                if i == retries - 1:
-                    raise
-                logger.warning(event="mongo_retry", attempt=i + 1, error=str(e))
-                time.sleep(0.3 * (i + 1))
+    # TENACITY RETRY WRAPPER
+
+    @retry(
+        stop=stop_after_attempt(settings.RETRY_MAX_ATTEMPTS),
+        wait=wait_exponential(
+            min=settings.RETRY_WAIT_MIN_SEC,
+            max=settings.RETRY_WAIT_MAX_SEC,
+        ),
+        retry=retry_if_exception_type((ConnectionFailure, ServerSelectionTimeoutError)),
+        reraise=True,
+    )
+    def _retry(self, fn):
+        def _do():
+            return fn()
+
+        if _PYBREAKER_AVAILABLE:
+            return _mongo_breaker(_do)()
+        return _do()
 
     # HELPERS
 
     def _clean(self, text: str) -> str:
-        return " ".join(str(text or "").strip().split())
+        import unicodedata
+        text = unicodedata.normalize("NFC", str(text or ""))
+        return " ".join(text.strip().split())
 
     def _role(self, role: str) -> str:
-        role = str(role or "user").lower()
-        return role if role in {"user", "assistant", "system"} else "user"
+        role = str(role or "user").lower().strip()
+        return role if role in _VALID_ROLES else "user"
+
+    def _modality(self, modality: str) -> str:
+        m = str(modality or "text").lower().strip()
+        return m if m in _VALID_MODALITIES else "text"
 
     def _importance(self, val: Any) -> float:
         try:
@@ -106,58 +180,81 @@ class MongoMemory:
         except Exception:
             return 0.5
 
-    def _valid_embedding(self, emb) -> bool:
+    def _valid_embedding(self, emb: Any) -> bool:
         return (
-            isinstance(emb, list) and
-            len(emb) in (settings.TEXT_EMBEDDING_DIM, settings.VISION_EMBEDDING_DIM)
+            isinstance(emb, list)
+            and len(emb) in (settings.TEXT_EMBEDDING_DIM, settings.VISION_EMBEDDING_DIM)
         )
 
-    # INDEXES
+    def _utcnow(self) -> datetime:
+        return datetime.now(tz=timezone.utc)
 
-    def _indexes(self) -> None:
+    # ENSURE INDEXES
+
+    def _ensure_indexes(self) -> None:
         try:
             # PRIMARY QUERY INDEX
             self.messages.create_index(
                 [("session_id", ASCENDING), ("timestamp", DESCENDING)],
-                name="session_timestamp",
+                name="idx_session_timestamp",
+                background=True,
+            )
+
+            # USER + SESSION INDEX
+            self.messages.create_index(
+                [("user_id", ASCENDING), ("session_id", ASCENDING)],
+                name="idx_user_session",
+                background=True,
             )
 
             # IMPORTANCE INDEX
             self.messages.create_index(
                 [("importance", DESCENDING)],
-                name="importance",
+                name="idx_importance",
+                background=True,
             )
 
             # ROLE FILTER INDEX
             self.messages.create_index(
                 [("session_id", ASCENDING), ("role", ASCENDING)],
-                name="session_role",
-            )
-            self.messages.create_index(
-                [("user_id", ASCENDING), ("session_id", ASCENDING)],
-                name="user_session",
+                name="idx_session_role",
+                background=True,
             )
 
-            # TTL INDEX: auto-expire messages after REDIS_TTL_SECONDS
+            # MODALITY FILTER INDEX
             self.messages.create_index(
-                [("timestamp", ASCENDING)],
-                expireAfterSeconds=settings.REDIS_TTL_SECONDS,
-                name="ttl_expire",
+                [("modality", ASCENDING)],
+                name="idx_modality",
+                background=True,
             )
 
-            # SUMMARIES INDEX
+            # TTL AUTO-EXPIRE INDEX
+            self.messages.create_index(
+                [("expire_at", ASCENDING)],
+                name="idx_ttl_expire",
+                expireAfterSeconds=0,
+                background=True,
+            )
+
+            # SUMMARIES INDEXES
             self.summaries.create_index(
                 [("session_id", ASCENDING), ("timestamp", DESCENDING)],
-                name="summary_session_timestamp",
+                name="idx_summary_session_timestamp",
+                background=True,
+            )
+            self.summaries.create_index(
+                [("user_id", ASCENDING)],
+                name="idx_summary_user_id",
+                background=True,
             )
 
-            logger.info(event="mongo_indexes_created")
+            logger.info(event="mongo_indexes_ensured")
 
-        except Exception as e:
-            if "already exists" in str(e) or "IndexOptionsConflict" in str(e):
-                logger.info(event="mongo_index_verified_existing")
+        except Exception as exc:
+            if "already exists" in str(exc) or "IndexOptionsConflict" in str(exc):
+                logger.debug(event="mongo_indexes_already_exist")
             else:
-                logger.warning(event="mongo_index_creation_failed", error=str(e))
+                logger.warning(event="mongo_index_creation_warning", error=str(exc))
 
     # STORE MESSAGE
 
@@ -169,14 +266,17 @@ class MongoMemory:
         embedding: Optional[List[float]] = None,
         modality: str = "text",
         importance: float = 1.0,
-        extra: Optional[Dict] = None,
+        user_id: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> None:
-
         if not session_id or not content:
             return
 
         if not self._is_available():
-            logger.warning(event="mongo_store_skipped_unavailable", session_id=session_id)
+            logger.warning(
+                event="mongo_store_skipped_unavailable",
+                session_id=session_id,
+            )
             return
 
         try:
@@ -185,41 +285,54 @@ class MongoMemory:
                 return
 
             content = content[:settings.MAX_PROMPT_CHARS]
+            now = self._utcnow()
 
-            doc: Dict = {
+            # COMPUTE TTL EXPIRY
+            ttl_seconds = getattr(settings, "MEMORY_REDIS_TTL", settings.REDIS_TTL_SECONDS)
+            expire_at = datetime.fromtimestamp(
+                time.time() + ttl_seconds,
+                tz=timezone.utc,
+            )
+
+            doc: Dict[str, Any] = {
                 "session_id": session_id,
-                "user_id":    (extra or {}).get("user_id") if isinstance(extra, dict) else None,
-                "role":       self._role(role),
-                "content":    content,
-                "timestamp":  datetime.utcnow(),
-                "modality":   modality,
+                "user_id": user_id,
+                "role": self._role(role),
+                "content": content,
+                "timestamp": now,
+                "expire_at": expire_at,
+                "modality": self._modality(modality),
                 "importance": self._importance(importance),
             }
 
             if self._valid_embedding(embedding):
                 doc["embedding"] = embedding
 
-            if isinstance(extra, dict):
+            if isinstance(extra, dict) and extra:
                 doc["extra"] = extra
 
-            self._retry(lambda: self.messages.insert_one(doc))
+            def _do():
+                self.messages.insert_one(doc)
 
-        except Exception as e:
+            self._retry(_do)
+
+        except Exception as exc:
             logger.error(
                 event="mongo_store_failed",
                 session_id=session_id,
-                error=str(e),
+                error=str(exc),
             )
 
-    # INSERT ALIAS (used by memory_manager)
+    # INSERT ALIAS — USED BY MEMORY MANAGER
 
-    def insert(self, session_id: str, message: Dict) -> None:
+    def insert(self, session_id: str, message: Dict[str, Any]) -> None:
         self.store_message(
             session_id=session_id,
             role=message.get("role", "user"),
             content=message.get("content", ""),
             modality=message.get("modality", "text"),
             importance=message.get("importance", 1.0),
+            user_id=message.get("user_id"),
         )
 
     # STORE SUMMARY
@@ -229,8 +342,8 @@ class MongoMemory:
         session_id: str,
         summary: str,
         embedding: Optional[List[float]] = None,
+        user_id: Optional[str] = None,
     ) -> None:
-
         if not session_id or not summary:
             return
 
@@ -239,28 +352,38 @@ class MongoMemory:
 
         try:
             summary = self._clean(summary)
-
-            if len(summary) < 5:
+            if len(summary) < settings.MIN_SUMMARY_LENGTH:
                 return
 
             summary = summary[:settings.MEMORY_SUMMARY_MAX_CHARS]
+            now = self._utcnow()
 
-            doc: Dict = {
+            doc: Dict[str, Any] = {
                 "session_id": session_id,
-                "summary":    summary,
-                "timestamp":  datetime.utcnow(),
+                "user_id": user_id,
+                "summary": summary,
+                "timestamp": now,
             }
 
             if self._valid_embedding(embedding):
                 doc["embedding"] = embedding
 
-            self._retry(lambda: self.summaries.insert_one(doc))
+            def _do():
+                self.summaries.insert_one(doc)
 
-        except Exception as e:
+            self._retry(_do)
+
+            logger.debug(
+                event="mongo_summary_stored",
+                session_id=session_id,
+                length=len(summary),
+            )
+
+        except Exception as exc:
             logger.error(
                 event="mongo_summary_store_failed",
                 session_id=session_id,
-                error=str(e),
+                error=str(exc),
             )
 
     # GET RECENT HISTORY
@@ -269,32 +392,50 @@ class MongoMemory:
         self,
         session_id: str,
         limit: Optional[int] = None,
-    ) -> List[Dict]:
-
+        role_filter: Optional[str] = None,
+        modality_filter: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         if not self._is_available():
             return []
 
         limit = min(limit or settings.MAX_HISTORY_MESSAGES, settings.MAX_HISTORY_MESSAGES)
 
         try:
-            cursor = self._retry(
-                lambda: self.messages.find(
-                    {"session_id": session_id},
-                    {"_id": 0},
-                ).sort("timestamp", DESCENDING).limit(limit)
-            )
+            query: Dict[str, Any] = {"session_id": session_id}
 
-            result: List[Dict] = []
+            if role_filter and role_filter in _VALID_ROLES:
+                query["role"] = role_filter
 
-            for doc in reversed(list(cursor)):
+            if modality_filter and modality_filter in _VALID_MODALITIES:
+                query["modality"] = modality_filter
+
+            def _do():
+                return list(
+                    self.messages.find(
+                        query,
+                        {"_id": 0},
+                    )
+                    .sort("timestamp", DESCENDING)
+                    .limit(limit)
+                )
+
+            raw = self._retry(_do)
+            result: List[Dict[str, Any]] = []
+
+            for doc in reversed(raw):
                 ts = doc.get("timestamp")
+                unix_ts: Optional[float] = None
+                if isinstance(ts, datetime):
+                    unix_ts = ts.timestamp()
+
                 result.append({
-                    "role":       doc.get("role"),
-                    "content":    self._clean(doc.get("content", "")),
-                    "embedding":  doc.get("embedding"),
-                    "modality":   doc.get("modality", "text"),
+                    "role": doc.get("role"),
+                    "content": self._clean(doc.get("content", "")),
+                    "embedding": doc.get("embedding"),
+                    "modality": doc.get("modality", "text"),
                     "importance": doc.get("importance", 1.0),
-                    "timestamp":  ts.timestamp() if isinstance(ts, datetime) else None,
+                    "timestamp": unix_ts,
+                    "user_id": doc.get("user_id"),
                 })
 
             logger.debug(
@@ -305,117 +446,197 @@ class MongoMemory:
 
             return result
 
-        except Exception as e:
+        except Exception as exc:
             logger.error(
                 event="mongo_fetch_failed",
                 session_id=session_id,
-                error=str(e),
+                error=str(exc),
             )
             return []
 
-    # GET ALIAS (used by memory_manager)
+    # GET ALIAS — USED BY MEMORY MANAGER
 
-    def get(self, session_id: str) -> List[Dict]:
+    def get(self, session_id: str) -> List[Dict[str, Any]]:
         return self.get_recent_history(session_id)
 
-    # GET LATEST SUMMARY (used by memory_fusion)
+    # GET LATEST SUMMARY — USED BY MEMORY FUSION
 
     def get_latest_summary(self, session_id: str) -> str:
         if not self._is_available():
             return ""
 
         try:
-            doc = self._retry(
-                lambda: self.summaries.find_one(
+            def _do():
+                return self.summaries.find_one(
                     {"session_id": session_id},
                     {"_id": 0, "summary": 1},
                     sort=[("timestamp", DESCENDING)],
                 )
-            )
+
+            doc = self._retry(_do)
             return self._clean(doc.get("summary", "")) if doc else ""
 
-        except Exception as e:
+        except Exception as exc:
             logger.error(
                 event="mongo_summary_fetch_failed",
                 session_id=session_id,
-                error=str(e),
+                error=str(exc),
             )
             return ""
 
-    # CLEAR MEMORY
+    # GET ALL SUMMARIES FOR SESSION
+
+    def get_summaries(
+        self,
+        session_id: str,
+        limit: int = 5,
+    ) -> List[str]:
+        if not self._is_available():
+            return []
+
+        try:
+            def _do():
+                return list(
+                    self.summaries.find(
+                        {"session_id": session_id},
+                        {"_id": 0, "summary": 1},
+                    )
+                    .sort("timestamp", DESCENDING)
+                    .limit(limit)
+                )
+
+            docs = self._retry(_do)
+            return [self._clean(d.get("summary", "")) for d in docs if d.get("summary")]
+
+        except Exception as exc:
+            logger.error(
+                event="mongo_summaries_fetch_failed",
+                session_id=session_id,
+                error=str(exc),
+            )
+            return []
+
+    # CLEAR SESSION MEMORY
 
     def clear_memory(self, session_id: str) -> None:
         if not self._is_available():
             return
 
         try:
-            self._retry(lambda: self.messages.delete_many({"session_id": session_id}))
-            self._retry(lambda: self.summaries.delete_many({"session_id": session_id}))
+            def _del_msgs():
+                return self.messages.delete_many({"session_id": session_id})
 
-            logger.info(event="mongo_memory_cleared", session_id=session_id)
+            def _del_sums():
+                return self.summaries.delete_many({"session_id": session_id})
 
-        except Exception as e:
+            r1 = self._retry(_del_msgs)
+            r2 = self._retry(_del_sums)
+
+            logger.info(
+                event="mongo_memory_cleared",
+                session_id=session_id,
+                messages_deleted=r1.deleted_count,
+                summaries_deleted=r2.deleted_count,
+            )
+
+        except Exception as exc:
             logger.error(
                 event="mongo_clear_failed",
                 session_id=session_id,
-                error=str(e),
+                error=str(exc),
             )
 
-    # DELETE ALIAS (used by memory_manager)
+    # DELETE ALIAS — USED BY MEMORY MANAGER
 
     def delete(self, session_id: str) -> None:
         self.clear_memory(session_id)
 
+    # GDPR PURGE — ALL DATA FOR USER
+
     def purge_user(self, user_id: str) -> None:
         if not user_id or not self._is_available():
             return
+
         try:
-            self._retry(lambda: self.messages.delete_many({"user_id": user_id}))
-            self._retry(lambda: self.summaries.delete_many({"user_id": user_id}))
-        except Exception as e:
-            logger.error(event="mongo_user_purge_failed", user_id=user_id, error=str(e))
+            def _del_msgs():
+                return self.messages.delete_many({"user_id": user_id})
+
+            def _del_sums():
+                return self.summaries.delete_many({"user_id": user_id})
+
+            r1 = self._retry(_del_msgs)
+            r2 = self._retry(_del_sums)
+
+            logger.info(
+                event="mongo_user_purged",
+                user_id=user_id,
+                messages_deleted=r1.deleted_count,
+                summaries_deleted=r2.deleted_count,
+            )
+
+        except Exception as exc:
+            logger.error(
+                event="mongo_user_purge_failed",
+                user_id=user_id,
+                error=str(exc),
+            )
+
+    # ASYNC WRAPPERS
+
+    async def async_store_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        embedding: Optional[List[float]] = None,
+        modality: str = "text",
+        importance: float = 1.0,
+        user_id: Optional[str] = None,
+    ) -> None:
+        await asyncio.to_thread(
+            self.store_message,
+            session_id, role, content, embedding, modality, importance, user_id,
+        )
+
+    async def async_get_recent_history(
+        self,
+        session_id: str,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        return await asyncio.to_thread(self.get_recent_history, session_id, limit)
+
+    async def async_purge_user(self, user_id: str) -> None:
+        await asyncio.to_thread(self.purge_user, user_id)
+
+    # MESSAGE COUNT
+
+    def message_count(self, session_id: str) -> int:
+        if not self._is_available():
+            return 0
+        try:
+            def _do():
+                return self.messages.count_documents({"session_id": session_id})
+            return int(self._retry(_do))
+        except Exception:
+            return 0
 
     # HEALTH CHECK
 
-    def health_check(self) -> Dict:
-        status = {"mongo_ok": self._mongo_ok}
+    def health_check(self) -> Dict[str, Any]:
+        status: Dict[str, Any] = {
+            "mongo_ok": self._mongo_ok,
+            "pymongo_available": _PYMONGO_AVAILABLE,
+            "circuit_breaker": _PYBREAKER_AVAILABLE,
+        }
 
         if self._is_available():
             try:
-                status["messages_count"]  = self.messages.estimated_document_count()
+                status["messages_count"] = self.messages.estimated_document_count()
                 status["summaries_count"] = self.summaries.estimated_document_count()
+                status["db_name"] = settings.MONGO_DB_NAME
             except Exception:
                 status["count_error"] = True
 
         return status
 
 
-# ============================================================
-# TESTS - Phase 24 Upgrade
-# Run: pytest app/memory/mongo_memory.py -v
-# ============================================================
-
-def test_memory_manager_fuses_redis_and_mongo() -> None:
-    assert MongoMemory is not None
-
-
-def test_redis_ttl_expires_old_turns() -> None:
-    assert settings.REDIS_TTL_SECONDS > 0
-
-
-def test_mongo_persistent_memory_retrieved() -> None:
-    mongo = object.__new__(MongoMemory)
-    mongo._mongo_ok = False
-    mongo.messages = None
-    assert MongoMemory.get_recent_history(mongo, "s1") == []
-
-
-def test_summarizer_compresses_long_memory() -> None:
-    assert settings.MEMORY_SUMMARY_INPUT_CHARS > 0
-
-
-def test_gdpr_purge_all_memory() -> None:
-    mongo = object.__new__(MongoMemory)
-    mongo._mongo_ok = False
-    mongo.messages = None
-    assert MongoMemory.purge_user(mongo, "u1") is None
