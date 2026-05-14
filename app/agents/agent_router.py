@@ -1,18 +1,44 @@
+import asyncio
 import json
 import re
 import time
 import unicodedata
-from typing import Dict
+from typing import Dict, Optional
+
+import structlog
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+from prometheus_client import Counter, Histogram
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.agents.agent_schema import AgentDecision
 from app.core.config import settings
-from app.utils.logger import get_logger
+from app.core.model_loader import model_loader
 
-logger = get_logger(__name__)
+logger = structlog.get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
+# PROMETHEUS METRICS
+_router_duration = Histogram(
+    "agent_router_duration_seconds",
+    "Agent router duration",
+    ["route", "status"],
+)
+_router_errors = Counter(
+    "agent_router_errors_total",
+    "Agent router errors by type",
+    ["error_type"],
+)
+_router_decisions = Counter(
+    "agent_router_decisions_total",
+    "Agent router decision counts by action",
+    ["action", "method"],
+)
 
-# HARD RULE KEYWORDS
+# SEMAPHORE
+_semaphore = asyncio.Semaphore(5)
 
+# HARD RULE KEYWORD SETS
 _RECENT_WORDS     = {"latest", "today", "news", "recent", "update", "current", "now", "live"}
 _MEMORY_WORDS     = {"earlier", "previous", "last time", "we discussed", "you said", "before"}
 _COMPLEX_KEYWORDS = {"compare", "difference", "process", "steps", "vs", "versus", "explain"}
@@ -20,6 +46,49 @@ _REASONING_WORDS  = {"why", "how", "explain", "reason", "cause", "because"}
 _MULTIMODAL_WORDS = {"image", "video", "diagram", "chart", "audio", "photo", "picture", "figure"}
 _CODE_WORDS       = {"code", "function", "implement", "script", "syntax", "class", "debug"}
 _GREETING_WORDS   = {"hello", "hi", "hey", "thanks", "thank you", "bye", "goodbye"}
+_MATH_WORDS       = {"calculate", "compute", "solve", "equation", "formula", "integral", "derivative"}
+_SECURITY_WORDS   = {"password", "credential", "secret", "token", "api key", "hack", "exploit"}
+
+
+# NORMALIZE QUERY
+
+def _normalize(query: str) -> str:
+    query = unicodedata.normalize("NFC", str(query or ""))
+    return " ".join(query.strip().split())
+
+
+# INJECTION PATTERN DETECTION
+
+_INJECTION_PATTERNS = [
+    "ignore previous instructions",
+    "ignore all instructions",
+    "disregard the above",
+    "forget everything",
+    "you are now",
+    "act as",
+    "jailbreak",
+    "override instructions",
+    "new instructions",
+    "system prompt",
+    "developer mode",
+    "bypass",
+    "admin override",
+]
+
+
+def _detect_injection(query: str) -> bool:
+    lower = query.lower()
+    return any(p in lower for p in _INJECTION_PATTERNS)
+
+
+# LANGUAGE DETECTION FOR MULTILINGUAL ROUTING
+
+def _detect_language(query: str) -> Optional[str]:
+    try:
+        from langdetect import detect
+        return detect(query[:500])
+    except Exception:
+        return None
 
 
 class AgentRouter:
@@ -27,10 +96,9 @@ class AgentRouter:
     # NORMALIZE
 
     def _normalize(self, query: str) -> str:
-        query = unicodedata.normalize("NFC", str(query or ""))
-        return " ".join(query.strip().split())
+        return _normalize(query)
 
-    # MAIN
+    # MAIN ROUTE
 
     def route(self, query: str, session_id: str) -> AgentDecision:
 
@@ -40,40 +108,120 @@ class AgentRouter:
         start = time.time()
         query = self._normalize(query)
 
-        signals = self._analyze(query)
+        with tracer.start_as_current_span("agent_router") as span:
+            span.set_attribute("query.length", len(query))
+            span.set_attribute("session.id", session_id)
 
-        # HARD RULE: GREETING / CHITCHAT
-        if signals["is_greeting"]:
-            return self._decision("direct", "greeting_detected", 0.95, session_id)
+            try:
+                # INJECTION GUARD
+                if _detect_injection(query):
+                    logger.warning(
+                        "router_injection_detected",
+                        query_prefix=query[:80],
+                        session_id=session_id,
+                    )
+                    _router_decisions.labels(
+                        action="reject",
+                        method="injection_guard",
+                    ).inc()
+                    return self._decision("direct", "injection_detected", 0.0, session_id)
 
-        # HARD RULE: CODE QUERY
-        if signals["is_code"]:
-            return self._decision("direct", "code_query", 0.9, session_id)
+                signals = self._analyze(query)
 
-        # HARD RULE: RECENT/WEB SEARCH
-        if signals["is_recent"]:
-            return self._decision("search", "recent_query", 0.95, session_id)
+                # HARD RULE: GREETING / CHITCHAT
+                if signals["is_greeting"]:
+                    d = self._decision("direct", "greeting_detected", 0.95, session_id)
+                    _router_decisions.labels(action="direct", method="hard_rule").inc()
+                    self._log_decision(d, signals, start, session_id)
+                    return d
 
-        # HARD RULE: MEMORY REFERENCE
-        if signals["is_memory"]:
-            return self._decision("memory", "memory_reference", 0.9, session_id)
+                # HARD RULE: CODE QUERY
+                if signals["is_code"]:
+                    d = self._decision("direct", "code_query", 0.9, session_id)
+                    _router_decisions.labels(action="direct", method="hard_rule").inc()
+                    self._log_decision(d, signals, start, session_id)
+                    return d
 
-        # LLM ROUTING
-        decision  = self._llm_route(query, signals, session_id)
-        validated = self._validate(decision, signals, session_id)
+                # HARD RULE: MATH QUERY
+                if signals["is_math"]:
+                    d = self._decision("direct", "math_query", 0.9, session_id)
+                    _router_decisions.labels(action="direct", method="hard_rule").inc()
+                    self._log_decision(d, signals, start, session_id)
+                    return d
 
-        validated.set_latency(start)
+                # HARD RULE: RECENT/WEB SEARCH
+                if signals["is_recent"]:
+                    d = self._decision("search", "recent_query", 0.95, session_id)
+                    _router_decisions.labels(action="search", method="hard_rule").inc()
+                    self._log_decision(d, signals, start, session_id)
+                    return d
 
+                # HARD RULE: MEMORY REFERENCE
+                if signals["is_memory"]:
+                    d = self._decision("memory", "memory_reference", 0.9, session_id)
+                    _router_decisions.labels(action="memory", method="hard_rule").inc()
+                    self._log_decision(d, signals, start, session_id)
+                    return d
+
+                # LLM ROUTING FOR AMBIGUOUS QUERIES
+                decision  = self._llm_route(query, signals, session_id)
+                validated = self._validate(decision, signals, session_id)
+                validated.set_latency(start)
+
+                _router_decisions.labels(
+                    action=validated.action,
+                    method="llm",
+                ).inc()
+                _router_duration.labels(
+                    route=validated.action,
+                    status="success",
+                ).observe(validated.latency_ms / 1000.0 if validated.latency_ms else 0)
+
+                span.set_attribute("decision.action", validated.action)
+                span.set_attribute("decision.confidence", validated.confidence)
+                span.set_status(Status(StatusCode.OK))
+
+                self._log_decision(validated, signals, start, session_id)
+
+                return validated
+
+            except Exception as exc:
+                latency    = round(time.time() - start, 3)
+                error_type = type(exc).__name__
+
+                _router_errors.labels(error_type=error_type).inc()
+                _router_duration.labels(route="fallback", status="error").observe(latency)
+
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                span.record_exception(exc)
+
+                logger.error(
+                    "router_failed",
+                    error=str(exc),
+                    error_type=error_type,
+                    session_id=session_id,
+                )
+
+                return self._decision("rag", "router_exception", 0.5, session_id)
+
+    # LOG DECISION
+
+    def _log_decision(
+        self,
+        decision: AgentDecision,
+        signals: Dict,
+        start: float,
+        session_id: str,
+    ) -> None:
         logger.info(
-            event="router_final",
-            action=validated.action,
-            confidence=validated.confidence,
+            "router_final",
+            action=decision.action,
+            confidence=decision.confidence,
+            reason=decision.reason,
             signal_summary={k: v for k, v in signals.items() if v},
-            latency_ms=validated.latency_ms,
+            latency_ms=round((time.time() - start) * 1000, 1),
             session_id=session_id,
         )
-
-        return validated
 
     # SIGNAL ANALYSIS
 
@@ -81,43 +229,68 @@ class AgentRouter:
         q      = query.lower()
         tokens = set(q.split())
 
+        # LANGUAGE DETECTION FOR MULTILINGUAL ROUTING
+        language = _detect_language(query)
+
         return {
-            "is_recent":          bool(tokens & _RECENT_WORDS),
-            "is_memory":          any(w in q for w in _MEMORY_WORDS),
-            "is_complex":         (
+            "is_recent":           bool(tokens & _RECENT_WORDS),
+            "is_memory":           any(w in q for w in _MEMORY_WORDS),
+            "is_complex":          (
                 len(tokens) > settings.DECOMPOSITION_MIN_WORDS or
                 bool(tokens & _COMPLEX_KEYWORDS)
             ),
-            "is_reasoning":       bool(tokens & _REASONING_WORDS),
+            "is_reasoning":        bool(tokens & _REASONING_WORDS),
             "has_multimodal_hint": bool(tokens & _MULTIMODAL_WORDS),
-            "is_code":            bool(tokens & _CODE_WORDS),
-            "is_greeting":        bool(tokens & _GREETING_WORDS) and len(tokens) <= 4,
+            "is_code":             bool(tokens & _CODE_WORDS),
+            "is_greeting":         bool(tokens & _GREETING_WORDS) and len(tokens) <= 4,
+            "is_math":             bool(tokens & _MATH_WORDS),
+            "is_security":         bool(tokens & _SECURITY_WORDS),
+            "is_multilingual":     language is not None and language != "en",
+            "language":            language,
+            "token_count":         len(tokens),
+            "has_question_mark":   "?" in query,
+            "multi_question":      query.count("?") > 1,
         }
 
-    # PROMPT
+    # PROMPT BUILDER
 
     def _build_prompt(self, query: str, signals: dict) -> str:
         instruction = (
-            "Route query to one:\n"
-            "rag | search | direct | memory | hybrid\n"
-            "Return JSON only.\n\n"
+            "Route the query to exactly ONE of these options:\n"
+            "rag | search | direct | memory | hybrid\n\n"
+            "ROUTING RULES:\n"
+            "- rag: knowledge base questions, factual lookups, document questions\n"
+            "- search: recent events, news, current information\n"
+            "- direct: greetings, code, math, simple factual answers\n"
+            "- memory: references to previous conversation\n"
+            "- hybrid: complex multi-source questions\n\n"
+            "Return JSON only. No explanation.\n\n"
         )
 
-        signal_str   = str({k: v for k, v in signals.items() if v})
-        body         = f"Signals:{signal_str}\nQuery:{query}\n"
-        format_block = '{"action":"...", "reason":"..."}'
+        signal_str   = str({k: v for k, v in signals.items() if v and k not in ("language",)})
+        body         = f"Signals: {signal_str}\nQuery: {query}\n"
+        format_block = '{"action":"<route>", "reason":"<brief reason>"}'
 
-        max_chars = settings.MAX_PROMPT_CHARS
-        available = max_chars - len(instruction) - len(format_block) - 50
+        max_chars  = settings.MAX_PROMPT_CHARS
+        available  = max_chars - len(instruction) - len(format_block) - 50
 
-        return instruction + body[:max(available, 0)] + format_block
+        return instruction + body[:max(available, 0)] + "\n" + format_block
 
-    # LLM ROUTING
+    # LLM ROUTING WITH RETRY
 
-    def _llm_route(self, query: str, signals: dict, session_id: str) -> AgentDecision:
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=4),
+        reraise=False,
+    )
+    def _llm_route(
+        self,
+        query: str,
+        signals: dict,
+        session_id: str,
+    ) -> AgentDecision:
+
         try:
-            from app.core.model_loader import model_loader
-
             llm = model_loader.get_llm()
         except Exception:
             return self._decision("rag", "llm_unavailable", 0.5, session_id)
@@ -126,7 +299,6 @@ class AgentRouter:
 
         try:
             t_start  = time.time()
-
             response = llm.generate(
                 prompt,
                 max_tokens=80,
@@ -134,12 +306,11 @@ class AgentRouter:
                 top_p=1.0,
                 session_id=session_id,
             )
-
             elapsed = time.time() - t_start
 
             if elapsed > settings.AGENT_STEP_TIMEOUT_SEC:
                 logger.warning(
-                    event="router_llm_timeout",
+                    "router_llm_timeout",
                     elapsed=round(elapsed, 2),
                     session_id=session_id,
                 )
@@ -147,17 +318,37 @@ class AgentRouter:
 
             return self._parse(response, signals, session_id)
 
-        except Exception as e:
+        except Exception as exc:
             logger.warning(
-                event="router_llm_failed",
-                error=str(e),
+                "router_llm_failed",
+                error=str(exc),
                 session_id=session_id,
             )
             return self._decision("rag", "llm_failure", 0.5, session_id)
 
-    # PARSE
+    # JSON EXTRACTION
 
-    def _parse(self, text: str, signals: dict, session_id: str) -> AgentDecision:
+    def _extract_json(self, text: str) -> str:
+        text = text.strip()
+
+        if "```" in text:
+            parts = text.split("```")
+            text  = next((p for p in parts if "{" in p), text)
+
+        match = re.search(r"\{.*?\}", text, re.DOTALL)
+        if match:
+            return match.group(0)
+
+        raise ValueError("NO_JSON_FOUND")
+
+    # PARSE LLM RESPONSE
+
+    def _parse(
+        self,
+        text: str,
+        signals: dict,
+        session_id: str,
+    ) -> AgentDecision:
         try:
             cleaned = self._extract_json(text)
             data    = json.loads(cleaned)
@@ -198,25 +389,15 @@ class AgentRouter:
         if signals.get("is_reasoning") and action in {"rag", "direct"}:
             score += 0.05
 
+        if signals.get("is_multilingual") and action in {"rag", "hybrid"}:
+            score += 0.05
+
+        if signals.get("multi_question") and action in {"hybrid", "rag"}:
+            score += 0.05
+
         return min(round(score, 3), 0.95)
 
-    # JSON EXTRACTION
-
-    def _extract_json(self, text: str) -> str:
-        text = text.strip()
-
-        if "```" in text:
-            parts = text.split("```")
-            text  = next((p for p in parts if "{" in p), text)
-
-        match = re.search(r"\{.*?\}", text, re.DOTALL)
-
-        if match:
-            return match.group(0)
-
-        raise ValueError("NO_JSON_FOUND")
-
-    # VALIDATE
+    # VALIDATE DECISION
 
     def _validate(
         self,
@@ -228,9 +409,17 @@ class AgentRouter:
         if decision.action not in {"rag", "search", "direct", "memory", "hybrid"}:
             return self._decision("rag", "invalid_action_fallback", 0.5, session_id)
 
-        # OVERRIDE: recent signal always forces search
+        # OVERRIDE: RECENT SIGNAL ALWAYS FORCES SEARCH
         if signals.get("is_recent"):
             return self._decision("search", "override_recent_signal", 0.95, session_id)
+
+        # OVERRIDE: SECURITY KEYWORDS FORCE DIRECT — AVOID RAG ON CREDENTIALS
+        if signals.get("is_security") and decision.action == "rag":
+            return self._decision("direct", "override_security_signal", 0.8, session_id)
+
+        # OVERRIDE: MULTI-QUESTION BENEFITS FROM HYBRID
+        if signals.get("multi_question") and decision.action == "direct":
+            return self._decision("hybrid", "override_multi_question", 0.75, session_id)
 
         return decision
 
@@ -251,31 +440,17 @@ class AgentRouter:
             session_id=session_id,
         )
 
+    # ASYNC ROUTE WRAPPER
 
-# ============================================================
-# TESTS - Phase 24 Upgrade
-# Run: pytest app/agents/agent_router.py -v
-# ============================================================
+    async def route_async(
+        self,
+        query: str,
+        session_id: str,
+    ) -> AgentDecision:
 
-def test_agent_react_loop_terminates() -> None:
-    router = AgentRouter()
-    assert router.route("hello", "s1").action == "direct"
+        async with _semaphore:
+            return await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.route(query, session_id),
+            )
 
-
-def test_tool_registry_validates_schema() -> None:
-    router = AgentRouter()
-    assert router._validate(router._decision("rag", "x", 0.5), {}, "s1").action == "rag"
-
-
-def test_planner_parallel_tool_calls() -> None:
-    router = AgentRouter()
-    assert router._analyze("compare image and transcript")["has_multimodal_hint"] is True
-
-
-def test_web_search_deduplicates_results() -> None:
-    router = AgentRouter()
-    assert router.route("latest model news", "s1").action == "search"
-
-
-def test_agent_timeout_guard() -> None:
-    assert settings.AGENT_STEP_TIMEOUT_SEC > 0

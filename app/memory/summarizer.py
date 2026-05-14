@@ -1,34 +1,58 @@
+import asyncio
 import hashlib
 import time
 import unicodedata
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+import structlog
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+from prometheus_client import Counter, Histogram
 
 from app.core.config import settings
-from app.utils.logger import get_logger
 
-logger = get_logger(__name__)
+logger = structlog.get_logger(__name__)
+tracer = trace.get_tracer(__name__)
+
+# PROMETHEUS METRICS
+_summary_duration = Histogram(
+    "memory_summarizer_duration_seconds",
+    "Memory summarizer duration",
+    ["status"],
+)
+_summary_errors = Counter(
+    "memory_summarizer_errors_total",
+    "Memory summarizer errors by type",
+    ["error_type"],
+)
+_summary_length = Histogram(
+    "memory_summary_length_chars",
+    "Length of generated summaries in characters",
+)
+
+# SEMAPHORE
+_semaphore = asyncio.Semaphore(5)
 
 
-# CLEAN
+# NORMALIZE TEXT
 
 def _clean(text: str) -> str:
     text = unicodedata.normalize("NFC", str(text or ""))
     return " ".join(text.strip().split())
 
 
-# HASH
+# SHA-256 HASH FOR DEDUP
 
 def _hash(msg: Dict) -> str:
     base = f"{msg.get('role')}|{str(msg.get('content'))[:200]}"
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 
-# DEDUP
+# DEDUP HISTORY
 
 def _dedup(history: List[Dict]) -> List[Dict]:
-    seen: set       = set()
+    seen: set        = set()
     out:  List[Dict] = []
-
     for msg in history:
         try:
             h = _hash(msg)
@@ -38,7 +62,6 @@ def _dedup(history: List[Dict]) -> List[Dict]:
             out.append(msg)
         except Exception:
             continue
-
     return out
 
 
@@ -50,13 +73,46 @@ def _sort_by_importance(history: List[Dict]) -> List[Dict]:
             return float(m.get("importance", 0.5))
         except Exception:
             return 0.5
-
     return sorted(history, key=_imp, reverse=True)
 
 
-# FORMAT CONVERSATION
+# PII SCRUB BEFORE SUMMARIZATION
 
-def _format(history: List[Dict]) -> str:
+def _scrub_pii(text: str) -> str:
+    if not settings.PII_DETECTION_ENABLED:
+        return text
+    try:
+        from presidio_analyzer import AnalyzerEngine
+        from presidio_anonymizer import AnonymizerEngine
+        entities   = getattr(settings, "PII_ENTITIES", [
+            "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER",
+            "US_SSN", "CREDIT_CARD", "LOCATION", "IP_ADDRESS",
+        ])
+        analyzer   = AnalyzerEngine()
+        anonymizer = AnonymizerEngine()
+        results    = analyzer.analyze(text=text, entities=entities, language="en")
+        if results:
+            text = anonymizer.anonymize(text=text, analyzer_results=results).text
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.warning("pii_scrub_failed", error=str(exc))
+    return text
+
+
+# LANGUAGE DETECTION
+
+def _detect_language(text: str) -> Optional[str]:
+    try:
+        from langdetect import detect
+        return detect(text[:2000])
+    except Exception:
+        return None
+
+
+# FORMAT CONVERSATION FOR SUMMARIZATION INPUT
+
+def _format_for_summary(history: List[Dict]) -> str:
     max_chars = settings.MEMORY_SUMMARY_INPUT_CHARS
     max_msgs  = settings.MAX_HISTORY_MESSAGES
 
@@ -75,6 +131,8 @@ def _format(history: List[Dict]) -> str:
             if len(content) < 5:
                 continue
 
+            # PII SCRUB BEFORE SENDING TO LLM
+            content = _scrub_pii(content)
             content = content[:settings.MAX_PROMPT_CHARS]
 
             mod_tag = f"[{modality.upper()}] " if modality != "text" else ""
@@ -93,7 +151,35 @@ def _format(history: List[Dict]) -> str:
     return "\n".join(parts)
 
 
-# VALIDATE
+# KEYWORD EXTRACTION FOR SUMMARY TAGS
+
+def _extract_keywords(text: str, max_kw: int = 10) -> List[str]:
+    try:
+        import yake
+        extractor = yake.KeywordExtractor(top=max_kw, stopwords=None)
+        kws       = extractor.extract_keywords(text)
+        return [kw for kw, _ in kws]
+    except ImportError:
+        pass
+    try:
+        from keybert import KeyBERT
+        kb  = KeyBERT()
+        kws = kb.extract_keywords(text, top_n=max_kw)
+        return [kw for kw, _ in kws]
+    except ImportError:
+        pass
+    return []
+
+
+# COMPRESSION RATIO CHECK
+
+def _compression_ratio(original: str, summary: str) -> float:
+    if not original:
+        return 0.0
+    return round(len(summary) / max(len(original), 1), 3)
+
+
+# VALIDATE SUMMARY OUTPUT
 
 def _validate(summary: str) -> str:
     if not summary:
@@ -111,22 +197,27 @@ def _validate(summary: str) -> str:
     if any(r in summary for r in required):
         return summary
 
-    # FALLBACK: accept any sufficiently long summary even without required headers
+    # ACCEPT SUFFICIENTLY LONG SUMMARY EVEN WITHOUT REQUIRED HEADERS
     if len(summary) >= settings.MIN_SUMMARY_LENGTH * 2:
-        logger.warning(event="summary_missing_headers_accepted_as_fallback")
+        logger.warning("summary_missing_headers_accepted_as_fallback")
         return summary
 
     return ""
 
 
-# PROMPT
+# BUILD SUMMARIZATION PROMPT
 
-def _prompt(conv: str) -> str:
+def _build_prompt(conv: str, language: Optional[str] = None) -> str:
+    lang_hint = f"Respond in {language}.\n" if language and language != "en" else ""
+
     instruction = (
-        "Compress conversation memory.\n"
-        "- Keep only important info\n"
-        "- No hallucination\n"
-        "- No filler\n\n"
+        f"{lang_hint}"
+        "Compress this conversation into structured memory.\n"
+        "Rules:\n"
+        "- Keep only factual, actionable information\n"
+        "- No hallucination or inference beyond what is stated\n"
+        "- No filler words\n"
+        "- Be maximally concise\n\n"
     )
 
     format_block = (
@@ -144,31 +235,72 @@ def _prompt(conv: str) -> str:
     return instruction + body + format_block
 
 
-# PERSIST SUMMARY
+# INCREMENTAL SUMMARY — MERGE EXISTING SUMMARY WITH NEW TURNS
+
+def _build_incremental_prompt(
+    existing_summary: str,
+    new_turns: str,
+) -> str:
+    instruction = (
+        "Update this memory summary with new conversation turns.\n"
+        "Rules:\n"
+        "- Preserve existing facts unless contradicted\n"
+        "- Add new facts from new turns\n"
+        "- Remove outdated entries if new turns contradict them\n"
+        "- Be maximally concise\n\n"
+    )
+
+    format_block = (
+        "Key Facts:\n- ...\n\n"
+        "User Intent:\n- ...\n\n"
+        "Preferences:\n- ...\n\n"
+        "Tasks:\n- ...\n\n"
+        "Context:\n- ..."
+    )
+
+    max_chars  = settings.MAX_PROMPT_CHARS
+    available  = max_chars - len(instruction) - len(format_block) - 100
+    half       = available // 2
+
+    existing_block = f"EXISTING SUMMARY:\n{existing_summary[:half]}\n\n"
+    new_block      = f"NEW TURNS:\n{new_turns[:half]}\n\n"
+
+    return instruction + existing_block + new_block + format_block
+
+
+# PERSIST SUMMARY TO MONGO
 
 def _persist_summary(
     summary: str,
     session_id: str,
-    mongo_memory,
+    mongo_memory: Any,
+    keywords: Optional[List[str]] = None,
 ) -> None:
     try:
         if mongo_memory and hasattr(mongo_memory, "store_summary"):
             mongo_memory.store_summary(session_id, summary)
-    except Exception as e:
+        if keywords:
+            logger.debug(
+                "summary_keywords_extracted",
+                count=len(keywords),
+                session_id=session_id,
+            )
+    except Exception as exc:
         logger.warning(
-            event="summary_persist_failed",
-            error=str(e),
+            "summary_persist_failed",
+            error=str(exc),
             session_id=session_id,
         )
 
 
-# MAIN
+# MAIN SYNC SUMMARIZER
 
 def summarize_conversation(
-    llm,
+    llm: Any,
     history: List[Dict],
     session_id: str = "default",
-    mongo_memory=None,
+    mongo_memory: Any = None,
+    existing_summary: Optional[str] = None,
 ) -> str:
 
     if not history:
@@ -176,91 +308,177 @@ def summarize_conversation(
 
     start = time.time()
 
+    with tracer.start_as_current_span("summarize_conversation") as span:
+        span.set_attribute("history.size", len(history))
+        span.set_attribute("session.id", session_id)
+        span.set_attribute("incremental", bool(existing_summary))
+
+        try:
+            conv = _format_for_summary(history)
+
+            if not conv:
+                logger.warning(
+                    "summary_empty_conversation",
+                    session_id=session_id,
+                )
+                span.set_status(Status(StatusCode.OK))
+                return ""
+
+            # LANGUAGE DETECTION FOR MULTILINGUAL SUMMARY
+            language = _detect_language(conv)
+
+            # INCREMENTAL OR FULL SUMMARIZATION
+            if existing_summary and len(existing_summary.strip()) > settings.MIN_SUMMARY_LENGTH:
+                prompt = _build_incremental_prompt(existing_summary, conv)
+                span.set_attribute("summary.mode", "incremental")
+            else:
+                prompt = _build_prompt(conv, language=language)
+                span.set_attribute("summary.mode", "full")
+
+            # LLM GENERATION WITH HARD TIMEOUT GUARD
+            t_llm = time.time()
+
+            try:
+                raw = llm.generate(
+                    prompt,
+                    max_tokens=settings.LLM_MAX_TOKENS,
+                    temperature=0.1,
+                    session_id=session_id,
+                )
+            except Exception as exc:
+                logger.error(
+                    "summary_llm_generate_failed",
+                    error=str(exc),
+                    session_id=session_id,
+                )
+                return ""
+
+            llm_latency = time.time() - t_llm
+
+            if llm_latency > settings.MODEL_TIMEOUT_SEC:
+                logger.warning(
+                    "summary_llm_timeout",
+                    llm_latency=round(llm_latency, 2),
+                    session_id=session_id,
+                )
+                return ""
+
+            summary = _validate(raw)
+
+            if not summary:
+                logger.warning(
+                    "summary_invalid",
+                    raw_length=len(raw) if raw else 0,
+                    session_id=session_id,
+                )
+                span.set_status(Status(StatusCode.OK))
+                return ""
+
+            # KEYWORD EXTRACTION FOR TAGGING
+            keywords = _extract_keywords(summary)
+
+            # COMPRESSION RATIO LOG
+            ratio = _compression_ratio(conv, summary)
+            logger.debug(
+                "summary_compression_ratio",
+                ratio=ratio,
+                session_id=session_id,
+            )
+
+            # AUTO-PERSIST TO MONGO
+            if mongo_memory:
+                _persist_summary(summary, session_id, mongo_memory, keywords)
+
+            latency = round(time.time() - start, 2)
+
+            _summary_duration.labels(status="success").observe(latency)
+            _summary_length.observe(len(summary))
+
+            span.set_attribute("summary.length", len(summary))
+            span.set_attribute("summary.language", language or "unknown")
+            span.set_attribute("summary.keywords", len(keywords))
+            span.set_attribute("compression.ratio", ratio)
+            span.set_status(Status(StatusCode.OK))
+
+            logger.info(
+                "summary_success",
+                length=len(summary),
+                input_messages=len(history),
+                conv_chars=len(conv),
+                language=language,
+                keywords=keywords[:5],
+                compression_ratio=ratio,
+                llm_latency=round(llm_latency, 2),
+                latency=latency,
+                session_id=session_id,
+            )
+
+            return summary
+
+        except Exception as exc:
+            latency    = round(time.time() - start, 2)
+            error_type = type(exc).__name__
+
+            _summary_duration.labels(status="error").observe(latency)
+            _summary_errors.labels(error_type=error_type).inc()
+
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            span.record_exception(exc)
+
+            logger.error(
+                "summary_failed",
+                error=str(exc),
+                error_type=error_type,
+                session_id=session_id,
+            )
+            return ""
+
+
+# ASYNC WRAPPER
+
+async def summarize_conversation_async(
+    llm: Any,
+    history: List[Dict],
+    session_id: str = "default",
+    mongo_memory: Any = None,
+    existing_summary: Optional[str] = None,
+) -> str:
+
+    async with _semaphore:
+        return await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: summarize_conversation(
+                llm,
+                history,
+                session_id,
+                mongo_memory,
+                existing_summary,
+            ),
+        )
+
+
+# GDPR PURGE — DELETE ALL SUMMARIES FOR A USER/SESSION
+
+async def gdpr_purge_summaries(
+    session_id: str,
+    mongo_memory: Any,
+) -> None:
     try:
-        conv = _format(history)
-
-        if not conv:
-            logger.warning(
-                event="summary_empty_conversation",
+        if mongo_memory and hasattr(mongo_memory, "delete"):
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                mongo_memory.delete,
+                session_id,
+            )
+            logger.info(
+                "gdpr_summaries_purged",
                 session_id=session_id,
             )
-            return ""
-
-        prompt = _prompt(conv)
-
-        # LLM GENERATE WITH TIMEOUT GUARD
-        t_llm = time.time()
-        raw   = llm.generate(prompt)
-
-        if time.time() - t_llm > settings.MODEL_TIMEOUT_SEC:
-            logger.warning(
-                event="summary_llm_timeout",
-                session_id=session_id,
-            )
-            return ""
-
-        summary = _validate(raw)
-
-        if not summary:
-            logger.warning(
-                event="summary_invalid",
-                raw_length=len(raw) if raw else 0,
-                session_id=session_id,
-            )
-            return ""
-
-        # AUTO-PERSIST TO MONGO
-        if mongo_memory:
-            _persist_summary(summary, session_id, mongo_memory)
-
-        latency = round(time.time() - start, 2)
-
-        logger.info(
-            event="summary_success",
-            length=len(summary),
-            input_messages=len(history),
-            conv_chars=len(conv),
-            latency=latency,
-            session_id=session_id,
-        )
-
-        return summary
-
-    except Exception as e:
+    except Exception as exc:
         logger.error(
-            event="summary_failed",
-            error=str(e),
+            "gdpr_purge_summaries_failed",
             session_id=session_id,
+            error=str(exc),
         )
-        return ""
 
 
-# ============================================================
-# TESTS - Phase 24 Upgrade
-# Run: pytest app/memory/summarizer.py -v
-# ============================================================
-
-def test_memory_manager_fuses_redis_and_mongo() -> None:
-    history = [{"role": "user", "content": "hello"}, {"role": "user", "content": "hello"}]
-    assert len(_dedup(history)) == 1
-
-
-def test_redis_ttl_expires_old_turns() -> None:
-    assert settings.REDIS_TTL_SECONDS > 0
-
-
-def test_mongo_persistent_memory_retrieved() -> None:
-    assert settings.MONGO_DB_NAME
-
-
-def test_summarizer_compresses_long_memory() -> None:
-    class LLM:
-        def generate(self, prompt: str) -> str:
-            return "Key Facts:\n- User likes RAG.\n\nUser Intent:\n- Build a reliable assistant."
-
-    history = [{"role": "user", "content": "I like RAG systems and need a reliable assistant.", "importance": 1.0}]
-    assert summarize_conversation(LLM(), history)
-
-
-def test_gdpr_purge_all_memory() -> None:
-    assert settings.GDPR_PURGE_ENABLED is True

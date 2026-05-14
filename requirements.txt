@@ -131,3 +131,6 @@ python-magic-bin
 opentelemetry-api
 prometheus-client
 pytest-asyncio
+pybreaker
+pyclamd
+presidio analyzer

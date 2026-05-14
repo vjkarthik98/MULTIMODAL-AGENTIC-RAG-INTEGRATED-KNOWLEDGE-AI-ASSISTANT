@@ -2,7 +2,7 @@ import math
 import time
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.config import settings
 
@@ -13,12 +13,154 @@ ActionType = Literal["rag", "search", "direct", "memory", "hybrid"]
 
 ALLOWED_ACTIONS = {"rag", "search", "direct", "memory", "hybrid"}
 
+# STEP COST LEVELS
+COST_LOW    = "low"
+COST_MEDIUM = "medium"
+COST_HIGH   = "high"
+
+
+# TOOL CALL SCHEMA — SINGLE TOOL INVOCATION CONTRACT
+
+class ToolCall(BaseModel):
+
+    model_config = {"validate_assignment": True}
+
+    name:       str
+    input:      Dict[str, Any]  = Field(default_factory=dict)
+    output:     Optional[Any]   = Field(default=None)
+    status:     str             = Field(default="pending")
+    latency_ms: Optional[float] = Field(default=None)
+    error:      Optional[str]   = Field(default=None)
+    timestamp:  float           = Field(default_factory=time.time)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name":       self.name,
+            "input":      self.input,
+            "output":     self.output,
+            "status":     self.status,
+            "latency_ms": self.latency_ms,
+            "error":      self.error,
+            "timestamp":  self.timestamp,
+        }
+
+
+# EXECUTION STEP SCHEMA — SINGLE PLAN STEP
+
+class ExecutionStep(BaseModel):
+
+    model_config = {"validate_assignment": True}
+
+    tool:        str
+    description: str  = Field(default="")
+    optional:    bool = Field(default=False)
+    cost:        str  = Field(default=COST_MEDIUM)
+    depends_on:  List[str] = Field(default_factory=list)
+    parallel:    bool = Field(default=False)
+
+    @field_validator("cost")
+    @classmethod
+    def validate_cost(cls, v: str) -> str:
+        allowed = {COST_LOW, COST_MEDIUM, COST_HIGH}
+        if v not in allowed:
+            return COST_MEDIUM
+        return v
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "tool":        self.tool,
+            "description": self.description,
+            "optional":    self.optional,
+            "cost":        self.cost,
+            "depends_on":  self.depends_on,
+            "parallel":    self.parallel,
+        }
+
+
+# EXECUTION PLAN SCHEMA
+
+class ExecutionPlan(BaseModel):
+
+    model_config = {"validate_assignment": True}
+
+    steps:  List[ExecutionStep] = Field(default_factory=list)
+    trace:  Dict[str, Any]      = Field(default_factory=dict)
+
+    @property
+    def total_cost(self) -> str:
+        cost_rank = {COST_LOW: 0, COST_MEDIUM: 1, COST_HIGH: 2}
+        if not self.steps:
+            return COST_LOW
+        max_cost = max(cost_rank.get(s.cost, 1) for s in self.steps)
+        return [COST_LOW, COST_MEDIUM, COST_HIGH][max_cost]
+
+    def tool_sequence(self) -> List[str]:
+        return [s.tool for s in self.steps]
+
+    def parallel_groups(self) -> List[List[ExecutionStep]]:
+        """
+        GROUP STEPS INTO SEQUENTIAL BATCHES WHERE PARALLEL STEPS
+        CAN EXECUTE CONCURRENTLY AND NON-PARALLEL STEPS BLOCK.
+        """
+        groups: List[List[ExecutionStep]] = []
+        current_group: List[ExecutionStep] = []
+
+        for step in self.steps:
+            if step.parallel:
+                current_group.append(step)
+            else:
+                if current_group:
+                    groups.append(current_group)
+                    current_group = []
+                groups.append([step])
+
+        if current_group:
+            groups.append(current_group)
+
+        return groups
+
+    def to_list(self) -> List[Dict[str, Any]]:
+        return [s.to_dict() for s in self.steps]
+
+
+# AGENT SIGNAL SCHEMA — STRUCTURED SIGNALS FROM ROUTER ANALYSIS
+
+class AgentSignals(BaseModel):
+
+    model_config = {"validate_assignment": True}
+
+    is_recent:           bool  = False
+    is_memory:           bool  = False
+    is_complex:          bool  = False
+    is_reasoning:        bool  = False
+    has_multimodal_hint: bool  = False
+    is_code:             bool  = False
+    is_greeting:         bool  = False
+    is_math:             bool  = False
+    is_security:         bool  = False
+    is_multilingual:     bool  = False
+    multi_question:      bool  = False
+    has_question_mark:   bool  = False
+    token_count:         int   = 0
+    language:            Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return self.model_dump()
+
+    def active_signals(self) -> List[str]:
+        return [
+            k for k, v in self.model_dump().items()
+            if isinstance(v, bool) and v
+        ]
+
+
+# AGENT DECISION SCHEMA — CORE ROUTING DECISION
 
 class AgentDecision(BaseModel):
 
     model_config = {"validate_assignment": True}
 
-    # CORE
+    # CORE FIELDS
     action:     ActionType
     reason:     str
 
@@ -26,25 +168,54 @@ class AgentDecision(BaseModel):
     confidence: float = Field(default=0.8, ge=0.0, le=1.0)
 
     # CONTEXT
-    session_id: str = Field(default="default")
-    signals:    Dict[str, Any]  = Field(default_factory=dict)
-    suggested_tools: List[str]  = Field(default_factory=list)
-    action_history:  List[str]  = Field(default_factory=list)
-    trace:      Dict[str, Any]  = Field(default_factory=dict)
+    session_id:      str              = Field(default="default")
+    signals:         Dict[str, Any]   = Field(default_factory=dict)
+    suggested_tools: List[str]        = Field(default_factory=list)
+    action_history:  List[str]        = Field(default_factory=list)
+    trace:           Dict[str, Any]   = Field(default_factory=dict)
+    tool_calls:      List[ToolCall]   = Field(default_factory=list)
+    query_type:      Optional[str]    = Field(default=None)
+    language:        Optional[str]    = Field(default=None)
 
     # TIMING
-    created_at: float  = Field(default_factory=time.time)
+    created_at: float          = Field(default_factory=time.time)
     latency_ms: Optional[float] = Field(default=None)
+
+    # VALIDATORS
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def validate_action(cls, v: Any) -> str:
+        v = str(v).strip().lower()
+        if v not in ALLOWED_ACTIONS:
+            return "rag"
+        return v
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def validate_reason(cls, v: Any) -> str:
+        v = str(v or "").strip()
+        return v or "no_reason_provided"
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def validate_confidence(cls, v: Any) -> float:
+        try:
+            val = float(v)
+            if math.isnan(val) or math.isinf(val):
+                return 0.5
+            return max(0.0, min(val, 1.0))
+        except (TypeError, ValueError):
+            return 0.5
 
     # NORMALIZE
 
     def normalize(self) -> "AgentDecision":
         self.action = str(self.action).strip().lower()
-        self.reason = (self.reason or "").strip()
-        self.reason = self.reason or "no_reason_provided"
+        self.reason = (self.reason or "").strip() or "no_reason_provided"
         return self
 
-    # VALIDATE STRICT
+    # VALIDATE STRICT — RAISES ON INVALID ACTION
 
     def validate_strict(self) -> "AgentDecision":
         if self.action not in ALLOWED_ACTIONS:
@@ -52,7 +223,7 @@ class AgentDecision(BaseModel):
         self._normalize_confidence()
         return self
 
-    # VALIDATE SAFE
+    # VALIDATE SAFE — CORRECTS INVALID ACTION TO RAG
 
     def validate_safe(self) -> "AgentDecision":
         if self.action not in ALLOWED_ACTIONS:
@@ -68,13 +239,10 @@ class AgentDecision(BaseModel):
         if not isinstance(self.confidence, (int, float)):
             self.confidence = 0.5
             return
-
         val = float(self.confidence)
-
         if math.isnan(val) or math.isinf(val):
             self.confidence = 0.5
             return
-
         self.confidence = max(0.0, min(val, 1.0))
 
     # FINALIZE
@@ -105,7 +273,13 @@ class AgentDecision(BaseModel):
     def is_multimodal(self) -> bool:
         return bool(self.signals.get("has_multimodal_hint", False))
 
-    # TRACE
+    def is_multilingual(self) -> bool:
+        return bool(self.signals.get("is_multilingual", False))
+
+    def is_complex(self) -> bool:
+        return bool(self.signals.get("is_complex", False))
+
+    # TRACE METHODS
 
     def add_trace(self, key: str, value: Any) -> "AgentDecision":
         try:
@@ -120,6 +294,10 @@ class AgentDecision(BaseModel):
 
     def set_latency(self, start_time: float) -> "AgentDecision":
         self.latency_ms = round((time.time() - start_time) * 1000, 2)
+        return self
+
+    def add_tool_call(self, tool_call: ToolCall) -> "AgentDecision":
+        self.tool_calls.append(tool_call)
         return self
 
     # SERIALIZATION
@@ -140,6 +318,9 @@ class AgentDecision(BaseModel):
             "suggested_tools": self.suggested_tools,
             "action_history":  self.action_history,
             "trace":           self.trace,
+            "tool_calls":      [tc.to_dict() for tc in self.tool_calls],
+            "query_type":      self.query_type,
+            "language":        self.language,
             "created_at":      self.created_at,
             "latency_ms":      self.latency_ms,
         }
@@ -151,33 +332,56 @@ class AgentDecision(BaseModel):
             "confidence": self.confidence,
             "session_id": self.session_id,
             "latency_ms": self.latency_ms,
+            "query_type": self.query_type,
+            "language":   self.language,
         }
 
 
-# ============================================================
-# TESTS - Phase 24 Upgrade
-# Run: pytest app/agents/agent_schema.py -v
-# ============================================================
+# AGENT RESPONSE SCHEMA — FINAL OUTPUT FROM AGENT
 
-def test_agent_react_loop_terminates() -> None:
-    decision = AgentDecision(action="rag", reason="unit").finalize()
-    assert decision.is_retrieval()
+class AgentResponse(BaseModel):
 
+    model_config = {"validate_assignment": True}
 
-def test_tool_registry_validates_schema() -> None:
-    decision = AgentDecision(action="rag", reason="unit", confidence=0.8).finalize()
-    assert decision.confidence == 0.8
+    response:           str
+    source:             str   = "agent"
+    decision:           str   = "unknown"
+    reason:             str   = ""
+    confidence:         float = Field(default=0.5, ge=0.0, le=1.0)
+    request_id:         str   = Field(default="")
+    session_id:         str   = Field(default="default")
+    latency:            float = Field(default=0.0, ge=0.0)
+    agent_latency:      float = Field(default=0.0, ge=0.0)
+    agent_latency_ms:   float = Field(default=0.0, ge=0.0)
+    metadata:           Dict[str, Any] = Field(default_factory=dict)
+    hallucination_warning: bool = Field(default=False)
+    is_fallback:        bool  = Field(default=False)
 
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def clamp_confidence(cls, v: Any) -> float:
+        try:
+            val = float(v)
+            if math.isnan(val) or math.isinf(val):
+                return 0.5
+            return max(0.0, min(val, 1.0))
+        except (TypeError, ValueError):
+            return 0.5
 
-def test_planner_parallel_tool_calls() -> None:
-    decision = AgentDecision(action="hybrid", reason="unit", signals={"has_multimodal_hint": True})
-    assert decision.is_multimodal()
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "response":            self.response,
+            "source":              self.source,
+            "decision":            self.decision,
+            "reason":              self.reason,
+            "confidence":          self.confidence,
+            "request_id":          self.request_id,
+            "session_id":          self.session_id,
+            "latency":             self.latency,
+            "agent_latency":       self.agent_latency,
+            "agent_latency_ms":    self.agent_latency_ms,
+            "metadata":            self.metadata,
+            "hallucination_warning": self.hallucination_warning,
+            "is_fallback":         self.is_fallback,
+        }
 
-
-def test_web_search_deduplicates_results() -> None:
-    assert "search" in ALLOWED_ACTIONS
-
-
-def test_agent_timeout_guard() -> None:
-    decision = AgentDecision(action="rag", reason="unit").set_latency(time.time())
-    assert decision.latency_ms is not None

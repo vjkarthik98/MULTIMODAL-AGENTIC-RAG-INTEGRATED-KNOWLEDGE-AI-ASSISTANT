@@ -1,75 +1,165 @@
+from __future__ import annotations
+
+import asyncio
 import hashlib
 import math
 import time
 from collections import OrderedDict
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+try:
+    import pybreaker
+    _text_breaker = pybreaker.CircuitBreaker(
+        fail_max=settings.CIRCUIT_BREAKER_MAX_FAILURES,
+        reset_timeout=settings.CIRCUIT_BREAKER_RESET_TIMEOUT,
+    )
+    _vision_breaker = pybreaker.CircuitBreaker(
+        fail_max=settings.CIRCUIT_BREAKER_MAX_FAILURES,
+        reset_timeout=settings.CIRCUIT_BREAKER_RESET_TIMEOUT,
+    )
+    _bm25_breaker = pybreaker.CircuitBreaker(
+        fail_max=settings.CIRCUIT_BREAKER_MAX_FAILURES,
+        reset_timeout=settings.CIRCUIT_BREAKER_RESET_TIMEOUT,
+    )
+    _PYBREAKER_AVAILABLE = True
+except ImportError:
+    _PYBREAKER_AVAILABLE = False
 
-# VISION KEYWORDS
+    class _DummyBreaker:
+        def __call__(self, fn):
+            return fn
 
+    _text_breaker = _DummyBreaker()   # type: ignore[assignment]
+    _vision_breaker = _DummyBreaker() # type: ignore[assignment]
+    _bm25_breaker = _DummyBreaker()   # type: ignore[assignment]
+
+
+# VISION QUERY KEYWORDS
 _VISION_KEYWORDS = {
     "image", "photo", "diagram", "visual", "figure",
     "chart", "graph", "screenshot", "picture", "illustration",
+    "drawing", "render", "thumbnail", "frame", "scene",
 }
+
+# AUDIO QUERY KEYWORDS
+_AUDIO_KEYWORDS = {
+    "audio", "sound", "speech", "transcript", "recording",
+    "voice", "podcast", "spoken", "listen", "hear",
+}
+
+# VIDEO QUERY KEYWORDS
+_VIDEO_KEYWORDS = {
+    "video", "clip", "footage", "movie", "film",
+    "watch", "stream", "playback", "scene", "frame",
+}
+
+# RRF CONSTANT
+_RRF_K: int = getattr(settings, "RRF_K", 60)
 
 
 class HybridRetriever:
 
-    def __init__(self, bm25, vector_store, embedder, clip_text_embedder=None) -> None:
-        self.bm25               = bm25
-        self.vector_store       = vector_store
-        self.embedder           = embedder
+    def __init__(
+        self,
+        bm25,
+        vector_store,
+        embedder,
+        clip_text_embedder=None,
+    ) -> None:
+        self.bm25 = bm25
+        self.vector_store = vector_store
+        self.embedder = embedder
         self.clip_text_embedder = clip_text_embedder
 
-        self.w_bm25   = settings.HYBRID_WEIGHT_BM25
+        self.w_bm25 = settings.HYBRID_WEIGHT_BM25
         self.w_vector = settings.HYBRID_WEIGHT_VECTOR
         self.w_vision = settings.HYBRID_WEIGHT_VISION
 
         self.candidate_multiplier = settings.HYBRID_CANDIDATES_MULTIPLIER
-        self.min_score            = settings.HYBRID_MIN_SCORE
+        self.min_score = settings.HYBRID_MIN_SCORE
+        self.mmr_enabled = settings.MMR_ENABLED
+        self.mmr_lambda = settings.MMR_LAMBDA
 
         # LRU EMBEDDING CACHE
-        self._cache: OrderedDict = OrderedDict()
-        self._cache_max: int     = settings.LRU_CACHE_MAXSIZE
+        self._embed_cache: OrderedDict = OrderedDict()
+        self._embed_cache_max: int = settings.LRU_CACHE_MAXSIZE
+
+        # VISION LRU CACHE
+        self._vision_cache: OrderedDict = OrderedDict()
+        self._vision_cache_max: int = min(settings.LRU_CACHE_MAXSIZE, 256)
 
     # HASH
 
     def _hash(self, text: str, meta: Dict) -> str:
-        base = f"{text[:200]}|{meta.get('doc_id')}|{meta.get('chunk_id')}"
+        base = f"{text[:200]}|{meta.get('doc_id', '')}|{meta.get('chunk_id', '')}"
         return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
-    # NORMALIZE
+    # QUERY NORMALIZATION
 
     def _normalize_query(self, q: str) -> str:
-        return " ".join(q.strip().split())
+        import unicodedata
+        q = unicodedata.normalize("NFC", str(q or ""))
+        return " ".join(q.strip().split())[:settings.MAX_PROMPT_CHARS]
 
-    # VISION DETECTION
+    # MODALITY DETECTION
 
     def _is_vision_query(self, q: str) -> bool:
         tokens = set(q.lower().split())
         return bool(tokens & _VISION_KEYWORDS)
 
-    # LRU EMBEDDING CACHE
+    def _is_audio_query(self, q: str) -> bool:
+        tokens = set(q.lower().split())
+        return bool(tokens & _AUDIO_KEYWORDS)
 
-    def _embed_query(self, q: str, session_id: str = "") -> List[float]:
-        if q in self._cache:
-            self._cache.move_to_end(q)
-            return self._cache[q]
+    def _is_video_query(self, q: str) -> bool:
+        tokens = set(q.lower().split())
+        return bool(tokens & _VIDEO_KEYWORDS)
 
-        try:
-            vec = self.embedder.embed_query(q, session_id=session_id)
-        except Exception as e:
-            logger.error(event="embed_query_failed", error=str(e), session_id=session_id)
-            raise
+    # SCORE VALID
 
-        self._cache[q] = vec
-        if len(self._cache) > self._cache_max:
-            self._cache.popitem(last=False)
+    def _valid_score(self, score: float) -> bool:
+        return isinstance(score, (int, float)) and not math.isnan(score) and not math.isinf(score)
+
+    # LRU EMBEDDING CACHE — TEXT
+
+    def _embed_query_cached(self, q: str, session_id: str = "") -> List[float]:
+        cache_key = hashlib.sha256(q.encode("utf-8")).hexdigest()
+
+        if cache_key in self._embed_cache:
+            self._embed_cache.move_to_end(cache_key)
+            logger.debug(event="embed_cache_hit", session_id=session_id)
+            return self._embed_cache[cache_key]
+
+        vec = self.embedder.embed_query(q, session_id=session_id)
+        self._embed_cache[cache_key] = vec
+
+        if len(self._embed_cache) > self._embed_cache_max:
+            self._embed_cache.popitem(last=False)
+
+        return vec
+
+    # LRU EMBEDDING CACHE — VISION
+
+    def _embed_vision_cached(self, q: str, session_id: str = "") -> List[float]:
+        cache_key = "vis_" + hashlib.sha256(q.encode("utf-8")).hexdigest()
+
+        if cache_key in self._vision_cache:
+            self._vision_cache.move_to_end(cache_key)
+            logger.debug(event="vision_embed_cache_hit", session_id=session_id)
+            return self._vision_cache[cache_key]
+
+        from app.core.model_loader import model_loader
+        clip = self.clip_text_embedder or model_loader.get_clip_text_embedder()
+        vec = clip.embed_single(q, session_id=session_id)
+
+        self._vision_cache[cache_key] = vec
+        if len(self._vision_cache) > self._vision_cache_max:
+            self._vision_cache.popitem(last=False)
 
         return vec
 
@@ -78,86 +168,262 @@ class HybridRetriever:
     def _normalize_scores(self, results: List[Dict]) -> List[Dict]:
         if not results:
             return results
-
-        scores    = [r.get("score", 0.0) for r in results]
-        max_score = max(scores) if scores else 0.0
-
-        if max_score <= 0.0:
+        scores = [r.get("score", 0.0) for r in results]
+        max_s = max(scores) if scores else 0.0
+        if max_s <= 1e-8:
             return results
-
         for r in results:
-            r["score"] = r.get("score", 0.0) / max_score
-
+            r["score"] = r.get("score", 0.0) / max_s
         return results
 
-    # SCORE VALID
+    # RRF FUSION
 
-    def _valid_score(self, score: float) -> bool:
-        return not (math.isnan(score) or math.isinf(score))
+    def _rrf_score(self, rank: int, weight: float) -> float:
+        return weight / (_RRF_K + rank)
 
-    # FUSION
+    # FUSE INTO COMBINED MAP
 
-    def _fuse(self, combined: Dict, results: List[Dict], weight: float) -> None:
+    def _fuse(
+        self,
+        combined: Dict[str, Dict],
+        results: List[Dict],
+        weight: float,
+        source_tag: str,
+    ) -> None:
         for rank, r in enumerate(results, start=1):
-            text  = r.get("text")
-            meta  = r.get("metadata", {})
-            rrf_score = 1.0 / (settings.RRF_K + rank)
-            score = (r.get("score", 0.0) * weight) + rrf_score
+            text = r.get("text")
+            meta = r.get("metadata", {}) or {}
 
             if not text:
                 continue
 
-            if not self._valid_score(score):
+            base_score = float(r.get("score", 0.0))
+            rrf = self._rrf_score(rank, weight)
+            combined_score = base_score * weight + rrf
+
+            if not self._valid_score(combined_score):
                 continue
 
-            if score < self.min_score * weight:
+            if combined_score < self.min_score * weight:
                 continue
 
             h = self._hash(text, meta)
 
             if h not in combined:
                 combined[h] = {
-                    "text":     text,
+                    "text": text,
                     "metadata": meta,
-                    "score":    score,
+                    "score": combined_score,
+                    "sources": {source_tag},
+                    "embedding": r.get("embedding"),
                 }
             else:
-                combined[h]["score"] += score
+                combined[h]["score"] += combined_score
+                combined[h]["sources"].add(source_tag)
 
-    # SEARCH
+    # METADATA FILTER
+
+    def _apply_filters(
+        self,
+        results: List[Dict],
+        filters: Optional[Dict[str, Any]],
+        session_id: Optional[str],
+    ) -> List[Dict]:
+        if not filters and not session_id:
+            return results
+
+        filtered = []
+        for r in results:
+            meta = r.get("metadata", {}) or {}
+            if filters:
+                if filters.get("modality") and meta.get("modality") != filters["modality"]:
+                    continue
+                if filters.get("language") and meta.get("language") != filters["language"]:
+                    continue
+                if filters.get("source_type") and meta.get("source_type") != filters["source_type"]:
+                    continue
+                if filters.get("date_from") and meta.get("ingestion_time", 0) < filters["date_from"]:
+                    continue
+                if filters.get("date_to") and meta.get("ingestion_time", float("inf")) > filters["date_to"]:
+                    continue
+            filtered.append(r)
+
+        return filtered
+
+    # MMR DIVERSITY
+
+    def _mmr(
+        self,
+        results: List[Dict],
+        top_k: int,
+    ) -> List[Dict]:
+        if not self.mmr_enabled or not results:
+            return results[:top_k]
+
+        selected: List[Dict] = []
+        candidates = list(results)
+
+        while candidates and len(selected) < top_k:
+            best_idx = 0
+            best_score = float("-inf")
+
+            for i, candidate in enumerate(candidates):
+                relevance = candidate.get("score", 0.0)
+
+                if selected:
+                    max_sim = max(
+                        self._text_overlap(
+                            candidate.get("text", ""),
+                            s.get("text", ""),
+                        )
+                        for s in selected
+                    )
+                else:
+                    max_sim = 0.0
+
+                mmr_score = (
+                    self.mmr_lambda * relevance
+                    - (1.0 - self.mmr_lambda) * max_sim
+                )
+
+                if mmr_score > best_score:
+                    best_score = mmr_score
+                    best_idx = i
+
+            selected.append(candidates.pop(best_idx))
+
+        return selected
+
+    # TEXT OVERLAP FOR MMR
+
+    def _text_overlap(self, left: str, right: str) -> float:
+        a = set(left.lower().split())
+        b = set(right.lower().split())
+        if not a or not b:
+            return 0.0
+        return len(a & b) / len(a | b)
+
+    # VECTOR SEARCH — TEXT SPACE
+
+    def _vector_search_text(
+        self,
+        q_vec: List[float],
+        candidate_k: int,
+        session_id: str,
+    ) -> List[Dict]:
+        def _do():
+            return self.vector_store.search_text(q_vec, candidate_k, session_id)
+
+        try:
+            if _PYBREAKER_AVAILABLE:
+                results = _text_breaker(_do)()
+            else:
+                results = _do()
+            return self._normalize_scores(results or [])
+        except Exception as exc:
+            logger.warning(
+                event="vector_text_search_failed",
+                error=str(exc),
+                session_id=session_id,
+            )
+            return []
+
+    # VECTOR SEARCH — VISION SPACE
+
+    def _vector_search_vision(
+        self,
+        v_vec: List[float],
+        candidate_k: int,
+        session_id: str,
+    ) -> List[Dict]:
+        def _do():
+            return self.vector_store.search_vision(v_vec, candidate_k, session_id)
+
+        try:
+            if _PYBREAKER_AVAILABLE:
+                results = _vision_breaker(_do)()
+            else:
+                results = _do()
+            return self._normalize_scores(results or [])
+        except Exception as exc:
+            logger.warning(
+                event="vector_vision_search_failed",
+                error=str(exc),
+                session_id=session_id,
+            )
+            return []
+
+    # BM25 SEARCH
+
+    def _bm25_search(
+        self,
+        query: str,
+        candidate_k: int,
+        session_id: str,
+        filters: Optional[Dict],
+    ) -> List[Dict]:
+        def _do():
+            return self.bm25.search(
+                query,
+                session_id=session_id,
+                top_k=candidate_k,
+                filters=filters,
+            )
+
+        try:
+            if _PYBREAKER_AVAILABLE:
+                results = _bm25_breaker(_do)()
+            else:
+                results = _do()
+            return self._normalize_scores(results or [])
+        except Exception as exc:
+            logger.warning(
+                event="bm25_search_failed",
+                error=str(exc),
+                session_id=session_id,
+            )
+            return []
+
+    # MAIN SEARCH
 
     def search(
         self,
         query: str,
         session_id: str,
         top_k: Optional[int] = None,
+        filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict]:
-
         if not query or not session_id:
             return []
 
-        start       = time.time()
-        query       = self._normalize_query(query)
-        top_k       = top_k or settings.DEFAULT_TOP_K
+        start = time.time()
+        query = self._normalize_query(query)
+        top_k = top_k or settings.DEFAULT_TOP_K
         candidate_k = min(top_k * self.candidate_multiplier, 50)
 
-        try:
-            # BM25
-            bm25_res: List[Dict] = []
-            try:
-                bm25_res = self.bm25.search(query, session_id, candidate_k)
-                bm25_res = self._normalize_scores(bm25_res)
-            except Exception as e:
-                logger.warning(event="bm25_search_failed", error=str(e), session_id=session_id)
+        is_vision = self._is_vision_query(query)
+        is_audio = self._is_audio_query(query)
+        is_video = self._is_video_query(query)
 
-            # VECTOR
-            vec_res: List[Dict] = []
+        try:
+            # TEXT EMBEDDING
+            q_vec: Optional[List[float]] = None
             try:
-                q_vec   = self._embed_query(query, session_id=session_id)
-                vec_res = self.vector_store.search_text(q_vec, candidate_k, session_id)
-                vec_res = self._normalize_scores(vec_res)
-            except Exception as e:
-                logger.warning(event="vector_search_failed", error=str(e), session_id=session_id)
+                q_vec = self._embed_query_cached(query, session_id=session_id)
+            except Exception as exc:
+                logger.warning(
+                    event="text_embed_failed",
+                    error=str(exc),
+                    session_id=session_id,
+                )
+
+            # BM25 SEARCH
+            bm25_res = self._bm25_search(query, candidate_k, session_id, filters)
+
+            # VECTOR TEXT SEARCH
+            vec_res: List[Dict] = []
+            if q_vec:
+                vec_res = self._vector_search_text(q_vec, candidate_k, session_id)
 
             # EARLY EXIT IF BOTH EMPTY
             if not bm25_res and not vec_res:
@@ -168,86 +434,127 @@ class HybridRetriever:
                 )
                 return []
 
-            # VISION
+            # VISION SEARCH
             vis_res: List[Dict] = []
-            if self._is_vision_query(query):
+            if is_vision:
                 try:
-                    from app.core.model_loader import model_loader
-
-                    clip  = self.clip_text_embedder or model_loader.get_clip_text_embedder()
-                    v_vec = clip.embed_single(query, session_id=session_id)
-                    vis_res = self.vector_store.search_vision(v_vec, candidate_k, session_id)
-                    vis_res = self._normalize_scores(vis_res)
-                except Exception as e:
+                    v_vec = self._embed_vision_cached(query, session_id=session_id)
+                    vis_res = self._vector_search_vision(v_vec, candidate_k, session_id)
+                except Exception as exc:
                     logger.warning(
-                        event="vision_search_failed",
-                        error=str(e),
+                        event="vision_search_skipped",
+                        error=str(exc),
                         session_id=session_id,
                     )
 
-            # FUSION
-            combined: Dict = {}
-            self._fuse(combined, bm25_res,  self.w_bm25)
-            self._fuse(combined, vec_res,   self.w_vector)
+            # AUDIO/VIDEO MODALITY FILTER BOOST
+            modality_filter: Optional[str] = None
+            if is_audio:
+                modality_filter = "audio"
+            elif is_video:
+                modality_filter = "video"
+
+            # RRF FUSION
+            combined: Dict[str, Dict] = {}
+            self._fuse(combined, bm25_res, self.w_bm25, "bm25")
+            self._fuse(combined, vec_res, self.w_vector, "dense")
 
             if vis_res:
-                self._fuse(combined, vis_res, self.w_vision)
+                self._fuse(combined, vis_res, self.w_vision, "vision")
 
             if not combined:
                 return []
 
-            results = sorted(
+            # SORT BY FUSED SCORE
+            fused = sorted(
                 combined.values(),
                 key=lambda x: x["score"],
                 reverse=True,
-            )[:top_k]
+            )
+
+            # METADATA FILTERING
+            fused = self._apply_filters(fused, filters, session_id)
+
+            # MODALITY BOOST FOR AUDIO/VIDEO QUERIES
+            if modality_filter:
+                for r in fused:
+                    if r.get("metadata", {}).get("modality") == modality_filter:
+                        r["score"] = min(r["score"] * 1.2, 1.0)
+                fused.sort(key=lambda x: x["score"], reverse=True)
+
+            # MMR DIVERSITY
+            final = self._mmr(fused, top_k)
+
+            # SCORE THRESHOLD
+            final = [r for r in final if r["score"] >= self.min_score]
+
+            # CLEAN INTERNAL FIELDS
+            for r in final:
+                r.pop("sources", None)
+
+            latency = round(time.time() - start, 3)
+
+            if latency * 1000 > settings.LATENCY_TARGET_CROSS_MODAL_MS:
+                logger.warning(
+                    event="hybrid_search_slo_exceeded",
+                    latency_ms=round(latency * 1000, 1),
+                    target_ms=settings.LATENCY_TARGET_CROSS_MODAL_MS,
+                    session_id=session_id,
+                )
 
             logger.info(
                 event="hybrid_search_success",
-                results=len(results),
+                results=len(final),
                 bm25_count=len(bm25_res),
                 vector_count=len(vec_res),
                 vision_count=len(vis_res),
-                latency=round(time.time() - start, 3),
+                is_vision=is_vision,
+                is_audio=is_audio,
+                is_video=is_video,
+                mmr_enabled=self.mmr_enabled,
+                latency=latency,
                 session_id=session_id,
             )
 
-            return results
+            return final
 
-        except Exception as e:
+        except Exception as exc:
             logger.error(
                 event="hybrid_search_failed",
-                error=str(e),
+                error=str(exc),
                 session_id=session_id,
             )
             return []
 
+    # ASYNC WRAPPER
 
-# ============================================================
-# TESTS - Phase 24 Upgrade
-# Run: pytest app/retrieval/hybrid_retriever.py -v
-# ============================================================
+    async def async_search(
+        self,
+        query: str,
+        session_id: str,
+        top_k: Optional[int] = None,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict]:
+        return await asyncio.to_thread(self.search, query, session_id, top_k, filters)
 
-def test_hybrid_fusion_outperforms_dense_alone() -> None:
-    hybrid = object.__new__(HybridRetriever)
-    hybrid.min_score = 0.0
-    combined: Dict = {}
-    HybridRetriever._fuse(hybrid, combined, [{"text": "a", "metadata": {}, "score": 0.5}], 0.6)
-    assert list(combined.values())[0]["score"] > 0.3
+    # HEALTH CHECK
+
+    def health_check(self) -> Dict[str, Any]:
+        return {
+            "bm25_ready": getattr(self.bm25, "bm25", None) is not None,
+            "vector_store_ready": self.vector_store is not None,
+            "embedder_ready": self.embedder is not None,
+            "clip_embedder_ready": self.clip_text_embedder is not None,
+            "mmr_enabled": self.mmr_enabled,
+            "circuit_breaker": _PYBREAKER_AVAILABLE,
+            "embed_cache_size": len(self._embed_cache),
+            "vision_cache_size": len(self._vision_cache),
+            "weights": {
+                "bm25": self.w_bm25,
+                "vector": self.w_vector,
+                "vision": self.w_vision,
+            },
+        }
 
 
-def test_bm25_index_loaded_from_pkl() -> None:
-    assert settings.BM25_MAX_DOCS > 0
 
-
-def test_reranker_reorders_results() -> None:
-    assert settings.RERANK_TOP_K > 0
-
-
-def test_metadata_filter_by_modality() -> None:
-    hybrid = object.__new__(HybridRetriever)
-    assert HybridRetriever._is_vision_query(hybrid, "show image chart") is True
-
-
-def test_mmr_reduces_redundancy() -> None:
-    assert 0.0 <= settings.MMR_LAMBDA <= 1.0

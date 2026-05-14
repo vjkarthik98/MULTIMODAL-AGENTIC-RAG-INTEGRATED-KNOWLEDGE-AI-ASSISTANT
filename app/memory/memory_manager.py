@@ -1,6 +1,10 @@
+from __future__ import annotations
+
+import asyncio
 import hashlib
 import time
-from typing import Dict, List, Optional
+import unicodedata
+from typing import Any, Dict, List, Optional
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -8,132 +12,244 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+# PROMETHEUS METRICS 
+
+def _get_metrics():
+    try:
+        from prometheus_client import Counter, Histogram, Gauge
+        memory_ops = Counter(
+            "memory_operations_total",
+            "Memory operations by type and store",
+            ["operation", "store"],
+        )
+        memory_latency = Histogram(
+            "memory_operation_latency_seconds",
+            "Memory operation latency",
+            ["operation"],
+        )
+        memory_size = Gauge(
+            "memory_session_size",
+            "Number of messages in memory per session",
+        )
+        return {
+            "memory_ops":     memory_ops,
+            "memory_latency": memory_latency,
+            "memory_size":    memory_size,
+        }
+    except Exception:
+        return {}
+
+
+_METRICS: Dict[str, Any] = {}
+
+if settings.PROMETHEUS_ENABLED:
+    try:
+        _METRICS = _get_metrics()
+    except Exception:
+        pass
+
+
+def _record_op(operation: str, store: str) -> None:
+    try:
+        if "memory_ops" in _METRICS:
+            _METRICS["memory_ops"].labels(operation=operation, store=store).inc()
+    except Exception:
+        pass
+
+
+def _record_latency(operation: str, latency: float) -> None:
+    try:
+        if "memory_latency" in _METRICS:
+            _METRICS["memory_latency"].labels(operation=operation).observe(latency)
+    except Exception:
+        pass
+
+
+def _set_memory_size(size: int) -> None:
+    try:
+        if "memory_size" in _METRICS:
+            _METRICS["memory_size"].set(size)
+    except Exception:
+        pass
+
+
+# NORMALIZE TEXT — SECTION 2.3
+
+def _normalize(text: str) -> str:
+    text = unicodedata.normalize("NFC", str(text or ""))
+    text = text.replace("\x00", "")
+    text = text.lstrip("\ufeff\ufffe")
+    return " ".join(text.strip().split())
+
+
+# MESSAGE HASH FOR DEDUP — SECTION 2.2
+
+def _hash_msg(msg: Dict[str, Any]) -> str:
+    base = f"{msg.get('role')}|{str(msg.get('content', ''))[:200]}"
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()
+
+
+# CONTENT VALIDATOR
+
+def _valid_content(content: str) -> bool:
+    return isinstance(content, str) and len(content.strip()) > 2
+
+
+# DEDUP MESSAGES
+
+def _dedup(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen: set                  = set()
+    out:  List[Dict[str, Any]] = []
+    for msg in history:
+        try:
+            h = _hash_msg(msg)
+            if h in seen:
+                continue
+            seen.add(h)
+            out.append(msg)
+        except Exception:
+            continue
+    return out
+
+
+# SLIDING WINDOW — SECTION 4.7
+
+def _apply_sliding_window(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    max_tokens = settings.SLIDING_WINDOW_MAX_TOKENS
+    total      = 0
+    trimmed:   List[Dict[str, Any]] = []
+
+    for msg in reversed(history):
+        content   = str(msg.get("content", ""))
+        token_est = max(1, len(content) // 4)
+        total    += token_est
+
+        if total > max_tokens:
+            break
+
+        trimmed.append(msg)
+
+    return list(reversed(trimmed))
+
+
+# MEMORY MANAGER CLASS
+
 class MemoryManager:
 
     def __init__(
         self,
-        redis_memory=None,
-        mongo_memory=None,
+        redis_memory:  Optional[Any] = None,
+        mongo_memory:  Optional[Any] = None,
     ) -> None:
 
-        # LAZY RESOLUTION FROM INFRA REGISTRY IF NOT INJECTED
+        # LAZY RESOLUTION FROM INFRA REGISTRY
         if redis_memory is None:
             try:
                 from app.core.infra_registry import infra
                 redis_memory = infra.get_memory()
-            except Exception:
+            except Exception as e:
+                logger.warning(event="redis_memory_init_failed", error=str(e))
                 redis_memory = None
 
         if mongo_memory is None:
             try:
                 from app.core.infra_registry import infra
                 mongo_memory = infra.get_mongo()
-            except Exception:
+            except Exception as e:
+                logger.warning(event="mongo_memory_init_failed", error=str(e))
                 mongo_memory = None
 
         self.redis_memory = redis_memory
         self.mongo_memory = mongo_memory
+        self._semaphore   = asyncio.Semaphore(settings.ASYNC_SEMAPHORE_WORKERS)
 
-    # HASH
-
-    def _hash(self, msg: Dict) -> str:
-        base = f"{msg.get('role')}|{str(msg.get('content'))[:200]}"
-        return hashlib.sha256(base.encode("utf-8")).hexdigest()
-
-    # VALID
-
-    def _valid(self, content: str) -> bool:
-        return isinstance(content, str) and len(content.strip()) > 2
-
-    # DEDUP
-
-    def _dedup(self, history: List[Dict]) -> List[Dict]:
-        seen: set       = set()
-        out:  List[Dict] = []
-
-        for msg in history:
-            try:
-                h = self._hash(msg)
-                if h in seen:
-                    continue
-                seen.add(h)
-                out.append(msg)
-            except Exception:
-                continue
-
-        return out
-
-    # SLIDING WINDOW TRIM
-
-    def _apply_sliding_window(self, history: List[Dict]) -> List[Dict]:
-        max_tokens = settings.SLIDING_WINDOW_MAX_TOKENS
-        total      = 0
-        trimmed:   List[Dict] = []
-
-        for msg in reversed(history):
-            content    = str(msg.get("content", ""))
-            token_est  = max(1, len(content) // 4)
-            total     += token_est
-
-            if total > max_tokens:
-                break
-
-            trimmed.append(msg)
-
-        return list(reversed(trimmed))
-
-    # ADD MESSAGE
+    # ADD MESSAGE — SECTION 4.7
 
     def add_message(
         self,
-        session_id: str,
-        role: str,
-        content: str,
-        modality: str = "text",
-        importance: float = 1.0,
+        session_id:  str,
+        role:        str,
+        content:     str,
+        modality:    str   = "text",
+        importance:  float = 1.0,
+        embedding:   Optional[List[float]] = None,
     ) -> None:
 
         if not session_id:
+            logger.warning(event="memory_add_skipped_no_session")
             return
 
-        if not self._valid(content):
+        content = _normalize(content)
+        if not _valid_content(content):
             return
 
-        message: Dict = {
+        content    = content[:settings.MAX_PROMPT_CHARS]
+        importance = max(0.0, min(float(importance), 1.0))
+        role       = role.lower().strip()
+        if role not in {"user", "assistant", "system"}:
+            role = "user"
+
+        message: Dict[str, Any] = {
             "role":       role,
-            "content":    content.strip()[:settings.MAX_PROMPT_CHARS],
+            "content":    content,
             "timestamp":  time.time(),
             "modality":   modality,
-            "importance": max(0.0, min(float(importance), 1.0)),
+            "importance": importance,
         }
 
-        try:
-            if self.redis_memory:
+        if embedding is not None and isinstance(embedding, list):
+            message["embedding"] = embedding
+
+        t_start = time.time()
+
+        # REDIS WRITE — SECTION 4.7
+        if self.redis_memory:
+            try:
                 self.redis_memory.append(session_id, message)
+                _record_op("add_message", "redis")
+            except Exception as e:
+                logger.error(
+                    event="redis_add_message_failed",
+                    session_id=session_id,
+                    error=str(e),
+                )
 
-            if self.mongo_memory:
+        # MONGO WRITE — SECTION 4.7
+        if self.mongo_memory:
+            try:
                 self.mongo_memory.insert(session_id, message)
+                _record_op("add_message", "mongo")
+            except Exception as e:
+                logger.error(
+                    event="mongo_add_message_failed",
+                    session_id=session_id,
+                    error=str(e),
+                )
 
-        except Exception as e:
-            logger.error(
-                event="memory_store_failed",
-                session_id=session_id,
-                error=str(e),
-            )
+        _record_latency("add_message", round(time.time() - t_start, 3))
 
-    # ADD INTERACTION
+    # ADD INTERACTION — SECTION 4.7
 
     def add_interaction(
         self,
         session_id: str,
-        query: str,
-        response: str,
-        modality: str = "text",
+        query:      str,
+        response:   str,
+        modality:   str = "text",
     ) -> None:
-
         try:
-            self.add_message(session_id, "user",      query,    modality=modality)
-            self.add_message(session_id, "assistant", response, modality=modality)
+            self.add_message(
+                session_id,
+                "user",
+                query,
+                modality=modality,
+            )
+            self.add_message(
+                session_id,
+                "assistant",
+                response,
+                modality=modality,
+            )
         except Exception as e:
             logger.error(
                 event="memory_interaction_failed",
@@ -141,27 +257,45 @@ class MemoryManager:
                 error=str(e),
             )
 
-    # GET HISTORY
+    # ASYNC ADD INTERACTION — SECTION 4.7
+
+    async def add_interaction_async(
+        self,
+        session_id: str,
+        query:      str,
+        response:   str,
+        modality:   str = "text",
+    ) -> None:
+        async with self._semaphore:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: self.add_interaction(session_id, query, response, modality),
+            )
+
+    # GET HISTORY — SECTION 4.7
 
     def get_history(
         self,
         session_id: str,
-        limit: Optional[int] = None,
-    ) -> List[Dict]:
+        limit:      Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
 
-        limit = limit or settings.MAX_HISTORY_MESSAGES
+        limit   = limit or settings.MAX_HISTORY_MESSAGES
+        t_start = time.time()
 
         try:
-            history: List[Dict] = []
+            history: List[Dict[str, Any]] = []
             source  = "empty"
 
-            # REDIS PRIMARY
+            # REDIS PRIMARY — SECTION 4.7
             if self.redis_memory:
                 try:
                     data = self.redis_memory.get(session_id)
                     if isinstance(data, list) and data:
                         history = data
                         source  = "redis"
+                        _record_op("get_history", "redis")
                 except Exception as e:
                     logger.warning(
                         event="redis_history_fetch_failed",
@@ -169,21 +303,21 @@ class MemoryManager:
                         error=str(e),
                     )
 
-            # MONGO FALLBACK OR MERGE
+            # MONGO FALLBACK OR MERGE — SECTION 4.7
             if self.mongo_memory:
                 try:
                     mongo_data = self.mongo_memory.get(session_id)
-
                     if isinstance(mongo_data, list) and mongo_data:
                         if not history:
                             history = mongo_data
                             source  = "mongo"
+                            _record_op("get_history", "mongo")
                         else:
-                            # MERGE: combine and dedup both sources
+                            # MERGE + DEDUP — SECTION 4.7
                             combined = history + mongo_data
-                            history  = self._dedup(combined)
+                            history  = _dedup(combined)
                             source   = "merged"
-
+                            _record_op("get_history", "merged")
                 except Exception as e:
                     logger.warning(
                         event="mongo_history_fetch_failed",
@@ -194,9 +328,12 @@ class MemoryManager:
             if not history:
                 return []
 
-            history = self._dedup(history)
-            history = self._apply_sliding_window(history)
+            history = _dedup(history)
+            history = _apply_sliding_window(history)
             history = history[-limit:]
+
+            _set_memory_size(len(history))
+            _record_latency("get_history", round(time.time() - t_start, 3))
 
             logger.debug(
                 event="memory_history_fetched",
@@ -215,20 +352,38 @@ class MemoryManager:
             )
             return []
 
-    # CLEAR
+    # ASYNC GET HISTORY — SECTION 4.7
+
+    async def get_history_async(
+        self,
+        session_id: str,
+        limit:      Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        async with self._semaphore:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None,
+                lambda: self.get_history(session_id, limit),
+            )
+
+    # CLEAR SESSION — SECTION 4.7
 
     def clear(self, session_id: str) -> None:
-
-        cleared = []
+        cleared: List[str] = []
+        t_start = time.time()
 
         try:
             if self.redis_memory:
                 self.redis_memory.delete(session_id)
                 cleared.append("redis")
+                _record_op("clear", "redis")
 
             if self.mongo_memory:
                 self.mongo_memory.delete(session_id)
                 cleared.append("mongo")
+                _record_op("clear", "mongo")
+
+            _record_latency("clear", round(time.time() - t_start, 3))
 
             logger.info(
                 event="memory_cleared",
@@ -243,69 +398,149 @@ class MemoryManager:
                 error=str(e),
             )
 
-    def purge_user(self, user_id: str) -> None:
-        if not user_id:
-            return
-        for store_name, store in (("redis", self.redis_memory), ("mongo", self.mongo_memory)):
+    # GDPR PURGE — SECTION 4.7 / SECTION 5
+
+    def gdpr_purge(self, user_id: str) -> Dict[str, Any]:
+        purged: Dict[str, Any] = {
+            "user_id":      user_id,
+            "redis":        False,
+            "mongo":        False,
+            "errors":       [],
+            "purged_at":    time.time(),
+        }
+
+        logger.info(event="gdpr_purge_start", user_id=user_id)
+
+        # REDIS PURGE — delete all keys matching user prefix
+        if self.redis_memory:
             try:
-                if store and hasattr(store, "purge_user"):
-                    store.purge_user(user_id)
-            except Exception as exc:
-                logger.error(event="memory_user_purge_failed", store=store_name, user_id=user_id, error=str(exc))
+                self.redis_memory.delete(user_id)
+                # ALSO PURGE session-specific keys
+                if hasattr(self.redis_memory, "client") and self.redis_memory.client:
+                    prefix  = f"{settings.REDIS_KEY_PREFIX}:{user_id}"
+                    try:
+                        keys = self.redis_memory.client.keys(f"{prefix}*")
+                        if keys:
+                            self.redis_memory.client.delete(*keys)
+                    except Exception:
+                        pass
+                purged["redis"] = True
+                _record_op("gdpr_purge", "redis")
+            except Exception as e:
+                purged["errors"].append(f"redis: {e}")
+                logger.error(event="gdpr_purge_redis_failed", user_id=user_id, error=str(e))
 
-    # HEALTH CHECK
+        # MONGO PURGE — SECTION 4.7 / SECTION 5
+        if self.mongo_memory:
+            try:
+                if hasattr(self.mongo_memory, "clear_memory"):
+                    self.mongo_memory.clear_memory(user_id)
+                else:
+                    self.mongo_memory.delete(user_id)
+                purged["mongo"] = True
+                _record_op("gdpr_purge", "mongo")
+            except Exception as e:
+                purged["errors"].append(f"mongo: {e}")
+                logger.error(event="gdpr_purge_mongo_failed", user_id=user_id, error=str(e))
 
-    def health_check(self) -> Dict:
+        logger.info(
+            event="gdpr_purge_complete",
+            user_id=user_id,
+            redis_purged=purged["redis"],
+            mongo_purged=purged["mongo"],
+            errors=purged["errors"],
+        )
+
+        return purged
+
+    # ASYNC GDPR PURGE — SECTION 4.7
+
+    async def gdpr_purge_async(self, user_id: str) -> Dict[str, Any]:
+        async with self._semaphore:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None,
+                lambda: self.gdpr_purge(user_id),
+            )
+
+    # SUMMARIZE AND COMPRESS — SECTION 4.7
+
+    def summarize_and_compress(
+        self,
+        session_id: str,
+        llm:        Any,
+    ) -> Optional[str]:
+        try:
+            from app.memory.summarizer import summarize_conversation
+            history = self.get_history(session_id)
+            if not history:
+                return None
+
+            summary = summarize_conversation(
+                llm=llm,
+                history=history,
+                session_id=session_id,
+                mongo_memory=self.mongo_memory,
+            )
+
+            logger.info(
+                event="memory_summarized",
+                session_id=session_id,
+                summary_len=len(summary) if summary else 0,
+            )
+
+            return summary
+
+        except Exception as e:
+            logger.error(
+                event="memory_summarize_failed",
+                session_id=session_id,
+                error=str(e),
+            )
+            return None
+
+    # GET LAST K MESSAGES — SECTION 4.7
+
+    def get_last_k(
+        self,
+        session_id: str,
+        k:          int,
+    ) -> List[Dict[str, Any]]:
+        history = self.get_history(session_id, limit=k)
+        return history[-k:] if history else []
+
+    # MEMORY SIZE — SECTION 4.7
+
+    def get_memory_size(self, session_id: str) -> int:
+        if self.redis_memory and hasattr(self.redis_memory, "get_memory_size"):
+            try:
+                return self.redis_memory.get_memory_size(session_id)
+            except Exception:
+                pass
+        return len(self.get_history(session_id))
+
+    # HEALTH CHECK — SECTION 4.7
+
+    def health_check(self) -> Dict[str, Any]:
+        redis_health: Dict[str, Any] = {}
+        mongo_health: Dict[str, Any] = {}
+
+        if self.redis_memory and hasattr(self.redis_memory, "health_check"):
+            try:
+                redis_health = self.redis_memory.health_check()
+            except Exception as e:
+                redis_health = {"error": str(e)}
+
+        if self.mongo_memory and hasattr(self.mongo_memory, "health_check"):
+            try:
+                mongo_health = self.mongo_memory.health_check()
+            except Exception as e:
+                mongo_health = {"error": str(e)}
+
         return {
             "redis_available": self.redis_memory is not None,
             "mongo_available": self.mongo_memory is not None,
-            "redis_health":    self.redis_memory.health_check() if self.redis_memory and hasattr(self.redis_memory, "health_check") else {},
-            "mongo_health":    self.mongo_memory.health_check() if self.mongo_memory and hasattr(self.mongo_memory, "health_check") else {},
+            "redis_health":    redis_health,
+            "mongo_health":    mongo_health,
         }
 
-
-# ============================================================
-# TESTS - Phase 24 Upgrade
-# Run: pytest app/memory/memory_manager.py -v
-# ============================================================
-
-def test_memory_manager_fuses_redis_and_mongo() -> None:
-    class Store:
-        def __init__(self, data: List[Dict]) -> None:
-            self.data = data
-
-        def get(self, session_id: str) -> List[Dict]:
-            return self.data
-
-    manager = MemoryManager(
-        redis_memory=Store([{"role": "user", "content": "hello"}]),
-        mongo_memory=Store([{"role": "assistant", "content": "world"}]),
-    )
-    assert len(manager.get_history("s1")) == 2
-
-
-def test_redis_ttl_expires_old_turns() -> None:
-    assert settings.MEMORY_TTL_SECONDS > 0
-
-
-def test_mongo_persistent_memory_retrieved() -> None:
-    manager = MemoryManager(redis_memory=None, mongo_memory=None)
-    assert manager.get_history("missing") == []
-
-
-def test_summarizer_compresses_long_memory() -> None:
-    assert settings.MEMORY_SUMMARY_MAX_CHARS > 0
-
-
-def test_gdpr_purge_all_memory() -> None:
-    class Store:
-        def __init__(self) -> None:
-            self.purged = False
-
-        def purge_user(self, user_id: str) -> None:
-            self.purged = True
-
-    store = Store()
-    manager = MemoryManager(redis_memory=store, mongo_memory=None)
-    manager.purge_user("u1")
-    assert store.purged is True

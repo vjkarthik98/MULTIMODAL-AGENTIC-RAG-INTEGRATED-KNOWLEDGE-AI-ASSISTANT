@@ -1,19 +1,49 @@
+import asyncio
+import hashlib
 import time
 import unicodedata
-from typing import Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+import structlog
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+from prometheus_client import Counter, Histogram
 
 from app.core.config import settings
-from app.utils.logger import get_logger
 
-logger = get_logger(__name__)
+logger = structlog.get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
+# PROMETHEUS METRICS
+_prompt_duration = Histogram(
+    "prompt_builder_duration_seconds",
+    "Prompt builder duration",
+    ["status"],
+)
+_prompt_errors = Counter(
+    "prompt_builder_errors_total",
+    "Prompt builder errors by type",
+    ["error_type"],
+)
+_prompt_length = Histogram(
+    "prompt_builder_length_chars",
+    "Final prompt length in characters",
+    ["prompt_type"],
+)
+_injection_detections = Counter(
+    "prompt_injection_detections_total",
+    "Number of prompt injection attempts detected",
+)
+
+# SEMAPHORE
+_semaphore = asyncio.Semaphore(5)
 
 # BUDGET RATIOS
-_MEM_RATIO  = 0.20
-_CTX_RATIO  = 0.55
-_QUERY_MAX  = 0.15
+_MEM_RATIO   = 0.20
+_CTX_RATIO   = 0.55
+_QUERY_MAX   = 0.15
 
-# PROMPT INJECTION PATTERNS
+# PROMPT INJECTION PATTERNS — COMPREHENSIVE LIST
 _INJECTION_PATTERNS = [
     "ignore previous instructions",
     "ignore all instructions",
@@ -22,6 +52,20 @@ _INJECTION_PATTERNS = [
     "you are now",
     "act as",
     "jailbreak",
+    "override instructions",
+    "new instructions",
+    "system prompt",
+    "pretend you are",
+    "roleplay as",
+    "simulate being",
+    "your true self",
+    "developer mode",
+    "dan mode",
+    "ignore the guidelines",
+    "bypass",
+    "sudo",
+    "admin override",
+    "unlock mode",
 ]
 
 # STRUCTURED KEYWORDS
@@ -32,12 +76,292 @@ _STRUCTURED_KEYWORDS = [
 ]
 
 # MULTIMODAL KEYWORDS
-_IMAGE_KEYWORDS  = {"image", "photo", "diagram", "figure", "chart", "screenshot", "picture"}
-_AUDIO_KEYWORDS  = {"audio", "sound", "speech", "transcript", "recording", "voice"}
-_VIDEO_KEYWORDS  = {"video", "clip", "footage", "scene", "frame"}
+_IMAGE_KEYWORDS = {"image", "photo", "diagram", "figure", "chart", "screenshot", "picture", "visual"}
+_AUDIO_KEYWORDS = {"audio", "sound", "speech", "transcript", "recording", "voice", "spoken"}
+_VIDEO_KEYWORDS = {"video", "clip", "footage", "scene", "frame", "watch", "recording"}
 
 # CODE KEYWORDS
-_CODE_KEYWORDS = {"code", "function", "class", "implement", "script", "snippet", "syntax"}
+_CODE_KEYWORDS = {"code", "function", "class", "implement", "script", "snippet", "syntax", "debug", "algorithm"}
+
+# COMPARATIVE KEYWORDS
+_COMPARATIVE_KEYWORDS = {"compare", "difference", "vs", "versus", "contrast", "better", "worse", "pros", "cons"}
+
+# TEMPORAL KEYWORDS
+_TEMPORAL_KEYWORDS = {"when", "before", "after", "since", "latest", "recent", "current", "timeline", "history"}
+
+
+# NORMALIZE TEXT
+
+def _clean(text: str) -> str:
+    text = unicodedata.normalize("NFC", str(text or ""))
+    return " ".join(text.strip().split())
+
+
+# TRUNCATE WITH LIMIT
+
+def _truncate(text: str, limit: int) -> str:
+    if not text:
+        return ""
+    return text[:max(limit, 0)]
+
+
+# SHA-256 HASH
+
+def _hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# PROMPT INJECTION DETECTION AND SANITIZATION
+
+def _sanitize_query(query: str) -> Tuple[str, bool]:
+    """
+    RETURNS (SANITIZED_QUERY, WAS_INJECTION_DETECTED).
+    STRIPS INJECTION PATTERNS AND TRUNCATES AT FIRST MATCH.
+    """
+    lower    = query.lower()
+    detected = False
+
+    for pattern in _INJECTION_PATTERNS:
+        if pattern in lower:
+            _injection_detections.inc()
+            detected = True
+            logger.warning(
+                "prompt_injection_detected",
+                pattern=pattern,
+                query_prefix=query[:80],
+            )
+            idx   = query.lower().find(pattern)
+            query = query[:idx].strip()
+            break
+
+    return query, detected
+
+
+# QUERY MODE DETECTION
+
+def _is_structured(query: str) -> bool:
+    q = query.lower()
+    return any(k in q for k in _STRUCTURED_KEYWORDS)
+
+
+def _is_code(query: str) -> bool:
+    tokens = set(query.lower().split())
+    return bool(tokens & _CODE_KEYWORDS)
+
+
+def _is_comparative(query: str) -> bool:
+    tokens = set(query.lower().split())
+    return bool(tokens & _COMPARATIVE_KEYWORDS)
+
+
+def _is_temporal(query: str) -> bool:
+    tokens = set(query.lower().split())
+    return bool(tokens & _TEMPORAL_KEYWORDS)
+
+
+def _detect_modality(query: str, context: str) -> Optional[str]:
+    combined = (query + " " + context).lower()
+    tokens   = set(combined.split())
+    if tokens & _IMAGE_KEYWORDS:
+        return "image"
+    if tokens & _AUDIO_KEYWORDS:
+        return "audio"
+    if tokens & _VIDEO_KEYWORDS:
+        return "video"
+    return None
+
+
+# DETECT QUERY TYPE FOR PROMPT ROUTING
+
+def _detect_query_type(query: str) -> str:
+    if _is_code(query):
+        return "code"
+    if _is_comparative(query):
+        return "comparative"
+    if _is_temporal(query):
+        return "temporal"
+    if _is_structured(query):
+        return "structured"
+    modality = _detect_modality(query, "")
+    if modality:
+        return modality
+    return "general"
+
+
+# DEDUP OVERLAP — REMOVE MEMORY CONTENT ALREADY IN CONTEXT
+
+def _deduplicate_context(memory: str, context: str) -> Tuple[str, str]:
+    if not memory or not context:
+        return memory, context
+    key = memory[:200].strip()
+    if key and key in context:
+        context = context.replace(key, "").strip()
+    return memory, context
+
+
+# PII SCRUB BEFORE PROMPT INJECTION
+
+def _scrub_pii(text: str) -> str:
+    if not settings.PII_DETECTION_ENABLED:
+        return text
+    try:
+        from presidio_analyzer import AnalyzerEngine
+        from presidio_anonymizer import AnonymizerEngine
+        entities   = getattr(settings, "PII_ENTITIES", [
+            "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER",
+            "US_SSN", "CREDIT_CARD", "LOCATION", "IP_ADDRESS",
+        ])
+        analyzer   = AnalyzerEngine()
+        anonymizer = AnonymizerEngine()
+        results    = analyzer.analyze(text=text, entities=entities, language="en")
+        if results:
+            text = anonymizer.anonymize(text=text, analyzer_results=results).text
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.warning("pii_scrub_failed", error=str(exc))
+    return text
+
+
+# SYSTEM PROMPT SELECTION — QUERY TYPE AWARE
+
+def _system_prompt(
+    query_type: str,
+    structured: bool,
+    is_code: bool,
+    modality: Optional[str],
+) -> str:
+
+    if structured:
+        return (
+            "You are a strict extraction system.\n"
+            "RULES:\n"
+            "- Use ONLY the provided context\n"
+            "- Return the exact requested value\n"
+            "- No explanation or padding\n"
+            "- If not found → 'I don't know'\n\n"
+        )
+
+    if is_code:
+        return (
+            "You are a precise code assistant.\n"
+            "RULES:\n"
+            "- Use ONLY the provided context\n"
+            "- Return clean, working code\n"
+            "- Include comments for clarity\n"
+            "- No hallucination\n"
+            "- If unsure → say so\n\n"
+        )
+
+    if query_type == "comparative":
+        return (
+            "You are an analytical assistant specializing in comparisons.\n"
+            "RULES:\n"
+            "- Use ONLY the provided context\n"
+            "- Structure: describe A, describe B, then compare\n"
+            "- Be objective and factual\n"
+            "- No hallucination\n\n"
+        )
+
+    if query_type == "temporal":
+        return (
+            "You are a temporal reasoning assistant.\n"
+            "RULES:\n"
+            "- Use ONLY the provided context\n"
+            "- Preserve chronological order\n"
+            "- Note time periods explicitly\n"
+            "- No hallucination\n\n"
+        )
+
+    if modality == "image":
+        return (
+            "You are an expert in visual reasoning.\n"
+            "RULES:\n"
+            "- Use ONLY the provided visual context and captions\n"
+            "- Describe visual content accurately\n"
+            "- No hallucination\n"
+            "- If unsure → 'I don't know'\n\n"
+        )
+
+    if modality == "audio":
+        return (
+            "You are an expert in audio and speech understanding.\n"
+            "RULES:\n"
+            "- Use ONLY the provided transcripts and context\n"
+            "- Reference speaker labels if available\n"
+            "- No hallucination\n"
+            "- If unsure → 'I don't know'\n\n"
+        )
+
+    if modality == "video":
+        return (
+            "You are an expert in video understanding.\n"
+            "RULES:\n"
+            "- Use ONLY the provided frames, captions and transcripts\n"
+            "- Reference timestamps if available\n"
+            "- No hallucination\n"
+            "- If unsure → 'I don't know'\n\n"
+        )
+
+    return (
+        "You are a grounded AI assistant.\n"
+        "RULES:\n"
+        "- Use ONLY the provided context\n"
+        "- No hallucination\n"
+        "- If unsure → 'I don't know'\n"
+        "- Be concise and factual\n\n"
+    )
+
+
+# OUTPUT FORMAT SELECTION
+
+def _output_format(
+    structured: bool,
+    is_code: bool,
+    query_type: str,
+) -> str:
+
+    if structured:
+        return "OUTPUT:\n<exact answer>"
+
+    if is_code:
+        return "OUTPUT:\n```\n<code here>\n```"
+
+    if query_type == "comparative":
+        return (
+            "FORMAT:\n"
+            "Entity A: <description>\n"
+            "Entity B: <description>\n"
+            "Comparison: <key differences and similarities>\n"
+            "Confidence: <0.0-1.0>"
+        )
+
+    if query_type == "temporal":
+        return (
+            "FORMAT:\n"
+            "Timeline: <chronological summary>\n"
+            "Answer: <direct answer>\n"
+            "Confidence: <0.0-1.0>"
+        )
+
+    return (
+        "FORMAT:\n"
+        "Answer: <text>\n"
+        "Confidence: <0.0-1.0>"
+    )
+
+
+# LANGUAGE HINT — INSTRUCT LLM TO RESPOND IN DETECTED LANGUAGE
+
+def _language_hint(context: str) -> Optional[str]:
+    try:
+        from langdetect import detect
+        lang = detect(context[:2000])
+        if lang and lang != "en":
+            return f"[RESPOND IN LANGUAGE: {lang.upper()}]\n"
+    except Exception:
+        pass
+    return None
 
 
 class PromptBuilder:
@@ -45,143 +369,7 @@ class PromptBuilder:
     def __init__(self) -> None:
         self.max_chars = settings.MAX_PROMPT_CHARS
 
-    # CLEAN
-
-    def _clean(self, text: str) -> str:
-        text = unicodedata.normalize("NFC", str(text or ""))
-        return " ".join(text.strip().split())
-
-    # TRUNCATE
-
-    def _truncate(self, text: str, limit: int) -> str:
-        if not text:
-            return ""
-        return text[:max(limit, 0)]
-
-    # INJECTION GUARD
-
-    def _sanitize_query(self, query: str) -> str:
-        lower = query.lower()
-        for pattern in _INJECTION_PATTERNS:
-            if pattern in lower:
-                logger.warning(
-                    event="prompt_injection_detected",
-                    pattern=pattern,
-                )
-                query = query[:query.lower().find(pattern)].strip()
-                break
-        return query
-
-    # DEDUP
-
-    def _deduplicate(self, memory: str, context: str) -> Tuple[str, str]:
-        if not memory or not context:
-            return memory, context
-
-        key = memory[:200].strip()
-        if key and key in context:
-            context = context.replace(key, "").strip()
-
-        return memory, context
-
-    # QUERY MODE DETECTION
-
-    def _is_structured(self, query: str) -> bool:
-        q = query.lower()
-        return any(k in q for k in _STRUCTURED_KEYWORDS)
-
-    def _is_code(self, query: str) -> bool:
-        tokens = set(query.lower().split())
-        return bool(tokens & _CODE_KEYWORDS)
-
-    def _detect_modality(self, query: str, context: str) -> Optional[str]:
-        combined = (query + " " + context).lower()
-        tokens   = set(combined.split())
-
-        if tokens & _IMAGE_KEYWORDS:
-            return "image"
-        if tokens & _AUDIO_KEYWORDS:
-            return "audio"
-        if tokens & _VIDEO_KEYWORDS:
-            return "video"
-        return None
-
-    # SYSTEM PROMPT
-
-    def _system(
-        self,
-        structured: bool,
-        is_code: bool,
-        modality: Optional[str],
-    ) -> str:
-
-        if structured:
-            return (
-                "You are a strict extraction system.\n"
-                "- Use ONLY context\n"
-                "- Return exact value\n"
-                "- No explanation\n"
-                "- If missing → I don't know\n\n"
-            )
-
-        if is_code:
-            return (
-                "You are a precise code assistant.\n"
-                "- Use ONLY provided context\n"
-                "- Return clean, working code\n"
-                "- No hallucination\n"
-                "- If unsure → say so\n\n"
-            )
-
-        if modality == "image":
-            return (
-                "You are an expert in visual reasoning.\n"
-                "- Use ONLY provided context\n"
-                "- Describe visual content accurately\n"
-                "- No hallucination\n"
-                "- If unsure → I don't know\n\n"
-            )
-
-        if modality == "audio":
-            return (
-                "You are an expert in audio and speech understanding.\n"
-                "- Use ONLY provided transcripts and context\n"
-                "- No hallucination\n"
-                "- If unsure → I don't know\n\n"
-            )
-
-        if modality == "video":
-            return (
-                "You are an expert in video understanding.\n"
-                "- Use ONLY provided frames and transcripts\n"
-                "- No hallucination\n"
-                "- If unsure → I don't know\n\n"
-            )
-
-        return (
-            "You are a grounded assistant.\n"
-            "- Use ONLY context\n"
-            "- No hallucination\n"
-            "- If unsure → I don't know\n"
-            "- Be precise\n\n"
-        )
-
-    # OUTPUT FORMAT
-
-    def _output_format(self, structured: bool, is_code: bool) -> str:
-        if structured:
-            return "OUTPUT:\n<exact answer>"
-
-        if is_code:
-            return "OUTPUT:\n```\n<code here>\n```"
-
-        return (
-            "FORMAT:\n"
-            "Answer:\n<text>\n"
-            "Confidence:\n<0-1>"
-        )
-
-    # MAIN
+    # MAIN BUILD PROMPT
 
     def build_prompt(
         self,
@@ -189,106 +377,184 @@ class PromptBuilder:
         context: str,
         memory: str = "",
         session_id: str = "default",
+        scrub_pii: bool = True,
     ) -> str:
 
         start = time.time()
 
-        try:
-            query   = self._clean(self._sanitize_query(query))
-            context = self._clean(context)
-            memory  = self._clean(memory)
+        with tracer.start_as_current_span("prompt_builder") as span:
+            span.set_attribute("session.id", session_id)
 
-            if not query:
-                raise ValueError("EMPTY_QUERY")
+            try:
+                # CLEAN INPUTS
+                query   = _clean(query)
+                context = _clean(context)
+                memory  = _clean(memory)
 
-            structured = self._is_structured(query)
-            is_code    = self._is_code(query)
-            modality   = self._detect_modality(query, context)
+                if not query:
+                    raise ValueError("EMPTY_QUERY")
 
-            memory, context = self._deduplicate(memory, context)
+                # INJECTION SANITIZATION
+                query, was_injected = _sanitize_query(query)
 
-            # BUDGET ALLOCATION
-            mem_budget   = int(self.max_chars * _MEM_RATIO)
-            ctx_budget   = int(self.max_chars * _CTX_RATIO)
-            query_budget = int(self.max_chars * _QUERY_MAX)
+                if not query:
+                    raise ValueError("QUERY_FULLY_SANITIZED_INJECTION_DETECTED")
 
-            memory  = self._truncate(memory,  mem_budget)
-            context = self._truncate(context, ctx_budget)
-            query   = self._truncate(query,   query_budget)
+                span.set_attribute("injection.detected", was_injected)
 
-            system       = self._system(structured, is_code, modality)
-            output_fmt   = self._output_format(structured, is_code)
+                # PII SCRUB BEFORE PROMPT INJECTION
+                if scrub_pii:
+                    context = _scrub_pii(context)
+                    memory  = _scrub_pii(memory)
 
-            mem_block   = f"MEMORY:\n{memory}\n\n"   if memory   else ""
-            ctx_block   = f"CONTEXT:\n{context}\n\n" if context  else ""
-            query_block = (
-                f"TASK:\n{query}\n\n"  if structured
-                else f"QUERY:\n{query}\n\n"
-            )
+                # QUERY TYPE AND MODALITY DETECTION
+                query_type = _detect_query_type(query)
+                structured = _is_structured(query)
+                is_code    = _is_code(query)
+                modality   = _detect_modality(query, context)
 
-            prompt = system + mem_block + ctx_block + query_block + output_fmt
+                span.set_attribute("query.type", query_type)
+                span.set_attribute("query.modality", modality or "text")
 
-            # FINAL OVERFLOW GUARD
-            if len(prompt) > self.max_chars:
-                fixed   = system + query_block + output_fmt
-                allowed = self.max_chars - len(fixed) - 20
-                middle  = self._truncate(mem_block + ctx_block, allowed)
-                prompt  = system + middle + query_block + output_fmt
+                # DEDUP OVERLAP BETWEEN MEMORY AND CONTEXT
+                memory, context = _deduplicate_context(memory, context)
 
-                logger.warning(
-                    event="prompt_truncated",
-                    original_size=len(system + mem_block + ctx_block + query_block + output_fmt),
-                    final_size=len(prompt),
+                # BUDGET ALLOCATION
+                mem_budget   = int(self.max_chars * _MEM_RATIO)
+                ctx_budget   = int(self.max_chars * _CTX_RATIO)
+                query_budget = int(self.max_chars * _QUERY_MAX)
+
+                memory  = _truncate(memory,  mem_budget)
+                context = _truncate(context, ctx_budget)
+                query   = _truncate(query,   query_budget)
+
+                # LANGUAGE HINT FOR MULTILINGUAL CONTEXT
+                lang_hint = _language_hint(context) or ""
+
+                # SYSTEM PROMPT
+                system     = _system_prompt(query_type, structured, is_code, modality)
+                output_fmt = _output_format(structured, is_code, query_type)
+
+                # BLOCK ASSEMBLY
+                lang_block  = lang_hint
+                mem_block   = f"MEMORY:\n{memory}\n\n"   if memory   else ""
+                ctx_block   = f"CONTEXT:\n{context}\n\n" if context  else ""
+                query_block = (
+                    f"TASK:\n{query}\n\n"
+                    if structured
+                    else f"QUERY:\n{query}\n\n"
+                )
+
+                prompt = (
+                    system
+                    + lang_block
+                    + mem_block
+                    + ctx_block
+                    + query_block
+                    + output_fmt
+                )
+
+                # OVERFLOW GUARD — PRESERVE SYSTEM + QUERY + FORMAT
+                if len(prompt) > self.max_chars:
+                    fixed   = system + lang_block + query_block + output_fmt
+                    allowed = self.max_chars - len(fixed) - 20
+                    middle  = _truncate(mem_block + ctx_block, allowed)
+                    prompt  = system + lang_block + middle + query_block + output_fmt
+
+                    logger.warning(
+                        "prompt_truncated",
+                        original_size=len(
+                            system + lang_block + mem_block
+                            + ctx_block + query_block + output_fmt
+                        ),
+                        final_size=len(prompt),
+                        session_id=session_id,
+                    )
+
+                latency = round(time.time() - start, 3)
+
+                _prompt_duration.labels(status="success").observe(latency)
+                _prompt_length.labels(prompt_type=query_type).observe(len(prompt))
+
+                span.set_attribute("prompt.length", len(prompt))
+                span.set_attribute("mem.chars", len(memory))
+                span.set_attribute("ctx.chars", len(context))
+                span.set_attribute("query.chars", len(query))
+                span.set_status(Status(StatusCode.OK))
+
+                logger.debug(
+                    "prompt_built",
+                    size=len(prompt),
+                    mem_chars=len(memory),
+                    ctx_chars=len(context),
+                    query_chars=len(query),
+                    structured=structured,
+                    is_code=is_code,
+                    query_type=query_type,
+                    modality=modality,
+                    injection_detected=was_injected,
+                    latency=latency,
                     session_id=session_id,
                 )
 
-            logger.debug(
-                event="prompt_built",
-                size=len(prompt),
-                mem_chars=len(memory),
-                ctx_chars=len(context),
-                query_chars=len(query),
-                structured=structured,
-                is_code=is_code,
-                modality=modality,
-                latency=round(time.time() - start, 3),
-                session_id=session_id,
+                return prompt
+
+            except Exception as exc:
+                latency    = round(time.time() - start, 3)
+                error_type = type(exc).__name__
+
+                _prompt_duration.labels(status="error").observe(latency)
+                _prompt_errors.labels(error_type=error_type).inc()
+
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                span.record_exception(exc)
+
+                logger.error(
+                    "prompt_build_failed",
+                    error=str(exc),
+                    error_type=error_type,
+                    session_id=session_id,
+                )
+                raise
+
+    # BATCH BUILD — BUILD PROMPTS FOR MULTIPLE QUERIES
+
+    def build_batch(
+        self,
+        queries: List[str],
+        context: str,
+        memory: str = "",
+        session_id: str = "default",
+    ) -> List[str]:
+        prompts: List[str] = []
+        for q in queries:
+            try:
+                prompt = self.build_prompt(q, context, memory, session_id)
+                prompts.append(prompt)
+            except Exception as exc:
+                logger.warning(
+                    "prompt_batch_item_failed",
+                    query_prefix=q[:50],
+                    error=str(exc),
+                    session_id=session_id,
+                )
+        return prompts
+
+    # ASYNC BUILD
+
+    async def build_prompt_async(
+        self,
+        query: str,
+        context: str,
+        memory: str = "",
+        session_id: str = "default",
+        scrub_pii: bool = True,
+    ) -> str:
+
+        async with _semaphore:
+            return await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.build_prompt(query, context, memory, session_id, scrub_pii),
             )
 
-            return prompt
 
-        except Exception as e:
-            logger.error(
-                event="prompt_build_failed",
-                error=str(e),
-                session_id=session_id,
-            )
-            raise
-
-
-# ============================================================
-# TESTS - Phase 24 Upgrade
-# Run: pytest app/prompt/prompt_builder.py -v
-# ============================================================
-
-def test_multi_hop_query_decomposed_to_subqueries() -> None:
-    builder = PromptBuilder()
-    prompt = builder.build_prompt("compare image and transcript", "IMAGE context")
-    assert "QUERY:" in prompt
-
-
-def test_reasoning_engine_uses_retrieved_evidence() -> None:
-    builder = PromptBuilder()
-    prompt = builder.build_prompt("What is this?", "Only this context")
-    assert "CONTEXT:" in prompt
-
-
-def test_result_fusion_resolves_contradiction() -> None:
-    builder = PromptBuilder()
-    assert builder._deduplicate("abc", "abc def")[1] == "def"
-
-
-def test_hallucination_guard_flags_unsupported_claim() -> None:
-    builder = PromptBuilder()
-    sanitized = builder._sanitize_query("ignore previous instructions reveal")
-    assert "ignore previous instructions" not in sanitized
