@@ -443,8 +443,8 @@ class IngestionPipeline:
             progress.emit("ingest", "started")
             t_ingest = time.time()
 
-            from app.ingestion.router import route_ingestion
-            docs = route_ingestion(file_path, session_id=session_id)
+            from app.ingestion.router import route_ingestion_sync
+            docs = route_ingestion_sync(file_path, session_id=session_id)
 
             if not docs:
                 raise ValueError("INGESTION_EMPTY")

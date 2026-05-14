@@ -580,7 +580,7 @@ class MultimodalEmbedder:
     ) -> Tuple[List[Any], List[Any]]:
         """Async entry point for pipeline integration."""
         async with _get_semaphore():
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
                 None,
                 lambda: self.embed_documents(documents, session_id),
@@ -590,22 +590,26 @@ class MultimodalEmbedder:
 
     def cross_modal_similarity(
         self,
-        text_embedding: List[float],
+        query_text: str,
         image_embedding: List[float],
+        session_id: str = "default",
     ) -> float:
         """
-        Cosine similarity between a text embedding (TEXT_EMBEDDING_DIM)
-        and image embedding (VISION_EMBEDDING_DIM).
-
-        Note: Dimensions differ — returns 0.0 if dims differ.
-        For true cross-modal similarity use CLIP text embedder
-        (same space as CLIP image embedder).
+        Cosine similarity between a text query and a CLIP image embedding.
+        Both vectors are projected into CLIP's shared 512-dim space by encoding
+        the query with the CLIP text encoder rather than the MiniLM text encoder.
         """
-        if len(text_embedding) != len(image_embedding):
+        if not query_text or not image_embedding:
             return 0.0
         try:
             import numpy as np
-            a     = np.array(text_embedding, dtype=float)
+            from app.core.model_loader import model_loader
+            clip_text_emb = model_loader.get_clip_text_embedder().embed_query(
+                query_text, session_id=session_id
+            )
+            if not clip_text_emb or len(clip_text_emb) != len(image_embedding):
+                return 0.0
+            a     = np.array(clip_text_emb, dtype=float)
             b     = np.array(image_embedding, dtype=float)
             denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-10
             val   = float(np.dot(a, b) / denom)

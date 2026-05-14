@@ -344,7 +344,7 @@ def _brightness_mean(frame: np.ndarray) -> float:
 
 
 def _is_too_dark(brightness: float) -> bool:
-    return brightness < settings.SCENE_CHANGE_THRESHOLD  # reuse threshold as dark floor ~15
+    return brightness < settings.FRAME_DARKNESS_THRESHOLD
 
 
 # PERCEPTUAL HASH
@@ -821,6 +821,7 @@ def extract_frames(
     video_path: str,
     interval_sec: int,
     session_id: str,
+    skip_scene_detection: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Extract frames from a video file.
@@ -897,7 +898,7 @@ def extract_frames(
         # CHOOSE EXTRACTION METHOD
         frames: List[FrameMetadata]
 
-        if SCENEDETECT_AVAILABLE and not is_short and duration >= 2.0:
+        if SCENEDETECT_AVAILABLE and not is_short and duration >= 2.0 and not skip_scene_detection:
             try:
                 frames = _extract_frames_pyscenedetect(
                     video_path=video_path,

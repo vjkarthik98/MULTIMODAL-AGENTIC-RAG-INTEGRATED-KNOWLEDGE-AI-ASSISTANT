@@ -28,16 +28,8 @@ _infra_init_errors = Counter(
     "Infrastructure initialization errors by service",
     ["service", "error_type"],
 )
-_circuit_breaker_state = Gauge(
-    "circuit_breaker_state",
-    "Circuit breaker state per service (0=closed, 1=open)",
-    ["service"],
-)
-_circuit_breaker_failures = Gauge(
-    "circuit_breaker_failures_total",
-    "Circuit breaker failure count per service",
-    ["service"],
-)
+from app.core.metrics import circuit_breaker_state as _circuit_breaker_state
+from app.core.metrics import circuit_breaker_failures as _circuit_breaker_failures
 _infra_available = Gauge(
     "infra_service_available",
     "Whether an infra service is available (1=yes, 0=no)",

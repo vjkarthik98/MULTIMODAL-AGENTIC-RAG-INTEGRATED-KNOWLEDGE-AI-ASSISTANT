@@ -45,6 +45,17 @@ _AUDIO_MAGIC: Dict[bytes, str] = {
 # FILLER WORD PATTERN
 _FILLER_PATTERN: Optional[re.Pattern] = None
 
+# YAMNET MODEL SINGLETON
+_yamnet_model: Optional[Any] = None
+
+
+def _get_yamnet() -> Any:
+    global _yamnet_model
+    if _yamnet_model is None:
+        import tensorflow_hub as hub
+        _yamnet_model = hub.load("https://tfhub.dev/google/yamnet/1")
+    return _yamnet_model
+
 
 def _get_filler_pattern() -> re.Pattern:
     global _FILLER_PATTERN
@@ -365,20 +376,30 @@ def _extract_id3(file_path: str) -> Dict[str, Any]:
 
 # NOISE CLASSIFICATION VIA YAMNET
 
+_YAMNET_SPEECH_CLASSES = {0, 1, 2, 3, 4}
+_YAMNET_MUSIC_CLASSES  = {137, 138, 139, 140}
+_YAMNET_CROWD_CLASSES  = {70, 71, 72}
+
+
 def _classify_noise(file_path: str) -> Optional[str]:
     try:
         import tensorflow as tf
-        import tensorflow_hub as hub
         import numpy as np
         import librosa
 
-        model = hub.load("https://tfhub.dev/google/yamnet/1")
+        model = _get_yamnet()
         y, _ = librosa.load(file_path, sr=16000, mono=True, duration=10)
         scores, _, _ = model(y)
         class_scores = tf.reduce_mean(scores, axis=0).numpy()
         top_idx = int(np.argmax(class_scores))
-        classes = ["music", "speech", "noise", "crowd", "static"]
-        return classes[top_idx % len(classes)]
+
+        if top_idx in _YAMNET_SPEECH_CLASSES:
+            return "speech"
+        if top_idx in _YAMNET_MUSIC_CLASSES:
+            return "music"
+        if top_idx in _YAMNET_CROWD_CLASSES:
+            return "crowd"
+        return "noise"
     except Exception:
         return None
 
@@ -574,9 +595,11 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
         # UNIVERSAL METADATA
         metadata = build_universal_metadata(
-            path,
+            str(path),
             Modality.AUDIO,
             mime_type,
+            file_size_bytes=file_size,
+            checksum_sha256=file_hash,
             language=None,
             chunk_count=0,
             tags=[],
@@ -606,9 +629,8 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 segments_iter, info, transcribe_latency = _transcribe_file(chunk_file, session_id)
                 language = getattr(info, "language", None)
 
-                # RTF CHECK
-                chunk_audio = _load_audio(chunk_file)
-                chunk_duration = chunk_audio.duration_seconds
+                # RTF CHECK — use duration from TranscriptionInfo to avoid re-loading the file
+                chunk_duration = float(getattr(info, "duration", 0.0) or 0.0)
                 rtf = transcribe_latency / max(chunk_duration, 1e-6)
 
                 if rtf > settings.LATENCY_TARGET_AUDIO_RTF:

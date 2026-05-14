@@ -60,7 +60,7 @@ _semaphore = asyncio.Semaphore(5)
 # SHA-256 FILE HASH
 
 def _file_hash(file_path: str) -> str:
-    h = hashlib.md5()
+    h = hashlib.sha256()
     with open(file_path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
@@ -481,8 +481,6 @@ def _process_pdf(
                 for r in repeated:
                     d.text = d.text.replace(r, "").strip()
 
-    pdf.close()
-
     # TABLES VIA PDFPLUMBER — RUN IN PARALLEL WITH PAGE LOOP
     try:
         with pdfplumber.open(active_path) as pdf_p:
@@ -551,10 +549,9 @@ def _process_pdf(
     except Exception as exc:
         logger.warning("pdf_table_extraction_failed", error=str(exc))
 
-    # HYPERLINK EXTRACTION
+    # HYPERLINK EXTRACTION — reuses the already-open fitz handle to avoid parsing the file twice
     try:
-        pdf2 = fitz.open(active_path)
-        for i, page in enumerate(pdf2, start=1):
+        for i, page in enumerate(pdf, start=1):
             links = page.get_links()
             for link in links:
                 uri = link.get("uri", "")
@@ -580,9 +577,10 @@ def _process_pdf(
                             },
                         ).finalize()
                     )
-        pdf2.close()
     except Exception as exc:
         logger.warning("pdf_hyperlink_extraction_failed", error=str(exc))
+    finally:
+        pdf.close()
 
     return documents
 

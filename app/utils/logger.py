@@ -74,7 +74,7 @@ _SKIP_KEYS = frozenset({
 })
 
 # VALUES TO SUPPRESS IN OUTPUT
-_SUPPRESS_VALUES = frozenset({None, "", "-", [], {}, ()})
+_SUPPRESS_VALUES = (None, "", "-", [], {}, ())
 
 
 # CLEAN CONSOLE FORMATTER
@@ -417,7 +417,7 @@ def _setup_logging() -> None:
     root_logger = StructuredLogger(logging.getLogger("app.logger"))
     root_logger.info(
         event="logging_initialized",
-        level=logging.getLevelName(level),
+        log_level=logging.getLevelName(level),
         json_mode=getattr(settings, "LOG_JSON", False),
         file_logging=getattr(settings, "ENABLE_FILE_LOGGING", True),
         service=settings.APP_NAME,

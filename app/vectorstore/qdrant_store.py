@@ -46,11 +46,7 @@ _search_errors = Counter(
     "Qdrant search errors",
     ["collection", "error_type"],
 )
-_circuit_breaker_state = Gauge(
-    "circuit_breaker_state",
-    "Circuit breaker state per service (0=closed, 1=open)",
-    ["service"],
-)
+from app.core.metrics import circuit_breaker_state as _circuit_breaker_state
 _vectors_stored = Gauge(
     "qdrant_vectors_stored_total",
     "Total vectors stored per collection",
@@ -668,6 +664,41 @@ class QdrantVectorStore:
                     session_id=session_id,
                     error=str(exc),
                 )
+
+    # PAYLOAD FIELD SEARCH — USED BY DEDUP CHECK
+
+    def search_by_payload(
+        self,
+        field: str,
+        value: str,
+        session_id: str = "",
+        limit: int = 1,
+    ) -> List[Any]:
+        results: List[Any] = []
+        for collection in (self.text_collection, self.vision_collection):
+            if collection not in self._collection_cache:
+                continue
+            try:
+                points, _ = self.client.scroll(
+                    collection_name=collection,
+                    scroll_filter=Filter(
+                        must=[FieldCondition(key=field, match=MatchValue(value=value))]
+                    ),
+                    limit=limit,
+                    with_payload=False,
+                    with_vectors=False,
+                )
+                results.extend(points)
+                if results:
+                    break
+            except Exception as exc:
+                logger.warning(
+                    "search_by_payload_failed",
+                    collection=collection,
+                    field=field,
+                    error=str(exc),
+                )
+        return results
 
     # COLLECTION STATS
 

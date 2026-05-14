@@ -47,6 +47,17 @@ MAGIC_BYTES: Dict[bytes, str] = {
 # DRM DETECTION SIGNATURES
 DRM_SIGNATURES = [b"drm", b"DRM", b"encrypted", b"ENCRYPTED", b"protect"]
 
+# EASYOCR SINGLETON — loaded once, reused across all calls
+_easyocr_reader: Optional[Any] = None
+
+
+def _get_easyocr_reader() -> Any:
+    global _easyocr_reader
+    if _easyocr_reader is None:
+        import easyocr
+        _easyocr_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+    return _easyocr_reader
+
 
 # SHA-256 FILE HASH 
 
@@ -331,8 +342,7 @@ def _extract_frame_ocr(image_path: str) -> str:
 
     # EASYOCR ENSEMBLE
     try:
-        import easyocr
-        reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+        reader = _get_easyocr_reader()
         detections = reader.readtext(image_path, detail=0)
         if detections:
             results.append(" ".join(detections))
@@ -471,7 +481,7 @@ def _attempt_recovery(file_path: str, output_path: str) -> bool:
 # MAIN ASYNC INGEST
 
 async def ingest_async(file_path: str, session_id: str) -> List[IngestedDocument]:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, ingest, file_path, session_id)
 
 
