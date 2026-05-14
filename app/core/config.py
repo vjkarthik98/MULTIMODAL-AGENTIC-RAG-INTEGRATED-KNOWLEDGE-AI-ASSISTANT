@@ -74,7 +74,7 @@ class Settings:
     # LOGGING
     LOG_LEVEL: str             = _str("LOG_LEVEL", "INFO")
     LOG_JSON: bool             = _bool("LOG_JSON", False)
-    LOG_SHOW_TIMESTAMP: bool   = _bool("LOG_SHOW_TIMESTAMP", True)
+    LOG_SHOW_TIMESTAMP: bool   = _bool("LOG_SHOW_TIMESTAMP", False)
     ENABLE_FILE_LOGGING: bool  = _bool("ENABLE_FILE_LOGGING", True)
     LOG_FILE_NAME: str         = _str("LOG_FILE_NAME", "app.log")
     LOG_MAX_BYTES: int         = _int("LOG_MAX_BYTES", 10_485_760)
@@ -197,6 +197,15 @@ class Settings:
     QDRANT_CB_FAIL_MAX: int         = _int("QDRANT_CB_FAIL_MAX", 5)
     QDRANT_CB_RESET_TIMEOUT: int    = _int("QDRANT_CB_RESET_TIMEOUT", 60)
 
+    # CIRCUIT BREAKER — SHARED DEFAULTS
+    CIRCUIT_BREAKER_MAX_FAILURES: int    = _int("CIRCUIT_BREAKER_MAX_FAILURES", 5)
+    CIRCUIT_BREAKER_RESET_TIMEOUT: int   = _int("CIRCUIT_BREAKER_RESET_TIMEOUT", 60)
+
+    # RETRY — SHARED DEFAULTS
+    RETRY_MAX_ATTEMPTS: int   = _int("RETRY_MAX_ATTEMPTS", 3)
+    RETRY_WAIT_MIN_SEC: float = _float("RETRY_WAIT_MIN_SEC", 1.0)
+    RETRY_WAIT_MAX_SEC: float = _float("RETRY_WAIT_MAX_SEC", 10.0)
+
     # REDIS
     REDIS_URL: Optional[str]         = _opt("REDIS_URL")
     REDIS_TOKEN: Optional[str]       = _opt("REDIS_TOKEN")
@@ -222,6 +231,8 @@ class Settings:
     MONGO_CB_RESET_TIMEOUT: int          = _int("MONGO_CB_RESET_TIMEOUT", 60)
     MONGO_MESSAGES_COLLECTION: str       = _str("MONGO_MESSAGES_COLLECTION", "messages")
     MONGO_SUMMARIES_COLLECTION: str      = _str("MONGO_SUMMARIES_COLLECTION", "summaries")
+    MONGO_MEMORY_COLLECTION: str         = _str("MONGO_MEMORY_COLLECTION", "messages")
+    MONGO_SUMMARY_COLLECTION: str        = _str("MONGO_SUMMARY_COLLECTION", "summaries")
     MONGO_AUDIT_COLLECTION: str          = _str("MONGO_AUDIT_COLLECTION", "audit_log")
 
     # CHUNKING
@@ -344,6 +355,7 @@ class Settings:
     FFMPEG_PATH: str                         = _str("FFMPEG_PATH", "ffmpeg")
     FFMPEG_TIMEOUT_SEC: int                  = _int("FFMPEG_TIMEOUT_SEC", 120)
     SCENE_CHANGE_THRESHOLD: float            = _float("SCENE_CHANGE_THRESHOLD", 25.0)
+    FRAME_DARKNESS_THRESHOLD: float          = _float("FRAME_DARKNESS_THRESHOLD", 10.0)
     VIDEO_DUPLICATE_FRAME_THRESHOLD: float   = _float("VIDEO_DUPLICATE_FRAME_THRESHOLD", 0.98)
     VIDEO_SUBTITLE_EXTRACTION: bool          = _bool("VIDEO_SUBTITLE_EXTRACTION", True)
     VIDEO_HDR_TONEMAPPING: bool              = _bool("VIDEO_HDR_TONEMAPPING", True)

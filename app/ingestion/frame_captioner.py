@@ -63,6 +63,34 @@ def _cache_key(image_path: str) -> str:
     return hashlib.sha256(image_path.encode("utf-8")).hexdigest()
 
 
+# CAPTION REDIS CACHE HELPERS
+
+def _caption_cache_get(key: str) -> Optional[str]:
+    try:
+        from app.core.infra_registry import infra
+        mem = infra.get_memory()
+        if mem:
+            val = mem.cache_get(f"caption:{key}")
+            return val if isinstance(val, str) else None
+    except Exception:
+        pass
+    return None
+
+
+def _caption_cache_set(key: str, caption: str) -> None:
+    try:
+        from app.core.infra_registry import infra
+        mem = infra.get_memory()
+        if mem:
+            mem.cache_set(
+                f"caption:{key}",
+                caption,
+                ttl=settings.REDIS_EMBEDDING_CACHE_TTL,
+            )
+    except Exception:
+        pass
+
+
 # REPETITION CLEAN
 
 def _remove_repetition(text: str) -> str:
@@ -393,11 +421,23 @@ def generate_caption(
         thumb_path = settings.TEMP_DIR / "thumbs" / f"{_cache_key(image_path)}.jpg"
         _generate_thumbnail(image, thumb_path)
 
-        # BLIP LOCAL CAPTION
-        t_infer = time.time()
-        raw_caption = _blip_caption(image, session_id)
-        infer_ms = round((time.time() - t_infer) * 1000, 1)
+        # BLIP LOCAL CAPTION — WITH REDIS CACHE
+        image_hash = _cache_key(image_path)
+        raw_caption: Optional[str] = None
         caption_source = "blip"
+        infer_ms = 0.0
+
+        if use_cache:
+            raw_caption = _caption_cache_get(image_hash)
+            if raw_caption:
+                caption_source = "cache"
+
+        if raw_caption is None:
+            t_infer = time.time()
+            raw_caption = _blip_caption(image, session_id)
+            infer_ms = round((time.time() - t_infer) * 1000, 1)
+            if use_cache and raw_caption:
+                _caption_cache_set(image_hash, raw_caption)
 
         # CLEAN AND VALIDATE
         caption = _clean_caption(raw_caption) if raw_caption else None
@@ -461,7 +501,7 @@ async def generate_caption_async(
     session_id: str,
     use_cache: bool = True,
 ) -> Optional[str]:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
         lambda: generate_caption(image_path, session_id, use_cache),

@@ -269,9 +269,9 @@ class QdrantInitializer:
         logger.info(
             event="qdrant_payload_indexes_done",
             collection=collection_name,
-            created=created,
-            skipped=skipped,
-            failed=failed,
+            indexes_created=created,
+            indexes_skipped=skipped,
+            indexes_failed=failed,
         )
 
     # ENSURE SINGLE COLLECTION

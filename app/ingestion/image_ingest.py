@@ -56,6 +56,17 @@ _WEAK_PREFIXES = [
     "this is a", "this is an",
 ]
 
+# EASYOCR SINGLETON — loaded once, reused across all calls
+_easyocr_reader: Optional[Any] = None
+
+
+def _get_easyocr_reader() -> Any:
+    global _easyocr_reader
+    if _easyocr_reader is None:
+        import easyocr
+        _easyocr_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+    return _easyocr_reader
+
 
 # SHA256 FILE HASH
 
@@ -367,9 +378,8 @@ def _extract_ocr(img: Image.Image, session_id: str) -> str:
 
     # EASYOCR ENSEMBLE
     try:
-        import easyocr
-        reader = easyocr.Reader(["en"], gpu=False, verbose=False)
         import numpy as np
+        reader = _get_easyocr_reader()
         results = reader.readtext(np.array(img))
         easy_text = " ".join([r[1] for r in results if r[2] > 0.3]).strip()
         if len(easy_text) >= settings.CHUNK_MIN_SIZE:
@@ -653,9 +663,11 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
         # UNIVERSAL METADATA
         metadata = build_universal_metadata(
-            path,
+            str(path),
             Modality.IMAGE,
             "image/jpeg",
+            file_size_bytes=file_size,
+            checksum_sha256=file_hash,
             language="und",
             chunk_count=0,
             tags=[],
@@ -746,12 +758,13 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 ).finalize()
             )
 
-        # VISION EMBEDDING DOCUMENT (CLIP)
+        # VISION EMBEDDING DOCUMENT (CLIP) — text field carries the image path so
+        # _dedup_chunks() keys differ from the caption doc and BM25 is not indexed twice.
         documents.append(
             IngestedDocument(
-                text=caption_clean,
+                text=source_path,
                 modality="image",
-                subtype="caption",
+                subtype="image_frame",
                 source_type="image",
                 source=source_name,
                 metadata=metadata,
