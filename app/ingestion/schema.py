@@ -505,34 +505,7 @@ def sha256_file(file_path: str) -> str:
 
     return h.hexdigest()
 
-# PROCESSING RESULT — RETURNED BY ALL INGESTORS
-
-class ProcessingResult(BaseModel):
-    success:   bool
-    modality:  str                       = "unknown"
-    session_id: str                      = "default"
-    latency:   float                     = 0.0
-    chunks:    int                       = 0
-    stored:    int                       = 0
-    source:    str                       = ""
-    metadata:  Optional[UniversalMetadata] = None
-    warnings:  List[str]                 = Field(default_factory=list)
-    errors:    List[str]                 = Field(default_factory=list)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "success":    self.success,
-            "modality":   self.modality,
-            "session_id": self.session_id,
-            "latency":    self.latency,
-            "chunks":     self.chunks,
-            "stored":     self.stored,
-            "source":     self.source,
-            "metadata":   self.metadata.to_dict() if self.metadata else None,
-            "warnings":   self.warnings,
-            "errors":     self.errors,
-        }
-
+from app.core.response import ProcessingResult  # noqa: F401  (re-exported for ingestion callers)
 
 # ERROR DETAIL
 

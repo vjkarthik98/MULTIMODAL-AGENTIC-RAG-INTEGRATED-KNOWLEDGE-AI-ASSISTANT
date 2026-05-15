@@ -205,15 +205,10 @@ class InfraRegistry:
         failures = [r for r in results if isinstance(r, Exception)]
 
         for f in failures:
-            logger.error("infra_warmup_error", error=str(f))
-
-        if failures:
-            raise RuntimeError(
-                f"INFRA_WARMUP_FAILED: {len(failures)} service(s) failed to initialize"
-            )
+            logger.warning("infra_warmup_partial_failure", error=str(f))
 
         self._initialized = True
-        logger.info("infra_warmup_completed")
+        logger.info("infra_warmup_completed", failures=len(failures))
 
     # QDRANT VECTOR STORE
 
