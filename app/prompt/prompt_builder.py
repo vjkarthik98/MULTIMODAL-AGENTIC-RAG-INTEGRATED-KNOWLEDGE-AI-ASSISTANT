@@ -351,19 +351,6 @@ def _output_format(
     )
 
 
-# LANGUAGE HINT — INSTRUCT LLM TO RESPOND IN DETECTED LANGUAGE
-
-def _language_hint(context: str) -> Optional[str]:
-    try:
-        from langdetect import detect
-        lang = detect(context[:2000])
-        if lang and lang != "en":
-            return f"[RESPOND IN LANGUAGE: {lang.upper()}]\n"
-    except Exception:
-        pass
-    return None
-
-
 class PromptBuilder:
 
     def __init__(self) -> None:
@@ -428,15 +415,11 @@ class PromptBuilder:
                 context = _truncate(context, ctx_budget)
                 query   = _truncate(query,   query_budget)
 
-                # LANGUAGE HINT FOR MULTILINGUAL CONTEXT
-                lang_hint = _language_hint(context) or ""
-
                 # SYSTEM PROMPT
                 system     = _system_prompt(query_type, structured, is_code, modality)
                 output_fmt = _output_format(structured, is_code, query_type)
 
                 # BLOCK ASSEMBLY
-                lang_block  = lang_hint
                 mem_block   = f"MEMORY:\n{memory}\n\n"   if memory   else ""
                 ctx_block   = f"CONTEXT:\n{context}\n\n" if context  else ""
                 query_block = (
@@ -447,7 +430,6 @@ class PromptBuilder:
 
                 prompt = (
                     system
-                    + lang_block
                     + mem_block
                     + ctx_block
                     + query_block
@@ -456,15 +438,15 @@ class PromptBuilder:
 
                 # OVERFLOW GUARD — PRESERVE SYSTEM + QUERY + FORMAT
                 if len(prompt) > self.max_chars:
-                    fixed   = system + lang_block + query_block + output_fmt
+                    fixed   = system + query_block + output_fmt
                     allowed = self.max_chars - len(fixed) - 20
                     middle  = _truncate(mem_block + ctx_block, allowed)
-                    prompt  = system + lang_block + middle + query_block + output_fmt
+                    prompt  = system + middle + query_block + output_fmt
 
                     logger.warning(
                         "prompt_truncated",
                         original_size=len(
-                            system + lang_block + mem_block
+                            system + mem_block
                             + ctx_block + query_block + output_fmt
                         ),
                         final_size=len(prompt),

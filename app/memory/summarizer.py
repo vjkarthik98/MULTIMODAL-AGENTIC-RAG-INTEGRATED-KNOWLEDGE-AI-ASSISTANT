@@ -100,16 +100,6 @@ def _scrub_pii(text: str) -> str:
     return text
 
 
-# LANGUAGE DETECTION
-
-def _detect_language(text: str) -> Optional[str]:
-    try:
-        from langdetect import detect
-        return detect(text[:2000])
-    except Exception:
-        return None
-
-
 # FORMAT CONVERSATION FOR SUMMARIZATION INPUT
 
 def _format_for_summary(history: List[Dict]) -> str:
@@ -207,11 +197,8 @@ def _validate(summary: str) -> str:
 
 # BUILD SUMMARIZATION PROMPT
 
-def _build_prompt(conv: str, language: Optional[str] = None) -> str:
-    lang_hint = f"Respond in {language}.\n" if language and language != "en" else ""
-
+def _build_prompt(conv: str) -> str:
     instruction = (
-        f"{lang_hint}"
         "Compress this conversation into structured memory.\n"
         "Rules:\n"
         "- Keep only factual, actionable information\n"
@@ -324,15 +311,12 @@ def summarize_conversation(
                 span.set_status(Status(StatusCode.OK))
                 return ""
 
-            # LANGUAGE DETECTION FOR MULTILINGUAL SUMMARY
-            language = _detect_language(conv)
-
             # INCREMENTAL OR FULL SUMMARIZATION
             if existing_summary and len(existing_summary.strip()) > settings.MIN_SUMMARY_LENGTH:
                 prompt = _build_incremental_prompt(existing_summary, conv)
                 span.set_attribute("summary.mode", "incremental")
             else:
-                prompt = _build_prompt(conv, language=language)
+                prompt = _build_prompt(conv)
                 span.set_attribute("summary.mode", "full")
 
             # LLM GENERATION WITH HARD TIMEOUT GUARD
@@ -395,7 +379,6 @@ def summarize_conversation(
             _summary_length.observe(len(summary))
 
             span.set_attribute("summary.length", len(summary))
-            span.set_attribute("summary.language", language or "unknown")
             span.set_attribute("summary.keywords", len(keywords))
             span.set_attribute("compression.ratio", ratio)
             span.set_status(Status(StatusCode.OK))
@@ -405,7 +388,6 @@ def summarize_conversation(
                 length=len(summary),
                 input_messages=len(history),
                 conv_chars=len(conv),
-                language=language,
                 keywords=keywords[:5],
                 compression_ratio=ratio,
                 llm_latency=round(llm_latency, 2),

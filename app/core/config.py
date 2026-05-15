@@ -122,8 +122,7 @@ class Settings:
 
     # EMBEDDINGS
     EMBEDDING_MODEL: str                = _str("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-    MULTILINGUAL_EMBEDDING_MODEL: str   = _str("MULTILINGUAL_EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-    EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 32)
+EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 32)
     EMBEDDING_MAX_BATCH_SIZE: int       = _int("EMBEDDING_MAX_BATCH_SIZE", 100)
     EMBEDDING_CACHE_TTL: int            = _int("EMBEDDING_CACHE_TTL", 2_592_000)
     TEXT_EMBEDDING_DIM: int             = _int("TEXT_EMBEDDING_DIM", 384)

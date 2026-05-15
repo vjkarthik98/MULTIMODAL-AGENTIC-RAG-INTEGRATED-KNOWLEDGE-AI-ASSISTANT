@@ -242,22 +242,6 @@ class ModelLoader:
 
         return self._text_embedder
 
-    # MULTILINGUAL EMBEDDER — PHASE 25
-
-    def get_multilingual_embedder(self) -> TextEmbedder:
-        multilingual_model = getattr(
-            settings, "MULTILINGUAL_EMBEDDING_MODEL",
-            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-        )
-        return self._safe_load(
-            lambda: TextEmbedder(
-                model_name=multilingual_model,
-                batch_size=settings.EMBEDDING_BATCH_SIZE,
-                device=self._device,
-            ),
-            "MultilingualEmbedder",
-        )
-
     # CLIP MODEL + PROCESSOR
 
     def get_clip(self) -> Tuple:

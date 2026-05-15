@@ -215,7 +215,6 @@ def filter_relevant_history(
     threshold: Optional[float] = None,
     session_id: str = "default",
     modality: Optional[str] = None,
-    language: Optional[str] = None,
 ) -> List[Dict]:
 
     if not history:
@@ -257,10 +256,6 @@ def filter_relevant_history(
 
                     # MODALITY FILTER
                     if modality and msg.get("modality", "text") != modality:
-                        continue
-
-                    # LANGUAGE FILTER
-                    if language and msg.get("language") and msg.get("language") != language:
                         continue
 
                     role = msg.get("role", "user")
@@ -377,7 +372,6 @@ async def filter_relevant_history_async(
     threshold: Optional[float] = None,
     session_id: str = "default",
     modality: Optional[str] = None,
-    language: Optional[str] = None,
 ) -> List[Dict]:
 
     async with _semaphore:
@@ -391,7 +385,6 @@ async def filter_relevant_history_async(
                 threshold,
                 session_id,
                 modality,
-                language,
             ),
         )
 
