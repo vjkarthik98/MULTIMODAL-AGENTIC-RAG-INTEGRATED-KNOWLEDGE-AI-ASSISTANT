@@ -145,14 +145,12 @@ class Planner:
     # DIRECT PLAN — SIMPLE LLM ANSWER WITHOUT RETRIEVAL
 
     def _direct(self, signals: Dict) -> ExecutionPlan:
-        is_code       = signals.get("is_code", False)
-        is_math       = signals.get("is_math", False)
-        is_multilingual = signals.get("is_multilingual", False)
+        is_code = signals.get("is_code", False)
+        is_math = signals.get("is_math", False)
 
         description = (
-            "Code reasoning"       if is_code  else
-            "Math reasoning"       if is_math  else
-            "Multilingual reasoning" if is_multilingual else
+            "Code reasoning"   if is_code else
+            "Math reasoning"   if is_math else
             "Direct reasoning"
         )
 
@@ -166,10 +164,9 @@ class Planner:
                 )
             ],
             trace={
-                "type":          "direct",
-                "is_code":       is_code,
-                "is_math":       is_math,
-                "is_multilingual": is_multilingual,
+                "type":    "direct",
+                "is_code": is_code,
+                "is_math": is_math,
             },
         )
 
@@ -265,11 +262,10 @@ class Planner:
     def _rag(self, signals: Dict) -> ExecutionPlan:
         steps: List[ExecutionStep] = []
 
-        is_complex      = signals.get("is_complex",          False)
-        is_reasoning    = signals.get("is_reasoning",        False)
-        is_multimodal   = signals.get("has_multimodal_hint", False)
-        is_multilingual = signals.get("is_multilingual",     False)
-        multi_question  = signals.get("multi_question",      False)
+        is_complex     = signals.get("is_complex",          False)
+        is_reasoning   = signals.get("is_reasoning",        False)
+        is_multimodal  = signals.get("has_multimodal_hint", False)
+        multi_question = signals.get("multi_question",      False)
 
         # DECOMPOSE FOR COMPLEX OR MULTI-HOP QUERIES
         if is_complex or is_reasoning or multi_question:
@@ -314,11 +310,10 @@ class Planner:
         return ExecutionPlan(
             steps=self._optimize(steps),
             trace={
-                "type":         "rag",
-                "complex":      is_complex,
-                "reasoning":    is_reasoning,
-                "multimodal":   is_multimodal,
-                "multilingual": is_multilingual,
+                "type":           "rag",
+                "complex":        is_complex,
+                "reasoning":      is_reasoning,
+                "multimodal":     is_multimodal,
                 "multi_question": multi_question,
             },
         )
@@ -328,12 +323,11 @@ class Planner:
     def _hybrid(self, signals: Dict) -> ExecutionPlan:
         steps: List[ExecutionStep] = []
 
-        is_complex      = signals.get("is_complex",          False)
-        is_reasoning    = signals.get("is_reasoning",        False)
-        is_multimodal   = signals.get("has_multimodal_hint", False)
-        is_multilingual = signals.get("is_multilingual",     False)
-        is_recent       = signals.get("is_recent",           False)
-        multi_question  = signals.get("multi_question",      False)
+        is_complex     = signals.get("is_complex",          False)
+        is_reasoning   = signals.get("is_reasoning",        False)
+        is_multimodal  = signals.get("has_multimodal_hint", False)
+        is_recent      = signals.get("is_recent",           False)
+        multi_question = signals.get("multi_question",      False)
 
         # ALWAYS FETCH MEMORY FIRST IN HYBRID
         steps.append(
@@ -397,12 +391,11 @@ class Planner:
         return ExecutionPlan(
             steps=self._optimize(steps),
             trace={
-                "type":         "hybrid",
-                "complex":      is_complex,
-                "reasoning":    is_reasoning,
-                "multimodal":   is_multimodal,
-                "multilingual": is_multilingual,
-                "is_recent":    is_recent,
+                "type":           "hybrid",
+                "complex":        is_complex,
+                "reasoning":      is_reasoning,
+                "multimodal":     is_multimodal,
+                "is_recent":      is_recent,
                 "multi_question": multi_question,
             },
         )

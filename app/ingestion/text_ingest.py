@@ -214,13 +214,6 @@ def _detect_language(text: str) -> Optional[str]:
     sample = text[:3000]
     results: List[str] = []
 
-    # LANGDETECT
-    try:
-        from langdetect import detect
-        results.append(detect(sample))
-    except Exception:
-        pass
-
     # LINGUA
     try:
         from lingua import LanguageDetectorBuilder

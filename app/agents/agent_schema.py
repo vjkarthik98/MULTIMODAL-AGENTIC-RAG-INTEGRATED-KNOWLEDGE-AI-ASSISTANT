@@ -138,11 +138,9 @@ class AgentSignals(BaseModel):
     is_greeting:         bool  = False
     is_math:             bool  = False
     is_security:         bool  = False
-    is_multilingual:     bool  = False
     multi_question:      bool  = False
     has_question_mark:   bool  = False
     token_count:         int   = 0
-    language:            Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return self.model_dump()
@@ -175,8 +173,6 @@ class AgentDecision(BaseModel):
     trace:           Dict[str, Any]   = Field(default_factory=dict)
     tool_calls:      List[ToolCall]   = Field(default_factory=list)
     query_type:      Optional[str]    = Field(default=None)
-    language:        Optional[str]    = Field(default=None)
-
     # TIMING
     created_at: float          = Field(default_factory=time.time)
     latency_ms: Optional[float] = Field(default=None)
@@ -272,9 +268,6 @@ class AgentDecision(BaseModel):
 
     def is_multimodal(self) -> bool:
         return bool(self.signals.get("has_multimodal_hint", False))
-
-    def is_multilingual(self) -> bool:
-        return bool(self.signals.get("is_multilingual", False))
 
     def is_complex(self) -> bool:
         return bool(self.signals.get("is_complex", False))

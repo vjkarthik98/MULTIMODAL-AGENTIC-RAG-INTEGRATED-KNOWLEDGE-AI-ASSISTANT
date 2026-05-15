@@ -279,16 +279,6 @@ def _valid_embedding(emb: List[float], expected_dim: int) -> bool:
     return True
 
 
-# LANGUAGE DETECTION (BEST-EFFORT)
-
-def _detect_language(text: str) -> Optional[str]:
-    try:
-        from langdetect import detect
-        return detect(text[:500])
-    except Exception:
-        return None
-
-
 # CLIP TEXT EMBEDDER CLASS
 
 class ClipTextEmbedder:
@@ -379,15 +369,13 @@ class ClipTextEmbedder:
             seen_checksums[checksum] = True
 
             token_estimate = _estimate_tokens(text)
-            language       = _detect_language(text)
 
             prepared.append({
-                "text":            text,
-                "checksum":        checksum,
-                "token_estimate":  token_estimate,
-                "was_truncated":   was_truncated,
-                "language":        language,
-                "text_preview":    text[:80],
+                "text":           text,
+                "checksum":       checksum,
+                "token_estimate": token_estimate,
+                "was_truncated":  was_truncated,
+                "text_preview":   text[:80],
             })
 
         return prepared
