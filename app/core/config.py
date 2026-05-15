@@ -527,7 +527,7 @@ class Settings:
         if not self.MONGO_URI:
             errors.append("MONGO_URI is required")
 
-        if not self.REDIS_URL and not self.REDIS_HOST:
+        if self.USE_REDIS and not self.REDIS_URL and not self.REDIS_HOST:
             errors.append("Either REDIS_URL or REDIS_HOST must be set")
 
         if self.MAX_CHUNKS <= 0:

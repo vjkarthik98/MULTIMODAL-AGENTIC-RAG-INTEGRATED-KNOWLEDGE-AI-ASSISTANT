@@ -10,7 +10,6 @@ from opentelemetry.trace import Status, StatusCode
 from prometheus_client import Counter, Histogram, Gauge
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from app.agents.agent_executor import AgentExecutor
 from app.core.config import settings
 from app.core.model_loader import model_loader
 
@@ -92,6 +91,54 @@ def _sanitize(query: str) -> str:
             )
             break
     return query
+
+
+class AgentExecutor:
+    """Classifies query intent and optionally generates direct LLM responses."""
+
+    _CONVERSATIONAL = frozenset({
+        "hello", "hi", "hey", "thanks", "thank you", "bye",
+        "goodbye", "help", "how are you",
+    })
+
+    def run(self, query: str, session_id: str = "default") -> Dict[str, Any]:
+        lower = query.lower().strip()
+
+        if any(kw in lower for kw in self._CONVERSATIONAL):
+            return self._direct(query, session_id, "greeting")
+
+        if len(query.split()) <= 5:
+            return self._direct(query, session_id, "short_query")
+
+        return {
+            "response": "Routing to knowledge base.",
+            "source":   "rag",
+            "decision": "rag",
+            "reason":   "knowledge_query",
+            "metadata": {"confidence": 0.80},
+        }
+
+    def _direct(self, query: str, session_id: str, reason: str) -> Dict[str, Any]:
+        try:
+            llm      = model_loader.get_llm()
+            response = llm.generate(
+                f"Answer briefly and helpfully:\n{query}",
+                max_tokens=256,
+                temperature=0.3,
+                session_id=session_id,
+            )
+            if not response or len(response.strip()) < 3:
+                raise ValueError("empty_llm_response")
+        except Exception:
+            response = "I can help with that. Please ask a more specific question."
+
+        return {
+            "response": response,
+            "source":   "llm",
+            "decision": "direct",
+            "reason":   reason,
+            "metadata": {"confidence": 0.70},
+        }
 
 
 class AgentController:

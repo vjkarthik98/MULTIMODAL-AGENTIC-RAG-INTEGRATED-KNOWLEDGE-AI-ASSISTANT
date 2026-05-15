@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(\\(Get-Item \"c:\\\\Users\\\\karth\\\\Desktop\\\\multimodal-rag-assistant\\\\CLAUDE.md\"\\).Length / 1KB)"
+      "PowerShell(\\(Get-Item \"c:\\\\Users\\\\karth\\\\Desktop\\\\multimodal-rag-assistant\\\\CLAUDE.md\"\\).Length / 1KB)",
+      "Bash(del \"c:\\\\Users\\\\karth\\\\Desktop\\\\multimodal-rag-assistant\\\\app\\\\agents\\\\agent_executor.py\")"
     ]
   }
 }

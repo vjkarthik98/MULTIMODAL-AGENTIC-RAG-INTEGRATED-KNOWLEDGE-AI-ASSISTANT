@@ -71,7 +71,7 @@ _MODALITY_SIZE_LIMITS: Dict[str, int] = {
 # LAZY SINGLETONS
 _rag_pipeline = None
 _query_pipeline_fn = None
-_audit_log_enabled: bool = getattr(settings, "AUDIT_LOGGING_ENABLED", True)
+_audit_log_enabled: bool = settings.AUDIT_LOG_ENABLED
 
 
 def _get_rag_pipeline():
