@@ -4,7 +4,8 @@
       "PowerShell(\\(Get-Item \"c:\\\\Users\\\\karth\\\\Desktop\\\\multimodal-rag-assistant\\\\CLAUDE.md\"\\).Length / 1KB)",
       "Bash(del \"c:\\\\Users\\\\karth\\\\Desktop\\\\multimodal-rag-assistant\\\\app\\\\agents\\\\agent_executor.py\")",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(python -m py_compile app/api/api_routes.py)"
     ]
   }
 }
