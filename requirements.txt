@@ -94,7 +94,6 @@ chardet>=5.0
 
 # TEXT PROCESSING
 langchain-text-splitters>=0.0.1
-langdetect>=1.0
 
 
 

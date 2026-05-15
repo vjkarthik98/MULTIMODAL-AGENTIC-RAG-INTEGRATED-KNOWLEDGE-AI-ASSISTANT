@@ -89,7 +89,6 @@ dependencies = [
 
     # TEXT PROCESSING
     "langchain-text-splitters>=0.0.1",
-    "langdetect>=1.0",
 
     # SERIALIZATION
     "orjson>=3.9",
@@ -229,7 +228,6 @@ module = [
     "docx.*",
     "openpyxl.*",
     "imagehash.*",
-    "langdetect.*",
     "tavily.*",
     "upstash_redis.*",
     "langfuse.*",

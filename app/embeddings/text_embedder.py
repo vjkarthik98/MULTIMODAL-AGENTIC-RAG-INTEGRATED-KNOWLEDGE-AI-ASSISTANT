@@ -14,21 +14,6 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-# LANGUAGE DETECTION FOR MULTILINGUAL ROUTING — SECTION 4.3
-
-def _detect_language(text: str) -> Optional[str]:
-    try:
-        from langdetect import detect
-        return detect(text[:500])
-    except Exception:
-        return None
-
-
-def _is_english(text: str) -> bool:
-    lang = _detect_language(text)
-    return lang in (None, "en")
-
-
 # REDIS EMBEDDING CACHE — SECTION 4.3 (SHA-256 key, TTL 30 days)
 
 class _EmbeddingCache:
@@ -210,44 +195,12 @@ class TextEmbedder:
 
         self.model = SentenceTransformer(model_name, device=device)
 
-        # MULTILINGUAL MODEL — SECTION 4.3
-        self._multilingual_model: Optional[SentenceTransformer] = None
-
         logger.info(
             event="text_embedder_initialized",
             model=model_name,
             device=device,
             dim=self.expected_dim,
         )
-
-    # MULTILINGUAL MODEL LAZY LOAD — SECTION 4.3
-
-    def _get_multilingual_model(self):
-        if self._multilingual_model is None:
-            try:
-                from sentence_transformers import SentenceTransformer
-                self._multilingual_model = SentenceTransformer(
-                    settings.MULTILINGUAL_EMBEDDING_MODEL,
-                    device=self.device,
-                )
-                logger.info(
-                    event="multilingual_model_loaded",
-                    model=settings.MULTILINGUAL_EMBEDDING_MODEL,
-                )
-            except Exception as e:
-                logger.warning(
-                    event="multilingual_model_load_failed",
-                    error=str(e),
-                )
-                self._multilingual_model = self.model
-        return self._multilingual_model
-
-    # ROUTE MODEL BY LANGUAGE 
-
-    def _route_model(self, text: str):
-        if _is_english(text):
-            return self.model
-        return self._get_multilingual_model()
 
     # ENCODE WITH TENACITY RETRY
 
@@ -314,10 +267,8 @@ class TextEmbedder:
             logger.debug(event="embed_cache_hit", session_id=session_id)
             return cached
 
-        model = self._route_model(clean)
-
         t_start = time.time()
-        emb = model.encode(
+        emb = self.model.encode(
             clean,
             convert_to_numpy=True,
             normalize_embeddings=True,
@@ -376,9 +327,7 @@ class TextEmbedder:
             if to_encode:
                 indices, batch_texts = zip(*to_encode)
                 try:
-                    # MULTILINGUAL ROUTING PER BATCH — SECTION 4.3
-                    model = self._route_model(batch_texts[0])
-                    embs = self._encode_with_retry(model, list(batch_texts))
+                    embs = self._encode_with_retry(self.model, list(batch_texts))
                     for idx, emb in zip(indices, embs):
                         if _valid_embedding(emb, self.expected_dim):
                             encoded[idx] = emb
@@ -459,9 +408,7 @@ class TextEmbedder:
             t_batch = time.time()
 
             try:
-                # MULTILINGUAL ROUTING — SECTION 4.3
-                model = self._route_model(batch_texts[0])
-                embs = self._encode_with_retry(model, batch_texts)
+                embs = self._encode_with_retry(self.model, batch_texts)
 
                 batch_latency = time.time() - t_batch
 

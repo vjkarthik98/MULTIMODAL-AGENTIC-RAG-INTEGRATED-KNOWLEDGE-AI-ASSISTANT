@@ -177,16 +177,6 @@ def _group_by_modality(messages: List[Dict]) -> Dict[str, List[Dict]]:
     return groups
 
 
-# LANGUAGE STATS — FOR MULTILINGUAL MEMORY CONTEXT
-
-def _language_stats(messages: List[Dict]) -> Dict[str, int]:
-    stats: Dict[str, int] = {}
-    for m in messages:
-        lang = m.get("language", "unknown")
-        stats[lang] = stats.get(lang, 0) + 1
-    return stats
-
-
 # MAIN SYNC FORMAT HISTORY
 
 def format_history(
@@ -258,15 +248,6 @@ def format_history(
                         fm = _format_message(m, per_msg_limit, scrub=scrub_pii)
                         if fm:
                             parts.append(fm)
-
-            # LANGUAGE STATS FOOTER — USEFUL FOR MULTILINGUAL SESSIONS
-            lang_stats = _language_stats(normal_msgs)
-            if len(lang_stats) > 1:
-                langs = ", ".join(
-                    f"{k}:{v}" for k, v in
-                    sorted(lang_stats.items(), key=lambda x: -x[1])
-                )
-                parts.append(f"\n[LANGUAGES: {langs}]")
 
             result = "\n".join(parts).strip()
 

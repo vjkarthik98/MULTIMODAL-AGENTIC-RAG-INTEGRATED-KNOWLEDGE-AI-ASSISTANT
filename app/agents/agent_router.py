@@ -81,16 +81,6 @@ def _detect_injection(query: str) -> bool:
     return any(p in lower for p in _INJECTION_PATTERNS)
 
 
-# LANGUAGE DETECTION FOR MULTILINGUAL ROUTING
-
-def _detect_language(query: str) -> Optional[str]:
-    try:
-        from langdetect import detect
-        return detect(query[:500])
-    except Exception:
-        return None
-
-
 class AgentRouter:
 
     # NORMALIZE
@@ -229,9 +219,6 @@ class AgentRouter:
         q      = query.lower()
         tokens = set(q.split())
 
-        # LANGUAGE DETECTION FOR MULTILINGUAL ROUTING
-        language = _detect_language(query)
-
         return {
             "is_recent":           bool(tokens & _RECENT_WORDS),
             "is_memory":           any(w in q for w in _MEMORY_WORDS),
@@ -245,8 +232,6 @@ class AgentRouter:
             "is_greeting":         bool(tokens & _GREETING_WORDS) and len(tokens) <= 4,
             "is_math":             bool(tokens & _MATH_WORDS),
             "is_security":         bool(tokens & _SECURITY_WORDS),
-            "is_multilingual":     language is not None and language != "en",
-            "language":            language,
             "token_count":         len(tokens),
             "has_question_mark":   "?" in query,
             "multi_question":      query.count("?") > 1,
@@ -267,7 +252,7 @@ class AgentRouter:
             "Return JSON only. No explanation.\n\n"
         )
 
-        signal_str   = str({k: v for k, v in signals.items() if v and k not in ("language",)})
+        signal_str   = str({k: v for k, v in signals.items() if v})
         body         = f"Signals: {signal_str}\nQuery: {query}\n"
         format_block = '{"action":"<route>", "reason":"<brief reason>"}'
 
@@ -387,9 +372,6 @@ class AgentRouter:
             score += 0.10
 
         if signals.get("is_reasoning") and action in {"rag", "direct"}:
-            score += 0.05
-
-        if signals.get("is_multilingual") and action in {"rag", "hybrid"}:
             score += 0.05
 
         if signals.get("multi_question") and action in {"hybrid", "rag"}:
