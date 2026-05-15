@@ -122,7 +122,7 @@ class Settings:
 
     # EMBEDDINGS
     EMBEDDING_MODEL: str                = _str("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 32)
+    EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 32)
     EMBEDDING_MAX_BATCH_SIZE: int       = _int("EMBEDDING_MAX_BATCH_SIZE", 100)
     EMBEDDING_CACHE_TTL: int            = _int("EMBEDDING_CACHE_TTL", 2_592_000)
     TEXT_EMBEDDING_DIM: int             = _int("TEXT_EMBEDDING_DIM", 384)
@@ -161,14 +161,17 @@ EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 32)
     WHISPER_FILLER_WORDS: List[str] = _list("WHISPER_FILLER_WORDS", ["uh", "um", "er", "hmm"])
 
     # RERANKER
-    RERANKER_MODEL: str            = _str("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
-    RERANK_TOP_K: int              = _int("RERANK_TOP_K", 5)
-    RERANK_MAX_INPUT: int          = _int("RERANK_MAX_INPUT", 20)
-    RERANK_CONTEXT_MAX_CHARS: int  = _int("RERANK_CONTEXT_MAX_CHARS", 512)
-    RERANK_MODEL_WEIGHT: float     = _float("RERANK_MODEL_WEIGHT", 0.5)
-    RERANK_FUSION_WEIGHT: float    = _float("RERANK_FUSION_WEIGHT", 0.5)
-    RERANK_POSITION_WEIGHT: float  = _float("RERANK_POSITION_WEIGHT", 0.1)
-    COHERE_API_KEY: Optional[str]  = _opt("COHERE_API_KEY")
+    RERANKER_MODEL: str             = _str("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+    RERANK_TOP_K: int               = _int("RERANK_TOP_K", 5)
+    RERANK_MAX_INPUT: int           = _int("RERANK_MAX_INPUT", 20)
+    RERANK_CONTEXT_MAX_CHARS: int   = _int("RERANK_CONTEXT_MAX_CHARS", 512)
+    RERANK_MODEL_WEIGHT: float      = _float("RERANK_MODEL_WEIGHT", 0.5)
+    RERANK_FUSION_WEIGHT: float     = _float("RERANK_FUSION_WEIGHT", 0.5)
+    RERANK_POSITION_WEIGHT: float   = _float("RERANK_POSITION_WEIGHT", 0.1)
+    RERANK_SCORE_THRESHOLD: float   = _float("RERANK_SCORE_THRESHOLD", 0.1)
+    MMR_ENABLED: bool               = _bool("MMR_ENABLED", True)
+    MMR_LAMBDA: float               = _float("MMR_LAMBDA", 0.7)
+    COHERE_API_KEY: Optional[str]   = _opt("COHERE_API_KEY")
 
     RERANK_MODALITY_WEIGHTS: Dict[str, float] = {
         "text":  1.0,
@@ -217,6 +220,7 @@ EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 32)
     REDIS_EMBEDDING_CACHE_TTL: int   = _int("REDIS_EMBEDDING_CACHE_TTL", 2_592_000)
     REDIS_KEY_PREFIX: str            = _str("REDIS_KEY_PREFIX", "rag")
     USE_REDIS: bool                  = _bool("USE_REDIS", False)
+    USE_MONGO: bool                  = _bool("USE_MONGO", True)
     REDIS_CB_FAIL_MAX: int           = _int("REDIS_CB_FAIL_MAX", 5)
     REDIS_CB_RESET_TIMEOUT: int      = _int("REDIS_CB_RESET_TIMEOUT", 30)
     REDIS_MAX_WINDOW_TURNS: int      = _int("REDIS_MAX_WINDOW_TURNS", 40)
@@ -301,9 +305,9 @@ EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 32)
     DECOMPOSITION_MIN_WORDS: int               = _int("DECOMPOSITION_MIN_WORDS", 6)
     DECOMPOSITION_MAX_SUBQUERIES: int          = _int("DECOMPOSITION_MAX_SUBQUERIES", 3)
     DECOMPOSITION_CONFIDENCE_THRESHOLD: float  = _float("DECOMPOSITION_CONFIDENCE_THRESHOLD", 0.5)
-    DECOMPOSITION_KEYWORDS: List[str]          = [
-        "compare", "difference", "vs", "process", "steps", "multiple",
-    ]
+    DECOMPOSITION_KEYWORDS: List[str]          = _list("DECOMPOSITION_KEYWORDS", [
+        "and", "also", "then", "but",
+    ])
 
     # WEB SEARCH
     TAVILY_API_KEY: str                    = _str("TAVILY_API_KEY", "")
@@ -434,6 +438,7 @@ EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 32)
 
     # SECURITY
     SECRET_KEY: str                        = _str("SECRET_KEY", "CHANGE_ME_IN_PRODUCTION")
+    DATABASE_URL: str                      = _str("DATABASE_URL", "sqlite:///./data/rag_users.db")
     CORS_ORIGINS: List[str]                = _list("CORS_ORIGINS", ["http://localhost:7860", "http://localhost:8000"])
     RATE_LIMIT_RPM: int                    = _int("RATE_LIMIT_RPM", 60)
     PII_DETECTION_ENABLED: bool            = _bool("PII_DETECTION_ENABLED", False)
@@ -523,8 +528,8 @@ EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 32)
         if not self.QDRANT_URL and not self.QDRANT_HOST:
             errors.append("Either QDRANT_URL or QDRANT_HOST must be set")
 
-        if not self.MONGO_URI:
-            errors.append("MONGO_URI is required")
+        if self.USE_MONGO and not self.MONGO_URI:
+            errors.append("MONGO_URI is required when USE_MONGO=true")
 
         if self.USE_REDIS and not self.REDIS_URL and not self.REDIS_HOST:
             errors.append("Either REDIS_URL or REDIS_HOST must be set")
@@ -579,6 +584,13 @@ EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 32)
             )
 
         return True
+
+    def get_service_status(self) -> Dict[str, bool]:
+        return {
+            "redis":  self.USE_REDIS,
+            "mongo":  self.USE_MONGO,
+            "qdrant": bool(self.QDRANT_URL or self.QDRANT_HOST),
+        }
 
 
 # SINGLETON
