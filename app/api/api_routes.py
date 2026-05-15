@@ -73,6 +73,9 @@ _rag_pipeline = None
 _query_pipeline_fn = None
 _audit_log_enabled: bool = settings.AUDIT_LOG_ENABLED
 
+# IN-MEMORY FILE DEDUP — maps SHA-256 hex → doc_id of first successful ingest
+_INGEST_DEDUP: Dict[str, str] = {}
+
 
 def _get_rag_pipeline():
     global _rag_pipeline
@@ -247,6 +250,236 @@ def _cleanup_file(file_path: Optional[Path]) -> None:
                 path=str(file_path),
                 error=str(exc),
             )
+
+
+# SHA-256 FILE HASH FOR DEDUP
+
+def _compute_file_hash(file_path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# ERROR CODE → HTTP 422 DETAIL PREFIXES THAT INDICATE STRUCTURED INGESTION ERRORS
+_INGEST_422_PREFIXES = (
+    "EMPTY_FILE",
+    "PASSWORD_PROTECTED",
+    "CORRUPTED_FILE",
+    "EMPTY_DOCUMENT",
+    "NO_CONTENT_EXTRACTED",
+    "FILE_TOO_LARGE",
+)
+
+
+# INGEST
+
+@router.post("/ingest")
+async def ingest_document(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    session_id: str = "default",
+) -> JSONResponse:
+    start = time.time()
+    request_id = _request_id()
+    file_path: Optional[Path] = None
+
+    _rate_limit_check(request)
+
+    try:
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="Invalid file: missing filename")
+
+        filename = Path(file.filename).name
+        ext = Path(filename).suffix.lower()
+
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type: {ext}",
+            )
+
+        max_size = _size_limit(ext)
+        _check_disk_space(UPLOAD_DIR)
+
+        file_path = UPLOAD_DIR / f"{uuid.uuid4().hex}_{filename}"
+        size = 0
+
+        with open(file_path, "wb") as f:
+            while True:
+                chunk = await file.read(settings.UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_size:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            f"File too large for type {ext}: "
+                            f"max {max_size // (1024 * 1024)}MB"
+                        ),
+                    )
+                f.write(chunk)
+
+        if size == 0:
+            return JSONResponse(
+                status_code=422,
+                content={"request_id": request_id, "error_code": "EMPTY_FILE", "detail": "Uploaded file is empty"},
+            )
+
+        if not _malware_scan(str(file_path)):
+            raise HTTPException(status_code=400, detail="File rejected: malware detected")
+
+        # DEDUP CHECK
+        file_hash = await asyncio.to_thread(_compute_file_hash, file_path)
+        if file_hash in _INGEST_DEDUP:
+            latency = round(time.time() - start, 3)
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "request_id":  request_id,
+                    "status":      "duplicate",
+                    "duplicate":   True,
+                    "file_hash":   file_hash,
+                    "filename":    filename,
+                    "ext":         ext,
+                    "modality":    _EXT_MODALITY.get(ext, "unknown"),
+                    "file_size":   size,
+                    "latency":     latency,
+                },
+            )
+
+        _audit_log(
+            "ingest_received",
+            request_id=request_id,
+            session_id=session_id,
+            file=filename,
+            ext=ext,
+            size=size,
+            ip=_client_ip(request),
+        )
+
+        modality = _EXT_MODALITY.get(ext, "unknown")
+
+        # RUN FULL PIPELINE — ingest → chunk → embed → store
+        try:
+            from app.pipeline.ingestion_pipeline import process_file
+            result = await asyncio.to_thread(process_file, str(file_path), session_id)
+
+        except RuntimeError as exc:
+            # Pipeline wraps ingestor errors as: RuntimeError("INGESTION_FAILED: <original>")
+            inner = str(exc).removeprefix("INGESTION_FAILED: ").strip()
+            if any(inner.startswith(p) for p in _INGEST_422_PREFIXES):
+                error_code = inner.split(":")[0].strip()
+                return JSONResponse(
+                    status_code=422,
+                    content={"request_id": request_id, "error_code": error_code, "detail": inner},
+                )
+            raise HTTPException(status_code=500, detail=str(exc))
+
+        except Exception as exc:
+            err_str = str(exc)
+            if any(err_str.startswith(p) for p in _INGEST_422_PREFIXES):
+                error_code = err_str.split(":")[0].strip()
+                return JSONResponse(
+                    status_code=422,
+                    content={"request_id": request_id, "error_code": error_code, "detail": err_str},
+                )
+            raise HTTPException(status_code=500, detail=err_str)
+
+        # PIPELINE-LEVEL DUPLICATE (detected by pipeline's own hash check)
+        if result.get("status") == "duplicate":
+            latency = round(time.time() - start, 3)
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "request_id": request_id,
+                    "status":     "duplicate",
+                    "duplicate":  True,
+                    "filename":   filename,
+                    "ext":        ext,
+                    "modality":   modality,
+                    "file_size":  size,
+                    "latency":    latency,
+                },
+            )
+
+        chunks = result.get("chunks", 0)
+        stored = result.get("stored", 0)
+
+        if chunks <= 0:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "request_id": request_id,
+                    "error_code": "NO_CONTENT_EXTRACTED",
+                    "detail":     "No usable content extracted from file",
+                },
+            )
+
+        # REGISTER DEDUP AFTER SUCCESSFUL PIPELINE
+        pipeline_hash = result.get("file_hash", file_hash)
+        _INGEST_DEDUP[pipeline_hash] = request_id
+
+        latency = round(time.time() - start, 3)
+
+        _audit_log(
+            "ingest_completed",
+            request_id=request_id,
+            session_id=session_id,
+            file=filename,
+            chunks=chunks,
+            stored=stored,
+            latency=latency,
+        )
+
+        logger.info(
+            event="api_ingest_success",
+            request_id=request_id,
+            file=filename,
+            ext=ext,
+            modality=modality,
+            size=size,
+            chunks=chunks,
+            stored=stored,
+            latency=latency,
+            session_id=session_id,
+        )
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "request_id":  request_id,
+                "status":      "success",
+                "duplicate":   False,
+                "filename":    filename,
+                "ext":         ext,
+                "modality":    modality,
+                "file_size":   size,
+                "file_hash":   pipeline_hash,
+                "chunks":      chunks,
+                "stored":      stored,
+                "latency":     latency,
+            },
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        logger.error(
+            event="api_ingest_failed",
+            request_id=request_id,
+            error=str(exc),
+            session_id=session_id,
+        )
+        raise HTTPException(status_code=500, detail="Ingestion failed")
+
+    finally:
+        background_tasks.add_task(_cleanup_file, file_path)
 
 
 # HEALTH
@@ -498,7 +731,7 @@ async def upload_file(
             "upload_received",
             request_id=request_id,
             session_id=session_id,
-            filename=filename,
+            file=filename,
             ext=ext,
             size=size,
             ip=_client_ip(request),
@@ -524,7 +757,7 @@ async def upload_file(
             "upload_completed",
             request_id=request_id,
             session_id=session_id,
-            filename=filename,
+            file=filename,
             chunks=chunks,
             stored=stored,
             latency=latency,
@@ -533,7 +766,7 @@ async def upload_file(
         logger.info(
             event="api_upload_success",
             request_id=request_id,
-            filename=filename,
+            file=filename,
             ext=ext,
             size=size,
             chunks=chunks,

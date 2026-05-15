@@ -101,6 +101,15 @@ def _table_to_markdown(rows: List[List[str]]) -> str:
     return "\n".join(lines)
 
 
+def _format_docx_table_rows(rows: List[List[str]]) -> str:
+    lines = []
+    for row in rows:
+        cells = [str(c or "").strip() for c in row]
+        if any(cells):
+            lines.append("[TABLE: " + " | ".join(cells) + "]")
+    return "\n".join(lines)
+
+
 # QUALITY SCORE
 
 def _quality(text: str) -> float:
@@ -330,6 +339,7 @@ def _process_pdf(
     session_id: str,
     source_name: str,
     source_path: str,
+    file_size: int = 0,
 ) -> List[IngestedDocument]:
 
     import fitz
@@ -425,11 +435,16 @@ def _process_pdf(
                     structure=_base_structure(
                         doc_id, session_id, source_path,
                         page=i,
+                        page_number=i,
                         total_pages=total_pages,
                         ocr_confidence=ocr_conf,
                         is_pdfa=is_pdfa,
                         has_xfa=has_xfa,
                         has_javascript=has_js,
+                        section_title=None,
+                        ingestion_timestamp=time.time(),
+                        language="en",
+                        file_size_bytes=file_size,
                         content_type="pdf_page",
                         ingestion_time=time.time(),
                     ),
@@ -497,7 +512,7 @@ def _process_pdf(
 
                     documents.append(
                         IngestedDocument(
-                            text=combined,
+                            text=f"[TABLE page {i}]\n{combined}",
                             modality="table",
                             subtype="structured",
                             source_type="pdf",
@@ -506,7 +521,13 @@ def _process_pdf(
                             structure=_base_structure(
                                 doc_id, session_id, source_path,
                                 page=i,
+                                page_number=i,
+                                total_pages=total_pages,
                                 table_index=t_idx,
+                                section_title=None,
+                                ingestion_timestamp=time.time(),
+                                language="en",
+                                file_size_bytes=file_size,
                                 content_type="pdf_table",
                                 ingestion_time=time.time(),
                             ),
@@ -641,6 +662,7 @@ def _process_docx(
     session_id: str,
     source_name: str,
     source_path: str,
+    file_size: int = 0,
 ) -> List[IngestedDocument]:
 
     if _is_docx_encrypted(file_path):
@@ -665,6 +687,13 @@ def _process_docx(
 
     documents: List[IngestedDocument] = []
 
+    # EMPTY DOCUMENT CHECK
+    has_content = any((p.text or "").strip() for p in doc.paragraphs) or bool(doc.tables)
+    if not has_content:
+        raise ValueError("EMPTY_DOCUMENT")
+
+    current_heading: Optional[str] = None
+
     # HEADING HIERARCHY H1-H9
     def _heading_level(paragraph: Any) -> Optional[int]:
         try:
@@ -686,6 +715,8 @@ def _process_docx(
 
         level   = _heading_level(p)
         subtype = "heading" if level else "paragraph"
+        if level:
+            current_heading = text
 
         text, pii_counts = _redact_pii(text)
         for et, cnt in pii_counts.items():
@@ -702,6 +733,12 @@ def _process_docx(
                     doc_id, session_id, source_path,
                     paragraph_index=i,
                     heading_level=level,
+                    page_number=None,
+                    total_pages=None,
+                    section_title=text if subtype == "heading" else current_heading,
+                    ingestion_timestamp=time.time(),
+                    language="en",
+                    file_size_bytes=file_size,
                     content_type="docx_paragraph",
                     ingestion_time=time.time(),
                 ),
@@ -715,14 +752,11 @@ def _process_docx(
 
     # TABLES
     for t_idx, table in enumerate(doc.tables):
-        rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
-        txt  = _table_to_text(rows)
-        md   = _table_to_markdown(rows)
+        rows     = [[cell.text.strip() for cell in row.cells] for row in table.rows]
+        combined = _format_docx_table_rows(rows)
 
-        if not txt:
+        if not combined:
             continue
-
-        combined = f"{txt}\n\n{md}"
 
         documents.append(
             IngestedDocument(
@@ -734,12 +768,18 @@ def _process_docx(
                 structure=_base_structure(
                     doc_id, session_id, source_path,
                     table_index=t_idx,
+                    page_number=None,
+                    total_pages=None,
+                    section_title=current_heading,
+                    ingestion_timestamp=time.time(),
+                    language="en",
+                    file_size_bytes=file_size,
                     content_type="docx_table",
                     ingestion_time=time.time(),
                 ),
                 extra_metadata={
-                    "data_quality_score": _quality(txt),
-                    "importance_score":   _quality(txt),
+                    "data_quality_score": _quality(combined),
+                    "importance_score":   _quality(combined),
                     "modality_weight":    1.0,
                 },
             ).finalize()
@@ -855,60 +895,93 @@ def _process_excel(
     session_id: str,
     source_name: str,
     source_path: str,
+    file_size: int = 0,
+    warnings: Optional[List[str]] = None,
 ) -> List[IngestedDocument]:
 
     import openpyxl
 
+    if warnings is None:
+        warnings = []
+
     documents: List[IngestedDocument] = []
+    ROWS_PER_CHUNK = 500
 
     try:
-        wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+        wb = openpyxl.load_workbook(file_path, data_only=True)
     except Exception as exc:
-        raise ValueError(f"EXCEL_OPEN_FAILED: {exc}")
+        err = str(exc)
+        raise ValueError(f"CORRUPTED_FILE: {err}")
 
-    for sheet_name in wb.sheetnames:
+    try:
+        for sheet_name in wb.sheetnames:
+            try:
+                ws = wb[sheet_name]
+
+                all_rows = [
+                    [str(c if c is not None else "").strip() for c in row]
+                    for row in ws.iter_rows(values_only=True)
+                ]
+
+                non_empty = [r for r in all_rows if any(c for c in r)]
+
+                if not non_empty:
+                    warnings.append(f"Empty sheet skipped: {sheet_name}")
+                    continue
+
+                for batch_start in range(0, len(non_empty), ROWS_PER_CHUNK):
+                    batch     = non_empty[batch_start:batch_start + ROWS_PER_CHUNK]
+                    row_start = batch_start + 1
+                    row_end   = batch_start + len(batch)
+
+                    txt = _table_to_text(batch)
+                    if not txt.strip():
+                        continue
+
+                    chunk_text = f"[Sheet: {sheet_name}, Rows {row_start}-{row_end}]\n{txt}"
+                    chunk_text, pii_counts = _redact_pii(chunk_text)
+                    for et, cnt in pii_counts.items():
+                        _pii_redacted.labels(entity_type=et).inc(cnt)
+
+                    documents.append(
+                        IngestedDocument(
+                            text=chunk_text,
+                            modality="table",
+                            subtype="structured",
+                            source_type="excel",
+                            source=source_name,
+                            structure=_base_structure(
+                                doc_id, session_id, source_path,
+                                sheet=sheet_name,
+                                row_start=row_start,
+                                row_end=row_end,
+                                page_number=None,
+                                total_pages=None,
+                                section_title=None,
+                                ingestion_timestamp=time.time(),
+                                language="en",
+                                file_size_bytes=file_size,
+                                content_type="excel_sheet",
+                                ingestion_time=time.time(),
+                            ),
+                            extra_metadata={
+                                "data_quality_score": _quality(txt),
+                                "importance_score":   _quality(txt),
+                                "modality_weight":    1.0,
+                            },
+                        ).finalize()
+                    )
+
+            except ValueError:
+                raise
+            except Exception as exc:
+                logger.warning("excel_sheet_failed", sheet=sheet_name, error=str(exc))
+    finally:
         try:
-            ws   = wb[sheet_name]
-            rows = [
-                [str(c or "").strip() for c in row]
-                for row in ws.iter_rows(values_only=True)
-            ]
-            txt  = _table_to_text(rows)
-            md   = _table_to_markdown(rows) if rows else ""
+            wb.close()
+        except Exception:
+            pass
 
-            if not txt:
-                continue
-
-            combined = f"{txt}\n\n{md}"
-            combined, pii_counts = _redact_pii(combined)
-            for et, cnt in pii_counts.items():
-                _pii_redacted.labels(entity_type=et).inc(cnt)
-
-            documents.append(
-                IngestedDocument(
-                    text=combined,
-                    modality="table",
-                    subtype="structured",
-                    source_type="excel",
-                    source=source_name,
-                    structure=_base_structure(
-                        doc_id, session_id, source_path,
-                        sheet=sheet_name,
-                        content_type="excel_sheet",
-                        ingestion_time=time.time(),
-                    ),
-                    extra_metadata={
-                        "data_quality_score": _quality(txt),
-                        "importance_score":   _quality(txt),
-                        "modality_weight":    1.0,
-                    },
-                ).finalize()
-            )
-
-        except Exception as exc:
-            logger.warning("excel_sheet_failed", sheet=sheet_name, error=str(exc))
-
-    wb.close()
     return documents
 
 
@@ -976,24 +1049,33 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                         None, _convert_doc_to_docx, file_path
                     )
 
+                doc_warnings: List[str] = []
+
                 # DISPATCH TO CORRECT PROCESSOR
                 if ext == ".pdf":
                     docs = await asyncio.get_event_loop().run_in_executor(
                         None,
-                        _process_pdf,
-                        active_path, doc_id, session_id, source_name, source_path,
+                        lambda: _process_pdf(
+                            active_path, doc_id, session_id, source_name, source_path,
+                            file_size=file_size,
+                        ),
                     )
                 elif ext in {".docx", ".doc"}:
                     docs = await asyncio.get_event_loop().run_in_executor(
                         None,
-                        _process_docx,
-                        active_path, doc_id, session_id, source_name, source_path,
+                        lambda: _process_docx(
+                            active_path, doc_id, session_id, source_name, source_path,
+                            file_size=file_size,
+                        ),
                     )
                 elif ext in {".xlsx", ".xls"}:
                     docs = await asyncio.get_event_loop().run_in_executor(
                         None,
-                        _process_excel,
-                        active_path, doc_id, session_id, source_name, source_path,
+                        lambda: _process_excel(
+                            active_path, doc_id, session_id, source_name, source_path,
+                            file_size=file_size,
+                            warnings=doc_warnings,
+                        ),
                     )
                 else:
                     raise ValueError(f"UNSUPPORTED_TYPE: {ext}")
@@ -1001,10 +1083,13 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 if not docs:
                     raise ValueError("NO_CONTENT_EXTRACTED")
 
-                # STAMP FILE HASH ON ALL DOCS
-                for d in docs:
+                # STAMP FILE HASH, CHUNK INDEX, AND TOTAL CHUNKS ON ALL DOCS
+                total_chunks = len(docs)
+                for idx, d in enumerate(docs):
                     d.structure.setdefault("file_hash", file_hash)
                     d.structure.setdefault("ingestion_time", time.time())
+                    d.structure.setdefault("chunk_index", idx)
+                    d.structure.setdefault("total_chunks", total_chunks)
 
                 latency = round(time.time() - start, 2)
 

@@ -29,7 +29,6 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-CLAUDE.md
 
 
 # PyInstaller
@@ -215,3 +214,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+CLAUDE.md
+.claude   
