@@ -522,10 +522,11 @@ class IngestionPipeline:
                 try:
                     multimodal      = model_loader.get_multimodal_embedder()
                     t_vis           = time.time()
-                    _, vis_embedded = multimodal.embed_documents(
+                    txt_from_vis, vis_embedded = multimodal.embed_documents(
                         vision_chunks, session_id=session_id
                     )
                     vision_embedded = vis_embedded
+                    text_embedded.extend(txt_from_vis)
                     _record_embed_latency(settings.CLIP_MODEL, round(time.time() - t_vis, 3))
                 except Exception as e:
                     logger.warning(

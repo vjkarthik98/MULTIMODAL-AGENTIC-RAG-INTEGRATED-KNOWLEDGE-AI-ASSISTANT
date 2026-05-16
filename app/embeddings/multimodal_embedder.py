@@ -22,6 +22,7 @@ def _make_metrics():
             def observe(self, *a, **kw): pass
             def inc(self, *a, **kw): pass
             def labels(self, **kw): return self
+            def set(self, *a, **kw): pass
         n = _Noop()
         return n, n, n, n, n
     try:
@@ -231,7 +232,7 @@ def _route_documents(docs: List[Any]) -> Tuple[List[Any], List[Any]]:
                 # ALWAYS TEXT-EMBED (caption or OCR text)
                 text_docs.append(doc)
                 # ADDITIONALLY VISION-EMBED IF ASSET PATH EXISTS
-                if subtype == "caption" and _resolve_asset_path(doc):
+                if subtype in ("caption", "image_frame") and _resolve_asset_path(doc):
                     vision_docs.append(doc)
 
             elif modality == "video":

@@ -54,7 +54,7 @@ ALLOWED_MODALITIES = {"text", "table", "image", "audio", "video"}
 ALLOWED_SUBTYPES: Dict[str, set] = {
     "text":  {"paragraph", "heading", "page", "chunk", "unknown"},
     "table": {"structured", "unknown"},
-    "image": {"caption", "ocr", "unknown"},
+    "image": {"caption", "ocr", "image_frame", "unknown"},
     "audio": {"speech", "unknown"},
     "video": {"speech", "frame", "ocr", "unknown"},
 }

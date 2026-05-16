@@ -219,7 +219,7 @@ def _load_audio(file_path: str) -> Any:
                 file=os.path.basename(file_path),
                 error=str(repair_exc),
             )
-        raise ValueError(f"AUDIO_LOAD_FAILED: {exc}")
+        raise ValueError(f"CORRUPTED_FILE: {exc}")
     return audio
 
 
@@ -443,10 +443,10 @@ def _get_speaker(
 
 # LONG AUDIO CHUNKING — SPLIT INTO 30-MIN SEGMENTS
 
-def _chunk_audio_file(file_path: str) -> List[str]:
+def _chunk_audio_file(file_path: str, preloaded: Optional[Any] = None) -> List[str]:
     from pydub import AudioSegment
     chunk_duration_ms = settings.AUDIO_CHUNK_DURATION_SEC * 1000
-    audio = AudioSegment.from_file(file_path)
+    audio = preloaded if preloaded is not None else AudioSegment.from_file(file_path)
     total_ms = len(audio)
 
     if total_ms <= chunk_duration_ms:
@@ -537,6 +537,12 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         if audio.frame_rate <= 0:
             raise ValueError("INVALID_SAMPLE_RATE")
 
+        # DURATION TOO SHORT — SKIP TRANSCRIPTION
+        if audio.duration_seconds < 1.0:
+            raise ValueError(
+                f"AUDIO_TOO_SHORT: duration {round(audio.duration_seconds, 2)}s is less than 1 second"
+            )
+
         duration_total = audio.duration_seconds
         channels = audio.channels
         frame_rate = audio.frame_rate
@@ -547,7 +553,7 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         snr_degraded = snr < settings.AUDIO_SNR_THRESHOLD_DB
 
         if audio.dBFS < -60.0:
-            raise ValueError("SILENT_AUDIO: below -60 dBFS threshold")
+            raise ValueError("EMPTY_CONTENT: silent audio below -60 dBFS threshold")
 
         if snr_degraded:
             logger.warning(
@@ -588,8 +594,8 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         if not is_music:
             speaker_map = _diarize(file_path, session_id)
 
-        # LONG AUDIO CHUNKING (> CHUNK_DURATION_SEC)
-        chunk_files = _chunk_audio_file(file_path)
+        # LONG AUDIO CHUNKING (> CHUNK_DURATION_SEC) — pass preloaded audio to avoid re-reading original
+        chunk_files = _chunk_audio_file(file_path, preloaded=audio)
         temp_chunk_paths = [c for c in chunk_files if c != file_path]
         is_chunked = len(chunk_files) > 1
 
@@ -600,7 +606,7 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
             mime_type,
             file_size_bytes=file_size,
             checksum_sha256=file_hash,
-            language=None,
+            language="unknown",
             chunk_count=0,
             tags=[],
             custom_fields={
@@ -744,6 +750,9 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     "checksum_sha256": file_hash,
                     "source_path": source_path,
                     "segment_index": global_idx,
+                    "start_time": round(seg_start, 3),
+                    "end_time": round(seg_end, 3),
+                    "duration_sec": round(duration, 3),
                     "timestamp_start": round(seg_start, 2),
                     "timestamp_end": round(seg_end, 2),
                     "duration": round(duration, 2),

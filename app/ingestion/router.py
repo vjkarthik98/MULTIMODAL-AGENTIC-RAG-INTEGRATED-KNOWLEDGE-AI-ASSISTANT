@@ -425,8 +425,13 @@ async def route_ingestion(
                 if not handler:
                     raise ValueError(f"HANDLER_NOT_FOUND: {modality}")
 
-                # RUN HANDLER WITH RETRY IN THREAD POOL
-                docs = await handler(file_path, session_id)
+                # RUN HANDLER — async handlers awaited directly, sync handlers run in thread pool
+                if asyncio.iscoroutinefunction(handler):
+                    docs = await handler(file_path, session_id)
+                else:
+                    docs = await asyncio.get_event_loop().run_in_executor(
+                        None, handler, file_path, session_id
+                    )
 
                 if not docs:
                     raise ValueError("NO_DOCS_RETURNED")
