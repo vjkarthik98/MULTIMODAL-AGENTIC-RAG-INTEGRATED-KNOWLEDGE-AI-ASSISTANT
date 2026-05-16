@@ -59,11 +59,21 @@ def _get_easyocr_reader() -> Any:
     return _easyocr_reader
 
 
-# SHA-256 FILE HASH 
+# SHA-256 FILE HASH
 
 def _sha256(file_path: str) -> str:
     h = hashlib.sha256()
     with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# MD5 HASH OF FRAME FILE FOR DUPLICATE DETECTION
+
+def _frame_hash(path: str) -> str:
+    h = hashlib.md5()
+    with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
@@ -122,33 +132,165 @@ def _check_disk_space(path: str) -> None:
         logger.warning(event="disk_check_failed", error=str(e))
 
 
-# FFMPEG RESOLVER
+# FFMPEG / FFPROBE RESOLVER
+
+_ffmpeg_cache: Optional[str] = None
+_ffprobe_cache: Optional[str] = None
+
+
+def _test_binary(path: str) -> bool:
+    """Return True only if the binary actually starts (catches DLL/arch errors on Windows)."""
+    try:
+        r = subprocess.run([path, "-version"], capture_output=True, timeout=5)
+        return r.returncode == 0
+    except Exception:
+        return False
+
 
 def _resolve_ffmpeg() -> str:
+    global _ffmpeg_cache
+    if _ffmpeg_cache is not None:
+        return _ffmpeg_cache
+
+    candidates: list = []
+
     configured = Path(settings.FFMPEG_PATH)
     if configured.exists():
-        return str(configured)
+        candidates.append(str(configured))
+
     discovered = shutil.which("ffmpeg")
-    if discovered:
-        return discovered
-    raise FileNotFoundError("FFMPEG_NOT_FOUND")
+    if discovered and discovered not in candidates:
+        candidates.append(discovered)
+
+    # imageio-ffmpeg bundles a static Windows binary — works even when conda ffmpeg has DLL issues
+    try:
+        import imageio_ffmpeg  # type: ignore
+        bundled = imageio_ffmpeg.get_ffmpeg_exe()
+        if bundled and bundled not in candidates:
+            candidates.append(bundled)
+    except Exception:
+        pass
+
+    for c in candidates:
+        if _test_binary(c):
+            logger.info(event="ffmpeg_resolved", path=c)
+            _ffmpeg_cache = c
+            return c
+        logger.warning(event="ffmpeg_candidate_failed", path=c)
+
+    raise FileNotFoundError(
+        "FFMPEG_NOT_FOUND: no working ffmpeg binary found. "
+        "Install imageio-ffmpeg: pip install imageio-ffmpeg"
+    )
 
 
 def _resolve_ffprobe() -> str:
+    global _ffprobe_cache
+    if _ffprobe_cache is not None:
+        return _ffprobe_cache
+
+    candidates: list = []
+
+    # Sibling of resolved ffmpeg binary (handles manual installs on Windows)
+    try:
+        ffmpeg_path = _resolve_ffmpeg()
+        for name in ("ffprobe", "ffprobe.exe", "ffprobe.EXE"):
+            candidate = Path(ffmpeg_path).parent / name
+            if candidate.exists():
+                candidates.append(str(candidate))
+    except Exception:
+        pass
+
     discovered = shutil.which("ffprobe")
-    if discovered:
-        return discovered
-    raise FileNotFoundError("FFPROBE_NOT_FOUND")
+    if discovered and discovered not in candidates:
+        candidates.append(discovered)
+
+    for c in candidates:
+        if _test_binary(c):
+            logger.info(event="ffprobe_resolved", path=c)
+            _ffprobe_cache = c
+            return c
+        logger.warning(event="ffprobe_candidate_failed", path=c)
+
+    raise FileNotFoundError("FFPROBE_NOT_FOUND: no working ffprobe binary found")
+
+
+# PYAV METADATA FALLBACK — used when ffprobe subprocess is unavailable/broken
+
+def _probe_with_pyav(file_path: str) -> Dict[str, Any]:
+    """Metadata extraction via PyAV (uses bundled libav DLLs, no subprocess)."""
+    try:
+        import av  # type: ignore
+        container = av.open(file_path)
+
+        duration = None
+        if container.duration:
+            duration = container.duration / 1_000_000  # microseconds → seconds
+
+        video_stream = next((s for s in container.streams if s.type == "video"), None)
+        audio_stream = next((s for s in container.streams if s.type == "audio"), None)
+
+        fps = None
+        width = 0
+        height = 0
+        codec = None
+        if video_stream:
+            try:
+                if video_stream.average_rate:
+                    fps = float(video_stream.average_rate)
+                ctx = video_stream.codec_context
+                width  = ctx.width  or 0
+                height = ctx.height or 0
+                codec  = ctx.name
+            except Exception:
+                pass
+
+        audio_codec    = None
+        audio_channels = 0
+        if audio_stream:
+            try:
+                ctx = audio_stream.codec_context
+                audio_codec    = ctx.name
+                audio_channels = getattr(ctx, "channels", 0) or 0
+            except Exception:
+                pass
+
+        result = {
+            "duration":         duration,
+            "size":             0,
+            "bitrate":          container.bit_rate or 0,
+            "format_name":      container.format.long_name if container.format else "",
+            "has_video":        video_stream is not None,
+            "has_audio":        audio_stream is not None,
+            "codec":            codec,
+            "fps":              fps,
+            "width":            width,
+            "height":           height,
+            "color_space":      None,
+            "is_hdr":           False,
+            "audio_codec":      audio_codec,
+            "audio_channels":   audio_channels,
+            "subtitle_streams": [],
+            "chapter_streams":  [],
+            "streams":          [],
+        }
+        container.close()
+        logger.info(event="pyav_probe_success", duration=duration, has_video=result["has_video"], file=file_path)
+        return result
+    except Exception as e:
+        logger.warning(event="pyav_probe_failed", error=str(e), file=file_path)
+        return {}
 
 
 # FFPROBE FULL METADATA — SECTION 4.1
 
 def _probe_metadata(file_path: str) -> Dict[str, Any]:
+    # Try ffprobe subprocess first (richer metadata: chapters, subtitles, HDR)
     try:
         ffprobe = _resolve_ffprobe()
         result = subprocess.run(
             [
-                ffprobe, "-v", "quiet",
+                ffprobe, "-v", "error",
                 "-print_format", "json",
                 "-show_format",
                 "-show_streams",
@@ -158,43 +300,53 @@ def _probe_metadata(file_path: str) -> Dict[str, Any]:
             text=True,
             timeout=30,
         )
-        if result.returncode != 0:
-            return {}
-        data = json.loads(result.stdout)
-        fmt = data.get("format", {})
-        streams = data.get("streams", [])
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            fmt = data.get("format", {})
+            streams = data.get("streams", [])
 
-        video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
-        audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+            video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
+            audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
 
-        duration = None
-        try:
-            duration = float(fmt.get("duration") or 0)
-        except (ValueError, TypeError):
-            pass
+            duration = None
+            try:
+                duration = float(fmt.get("duration") or 0)
+            except (ValueError, TypeError):
+                pass
 
-        return {
-            "duration":      duration,
-            "size":          int(fmt.get("size", 0)),
-            "bitrate":       int(fmt.get("bit_rate", 0)),
-            "format_name":   fmt.get("format_name", ""),
-            "has_video":     video_stream is not None,
-            "has_audio":     audio_stream is not None,
-            "codec":         video_stream.get("codec_name") if video_stream else None,
-            "fps":           _parse_fps(video_stream.get("r_frame_rate", "0/1")) if video_stream else None,
-            "width":         int(video_stream.get("width", 0)) if video_stream else 0,
-            "height":        int(video_stream.get("height", 0)) if video_stream else 0,
-            "color_space":   video_stream.get("color_space") if video_stream else None,
-            "is_hdr":        _detect_hdr(video_stream) if video_stream else False,
-            "audio_codec":   audio_stream.get("codec_name") if audio_stream else None,
-            "audio_channels": int(audio_stream.get("channels", 0)) if audio_stream else 0,
-            "subtitle_streams": [s for s in streams if s.get("codec_type") == "subtitle"],
-            "chapter_streams":  data.get("chapters", []),
-            "streams":          streams,
-        }
+            return {
+                "duration":      duration,
+                "size":          int(fmt.get("size", 0)),
+                "bitrate":       int(fmt.get("bit_rate", 0)),
+                "format_name":   fmt.get("format_name", ""),
+                "has_video":     video_stream is not None,
+                "has_audio":     audio_stream is not None,
+                "codec":         video_stream.get("codec_name") if video_stream else None,
+                "fps":           _parse_fps(video_stream.get("r_frame_rate", "0/1")) if video_stream else None,
+                "width":         int(video_stream.get("width", 0)) if video_stream else 0,
+                "height":        int(video_stream.get("height", 0)) if video_stream else 0,
+                "color_space":   video_stream.get("color_space") if video_stream else None,
+                "is_hdr":        _detect_hdr(video_stream) if video_stream else False,
+                "audio_codec":   audio_stream.get("codec_name") if audio_stream else None,
+                "audio_channels": int(audio_stream.get("channels", 0)) if audio_stream else 0,
+                "subtitle_streams": [s for s in streams if s.get("codec_type") == "subtitle"],
+                "chapter_streams":  data.get("chapters", []),
+                "streams":          streams,
+            }
+        logger.warning(
+            event="ffprobe_nonzero",
+            returncode=result.returncode,
+            stderr=result.stderr[:500] if result.stderr else "",
+            file=file_path,
+        )
+    except FileNotFoundError:
+        logger.warning(event="ffprobe_unavailable", file=file_path)
     except Exception as e:
         logger.warning(event="ffprobe_failed", error=str(e))
-        return {}
+
+    # PyAV fallback — uses bundled libav DLLs, works even when system ffprobe is broken
+    logger.info(event="probe_pyav_fallback", file=file_path)
+    return _probe_with_pyav(file_path)
 
 
 def _parse_fps(rate_str: str) -> Optional[float]:
@@ -545,6 +697,12 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
     staging = settings.UPLOAD_STAGING_DIR
     staging.mkdir(parents=True, exist_ok=True)
 
+    # FFMPEG AVAILABILITY CHECK — fail fast with clear message
+    try:
+        _resolve_ffmpeg()
+    except FileNotFoundError:
+        raise ValueError("FFMPEG_NOT_FOUND: ffmpeg binary not found, please install ffmpeg")
+
     logger.info(
         event="video_ingest_start",
         file=source_name,
@@ -556,6 +714,10 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
     try:
         # FFPROBE METADATA — SECTION 4.1
         probe = _probe_metadata(file_path)
+
+        # Both ffprobe and PyAV returned empty — file is likely corrupt or unreadable
+        if not probe:
+            raise ValueError("CORRUPTED_FILE: video probe failed with all methods (ffprobe + PyAV). File may be corrupt or an unsupported format.")
 
         video_duration = probe.get("duration")
 
@@ -630,6 +792,9 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                             chunk_id=i,
                             structure=_base_structure(
                                 doc_id, session_id, file_hash, source_path,
+                                chunk_type="audio_segment",
+                                start_time=round(start_t, 3),
+                                end_time=round(end_t, 3),
                                 timestamp_start=start_t,
                                 timestamp_end=end_t,
                                 confidence=s.get("confidence"),
@@ -663,7 +828,13 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         else:
             # NO AUDIO TRACK — VISUAL ONLY — SECTION 4.1
             universal_meta.custom_fields["audio_available"] = False
-            logger.info(event="video_no_audio_track", file=source_name)
+            universal_meta.add_error("no_audio_track_found")
+            logger.warning(
+                event="video_no_audio_track",
+                file=source_name,
+                warning="no_audio_track_found",
+                session_id=session_id,
+            )
 
         # SUBTITLE EXTRACTION — SECTION 4.1
         subtitle_streams = probe.get("subtitle_streams", [])
@@ -745,7 +916,20 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
         # FRAME PROCESSING — DUPLICATE SKIP; HDR TONEMAPPING — SECTION 4.1
         is_hdr = probe.get("is_hdr", False)
-        prev_frame_path: Optional[str] = None
+        seen_frame_hashes: set = set()
+        total_frames_count = len(frames)
+
+        if total_frames_count > settings.MAX_VIDEO_FRAMES:
+            logger.warning(
+                event="video_frames_capped",
+                original=total_frames_count,
+                capped=settings.MAX_VIDEO_FRAMES,
+                file=source_name,
+                session_id=session_id,
+            )
+            universal_meta.add_error(
+                f"VIDEO_FRAMES_CAPPED: extracted {total_frames_count}, capped at {settings.MAX_VIDEO_FRAMES}"
+            )
 
         for frame in frames[:settings.MAX_VIDEO_FRAMES]:
             try:
@@ -755,18 +939,12 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 if not Path(f_path).exists():
                     continue
 
-                # DUPLICATE FRAME SKIP — SECTION 4.1
-                if prev_frame_path and Path(prev_frame_path).exists():
-                    sim = _frame_cosine_similarity(prev_frame_path, f_path)
-                    if sim > settings.VIDEO_DUPLICATE_FRAME_THRESHOLD:
-                        logger.debug(
-                            event="duplicate_frame_skipped",
-                            sim=round(sim, 3),
-                            ts=ts,
-                        )
-                        continue
-
-                prev_frame_path = f_path
+                # DUPLICATE FRAME SKIP VIA IMAGE HASH — SECTION 4.1
+                fhash = _frame_hash(f_path)
+                if fhash in seen_frame_hashes:
+                    logger.debug(event="duplicate_frame_skipped_hash", ts=ts)
+                    continue
+                seen_frame_hashes.add(fhash)
 
                 # HDR TONE-MAP TO SDR — SECTION 4.1
                 processing_path = f_path
@@ -801,10 +979,14 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                         chunk_id=frame["frame_index"],
                         structure=_base_structure(
                             doc_id, session_id, file_hash, source_path,
-                            asset_path=processing_path,
+                            chunk_type="frame",
+                            timestamp_sec=round(ts, 3),
                             timestamp_start=ts,
                             timestamp_end=frame.get("timestamp_end", ts),
                             frame_index=frame["frame_index"],
+                            total_frames=total_frames_count,
+                            caption=caption,
+                            asset_path=processing_path,
                             linked_speech=linked,
                             conflict_flag=conflict_flag,
                             alignment_score=align,

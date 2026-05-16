@@ -182,7 +182,7 @@ def _load_image(path: Path, session_id: str) -> Image.Image:
             from pillow_heif import register_heif_opener
             register_heif_opener()
         except ImportError:
-            raise ImportError("PILLOW_HEIF_REQUIRED for HEIC/HEIF images")
+            raise UnsupportedMimeError("Install pillow-heif for HEIC support")
 
     # SVG FORMAT
     if suffix == ".svg":
@@ -523,7 +523,7 @@ def _generate_caption(file_path: str, img: Image.Image, session_id: str) -> str:
     except Exception as exc:
         logger.warning(event="caption_failed", error=str(exc), session_id=session_id)
 
-    return "Generic image content"
+    return "[Image: no caption generated]"
 
 
 # QUALITY SCORE
@@ -556,6 +556,18 @@ def _sha256_check(path: Path) -> str:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+# CAPTION CONFIDENCE PROXY
+
+def _compute_caption_confidence(caption: str) -> float:
+    words = caption.split()
+    if not words:
+        return 0.0
+    unique = set(w.lower() for w in words)
+    diversity = len(unique) / len(words)
+    length_score = min(len(caption) / 100.0, 1.0)
+    return round((diversity + length_score) / 2.0, 3)
 
 
 # MULTI-PAGE TIFF HANDLER
@@ -606,10 +618,12 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
     # MULTI-PAGE TIFF
     is_multi_tiff = ext in {".tiff", ".tif"}
     tiff_pages: List[Image.Image] = []
+    total_frames = 1
 
     try:
         if is_multi_tiff:
             tiff_pages = _load_tiff_pages(path)
+            total_frames = max(len(tiff_pages), 1)
             if len(tiff_pages) > 1:
                 logger.debug(
                     event="multi_page_tiff",
@@ -718,6 +732,7 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
         # CAPTION DOCUMENT
         caption_clean = sanitize_prompt_injection(redact_pii(normalize_text(caption)))
+        cap_conf = _compute_caption_confidence(caption_clean) if caption_clean != "[Image: no caption generated]" else 0.0
         documents.append(
             IngestedDocument(
                 text=caption_clean,
@@ -726,7 +741,17 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 source_type="image",
                 source=source_name,
                 metadata=metadata,
-                structure={**base_structure, "content_type": "image_caption", "embedding_space": "text"},
+                structure={
+                    **base_structure,
+                    "content_type":      "image_caption",
+                    "embedding_space":   "text",
+                    "caption":           caption_clean,
+                    "caption_confidence": cap_conf,
+                    "width":             width,
+                    "height":            height,
+                    "is_solid_color":    solid,
+                    "total_frames":      total_frames,
+                },
                 extra_metadata={
                     "modality_weight": 1.0,
                     "importance_score": quality,
