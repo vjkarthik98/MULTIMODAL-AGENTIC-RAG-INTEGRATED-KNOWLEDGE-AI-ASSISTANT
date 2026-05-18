@@ -144,14 +144,15 @@ class Reranker:
 
         return (header + " " + text).strip()
 
-    # PRE-FILTER — REMOVE LOW QUALITY DOCS
+    # PRE-FILTER — REMOVE EMPTY / TOO-SHORT DOCS ONLY
+    # Score threshold is NOT applied here: upstream RRF scores are inherently
+    # small (~1/61) and the cross-encoder re-scores everything from scratch.
 
     def _filter(self, docs: List[Dict]) -> List[Dict]:
         return [
             d for d in docs
             if d.get("text")
             and len(str(d.get("text", "")).strip()) >= settings.CHUNK_MIN_SIZE
-            and d.get("score", 0.0) > self.score_threshold
         ]
 
     # SCORE NORMALIZATION

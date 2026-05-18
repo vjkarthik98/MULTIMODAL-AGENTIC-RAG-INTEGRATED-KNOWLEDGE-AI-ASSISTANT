@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import time
 import traceback
@@ -77,6 +78,30 @@ _SKIP_KEYS = frozenset({
 _SUPPRESS_VALUES = (None, "", "-", [], {}, ())
 
 
+# ANSI ESCAPE STRIP FILTER — applied to file handler to remove color codes
+# from uvicorn and any other library that pre-formats with ANSI sequences.
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+class _StripAnsiFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = _ANSI_RE.sub("", str(record.msg))
+        if record.args:
+            if isinstance(record.args, dict):
+                record.args = {k: _ANSI_RE.sub("", str(v)) if isinstance(v, str) else v
+                               for k, v in record.args.items()}
+            elif isinstance(record.args, tuple):
+                record.args = tuple(
+                    _ANSI_RE.sub("", str(a)) if isinstance(a, str) else a
+                    for a in record.args
+                )
+        # Strip color_message injected by uvicorn's DefaultFormatter
+        if hasattr(record, "color_message"):
+            del record.color_message
+        return True
+
+
 # CLEAN CONSOLE FORMATTER
 
 class CleanFormatter(logging.Formatter):
@@ -90,9 +115,9 @@ class CleanFormatter(logging.Formatter):
     }
     RESET = "\033[0m"
 
-    def __init__(self, use_color: bool = True) -> None:
+    def __init__(self, use_color: bool = True, force_no_color: bool = False) -> None:
         super().__init__()
-        self._use_color = use_color and sys.stdout.isatty()
+        self._use_color = (not force_no_color) and use_color and sys.stdout.isatty()
 
     def format(self, record: logging.LogRecord) -> str:
         timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -286,7 +311,7 @@ def _get_log_level() -> int:
 
 # FORMATTER FACTORY
 
-def _build_formatter() -> logging.Formatter:
+def _build_console_formatter() -> logging.Formatter:
     use_json = getattr(settings, "LOG_JSON", False)
     if use_json:
         return JsonFormatter()
@@ -294,15 +319,19 @@ def _build_formatter() -> logging.Formatter:
     return CleanFormatter(use_color=use_color)
 
 
+def _build_file_formatter() -> logging.Formatter:
+    use_json = getattr(settings, "LOG_JSON", False)
+    if use_json:
+        return JsonFormatter()
+    return CleanFormatter(use_color=False, force_no_color=True)
+
+
 # CONSOLE HANDLER
 
-def _build_console_handler(
-    level: int,
-    formatter: logging.Formatter,
-) -> logging.StreamHandler:
+def _build_console_handler(level: int) -> logging.StreamHandler:
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(level)
-    handler.setFormatter(formatter)
+    handler.setFormatter(_build_console_formatter())
     return handler
 
 
@@ -310,7 +339,6 @@ def _build_console_handler(
 
 def _build_file_handler(
     level: int,
-    formatter: logging.Formatter,
 ) -> Optional[RotatingFileHandler]:
     if not getattr(settings, "ENABLE_FILE_LOGGING", True):
         return None
@@ -328,7 +356,8 @@ def _build_file_handler(
             encoding="utf-8",
         )
         handler.setLevel(level)
-        handler.setFormatter(formatter)
+        handler.setFormatter(_build_file_formatter())
+        handler.addFilter(_StripAnsiFilter())
         return handler
 
     except Exception as exc:
@@ -390,23 +419,22 @@ def _setup_logging() -> None:
         return
 
     level = _get_log_level()
-    formatter = _build_formatter()
 
     root = logging.getLogger()
     root.handlers.clear()
     root.setLevel(level)
 
     # CONSOLE HANDLER
-    console = _build_console_handler(level, formatter)
+    console = _build_console_handler(level)
     root.addHandler(console)
 
     # FILE HANDLER
-    file_handler = _build_file_handler(level, formatter)
+    file_handler = _build_file_handler(level)
     if file_handler:
         root.addHandler(file_handler)
 
     # UVICORN
-    _configure_uvicorn_loggers(level, formatter)
+    _configure_uvicorn_loggers(level, _build_console_formatter())
 
     # SUPPRESS NOISY LIBRARIES
     _suppress_noisy_loggers()

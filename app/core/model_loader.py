@@ -61,8 +61,18 @@ _embedding_latency = Histogram(
     ["model"],
 )
 
-# SEMAPHORE — PREVENT CONCURRENT HEAVY MODEL LOADS
-_load_semaphore = asyncio.Semaphore(1)
+# SEMAPHORE — lazy init to avoid missing event loop at import time
+_load_semaphore: Optional[asyncio.Semaphore] = None
+_load_semaphore_lock = threading.Lock()
+
+
+def _get_load_semaphore() -> asyncio.Semaphore:
+    global _load_semaphore
+    if _load_semaphore is None:
+        with _load_semaphore_lock:
+            if _load_semaphore is None:
+                _load_semaphore = asyncio.Semaphore(1)
+    return _load_semaphore
 
 
 class ModelLoader:
@@ -177,7 +187,6 @@ class ModelLoader:
                 try:
                     future = self._executor.submit(load_fn)
                     future.result(timeout=settings.MODEL_TIMEOUT_SEC)
-                    time.sleep(2.0)
                 except Exception as exc:
                     logger.warning(
                         "warmup_model_failed",
@@ -193,19 +202,28 @@ class ModelLoader:
     async def warmup_async(self) -> None:
         if self._initialized:
             return
-        async with _load_semaphore:
-            await asyncio.get_event_loop().run_in_executor(
+        async with _get_load_semaphore():
+            await asyncio.get_running_loop().run_in_executor(
                 self._executor, self.warmup
             )
 
-    # LLM — GGUF MODEL
+    # LLM — GGUF MODEL (or MockLLM when LLM_MOCK_MODE=true)
 
-    def get_llm(self) -> GGUFModel:
+    def get_llm(self) -> Any:
         if self._llm:
             return self._llm
 
         with self._lock:
             if self._llm:
+                return self._llm
+
+            if settings.LLM_MOCK_MODE:
+                from app.llm.mock_llm import MockLLM
+                self._llm = MockLLM()
+                logger.warning(
+                    "llm_mock_mode_active",
+                    hint="Set LLM_MOCK_MODE=false to use the real GGUF model",
+                )
                 return self._llm
 
             if not settings.LLM_MODEL_PATH:

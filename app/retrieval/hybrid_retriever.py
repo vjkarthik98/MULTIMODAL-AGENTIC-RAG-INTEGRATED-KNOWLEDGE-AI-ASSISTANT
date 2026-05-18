@@ -225,15 +225,16 @@ class HybridRetriever:
         filters: Optional[Dict[str, Any]],
         session_id: Optional[str],
     ) -> List[Dict]:
-        if not filters and not session_id:
+        # NOTE: session isolation is already enforced upstream (bm25.search and
+        # vector_store.search both filter by session_id before results reach here).
+        # Re-filtering here would silently drop results when metadata["session_id"]
+        # is missing or mismatched due to schema defaults. Only apply extra filters.
+        if not filters:
             return results
 
         filtered = []
         for r in results:
             meta = r.get("metadata", {}) or {}
-
-            if session_id and meta.get("session_id") != session_id:
-                continue
 
             if filters:
                 if filters.get("modality") and meta.get("modality") != filters["modality"]:
@@ -425,27 +426,26 @@ class HybridRetriever:
             if q_vec:
                 vec_res = self._vector_search_text(q_vec, candidate_k, session_id)
 
-            # EARLY EXIT IF BOTH EMPTY
-            if not bm25_res and not vec_res:
+            # VISION SEARCH — always fan out (boost weight on vision-cued queries).
+            vis_res: List[Dict] = []
+            try:
+                v_vec = self._embed_vision_cached(query, session_id=session_id)
+                vis_res = self._vector_search_vision(v_vec, candidate_k, session_id)
+            except Exception as exc:
                 logger.warning(
-                    event="hybrid_retrieval_empty_no_results_from_either_retriever",
+                    event="vision_search_skipped",
+                    error=str(exc),
+                    session_id=session_id,
+                )
+
+            # EARLY EXIT IF ALL EMPTY (text + vision)
+            if not bm25_res and not vec_res and not vis_res:
+                logger.warning(
+                    event="hybrid_retrieval_empty_no_results_from_any_retriever",
                     query_len=len(query),
                     session_id=session_id,
                 )
                 return []
-
-            # VISION SEARCH
-            vis_res: List[Dict] = []
-            if is_vision:
-                try:
-                    v_vec = self._embed_vision_cached(query, session_id=session_id)
-                    vis_res = self._vector_search_vision(v_vec, candidate_k, session_id)
-                except Exception as exc:
-                    logger.warning(
-                        event="vision_search_skipped",
-                        error=str(exc),
-                        session_id=session_id,
-                    )
 
             # AUDIO/VIDEO MODALITY FILTER BOOST
             modality_filter: Optional[str] = None
@@ -454,13 +454,14 @@ class HybridRetriever:
             elif is_video:
                 modality_filter = "video"
 
-            # RRF FUSION
+            # RRF FUSION — vision always contributes; boosted when query is vision-cued.
             combined: Dict[str, Dict] = {}
             self._fuse(combined, bm25_res, self.w_bm25, "bm25")
             self._fuse(combined, vec_res, self.w_vector, "dense")
 
             if vis_res:
-                self._fuse(combined, vis_res, self.w_vision, "vision")
+                vis_weight = self.w_vision * (1.5 if is_vision else 1.0)
+                self._fuse(combined, vis_res, vis_weight, "vision")
 
             if not combined:
                 return []
@@ -485,8 +486,9 @@ class HybridRetriever:
             # MMR DIVERSITY
             final = self._mmr(fused, top_k)
 
-            # SCORE THRESHOLD
-            final = [r for r in final if r["score"] >= self.min_score]
+            # SCORE THRESHOLD — skip: RRF scores are inherently small (max ~1/61)
+            # and already scoped by session filter; dropping by absolute threshold
+            # would discard all valid results when only one retriever has results.
 
             # CLEAN INTERNAL FIELDS
             for r in final:

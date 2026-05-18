@@ -587,7 +587,15 @@ def _load_tiff_pages(path: Path) -> List[Image.Image]:
 
 # MAIN INGEST
 
-def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
+def ingest(
+    file_path: str,
+    session_id: str,
+    parent_doc_id:   Optional[str] = None,
+    parent_modality: Optional[str] = None,
+    parent_source:   Optional[str] = None,
+    parent_page:     Optional[int] = None,
+    parent_sheet:    Optional[str] = None,
+) -> List[IngestedDocument]:
     if not session_id:
         raise ValueError("SESSION_ID_REQUIRED")
 
@@ -712,6 +720,13 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
             "checksum_sha256": file_hash,
             "source_path": source_path,
             "asset_path": source_path,
+            # When this image came from a parent docx/xlsx, link back so retrieval
+            # can group "page 4 of foo.docx contains image X".
+            "parent_doc_id":   parent_doc_id,
+            "parent_modality": parent_modality,
+            "parent_source":   parent_source,
+            "parent_page":     parent_page,
+            "parent_sheet":    parent_sheet,
             "original_width": original_width,
             "original_height": original_height,
             "image_width": width,

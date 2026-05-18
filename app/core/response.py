@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import re
 import time
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -273,6 +275,27 @@ class UniversalErrorResponse(BaseResponse):
 
 # QUERY RESPONSE
 
+# RETRIEVED SOURCE SHAPE — canonical citation record returned to the API
+# Fields (Dict[str, Any] to stay style-consistent with the rest of this module):
+#   source            str           — basename of the original file (REQUIRED)
+#   modality          str           — text|pdf|word|excel|image|audio|video (REQUIRED)
+#   chunk_id          str           — unique per-chunk id (REQUIRED)
+#   subtype           Optional[str] — page|paragraph|table|caption|ocr|frame|speech|chart
+#   page              Optional[int]
+#   sheet             Optional[str]
+#   timestamp_start   Optional[float]
+#   timestamp_end     Optional[float]
+#   speaker           Optional[str]
+#   asset_path        Optional[str] — for video frames / images
+#   score             Optional[float]
+#   doc_id            Optional[str]
+#   parent_modality   Optional[str] — set when an image came from a word/excel parent
+#   parent_page       Optional[int]
+#   parent_sheet      Optional[str]
+#   cite_key          str           — bracket tag the LLM is told to emit, e.g. [foo.pdf p.4]
+#   snippet           str           — first ~240 chars of the chunk text
+
+
 class QueryResponse(BaseResponse):
 
     def __init__(
@@ -287,6 +310,7 @@ class QueryResponse(BaseResponse):
         metadata:     Optional[Dict[str, Any]] = None,
         trace_id:     Optional[str]          = None,
         cache_hit:    bool                   = False,
+        sources:      Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         super().__init__(
             success=True,
@@ -298,7 +322,8 @@ class QueryResponse(BaseResponse):
         )
         self.answer       = answer
         self.confidence   = max(0.0, min(float(confidence), 1.0))
-        self.sources_used = sources_used
+        self.sources      = list(sources) if sources else []
+        self.sources_used = sources_used if sources_used else len(self.sources)
         self.decision     = decision
         self.source       = source
         self.cache_hit    = cache_hit
@@ -309,6 +334,7 @@ class QueryResponse(BaseResponse):
             "answer":       self.answer,
             "confidence":   self.confidence,
             "sources_used": self.sources_used,
+            "sources":      self.sources,
             "decision":     self.decision,
             "source":       self.source,
             "cache_hit":    self.cache_hit,
@@ -602,6 +628,142 @@ def validation_err(
     return result
 
 
+# RETRIEVED SOURCE BUILDER
+
+_CITE_KEY_RE = re.compile(r"[^A-Za-z0-9._\- =:]+")
+
+
+def _format_ts(seconds: Optional[float]) -> Optional[str]:
+    if seconds is None:
+        return None
+    try:
+        s = float(seconds)
+    except Exception:
+        return None
+    if s < 0:
+        return None
+    m, sec = divmod(int(round(s)), 60)
+    h, m   = divmod(m, 60)
+    if h:
+        return f"{h:02d}:{m:02d}:{sec:02d}"
+    return f"{m:02d}:{sec:02d}"
+
+
+def _safe_basename(path: Any) -> str:
+    if not path:
+        return "unknown"
+    try:
+        return os.path.basename(str(path)) or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _make_cite_key(
+    source:          str,
+    page:            Optional[int]   = None,
+    sheet:           Optional[str]   = None,
+    timestamp_start: Optional[float] = None,
+    section_id:      Optional[str]   = None,
+) -> str:
+    """Build the bracket tag the LLM must emit verbatim. Stable & sanitized."""
+    src = _safe_basename(source)
+    src = _CITE_KEY_RE.sub("_", src)
+    if section_id:
+        sec_clean = _CITE_KEY_RE.sub("_", str(section_id))[:40]
+        return f"[{src} {sec_clean}]"
+    if page is not None:
+        try:
+            return f"[{src} p.{int(page)}]"
+        except Exception:
+            pass
+    if sheet:
+        sheet_clean = _CITE_KEY_RE.sub("_", str(sheet))[:40]
+        return f"[{src} sheet={sheet_clean}]"
+    ts = _format_ts(timestamp_start)
+    if ts:
+        return f"[{src} t={ts}]"
+    return f"[{src}]"
+
+
+def build_retrieved_source(
+    doc:       Dict[str, Any],
+    rank:      int = 0,
+    snippet_chars: int = 240,
+) -> Dict[str, Any]:
+    """Map one retrieved doc (text + metadata + score) to the canonical RetrievedSource shape."""
+    meta = doc.get("metadata") or {}
+    text = doc.get("text") or ""
+
+    raw_source     = meta.get("source") or meta.get("file_path") or meta.get("doc_id") or ""
+    source_name    = _safe_basename(raw_source)
+    modality       = str(meta.get("modality") or "text")
+    subtype        = meta.get("subtype")
+    page           = meta.get("page")
+    sheet          = meta.get("sheet")
+    ts_start       = meta.get("timestamp_start")
+    ts_end         = meta.get("timestamp_end")
+    speaker        = meta.get("speaker")
+    asset_path     = meta.get("asset_path")
+    chunk_id       = meta.get("chunk_id") or f"r{rank}"
+    doc_id         = meta.get("doc_id")
+    parent_modality = meta.get("parent_modality")
+    parent_page    = meta.get("parent_page")
+    parent_sheet   = meta.get("parent_sheet")
+    section_id     = meta.get("section_id")
+    section_title  = meta.get("section_title")
+
+    snippet = " ".join(str(text).split())[:snippet_chars]
+
+    cite_key = _make_cite_key(
+        source=source_name,
+        page=page if isinstance(page, int) else None,
+        sheet=sheet,
+        timestamp_start=ts_start,
+        section_id=section_id if isinstance(section_id, str) and section_id else None,
+    )
+
+    return {
+        "source":          source_name,
+        "modality":        modality,
+        "subtype":         subtype,
+        "page":            page if isinstance(page, int) else None,
+        "sheet":           sheet,
+        "timestamp_start": float(ts_start) if isinstance(ts_start, (int, float)) else None,
+        "timestamp_end":   float(ts_end)   if isinstance(ts_end,   (int, float)) else None,
+        "speaker":         speaker,
+        "asset_path":      asset_path,
+        "score":           float(doc.get("score")) if isinstance(doc.get("score"), (int, float)) else None,
+        "chunk_id":        str(chunk_id),
+        "doc_id":          str(doc_id) if doc_id else None,
+        "parent_modality": parent_modality,
+        "parent_page":     parent_page if isinstance(parent_page, int) else None,
+        "parent_sheet":    parent_sheet,
+        "section_id":      section_id if isinstance(section_id, str) and section_id else None,
+        "section_title":   section_title if isinstance(section_title, str) and section_title else None,
+        "cite_key":        cite_key,
+        "snippet":         snippet,
+    }
+
+
+def build_sources(
+    docs:          List[Dict[str, Any]],
+    snippet_chars: int = 240,
+) -> List[Dict[str, Any]]:
+    """Deterministic list of RetrievedSource records from final retrieved docs."""
+    out: List[Dict[str, Any]] = []
+    seen_cite: Dict[str, int] = {}
+    for rank, d in enumerate(docs or []):
+        rec = build_retrieved_source(d, rank=rank, snippet_chars=snippet_chars)
+        key = rec["cite_key"]
+        # Keep the first occurrence (highest-ranked) per cite_key; later dupes are dropped
+        # so the citation tag is a closed set.
+        if key in seen_cite:
+            continue
+        seen_cite[key] = rank
+        out.append(rec)
+    return out
+
+
 def query_ok(
     answer:       str,
     session_id:   str,
@@ -613,6 +775,7 @@ def query_ok(
     metadata:     Optional[Dict[str, Any]] = None,
     trace_id:     Optional[str]          = None,
     cache_hit:    bool                   = False,
+    sources:      Optional[List[Dict[str, Any]]] = None,
 ) -> QueryResponse:
     return QueryResponse(
         answer=answer,
@@ -625,4 +788,5 @@ def query_ok(
         metadata=metadata,
         trace_id=trace_id,
         cache_hit=cache_hit,
+        sources=sources,
     )

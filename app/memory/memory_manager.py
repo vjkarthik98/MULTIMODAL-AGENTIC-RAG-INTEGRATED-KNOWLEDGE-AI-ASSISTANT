@@ -267,8 +267,7 @@ class MemoryManager:
         modality:   str = "text",
     ) -> None:
         async with self._semaphore:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
+            await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: self.add_interaction(session_id, query, response, modality),
             )
@@ -326,6 +325,11 @@ class MemoryManager:
                     )
 
             if not history:
+                if source == "empty":
+                    logger.info(
+                        event="memory_context_empty_all_services_unavailable",
+                        session_id=session_id,
+                    )
                 return []
 
             history = _dedup(history)
@@ -345,7 +349,7 @@ class MemoryManager:
             return history
 
         except Exception as e:
-            logger.error(
+            logger.warning(
                 event="memory_fetch_failed",
                 session_id=session_id,
                 error=str(e),
@@ -360,8 +364,7 @@ class MemoryManager:
         limit:      Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         async with self._semaphore:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
+            return await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: self.get_history(session_id, limit),
             )
@@ -457,8 +460,7 @@ class MemoryManager:
 
     async def gdpr_purge_async(self, user_id: str) -> Dict[str, Any]:
         async with self._semaphore:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
+            return await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: self.gdpr_purge(user_id),
             )
@@ -508,6 +510,40 @@ class MemoryManager:
     ) -> List[Dict[str, Any]]:
         history = self.get_history(session_id, limit=k)
         return history[-k:] if history else []
+
+    # GET CONTEXT AS STRING — SECTION 4.7
+    # Always returns a string (may be empty). Never raises.
+
+    def get_context(self, session_id: str, limit: Optional[int] = None) -> str:
+        try:
+            history = self.get_history(session_id, limit=limit)
+            if not history:
+                return ""
+            parts: List[str] = []
+            for msg in history:
+                role    = msg.get("role", "user").capitalize()
+                content = str(msg.get("content", "")).strip()
+                if content:
+                    parts.append(f"{role}: {content}")
+            return "\n".join(parts)
+        except Exception as e:
+            logger.warning(event="memory_get_context_failed", session_id=session_id, error=str(e))
+            return ""
+
+    # STORE TURN — SECTION 4.7
+    # Always succeeds as no-op if services unavailable. Never raises.
+
+    def store_turn(
+        self,
+        session_id: str,
+        query:      str,
+        response:   str,
+        modality:   str = "text",
+    ) -> None:
+        try:
+            self.add_interaction(session_id, query, response, modality=modality)
+        except Exception as e:
+            logger.warning(event="memory_store_turn_failed", session_id=session_id, error=str(e))
 
     # MEMORY SIZE — SECTION 4.7
 

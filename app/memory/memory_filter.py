@@ -1,9 +1,10 @@
 import asyncio
 import hashlib
 import math
+import threading
 import time
 import unicodedata
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import structlog
@@ -181,24 +182,27 @@ def _normalize_scores(scored: List[Tuple[float, Dict]]) -> List[Tuple[float, Dic
     return [(float(normed[i]), m) for i, (_, m) in enumerate(scored)]
 
 
-# EMBED WITH CACHE — AVOID RE-EMBEDDING SAME TEXT
+# EMBED WITH CACHE — thread-safe LRU, bounded at _MAX_CACHE entries
 
 _embed_cache: Dict[str, List[float]] = {}
-_MAX_CACHE   = 500
+_embed_cache_lock = threading.Lock()
+_MAX_CACHE = 500
 
 
 def _embed_text(text: str, embedder: Any, session_id: str) -> Optional[List[float]]:
     cache_key = hashlib.sha256(text[:500].encode()).hexdigest()
-    if cache_key in _embed_cache:
-        return _embed_cache[cache_key]
+    with _embed_cache_lock:
+        if cache_key in _embed_cache:
+            return _embed_cache[cache_key]
     try:
         vec = embedder.embed_query(text, session_id=session_id)
         if _valid_embedding(vec):
-            if len(_embed_cache) >= _MAX_CACHE:
-                # EVICT OLDEST ENTRY
-                oldest = next(iter(_embed_cache))
-                del _embed_cache[oldest]
-            _embed_cache[cache_key] = vec
+            with _embed_cache_lock:
+                if cache_key not in _embed_cache:
+                    if len(_embed_cache) >= _MAX_CACHE:
+                        oldest = next(iter(_embed_cache))
+                        del _embed_cache[oldest]
+                    _embed_cache[cache_key] = vec
             return vec
     except Exception as exc:
         logger.warning("embed_text_failed", error=str(exc), session_id=session_id)
@@ -375,7 +379,7 @@ async def filter_relevant_history_async(
 ) -> List[Dict]:
 
     async with _semaphore:
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: filter_relevant_history(
                 query,

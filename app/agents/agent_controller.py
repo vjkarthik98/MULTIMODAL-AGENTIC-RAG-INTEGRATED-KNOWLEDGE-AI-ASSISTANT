@@ -1,7 +1,9 @@
 import asyncio
+import threading
 import time
 import unicodedata
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any, Dict, Optional
 
 import structlog
@@ -12,6 +14,8 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
 from app.core.model_loader import model_loader
+
+_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="agent_ctrl")
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -47,8 +51,18 @@ _CONFIDENCE_MAP: Dict[str, float] = {
     "reject":   0.00,
 }
 
-# SEMAPHORE — CAP CONCURRENT CONTROLLER REQUESTS
-_semaphore = asyncio.Semaphore(settings.MAX_PARALLEL_REQUESTS)
+# SEMAPHORE — created lazily inside async context to avoid missing event loop
+_semaphore: Optional[asyncio.Semaphore] = None
+_semaphore_lock = threading.Lock()
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _semaphore
+    if _semaphore is None:
+        with _semaphore_lock:
+            if _semaphore is None:
+                _semaphore = asyncio.Semaphore(settings.MAX_PARALLEL_REQUESTS)
+    return _semaphore
 
 
 # NORMALIZE QUERY
@@ -250,28 +264,38 @@ class AgentController:
                     session_id=session_id,
                 )
 
-                return self._fallback(query, start, session_id, request_id)
+                try:
+                    return self._fallback(query, start, session_id, request_id)
+                except Exception:
+                    return {
+                        "response":   "Unable to process your request at this time.",
+                        "source":     "fallback",
+                        "decision":   "direct",
+                        "reason":     "all_retries_exhausted",
+                        "confidence": 0.1,
+                        "request_id": request_id,
+                        "latency":    round(time.time() - start, 3),
+                        "metadata":   {},
+                    }
 
             finally:
                 _active_requests.dec()
 
-    # TIMEOUT EXECUTION
+    # TIMEOUT EXECUTION — uses a real future so the timeout actually preempts
 
     def _execute_with_timeout(
         self,
         query: str,
         session_id: str,
     ) -> Dict[str, Any]:
-        start   = time.time()
-        result  = self.executor.run(query, session_id)
-        elapsed = time.time() - start
-
-        if elapsed > self.timeout:
+        future = _executor.submit(self.executor.run, query, session_id)
+        try:
+            return future.result(timeout=self.timeout)
+        except FuturesTimeoutError:
+            future.cancel()
             raise TimeoutError(
-                f"AGENT_TIMEOUT_{elapsed:.1f}s > {self.timeout}s"
+                f"AGENT_TIMEOUT: executor did not finish within {self.timeout}s"
             )
-
-        return result
 
     # VALIDATION
 
@@ -337,7 +361,7 @@ class AgentController:
     @retry(
         stop=stop_after_attempt(2),
         wait=wait_exponential(multiplier=1, min=1, max=4),
-        reraise=False,
+        reraise=True,
     )
     def _fallback(
         self,
@@ -388,8 +412,8 @@ class AgentController:
         session_id: str,
     ) -> Dict[str, Any]:
 
-        async with _semaphore:
-            return await asyncio.get_event_loop().run_in_executor(
+        async with _get_semaphore():
+            return await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: self.handle(query, session_id),
             )

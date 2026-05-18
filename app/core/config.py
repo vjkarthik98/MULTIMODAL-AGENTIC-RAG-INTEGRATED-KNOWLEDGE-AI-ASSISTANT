@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
 
-load_dotenv(override=False)
+load_dotenv(override=True)
 
 
 # HELPERS
@@ -107,13 +107,14 @@ class Settings:
     INGESTION_WORKER_COUNT: int     = _int("INGESTION_WORKER_COUNT", 3)
 
     # LLM
+    LLM_MOCK_MODE: bool      = _bool("LLM_MOCK_MODE", False)
     LLM_MODEL_PATH: str      = _str("LLM_MODEL_PATH", "./models/mistral-7b-instruct-v0.2.Q4_K_M.gguf")
     LLM_MAX_TOKENS: int      = _int("LLM_MAX_TOKENS", 512)
     CONTEXT_MAX_TOKENS: int  = _int("CONTEXT_MAX_TOKENS", 4096)
     LLM_TEMPERATURE: float   = _float("LLM_TEMPERATURE", 0.2)
     LLM_TOP_P: float         = _float("LLM_TOP_P", 0.9)
     MAX_PROMPT_CHARS: int    = _int("MAX_PROMPT_CHARS", 8000)
-    LLM_GPU_LAYERS: int      = _int("LLM_GPU_LAYERS", 0)
+    LLM_GPU_LAYERS: int      = _int("LLM_GPU_LAYERS", 20)
     LLM_THREADS: int         = _int("LLM_THREADS", 8)
     LLM_N_BATCH: int         = _int("LLM_N_BATCH", 512)
     LLM_MAX_RETRIES: int     = _int("LLM_MAX_RETRIES", 3)
@@ -224,6 +225,7 @@ class Settings:
     REDIS_CB_FAIL_MAX: int           = _int("REDIS_CB_FAIL_MAX", 5)
     REDIS_CB_RESET_TIMEOUT: int      = _int("REDIS_CB_RESET_TIMEOUT", 30)
     REDIS_MAX_WINDOW_TURNS: int      = _int("REDIS_MAX_WINDOW_TURNS", 40)
+    REDIS_MAX_CONNECTIONS: int       = _int("REDIS_MAX_CONNECTIONS", 10)
 
     # MONGODB
     MONGO_URI: str                       = _str("MONGO_URI", "mongodb://localhost:27017")
@@ -237,6 +239,20 @@ class Settings:
     MONGO_MEMORY_COLLECTION: str         = _str("MONGO_MEMORY_COLLECTION", "messages")
     MONGO_SUMMARY_COLLECTION: str        = _str("MONGO_SUMMARY_COLLECTION", "summaries")
     MONGO_AUDIT_COLLECTION: str          = _str("MONGO_AUDIT_COLLECTION", "audit_log")
+
+    # TEXT REPAIR — per-pass toggles for the broken-corpus hardening layer
+    # (mojibake fix, noise-line strip, whitespace recovery, OCR normalization,
+    # footnote strip, placeholder skip, title-mismatch flag, version tagging).
+    # All default ON; each pass is a no-op on clean text so the cost is low.
+    TEXT_REPAIR_ENABLED: bool        = _bool("TEXT_REPAIR_ENABLED",     True)
+    TEXT_REPAIR_MOJIBAKE: bool       = _bool("TEXT_REPAIR_MOJIBAKE",    True)
+    TEXT_REPAIR_NOISE_LINES: bool    = _bool("TEXT_REPAIR_NOISE_LINES", True)
+    TEXT_REPAIR_WHITESPACE: bool     = _bool("TEXT_REPAIR_WHITESPACE",  True)
+    TEXT_REPAIR_OCR: bool            = _bool("TEXT_REPAIR_OCR",         True)
+    TEXT_REPAIR_FOOTNOTES: bool      = _bool("TEXT_REPAIR_FOOTNOTES",   True)
+    TEXT_REPAIR_PLACEHOLDERS: bool   = _bool("TEXT_REPAIR_PLACEHOLDERS", True)
+    TEXT_REPAIR_TITLE_MISMATCH: bool = _bool("TEXT_REPAIR_TITLE_MISMATCH", True)
+    TEXT_REPAIR_VERSION_TAG: bool    = _bool("TEXT_REPAIR_VERSION_TAG", True)
 
     # CHUNKING
     CHUNK_SIZE: int                  = _int("CHUNK_SIZE", 512)
@@ -329,6 +345,7 @@ class Settings:
     MEMORY_RECENCY_SCALE: float      = _float("MEMORY_RECENCY_SCALE", 3600.0)
     MEMORY_SUMMARY_MAX_CHARS: int    = _int("MEMORY_SUMMARY_MAX_CHARS", 2000)
     MEMORY_SUMMARY_INPUT_CHARS: int  = _int("MEMORY_SUMMARY_INPUT_CHARS", 4000)
+    MEMORY_SUMMARY_EVERY_N_TURNS: int = _int("MEMORY_SUMMARY_EVERY_N_TURNS", 10)
     MIN_SUMMARY_LENGTH: int          = _int("MIN_SUMMARY_LENGTH", 50)
     SLIDING_WINDOW_MAX_TOKENS: int   = _int("SLIDING_WINDOW_MAX_TOKENS", 4096)
 
@@ -406,6 +423,9 @@ class Settings:
     CLAMAV_HOST: str                      = _str("CLAMAV_HOST", "localhost")
     CLAMAV_PORT: int                      = _int("CLAMAV_PORT", 3310)
     TEMP_FILE_ENCRYPTION: bool            = _bool("TEMP_FILE_ENCRYPTION", False)
+
+    # HALLUCINATION
+    HALLUCINATION_THRESHOLD: float = _float("HALLUCINATION_THRESHOLD", 0.5)
 
     # CROSS-MODAL FUSION
     CROSS_MODAL_FUSION_TIMEOUT: float         = _float("CROSS_MODAL_FUSION_TIMEOUT", 5.0)
@@ -501,7 +521,7 @@ class Settings:
     def validate(self) -> bool:
         errors: List[str] = []
 
-        if not self.LLM_MODEL_PATH:
+        if not self.LLM_MOCK_MODE and not self.LLM_MODEL_PATH:
             errors.append("LLM_MODEL_PATH is required")
 
         if self.LLM_MAX_TOKENS > self.CONTEXT_MAX_TOKENS:

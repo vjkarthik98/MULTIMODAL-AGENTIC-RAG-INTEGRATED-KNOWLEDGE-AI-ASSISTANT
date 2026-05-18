@@ -238,8 +238,11 @@ def _system_prompt(
             "RULES:\n"
             "- Use ONLY the provided context\n"
             "- Return the exact requested value\n"
+            "- After each fact, cite the source number in square brackets,"
+            " e.g. [1] or [2,3] for multi-source claims\n"
             "- No explanation or padding\n"
-            "- If not found → 'I don't know'\n\n"
+            "- If the answer is not in the context, reply exactly:"
+            " \"I could not find this in the provided sources.\"\n\n"
         )
 
     if is_code:
@@ -259,8 +262,12 @@ def _system_prompt(
             "RULES:\n"
             "- Use ONLY the provided context\n"
             "- Structure: describe A, describe B, then compare\n"
-            "- Be objective and factual\n"
-            "- No hallucination\n\n"
+            "- After each fact, cite the source number in square brackets,"
+            " e.g. [1] or [2,3] for multi-source claims\n"
+            "- Be objective and factual; if sources disagree, surface the"
+            " disagreement and cite both\n"
+            "- If the answer is not in the context, reply exactly:"
+            " \"I could not find this in the provided sources.\"\n\n"
         )
 
     if query_type == "temporal":
@@ -270,7 +277,10 @@ def _system_prompt(
             "- Use ONLY the provided context\n"
             "- Preserve chronological order\n"
             "- Note time periods explicitly\n"
-            "- No hallucination\n\n"
+            "- After each fact, cite the source number in square brackets,"
+            " e.g. [1] or [2,3] for multi-source claims\n"
+            "- If the answer is not in the context, reply exactly:"
+            " \"I could not find this in the provided sources.\"\n\n"
         )
 
     if modality == "image":
@@ -305,14 +315,20 @@ def _system_prompt(
 
     return (
         "You are a precise knowledge assistant.\n"
-        "Answer ONLY using the provided context chunks below.\n"
+        "Answer ONLY using the provided CONTEXT chunks below. Each chunk is\n"
+        "labelled with a number like [1], [2], [3] at the start.\n"
         "Rules:\n"
         "1. Use ONLY information present in the provided context.\n"
-        "2. If the answer is not in the context, respond exactly: "
-        '"The provided documents do not contain information about this topic."\n'
-        "3. Cite sources: reference document name and page number when relevant.\n"
-        "4. Never add information not present in the context.\n"
-        "5. Be concise and direct.\n\n"
+        "2. After every fact in your answer, cite the source number in\n"
+        "   square brackets, e.g. \"... is the answer [1]\" or \"both A and B\n"
+        "   are valid [1,3]\" for multi-source claims.\n"
+        "3. If sources disagree, surface the disagreement and cite each\n"
+        "   conflicting source.\n"
+        "4. Never add information not present in the context. Do not use\n"
+        "   prior knowledge.\n"
+        "5. If the answer is not in the context, reply exactly:\n"
+        '   "I could not find this in the provided sources."\n'
+        "6. Be concise and direct.\n\n"
     )
 
 

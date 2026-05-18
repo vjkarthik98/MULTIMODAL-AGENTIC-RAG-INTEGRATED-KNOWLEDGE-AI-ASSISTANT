@@ -108,6 +108,7 @@ class _InMemoryStore:
 class RedisMemory:
 
     def __init__(self) -> None:
+        self._enabled: bool = settings.USE_REDIS
         self.client = None
         self._use_upstash: bool = False
         self._redis_ok: bool = False
@@ -118,6 +119,10 @@ class RedisMemory:
         self.query_cache_ttl: int = settings.REDIS_QUERY_CACHE_TTL
         self.embed_cache_ttl: int = settings.REDIS_EMBEDDING_CACHE_TTL
         self.prefix: str = settings.REDIS_KEY_PREFIX
+
+        if not self._enabled:
+            logger.info(event="redis_disabled_memory_using_no_op_fallback")
+            return
 
         self._connect()
 
@@ -221,7 +226,7 @@ class RedisMemory:
         return m if m in _VALID_MODALITIES else "text"
 
     def _key(self, session_id: str) -> str:
-        return f"{self.prefix}:{session_id}"
+        return f"{self.prefix}:{session_id}:history"
 
     def _hash_msg(self, msg: Dict) -> str:
         base = f"{msg.get('role')}|{str(msg.get('content', ''))[:200]}"
@@ -234,15 +239,22 @@ class RedisMemory:
         )
 
     # PIPELINE WRITE — RPUSH + LTRIM + EXPIRE
+    # Upstash HTTP client has no pipeline(); issue commands individually.
 
     def _pipeline_write(self, key: str, payload: str) -> None:
         def _do():
-            pipe = self.client.pipeline()
-            pipe.rpush(key, payload)
-            pipe.ltrim(key, -self.max_messages, -1)
-            if self.ttl:
-                pipe.expire(key, self.ttl)
-            pipe.execute()
+            if self._use_upstash:
+                self.client.rpush(key, payload)
+                self.client.ltrim(key, -self.max_messages, -1)
+                if self.ttl:
+                    self.client.expire(key, self.ttl)
+            else:
+                pipe = self.client.pipeline()
+                pipe.rpush(key, payload)
+                pipe.ltrim(key, -self.max_messages, -1)
+                if self.ttl:
+                    pipe.expire(key, self.ttl)
+                pipe.execute()
 
         self._retry(_do)
 
@@ -258,6 +270,8 @@ class RedisMemory:
         importance: float = 1.0,
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
+        if not self._enabled:
+            return
         if not session_id or not content:
             return
 
@@ -303,6 +317,8 @@ class RedisMemory:
     # APPEND ALIAS — USED BY MEMORY MANAGER
 
     def append(self, session_id: str, message: Dict[str, Any]) -> None:
+        if not self._enabled:
+            return
         self.add_message(
             session_id=session_id,
             role=message.get("role", "user"),
@@ -314,6 +330,8 @@ class RedisMemory:
     # GET HISTORY
 
     def get_history(self, session_id: str) -> List[Dict[str, Any]]:
+        if not self._enabled:
+            return []
         key = self._key(session_id)
 
         if self._is_available():
@@ -346,6 +364,8 @@ class RedisMemory:
         session_id: str,
         k: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
+        if not self._enabled:
+            return []
         k = k or settings.MEMORY_TOP_K
         key = self._key(session_id)
 
@@ -401,6 +421,8 @@ class RedisMemory:
     # MEMORY SIZE
 
     def get_memory_size(self, session_id: str) -> int:
+        if not self._enabled:
+            return 0
         key = self._key(session_id)
 
         if self._is_available():
@@ -417,6 +439,8 @@ class RedisMemory:
     # CLEAR MEMORY
 
     def clear_memory(self, session_id: str) -> None:
+        if not self._enabled:
+            return
         key = self._key(session_id)
 
         if self._is_available():
@@ -447,7 +471,7 @@ class RedisMemory:
     # GDPR PURGE — ALL DATA FOR USER_ID PREFIX
 
     def purge_user(self, user_id: str) -> None:
-        if not user_id:
+        if not self._enabled or not user_id:
             return
 
         prefix = f"{self.prefix}:{user_id}:"
@@ -498,6 +522,8 @@ class RedisMemory:
         value: Any,
         ttl: Optional[int] = None,
     ) -> None:
+        if not self._enabled:
+            return
         ttl = ttl or self.query_cache_ttl
 
         try:
@@ -519,6 +545,8 @@ class RedisMemory:
         self._fallback.setex(cache_key, ttl, payload)
 
     def cache_get(self, cache_key: str) -> Optional[Any]:
+        if not self._enabled:
+            return None
         if self._is_available():
             try:
                 def _do():
@@ -540,6 +568,8 @@ class RedisMemory:
         return None
 
     def cache_delete(self, cache_key: str) -> None:
+        if not self._enabled:
+            return
         if self._is_available():
             try:
                 def _do():
@@ -549,6 +579,38 @@ class RedisMemory:
                 logger.warning(event="redis_cache_delete_failed", error=str(exc))
         self._fallback.delete(cache_key)
 
+    def cache_flush_query_cache(self) -> int:
+        """Delete all query-response cache entries (keys prefixed 'qresp:').
+        Uses SCAN to avoid blocking. Returns number of keys deleted."""
+        deleted = 0
+        if self._is_available():
+            try:
+                cursor = 0
+                while True:
+                    result = self.client.scan(cursor, match="qresp:*", count=100)
+                    # Upstash HTTP client returns [cursor, [keys]]
+                    if isinstance(result, (list, tuple)) and len(result) == 2:
+                        cursor, keys = result
+                    else:
+                        break
+                    if keys:
+                        for k in keys:
+                            self.client.delete(k)
+                        deleted += len(keys)
+                    if int(cursor) == 0:
+                        break
+                logger.info(event="query_cache_flushed", deleted=deleted)
+                return deleted
+            except Exception as exc:
+                logger.warning(event="query_cache_flush_failed", error=str(exc))
+
+        # Fallback in-memory: delete keys starting with qresp:
+        fallback_keys = [k for k in list(self._fallback._store.keys()) if k.startswith("qresp:")]
+        for k in fallback_keys:
+            self._fallback.delete(k)
+        deleted += len(fallback_keys)
+        return deleted
+
     # EMBEDDING CACHE
 
     def embedding_cache_set(
@@ -556,12 +618,16 @@ class RedisMemory:
         text_hash: str,
         embedding: List[float],
     ) -> None:
+        if not self._enabled:
+            return
         if not self._valid_embedding(embedding):
             return
         key = f"{self.prefix}:emb:{text_hash}"
         self.cache_set(key, embedding, ttl=self.embed_cache_ttl)
 
     def embedding_cache_get(self, text_hash: str) -> Optional[List[float]]:
+        if not self._enabled:
+            return None
         key = f"{self.prefix}:emb:{text_hash}"
         result = self.cache_get(key)
         if isinstance(result, list) and self._valid_embedding(result):

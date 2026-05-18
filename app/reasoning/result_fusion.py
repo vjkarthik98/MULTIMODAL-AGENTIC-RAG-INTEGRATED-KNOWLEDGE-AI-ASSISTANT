@@ -220,13 +220,12 @@ def _score_fusion(results: List[Dict]) -> List[Dict]:
     return results
 
 
-# FILTER BY MINIMUM SCORE AND TEXT PRESENCE
+# FILTER BY TEXT PRESENCE — score threshold applied after normalization
+# (raw RRF scores are inherently small ~1/61 and cannot be compared against
+#  an absolute threshold before _normalize_scores rescales them to [0,1])
 
 def _filter(results: List[Dict]) -> List[Dict]:
-    return [
-        r for r in results
-        if r.get("text") and r.get("score", 0.0) > settings.FUSION_MIN_SCORE
-    ]
+    return [r for r in results if r.get("text")]
 
 
 # EXACT DEDUP BY HASH
