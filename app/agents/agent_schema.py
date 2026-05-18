@@ -349,6 +349,7 @@ class AgentResponse(BaseModel):
     metadata:           Dict[str, Any] = Field(default_factory=dict)
     hallucination_warning: bool = Field(default=False)
     is_fallback:        bool  = Field(default=False)
+    sources:            List[Dict[str, Any]] = Field(default_factory=list)
 
     @field_validator("confidence", mode="before")
     @classmethod
@@ -360,6 +361,15 @@ class AgentResponse(BaseModel):
             return max(0.0, min(val, 1.0))
         except (TypeError, ValueError):
             return 0.5
+
+    @field_validator("sources", mode="before")
+    @classmethod
+    def coerce_sources(cls, v: Any) -> List[Dict[str, Any]]:
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return v
+        return []
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -376,5 +386,6 @@ class AgentResponse(BaseModel):
             "metadata":            self.metadata,
             "hallucination_warning": self.hallucination_warning,
             "is_fallback":         self.is_fallback,
+            "sources":             self.sources,
         }
 
