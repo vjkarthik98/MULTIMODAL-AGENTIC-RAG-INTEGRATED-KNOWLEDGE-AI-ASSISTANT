@@ -59,7 +59,7 @@ _VIDEO_KEYWORDS = {
 }
 
 # RRF CONSTANT
-_RRF_K: int = getattr(settings, "RRF_K", 60)
+_RRF_K: int = settings.HYBRID_RRF_K
 
 
 class HybridRetriever:
@@ -176,10 +176,10 @@ class HybridRetriever:
             r["score"] = r.get("score", 0.0) / max_s
         return results
 
-    # RRF FUSION
+    # RRF FUSION — score = sum(1 / (K + rank_i)) per spec
 
-    def _rrf_score(self, rank: int, weight: float) -> float:
-        return weight / (_RRF_K + rank)
+    def _rrf_score(self, rank: int) -> float:
+        return 1.0 / (_RRF_K + rank)
 
     # FUSE INTO COMBINED MAP
 
@@ -197,14 +197,10 @@ class HybridRetriever:
             if not text:
                 continue
 
-            base_score = float(r.get("score", 0.0))
-            rrf = self._rrf_score(rank, weight)
-            combined_score = base_score * weight + rrf
+            rrf = self._rrf_score(rank) * weight
+            combined_score = rrf
 
             if not self._valid_score(combined_score):
-                continue
-
-            if combined_score < self.min_score * weight:
                 continue
 
             h = self._hash(text, meta)
@@ -235,6 +231,10 @@ class HybridRetriever:
         filtered = []
         for r in results:
             meta = r.get("metadata", {}) or {}
+
+            if session_id and meta.get("session_id") != session_id:
+                continue
+
             if filters:
                 if filters.get("modality") and meta.get("modality") != filters["modality"]:
                     continue
@@ -428,7 +428,7 @@ class HybridRetriever:
             # EARLY EXIT IF BOTH EMPTY
             if not bm25_res and not vec_res:
                 logger.warning(
-                    event="hybrid_no_results",
+                    event="hybrid_retrieval_empty_no_results_from_either_retriever",
                     query_len=len(query),
                     session_id=session_id,
                 )

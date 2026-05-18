@@ -340,14 +340,15 @@ class RAGPipeline:
             )
             return "I don't know based on available data."
 
-    # EMPTY RESPONSE
+    # EMPTY RESPONSE — no docs retrieved, do NOT call LLM
 
     def _empty(self, start: float) -> Dict[str, Any]:
         return {
-            "answer":   "I don't know based on available data.",
-            "sources":  [],
-            "latency":  round(time.time() - start, 2),
-            "metadata": {"docs": 0},
+            "answer":     "No relevant documents found. Please ingest documents first.",
+            "confidence": 0.0,
+            "sources":    [],
+            "latency":    round(time.time() - start, 2),
+            "metadata":   {"docs": 0},
         }
 
     # MAIN RUN — SECTION 4.6
@@ -412,6 +413,16 @@ class RAGPipeline:
             docs = _dedup_docs(docs)
             docs = sorted(docs, key=lambda d: d.get("score", 0.0), reverse=True)
             docs = docs[:settings.RAG_TOP_K]
+
+            # SCORE THRESHOLD GUARD — treat low-score results as empty retrieval
+            docs = [d for d in docs if d.get("score", 0.0) >= settings.FUSION_MIN_SCORE]
+            if not docs:
+                logger.warning(
+                    event="rag_all_chunks_below_min_score",
+                    threshold=settings.FUSION_MIN_SCORE,
+                    session_id=session_id,
+                )
+                return self._empty(start)
 
             # CONTEXT ASSEMBLY
             context      = _build_context(docs, settings.MAX_CONTEXT_CHARS)
