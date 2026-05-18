@@ -298,6 +298,79 @@ def _store_interaction(
         logger.warning(event="memory_store_failed", error=str(e), session_id=session_id)
 
 
+# SOURCES ARRAY BUILDER — PHASE 24.8
+
+def _build_sources_array(docs: List[Dict[str, Any]], max_items: int = 3) -> List[Dict[str, Any]]:
+    """Build the Phase 24.8 standardised sources array from reranked docs (top min(max_items, len))."""
+    import os as _os
+    out: List[Dict[str, Any]] = []
+    for doc in docs[:max_items]:
+        meta  = doc.get("metadata") or {}
+        text  = doc.get("text") or ""
+        score = doc.get("final_score") if doc.get("final_score") is not None else doc.get("score")
+        try:
+            score = float(score) if score is not None else 0.0
+        except (TypeError, ValueError):
+            score = 0.0
+
+        src_raw = (
+            meta.get("source")
+            or meta.get("filename")
+            or meta.get("file_path")
+            or "unknown"
+        )
+        source_name = _os.path.basename(str(src_raw)) if src_raw != "unknown" else "unknown"
+
+        modality = str(meta.get("modality") or "text")
+
+        page_number: Optional[int] = None
+        raw_page = meta.get("page_number") if meta.get("page_number") is not None else meta.get("page")
+        if isinstance(raw_page, int):
+            page_number = raw_page
+        elif raw_page is not None:
+            try:
+                page_number = int(raw_page)
+            except (TypeError, ValueError):
+                pass
+
+        start_time: Optional[float] = None
+        end_time:   Optional[float] = None
+        raw_start = meta.get("start_time") if meta.get("start_time") is not None else meta.get("timestamp_start")
+        raw_end   = meta.get("end_time")   if meta.get("end_time")   is not None else meta.get("timestamp_end")
+        if raw_start is not None:
+            try:
+                start_time = float(raw_start)
+            except (TypeError, ValueError):
+                pass
+        if raw_end is not None:
+            try:
+                end_time = float(raw_end)
+            except (TypeError, ValueError):
+                pass
+
+        doc_id = str(meta.get("doc_id") or meta.get("chunk_id") or "")
+
+        out.append({
+            "text":        str(text)[:200],
+            "score":       round(score, 6),
+            "source":      source_name,
+            "page_number": page_number,
+            "start_time":  start_time,
+            "end_time":    end_time,
+            "modality":    modality,
+            "doc_id":      doc_id,
+        })
+    return out
+
+
+def _confidence_from_sources(sources: List[Dict[str, Any]]) -> float:
+    """Mean score of top-3 sources, clamped to [0.0, 1.0]. Returns 0.0 if no sources."""
+    scores = [s["score"] for s in sources[:3] if isinstance(s.get("score"), (int, float))]
+    if not scores:
+        return 0.0
+    return round(max(0.0, min(sum(scores) / len(scores), 1.0)), 6)
+
+
 # STREAMING RESPONSE — SECTION 4.6
 
 async def stream_query(
@@ -367,9 +440,17 @@ def query_pipeline(
 
     if not query or not query.strip():
         return {
-            "answer":   "Query cannot be empty.",
-            "latency":  0.0,
-            "trace_id": trace_id,
+            "answer":               "Query cannot be empty.",
+            "confidence":           0.0,
+            "decision":             "reject",
+            "source":               "validation",
+            "session_id":           session_id,
+            "request_id":           trace_id,
+            "latency":              0.0,
+            "sources":              [],
+            "is_fallback":          False,
+            "hallucination_warning": True,
+            "trace_id":             trace_id,
         }
 
     # NORMALIZE AND SANITIZE — SECTION 2.3 / SECTION 5
@@ -417,14 +498,22 @@ def query_pipeline(
         # SHORT-CIRCUIT FOR NON-RAG DECISIONS — SECTION 4.9
         if decision in {"direct", "search", "memory"}:
             answer = agent_result.get("response", "No answer generated.")
+            conf   = float(agent_result.get("confidence", 0.5))
+            conf   = max(0.0, min(conf, 1.0))
             resp = {
-                "answer":        answer,
-                "confidence":    agent_result.get("confidence", 0.5),
-                "decision":      decision,
-                "agent_latency": agent_latency,
-                "latency":       round(time.time() - start, 3),
-                "trace_id":      trace_id,
-                "metadata":      {"source": "agent"},
+                "answer":               answer,
+                "confidence":           conf,
+                "decision":             decision,
+                "source":               "agent",
+                "session_id":           session_id,
+                "request_id":           trace_id,
+                "agent_latency":        agent_latency,
+                "latency":              round(time.time() - start, 3),
+                "sources":              [],
+                "is_fallback":          False,
+                "hallucination_warning": conf < settings.AGENT_LOW_CONFIDENCE,
+                "trace_id":             trace_id,
+                "metadata":             {"source": "agent"},
             }
             _cache_set(session_id, query, resp)
             _store_interaction(session_id, query, answer, memory)
@@ -479,33 +568,34 @@ def query_pipeline(
                 session_id=session_id,
             )
             return {
-                "answer":     "No relevant documents found. Please ingest documents first.",
-                "confidence": 0.0,
-                "sources":    [],
-                "latency":    round(time.time() - start, 3),
-                "trace_id":   trace_id,
+                "answer":               "No relevant documents found. Please ingest documents first.",
+                "confidence":           0.0,
+                "decision":             decision,
+                "source":               "rag",
+                "session_id":           session_id,
+                "request_id":           trace_id,
+                "latency":              round(time.time() - start, 3),
+                "sources":              [],
+                "is_fallback":          False,
+                "hallucination_warning": True,
+                "trace_id":             trace_id,
             }
 
         # RESULT FUSION — SECTION 4.8
         fused = fusion.fuse(retrieved, session_id=session_id)
         if not fused:
             return {
-                "answer":     "No relevant documents found. Please ingest documents first.",
-                "confidence": 0.0,
-                "sources":    [],
-                "latency":    round(time.time() - start, 3),
-                "trace_id":   trace_id,
-            }
-
-        # FUSION MIN SCORE GUARD
-        fused = [d for d in fused if d.get("score", 0.0) >= settings.FUSION_MIN_SCORE]
-        if not fused:
-            return {
-                "answer":     "No relevant documents found. Please ingest documents first.",
-                "confidence": 0.0,
-                "sources":    [],
-                "latency":    round(time.time() - start, 3),
-                "trace_id":   trace_id,
+                "answer":               "No relevant documents found. Please ingest documents first.",
+                "confidence":           0.0,
+                "decision":             decision,
+                "source":               "rag",
+                "session_id":           session_id,
+                "request_id":           trace_id,
+                "latency":              round(time.time() - start, 3),
+                "sources":              [],
+                "is_fallback":          False,
+                "hallucination_warning": True,
+                "trace_id":             trace_id,
             }
 
         # RERANK — SECTION 4.5
@@ -518,14 +608,24 @@ def query_pipeline(
 
         if not reranked:
             return {
-                "answer":     "No relevant documents found. Please ingest documents first.",
-                "confidence": 0.0,
-                "sources":    [],
-                "latency":    round(time.time() - start, 3),
-                "trace_id":   trace_id,
+                "answer":               "No relevant documents found. Please ingest documents first.",
+                "confidence":           0.0,
+                "decision":             decision,
+                "source":               "rag",
+                "session_id":           session_id,
+                "request_id":           trace_id,
+                "latency":              round(time.time() - start, 3),
+                "sources":              [],
+                "is_fallback":          False,
+                "hallucination_warning": True,
+                "trace_id":             trace_id,
             }
 
         final_docs = reranked[:settings.RAG_TOP_K]
+
+        # BUILD CANONICAL SOURCES[] WITH cite_key BEFORE REASONING
+        from app.core.response import build_sources
+        canonical_sources = build_sources(final_docs)
 
         # REASONING — SECTION 4.8
         t_reason = time.time()
@@ -536,6 +636,7 @@ def query_pipeline(
                 retrieved_docs=final_docs,
                 memory_context=memory_context,
                 session_id=session_id,
+                sources=canonical_sources,
             )
             reasoning_latency = round(time.time() - t_reason, 3)
             _record_llm_latency("gguf_mistral", reasoning_latency)
@@ -592,15 +693,44 @@ def query_pipeline(
         if not answer:
             answer = "No answer generated."
 
+        # PHASE 24.8 — build standardised sources[] from reranked docs
+        p248_sources = _build_sources_array(final_docs, max_items=min(3, len(final_docs)))
+
+        # CONFIDENCE — prefer executor value when valid; else compute from source scores
+        raw_conf = output.get("confidence")
+        if raw_conf is not None:
+            try:
+                raw_conf = float(raw_conf)
+                if not (0.0 <= raw_conf <= 1.0):
+                    raw_conf = None
+            except (TypeError, ValueError):
+                raw_conf = None
+        confidence = raw_conf if raw_conf is not None else _confidence_from_sources(p248_sources)
+        confidence = round(max(0.0, min(confidence, 1.0)), 6)
+
+        hallucination_warning = confidence < settings.AGENT_LOW_CONFIDENCE
+
+        # FINAL sources[] — prefer the Phase 24.8 array built from reranked docs.
+        # Also keep canonical_sources for LLM citation rendering.
+        out_sources = output.get("sources")
+        if not isinstance(out_sources, list):
+            out_sources = canonical_sources
+
         total_latency = round(time.time() - start, 3)
 
         response = {
-            "answer":       answer,
-            "confidence":   output.get("confidence", 0.5),
-            "sources_used": output.get("sources_used", 0),
-            "decision":     decision,
-            "latency":      total_latency,
-            "trace_id":     trace_id,
+            "answer":               answer,
+            "confidence":           confidence,
+            "decision":             decision,
+            "source":               "agent",
+            "session_id":           session_id,
+            "request_id":           trace_id,
+            "latency":              total_latency,
+            "sources":              p248_sources,
+            "is_fallback":          False,
+            "hallucination_warning": hallucination_warning,
+            "sources_used":         len(p248_sources),
+            "trace_id":             trace_id,
             "metadata": {
                 "agent_latency":     agent_latency,
                 "retrieval_latency": retrieval_latency,
@@ -609,10 +739,18 @@ def query_pipeline(
                 "queries_expanded":  len(queries),
                 "memory_injected":   bool(memory_context),
                 "cache_hit":         False,
+                "canonical_sources": out_sources,
             },
         }
 
-        _cache_set(session_id, query, response)
+        if (
+            answer
+            and "No relevant documents" not in answer
+            and "Something went wrong" not in answer
+            and "No answer generated" not in answer
+            and output.get("confidence", 0) > 0.15
+        ):
+            _cache_set(session_id, query, response)
         _store_interaction(session_id, query, answer, memory)
 
         logger.info(
@@ -636,10 +774,18 @@ def query_pipeline(
             trace_id=trace_id,
         )
         return {
-            "answer":   "Something went wrong. Please try again.",
-            "latency":  round(time.time() - start, 3),
-            "trace_id": trace_id,
-            "error":    str(e),
+            "answer":               "Something went wrong. Please try again.",
+            "confidence":           0.0,
+            "decision":             "fallback",
+            "source":               "error",
+            "session_id":           session_id,
+            "request_id":           trace_id,
+            "latency":              round(time.time() - start, 3),
+            "sources":              [],
+            "is_fallback":          True,
+            "hallucination_warning": True,
+            "trace_id":             trace_id,
+            "error":                str(e),
         }
 
 
