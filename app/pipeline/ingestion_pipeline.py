@@ -500,6 +500,8 @@ class IngestionPipeline:
 
             # STAMP FILE HASH ON ALL CHUNKS — SECTION 2.2
             for c in chunks:
+                if not isinstance(c.structure, dict):
+                    c.structure = {}
                 c.structure.setdefault("checksum_sha256", file_hash)
                 c.structure.setdefault("file_size_bytes", file_size)
                 c.structure.setdefault("ingestion_time",  time.time())
@@ -551,18 +553,6 @@ class IngestionPipeline:
                 latency=embed_latency,
             )
 
-            # BM25 INDEX UPDATE — SECTION 4.5
-            try:
-                if self.bm25:
-                    self.bm25.add_documents(chunks, session_id=session_id)
-            except Exception as e:
-                logger.error(
-                    event="bm25_update_failed",
-                    error=str(e),
-                    session_id=session_id,
-                )
-                _record_error(modality, "bm25_update_failed")
-
             # VECTOR STORE UPSERT — SECTION 4.4 / 4.6
             progress.emit("store", "started")
             t_store = time.time()
@@ -581,6 +571,19 @@ class IngestionPipeline:
                         session_id=session_id,
                     )
                     _record_error(modality, "vector_insert_failed")
+
+            # BM25 INDEX UPDATE — after Qdrant upsert succeeds
+            if total > 0:
+                try:
+                    if self.bm25:
+                        self.bm25.add_documents(chunks, session_id=session_id)
+                except Exception as e:
+                    logger.error(
+                        event="bm25_update_failed",
+                        error=str(e),
+                        session_id=session_id,
+                    )
+                    _record_error(modality, "bm25_update_failed")
 
             store_latency = round(time.time() - t_store, 2)
             total_latency = round(time.time() - start, 2)

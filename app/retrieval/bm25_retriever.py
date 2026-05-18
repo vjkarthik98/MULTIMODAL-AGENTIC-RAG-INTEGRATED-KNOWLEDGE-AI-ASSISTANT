@@ -235,6 +235,46 @@ class BM25Retriever:
             latency=round(time.time() - start, 2),
         )
 
+    # ADD DOCUMENT — SINGLE DOC INCREMENTAL (called from ingestion pipeline)
+
+    def add_document(self, text: str, metadata: Dict[str, Any]) -> None:
+        if not text or not text.strip():
+            return
+        text = text[:settings.BM25_MAX_TEXT_CHARS]
+        h = self._hash(text)
+        seen_existing: Set[str] = {
+            self._hash(getattr(d, "text", "")[:settings.BM25_MAX_TEXT_CHARS])
+            for d in self.documents
+        }
+        if h in seen_existing:
+            return
+        tokens = self._tokenize(text)
+        if not tokens:
+            return
+
+        class _Doc:
+            pass
+
+        doc = _Doc()
+        doc.text = text  # type: ignore[attr-defined]
+        doc.structure = metadata  # type: ignore[attr-defined]
+        doc.modality = metadata.get("modality", "text")  # type: ignore[attr-defined]
+        doc.subtype = metadata.get("subtype")  # type: ignore[attr-defined]
+        doc.source = metadata.get("source")  # type: ignore[attr-defined]
+        doc.source_type = metadata.get("source_type")  # type: ignore[attr-defined]
+        doc.chunk_id = metadata.get("chunk_id")  # type: ignore[attr-defined]
+        doc.page = metadata.get("page")  # type: ignore[attr-defined]
+
+        self.documents.append(doc)
+        self.tokenized_corpus.append(tokens)
+        self.bm25 = BM25Okapi(self.tokenized_corpus)
+        self._save_index()
+        logger.info(
+            event="bm25_document_added",
+            session_id=metadata.get("session_id"),
+            total=len(self.documents),
+        )
+
     # ADD DOCUMENTS — INCREMENTAL
 
     def add_documents(self, documents: List[Any], session_id: str = "") -> None:
@@ -339,6 +379,10 @@ class BM25Retriever:
         session_id: Optional[str],
         filters: Optional[Dict[str, Any]],
     ) -> bool:
+        # SESSION ISOLATION — always enforce when session_id is provided
+        if session_id and meta.get("session_id") != session_id:
+            return False
+
         if self.modality_filter and meta.get("modality") != self.modality_filter:
             return False
 
@@ -348,8 +392,6 @@ class BM25Retriever:
             if filters.get("language") and meta.get("language") != filters["language"]:
                 return False
             if filters.get("source_type") and meta.get("source_type") != filters["source_type"]:
-                return False
-            if filters.get("session_id") and meta.get("session_id") != filters["session_id"]:
                 return False
 
         return True
@@ -368,7 +410,7 @@ class BM25Retriever:
             self._load_index()
 
         if not self.bm25:
-            logger.warning(event="bm25_not_ready", session_id=session_id)
+            logger.info(event="bm25_empty_index_returning_empty_list", session_id=session_id)
             return []
 
         if not query:

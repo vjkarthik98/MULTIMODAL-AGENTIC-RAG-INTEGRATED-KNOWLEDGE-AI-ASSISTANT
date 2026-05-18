@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 import time
 import unicodedata
 import uuid
@@ -143,7 +144,7 @@ def _cache_set(session_id: str, query: str, data: Dict[str, Any]) -> None:
         pass
 
 
-# LAZY SINGLETONS
+# LAZY SINGLETONS — all guarded by a per-singleton lock to prevent double-init
 
 _agent        = None
 _bm25         = None
@@ -155,58 +156,77 @@ _hybrid       = None
 _reasoning    = None
 _decomposer   = None
 
+_lock_agent     = threading.Lock()
+_lock_infra     = threading.Lock()
+_lock_fusion    = threading.Lock()
+_lock_reranker  = threading.Lock()
+_lock_hybrid    = threading.Lock()
+_lock_reasoning = threading.Lock()
+
 
 def _get_agent():
     global _agent
     if _agent is None:
-        from app.agents.agent_controller import AgentController
-        _agent = AgentController()
+        with _lock_agent:
+            if _agent is None:
+                from app.agents.agent_controller import AgentController
+                _agent = AgentController()
     return _agent
 
 
 def _get_infra():
     global _bm25, _vector_store, _memory
     if _bm25 is None or _vector_store is None or _memory is None:
-        from app.core.infra_registry import infra
-        _bm25         = infra.get_bm25()
-        _vector_store = infra.get_vector_store()
-        _memory       = infra.get_memory()
+        with _lock_infra:
+            if _bm25 is None or _vector_store is None or _memory is None:
+                from app.core.infra_registry import infra
+                _bm25         = infra.get_bm25()
+                _vector_store = infra.get_vector_store()
+                _memory       = infra.get_memory()
     return _bm25, _vector_store, _memory
 
 
 def _get_fusion():
     global _fusion
     if _fusion is None:
-        from app.reasoning.result_fusion import ResultFusion
-        _fusion = ResultFusion()
+        with _lock_fusion:
+            if _fusion is None:
+                from app.reasoning.result_fusion import ResultFusion
+                _fusion = ResultFusion()
     return _fusion
 
 
 def _get_reranker():
     global _reranker
     if _reranker is None:
-        from app.retrieval.reranker import Reranker
-        _reranker = Reranker()
+        with _lock_reranker:
+            if _reranker is None:
+                from app.retrieval.reranker import Reranker
+                _reranker = Reranker()
     return _reranker
 
 
 def _get_hybrid(embedder: Any) -> Any:
     global _hybrid
     if _hybrid is None:
-        from app.retrieval.hybrid_retriever import HybridRetriever
-        bm25, vector_store, _ = _get_infra()
-        _hybrid = HybridRetriever(bm25, vector_store, embedder)
+        with _lock_hybrid:
+            if _hybrid is None:
+                from app.retrieval.hybrid_retriever import HybridRetriever
+                bm25, vector_store, _ = _get_infra()
+                _hybrid = HybridRetriever(bm25, vector_store, embedder)
     return _hybrid
 
 
 def _get_reasoning_components(llm: Any):
     global _reasoning, _decomposer
-    if _reasoning is None:
-        from app.reasoning.reasoning_engine import ReasoningEngine
-        _reasoning = ReasoningEngine(llm)
-    if _decomposer is None:
-        from app.reasoning.query_decomposer import QueryDecomposer
-        _decomposer = QueryDecomposer(llm)
+    if _reasoning is None or _decomposer is None:
+        with _lock_reasoning:
+            if _reasoning is None:
+                from app.reasoning.reasoning_engine import ReasoningEngine
+                _reasoning = ReasoningEngine(llm)
+            if _decomposer is None:
+                from app.reasoning.query_decomposer import QueryDecomposer
+                _decomposer = QueryDecomposer(llm)
     return _reasoning, _decomposer
 
 
@@ -235,7 +255,7 @@ def _build_memory_context(
         return ""
 
 
-# STORE INTERACTION — SECTION 4.7
+# STORE INTERACTION + AUTO-SUMMARIZE EVERY N TURNS — SECTION 4.7
 
 def _store_interaction(
     session_id: str,
@@ -243,12 +263,37 @@ def _store_interaction(
     answer: str,
     memory: Any,
 ) -> None:
-    if not memory or not answer.strip():
+    if not answer.strip():
         return
     try:
         from app.memory.memory_manager import MemoryManager
+        from app.core.infra_registry import infra
         mgr = MemoryManager()
         mgr.add_interaction(session_id, query, answer)
+
+        # AUTO-SUMMARIZE AFTER EVERY N TURNS — fires in background thread
+        size = mgr.get_memory_size(session_id)
+        every_n = settings.MEMORY_SUMMARY_EVERY_N_TURNS * 2  # each turn = 2 messages
+        if every_n > 0 and size > 0 and size % every_n == 0:
+            import threading
+            def _run_summary():
+                try:
+                    from app.core.model_loader import model_loader
+                    llm = model_loader.get_llm()
+                    mgr.summarize_and_compress(session_id, llm)
+                    logger.info(
+                        event="auto_summary_triggered",
+                        session_id=session_id,
+                        turn=size // 2,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        event="auto_summary_failed",
+                        error=str(exc),
+                        session_id=session_id,
+                    )
+            threading.Thread(target=_run_summary, daemon=True).start()
+
     except Exception as e:
         logger.warning(event="memory_store_failed", error=str(e), session_id=session_id)
 
@@ -269,19 +314,37 @@ async def stream_query(
     query = query[:settings.MAX_PROMPT_CHARS]
 
     try:
-        from app.core.model_loader import model_loader
         from app.pipeline.rag_pipeline import RAGPipeline
+        import queue as _queue
 
         rag = RAGPipeline()
-        gen = rag.stream(query, session_id=session_id)
 
-        async def _wrap_sync_gen():
-            loop = asyncio.get_event_loop()
-            for token in await loop.run_in_executor(None, list, gen):
-                yield token
+        # Run the sync generator in a thread and forward tokens via a queue
+        token_queue: _queue.Queue = _queue.Queue()
+        _SENTINEL = object()
 
-        async for token in _wrap_sync_gen():
-            yield token
+        def _producer():
+            try:
+                for tok in rag.stream(query, session_id=session_id):
+                    token_queue.put(tok)
+            except Exception as exc:
+                token_queue.put(exc)
+            finally:
+                token_queue.put(_SENTINEL)
+
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, _producer)
+
+        while True:
+            item = await loop.run_in_executor(None, token_queue.get)
+            if item is _SENTINEL:
+                break
+            if isinstance(item, Exception):
+                logger.error(event="stream_query_failed", error=str(item), session_id=session_id)
+                yield f"[ERROR]: {item}"
+                break
+            if item:
+                yield item
 
         yield "[DONE]"
 
@@ -320,6 +383,8 @@ def query_pipeline(
         cached["latency"]   = round(time.time() - start, 3)
         cached["cache_hit"] = True
         cached["trace_id"]  = trace_id
+        if isinstance(cached.get("metadata"), dict):
+            cached["metadata"]["cache_hit"] = True
         logger.debug(event="query_cache_hit", session_id=session_id)
         return cached
 
@@ -414,18 +479,33 @@ def query_pipeline(
                 session_id=session_id,
             )
             return {
-                "answer":   "No relevant information found.",
-                "latency":  round(time.time() - start, 3),
-                "trace_id": trace_id,
+                "answer":     "No relevant documents found. Please ingest documents first.",
+                "confidence": 0.0,
+                "sources":    [],
+                "latency":    round(time.time() - start, 3),
+                "trace_id":   trace_id,
             }
 
         # RESULT FUSION — SECTION 4.8
         fused = fusion.fuse(retrieved, session_id=session_id)
         if not fused:
             return {
-                "answer":   "No relevant information found.",
-                "latency":  round(time.time() - start, 3),
-                "trace_id": trace_id,
+                "answer":     "No relevant documents found. Please ingest documents first.",
+                "confidence": 0.0,
+                "sources":    [],
+                "latency":    round(time.time() - start, 3),
+                "trace_id":   trace_id,
+            }
+
+        # FUSION MIN SCORE GUARD
+        fused = [d for d in fused if d.get("score", 0.0) >= settings.FUSION_MIN_SCORE]
+        if not fused:
+            return {
+                "answer":     "No relevant documents found. Please ingest documents first.",
+                "confidence": 0.0,
+                "sources":    [],
+                "latency":    round(time.time() - start, 3),
+                "trace_id":   trace_id,
             }
 
         # RERANK — SECTION 4.5
@@ -438,9 +518,11 @@ def query_pipeline(
 
         if not reranked:
             return {
-                "answer":   "No relevant information found.",
-                "latency":  round(time.time() - start, 3),
-                "trace_id": trace_id,
+                "answer":     "No relevant documents found. Please ingest documents first.",
+                "confidence": 0.0,
+                "sources":    [],
+                "latency":    round(time.time() - start, 3),
+                "trace_id":   trace_id,
             }
 
         final_docs = reranked[:settings.RAG_TOP_K]
@@ -456,7 +538,7 @@ def query_pipeline(
                 session_id=session_id,
             )
             reasoning_latency = round(time.time() - t_reason, 3)
-            _record_llm_latency(settings.EMBEDDING_MODEL, reasoning_latency)
+            _record_llm_latency("gguf_mistral", reasoning_latency)
         except Exception as e:
             logger.error(
                 event="reasoning_failed",
@@ -567,7 +649,7 @@ async def query_pipeline_async(
     query: str,
     session_id: str = "default",
 ) -> Dict[str, Any]:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await asyncio.wait_for(
         loop.run_in_executor(None, query_pipeline, query, session_id),
         timeout=settings.REQUEST_TIMEOUT_SEC,
