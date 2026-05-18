@@ -304,12 +304,15 @@ def _system_prompt(
         )
 
     return (
-        "You are a grounded AI assistant.\n"
-        "RULES:\n"
-        "- Use ONLY the provided context\n"
-        "- No hallucination\n"
-        "- If unsure → 'I don't know'\n"
-        "- Be concise and factual\n\n"
+        "You are a precise knowledge assistant.\n"
+        "Answer ONLY using the provided context chunks below.\n"
+        "Rules:\n"
+        "1. Use ONLY information present in the provided context.\n"
+        "2. If the answer is not in the context, respond exactly: "
+        '"The provided documents do not contain information about this topic."\n'
+        "3. Cite sources: reference document name and page number when relevant.\n"
+        "4. Never add information not present in the context.\n"
+        "5. Be concise and direct.\n\n"
     )
 
 
@@ -402,6 +405,10 @@ class PromptBuilder:
 
                 span.set_attribute("query.type", query_type)
                 span.set_attribute("query.modality", modality or "text")
+
+                # NO-CONTEXT GUARD — do not build prompt when retrieval was empty
+                if not context:
+                    raise ValueError("EMPTY_CONTEXT_NO_DOCUMENTS_RETRIEVED")
 
                 # DEDUP OVERLAP BETWEEN MEMORY AND CONTEXT
                 memory, context = _deduplicate_context(memory, context)
