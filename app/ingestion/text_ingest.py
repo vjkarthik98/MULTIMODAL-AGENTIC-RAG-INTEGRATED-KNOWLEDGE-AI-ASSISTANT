@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import re
 import time
 import uuid
 from pathlib import Path
@@ -14,6 +15,15 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
 from app.ingestion.schema import IngestedDocument
+from app.ingestion.text_repair import (
+    extract_version,
+    has_title_mismatch,
+    is_placeholder,
+    normalize_ocr_noise,
+    recover_whitespace,
+    repair_text,
+    strip_footnotes,
+)
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -359,6 +369,46 @@ def _quality_score(chunk: str) -> float:
     return 1.0
 
 
+# SECTION SPLITTING — DETECT [DOC-NNN] HEADERS
+#
+# Many synthetic / multi-doc corpora pack several logical documents into one
+# file using a header line like "[DOC-001] Some title". We slice the file
+# into per-section blocks BEFORE chunking so each chunk carries its own
+# section_id / section_title and remains citable down to the section level.
+# If no markers are present the splitter falls back to a single (None, None)
+# block, which makes the pipeline a no-op for plain txt/md.
+
+_SECTION_HEADER_RE = re.compile(
+    r"^[ \t]*\[(DOC-[A-Za-z0-9._\-]+)\][ \t]*(.*)$",
+    re.MULTILINE,
+)
+
+
+def _split_sections(text: str) -> List[Tuple[Optional[str], Optional[str], str]]:
+    matches = list(_SECTION_HEADER_RE.finditer(text))
+    if not matches:
+        return [(None, None, text)]
+
+    sections: List[Tuple[Optional[str], Optional[str], str]] = []
+
+    # PREAMBLE BEFORE FIRST [DOC-NNN] — keep only if non-trivial
+    preamble = text[: matches[0].start()].strip()
+    if preamble and len(preamble) >= settings.CHUNK_MIN_SIZE:
+        sections.append((None, None, preamble))
+
+    for i, m in enumerate(matches):
+        section_id    = m.group(1).strip()
+        section_title = m.group(2).strip() or None
+        body_start    = m.end()
+        body_end      = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body          = text[body_start:body_end].strip()
+        if not body:
+            continue
+        sections.append((section_id, section_title, body))
+
+    return sections
+
+
 # CHUNKING — SEMANTIC BOUNDARY AWARE
 
 def _chunk_text(text: str) -> List[str]:
@@ -368,7 +418,7 @@ def _chunk_text(text: str) -> List[str]:
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=settings.CHUNK_SIZE,
             chunk_overlap=settings.CHUNK_OVERLAP,
-            separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""],
+            separators=["\n[DOC-", "\n\n", "\n", ". ", "! ", "? ", " ", ""],
         )
         chunks = splitter.split_text(text)
         if chunks:
@@ -460,6 +510,21 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                         file=path.name,
                     )
 
+                # FILE-LEVEL REPAIR — mojibake fix + noise-line strip.
+                # Cheap, idempotent, no-op on clean text. Per-chunk repairs
+                # (OCR, whitespace recovery, footnote strip, placeholder
+                # detection, title-mismatch flag, version tagging) run later
+                # once chunks are produced.
+                raw_text, repair_stats = await asyncio.get_event_loop().run_in_executor(
+                    None, repair_text, raw_text
+                )
+                if repair_stats:
+                    logger.info(
+                        "text_repair_file_level",
+                        file=path.name,
+                        **repair_stats,
+                    )
+
                 # NORMALIZE
                 text = _normalize_text(raw_text)
 
@@ -490,34 +555,95 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 for entity_type, count in pii_counts.items():
                     _pii_redacted.labels(entity_type=entity_type).inc(count)
 
-                # CHUNKING
-                chunks = await asyncio.get_event_loop().run_in_executor(
-                    None, _chunk_text, text
+                # SECTION SPLITTING — detect [DOC-NNN] blocks before chunking.
+                # Falls back to a single (None, None, text) block for plain files.
+                sections = await asyncio.get_event_loop().run_in_executor(
+                    None, _split_sections, text
                 )
 
-                if not chunks:
+                # CHUNK PER SECTION
+                # We preserve (section_id, section_title, chunk_text, section_extras)
+                # tuples so the citation layer can render Claude-style numbered
+                # references that point back to a specific DOC-NNN.
+                chunk_tuples: List[
+                    Tuple[Optional[str], Optional[str], str, Dict[str, Any]]
+                ] = []
+                dropped_sections = 0
+                for section_id_val, section_title_val, body in sections:
+                    # SKIP EMPTY / PLACEHOLDER SECTIONS
+                    if is_placeholder(body):
+                        dropped_sections += 1
+                        logger.info(
+                            "dropped_empty_section",
+                            section_id=section_id_val,
+                            section_title=section_title_val,
+                            file=path.name,
+                        )
+                        continue
+
+                    # STRIP FOOTNOTES / EDITOR NOTES — preserve as metadata
+                    cleaned_body, footnotes = strip_footnotes(body)
+
+                    section_extras: Dict[str, Any] = {}
+                    if footnotes:
+                        section_extras["footnotes"] = footnotes
+
+                    version_info = extract_version(section_id_val, section_title_val)
+                    if version_info:
+                        section_extras["doc_version"]      = version_info["version"]
+                        section_extras["doc_version_kind"] = version_info["kind"]
+
+                    section_chunks = await asyncio.get_event_loop().run_in_executor(
+                        None, _chunk_text, cleaned_body
+                    )
+                    for ch in section_chunks:
+                        if ch and ch.strip():
+                            chunk_tuples.append(
+                                (section_id_val, section_title_val, ch, section_extras)
+                            )
+
+                if dropped_sections:
+                    logger.info(
+                        "dropped_empty_sections_total",
+                        count=dropped_sections,
+                        file=path.name,
+                    )
+
+                if not chunk_tuples:
                     raise ValueError("NO_CHUNKS_PRODUCED")
 
-                if len(chunks) > settings.MAX_CHUNKS:
+                if len(chunk_tuples) > settings.MAX_CHUNKS:
                     logger.warning(
                         "chunk_limit_applied",
-                        original=len(chunks),
+                        original=len(chunk_tuples),
                         limited=settings.MAX_CHUNKS,
                         file=path.name,
                     )
-                    chunks = chunks[:settings.MAX_CHUNKS]
+                    chunk_tuples = chunk_tuples[:settings.MAX_CHUNKS]
 
-                total_chunks = len(chunks)
+                total_chunks = len(chunk_tuples)
                 documents:   List[IngestedDocument] = []
 
                 # NEAR-DEDUP VIA SIMHASH
                 seen_hashes:    set = set()
                 seen_simhashes: List[int] = []
 
-                for i, chunk in enumerate(chunks):
+                for i, (section_id_val, section_title_val, chunk, section_extras) in enumerate(chunk_tuples):
                     chunk = chunk.strip()
                     if not chunk:
                         continue
+
+                    # PER-CHUNK REPAIRS — only kick in for actually broken chunks
+                    chunk_repairs: Dict[str, Any] = {}
+                    repaired, ws_fixed = recover_whitespace(chunk)
+                    if ws_fixed:
+                        chunk = repaired
+                        chunk_repairs["whitespace_recovered"] = True
+                    repaired, ocr_fixed = normalize_ocr_noise(chunk)
+                    if ocr_fixed:
+                        chunk = repaired
+                        chunk_repairs["ocr_normalized"] = True
+
                     if len(chunk) < settings.CHUNK_MIN_SIZE:
                         continue
 
@@ -546,6 +672,20 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     first_line    = chunk.split("\n")[0]
                     heading_level = _extract_heading_level(first_line)
 
+                    title_mismatch = has_title_mismatch(section_title_val, keywords)
+
+                    chunk_extra_metadata: Dict[str, Any] = {
+                        "modality_weight":    1.0,
+                        "importance_score":   quality,
+                        "data_quality_score": quality,
+                    }
+                    if section_extras:
+                        chunk_extra_metadata.update(section_extras)
+                    if chunk_repairs:
+                        chunk_extra_metadata.update(chunk_repairs)
+                    if title_mismatch:
+                        chunk_extra_metadata["title_mismatch"] = True
+
                     doc = IngestedDocument(
                         text=chunk,
                         modality="text",
@@ -563,7 +703,8 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                             "chunk_length":        len(chunk),
                             "page_number":         None,
                             "total_pages":         None,
-                            "section_title":       None,
+                            "section_id":          section_id_val,
+                            "section_title":       section_title_val,
                             "ingestion_timestamp": time.time(),
                             "language":            "en",
                             "file_size_bytes":     file_size,
@@ -575,11 +716,7 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                             "content_type":        "text_chunk",
                             "ingestion_time":      time.time(),
                         },
-                        extra_metadata={
-                            "modality_weight":    1.0,
-                            "importance_score":   quality,
-                            "data_quality_score": quality,
-                        },
+                        extra_metadata=chunk_extra_metadata,
                     ).finalize()
 
                     documents.append(doc)

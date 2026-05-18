@@ -656,6 +656,66 @@ def _has_macros(file_path: str) -> bool:
 
 # DOCX PROCESSOR
 
+# EMBEDDED IMAGE HELPER — write image bytes to a temp file and route through
+# image_ingest so we get caption + OCR (text_collection) + CLIP (vision_collection)
+# all linked back to the parent docx/xlsx via parent_* fields.
+
+def _ingest_embedded_image_bytes(
+    blob:            bytes,
+    ext_hint:        str,
+    session_id:      str,
+    parent_doc_id:   str,
+    parent_modality: str,
+    parent_source:   str,
+    parent_page:     Optional[int] = None,
+    parent_sheet:    Optional[str] = None,
+) -> List[IngestedDocument]:
+    if not blob:
+        return []
+
+    # Reject suspicious tiny payloads (1x1 trackers etc.).
+    if len(blob) < 256:
+        return []
+
+    safe_ext = (ext_hint or ".png").lower().strip()
+    if safe_ext == ".jpeg":
+        safe_ext = ".jpg"
+    if safe_ext not in {".png", ".jpg", ".bmp", ".gif", ".webp", ".tiff", ".tif"}:
+        safe_ext = ".png"
+
+    tmp_dir = Path(settings.TEMP_DIR) / "embedded_images"
+    try:
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        tmp_dir = Path(tempfile.gettempdir())
+
+    digest = hashlib.sha256(blob).hexdigest()
+    tmp_path = tmp_dir / f"{digest}{safe_ext}"
+
+    try:
+        if not tmp_path.exists():
+            tmp_path.write_bytes(blob)
+        return image_ingest(
+            str(tmp_path),
+            session_id,
+            parent_doc_id=parent_doc_id,
+            parent_modality=parent_modality,
+            parent_source=parent_source,
+            parent_page=parent_page,
+            parent_sheet=parent_sheet,
+        ) or []
+    except Exception as exc:
+        logger.warning(
+            "embedded_image_ingest_failed",
+            parent_modality=parent_modality,
+            parent_source=parent_source,
+            sheet=parent_sheet,
+            page=parent_page,
+            error=str(exc),
+        )
+        return []
+
+
 def _process_docx(
     file_path: str,
     doc_id: str,
@@ -884,6 +944,41 @@ def _process_docx(
     except Exception:
         pass
 
+    # EMBEDDED IMAGES — route each through image_ingest (caption + OCR + CLIP).
+    try:
+        related = getattr(doc.part, "related_parts", {}) or {}
+        seen_blobs: set = set()
+        for rel_id, part in related.items():
+            try:
+                ct = getattr(part, "content_type", "") or ""
+                if not ct.startswith("image/"):
+                    continue
+                blob = getattr(part, "blob", None)
+                if not blob:
+                    continue
+                digest = hashlib.sha256(blob).hexdigest()
+                if digest in seen_blobs:
+                    continue
+                seen_blobs.add(digest)
+                ext_hint = "." + ct.split("/", 1)[-1].split(";", 1)[0].strip().lower()
+                if ext_hint in {".jpeg"}:
+                    ext_hint = ".jpg"
+                embedded = _ingest_embedded_image_bytes(
+                    blob=blob,
+                    ext_hint=ext_hint,
+                    session_id=session_id,
+                    parent_doc_id=doc_id,
+                    parent_modality="word",
+                    parent_source=source_name,
+                    parent_page=None,
+                    parent_sheet=None,
+                )
+                documents.extend(embedded)
+            except Exception as exc:
+                logger.warning("docx_embedded_image_failed", error=str(exc))
+    except Exception as exc:
+        logger.warning("docx_embedded_image_scan_failed", error=str(exc))
+
     return documents
 
 
@@ -970,6 +1065,181 @@ def _process_excel(
                                 "modality_weight":    1.0,
                             },
                         ).finalize()
+                    )
+
+                # EMBEDDED IMAGES PER SHEET — route through image_ingest.
+                try:
+                    sheet_images = list(getattr(ws, "_images", []) or [])
+                    for img_obj in sheet_images:
+                        try:
+                            blob: Optional[bytes] = None
+                            ext_hint = ".png"
+                            # openpyxl <3.1 uses ._data() callable; >=3.1 stores .ref/.path.
+                            data_attr = getattr(img_obj, "_data", None)
+                            if callable(data_attr):
+                                try:
+                                    blob = data_attr()
+                                except Exception:
+                                    blob = None
+                            if not blob:
+                                ref = getattr(img_obj, "ref", None) or getattr(img_obj, "path", None)
+                                if ref and hasattr(ref, "read"):
+                                    try:
+                                        ref.seek(0)
+                                    except Exception:
+                                        pass
+                                    blob = ref.read()
+                                elif isinstance(ref, (str, os.PathLike)):
+                                    try:
+                                        with open(ref, "rb") as fh:
+                                            blob = fh.read()
+                                        ext_hint = os.path.splitext(str(ref))[1] or ext_hint
+                                    except Exception:
+                                        blob = None
+                            fmt = getattr(img_obj, "format", None)
+                            if fmt:
+                                ext_hint = "." + str(fmt).lower()
+                            embedded = _ingest_embedded_image_bytes(
+                                blob=blob or b"",
+                                ext_hint=ext_hint,
+                                session_id=session_id,
+                                parent_doc_id=doc_id,
+                                parent_modality="excel",
+                                parent_source=source_name,
+                                parent_page=None,
+                                parent_sheet=sheet_name,
+                            )
+                            documents.extend(embedded)
+                        except Exception as exc:
+                            logger.warning(
+                                "excel_embedded_image_failed",
+                                sheet=sheet_name,
+                                error=str(exc),
+                            )
+                except Exception as exc:
+                    logger.warning(
+                        "excel_image_scan_failed",
+                        sheet=sheet_name,
+                        error=str(exc),
+                    )
+
+                # CHARTS AS TEXT — title, axis titles, series names, data range.
+                try:
+                    sheet_charts = list(getattr(ws, "_charts", []) or [])
+                    for chart_idx, chart in enumerate(sheet_charts):
+                        try:
+                            def _safe_str(v: Any) -> str:
+                                try:
+                                    return str(v) if v is not None else ""
+                                except Exception:
+                                    return ""
+
+                            title_text = ""
+                            try:
+                                t = chart.title
+                                if t is not None:
+                                    if hasattr(t, "tx") and t.tx and getattr(t.tx, "rich", None):
+                                        runs = []
+                                        for p in (t.tx.rich.p or []):
+                                            for r in (p.r or []):
+                                                runs.append(_safe_str(getattr(r, "t", "")))
+                                        title_text = " ".join(r for r in runs if r).strip()
+                                    elif hasattr(t, "tx") and t.tx and getattr(t.tx, "strRef", None):
+                                        title_text = _safe_str(getattr(t.tx.strRef, "f", ""))
+                                    else:
+                                        title_text = _safe_str(t)
+                            except Exception:
+                                title_text = ""
+
+                            chart_type = type(chart).__name__
+                            x_axis = ""
+                            y_axis = ""
+                            try:
+                                x_axis = _safe_str(getattr(getattr(chart, "x_axis", None), "title", "") or "")
+                                y_axis = _safe_str(getattr(getattr(chart, "y_axis", None), "title", "") or "")
+                            except Exception:
+                                pass
+
+                            series_names: List[str] = []
+                            data_refs: List[str] = []
+                            try:
+                                for s in getattr(chart, "series", []) or []:
+                                    try:
+                                        if getattr(s, "tx", None) and getattr(s.tx, "strRef", None):
+                                            series_names.append(_safe_str(s.tx.strRef.f))
+                                    except Exception:
+                                        pass
+                                    try:
+                                        ref = getattr(getattr(s, "val", None), "numRef", None)
+                                        if ref is not None:
+                                            data_refs.append(_safe_str(getattr(ref, "f", "")))
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+
+                            chart_parts: List[str] = [f"[Chart: {chart_type} on sheet {sheet_name}]"]
+                            if title_text:
+                                chart_parts.append(f"Title: {title_text}")
+                            if x_axis:
+                                chart_parts.append(f"X axis: {x_axis}")
+                            if y_axis:
+                                chart_parts.append(f"Y axis: {y_axis}")
+                            series_names = [s for s in series_names if s]
+                            if series_names:
+                                chart_parts.append("Series: " + ", ".join(series_names[:12]))
+                            data_refs = [r for r in data_refs if r]
+                            if data_refs:
+                                chart_parts.append("Data: " + "; ".join(data_refs[:6]))
+
+                            chart_text = "\n".join(chart_parts)
+                            if len(chart_text) < 16:
+                                continue
+
+                            chart_text, pii_counts = _redact_pii(chart_text)
+                            for et, cnt in pii_counts.items():
+                                _pii_redacted.labels(entity_type=et).inc(cnt)
+
+                            documents.append(
+                                IngestedDocument(
+                                    text=chart_text,
+                                    modality="table",
+                                    subtype="chart",
+                                    source_type="excel",
+                                    source=source_name,
+                                    structure=_base_structure(
+                                        doc_id, session_id, source_path,
+                                        sheet=sheet_name,
+                                        chart_index=chart_idx,
+                                        chart_type=chart_type,
+                                        chart_title=title_text or None,
+                                        page_number=None,
+                                        total_pages=None,
+                                        section_title=title_text or None,
+                                        ingestion_timestamp=time.time(),
+                                        language="en",
+                                        file_size_bytes=file_size,
+                                        content_type="excel_chart",
+                                        ingestion_time=time.time(),
+                                    ),
+                                    extra_metadata={
+                                        "data_quality_score": _quality(chart_text),
+                                        "importance_score":   0.9,
+                                        "modality_weight":    1.0,
+                                    },
+                                ).finalize()
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "excel_chart_failed",
+                                sheet=sheet_name,
+                                error=str(exc),
+                            )
+                except Exception as exc:
+                    logger.warning(
+                        "excel_chart_scan_failed",
+                        sheet=sheet_name,
+                        error=str(exc),
                     )
 
             except ValueError:

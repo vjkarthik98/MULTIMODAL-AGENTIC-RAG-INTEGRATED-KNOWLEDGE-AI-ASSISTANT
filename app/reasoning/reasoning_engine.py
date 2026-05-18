@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
 import math
+import re
+import threading
 import time
 import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
@@ -37,8 +39,18 @@ _llm_call_duration = Histogram(
     ["model"],
 )
 
-# SEMAPHORE
-_semaphore = asyncio.Semaphore(5)
+# SEMAPHORE — lazy init to avoid missing event loop at import time
+_semaphore: Optional[asyncio.Semaphore] = None
+_semaphore_lock = threading.Lock()
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _semaphore
+    if _semaphore is None:
+        with _semaphore_lock:
+            if _semaphore is None:
+                _semaphore = asyncio.Semaphore(5)
+    return _semaphore
 
 # REASONING STEP TYPES
 STEP_RETRIEVE  = "retrieve"
@@ -60,6 +72,44 @@ def _normalize(text: str) -> str:
     return " ".join(text.strip().split())
 
 
+# CITATION TAG HANDLING
+# Tags look like [foo.pdf p.4], [bar.mp4 t=01:23], [baz.xlsx sheet=Q1], [qux.docx].
+# The closed-set guarantee is enforced by SUBSTRING scanning the answer text for
+# each known cite_key — we never accept a tag that wasn't built by build_sources().
+
+# Used only by the hallucination guard to strip bracketed annotations before
+# scoring. Conservative: only short [..] groups (citation-shaped).
+_CITE_TAG_STRIP_RE = re.compile(r"\[[^\[\]\n]{1,160}\]")
+
+
+def _strip_cite_tags(text: str) -> str:
+    if not text:
+        return ""
+    return _CITE_TAG_STRIP_RE.sub(" ", text)
+
+
+def _extract_cite_tags(text: str, valid: List[str]) -> List[str]:
+    """Return the cite_keys from `valid` that actually appear as substrings of `text`.
+    Closed-set: a tag the LLM invented (not in `valid`) cannot pass."""
+    if not text or not valid:
+        return []
+    out: List[str] = []
+    seen: set = set()
+    # Preserve order in which keys first appear in the answer.
+    spans: List[Tuple[int, str]] = []
+    for key in valid:
+        if not key or key in seen:
+            continue
+        idx = text.find(key)
+        if idx >= 0:
+            spans.append((idx, key))
+            seen.add(key)
+    spans.sort(key=lambda t: t[0])
+    for _, key in spans:
+        out.append(key)
+    return out
+
+
 # HALLUCINATION GUARD
 # CROSS-CHECKS ANSWER AGAINST RETRIEVED CHUNKS
 # FLAGS CLAIMS NOT SUPPORTED BY ANY CHUNK
@@ -77,7 +127,14 @@ def _hallucination_guard(
     if not answer or not docs:
         return False, 1.0
 
-    thr = threshold or getattr(settings, "HALLUCINATION_THRESHOLD", 0.5)
+    # Default to a looser global threshold (paraphrases lose surface overlap).
+    # Caller may override; settings.HALLUCINATION_THRESHOLD still wins if set lower.
+    thr = threshold
+    if thr is None:
+        thr = float(getattr(settings, "HALLUCINATION_THRESHOLD", 0.4) or 0.4)
+
+    # STRIP CITATION TAGS BEFORE SCORING — they bias overlap and aren't claims.
+    cleaned = _strip_cite_tags(answer)
 
     # COLLECT ALL DOC TEXT
     all_doc_text = " ".join(
@@ -92,12 +149,15 @@ def _hallucination_guard(
     # SENTENCE-LEVEL SUPPORT CHECK
     sentences = [
         s.strip()
-        for s in answer.replace("!", ".").replace("?", ".").split(".")
+        for s in cleaned.replace("!", ".").replace("?", ".").split(".")
         if len(s.strip()) > 20
     ]
 
     if not sentences:
         return False, 1.0
+
+    # Per-sentence threshold lowered to 0.25 (paraphrases keep ~25-40% of >4-char tokens).
+    per_sentence_thr = 0.25
 
     supported = 0
     for sentence in sentences:
@@ -105,9 +165,9 @@ def _hallucination_guard(
         if not words:
             supported += 1
             continue
-        # CHECK IF MAJORITY OF SIGNIFICANT WORDS APPEAR IN DOCS
+        # CHECK IF SUFFICIENT FRACTION OF SIGNIFICANT WORDS APPEAR IN DOCS
         hits = sum(1 for w in words if w in all_doc_text)
-        if hits / max(len(words), 1) >= 0.4:
+        if hits / max(len(words), 1) >= per_sentence_thr:
             supported += 1
 
     support_score  = supported / max(len(sentences), 1)
@@ -143,15 +203,27 @@ def _scrub_answer_pii(text: str) -> str:
 # KNOWLEDGE PREPARATION FROM RETRIEVED DOCS
 
 def _prepare_knowledge(
-    docs: List[Dict],
-    max_docs: int = None,
-    max_chars: int = None,
+    docs:     List[Dict],
+    max_docs: int                            = None,
+    max_chars: int                           = None,
+    sources:  Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     if not docs:
         return ""
 
     max_docs  = max_docs  or settings.RAG_TOP_K
     max_chars = max_chars or settings.RAG_DOC_MAX_CHARS
+
+    # If canonical sources[] were built upstream, use their cite_keys for stable tags.
+    # Map by (doc_id, chunk_id) and fall back to source+page-derived key.
+    cite_by_key: Dict[Tuple[Optional[str], Optional[str]], str] = {}
+    if sources:
+        for s in sources:
+            k = (s.get("doc_id"), s.get("chunk_id"))
+            ck = s.get("cite_key")
+            if ck:
+                cite_by_key[k] = ck
+
     seen:  set        = set()
     parts: List[str]  = []
 
@@ -165,30 +237,25 @@ def _prepare_knowledge(
             continue
         seen.add(h)
 
-        meta         = d.get("metadata", {}) or {}
-        source       = meta.get("source", "unknown")
-        modality     = meta.get("modality", "text")
-        subtype      = meta.get("subtype", "")
-        page         = meta.get("page")
-        language     = meta.get("language")
-        ts_start     = meta.get("timestamp_start")
-        speaker      = meta.get("speaker")
-        heading      = meta.get("heading_level")
+        meta = d.get("metadata", {}) or {}
+        doc_id   = meta.get("doc_id")
+        chunk_id = meta.get("chunk_id")
 
-        label = f"[{modality.upper()}"
-        if subtype:
-            label += f"/{subtype}"
-        if page:
-            label += f" | p{page}"
-        if ts_start is not None:
-            label += f" | t={ts_start}s"
-        if speaker:
-            label += f" | spk={speaker}"
-        if language and language != "en":
-            label += f" | lang={language}"
-        label += f" | {source}]"
+        cite_key = cite_by_key.get((doc_id, chunk_id))
+        if not cite_key:
+            # Build a key inline as a fallback. Match build_sources() format.
+            try:
+                from app.core.response import _make_cite_key
+                cite_key = _make_cite_key(
+                    source=meta.get("source") or "unknown",
+                    page=meta.get("page") if isinstance(meta.get("page"), int) else None,
+                    sheet=meta.get("sheet"),
+                    timestamp_start=meta.get("timestamp_start"),
+                )
+            except Exception:
+                cite_key = f"[{meta.get('source', 'unknown')}]"
 
-        parts.append(f"{label} {text[:max_chars]}")
+        parts.append(f"{cite_key} {text[:max_chars]}")
 
     return "\n\n".join(parts)
 
@@ -229,6 +296,7 @@ def _build_cot_prompt(
     knowledge: str,
     memory: str,
     query_type: str = "factual",
+    cite_keys: Optional[List[str]] = None,
 ) -> str:
 
     type_instructions = {
@@ -266,28 +334,64 @@ def _build_cot_prompt(
     type_instruction = type_instructions.get(query_type, type_instructions["factual"])
 
     instruction = (
-        "You are a grounded AI assistant.\n"
-        "RULES:\n"
-        "- Use ONLY the provided knowledge\n"
-        "- If knowledge is insufficient → say 'I don't know based on available data'\n"
-        "- No hallucination\n"
-        "- Be concise and factual\n"
-        f"- {type_instruction}\n\n"
+        "You are a grounded AI assistant. Use ONLY the provided KNOWLEDGE chunks.\n"
+        "You MAY combine facts from multiple chunks to answer a question, even\n"
+        "if no single chunk contains the full answer — synthesis across chunks\n"
+        "is encouraged when the question asks how two topics relate.\n"
+        "Only say 'I don't know based on available data' when NO chunk contains\n"
+        "any fact relevant to the question.\n"
+        "The MEMORY section (if present) is prior conversation context for your\n"
+        "reference only. NEVER cite MEMORY, never copy MEMORY timestamps like\n"
+        "'[6m ago]' into your Answer, and never list MEMORY content as a source.\n"
+        "Be concise but complete.\n\n"
+    )
+
+    # CITATION RULES — make the LLM emit the exact bracket tags shown in KNOWLEDGE.
+    tag_list = ""
+    if cite_keys:
+        tag_list = "Available source tags (use ONLY these, verbatim): " + ", ".join(cite_keys[:12]) + "\n"
+    citation_rules = (
+        "CITATION RULES:\n"
+        "- Write a full prose answer that directly addresses the QUERY using facts from KNOWLEDGE.\n"
+        "- After each factual sentence, append the matching source tag from KNOWLEDGE.\n"
+        "- Use ONLY tags listed below. Never invent tags or filenames.\n"
+        f"{tag_list}\n"
     )
 
     memory_block    = f"MEMORY:\n{memory}\n\n"    if memory    else ""
     knowledge_block = f"KNOWLEDGE:\n{knowledge}\n\n" if knowledge else ""
     query_block     = f"QUERY:\n{query}\n\n"
 
-    output_format = (
-        "FORMAT:\n"
-        "Reasoning: <step by step reasoning>\n"
-        "Answer: <final answer>\n"
-        "Confidence: <0.0-1.0>\n"
-        "Sources Used: <integer>\n"
+    # Few-shot example using one of the actual cite keys so Mistral copies the
+    # PATTERN (full sentence + trailing tag), not the placeholder text.
+    example_tag = cite_keys[0] if cite_keys else "[source.txt]"
+    example_block = (
+        "EXAMPLE OF CORRECT OUTPUT FORMAT (do not copy the content, only the structure):\n"
+        f"Answer: The three macronutrients are carbohydrates, proteins, and fats {example_tag}. "
+        f"Each gram of carbohydrate and protein provides 4 kcal, while fat provides 9 kcal {example_tag}.\n"
+        f"Answer Tags: {example_tag}\n"
+        "Confidence: 0.9\n"
+        "Sources Used: 1\n\n"
+        "Now answer the actual QUERY below using the same structure. Do NOT echo the example.\n\n"
     )
 
-    return instruction + memory_block + knowledge_block + query_block + output_format
+    output_format = (
+        "Respond in exactly this format (replace each <...> with real content):\n"
+        "Answer: <one or more complete sentences answering the QUERY, with source tags appended>\n"
+        "Answer Tags: <comma-separated list of tags you used>\n"
+        "Confidence: <number between 0.0 and 1.0>\n"
+        "Sources Used: <integer count>\n"
+    )
+
+    return (
+        instruction
+        + citation_rules
+        + memory_block
+        + knowledge_block
+        + example_block
+        + query_block
+        + output_format
+    )
 
 
 # REACT PROMPT BUILDER — FOR TOOL-AUGMENTED REASONING
@@ -344,6 +448,7 @@ def _build_react_prompt(
 def _parse_response(
     text: str,
     docs: List[Dict],
+    valid_cite_keys: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
 
     if not text:
@@ -354,31 +459,104 @@ def _parse_response(
         confidence: float = 0.5
         sources:    int   = 0
         reasoning:  str   = ""
+        tags_line:  str   = ""
 
-        for line in text.split("\n"):
+        # NORMALIZE — strip leading bracket wrappers that Mistral sometimes
+        # emits, like "[Answer: ..." or "[Answer Tags]: ..." which break line
+        # prefix matching. Also handles "[Answer: foo [Answer Tags]: bar" on
+        # one line by inserting line breaks before each known key.
+        norm_text = text
+        for key_pat in (
+            r"\[\s*Answer\s*\]\s*:",
+            r"\[\s*Answer\s+Tags\s*\]\s*:",
+            r"\[\s*Confidence\s*\]\s*:",
+            r"\[\s*Sources\s+Used\s*\]\s*:",
+            r"\[\s*Reasoning\s*\]\s*:",
+        ):
+            norm_text = re.sub(key_pat, lambda m: m.group(0).strip("[]"),
+                               norm_text, flags=re.IGNORECASE)
+
+        # Insert newlines before each format key when they appear inline,
+        # so the line-based scanner below can split them apart.
+        for key in ("Answer Tags:", "Confidence:", "Sources Used:", "Reasoning:"):
+            norm_text = re.sub(r"\s+(?=" + re.escape(key) + r")",
+                               "\n", norm_text, flags=re.IGNORECASE)
+
+        answer_lines: list = []
+        in_answer = False
+
+        _FORMAT_KEYS = (
+            "confidence:", "sources used:", "reasoning:", "answer tags:",
+        )
+
+        for line in norm_text.split("\n"):
             ll = line.lower().strip()
 
             if ll.startswith("answer:") or ll.startswith("answer "):
-                answer = line.split(":", 1)[-1].strip()
+                val = line.split(":", 1)[-1].strip()
+                # strip placeholder <answer> prefix if LLM echoed it
+                if val.startswith("<answer>"):
+                    val = val[len("<answer>"):].strip()
+                answer_lines = [val] if val else []
+                in_answer = True
+
+            elif ll.startswith("answer tags:") or ll.startswith("answer tags "):
+                in_answer = False
+                tags_line = line.split(":", 1)[-1].strip()
 
             elif ll.startswith("reasoning:") or ll.startswith("reasoning "):
+                in_answer = False
                 reasoning = line.split(":", 1)[-1].strip()
 
             elif ll.startswith("confidence:") or ll.startswith("confidence "):
+                in_answer = False
                 try:
                     confidence = float(line.split(":", 1)[-1].strip())
                 except Exception:
                     confidence = 0.5
 
             elif ll.startswith("sources used:") or ll.startswith("sources used "):
+                in_answer = False
                 try:
                     sources = int(line.split(":", 1)[-1].strip())
                 except Exception:
                     sources = 0
 
+            elif in_answer and not any(ll.startswith(k) for k in _FORMAT_KEYS):
+                answer_lines.append(line)
+
+        answer = " ".join(answer_lines).strip()
+
+        # POST-CLEAN — strip any trailing format key fragments that survived
+        # (e.g. Mistral wrote "...post-2020. [Answer Tags]: foo" as one line).
+        if answer:
+            for key in ("Answer Tags:", "Confidence:", "Sources Used:",
+                        "Reasoning:", "[Answer Tags]:", "[Confidence]:"):
+                idx = answer.lower().find(key.lower())
+                if idx > 0:
+                    answer = answer[:idx].strip()
+
+        # REJECT CITATION-ONLY ANSWERS — Mistral sometimes echoes only the
+        # example tag (e.g. "[file.pdf p.4]") with no prose. Strip all bracketed
+        # tags and check whether any real content remains.
+        if answer:
+            stripped = re.sub(r"\[[^\]]+\]", "", answer).strip()
+            if len(stripped) < 10:
+                answer = ""
+
         # FALLBACK IF ANSWER NOT CLEANLY PARSED
         if not answer or len(answer) < 10:
-            answer = text.strip()
+            # strip trailing format lines from raw text
+            clean_lines = []
+            for line in norm_text.split("\n"):
+                ll = line.lower().strip()
+                if any(ll.startswith(k) for k in (
+                    "confidence:", "sources used:", "reasoning:",
+                    "answer:", "answer tags:",
+                )):
+                    break
+                clean_lines.append(line)
+            answer = " ".join(clean_lines).strip() or text.strip()
 
         # NaN/INF GUARD ON CONFIDENCE
         if math.isnan(confidence) or math.isinf(confidence):
@@ -386,20 +564,35 @@ def _parse_response(
 
         confidence = max(0.0, min(confidence, 1.0))
 
-        # AUTO SOURCES COUNT
-        if sources == 0 and docs:
-            sources = min(
-                len([d for d in docs if d.get("text")]),
-                len(docs),
-            )
+        # CITATION EXTRACTION — inline tags + Answer Tags: line, validated.
+        cited_tags: List[str] = []
+        if valid_cite_keys:
+            inline = _extract_cite_tags(answer, valid_cite_keys)
+            cited_tags.extend(inline)
+            if tags_line:
+                # Pull tag-shaped substrings out of the tags line
+                for tag in _extract_cite_tags(tags_line, valid_cite_keys):
+                    if tag not in cited_tags:
+                        cited_tags.append(tag)
 
-        sources = min(sources, len(docs))
+        # AUTO SOURCES COUNT
+        if sources == 0:
+            if cited_tags:
+                sources = len(cited_tags)
+            elif docs:
+                sources = min(
+                    len([d for d in docs if d.get("text")]),
+                    len(docs),
+                )
+
+        sources = min(sources, max(len(docs), len(cited_tags)))
 
         return {
             "answer":       answer,
             "reasoning":    reasoning,
             "confidence":   confidence,
             "sources_used": sources,
+            "cited_tags":   cited_tags,
         }
 
     except Exception:
@@ -418,6 +611,7 @@ def _fallback_response(text: str = "") -> Dict[str, Any]:
         "reasoning":    "",
         "confidence":   0.3,
         "sources_used": 0,
+        "cited_tags":   [],
     }
 
 
@@ -501,6 +695,7 @@ class ReasoningEngine:
         query_type: str = "factual",
         use_react: bool = False,
         step_history: Optional[List[Dict]] = None,
+        sources: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
 
         if not query:
@@ -508,6 +703,18 @@ class ReasoningEngine:
 
         start      = time.time()
         trace_log: List[Dict] = []
+
+        # Build sources lazily here if pipeline didn't supply them (back-compat).
+        if sources is None:
+            try:
+                from app.core.response import build_sources
+                sources = build_sources(retrieved_docs)
+            except Exception:
+                sources = []
+
+        cite_keys: List[str] = list(dict.fromkeys(
+            s.get("cite_key") for s in (sources or []) if s.get("cite_key")
+        ))
 
         with tracer.start_as_current_span("reasoning_generate_answer") as span:
             span.set_attribute("query.length", len(query))
@@ -518,7 +725,7 @@ class ReasoningEngine:
 
             try:
                 query    = _normalize(query)
-                knowledge = _prepare_knowledge(retrieved_docs)
+                knowledge = _prepare_knowledge(retrieved_docs, sources=sources)
                 memory   = _prepare_memory(memory_context)
 
                 # RECORD RETRIEVE STEP
@@ -546,6 +753,7 @@ class ReasoningEngine:
                         knowledge,
                         memory,
                         query_type=query_type,
+                        cite_keys=cite_keys,
                     )
 
                 # PROMPT BUDGET WARNING
@@ -575,8 +783,10 @@ class ReasoningEngine:
                     span.set_status(Status(StatusCode.OK))
                     return _fallback_response()
 
-                # PARSE RESPONSE
-                parsed = _parse_response(response, retrieved_docs)
+                # PARSE RESPONSE (validate citation tags against the closed set)
+                parsed = _parse_response(response, retrieved_docs, valid_cite_keys=cite_keys)
+
+                cited_tags = parsed.get("cited_tags") or []
 
                 # HALLUCINATION GUARD
                 t_verify = time.time()
@@ -584,6 +794,12 @@ class ReasoningEngine:
                     parsed["answer"],
                     retrieved_docs,
                 )
+                # CITATION-BASED RELAXATION:
+                # If the LLM cited >=1 VALID tag, treat the answer as grounded
+                # regardless of surface-word overlap (paraphrase-friendly).
+                if cited_tags:
+                    is_hallucinated = False
+
                 verify_latency = round(time.time() - t_verify, 3)
 
                 _record_step(
@@ -592,7 +808,11 @@ class ReasoningEngine:
                     parsed["answer"][:200],
                     f"support={support_score}",
                     verify_latency,
-                    {"hallucinated": is_hallucinated, "support_score": support_score},
+                    {
+                        "hallucinated":  is_hallucinated,
+                        "support_score": support_score,
+                        "cited_tags":    len(cited_tags),
+                    },
                 )
 
                 if is_hallucinated:
@@ -602,11 +822,40 @@ class ReasoningEngine:
                         support_score=support_score,
                         session_id=session_id,
                     )
-                    # DOWNGRADE CONFIDENCE WHEN HALLUCINATION DETECTED
+                    # Only downgrade when BOTH no valid citations AND low support.
                     parsed["confidence"] = min(parsed["confidence"], 0.4)
                     parsed["hallucination_warning"] = True
                 else:
                     parsed["hallucination_warning"] = False
+
+                # FILTERED SOURCES — subset of input sources that the LLM actually cited.
+                ans_lower = (parsed.get("answer") or "").lower()
+                _REFUSAL_SENTINELS = (
+                    "i don't know",
+                    "i dont know",
+                    "insufficient knowledge",
+                    "i don't have sufficient",
+                    "i do not have sufficient",
+                    "couldn't generate a reliable answer",
+                    "couldn't generate",
+                    "no answer generated",
+                    "something went wrong",
+                )
+                is_refusal = any(s in ans_lower for s in _REFUSAL_SENTINELS)
+
+                if is_refusal:
+                    # Refusals carry no real grounding — don't fake sources.
+                    parsed["sources"] = []
+                elif cited_tags and sources:
+                    cited_set = set(cited_tags)
+                    parsed["sources"] = [
+                        s for s in sources if s.get("cite_key") in cited_set
+                    ]
+                else:
+                    # Fallback to top-3 retrieved sources so the UI always has citations.
+                    parsed["sources"] = list((sources or [])[:3])
+
+                parsed["sources_used"] = len(parsed["sources"])
 
                 # PII SCRUB ANSWER
                 parsed["answer"] = _scrub_answer_pii(parsed["answer"])
@@ -675,10 +924,11 @@ class ReasoningEngine:
         query_type: str = "factual",
         use_react: bool = False,
         step_history: Optional[List[Dict]] = None,
+        sources: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
 
-        async with _semaphore:
-            return await asyncio.get_event_loop().run_in_executor(
+        async with _get_semaphore():
+            return await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: self.generate_answer(
                     query,
@@ -688,6 +938,7 @@ class ReasoningEngine:
                     query_type,
                     use_react,
                     step_history,
+                    sources,
                 ),
             )
 

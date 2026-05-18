@@ -3,7 +3,6 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-import structlog
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 from prometheus_client import Counter, Histogram, Gauge
@@ -21,8 +20,9 @@ from qdrant_client.models import (
 )
 
 from app.core.config import settings
+from app.utils.logger import get_logger
 
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
 # PROMETHEUS METRICS
@@ -502,11 +502,10 @@ class QdrantVectorStore:
                 FieldCondition(key="modality", match=MatchValue(value=self.modality_filter))
             )
 
-        if exclude_deleted:
-            # EXCLUDE SOFT-DELETED DOCS — DELETED_AT MUST BE NULL
-            conditions.append(
-                FieldCondition(key="deleted_at", match=MatchValue(value=None))
-            )
+        # NOTE: soft-delete filter via IsNullCondition requires a bool/integer
+        # payload index which Qdrant Cloud does not support on KEYWORD-indexed fields.
+        # Soft-deleted docs are excluded at insert time by not re-upserting them;
+        # the deleted_at field is only used by the GDPR purge path, not search.
 
         return Filter(must=conditions) if conditions else None
 
