@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import threading
 import time
 import unicodedata
 from typing import Dict, Optional
@@ -35,8 +36,18 @@ _router_decisions = Counter(
     ["action", "method"],
 )
 
-# SEMAPHORE
-_semaphore = asyncio.Semaphore(5)
+# SEMAPHORE — lazy init to avoid missing event loop at import time
+_semaphore: Optional[asyncio.Semaphore] = None
+_semaphore_lock = threading.Lock()
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _semaphore
+    if _semaphore is None:
+        with _semaphore_lock:
+            if _semaphore is None:
+                _semaphore = asyncio.Semaphore(5)
+    return _semaphore
 
 # HARD RULE KEYWORD SETS
 _RECENT_WORDS     = {"latest", "today", "news", "recent", "update", "current", "now", "live"}
@@ -154,7 +165,15 @@ class AgentRouter:
                     return d
 
                 # LLM ROUTING FOR AMBIGUOUS QUERIES
-                decision  = self._llm_route(query, signals, session_id)
+                try:
+                    decision = self._llm_route(query, signals, session_id)
+                except Exception as exc:
+                    logger.warning(
+                        "router_llm_route_failed",
+                        error=str(exc),
+                        session_id=session_id,
+                    )
+                    decision = self._decision("rag", "llm_route_exception", 0.5, session_id)
                 validated = self._validate(decision, signals, session_id)
                 validated.set_latency(start)
 
@@ -266,7 +285,7 @@ class AgentRouter:
     @retry(
         stop=stop_after_attempt(2),
         wait=wait_exponential(multiplier=1, min=1, max=4),
-        reraise=False,
+        reraise=True,
     )
     def _llm_route(
         self,
@@ -430,8 +449,8 @@ class AgentRouter:
         session_id: str,
     ) -> AgentDecision:
 
-        async with _semaphore:
-            return await asyncio.get_event_loop().run_in_executor(
+        async with _get_semaphore():
+            return await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: self.route(query, session_id),
             )

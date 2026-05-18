@@ -111,7 +111,7 @@ def _mmr(
 
     # IF NO EMBEDDINGS AVAILABLE FALL BACK TO SCORE-BASED SELECTION
     if not any(_has_embedding(r) for r in results):
-        return results[:top_k]
+        return sorted(results, key=lambda x: x.get("score", 0.0), reverse=True)[:top_k]
 
     selected:   List[Dict] = []
     candidates: List[Dict] = list(results)
@@ -164,7 +164,7 @@ class Retriever:
     @retry(
         stop=stop_after_attempt(2),
         wait=wait_exponential(multiplier=1, min=1, max=4),
-        reraise=False,
+        reraise=True,
     )
     def _expand_query(self, query: str, session_id: str) -> List[str]:
 
@@ -275,10 +275,14 @@ class Retriever:
         language: Optional[str] = None,
         date_from: Optional[float] = None,
         date_to: Optional[float] = None,
+        session_id: Optional[str] = None,
     ) -> List[Dict]:
         filtered = []
         for r in results:
             meta = r.get("metadata", {}) or {}
+
+            if session_id and meta.get("session_id") != session_id:
+                continue
 
             if modality and meta.get("modality") != modality:
                 continue
@@ -426,7 +430,15 @@ class Retriever:
 
                 self._ensure_bm25(session_id)
 
-                queries = self._expand_query(query, session_id)
+                try:
+                    queries = self._expand_query(query, session_id) or [query]
+                except Exception as exc:
+                    logger.warning(
+                        "query_expansion_failed",
+                        error=str(exc),
+                        session_id=session_id,
+                    )
+                    queries = [query]
 
                 vector_res: List[Dict] = []
                 bm25_res:   List[Dict] = []
@@ -467,12 +479,12 @@ class Retriever:
                 bm25_res   = _normalize_scores(bm25_res)
 
                 # METADATA FILTER
-                if modality or language or date_from or date_to:
+                if modality or language or date_from or date_to or session_id:
                     vector_res = self._apply_metadata_filter(
-                        vector_res, modality, language, date_from, date_to
+                        vector_res, modality, language, date_from, date_to, session_id
                     )
                     bm25_res = self._apply_metadata_filter(
-                        bm25_res, modality, language, date_from, date_to
+                        bm25_res, modality, language, date_from, date_to, session_id
                     )
 
                 # MERGE — RRF OR WEIGHTED
@@ -563,7 +575,7 @@ class Retriever:
     ) -> List[Dict]:
 
         async with _semaphore:
-            return await asyncio.get_event_loop().run_in_executor(
+            return await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: self.retrieval(
                     query,

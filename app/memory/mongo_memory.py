@@ -75,11 +75,16 @@ _VALID_MODALITIES = {"text", "image", "audio", "video", "table", "document"}
 class MongoMemory:
 
     def __init__(self) -> None:
+        self._enabled: bool = bool(settings.MONGO_URI) and settings.USE_MONGO
         self._mongo_ok: bool = False
         self.client = None
         self.db = None
         self.messages = None
         self.summaries = None
+
+        if not self._enabled:
+            logger.info(event="mongo_disabled_no_uri_or_flag")
+            return
 
         if not _PYMONGO_AVAILABLE:
             logger.warning(event="pymongo_not_installed")
@@ -116,13 +121,11 @@ class MongoMemory:
 
         except (ConnectionFailure, ServerSelectionTimeoutError) as exc:
             self._mongo_ok = False
-            logger.error(event="mongo_connection_failed", error=str(exc))
-            raise
+            logger.warning(event="mongo_connection_failed", error=str(exc))
 
         except Exception as exc:
             self._mongo_ok = False
-            logger.error(event="mongo_init_failed", error=str(exc))
-            raise
+            logger.warning(event="mongo_init_failed", error=str(exc))
 
     # AVAILABILITY CHECK
 
@@ -272,6 +275,9 @@ class MongoMemory:
         if not session_id or not content:
             return
 
+        if not self._enabled:
+            return
+
         if not self._is_available():
             logger.warning(
                 event="mongo_store_skipped_unavailable",
@@ -317,7 +323,7 @@ class MongoMemory:
             self._retry(_do)
 
         except Exception as exc:
-            logger.error(
+            logger.warning(
                 event="mongo_store_failed",
                 session_id=session_id,
                 error=str(exc),
@@ -347,7 +353,7 @@ class MongoMemory:
         if not session_id or not summary:
             return
 
-        if not self._is_available():
+        if not self._enabled or not self._is_available():
             return
 
         try:
@@ -380,7 +386,7 @@ class MongoMemory:
             )
 
         except Exception as exc:
-            logger.error(
+            logger.warning(
                 event="mongo_summary_store_failed",
                 session_id=session_id,
                 error=str(exc),
@@ -447,7 +453,7 @@ class MongoMemory:
             return result
 
         except Exception as exc:
-            logger.error(
+            logger.warning(
                 event="mongo_fetch_failed",
                 session_id=session_id,
                 error=str(exc),
@@ -477,7 +483,7 @@ class MongoMemory:
             return self._clean(doc.get("summary", "")) if doc else ""
 
         except Exception as exc:
-            logger.error(
+            logger.warning(
                 event="mongo_summary_fetch_failed",
                 session_id=session_id,
                 error=str(exc),
@@ -540,7 +546,7 @@ class MongoMemory:
             )
 
         except Exception as exc:
-            logger.error(
+            logger.warning(
                 event="mongo_clear_failed",
                 session_id=session_id,
                 error=str(exc),

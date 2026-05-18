@@ -73,7 +73,11 @@ tenacity>=8.2
 pillow>=10.2
 opencv-python>=4.9
 pytesseract>=0.3
+easyocr>=1.7
 imagehash>=4.3
+# Optional: HEIC/HEIF support for iPhone photos. Safe to omit on systems
+# without libheif; image_ingest only uses it via a soft try/except.
+pillow-heif>=0.16
 
 
 
@@ -133,3 +137,9 @@ pytest-asyncio
 pybreaker
 pyclamd
 presidio analyzer
+
+
+ftfy
+wordsegment
+wordfreq
+bleach

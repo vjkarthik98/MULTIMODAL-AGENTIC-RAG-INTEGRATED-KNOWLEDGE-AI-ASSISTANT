@@ -160,6 +160,17 @@ def _dedup_docs(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 # BUILD CONTEXT STRING — SECTION 4.6
+#
+# Renders retrieved chunks in Claude-style numbered references:
+#
+#   [1] (rag_test_corpus.txt — DOC-001 — Transformer Architecture) <chunk text>
+#   [2] (rag_test_corpus.txt — DOC-002) <chunk text>
+#
+# The number aligns 1-to-1 with the position in the canonical `sources`
+# list returned to the API, so the UI can render
+#   Sources:
+#   [1] rag_test_corpus.txt — DOC-001 (Transformer Architecture)
+#   [2] rag_test_corpus.txt — DOC-002
 
 def _build_context(
     docs: List[Dict[str, Any]],
@@ -168,22 +179,30 @@ def _build_context(
     parts: List[str] = []
     total: int       = 0
 
-    for d in docs:
-        text     = d.get("text", "").strip()
-        meta     = d.get("metadata", {}) or {}
-        modality = meta.get("modality", "text")
-        source   = meta.get("source", "")
-        subtype  = meta.get("subtype", "")
+    for idx, d in enumerate(docs, start=1):
+        text          = d.get("text", "").strip()
+        meta          = d.get("metadata", {}) or {}
+        source        = meta.get("source") or ""
+        section_id    = meta.get("section_id")
+        section_title = meta.get("section_title")
+        page          = meta.get("page")
 
         if not text:
             continue
 
-        label = f"[{modality.upper()}"
-        if subtype:
-            label += f"/{subtype}"
+        # LABEL — readable for the LLM and stable for citation parsing
+        label_parts: List[str] = []
         if source:
-            label += f" | {source}"
-        label += "]"
+            label_parts.append(str(source))
+        if section_id:
+            label_parts.append(str(section_id))
+        elif page is not None:
+            label_parts.append(f"p.{page}")
+        if section_title:
+            label_parts.append(str(section_title))
+
+        provenance = " — ".join(label_parts) if label_parts else "unknown"
+        label      = f"[{idx}] ({provenance})"
 
         chunk = f"{label} {text}"[:settings.RAG_DOC_MAX_CHARS]
 
@@ -414,19 +433,16 @@ class RAGPipeline:
             docs = sorted(docs, key=lambda d: d.get("score", 0.0), reverse=True)
             docs = docs[:settings.RAG_TOP_K]
 
-            # SCORE THRESHOLD GUARD — treat low-score results as empty retrieval
-            docs = [d for d in docs if d.get("score", 0.0) >= settings.FUSION_MIN_SCORE]
-            if not docs:
-                logger.warning(
-                    event="rag_all_chunks_below_min_score",
-                    threshold=settings.FUSION_MIN_SCORE,
-                    session_id=session_id,
-                )
-                return self._empty(start)
-
             # CONTEXT ASSEMBLY
+            from app.core.response import build_sources
+            canonical_sources = build_sources(docs)
+            # Attach 1-based index so callers can render Claude-style
+            # "[1] file.txt — DOC-001 (Title)" alongside answer text that
+            # contains "[1]" footnote markers.
+            for i, s in enumerate(canonical_sources, start=1):
+                s["index"] = i
             context      = _build_context(docs, settings.MAX_CONTEXT_CHARS)
-            sources      = _extract_sources(docs)
+            sources      = canonical_sources
             full_context = _compose(history_text, context)
             full_context = full_context[:settings.MAX_PROMPT_CHARS]
 
