@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import re
 import time
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
@@ -37,6 +38,56 @@ except ImportError:
     _text_breaker = _DummyBreaker()   # type: ignore[assignment]
     _vision_breaker = _DummyBreaker() # type: ignore[assignment]
     _bm25_breaker = _DummyBreaker()   # type: ignore[assignment]
+
+
+# COLLOQUIAL → KEYWORD HEURISTIC EXPANSION
+#
+# Cheap, deterministic, no model call. Drops the stopwords/filler tokens that
+# common questions wrap technical terms in, producing a tighter BM25 form.
+# We DO NOT use this for dense retrieval — sentence-transformers already
+# handles synonym/paraphrase well. We use it ONLY to widen the BM25 lane.
+# Latency overhead per query: < 1 ms.
+
+_QUERY_STOPWORDS: set = {
+    "what", "which", "who", "when", "where", "why", "how",
+    "is", "are", "was", "were", "be", "been", "being",
+    "do", "does", "did", "doing", "done",
+    "the", "a", "an", "of", "to", "in", "on", "for", "at", "by",
+    "with", "from", "this", "that", "these", "those", "it", "its",
+    "as", "and", "or", "but", "so", "if", "no", "not", "any",
+    "can", "could", "should", "would", "may", "might", "will",
+    "me", "my", "you", "your", "we", "our", "they", "their",
+    "about", "into", "than", "then", "also", "tell", "give",
+    "explain", "describe", "summarize", "summarise", "show",
+    "good", "bad", "make", "makes", "made",
+}
+
+
+def _expand_query_heuristic(q: str) -> List[str]:
+    """Return up to 2 distinct query forms for BM25: [original, keywords-only].
+
+    Adds nothing for queries that are already mostly keywords (avoids dups
+    feeding RRF and inflating scores on already-good queries).
+    """
+    if not q:
+        return []
+    original = q.strip()
+    tokens   = [t for t in re.findall(r"[A-Za-z0-9'\-]+", original.lower())]
+    if not tokens:
+        return [original]
+
+    keep = [t for t in tokens if t not in _QUERY_STOPWORDS and len(t) > 1]
+
+    # If the keyword form is identical (or near-identical) to the original,
+    # don't bother emitting a second variant.
+    if not keep or len(keep) >= len(tokens) - 1:
+        return [original]
+
+    keyword_form = " ".join(keep)
+    if keyword_form.lower() == original.lower():
+        return [original]
+
+    return [original, keyword_form]
 
 
 # VISION QUERY KEYWORDS
@@ -418,25 +469,40 @@ class HybridRetriever:
                     session_id=session_id,
                 )
 
-            # BM25 SEARCH
-            bm25_res = self._bm25_search(query, candidate_k, session_id, filters)
+            # BM25 SEARCH — run for each heuristic query variant and union
+            # results so colloquial queries ("how does the body fight germs?")
+            # still hit the keyword-heavy chunks. Cheap (<1ms expansion,
+            # +1 BM25 lookup at worst). Dense lane uses the original query
+            # only — sentence-transformers already paraphrase well.
+            bm25_res: List[Dict] = []
+            seen_bm25_keys: set  = set()
+            for variant in _expand_query_heuristic(query):
+                variant_res = self._bm25_search(variant, candidate_k, session_id, filters)
+                for r in variant_res:
+                    meta = r.get("metadata") or {}
+                    key  = self._hash(r.get("text", ""), meta)
+                    if key in seen_bm25_keys:
+                        continue
+                    seen_bm25_keys.add(key)
+                    bm25_res.append(r)
 
             # VECTOR TEXT SEARCH
             vec_res: List[Dict] = []
             if q_vec:
                 vec_res = self._vector_search_text(q_vec, candidate_k, session_id)
 
-            # VISION SEARCH — always fan out (boost weight on vision-cued queries).
+            # VISION SEARCH — only when vision_collection has indexed points.
             vis_res: List[Dict] = []
-            try:
-                v_vec = self._embed_vision_cached(query, session_id=session_id)
-                vis_res = self._vector_search_vision(v_vec, candidate_k, session_id)
-            except Exception as exc:
-                logger.warning(
-                    event="vision_search_skipped",
-                    error=str(exc),
-                    session_id=session_id,
-                )
+            if self.vector_store.has_vision_data():
+                try:
+                    v_vec = self._embed_vision_cached(query, session_id=session_id)
+                    vis_res = self._vector_search_vision(v_vec, candidate_k, session_id)
+                except Exception as exc:
+                    logger.warning(
+                        event="vision_search_skipped",
+                        error=str(exc),
+                        session_id=session_id,
+                    )
 
             # EARLY EXIT IF ALL EMPTY (text + vision)
             if not bm25_res and not vec_res and not vis_res:

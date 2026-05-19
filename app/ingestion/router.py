@@ -185,16 +185,12 @@ def _guard_path(file_path: str) -> Path:
 
     resolved = Path(file_path).expanduser().resolve()
 
-    print("DEBUG RESOLVED:", resolved)
-
     allowed_roots = [
         Path(settings.UPLOAD_STAGING_DIR).resolve(),
         Path(settings.DATA_DIR).resolve(),
         Path(tempfile.gettempdir()).resolve(),
         Path("C:/temp").resolve(),
     ]
-
-   
 
     for root in allowed_roots:
         root = root.resolve()

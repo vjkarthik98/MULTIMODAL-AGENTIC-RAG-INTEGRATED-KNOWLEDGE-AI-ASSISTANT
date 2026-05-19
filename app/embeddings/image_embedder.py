@@ -472,6 +472,8 @@ class ImageEmbedder:
 
                 with torch.no_grad():
                     features = self.model.get_image_features(**inputs)
+                    if not isinstance(features, torch.Tensor):
+                        features = features.pooler_output
                     features = F.normalize(features, p=2, dim=-1)
 
                 embeddings    = features.detach().cpu().numpy().tolist()

@@ -16,6 +16,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from app.core.config import settings
 from app.ingestion.schema import IngestedDocument
 from app.ingestion.text_repair import (
+    detect_error_markers,
     extract_version,
     has_title_mismatch,
     is_placeholder,
@@ -584,9 +585,25 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     # STRIP FOOTNOTES / EDITOR NOTES — preserve as metadata
                     cleaned_body, footnotes = strip_footnotes(body)
 
+                    # ERROR-MARKER DETECTION — strip and preserve as metadata.
+                    # The prompt builder consumes `error_markers` and tells the
+                    # LLM to treat the chunk's specific claim as suspect.
+                    cleaned_body, error_markers = detect_error_markers(cleaned_body)
+
+                    # Surface mislabeled-section markers (e.g. "→ WRONG LABEL")
+                    # as a top-level flag too, so callers don't have to parse
+                    # the markers string.
+                    title_marked_mismatch = any(
+                        "wrong label" in m.lower() for m in error_markers
+                    )
+
                     section_extras: Dict[str, Any] = {}
                     if footnotes:
                         section_extras["footnotes"] = footnotes
+                    if error_markers:
+                        section_extras["error_markers"] = error_markers
+                    if title_marked_mismatch:
+                        section_extras["title_mismatch"] = True
 
                     version_info = extract_version(section_id_val, section_title_val)
                     if version_info:
@@ -686,6 +703,46 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     if title_mismatch:
                         chunk_extra_metadata["title_mismatch"] = True
 
+                    # Fields the retrieval/prompt layer needs must live in
+                    # `structure` so they survive the Qdrant payload round-trip
+                    # (Qdrant's payload builder reads from structure, not
+                    # extra_metadata). Keep them in both for resilience.
+                    structure_carry_overs: Dict[str, Any] = {}
+                    if section_extras.get("error_markers"):
+                        structure_carry_overs["error_markers"] = section_extras["error_markers"]
+                    if section_extras.get("doc_version"):
+                        structure_carry_overs["doc_version"]      = section_extras["doc_version"]
+                        structure_carry_overs["doc_version_kind"] = section_extras.get("doc_version_kind")
+                    if section_extras.get("footnotes"):
+                        structure_carry_overs["footnotes"] = section_extras["footnotes"]
+                    if chunk_extra_metadata.get("title_mismatch"):
+                        structure_carry_overs["title_mismatch"] = True
+
+                    structure_payload: Dict[str, Any] = {
+                        "doc_id":              doc_id,
+                        "session_id":          session_id,
+                        "file_hash":           file_hash,
+                        "source_path":         source_path,
+                        "chunk_index":         i,
+                        "total_chunks":        total_chunks,
+                        "chunk_length":        len(chunk),
+                        "page_number":         None,
+                        "total_pages":         None,
+                        "section_id":          section_id_val,
+                        "section_title":       section_title_val,
+                        "ingestion_timestamp": time.time(),
+                        "language":            "en",
+                        "file_size_bytes":     file_size,
+                        "is_rtl":              is_rtl,
+                        "heading_level":       heading_level,
+                        "readability_score":   fk_score,
+                        "tags":                keywords,
+                        "pii_redacted":        bool(pii_counts),
+                        "content_type":        "text_chunk",
+                        "ingestion_time":      time.time(),
+                    }
+                    structure_payload.update(structure_carry_overs)
+
                     doc = IngestedDocument(
                         text=chunk,
                         modality="text",
@@ -693,29 +750,7 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                         source_type="file",
                         source=source_name,
                         chunk_id=i,
-                        structure={
-                            "doc_id":              doc_id,
-                            "session_id":          session_id,
-                            "file_hash":           file_hash,
-                            "source_path":         source_path,
-                            "chunk_index":         i,
-                            "total_chunks":        total_chunks,
-                            "chunk_length":        len(chunk),
-                            "page_number":         None,
-                            "total_pages":         None,
-                            "section_id":          section_id_val,
-                            "section_title":       section_title_val,
-                            "ingestion_timestamp": time.time(),
-                            "language":            "en",
-                            "file_size_bytes":     file_size,
-                            "is_rtl":              is_rtl,
-                            "heading_level":       heading_level,
-                            "readability_score":   fk_score,
-                            "tags":                keywords,
-                            "pii_redacted":        bool(pii_counts),
-                            "content_type":        "text_chunk",
-                            "ingestion_time":      time.time(),
-                        },
+                        structure=structure_payload,
                         extra_metadata=chunk_extra_metadata,
                     ).finalize()
 
