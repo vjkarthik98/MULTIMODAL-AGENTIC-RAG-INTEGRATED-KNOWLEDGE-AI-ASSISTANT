@@ -177,11 +177,17 @@ class ModelLoader:
             load_functions = [
                 (self.get_llm,          "LLM"),
                 (self.get_embedder,     "TextEmbedder"),
-                (self.get_clip,         "CLIP"),
-                (self.get_whisper,      "Whisper"),
-                (self.get_blip,         "BLIP"),
                 (self.get_reranker,     "Reranker"),
             ]
+            if settings.ENABLE_VISION:
+                load_functions += [
+                    (self.get_clip,     "CLIP"),
+                    (self.get_blip,     "BLIP"),
+                ]
+            if settings.ENABLE_AUDIO:
+                load_functions += [
+                    (self.get_whisper,  "Whisper"),
+                ]
 
             for load_fn, name in load_functions:
                 try:

@@ -364,10 +364,13 @@ def _build_sources_array(docs: List[Dict[str, Any]], max_items: int = 3) -> List
 
 
 def _confidence_from_sources(sources: List[Dict[str, Any]]) -> float:
-    """Mean score of top-3 sources, clamped to [0.0, 1.0]. Returns 0.0 if no sources."""
+    """Confidence from top source score. When top chunk dominates (gap > 0.3 vs next),
+    use top score directly. Otherwise fall back to mean of top-3."""
     scores = [s["score"] for s in sources[:3] if isinstance(s.get("score"), (int, float))]
     if not scores:
         return 0.0
+    if len(scores) >= 2 and (scores[0] - scores[1]) > 0.3:
+        return round(max(0.0, min(scores[0], 1.0)), 6)
     return round(max(0.0, min(sum(scores) / len(scores), 1.0)), 6)
 
 

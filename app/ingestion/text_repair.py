@@ -283,6 +283,71 @@ def has_title_mismatch(section_title: Optional[str], keywords: List[str]) -> boo
     return title_tokens.isdisjoint(kw_tokens)
 
 
+# PASS 7B — ERROR MARKER DETECTION
+#
+# Catches in-corpus self-flagging that the strip_footnotes pass would miss:
+#   - "NOTE: \"ada-003\" does not exist — this is an intentional error..."
+#   - "→ WRONG LABEL (actual content: ...)"
+#   - "[CONFIRMED]", "[UPDATED: ...]" version-tag annotations
+#   - "this claim is disputed" / "disputed in some literature"
+#
+# Strips the marker text from the body (so it doesn't pollute the embedding)
+# and returns the markers as a list for the chunk's extra_metadata. The
+# prompt builder's general branch knows how to consume an ERROR_MARKERS
+# header and tell the LLM to treat the chunk's claim as suspect.
+
+_ERROR_MARKER_PATTERNS = [
+    # "intentional error" / "this is an intentional error" / "for testing"
+    re.compile(
+        r"(?:NOTE\s*:?\s*)?[\"']?[^\"'\n]{0,40}[\"']?\s*"
+        r"(?:does\s+not\s+exist|is\s+an?\s+intentional\s+error|"
+        r"for\s+testing|fake|hallucinated)[^.\n]*\.?",
+        re.IGNORECASE,
+    ),
+    # "→ WRONG LABEL (actual content: ...)" style mislabel flags
+    re.compile(r"[→\->]+\s*WRONG\s+LABEL[^\n]*", re.IGNORECASE),
+    # "disputed in some literature" / "this claim is disputed"
+    re.compile(r"(?:this\s+claim\s+is\s+)?disputed(?:\s+in\s+some\s+literature)?", re.IGNORECASE),
+    # version-tag annotations inside body text
+    re.compile(r"\[CONFIRMED\]|\[UPDATED:[^\]]*\]|\[UNCHANGED\]", re.IGNORECASE),
+]
+
+
+def detect_error_markers(text: str) -> Tuple[str, List[str]]:
+    """
+    Scan `text` for in-corpus error/warning self-flags. Returns
+    (cleaned_text, markers) where `markers` is a list of canonical short
+    labels (e.g. ["intentional error", "does not exist", "WRONG LABEL"]).
+
+    Stripping is conservative: only the matched span is removed so the
+    surrounding sentence stays intact for the embedder.
+    """
+    if not text:
+        return text, []
+
+    found: List[str] = []
+    cleaned = text
+
+    for pat in _ERROR_MARKER_PATTERNS:
+        for match in pat.finditer(cleaned):
+            snippet = match.group(0).strip()
+            if snippet:
+                # Canonicalise: keep it short and lowercase for dedup
+                label = re.sub(r"\s+", " ", snippet).strip(" .\"'")
+                if len(label) > 80:
+                    label = label[:77] + "..."
+                if label and label.lower() not in {f.lower() for f in found}:
+                    found.append(label)
+        cleaned = pat.sub(" ", cleaned)
+
+    if found:
+        # Collapse the whitespace the substitutions left behind
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+        cleaned = re.sub(r"\n[ \t]+", "\n", cleaned)
+
+    return cleaned, found
+
+
 # PASS 8 — VERSION TAGGING
 #
 # Extracts version info from section id/title. Returned as a small dict

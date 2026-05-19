@@ -38,6 +38,7 @@ PAYLOAD_INDEXES: Dict[str, Any] = {
     "content_type":    "keyword",
     "embedding_space": "keyword",
     "language":        "keyword",
+    "checksum_sha256": "keyword",
     "chunk_id":        "integer",
     "page":            "integer",
     "ingestion_time":  "float",

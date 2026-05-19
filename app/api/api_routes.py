@@ -630,6 +630,8 @@ async def query_rag(
             "sources":              sources,
             "is_fallback":          validated.is_fallback,
             "hallucination_warning": validated.hallucination_warning,
+            "memory_injected":      bool(result.get("memory_injected", False)),
+            "cache_hit":            bool(result.get("cache_hit", False)),
         }
 
         _audit_log(

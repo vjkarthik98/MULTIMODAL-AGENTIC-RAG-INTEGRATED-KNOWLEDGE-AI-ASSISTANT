@@ -464,6 +464,10 @@ class ClipTextEmbedder:
 
                 with torch.no_grad():
                     features = self.model.get_text_features(**inputs)
+                    # Some transformers versions return BaseModelOutputWithPooling
+                    # instead of a plain tensor when output_hidden_states is set.
+                    if not isinstance(features, torch.Tensor):
+                        features = features.pooler_output
                     features = F.normalize(features, p=2, dim=-1)
 
                 embeddings    = features.detach().cpu().numpy().tolist()
