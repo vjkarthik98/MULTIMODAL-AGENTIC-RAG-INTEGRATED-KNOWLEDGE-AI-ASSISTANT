@@ -186,6 +186,8 @@ def _build_context(
         section_id    = meta.get("section_id")
         section_title = meta.get("section_title")
         page          = meta.get("page")
+        error_markers = meta.get("error_markers") or []
+        doc_version   = meta.get("doc_version")
 
         if not text:
             continue
@@ -200,9 +202,19 @@ def _build_context(
             label_parts.append(f"p.{page}")
         if section_title:
             label_parts.append(str(section_title))
+        if doc_version:
+            label_parts.append(f"version={doc_version}")
 
         provenance = " — ".join(label_parts) if label_parts else "unknown"
         label      = f"[{idx}] ({provenance})"
+
+        # When the chunk carries in-corpus self-flags (e.g. "intentional
+        # error", "does not exist", "WRONG LABEL"), surface them on a
+        # separate header line so the LLM can treat the claim as suspect.
+        # The prompt builder's general branch explains this exact format.
+        if error_markers:
+            joined = "; ".join(str(m) for m in error_markers[:4])
+            label = f"{label}\n⚠ ERROR_MARKERS={joined}"
 
         chunk = f"{label} {text}"[:settings.RAG_DOC_MAX_CHARS]
 
@@ -269,11 +281,36 @@ class RAGPipeline:
         self._mongo         = None
 
     # LAZY INIT — AVOID CIRCULAR IMPORTS
+    #
+    # We use HybridRetriever directly (the live `query_pipeline` already
+    # does the same). The older `app.retrieval.retriever.Retriever` class
+    # is kept on disk for legacy integration tests but is no longer on the
+    # production path — it had its own RRF/MMR/query-expansion that
+    # diverged from HybridRetriever's, causing identical queries to return
+    # different results depending on entry point.
 
     def _get_retriever(self):
         if self._retriever is None:
-            from app.retrieval.retriever import Retriever
-            self._retriever = Retriever()
+            from app.core.infra_registry import infra
+            from app.core.model_loader import model_loader
+            from app.retrieval.hybrid_retriever import HybridRetriever
+
+            bm25         = infra.get_bm25()
+            vector_store = infra.get_vector_store()
+            embedder     = model_loader.get_embedder()
+            clip_embed   = None
+            if settings.ENABLE_VISION:
+                try:
+                    clip_embed = model_loader.get_clip_text_embedder()
+                except Exception as exc:
+                    logger.warning(event="clip_text_embedder_unavailable", error=str(exc))
+
+            self._retriever = HybridRetriever(
+                bm25=bm25,
+                vector_store=vector_store,
+                embedder=embedder,
+                clip_text_embedder=clip_embed,
+            )
         return self._retriever
 
     def _get_prompt_builder(self):
@@ -402,11 +439,14 @@ class RAGPipeline:
             history_text = _format_history(history, settings.MEMORY_MAX_CONTEXT_CHARS)
             _record_stage("memory", round(time.time() - t_mem, 3))
 
-            # RETRIEVAL — SECTION 4.5
+            # RETRIEVAL — SECTION 4.5 — HybridRetriever.search() returns
+            # the same Dict[text/metadata/score/embedding] shape Retriever.retrieval()
+            # did, but routed through the single canonical RRF + MMR + heuristic
+            # query-expansion path used by the live query_pipeline.
             t_ret = time.time()
             try:
                 retriever = self._get_retriever()
-                raw_docs  = retriever.retrieval(
+                raw_docs  = retriever.search(
                     query=query,
                     session_id=session_id,
                     top_k=settings.DEFAULT_TOP_K,
@@ -556,7 +596,7 @@ class RAGPipeline:
         def _generator() -> Iterator[str]:
             try:
                 retriever = self._get_retriever()
-                raw_docs  = retriever.retrieval(
+                raw_docs  = retriever.search(
                     query=query,
                     session_id=session_id,
                     top_k=min(3, settings.DEFAULT_TOP_K),

@@ -192,6 +192,7 @@ class QdrantVectorStore:
                 ("content_type",    PayloadSchemaType.KEYWORD),
                 ("embedding_space", PayloadSchemaType.KEYWORD),
                 ("deleted_at",      PayloadSchemaType.KEYWORD),
+                ("checksum_sha256", PayloadSchemaType.KEYWORD),
             ]:
                 try:
                     self.client.create_payload_index(
@@ -248,6 +249,11 @@ class QdrantVectorStore:
             "hierarchy_level": s.get("hierarchy_level"),
             "checksum":        s.get("file_hash"),
             "ingestion_time":  s.get("ingestion_time"),
+            "section_id":      s.get("section_id"),
+            "section_title":   s.get("section_title"),
+            "error_markers":   s.get("error_markers") or [],
+            "doc_version":     s.get("doc_version"),
+            "title_mismatch":  bool(s.get("title_mismatch", False)),
             "deleted_at":      None,
         }
 
@@ -698,6 +704,16 @@ class QdrantVectorStore:
                     error=str(exc),
                 )
         return results
+
+    # VISION COLLECTION EMPTY CHECK
+
+    def has_vision_data(self) -> bool:
+        """Returns True only if vision_collection has at least one indexed point."""
+        try:
+            info = self.client.get_collection(self.vision_collection)
+            return (info.points_count or 0) > 0
+        except Exception:
+            return False
 
     # COLLECTION STATS
 

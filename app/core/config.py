@@ -109,7 +109,7 @@ class Settings:
     # LLM
     LLM_MOCK_MODE: bool      = _bool("LLM_MOCK_MODE", False)
     LLM_MODEL_PATH: str      = _str("LLM_MODEL_PATH", "./models/mistral-7b-instruct-v0.2.Q4_K_M.gguf")
-    LLM_MAX_TOKENS: int      = _int("LLM_MAX_TOKENS", 512)
+    LLM_MAX_TOKENS: int      = _int("LLM_MAX_TOKENS", 768)
     CONTEXT_MAX_TOKENS: int  = _int("CONTEXT_MAX_TOKENS", 4096)
     LLM_TEMPERATURE: float   = _float("LLM_TEMPERATURE", 0.2)
     LLM_TOP_P: float         = _float("LLM_TOP_P", 0.9)
@@ -129,6 +129,10 @@ class Settings:
     TEXT_EMBEDDING_DIM: int             = _int("TEXT_EMBEDDING_DIM", 384)
     MATRYOSHKA_SHORT_DIM: int           = _int("MATRYOSHKA_SHORT_DIM", 256)
     MATRYOSHKA_LONG_DIM: int            = _int("MATRYOSHKA_LONG_DIM", 1536)
+
+    # MODALITY FEATURE FLAGS — set to false to skip model load and all related processing
+    ENABLE_VISION: bool              = _bool("ENABLE_VISION", True)
+    ENABLE_AUDIO: bool               = _bool("ENABLE_AUDIO", True)
 
     # VISION MODELS
     CLIP_MODEL: str                  = _str("CLIP_MODEL", "openai/clip-vit-base-patch32")
@@ -286,7 +290,7 @@ class Settings:
     HYBRID_WEIGHT_VECTOR: float        = _float("HYBRID_WEIGHT_VECTOR", 0.6)
     HYBRID_WEIGHT_VISION: float        = _float("HYBRID_WEIGHT_VISION", 0.2)
     HYBRID_CANDIDATES_MULTIPLIER: int  = _int("HYBRID_CANDIDATES_MULTIPLIER", 3)
-    HYBRID_MIN_SCORE: float            = _float("HYBRID_MIN_SCORE", 0.05)
+    HYBRID_MIN_SCORE: float            = _float("HYBRID_MIN_SCORE", 0.20)
     HYBRID_RRF_K: int                  = _int("HYBRID_RRF_K", 60)
     HYBRID_MMR_LAMBDA: float           = _float("HYBRID_MMR_LAMBDA", 0.7)
     HYBRID_SCORE_THRESHOLD: float      = _float("HYBRID_SCORE_THRESHOLD", 0.1)
