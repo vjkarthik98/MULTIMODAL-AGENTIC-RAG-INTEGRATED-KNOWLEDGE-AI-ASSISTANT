@@ -51,7 +51,7 @@ class Settings:
 
     # CORE APPLICATION
     APP_NAME: str        = _str("APP_NAME", "Multimodal RAG Agentic Knowledge AI Assistant")
-    APP_VERSION: str     = _str("APP_VERSION", "0.25.0")
+    APP_VERSION: str     = _str("APP_VERSION", "0.20.0")
     APP_DESCRIPTION: str = _str("APP_DESCRIPTION", "Production Multimodal RAG + Agentic AI System — Phase 24")
     ENV: str             = _str("ENV", "development")
     DEBUG: bool          = _bool("DEBUG", False)

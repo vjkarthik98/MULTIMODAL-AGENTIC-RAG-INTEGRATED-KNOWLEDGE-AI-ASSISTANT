@@ -176,6 +176,51 @@ def _hallucination_guard(
     return is_hallucinated, round(support_score, 3)
 
 
+# NUMERIC FAITHFULNESS CHECK
+# Extracts numeric tokens from the answer and verifies each one appears in
+# the retrieved knowledge. Catches the case where the LLM substitutes a
+# parametric-memory number (e.g. "33.9%") for a context number ("31.4%").
+
+# Matches integers, decimals, percentages, currency-style numbers.
+_NUM_RE = re.compile(r"\d+(?:[.,]\d+)*%?")
+
+
+def _extract_numbers(text: str) -> List[str]:
+    if not text:
+        return []
+    return [m.group(0) for m in _NUM_RE.finditer(text)]
+
+
+def _number_in_context(num: str, context: str) -> bool:
+    """A number is supported if it appears verbatim in context, OR if its
+    bare-digit form does (so '31.4%' is supported by '31.4' in the text)."""
+    if not num or not context:
+        return False
+    if num in context:
+        return True
+    bare = num.rstrip("%")
+    if bare and bare != num and bare in context:
+        return True
+    return False
+
+
+def _unsupported_numbers(answer: str, docs: List[Dict]) -> List[str]:
+    """Return numeric tokens in `answer` that do NOT appear in any doc."""
+    nums = _extract_numbers(_strip_cite_tags(answer))
+    if not nums:
+        return []
+    context = " ".join(str(d.get("text", "") or "") for d in docs)
+    unsupported: List[str] = []
+    seen: set = set()
+    for n in nums:
+        if n in seen:
+            continue
+        seen.add(n)
+        if not _number_in_context(n, context):
+            unsupported.append(n)
+    return unsupported
+
+
 # PII SCRUB ANSWER BEFORE RETURNING
 
 def _scrub_answer_pii(text: str) -> str:
@@ -334,16 +379,23 @@ def _build_cot_prompt(
     type_instruction = type_instructions.get(query_type, type_instructions["factual"])
 
     instruction = (
-        "You are a grounded AI assistant. Use ONLY the provided KNOWLEDGE chunks.\n"
-        "You MAY combine facts from multiple chunks to answer a question, even\n"
-        "if no single chunk contains the full answer — synthesis across chunks\n"
-        "is encouraged when the question asks how two topics relate.\n"
-        "Only say 'I don't know based on available data' when NO chunk contains\n"
-        "any fact relevant to the question.\n"
-        "The MEMORY section (if present) is prior conversation context for your\n"
-        "reference only. NEVER cite MEMORY, never copy MEMORY timestamps like\n"
-        "'[6m ago]' into your Answer, and never list MEMORY content as a source.\n"
-        "Be concise but complete.\n\n"
+        "You are a strict, grounded AI assistant. Use ONLY the provided KNOWLEDGE chunks.\n"
+        "\n"
+        "ABSOLUTE RULES — VIOLATING ANY OF THESE IS A FAILURE:\n"
+        "1. Every number, percentage, date, name, and proper noun in your Answer\n"
+        "   MUST appear verbatim in at least one KNOWLEDGE chunk. Do NOT round,\n"
+        "   convert, paraphrase, or substitute numbers. If KNOWLEDGE says '31.4%',\n"
+        "   you MUST write '31.4%' — never '33.9%', '~31%', or 'about 31'.\n"
+        "2. Do NOT use prior training knowledge. If a fact is not in KNOWLEDGE,\n"
+        "   you do not know it. Say 'The provided documents do not contain this\n"
+        "   information.'\n"
+        "3. You MAY combine facts from multiple chunks, but every individual fact\n"
+        "   in the combination must still come from KNOWLEDGE verbatim.\n"
+        "4. The MEMORY section is prior conversation context only. NEVER cite\n"
+        "   MEMORY, never copy MEMORY timestamps like '[6m ago]', never list\n"
+        "   MEMORY as a source.\n"
+        "5. Be concise. Quote numbers and names exactly as they appear in KNOWLEDGE.\n"
+        "\n"
     )
 
     # CITATION RULES — make the LLM emit the exact bracket tags shown in KNOWLEDGE.
@@ -362,17 +414,17 @@ def _build_cot_prompt(
     knowledge_block = f"KNOWLEDGE:\n{knowledge}\n\n" if knowledge else ""
     query_block     = f"QUERY:\n{query}\n\n"
 
-    # Few-shot example using one of the actual cite keys so Mistral copies the
-    # PATTERN (full sentence + trailing tag), not the placeholder text.
+    # Few-shot example: STRUCTURE ONLY, no numbers or named entities that could
+    # leak into the answer. Mistral-7B Q4 has been observed copying numeric
+    # tokens from the example into the answer.
     example_tag = cite_keys[0] if cite_keys else "[source.txt]"
     example_block = (
-        "EXAMPLE OF CORRECT OUTPUT FORMAT (do not copy the content, only the structure):\n"
-        f"Answer: The three macronutrients are carbohydrates, proteins, and fats {example_tag}. "
-        f"Each gram of carbohydrate and protein provides 4 kcal, while fat provides 9 kcal {example_tag}.\n"
+        "EXAMPLE OF CORRECT OUTPUT FORMAT (structure only — do NOT copy any words from this example):\n"
+        f"Answer: <subject> <verb> <object stated verbatim from KNOWLEDGE> {example_tag}.\n"
         f"Answer Tags: {example_tag}\n"
         "Confidence: 0.9\n"
         "Sources Used: 1\n\n"
-        "Now answer the actual QUERY below using the same structure. Do NOT echo the example.\n\n"
+        "Now answer the actual QUERY below. Copy numbers and names character-for-character from KNOWLEDGE.\n\n"
     )
 
     output_format = (
@@ -456,31 +508,48 @@ def _parse_response(
 
     try:
         answer:     str   = ""
-        confidence: float = 0.5
+        # `confidence` is `None` until the LLM actually emits a Confidence: line.
+        # Downstream code uses this to distinguish "LLM said 0.5" from
+        # "LLM omitted the field" so the pipeline can fall through to the
+        # retrieval-derived confidence instead of a misleading hardcoded 0.5.
+        confidence: Optional[float] = None
         sources:    int   = 0
         reasoning:  str   = ""
         tags_line:  str   = ""
 
-        # NORMALIZE — strip leading bracket wrappers that Mistral sometimes
-        # emits, like "[Answer: ..." or "[Answer Tags]: ..." which break line
-        # prefix matching. Also handles "[Answer: foo [Answer Tags]: bar" on
-        # one line by inserting line breaks before each known key.
+        # NORMALIZE — strip leading bracket wrappers that Mistral emits in
+        # several variants. All of these break the line-based prefix matcher
+        # below if not flattened first:
+        #   "[Answer]: foo"     (closed bracket)
+        #   "[Answer: foo"      (open bracket only — most common, was missed)
+        #   "[ Answer ]: foo"   (whitespace inside)
+        # We match ANY of these and replace with the bare "<Key>:" form so the
+        # downstream line-scanner can recognise the prefix correctly.
         norm_text = text
-        for key_pat in (
-            r"\[\s*Answer\s*\]\s*:",
-            r"\[\s*Answer\s+Tags\s*\]\s*:",
-            r"\[\s*Confidence\s*\]\s*:",
-            r"\[\s*Sources\s+Used\s*\]\s*:",
-            r"\[\s*Reasoning\s*\]\s*:",
-        ):
-            norm_text = re.sub(key_pat, lambda m: m.group(0).strip("[]"),
-                               norm_text, flags=re.IGNORECASE)
+        keys_for_norm = ("Answer Tags", "Sources Used", "Confidence",
+                         "Reasoning", "Answer")
+        for key in keys_for_norm:
+            key_re = re.escape(key)
+            # Variant 1: "[Key]:" or "[ Key ]:"
+            norm_text = re.sub(
+                r"\[\s*" + key_re + r"\s*\]\s*:",
+                key + ":", norm_text, flags=re.IGNORECASE,
+            )
+            # Variant 2: "[Key:" (open bracket only — no matching ])
+            norm_text = re.sub(
+                r"\[\s*" + key_re + r"\s*:",
+                key + ":", norm_text, flags=re.IGNORECASE,
+            )
 
-        # Insert newlines before each format key when they appear inline,
-        # so the line-based scanner below can split them apart.
+        # Insert newlines before each format key when they appear inline.
+        # Allow optional preceding "[" so "...years. [Answer Tags:" splits too —
+        # the normalization above already removed those that started at line
+        # start, but inline occurrences still keep their "[" until here.
         for key in ("Answer Tags:", "Confidence:", "Sources Used:", "Reasoning:"):
-            norm_text = re.sub(r"\s+(?=" + re.escape(key) + r")",
-                               "\n", norm_text, flags=re.IGNORECASE)
+            norm_text = re.sub(
+                r"\s+(?=\[?\s*" + re.escape(key) + r")",
+                "\n", norm_text, flags=re.IGNORECASE,
+            )
 
         answer_lines: list = []
         in_answer = False
@@ -492,7 +561,16 @@ def _parse_response(
         for line in norm_text.split("\n"):
             ll = line.lower().strip()
 
-            if ll.startswith("answer:") or ll.startswith("answer "):
+            # IMPORTANT: check "answer tags:" FIRST, because the broader
+            # "answer " prefix below would otherwise swallow it (a line like
+            # "Answer Tags: foo" starts with "answer ", which would wrongly
+            # treat the tag line as a new Answer field, overwriting the real
+            # answer with the tag content).
+            if ll.startswith("answer tags:") or ll.startswith("answer tags "):
+                in_answer = False
+                tags_line = line.split(":", 1)[-1].strip()
+
+            elif ll.startswith("answer:") or ll.startswith("answer "):
                 val = line.split(":", 1)[-1].strip()
                 # strip placeholder <answer> prefix if LLM echoed it
                 if val.startswith("<answer>"):
@@ -500,20 +578,20 @@ def _parse_response(
                 answer_lines = [val] if val else []
                 in_answer = True
 
-            elif ll.startswith("answer tags:") or ll.startswith("answer tags "):
-                in_answer = False
-                tags_line = line.split(":", 1)[-1].strip()
-
             elif ll.startswith("reasoning:") or ll.startswith("reasoning "):
                 in_answer = False
                 reasoning = line.split(":", 1)[-1].strip()
 
             elif ll.startswith("confidence:") or ll.startswith("confidence "):
                 in_answer = False
+                # Parse the value; leave `confidence` as None if it's
+                # unparseable so the pipeline still falls through to the
+                # retrieval-derived confidence. A malformed Confidence: line
+                # is no more informative than a missing one.
                 try:
                     confidence = float(line.split(":", 1)[-1].strip())
                 except Exception:
-                    confidence = 0.5
+                    confidence = None
 
             elif ll.startswith("sources used:") or ll.startswith("sources used "):
                 in_answer = False
@@ -527,14 +605,126 @@ def _parse_response(
 
         answer = " ".join(answer_lines).strip()
 
-        # POST-CLEAN — strip any trailing format key fragments that survived
-        # (e.g. Mistral wrote "...post-2020. [Answer Tags]: foo" as one line).
+        # POST-CLEAN — strip any trailing format key fragments that survived.
+        # Mistral emits these in several bracket variants:
+        #   "Answer Tags:"        (clean)
+        #   "[Answer Tags]:"      (closed bracket)
+        #   "[Answer Tags:"       (open bracket only)  ← was missed
+        #   " [Answer Tags:"      (open bracket with leading space)
         if answer:
-            for key in ("Answer Tags:", "Confidence:", "Sources Used:",
-                        "Reasoning:", "[Answer Tags]:", "[Confidence]:"):
-                idx = answer.lower().find(key.lower())
-                if idx > 0:
-                    answer = answer[:idx].strip()
+            # Build a regex that catches any of these key markers with optional
+            # surrounding brackets and optional leading whitespace+bracket.
+            # "Answer Tags" must come BEFORE "Answer" in the alternation so the
+            # longer match wins — otherwise the regex would split at the first
+            # "Answer" and leave " Tags:" stranded.
+            keys = (
+                "Answer Tags", "Sources Used",
+                "Confidence", "Reasoning", "Answer",
+            )
+            key_pattern = (
+                r"\s*\[?\s*(?:"
+                + "|".join(re.escape(k) for k in keys)
+                + r")\s*\]?\s*:"
+            )
+            m = re.search(key_pattern, answer, flags=re.IGNORECASE)
+            if m and m.start() > 0:
+                answer = answer[:m.start()].strip()
+            # Trim any dangling open bracket / trailing punctuation left over
+            # from a partial format fragment that didn't match the pattern.
+            answer = re.sub(r"\s*\[\s*$", "", answer).strip()
+            answer = answer.rstrip(",;: \t")
+            # Repair common Mistral malformation: closing the last list item
+            # with "}" or ")" instead of the natural sentence terminator. Only
+            # touch the FINAL character to stay conservative.
+            if answer.endswith("}") or answer.endswith(")"):
+                # Replace only if there's no matching opener for the brace/paren
+                # in the answer (i.e. it's a malformed closer, not balanced).
+                last_char = answer[-1]
+                opener = "{" if last_char == "}" else "("
+                if answer.count(opener) < answer.count(last_char):
+                    answer = answer[:-1].rstrip() + "."
+
+            # Repair citation-in-data-slot artifacts. Mistral occasionally
+            # emits a sentence where the citation tag has been inserted into
+            # the grammatical position of a missing value — typically because
+            # the numeric guard's retry stripped a fabricated number and the
+            # regeneration substituted the tag where the number used to be.
+            # Pattern: "<word> of [..long_tag..] <word>" where the tag is in
+            # the noun-phrase slot rather than at end-of-sentence/clause.
+            # The fix drops the malformed clause up to the next clause break
+            # (", but", "; ", ". "), preserving the rest of the answer.
+            citation_in_slot = re.compile(
+                r"\b(?:of|is|are|was|were|at|reaches|reached|approximately|about|around|"
+                r"holds?|has|have|had|totaling|totalling|valued|worth)\s+"
+                r"\[[^\[\]\n]{8,200}\]\s+(?:in|at|on|of|for|across|globally|worldwide|"
+                r"per|annually|monthly|yearly|today|currently)",
+                flags=re.IGNORECASE,
+            )
+            m_slot = citation_in_slot.search(answer)
+            if m_slot:
+                # Cut the offending clause: from the start of the matched
+                # phrase to the next clause boundary (or end of string).
+                cut_start = m_slot.start()
+                # Walk back to the start of the current clause (after the
+                # nearest preceding sentence/clause boundary).
+                lookbehind = answer[:cut_start]
+                clause_start = max(
+                    lookbehind.rfind(". "),
+                    lookbehind.rfind(", but "),
+                    lookbehind.rfind(", however "),
+                    lookbehind.rfind("; "),
+                )
+                clause_start = clause_start + 2 if clause_start >= 0 else 0
+                # Find the end of the broken clause.
+                tail = answer[cut_start:]
+                clause_end_rel = -1
+                for sep in (", but ", ", however ", "; ", ". "):
+                    idx = tail.find(sep)
+                    if idx >= 0 and (clause_end_rel < 0 or idx < clause_end_rel):
+                        clause_end_rel = idx + len(sep)
+                if clause_end_rel < 0:
+                    # No following clause — drop the broken phrase entirely.
+                    answer = answer[:clause_start].rstrip().rstrip(",;:") or answer
+                else:
+                    answer = (
+                        answer[:clause_start]
+                        + answer[cut_start + clause_end_rel:]
+                    ).strip()
+                # Capitalize first letter if we trimmed away the original opener.
+                if answer and answer[0].islower():
+                    answer = answer[0].upper() + answer[1:]
+                logger.info("reasoning_repaired_citation_in_slot")
+
+            # POST-REPAIR INTEGRITY CHECK
+            # If the answer STILL contains citation-in-data-slot patterns after
+            # one repair pass — i.e. multiple broken slots chained without any
+            # refusal text between them — the LLM has produced an unsalvageable
+            # response (it tried to invent a value the document doesn't have,
+            # and the citation tag was substituted into the value's grammatical
+            # position multiple times). Replace the whole answer with an
+            # explicit refusal. This is the case Q10 hit when Mistral wrote
+            # "holds a market share of [tag] in [...] segment [tag]." with no
+            # "but the document doesn't contain..." follow-up.
+            REFUSAL_MARKERS = (
+                "does not contain", "do not contain",
+                "not mentioned", "not specified",
+                "is not provided", "are not provided",
+                "no information", "cannot find",
+                "i don't know", "i do not know",
+            )
+            has_refusal = any(
+                m in (answer or "").lower() for m in REFUSAL_MARKERS
+            )
+            still_broken = citation_in_slot.search(answer or "") is not None
+            if still_broken and not has_refusal:
+                logger.warning(
+                    "reasoning_unsalvageable_citation_substitution",
+                    answer_prefix=(answer or "")[:120],
+                )
+                answer = (
+                    "The provided documents do not contain the information "
+                    "needed to answer this question."
+                )
 
         # REJECT CITATION-ONLY ANSWERS — Mistral sometimes echoes only the
         # example tag (e.g. "[file.pdf p.4]") with no prose. Strip all bracketed
@@ -558,11 +748,15 @@ def _parse_response(
                 clean_lines.append(line)
             answer = " ".join(clean_lines).strip() or text.strip()
 
-        # NaN/INF GUARD ON CONFIDENCE
-        if math.isnan(confidence) or math.isinf(confidence):
-            confidence = 0.5
-
-        confidence = max(0.0, min(confidence, 1.0))
+        # NaN/INF GUARD ON CONFIDENCE. When the LLM omitted the Confidence:
+        # line entirely, `confidence` is None — leave it that way so the
+        # pipeline can substitute a retrieval-derived score downstream
+        # instead of a misleading hardcoded 0.5.
+        if confidence is not None:
+            if math.isnan(confidence) or math.isinf(confidence):
+                confidence = None
+            else:
+                confidence = max(0.0, min(confidence, 1.0))
 
         # CITATION EXTRACTION — inline tags + Answer Tags: line, validated.
         cited_tags: List[str] = []
@@ -646,7 +840,7 @@ class ReasoningEngine:
         prompt: str,
         session_id: str,
         max_tokens: Optional[int] = None,
-        temperature: float = 0.1,
+        temperature: float = 0.0,
     ) -> Optional[str]:
 
         if len(prompt) > self.max_prompt_chars:
@@ -788,6 +982,64 @@ class ReasoningEngine:
 
                 cited_tags = parsed.get("cited_tags") or []
 
+                # NUMERIC FAITHFULNESS — catches the "31.4 → 33.9" substitution.
+                # If unsupported numbers are detected, retry ONCE with a hardened
+                # prompt that explicitly tells the model which numbers were
+                # fabricated AND instructs it to refuse if the doc lacks the data.
+                bad_nums = _unsupported_numbers(parsed["answer"], retrieved_docs)
+                if bad_nums:
+                    logger.warning(
+                        "reasoning_numeric_mismatch",
+                        unsupported=bad_nums[:5],
+                        session_id=session_id,
+                    )
+                    retry_prompt = (
+                        prompt
+                        + "\n\nIMPORTANT CORRECTION: Your previous answer contained "
+                        f"the number(s) {', '.join(bad_nums)} which do NOT appear "
+                        "anywhere in KNOWLEDGE. You MUST use only numbers that "
+                        "appear verbatim in KNOWLEDGE. If KNOWLEDGE does not "
+                        "contain the value the QUERY asks for, respond with "
+                        "exactly: 'The provided documents do not contain the "
+                        "information needed to answer this question.' Do NOT "
+                        "invent a substitute number.\n"
+                    )
+                    retry_response = self._call_llm(
+                        retry_prompt, session_id, temperature=0.0,
+                    )
+                    if retry_response:
+                        retry_parsed = _parse_response(
+                            retry_response, retrieved_docs, valid_cite_keys=cite_keys,
+                        )
+                        retry_bad = _unsupported_numbers(
+                            retry_parsed["answer"], retrieved_docs,
+                        )
+                        if len(retry_bad) < len(bad_nums):
+                            parsed = retry_parsed
+                            cited_tags = parsed.get("cited_tags") or []
+                            bad_nums = retry_bad
+
+                # If, even after one retry, the answer still contains
+                # fabricated numbers, the LLM is hallucinating values the
+                # document doesn't have. Scrubbing the number in-place leaves
+                # broken grammar; the safest action is to REPLACE the answer
+                # with an explicit refusal so the user is not shown a
+                # fabricated figure. The hallucination warning + low
+                # confidence are not enough — the answer text itself must
+                # not display the fabricated value.
+                if bad_nums:
+                    logger.warning(
+                        "reasoning_replacing_unfaithful_answer",
+                        unsupported=bad_nums[:5],
+                        session_id=session_id,
+                    )
+                    parsed["answer"] = (
+                        "The provided documents do not contain the "
+                        "information needed to answer this question."
+                    )
+                    parsed["cited_tags"] = []
+                    cited_tags = []
+
                 # HALLUCINATION GUARD
                 t_verify = time.time()
                 is_hallucinated, support_score = _hallucination_guard(
@@ -795,10 +1047,14 @@ class ReasoningEngine:
                     retrieved_docs,
                 )
                 # CITATION-BASED RELAXATION:
-                # If the LLM cited >=1 VALID tag, treat the answer as grounded
-                # regardless of surface-word overlap (paraphrase-friendly).
-                if cited_tags:
+                # If the LLM cited >=1 VALID tag AND no numeric mismatch remains,
+                # treat the answer as grounded regardless of surface overlap.
+                if cited_tags and not bad_nums:
                     is_hallucinated = False
+                # NUMERIC MISMATCH OVERRIDES citation relaxation — citations
+                # cannot rescue an answer that contains fabricated numbers.
+                if bad_nums:
+                    is_hallucinated = True
 
                 verify_latency = round(time.time() - t_verify, 3)
 
@@ -820,10 +1076,16 @@ class ReasoningEngine:
                     logger.warning(
                         "reasoning_hallucination_detected",
                         support_score=support_score,
+                        unsupported_numbers=bad_nums[:5] if bad_nums else [],
                         session_id=session_id,
                     )
-                    # Only downgrade when BOTH no valid citations AND low support.
-                    parsed["confidence"] = min(parsed["confidence"], 0.4)
+                    # Numeric mismatch is a hard fail — clamp confidence low.
+                    # When the LLM omitted Confidence: (parsed["confidence"]
+                    # is None), force a low value here since we KNOW the
+                    # answer is suspect — we can't defer to retrieval scoring.
+                    cap = 0.2 if bad_nums else 0.4
+                    cur = parsed.get("confidence")
+                    parsed["confidence"] = cap if cur is None else min(cur, cap)
                     parsed["hallucination_warning"] = True
                 else:
                     parsed["hallucination_warning"] = False
@@ -840,12 +1102,30 @@ class ReasoningEngine:
                     "couldn't generate",
                     "no answer generated",
                     "something went wrong",
+                    # New: phrases emitted by the post-repair refusal path
+                    # in _parse_response, plus general document-doesn't-contain
+                    # language Mistral itself may emit.
+                    "do not contain the information",
+                    "does not contain the information",
+                    "do not contain this information",
+                    "does not contain this information",
+                    "documents do not contain",
+                    "document does not contain",
+                    "not provided in the document",
+                    "not specified in the document",
+                    "not mentioned in the document",
                 )
                 is_refusal = any(s in ans_lower for s in _REFUSAL_SENTINELS)
 
                 if is_refusal:
-                    # Refusals carry no real grounding — don't fake sources.
+                    # Refusals carry no real grounding — don't fake sources,
+                    # and force a low-confidence + warning signal so callers
+                    # and the UI can flag it. Without this, a refusal that
+                    # the LLM emitted with Confidence: 1.0 would look like a
+                    # confident grounded answer.
                     parsed["sources"] = []
+                    parsed["confidence"] = min(parsed.get("confidence") or 0.1, 0.1)
+                    parsed["hallucination_warning"] = True
                 elif cited_tags and sources:
                     cited_set = set(cited_tags)
                     parsed["sources"] = [

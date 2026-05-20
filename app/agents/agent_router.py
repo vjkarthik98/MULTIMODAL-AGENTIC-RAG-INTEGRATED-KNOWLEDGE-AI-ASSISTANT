@@ -263,12 +263,18 @@ class AgentRouter:
             "Route the query to exactly ONE of these options:\n"
             "rag | search | direct | memory | hybrid\n\n"
             "ROUTING RULES:\n"
-            "- rag: knowledge base questions, factual lookups, document questions\n"
-            "- search: recent events, news, current information\n"
-            "- direct: greetings, code, math, simple factual answers\n"
-            "- memory: references to previous conversation\n"
-            "- hybrid: complex multi-source questions\n\n"
-            "Return JSON only. No explanation.\n\n"
+            "- rag: ANY question that asks for a specific fact, name, number, date,\n"
+            "  specification, person, project, product, organization, or event.\n"
+            "  This is the DEFAULT for any question containing 'what', 'who',\n"
+            "  'when', 'where', 'which', or 'how much/many'. Always prefer rag\n"
+            "  when the answer could plausibly live in an ingested document.\n"
+            "- search: recent events, news, today's information, live data only\n"
+            "- direct: ONLY pure chitchat, greetings, math arithmetic, or code\n"
+            "  syntax help. NEVER use direct for factual questions about\n"
+            "  companies, people, products, or technical specifications.\n"
+            "- memory: explicit references to previous conversation turns\n"
+            "- hybrid: complex multi-part questions needing both docs and search\n\n"
+            "When uncertain, choose rag. Return JSON only. No explanation.\n\n"
         )
 
         signal_str   = str({k: v for k, v in signals.items() if v})
@@ -400,6 +406,8 @@ class AgentRouter:
 
     # VALIDATE DECISION
 
+    _INTERROGATIVES = {"what", "who", "when", "where", "which", "whose", "whom"}
+
     def _validate(
         self,
         decision: AgentDecision,
@@ -421,6 +429,20 @@ class AgentRouter:
         # OVERRIDE: MULTI-QUESTION BENEFITS FROM HYBRID
         if signals.get("multi_question") and decision.action == "direct":
             return self._decision("hybrid", "override_multi_question", 0.75, session_id)
+
+        # OVERRIDE: LLM picked `direct` but the query looks like a factual
+        # lookup (interrogative + non-trivial length + not greeting/code/math).
+        # Force rag so we never hallucinate a doc answer from parametric memory.
+        if (
+            decision.action == "direct"
+            and not signals.get("is_greeting")
+            and not signals.get("is_code")
+            and not signals.get("is_math")
+            and signals.get("token_count", 0) >= 5
+        ):
+            return self._decision(
+                "rag", "override_factual_lookup", 0.8, session_id,
+            )
 
         return decision
 
