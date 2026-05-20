@@ -57,8 +57,9 @@ class Settings:
     DEBUG: bool          = _bool("DEBUG", False)
 
     # SERVER
-    HOST: str = _str("HOST", "127.0.0.1")
-    PORT: int = _int("PORT", 8000)
+    HOST: str      = _str("HOST",      "0.0.0.0")
+    PORT: int      = _int("PORT",      8000)
+    ROOT_PATH: str = _str("ROOT_PATH", "")
 
     # PATHS
     DATA_DIR: Path           = Path(_str("DATA_DIR",           str(PROJECT_ROOT / "data")))
@@ -133,6 +134,25 @@ class Settings:
     # MODALITY FEATURE FLAGS — set to false to skip model load and all related processing
     ENABLE_VISION: bool              = _bool("ENABLE_VISION", True)
     ENABLE_AUDIO: bool               = _bool("ENABLE_AUDIO", True)
+
+    # MODEL DEVICE / WARMUP — Lightning AI hybrid CPU+GPU profile
+    # Profiles: "auto" (CUDA → hybrid, else cpu), "hybrid", "all_gpu", "all_cpu"
+    MODELS_DEVICE_PROFILE: str       = _str("MODELS_DEVICE_PROFILE", "auto")
+    VRAM_BUDGET_GB: float            = _float("VRAM_BUDGET_GB", 14.0)
+    WARMUP_AT_STARTUP: bool          = _bool("WARMUP_AT_STARTUP", False)
+    WARMUP_MODELS: List[str]         = _list("WARMUP_MODELS", [])
+    MODEL_PARALLEL_LOAD: bool        = _bool("MODEL_PARALLEL_LOAD", True)
+    LLM_GPU_LAYERS_AUTO: bool        = _bool("LLM_GPU_LAYERS_AUTO", True)
+    LLM_GPU_LAYERS_ALL: int          = _int("LLM_GPU_LAYERS_ALL", -1)
+    EMBEDDER_HALF_PRECISION: bool    = _bool("EMBEDDER_HALF_PRECISION", True)
+    VISION_HALF_PRECISION: bool      = _bool("VISION_HALF_PRECISION", True)
+    WHISPER_COMPUTE_TYPE: str        = _str("WHISPER_COMPUTE_TYPE", "")
+    EMBEDDER_DEVICE: str             = _str("EMBEDDER_DEVICE", "")
+    RERANKER_DEVICE: str             = _str("RERANKER_DEVICE", "")
+    CLIP_DEVICE: str                 = _str("CLIP_DEVICE", "")
+    BLIP_DEVICE: str                 = _str("BLIP_DEVICE", "")
+    WHISPER_DEVICE: str              = _str("WHISPER_DEVICE", "")
+    LLM_DEVICE_HINT: str             = _str("LLM_DEVICE_HINT", "")
 
     # VISION MODELS
     CLIP_MODEL: str                  = _str("CLIP_MODEL", "openai/clip-vit-base-patch32")
@@ -463,7 +483,7 @@ class Settings:
     # SECURITY
     SECRET_KEY: str                        = _str("SECRET_KEY", "CHANGE_ME_IN_PRODUCTION")
     DATABASE_URL: str                      = _str("DATABASE_URL", "sqlite:///./data/rag_users.db")
-    CORS_ORIGINS: List[str]                = _list("CORS_ORIGINS", ["http://localhost:7860", "http://localhost:8000"])
+    CORS_ORIGINS: List[str]                = _list("CORS_ORIGINS", ["*"])
     RATE_LIMIT_RPM: int                    = _int("RATE_LIMIT_RPM", 60)
     PII_DETECTION_ENABLED: bool            = _bool("PII_DETECTION_ENABLED", False)
     PII_ENTITIES: List[str]                = _list("PII_ENTITIES", ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "US_SSN", "CREDIT_CARD"])

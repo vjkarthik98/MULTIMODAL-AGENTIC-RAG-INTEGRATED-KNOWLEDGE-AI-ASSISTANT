@@ -473,6 +473,15 @@ def query_pipeline(
         return cached
 
     try:
+        # PARALLEL MODEL WARM — LLM + text embedder + reranker load
+        # concurrently on the first query so we don't serialize their
+        # latencies. Subsequent queries are no-ops.
+        try:
+            from app.core.model_registry import model_registry
+            model_registry.ensure_for_query(needs_vision=False)
+        except Exception as warm_exc:
+            logger.warning(event="query_warmup_failed", error=str(warm_exc))
+
         from app.core.model_loader import model_loader
         llm      = model_loader.get_llm()
         embedder = model_loader.get_embedder()

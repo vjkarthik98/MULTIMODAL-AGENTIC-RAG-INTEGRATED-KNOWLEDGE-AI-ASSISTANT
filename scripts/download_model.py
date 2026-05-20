@@ -212,22 +212,18 @@ def download_model(
 
                 from huggingface_hub import hf_hub_download
 
-                temp_path = target_path + f".tmp.{attempt}"
+                downloaded = hf_hub_download(
+                    repo_id=repo_id,
+                    filename=filename,
+                    local_dir=local_dir,
+                    token=hf_token,
+                )
 
-                def _do_download(dest: str) -> None:
-                    downloaded = hf_hub_download(
-                        repo_id=repo_id,
-                        filename=filename,
-                        local_dir=local_dir,
-                        local_dir_use_symlinks=False,
-                        resume_download=True,
-                        token=hf_token,
-                    )
-                    # MOVE DOWNLOADED FILE TO EXPECTED TARGET PATH
-                    if downloaded != target_path and os.path.exists(downloaded):
-                        shutil.move(downloaded, dest)
-
-                _atomic_write(_do_download, temp_path, target_path)
+                # hf_hub_download writes atomically to local_dir/filename and
+                # returns its absolute path. If that's not already our target,
+                # move it into place.
+                if os.path.abspath(downloaded) != os.path.abspath(target_path):
+                    shutil.move(downloaded, target_path)
 
                 _validate_download(target_path)
                 _verify_checksum(target_path, expected_sha256)

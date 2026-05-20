@@ -95,15 +95,27 @@ async def _warmup_infra() -> None:
         logger.warning(event="infra_warmup_failed", error=str(e))
 
 
-# MODEL WARMUP — EMBEDDER MINIMUM REQUIRED FOR QUERY PATH
+# MODEL WARMUP — OPT-IN VIA WARMUP_AT_STARTUP
+# Default is False so uvicorn cold-starts without paying any model-load cost.
+# When True, the registry warms only the models listed in WARMUP_MODELS
+# (or the text embedder as a sensible minimum). Per-modality ingestion
+# and the first query both load on demand through model_registry.
 
-def _warmup_embedder() -> None:
+def _warmup_models_if_requested() -> None:
+    if not settings.WARMUP_AT_STARTUP:
+        logger.info(
+            event="startup_warmup_skipped",
+            reason="lazy_mode",
+            hint="models load on first ingest/query via model_registry",
+        )
+        return
     try:
-        from app.core.model_loader import model_loader
-        model_loader.get_embedder()
-        logger.info(event="embedder_ready")
+        from app.core.model_registry import model_registry
+        requested = list(settings.WARMUP_MODELS) or ["text_embedder"]
+        model_registry.ensure(requested)
+        logger.info(event="startup_warmup_complete", models=requested)
     except Exception as e:
-        logger.warning(event="embedder_warmup_failed", error=str(e))
+        logger.warning(event="startup_warmup_failed", error=str(e))
 
 
 # AUDIT LOG SETUP — SECTION 5
@@ -170,9 +182,14 @@ async def lifespan(app: FastAPI):
     # INFRA WARMUP (Qdrant + BM25 + Redis + Mongo)
     await _warmup_infra()
 
-    # EMBEDDER WARMUP — MINIMUM FOR QUERY PATH
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _warmup_embedder)
+    # MODEL WARMUP — OPT-IN. Default: nothing loads here; modality-scoped
+    # warmups handle it on first request. Set WARMUP_AT_STARTUP=true to
+    # preload (and use WARMUP_MODELS to pick which).
+    if settings.WARMUP_AT_STARTUP:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _warmup_models_if_requested)
+    else:
+        _warmup_models_if_requested()
 
     startup_latency = round(time.time() - startup_start, 2)
     logger.info(
@@ -198,6 +215,7 @@ app = FastAPI(
     lifespan=lifespan,
     docs_url="/docs"   if settings.ENV != "production" else None,
     redoc_url="/redoc" if settings.ENV != "production" else None,
+    root_path=settings.ROOT_PATH,
 )
 
 
