@@ -417,6 +417,25 @@ async def route_ingestion(
                     session_id=session_id,
                 )
 
+                # PER-MODALITY MODEL WARM — load ONLY the models this
+                # modality needs (e.g. .txt → text embedder; .mp3 →
+                # whisper + text embedder; .png → BLIP/CLIP/text embedder).
+                # Other models stay unloaded so VRAM/RAM stay free.
+                try:
+                    from app.core.model_registry import model_registry
+                    await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        model_registry.ensure_for_modality,
+                        modality,
+                    )
+                except Exception as warm_exc:
+                    logger.warning(
+                        "modality_warmup_failed",
+                        modality=modality,
+                        error=str(warm_exc),
+                        session_id=session_id,
+                    )
+
                 handler = INGESTION_HANDLERS.get(modality)
                 if not handler:
                     raise ValueError(f"HANDLER_NOT_FOUND: {modality}")
