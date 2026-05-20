@@ -98,34 +98,31 @@ class Reranker:
     def _clean_text(self, text: str) -> str:
         return " ".join(str(text or "").split())
 
-    # CONTEXT BUILDER — ENRICHES DOC WITH METADATA LABELS
+    # CONTEXT BUILDER FOR CROSS-ENCODER
+    # The cross-encoder needs a CLEAN (query, text) pair. Prepending verbose
+    # metadata headers like "[SRC:b62c7383...] [TEXT] [TEXT_CHUNK]" pollutes
+    # the input — every chunk gets the same 30+ noise tokens, which dilutes
+    # the query-document similarity signal and makes the ranker indecisive.
+    # We only add headers when they carry SEMANTIC information that helps
+    # disambiguate retrieval (modality for non-text, page for paginated docs,
+    # speaker for audio, timestamp for video). We never add the source/UUID
+    # or generic content_type — those are identical across the corpus.
 
     def _context(self, doc: Dict) -> str:
         meta = doc.get("metadata", {}) or {}
         structure = meta.get("structure", {}) or {}
 
         modality = meta.get("modality", "text")
-        source = meta.get("source") or meta.get("source_type", "")
-        content_type = meta.get("content_type") or structure.get("content_type", "")
-        emb_space = meta.get("embedding_space") or structure.get("embedding_space", "text")
         page = meta.get("page") or structure.get("page")
         speaker = structure.get("speaker")
-        language = meta.get("language") or structure.get("language")
         ts_start = structure.get("timestamp_start")
 
         header_parts: List[str] = []
 
-        if source:
-            header_parts.append(f"[SRC:{str(source)[:20]}]")
-
-        if modality:
+        # Only signal modality when it's NOT plain text — text is the default,
+        # adding "[TEXT]" to every chunk is pure noise.
+        if modality and modality != "text":
             header_parts.append(f"[{modality.upper()}]")
-
-        if content_type:
-            header_parts.append(f"[{str(content_type).upper()}]")
-
-        if emb_space == "vision":
-            header_parts.append("[VISION]")
 
         if page:
             header_parts.append(f"[PG:{page}]")
@@ -133,16 +130,13 @@ class Reranker:
         if speaker:
             header_parts.append(f"[SPK:{speaker}]")
 
-        if language and language != "en":
-            header_parts.append(f"[LANG:{language}]")
-
         if ts_start is not None:
             header_parts.append(f"[T:{round(float(ts_start), 1)}s]")
 
         text = self._clean_text(doc.get("text", ""))[:self.context_chars]
-        header = " ".join(header_parts)
-
-        return (header + " " + text).strip()
+        if not header_parts:
+            return text
+        return (" ".join(header_parts) + " " + text).strip()
 
     # PRE-FILTER — REMOVE EMPTY / TOO-SHORT DOCS ONLY
     # Score threshold is NOT applied here: upstream RRF scores are inherently

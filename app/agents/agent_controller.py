@@ -108,29 +108,72 @@ def _sanitize(query: str) -> str:
 
 
 class AgentExecutor:
-    """Classifies query intent and optionally generates direct LLM responses."""
+    """Delegates routing to AgentRouter. Only handles routes that bypass RAG
+    (direct/search/memory). RAG/hybrid routes return a thin signal so the
+    pipeline performs retrieval — this executor must NEVER fabricate an answer
+    to a factual document question."""
 
-    _CONVERSATIONAL = frozenset({
-        "hello", "hi", "hey", "thanks", "thank you", "bye",
-        "goodbye", "help", "how are you",
+    # Whole-word greeting tokens. Substring matching previously caused "hi"
+    # to match "which", "this", "while" — routing factual questions to direct.
+    _CONVERSATIONAL_TOKENS = frozenset({
+        "hello", "hi", "hey", "thanks", "bye", "goodbye",
+    })
+    _CONVERSATIONAL_PHRASES = frozenset({
+        "thank you", "how are you", "good morning",
+        "good afternoon", "good evening",
     })
 
-    def run(self, query: str, session_id: str = "default") -> Dict[str, Any]:
-        lower = query.lower().strip()
+    def __init__(self) -> None:
+        from app.agents.agent_router import AgentRouter
+        self._router = AgentRouter()
 
-        if any(kw in lower for kw in self._CONVERSATIONAL):
+    def _is_conversational(self, query: str) -> bool:
+        lower = query.lower().strip().rstrip("?!.,")
+        tokens = set(lower.split())
+        if tokens & self._CONVERSATIONAL_TOKENS and len(tokens) <= 4:
+            return True
+        if any(p == lower or lower.startswith(p + " ") for p in self._CONVERSATIONAL_PHRASES):
+            return True
+        return False
+
+    def run(self, query: str, session_id: str = "default") -> Dict[str, Any]:
+        # Cheap fast-path for genuine greetings (whole-word, short query only)
+        if self._is_conversational(query):
             return self._direct(query, session_id, "greeting")
 
-        if len(query.split()) <= 5:
-            return self._direct(query, session_id, "short_query")
+        # Delegate to the router for all other queries. The router uses
+        # signal analysis + LLM and returns one of rag/search/direct/memory/hybrid.
+        try:
+            decision = self._router.route(query, session_id)
+            action = decision.action
+            reason = decision.reason
+            confidence = float(decision.confidence)
+        except Exception as exc:
+            logger.warning("executor_router_failed", error=str(exc), session_id=session_id)
+            action, reason, confidence = "rag", "router_exception", 0.5
 
-        return {
-            "response": "Routing to knowledge base.",
-            "source":   "rag",
-            "decision": "rag",
-            "reason":   "knowledge_query",
-            "metadata": {"confidence": 0.80},
-        }
+        # RAG/hybrid → return a signal; the pipeline performs retrieval.
+        if action in {"rag", "hybrid"}:
+            return {
+                "response": "Routing to knowledge base.",
+                "source":   "rag",
+                "decision": action,
+                "reason":   reason or "knowledge_query",
+                "metadata": {"confidence": max(confidence, 0.6)},
+            }
+
+        # search/memory → also requires the pipeline to fulfil; pass through.
+        if action in {"search", "memory"}:
+            return {
+                "response": f"Routing to {action}.",
+                "source":   action,
+                "decision": action,
+                "reason":   reason or f"{action}_route",
+                "metadata": {"confidence": confidence},
+            }
+
+        # direct → only safe when router is confident this is NOT a doc question.
+        return self._direct(query, session_id, reason or "router_direct")
 
     def _direct(self, query: str, session_id: str, reason: str) -> Dict[str, Any]:
         try:

@@ -755,12 +755,20 @@ def query_pipeline(
             },
         }
 
+        # Cache only when we have a real answer AND a credible confidence.
+        # `output["confidence"]` may be None when the LLM omitted the
+        # Confidence: line — in that case fall back to the final computed
+        # `confidence` (derived from retrieval scores) for the cache gate.
+        cache_conf = output.get("confidence")
+        if cache_conf is None:
+            cache_conf = confidence
         if (
             answer
             and "No relevant documents" not in answer
             and "Something went wrong" not in answer
             and "No answer generated" not in answer
-            and output.get("confidence", 0) > 0.15
+            and isinstance(cache_conf, (int, float))
+            and cache_conf > 0.15
         ):
             _cache_set(session_id, query, response)
         _store_interaction(session_id, query, answer, memory)
