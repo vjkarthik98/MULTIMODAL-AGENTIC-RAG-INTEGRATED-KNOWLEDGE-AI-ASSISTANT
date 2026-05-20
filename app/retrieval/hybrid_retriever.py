@@ -549,8 +549,19 @@ class HybridRetriever:
                         r["score"] = min(r["score"] * 1.2, 1.0)
                 fused.sort(key=lambda x: x["score"], reverse=True)
 
-            # MMR DIVERSITY
-            final = self._mmr(fused, top_k)
+            # NOTE: We deliberately do NOT clip to top_k here. The downstream
+            # cross-encoder reranker is the layer that should make the final
+            # relevance decision, and it can only re-score what we hand it.
+            # Previously we clipped to top_k=5 and applied MMR diversity here,
+            # which discarded BM25's strong lexical hits (e.g. chunks that
+            # share many tokens with their neighbours) before the reranker
+            # ever saw them. Multi-hop queries like "Atacama-3 storage capacity"
+            # could lose the very chunk that answers the question.
+            #
+            # We now pass the full fused candidate pool downstream and let the
+            # cross-encoder pick the winners. MMR runs ONLY when explicitly
+            # requested and only as a final-stage tie-breaker.
+            final = fused[:max(top_k * self.candidate_multiplier, top_k)]
 
             # SCORE THRESHOLD — skip: RRF scores are inherently small (max ~1/61)
             # and already scoped by session filter; dropping by absolute threshold
