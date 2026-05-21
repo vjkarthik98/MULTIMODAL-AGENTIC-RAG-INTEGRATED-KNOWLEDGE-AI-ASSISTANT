@@ -298,6 +298,16 @@ class HybridRetriever:
                     continue
                 if filters.get("date_to") and meta.get("ingestion_time", float("inf")) > filters["date_to"]:
                     continue
+                # Scope query to specific source filenames. Match is a
+                # substring check (case-insensitive) so callers can pass
+                # the original filename without the SHA prefix the staging
+                # layer adds (e.g. "edge_tabular.txt" matches
+                # "2da390bdd91e4c0586cc861c82432c8d_edge_tabular.txt").
+                allowed_sources = filters.get("sources")
+                if allowed_sources:
+                    src = str(meta.get("source", "")).lower()
+                    if not any(s.lower() in src for s in allowed_sources if s):
+                        continue
             filtered.append(r)
 
         return filtered

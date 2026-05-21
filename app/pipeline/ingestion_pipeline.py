@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import settings
 from app.ingestion.schema import (
+    CorruptFileError,
     DiskSpaceError,
     DuplicateFileError,
     EmptyFileError,
@@ -170,6 +171,100 @@ def _malware_scan(file_path: str) -> None:
         raise
     except Exception as e:
         logger.warning(event="clamav_scan_failed", error=str(e))
+
+
+# TEXT CORRUPTION PREFLIGHT — protects against corpus poisoning by
+# silently ingesting unreadable / binary-tainted "text" files.
+#
+# Only scans extensions that are supposed to be plain text. Binary
+# formats (.pdf, .docx, .xlsx, images, audio, video) legitimately
+# contain non-printable bytes and are validated by their own parsers
+# downstream.
+
+_TEXT_LIKE_EXTS = {".txt", ".md", ".markdown", ".csv", ".json", ".log"}
+
+# Read at most this many bytes for the scan. Enough to catch BOM,
+# null bytes, and trailing-binary tails on the docs we ingest;
+# bounded so a giant file does not blow memory in preflight.
+_CORRUPTION_SCAN_MAX_BYTES = 2 * 1024 * 1024  # 2 MiB
+
+
+def _scan_corruption(file_path: str) -> List[str]:
+    """Return a list of corruption reason codes for a text-like file.
+
+    An empty list means the file looks clean. A non-empty list is
+    treated by the pipeline as a hard fail (CORRUPTED_FILE).
+    """
+    ext = Path(file_path).suffix.lower()
+    if ext not in _TEXT_LIKE_EXTS:
+        return []
+
+    try:
+        with open(file_path, "rb") as f:
+            raw = f.read(_CORRUPTION_SCAN_MAX_BYTES)
+    except OSError as e:
+        logger.warning(event="corruption_scan_read_failed", error=str(e))
+        return []
+
+    if not raw:
+        return []
+
+    reasons: List[str] = []
+
+    # NULL BYTES — strongest signal of "this is not text"
+    if b"\x00" in raw:
+        reasons.append("null_bytes")
+
+    # ANSI ESCAPE SEQUENCES — never present in legitimate plain text
+    # written by humans; appears here as fake "[31mERROR[0m" markers
+    # left in the corrupted sample.
+    if b"\x1b[" in raw:
+        reasons.append("ansi_escape_sequences")
+
+    # BINARY TAIL — last 64 bytes contain a high ratio of non-printable,
+    # non-whitespace bytes. Catches truncation artefacts and trailing
+    # garbage even when null bytes are absent.
+    tail = raw[-64:] if len(raw) >= 64 else raw
+    if tail:
+        non_printable = sum(
+            1 for b in tail
+            if b < 0x20 and b not in (0x09, 0x0A, 0x0D)
+        )
+        if non_printable / len(tail) >= 0.10:
+            reasons.append("binary_tail")
+
+    # DECODE TEST — try utf-8 strict, fall back to utf-8-sig (strips BOM).
+    # If neither works, the file is not valid UTF-8 text.
+    decoded: Optional[str] = None
+    for enc in ("utf-8", "utf-8-sig"):
+        try:
+            decoded = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if decoded is None:
+        reasons.append("invalid_utf8")
+        return reasons  # cannot run char-level checks on undecodable bytes
+
+    # REPLACEMENT-CHAR RATIO — U+FFFD is the standard "this byte could
+    # not be decoded" marker. A real document should not contain any;
+    # >0.5% means a meaningful chunk of the text is unrecoverable.
+    if decoded:
+        ufffd_ratio = decoded.count("�") / len(decoded)
+        if ufffd_ratio >= 0.005:
+            reasons.append(f"replacement_char_ratio={ufffd_ratio:.4f}")
+
+        # CONTROL-CHAR RATIO — non-printable, non-whitespace control
+        # codepoints in decoded text.
+        ctrl = sum(
+            1 for ch in decoded
+            if ord(ch) < 0x20 and ch not in ("\t", "\n", "\r")
+        )
+        ctrl_ratio = ctrl / len(decoded)
+        if ctrl_ratio >= 0.01:
+            reasons.append(f"control_char_ratio={ctrl_ratio:.4f}")
+
+    return reasons
 
 
 # SHA-256 DEDUP CHECK AGAINST QDRANT — SECTION 2.3
@@ -423,6 +518,24 @@ class IngestionPipeline:
             # MALWARE SCAN — SECTION 5
             _malware_scan(file_path)
 
+            # CORPUS-POISONING GUARD — reject text files containing null
+            # bytes, ANSI escapes, undecodable UTF-8, high U+FFFD ratio,
+            # or binary trailing garbage. Prevents corrupted content
+            # from reaching the chunker / embedder / vector store.
+            corruption_reasons = _scan_corruption(file_path)
+            if corruption_reasons:
+                logger.warning(
+                    event="ingestion_corruption_detected",
+                    file=file_name,
+                    reasons=corruption_reasons,
+                    session_id=session_id,
+                )
+                _record_error("text", "corrupted_file")
+                raise CorruptFileError(
+                    f"CORRUPTED_FILE: {file_name} failed text-integrity checks "
+                    f"({', '.join(corruption_reasons)})"
+                )
+
             # SHA-256 HASH + DEDUP — SECTION 2.2 / 2.3
             file_hash = _sha256(file_path)
 
@@ -633,7 +746,7 @@ class IngestionPipeline:
                 "latency":    round(time.time() - start, 2),
             }
 
-        except (EmptyFileError, FileTooLargeError, UnsupportedMimeError) as e:
+        except (EmptyFileError, FileTooLargeError, UnsupportedMimeError, CorruptFileError) as e:
             error_type = type(e).__name__
             _record_error("unknown", error_type)
             progress.emit("preflight", "failed", error=str(e))
