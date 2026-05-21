@@ -148,3 +148,8 @@ ruff>=0.4
 isort>=5.13
 mypy>=1.9
 pre-commit>=3.7
+
+
+torch
+torchvision 
+torchaudio 

@@ -1,0 +1,80 @@
+MERIDIAN INFRASTRUCTURE PARTNERS
+Annual Grid Modernisation Report — Fiscal Year 2024
+
+EXECUTIVE SUMMARY
+
+Meridian Infrastructure Partners (MIP) is a private infrastructure investment and operations company specialising in emerging-market power grid rehabilitation. In FY2024, MIP completed grid modernisation programmes across seven countries, deploying USD 842 million in capital and connecting an additional 3.2 million households to reliable electricity. This report details technical outcomes, financial performance, and forward commitments.
+
+PART I: PROGRAMME OVERVIEW
+
+1.1 Corporate Profile
+MIP was incorporated in Singapore in 2014. The company operates through three business units: Grid Rehabilitation (GR), Renewable Integration (RI), and Digital Grid Solutions (DGS). MIP's investor base includes sovereign wealth funds, multilateral development banks, and pension funds across 22 countries. As of December 2024, MIP manages assets under operation valued at USD 6.4 billion.
+
+1.2 FY2024 Capital Deployment
+Total capital deployed in FY2024 was USD 842 million, allocated as follows: Grid Rehabilitation 54%, Renewable Integration 33%, Digital Grid Solutions 13%. The weighted average project IRR across the portfolio is 14.2%. Currency exposure is hedged to 85% across USD, EUR, and SGD.
+
+1.3 Technology Standards
+All MIP grid rehabilitation projects comply with IEC 61968 (Application Integration at Electric Utilities), IEC 62351 (Power Systems Management Security), and IEEE 1547-2018 (Interconnection and Interoperability of Distributed Energy Resources). SCADA systems deployed across new installations run on MIP's proprietary OmegaGrid platform v4.1, which supports ISO/IEC 27001 security controls and sub-second fault isolation via adaptive protection relays.
+
+PART II: COUNTRY PROGRAMME REPORTS
+
+2.1 Nigeria — Lagos Distribution Grid
+Project duration: January 2023 – June 2024.
+Capital invested: USD 198 million.
+Scope: 1,840 km of 33 kV and 11 kV distribution line replacement, 62 new 33/11 kV substations, 8,400 smart meter installations in pilot zones. Grid technical losses reduced from 38.2% to 19.4%. Peak demand reliability (System Average Interruption Duration Index, SAIDI) improved from 2,847 minutes per year to 412 minutes per year. Renewable integration capacity added: 140 MW solar via 11 grid-scale PV connections.
+
+2.2 Bangladesh — Dhaka Peri-Urban Expansion
+Project duration: March 2023 – December 2024.
+Capital invested: USD 112 million.
+Scope: Extension of the national grid to 6 peri-urban districts totalling 2.1 million residents previously reliant on off-grid diesel. New 132 kV transmission lines: 340 km. Distribution substations commissioned: 28. Power purchase agreement signed with Bangladesh Rural Electrification Board at USD 0.074 per kWh for a 15-year term.
+
+2.3 Pakistan — Karachi Grid East Rehabilitation
+Project duration: July 2022 – September 2024.
+Capital invested: USD 127.4 million.
+Scope: Full replacement of 860 km of ageing aluminium conductor steel-reinforced (ACSR) transmission lines with high-temperature low-sag (HTLS) conductors rated at 220 kV. Installation of 34 digital fault recorders and 18 phasor measurement units (PMU) across 6 substations. Protection relay upgrade covering 142 feeders using IEC 61850-compliant numerical relays. Pre-project fault-clearance time averaged 1.8 seconds; post-rehabilitation average is 0.25 seconds, representing an 86.2% improvement in fault-clearance performance. Unplanned outage duration fell by 61% year-on-year following commissioning in Q3 2024.
+
+2.4 Ethiopia — Great Rift Valley Interconnect
+Project duration: June 2023 – ongoing (Phase 1 complete December 2024).
+Capital invested Phase 1: USD 89 million.
+Scope Phase 1: 420 km HVDC transmission link at ±250 kV connecting the Great Rift Valley geothermal generation cluster (total capacity 620 MW across 14 units) to the Addis Ababa load centre. Phase 1 energisation occurred on 14 November 2024. Phase 2 (budgeted USD 74 million) covers extension to Djibouti for regional export, with financial close expected Q2 2025.
+
+2.5 Vietnam — Mekong Delta Grid Stability
+Project duration: February 2024 – ongoing (commissioning Q2 2025).
+Capital invested to date: USD 64 million.
+Scope: Deployment of 4 × 50 MVAr static VAr compensators (SVCs) and a 120 MW / 240 MWh battery energy storage system (BESS) to stabilise voltage profiles in the Mekong Delta region, where high solar PV penetration (38% of installed generation capacity) has caused frequency deviation events. The BESS uses lithium iron phosphate (LFP) chemistry with a 10-year performance warranty from CATL. Expected annual frequency exceedance hours to fall from 310 to less than 20 once fully commissioned.
+
+2.6 Mozambique — Northern Corridor Transmission
+Project duration: September 2023 – March 2025 (commissioning expected).
+Capital invested to date: USD 68 million.
+Scope: 185 km 220 kV overhead transmission line from the Cahora Bassa hydroelectric dam offtake to the Nampula load centre. Tower design is galvanised lattice steel rated for 140 km/h wind loading per IEC 60826. Right-of-way agreements secured with 312 landholders; no involuntary resettlement required. Line energisation targeted for March 2025.
+
+2.7 Indonesia — East Kalimantan Industrial Grid
+Project duration: April 2024 – December 2025 (Phase 1 complete June 2025).
+Capital invested to date: USD 184 million.
+Scope: Industrial grid build-out to support the East Kalimantan special economic zone (SEZ), serving the zone's 2027 target of attracting USD 12 billion in manufacturing FDI. Phase 1 deliverables: 2 × 150 MW gas-fired open-cycle peaker plants, 280 km of 150 kV transmission, 18 industrial substations. Phase 2 adds 300 MW of utility-scale solar with storage.
+
+PART III: FINANCIAL PERFORMANCE
+
+3.1 Revenue and EBITDA
+FY2024 consolidated revenue: USD 318 million (FY2023: USD 274 million; growth 16.1%). EBITDA: USD 97 million (margin 30.5%). Net income after financing costs and taxes: USD 41 million. Year-end cash and equivalents: USD 203 million. Revolving credit facility: USD 400 million (drawn USD 155 million as at 31 December 2024).
+
+3.2 Debt Profile
+MIP's gross debt as at 31 December 2024 was USD 1.24 billion, of which 78% is project-level non-recourse financing. Corporate-level debt carries a weighted average cost of capital (WACC) of 7.8%. Debt-to-equity ratio: 1.7x. Net debt / EBITDA: 10.7x (consistent with infrastructure norms given long-duration asset base).
+
+3.3 Forward Pipeline
+The identified project pipeline for FY2025–2027 comprises 19 projects across 11 countries with total capital value of USD 2.1 billion. Of these, 6 projects (USD 680 million) have reached financial close or are in final negotiations. Key pipeline projects: Southern Africa Power Pool interconnect (USD 340 million, Zimbabwe–Zambia–Mozambique), West Africa regional grid hub (USD 290 million, Ghana–Côte d'Ivoire–Togo), and South Asia cross-border transmission (USD 195 million, Nepal–India).
+
+PART IV: ESG AND GOVERNANCE
+
+4.1 Environmental Standards
+All MIP projects are subject to IFC Performance Standards and Equator Principles. Environmental and Social Impact Assessments (ESIAs) are conducted by independent accredited consultants. Biodiversity offset plans are implemented where projects intersect IUCN Category I–IV protected areas. MIP's Scope 1 and 2 emissions for corporate operations in FY2024 were 3,140 tCO2eq, offset via Gold Standard-certified credits.
+
+4.2 Community Benefit Frameworks
+MIP requires a Community Benefit Framework (CBF) on all projects with capital value above USD 50 million. CBF deliverables in FY2024 included: 14 vocational training centres, 8 rural health clinics with grid-powered medical refrigeration, and 23 women-led micro-enterprise cooperatives provided with reliable power supply and business development support.
+
+4.3 Corporate Governance
+MIP's board comprises 9 directors: 4 independent, 3 investor representatives, and 2 executive directors. The audit committee, chaired by a Big Four partner, oversees internal controls and financial reporting. MIP achieved ISO 37001 Anti-Bribery Management System certification in 2023, covering all country operations.
+
+PART V: OUTLOOK
+
+FY2025 guidance: revenue USD 370–390 million; EBITDA margin 31–33%. Capital deployment target: USD 1.1 billion, conditional on financial close of pipeline projects. Meridian expects to cross 5 GW of cumulative rehabilitated grid capacity by Q3 2026 and 10 GW by 2030, consistent with its commitment to the UN Sustainable Development Goal 7 (affordable and clean energy for all).
