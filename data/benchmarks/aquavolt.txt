@@ -1,0 +1,19 @@
+AquaVolt Technologies — Company Overview
+
+Section 1: Company Profile
+AquaVolt Technologies is a hydrokinetic energy company founded in 2018 and headquartered in Oslo, Norway. The company designs and manufactures underwater turbine arrays that harvest kinetic energy from tidal currents and river flows. AquaVolt serves coastal municipalities, offshore platforms, and remote island grids. As of 2025, AquaVolt has deployed 47 turbine arrays across 12 countries, generating a combined installed capacity of 340 MW.
+
+Section 2: Technology Platform
+AquaVolt's core product is the TidalCore X9 turbine, a bi-directional axial-flow turbine rated at 2.4 MW per unit. The TidalCore X9 operates at current velocities between 1.5 and 4.2 metres per second and achieves a peak conversion efficiency of 44.7%. Each turbine is constructed from grade-5 titanium alloy with a 25-year design life. The nacelle integrates a distributed sensor array that transmits real-time performance telemetry over satellite to AquaVolt's cloud monitoring platform, AquaSync.
+
+Section 3: Financial Performance
+AquaVolt reported annual revenue of USD 212 million for fiscal year 2024, representing 38% year-on-year growth. Gross margin improved from 31% to 36% driven by manufacturing scale efficiencies at the company's Stavanger production facility. EBITDA for FY2024 was USD 48 million. The company raised a Series C funding round of USD 95 million in March 2024, led by BlueHorizon Capital with participation from Nordic Climate Fund. Total capital raised to date stands at USD 187 million.
+
+Section 4: Key Deployments
+AquaVolt's flagship installation is the Pentland Firth Array in Scotland, comprising 18 TidalCore X9 units delivering 43.2 MW to the Orkney Islands grid. The Flores Strait Array in Indonesia (12 units, 28.8 MW) powers a desalination complex serving 180,000 residents. The Amazon River Pilot in Brazil (3 units, 7.2 MW) provides baseload power to a remote community of 14,000 people who previously relied entirely on diesel generators. A contract signed in Q3 2024 covers deployment of 24 units in the Strait of Hormuz for an undisclosed sovereign energy authority, valued at USD 136 million.
+
+Section 5: ESG and Certifications
+AquaVolt has received the IEA Hydrokinetic Gold Standard certification and the DNV Marine Renewable Energy Type Approval. The company maintains a carbon-negative operational profile: lifecycle emissions per MWh are 4.2 gCO2eq, compared to 820 gCO2eq for coal. Marine biodiversity impact assessments conducted by the University of Bergen found zero statistically significant fish population changes at the Pentland Firth site over a 36-month monitoring window.
+
+Section 6: Leadership
+Chief Executive Officer: Dr. Ingrid Halvorsen (formerly VP Engineering at Equinor). Chief Technology Officer: Dr. Yuki Tanaka (PhD, Fluid Dynamics, Kyoto University). Chief Financial Officer: Marcus Webb (ex-Goldman Sachs, Infrastructure Finance). Board Chair: Professor Astrid Lindqvist (Norwegian Academy of Science).
