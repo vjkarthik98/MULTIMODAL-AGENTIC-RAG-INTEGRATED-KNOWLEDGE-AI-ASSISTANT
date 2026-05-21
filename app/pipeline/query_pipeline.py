@@ -155,6 +155,7 @@ _reranker     = None
 _hybrid       = None
 _reasoning    = None
 _decomposer   = None
+_tool_registry = None
 
 _lock_agent     = threading.Lock()
 _lock_infra     = threading.Lock()
@@ -162,6 +163,21 @@ _lock_fusion    = threading.Lock()
 _lock_reranker  = threading.Lock()
 _lock_hybrid    = threading.Lock()
 _lock_reasoning = threading.Lock()
+_lock_tool_registry = threading.Lock()
+
+
+def _get_tool_registry():
+    """Lazy singleton for the tool registry. Required so the pipeline can
+    invoke web search / memory tools when the agent routes to those paths
+    instead of returning the router's stub message ("Routing to search.")
+    as the final answer."""
+    global _tool_registry
+    if _tool_registry is None:
+        with _lock_tool_registry:
+            if _tool_registry is None:
+                from app.agents.tool_registry import ToolRegistry
+                _tool_registry = ToolRegistry()
+    return _tool_registry
 
 
 def _get_agent():
@@ -434,6 +450,7 @@ async def stream_query(
 def query_pipeline(
     query: str,
     session_id: str = "default",
+    sources: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
 
     start      = time.time()
@@ -507,8 +524,66 @@ def query_pipeline(
 
         decision = agent_result.get("decision", "rag")
 
+        # WEB SEARCH PATH — invoke Tavily via the tool registry. The agent
+        # only DECIDES to route to search; it does not call the tool. The
+        # pipeline is responsible for fulfilling the decision.
+        if decision == "search":
+            answer = "Web search unavailable."
+            sources_out: List[Dict[str, Any]] = []
+            conf = 0.1
+            t_tool = time.time()
+            try:
+                registry = _get_tool_registry()
+                search_tool = registry.get_optional("search")
+                if search_tool is not None:
+                    tool_out = search_tool.handler(query, {}, session_id) or {}
+                    answer   = tool_out.get("answer") or "No web results found."
+                    conf     = float(tool_out.get("confidence", 0.5))
+                    # Normalise Tavily URL list into the same {text, source, ...}
+                    # shape the API response model expects.
+                    for url in tool_out.get("sources", []) or []:
+                        sources_out.append({
+                            "text":         "",
+                            "score":        conf,
+                            "source":       url,
+                            "page_number":  None,
+                            "start_time":   None,
+                            "end_time":     None,
+                            "modality":     "web",
+                            "doc_id":       None,
+                        })
+            except Exception as e:
+                logger.warning(
+                    event="web_search_invocation_failed",
+                    error=str(e),
+                    session_id=session_id,
+                )
+                _record_query_error("web_search")
+            tool_latency = round(time.time() - t_tool, 3)
+
+            conf = max(0.0, min(conf, 1.0))
+            resp = {
+                "answer":               answer,
+                "confidence":           conf,
+                "decision":             decision,
+                "source":               "web_search",
+                "session_id":           session_id,
+                "request_id":           trace_id,
+                "agent_latency":        agent_latency,
+                "tool_latency":         tool_latency,
+                "latency":              round(time.time() - start, 3),
+                "sources":              sources_out,
+                "is_fallback":          False,
+                "hallucination_warning": conf < settings.AGENT_LOW_CONFIDENCE,
+                "trace_id":             trace_id,
+                "metadata":             {"source": "web_search"},
+            }
+            _cache_set(session_id, query, resp)
+            _store_interaction(session_id, query, answer, memory)
+            return resp
+
         # SHORT-CIRCUIT FOR NON-RAG DECISIONS — SECTION 4.9
-        if decision in {"direct", "search", "memory"}:
+        if decision in {"direct", "memory"}:
             answer = agent_result.get("response", "No answer generated.")
             conf   = float(agent_result.get("confidence", 0.5))
             conf   = max(0.0, min(conf, 1.0))
@@ -553,12 +628,27 @@ def query_pipeline(
         t_ret     = time.time()
         retrieved: List[Dict[str, Any]] = []
 
+        # Build per-query filter dict. Currently only `sources` is exposed
+        # via the public API; future filters (modality, language, date range)
+        # can be plugged in here.
+        retrieval_filters: Optional[Dict[str, Any]] = None
+        if sources:
+            retrieval_filters = {"sources": sources}
+
+        # Hybrid decisions retrieve deeper so adjacent section chunks can surface.
+        _retrieval_top_k = (
+            min(settings.DEFAULT_TOP_K + 3, 10)
+            if decision == "hybrid"
+            else settings.DEFAULT_TOP_K
+        )
+
         for q in queries:
             try:
                 results = hybrid.search(
                     q,
                     session_id=session_id,
-                    top_k=settings.DEFAULT_TOP_K,
+                    top_k=_retrieval_top_k,
+                    filters=retrieval_filters,
                 )
                 retrieved.extend(results)
             except Exception as e:
@@ -635,6 +725,62 @@ def query_pipeline(
 
         final_docs = reranked[:settings.RAG_TOP_K]
 
+        # HYBRID WEB SEARCH — fetch Tavily alongside RAG docs when decision is "hybrid"
+        _hybrid_web_docs: List[str] = []
+        _hybrid_web_sources: List[Dict[str, Any]] = []
+        _hybrid_web_conf: float = 0.0
+        if decision == "hybrid":
+            t_web = time.time()
+            try:
+                _registry = _get_tool_registry()
+                _search_tool = _registry.get_optional("search")
+                if _search_tool is not None:
+                    _tool_out = _search_tool.handler(query, {}, session_id) or {}
+                    _hybrid_web_conf = float(_tool_out.get("confidence", 0.5))
+                    _hybrid_web_docs = (_tool_out.get("documents") or [])[:3]
+                    for _url in (_tool_out.get("sources") or []):
+                        _hybrid_web_sources.append({
+                            "text": "", "score": _hybrid_web_conf, "source": _url,
+                            "page_number": None, "start_time": None, "end_time": None,
+                            "modality": "web", "doc_id": None,
+                        })
+                    logger.info(
+                        event="hybrid_web_fetched",
+                        web_docs=len(_hybrid_web_docs),
+                        web_sources=len(_hybrid_web_sources),
+                        latency=round(time.time() - t_web, 3),
+                        session_id=session_id,
+                    )
+            except Exception as _web_exc:
+                logger.warning(
+                    event="hybrid_web_fetch_failed",
+                    error=str(_web_exc),
+                    session_id=session_id,
+                )
+                _record_query_error("hybrid_web")
+
+        # ENTITY RELEVANCE PRE-FILTER — drop web docs that are about a different
+        # entity than what the query asks about. Takes the longest non-stopword token
+        # (≥ 8 chars) from the query as the "key term". If none of the fetched web
+        # docs contain it, the results are about a wrong entity — clear both lists so
+        # the LLM answers from [Document] only and doesn't narrate irrelevant content.
+        if _hybrid_web_docs:
+            _qterms = [
+                w.strip("'s.,?!\"()[]").lower()
+                for w in query.split()
+                if len(w.strip("'s.,?!\"()[]")) >= 8
+            ]
+            if _qterms:
+                _key_term = max(_qterms, key=len)
+                if not any(_key_term in doc.lower() for doc in _hybrid_web_docs):
+                    logger.info(
+                        event="hybrid_web_entity_mismatch",
+                        key_term=_key_term,
+                        session_id=session_id,
+                    )
+                    _hybrid_web_docs = []
+                    _hybrid_web_sources = []
+
         # BUILD CANONICAL SOURCES[] WITH cite_key BEFORE REASONING
         from app.core.response import build_sources
         canonical_sources = build_sources(final_docs)
@@ -643,13 +789,43 @@ def query_pipeline(
         t_reason = time.time()
 
         try:
-            output = reasoning.generate_answer(
-                query=query,
-                retrieved_docs=final_docs,
-                memory_context=memory_context,
-                session_id=session_id,
-                sources=canonical_sources,
-            )
+            if decision == "hybrid" and _hybrid_web_docs:
+                _rag_ctx = "\n\n".join(
+                    d.get("text", "")[:settings.RAG_DOC_MAX_CHARS] for d in final_docs
+                )
+                _web_ctx = "\n\n".join(_hybrid_web_docs)[:settings.WEB_CONTEXT_MAX_CHARS]
+                _doc_section = f"[DOCUMENT SOURCES]:\n{_rag_ctx[:settings.MAX_CONTEXT_CHARS // 2]}" if _rag_ctx else ""
+                _web_section = f"[WEB SEARCH RESULTS]:\n{_web_ctx}" if _web_ctx else ""
+                _combined = "\n\n".join(x for x in [_doc_section, _web_section] if x)
+                _hybrid_prompt = (
+                    "Answer using the context below. "
+                    "Cite as [Document] or [Web] where helpful.\n"
+                    "Rules:\n"
+                    "- Prefer [Document] for stored facts about the specific entity being asked about\n"
+                    "- Use [Web] only if those results are about the SAME entity or topic as the query\n"
+                    "- If [Web] results are about a different company, person, or entity, ignore them entirely\n"
+                    "- Never mix information from unrelated companies or entities\n\n"
+                    f"{_combined}\n\nQUERY:\n{query}\n\nAnswer:"
+                )
+                _raw = llm.generate(
+                    _hybrid_prompt,
+                    max_tokens=settings.LLM_MAX_TOKENS,
+                    temperature=0.1,
+                    session_id=session_id,
+                )
+                output = {
+                    "answer":       (_raw or "").strip() or "No answer generated.",
+                    "confidence":   max(float(_hybrid_web_conf), 0.4),
+                    "sources_used": len(final_docs) + len(_hybrid_web_docs),
+                }
+            else:
+                output = reasoning.generate_answer(
+                    query=query,
+                    retrieved_docs=final_docs,
+                    memory_context=memory_context,
+                    session_id=session_id,
+                    sources=canonical_sources,
+                )
             reasoning_latency = round(time.time() - t_reason, 3)
             _record_llm_latency("gguf_mistral", reasoning_latency)
         except Exception as e:
@@ -707,6 +883,16 @@ def query_pipeline(
 
         # PHASE 24.8 — build standardised sources[] from reranked docs
         p248_sources = _build_sources_array(final_docs, max_items=min(3, len(final_docs)))
+        if decision == "hybrid" and _hybrid_web_sources:
+            p248_sources = p248_sources + _hybrid_web_sources[:3]
+
+        # Drop doc chunks that are pure retrieval noise (score < floor).
+        # Web sources use confidence-based scores so are always kept.
+        _MIN_DOC_SOURCE_SCORE = 0.05
+        p248_sources = [
+            s for s in p248_sources
+            if s.get("modality") != "text" or s.get("score", 0.0) >= _MIN_DOC_SOURCE_SCORE
+        ]
 
         # CONFIDENCE — prefer executor value when valid; else compute from source scores
         raw_conf = output.get("confidence")
@@ -720,7 +906,7 @@ def query_pipeline(
         confidence = raw_conf if raw_conf is not None else _confidence_from_sources(p248_sources)
         confidence = round(max(0.0, min(confidence, 1.0)), 6)
 
-        hallucination_warning = confidence < settings.AGENT_LOW_CONFIDENCE
+        hallucination_warning = confidence <= settings.AGENT_LOW_CONFIDENCE
 
         # FINAL sources[] — prefer the Phase 24.8 array built from reranked docs.
         # Also keep canonical_sources for LLM citation rendering.
@@ -734,7 +920,7 @@ def query_pipeline(
             "answer":               answer,
             "confidence":           confidence,
             "decision":             decision,
-            "source":               "agent",
+            "source":               "hybrid" if decision == "hybrid" else "agent",
             "session_id":           session_id,
             "request_id":           trace_id,
             "latency":              total_latency,
@@ -752,6 +938,7 @@ def query_pipeline(
                 "memory_injected":   bool(memory_context),
                 "cache_hit":         False,
                 "canonical_sources": out_sources,
+                "hybrid_web_results": len(_hybrid_web_sources) if decision == "hybrid" else 0,
             },
         }
 
@@ -814,10 +1001,11 @@ def query_pipeline(
 async def query_pipeline_async(
     query: str,
     session_id: str = "default",
+    sources: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     loop = asyncio.get_running_loop()
     return await asyncio.wait_for(
-        loop.run_in_executor(None, query_pipeline, query, session_id),
+        loop.run_in_executor(None, query_pipeline, query, session_id, sources),
         timeout=settings.REQUEST_TIMEOUT_SEC,
     )
 

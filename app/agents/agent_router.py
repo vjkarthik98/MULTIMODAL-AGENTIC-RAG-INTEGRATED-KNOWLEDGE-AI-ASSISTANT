@@ -150,10 +150,10 @@ class AgentRouter:
                     self._log_decision(d, signals, start, session_id)
                     return d
 
-                # HARD RULE: RECENT/WEB SEARCH
+                # HARD RULE: RECENT QUERY — RAG + web fusion
                 if signals["is_recent"]:
-                    d = self._decision("search", "recent_query", 0.95, session_id)
-                    _router_decisions.labels(action="search", method="hard_rule").inc()
+                    d = self._decision("hybrid", "recent_hybrid", 0.95, session_id)
+                    _router_decisions.labels(action="hybrid", method="hard_rule").inc()
                     self._log_decision(d, signals, start, session_id)
                     return d
 
@@ -384,7 +384,7 @@ class AgentRouter:
     def _score_confidence(self, action: str, signals: dict) -> float:
         score = 0.6
 
-        if signals.get("is_recent") and action == "search":
+        if signals.get("is_recent") and action in {"search", "hybrid"}:
             score += 0.30
 
         if signals.get("is_memory") and action == "memory":
@@ -418,9 +418,9 @@ class AgentRouter:
         if decision.action not in {"rag", "search", "direct", "memory", "hybrid"}:
             return self._decision("rag", "invalid_action_fallback", 0.5, session_id)
 
-        # OVERRIDE: RECENT SIGNAL ALWAYS FORCES SEARCH
+        # OVERRIDE: RECENT SIGNAL ROUTES TO HYBRID — RAG + web fusion
         if signals.get("is_recent"):
-            return self._decision("search", "override_recent_signal", 0.95, session_id)
+            return self._decision("hybrid", "override_recent_hybrid", 0.95, session_id)
 
         # OVERRIDE: SECURITY KEYWORDS FORCE DIRECT — AVOID RAG ON CREDENTIALS
         if signals.get("is_security") and decision.action == "rag":
