@@ -111,6 +111,10 @@ def _get_query_pipeline():
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=8000)
     session_id: str = Field(default="default", max_length=128)
+    # Optional: restrict retrieval to chunks whose `source` filename
+    # contains any of these substrings. Use this to scope a query to a
+    # specific uploaded file when the session has many ingested documents.
+    sources: Optional[List[str]] = Field(default=None, max_length=20)
 
     @field_validator("query")
     @classmethod
@@ -127,6 +131,14 @@ class QueryRequest(BaseModel):
         if not v:
             return "default"
         return v[:128]
+
+    @field_validator("sources")
+    @classmethod
+    def validate_sources(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is None:
+            return None
+        cleaned = [s.strip()[:256] for s in v if s and s.strip()]
+        return cleaned or None
 
 
 class ClearMemoryRequest(BaseModel):
@@ -579,7 +591,9 @@ async def query_rag(
 
         pipeline_fn = _get_query_pipeline()
 
-        result = await asyncio.to_thread(pipeline_fn, query, session_id)
+        result = await asyncio.to_thread(
+            pipeline_fn, query, session_id, request_body.sources
+        )
 
         if not isinstance(result, dict) or "answer" not in result:
             raise RuntimeError("Invalid pipeline response")
@@ -806,7 +820,21 @@ async def upload_file(
 
         # INGEST
         from app.pipeline.ingestion_pipeline import process_file
-        result = await asyncio.to_thread(process_file, str(file_path), session_id)
+        try:
+            result = await asyncio.to_thread(process_file, str(file_path), session_id)
+        except Exception as exc:
+            err_str = str(exc).removeprefix("INGESTION_FAILED: ").strip()
+            if any(err_str.startswith(p) for p in _INGEST_422_PREFIXES):
+                error_code = err_str.split(":")[0].strip()
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "request_id": request_id,
+                        "error_code": error_code,
+                        "detail": err_str,
+                    },
+                )
+            raise
 
         if not result or result.get("status") not in ("success", "partial_failure"):
             error_detail = result.get("error", "Ingestion failed") if result else "Ingestion failed"

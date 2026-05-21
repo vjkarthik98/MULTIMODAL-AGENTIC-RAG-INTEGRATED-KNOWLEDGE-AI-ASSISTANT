@@ -49,6 +49,9 @@ _BLOCKED_DOMAINS: Set[str] = {
     "instagram.com",
     "tiktok.com",
     "tumblr.com",
+    "youtube.com",
+    "youtu.be",
+    "linkedin.com",
 }
 
 # SSRF PREVENTION — BLOCK PRIVATE IP RANGES

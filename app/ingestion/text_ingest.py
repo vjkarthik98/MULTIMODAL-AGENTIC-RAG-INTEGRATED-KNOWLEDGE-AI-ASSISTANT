@@ -212,9 +212,32 @@ def _load_text_streaming(path: Path, max_bytes: int) -> str:
 
 # UNICODE NORMALIZATION
 
+# Zero-width and invisible formatting characters that survive NFKC and must
+# be stripped explicitly so they don't split tokens or break exact-match search.
+_ZERO_WIDTH_RE = re.compile(
+    r"[​‌‍⁠⁡⁢⁣⁤﻿­]"
+)
+
+# Unicode whitespace codepoints that are visually identical to a regular space
+# but use different codepoints (e.g. NARROW NO-BREAK SPACE U+202F, FIGURE SPACE
+# U+2007, HAIR SPACE U+200A). NFKC maps most of these to a regular space;
+# this pattern catches the remainder.
+_FANCY_SPACE_RE = re.compile(
+    r"[   -   　]"
+)
+
+
 def _normalize_text(text: str) -> str:
     import unicodedata
-    text = unicodedata.normalize("NFC", text)
+    # NFKC: decomposes and recomposes using compatibility equivalence.
+    # This maps fullwidth ASCII (e.g. ｓｗ → sw), ligatures (ﬀ → ff),
+    # and mathematical bold letters to their ASCII equivalents. It also
+    # unifies NFC/NFD diacritics (Reykjavík both forms → same string).
+    text = unicodedata.normalize("NFKC", text)
+    # Collapse Unicode fancy-space variants to a regular ASCII space.
+    text = _FANCY_SPACE_RE.sub(" ", text)
+    # Strip zero-width / invisible formatting characters that survive NFKC.
+    text = _ZERO_WIDTH_RE.sub("", text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     return text.strip()
 
@@ -410,10 +433,166 @@ def _split_sections(text: str) -> List[Tuple[Optional[str], Optional[str], str]]
     return sections
 
 
+# FIXED-WIDTH TABLE DETECTION
+#
+# Detects regions of the form:
+#     Col1     Col2     Col3
+#     ------   ------   ------
+#     a        b        c
+#     d        e        f
+#
+# A separator line of dashes (with optional spaces between dash runs) signals
+# the row immediately above is the header. Subsequent non-blank lines until a
+# blank line or non-table-looking line are treated as data rows.
+
+# A line that is (mostly) dashes and spaces. Allow `=` and `|` too — some
+# documents use those as separators.
+_TABLE_SEPARATOR_RE = re.compile(r"^[\s\-=|+]{6,}$")
+
+
+def _looks_like_data_row(line: str) -> bool:
+    """Heuristic: a data row has at least 2 columns separated by 2+ spaces
+    (the fixed-width convention) and is not blank."""
+    stripped = line.strip()
+    if not stripped:
+        return False
+    # At least two runs of non-whitespace separated by 2+ spaces.
+    return bool(re.search(r"\S(?:  +)\S", line))
+
+
+def _extract_table_blocks(
+    text: str,
+) -> List[Tuple[int, int, str, List[str]]]:
+    """Find fixed-width table regions in `text`.
+
+    Returns a list of (start_offset, end_offset, header_line, data_rows)
+    tuples. Offsets are inclusive of the header line and exclusive of the
+    line *after* the last data row, so the caller can splice the region
+    out cleanly.
+
+    Detection strategy: a table is a run of 4+ consecutive lines that all
+    look like fixed-width data rows (2+ columns separated by 2+ spaces).
+    The first line in the run is treated as the header — this handles the
+    common case where the dash-separator line has been stripped earlier
+    in the pipeline by noise-line removal. Pure-separator lines (---) and
+    blank lines inside the run are tolerated and skipped.
+    """
+    lines = text.split("\n")
+    # Track byte offsets so we can map line indices back to text slices.
+    offsets: List[int] = []
+    pos = 0
+    for line in lines:
+        offsets.append(pos)
+        pos += len(line) + 1  # +1 for the \n we split on
+
+    blocks: List[Tuple[int, int, str, List[str]]] = []
+    MIN_TABLE_LINES = 4  # header + 3 data rows minimum
+
+    i = 0
+    while i < len(lines):
+        # Skip blank lines and pure separator lines.
+        if not lines[i].strip() or _TABLE_SEPARATOR_RE.match(lines[i]):
+            i += 1
+            continue
+
+        if not _looks_like_data_row(lines[i]):
+            i += 1
+            continue
+
+        # Found a potential table-row line. Walk forward collecting
+        # consecutive data-row lines (skipping internal separator lines).
+        run_start = i
+        run_lines: List[int] = [i]
+        j = i + 1
+        while j < len(lines):
+            row = lines[j]
+            if _TABLE_SEPARATOR_RE.match(row):
+                # Skip internal separator lines but don't terminate.
+                j += 1
+                continue
+            if not row.strip():
+                break  # blank line ends the table
+            if not _looks_like_data_row(row):
+                break
+            run_lines.append(j)
+            j += 1
+
+        if len(run_lines) >= MIN_TABLE_LINES:
+            header_idx = run_lines[0]
+            data_indices = run_lines[1:]
+            header = lines[header_idx]
+            data_rows = [lines[k] for k in data_indices]
+            start_off = offsets[header_idx]
+            end_line_idx = run_lines[-1]
+            end_off = offsets[end_line_idx] + len(lines[end_line_idx]) + 1
+            blocks.append((start_off, end_off, header, data_rows))
+            i = j
+            continue
+
+        # Not enough rows — advance past this line.
+        i += 1
+    return blocks
+
+
+def _chunk_table(header: str, data_rows: List[str]) -> List[str]:
+    """Emit one chunk per data row, each prefixed with the header.
+
+    Per-row chunks maximise retrieval discriminability: the row's unique
+    tokens (IDs, names, numbers) dominate the embedding signal instead of
+    being averaged out with neighbouring rows. The header is still attached
+    so the LLM can interpret which value belongs to which column.
+
+    Falls back to packing multiple short rows together only when a single
+    header+row pair is below CHUNK_MIN_SIZE — otherwise the chunk would be
+    dropped by the downstream min-size filter.
+    """
+    chunks: List[str] = []
+    header_len = len(header) + 1
+
+    pending_rows: List[str] = []
+    pending_len  = 0
+    min_size     = settings.CHUNK_MIN_SIZE
+
+    def flush():
+        if pending_rows:
+            chunks.append(header + "\n" + "\n".join(pending_rows))
+
+    for row in data_rows:
+        candidate_size = header_len + pending_len + len(row) + 1
+        if pending_rows and candidate_size >= min_size:
+            # The accumulated chunk is already above the min-size floor —
+            # emit it now and start fresh so each row gets its own chunk.
+            flush()
+            pending_rows = [row]
+            pending_len  = len(row) + 1
+        else:
+            pending_rows.append(row)
+            pending_len += len(row) + 1
+
+    flush()
+    return chunks
+
+
 # CHUNKING — SEMANTIC BOUNDARY AWARE
 
 def _chunk_text(text: str) -> List[str]:
+    # TABLE-AWARE PASS — extract fixed-width table regions first and chunk
+    # them with the header attached to every data chunk. This prevents
+    # mid-row splits and ensures row-level queries land on chunks that
+    # carry the column meanings.
+    table_chunks: List[str] = []
+    table_blocks = _extract_table_blocks(text)
+    if table_blocks:
+        # Splice the table regions out of the text so the standard chunker
+        # doesn't see them. Walk back-to-front so offsets stay valid.
+        non_table_text = text
+        for start_off, end_off, header, data_rows in reversed(table_blocks):
+            non_table_text = non_table_text[:start_off] + non_table_text[end_off:]
+            table_chunks.extend(_chunk_table(header, data_rows))
+        text = non_table_text
+
     # TRY LANGCHAIN SEMANTIC SPLITTER
+    chunks: List[str] = []
     try:
         from langchain_text_splitters import RecursiveCharacterTextSplitter
         splitter = RecursiveCharacterTextSplitter(
@@ -422,21 +601,22 @@ def _chunk_text(text: str) -> List[str]:
             separators=["\n[DOC-", "\n\n", "\n", ". ", "! ", "? ", " ", ""],
         )
         chunks = splitter.split_text(text)
-        if chunks:
-            return [c.strip() for c in chunks if c.strip()]
+        chunks = [c.strip() for c in chunks if c.strip()]
     except Exception:
-        pass
+        chunks = []
 
-    # FALLBACK — SLIDING WINDOW
-    size    = settings.CHUNK_SIZE
-    overlap = settings.CHUNK_OVERLAP
-    step    = max(size - overlap, 1)
-    chunks  = []
-    for i in range(0, len(text), step):
-        chunk = text[i:i + size].strip()
-        if chunk:
-            chunks.append(chunk)
-    return chunks
+    if not chunks:
+        # FALLBACK — SLIDING WINDOW
+        size    = settings.CHUNK_SIZE
+        overlap = settings.CHUNK_OVERLAP
+        step    = max(size - overlap, 1)
+        for i in range(0, len(text), step):
+            ch = text[i:i + size].strip()
+            if ch:
+                chunks.append(ch)
+
+    # Table chunks first — they're the highest-precision retrieval units.
+    return table_chunks + chunks
 
 
 # MAIN ASYNC INGEST
