@@ -393,6 +393,43 @@ def _quality_score(chunk: str) -> float:
     return 1.0
 
 
+# NUMBERED SECTION DETECTION — "SECTION N:", "N.", "N.M" style headings
+#
+# Detects the leading section number from a chunk's first line so the
+# retrieval layer can apply temporal boosts. Returns (section_number, is_forward)
+# where section_number is the top-level integer (e.g. 8 for "SECTION 8.2")
+# and is_forward is True when the section is 8+ OR the text contains
+# forward-looking language keywords.
+
+_NUMBERED_SECTION_RE = re.compile(
+    r"(?:^|\n)[ \t]*(?:SECTION\s+)?(\d+)(?:\.\d+)*\s*[:\.\-\)]",
+    re.IGNORECASE,
+)
+
+_FORWARD_LOOKING_WORDS = frozenset([
+    "outlook", "guidance", "forecast", "projection", "forward", "target",
+    "expected", "anticipated", "objective", "strategy", "strategic",
+    "plan", "planned", "pipeline", "upcoming", "going forward",
+    "future", "fy2025", "fy2026", "fy2027",
+])
+
+
+def _detect_section_metadata(chunk: str) -> Dict[str, Any]:
+    """Extract section number and forward-looking flag from chunk text."""
+    meta: Dict[str, Any] = {}
+    m = _NUMBERED_SECTION_RE.search(chunk[:400])
+    if m:
+        try:
+            sec_num = int(m.group(1))
+            meta["section_number"] = sec_num
+        except (ValueError, IndexError):
+            pass
+
+    lower = chunk.lower()
+    meta["is_forward_looking"] = any(w in lower for w in _FORWARD_LOOKING_WORDS)
+    return meta
+
+
 # SECTION SPLITTING — DETECT [DOC-NNN] HEADERS
 #
 # Many synthetic / multi-doc corpora pack several logical documents into one
@@ -598,7 +635,7 @@ def _chunk_text(text: str) -> List[str]:
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=settings.CHUNK_SIZE,
             chunk_overlap=settings.CHUNK_OVERLAP,
-            separators=["\n[DOC-", "\n\n", "\n", ". ", "! ", "? ", " ", ""],
+            separators=["\n[DOC-", "\nSECTION ", "\n====", "\n----", "\n####", "\n###", "\n##", "\n#", "\n\n", "\n", ". ", "! ", "? ", " ", ""],
         )
         chunks = splitter.split_text(text)
         chunks = [c.strip() for c in chunks if c.strip()]
@@ -708,6 +745,12 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
                 # NORMALIZE
                 text = _normalize_text(raw_text)
+
+                # STRIP VISUAL DIVIDER LINES (===, ---) — pure decoration that
+                # wastes chunk space and dilutes embedding signal.
+                import re as _re
+                text = _re.sub(r"\n={4,}\n", "\n", text)
+                text = _re.sub(r"\n-{4,}\n", "\n", text)
 
                 if not text or text.isspace():
                     raise ValueError("EMPTY_CONTENT_AFTER_NORMALIZE")
@@ -887,6 +930,10 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     # `structure` so they survive the Qdrant payload round-trip
                     # (Qdrant's payload builder reads from structure, not
                     # extra_metadata). Keep them in both for resilience.
+                    # NUMBERED SECTION METADATA — detect "SECTION N:" or "N.M" headings
+                    # so the retrieval layer can apply temporal boosts for historical queries.
+                    _sec_meta = _detect_section_metadata(chunk)
+
                     structure_carry_overs: Dict[str, Any] = {}
                     if section_extras.get("error_markers"):
                         structure_carry_overs["error_markers"] = section_extras["error_markers"]
@@ -920,6 +967,8 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                         "pii_redacted":        bool(pii_counts),
                         "content_type":        "text_chunk",
                         "ingestion_time":      time.time(),
+                        "section_number":      _sec_meta.get("section_number"),
+                        "is_forward_looking":  _sec_meta.get("is_forward_looking", False),
                     }
                     structure_payload.update(structure_carry_overs)
 

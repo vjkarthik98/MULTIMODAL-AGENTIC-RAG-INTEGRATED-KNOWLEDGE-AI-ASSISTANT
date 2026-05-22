@@ -29,20 +29,23 @@ except ImportError:
 # COLLECTION SCHEMA — PHASE 24 UNIVERSAL METADATA PAYLOAD FIELDS
 
 PAYLOAD_INDEXES: Dict[str, Any] = {
-    "session_id":      "keyword",
-    "modality":        "keyword",
-    "subtype":         "keyword",
-    "source_type":     "keyword",
-    "source":          "keyword",
-    "doc_id":          "keyword",
-    "content_type":    "keyword",
-    "embedding_space": "keyword",
-    "language":        "keyword",
-    "checksum_sha256": "keyword",
-    "chunk_id":        "integer",
-    "page":            "integer",
-    "ingestion_time":  "float",
-    "deleted":         "bool",
+    "session_id":        "keyword",
+    "user_id":           "keyword",
+    "modality":          "keyword",
+    "subtype":           "keyword",
+    "source_type":       "keyword",
+    "source":            "keyword",
+    "doc_id":            "keyword",
+    "content_type":      "keyword",
+    "embedding_space":   "keyword",
+    "language":          "keyword",
+    "checksum_sha256":   "keyword",
+    "chunk_id":          "integer",
+    "page":              "integer",
+    "ingestion_time":    "float",
+    "deleted":           "bool",
+    "section_number":    "integer",
+    "is_forward_looking": "bool",
 }
 
 PAYLOAD_SCHEMA_TYPE_MAP: Dict[str, Any] = {}

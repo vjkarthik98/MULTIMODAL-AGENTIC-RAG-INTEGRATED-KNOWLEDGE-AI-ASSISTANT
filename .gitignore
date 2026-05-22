@@ -219,3 +219,5 @@ __marimo__/
 .claude/
 CLAUDE.md
 rag_env 
+.hf_cache
+.torch_cache

@@ -8,19 +8,31 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import settings
 from app.core.infra_registry import infra
 from app.utils.logger import get_logger
+from app.utils.paths import user_knowledge_base_dir, user_staging_dir
 
 logger = get_logger(__name__)
 
 router = APIRouter()
 
-# UPLOAD STAGING DIR
+
+def get_current_user_id(request: Request, explicit_user_id: Optional[str] = None) -> str:
+    """
+    Resolve current user id.
+    Priority: explicit arg (eg. form field) → X-User-ID header → dev default.
+    Phase 27 will replace this with JWT decode.
+    """
+    if explicit_user_id and explicit_user_id.strip():
+        return explicit_user_id.strip()[:128]
+    return request.headers.get("X-User-ID", settings.DEFAULT_DEV_USER_ID)
+
+# UPLOAD STAGING DIR — global fallback only; uploads now go to per-user dirs
 UPLOAD_DIR: Path = settings.UPLOAD_STAGING_DIR
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -111,6 +123,9 @@ def _get_query_pipeline():
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=8000)
     session_id: str = Field(default="default", max_length=128)
+    # Optional: identify which user's knowledge base to query against.
+    # Overrides X-User-ID header. Falls back to header → dev default if omitted.
+    user_id: Optional[str] = Field(default=None, max_length=128)
     # Optional: restrict retrieval to chunks whose `source` filename
     # contains any of these substrings. Use this to scope a query to a
     # specific uploaded file when the session has many ingested documents.
@@ -305,6 +320,16 @@ _INGEST_422_PREFIXES = (
     "DRM_PROTECTED",
     "SVG_RASTERIZATION_FAILED",
     "PILLOW_HEIF_REQUIRED",
+    "INVALID_FILE_TYPE",
+    "UNSUPPORTED_TYPE",
+    "MIME_NOT_ALLOWED",
+    "EXT_NOT_ALLOWED",
+    "CORRUPT_IMAGE",
+    "IMAGE_LOAD_FAILED",
+    "INVALID_IMAGE_DIMENSIONS",
+    "MAGIC_BYTE_MIME_MISMATCH",
+    "UNSUPPORTED_IMAGE_FORMAT",
+    "RAW_DECODE_FAILED",
 )
 
 
@@ -315,11 +340,13 @@ async def ingest_document(
     request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    session_id: str = "default",
+    session_id: str = Form("default"),
+    user_id: Optional[str] = Form(None),
 ) -> JSONResponse:
     start = time.time()
     request_id = _request_id()
     file_path: Optional[Path] = None
+    user_id = get_current_user_id(request, explicit_user_id=user_id)
 
     _rate_limit_check(request)
 
@@ -337,9 +364,11 @@ async def ingest_document(
             )
 
         max_size = _size_limit(ext)
-        _check_disk_space(UPLOAD_DIR)
+        staging_dir = user_staging_dir(user_id)
+        _check_disk_space(staging_dir)
 
-        file_path = UPLOAD_DIR / f"{uuid.uuid4().hex}_{filename}"
+        # Write to user staging first (temp), then copy to knowledge_base on success
+        file_path = staging_dir / f"{uuid.uuid4().hex}_{filename}"
         size = 0
 
         with open(file_path, "wb") as f:
@@ -386,6 +415,12 @@ async def ingest_document(
                 },
             )
 
+        # PERSIST TO KNOWLEDGE BASE — copy original file before pipeline may clean staging
+        kb_dir = user_knowledge_base_dir(user_id)
+        kb_path = kb_dir / filename
+        import shutil as _shutil
+        _shutil.copy2(str(file_path), str(kb_path))
+
         _audit_log(
             "ingest_received",
             request_id=request_id,
@@ -401,7 +436,7 @@ async def ingest_document(
         # RUN FULL PIPELINE — ingest → chunk → embed → store
         try:
             from app.pipeline.ingestion_pipeline import process_file
-            result = await asyncio.to_thread(process_file, str(file_path), session_id)
+            result = await asyncio.to_thread(process_file, str(file_path), session_id, user_id)
 
         except RuntimeError as exc:
             # Pipeline wraps ingestor errors as: RuntimeError("INGESTION_FAILED: <original>")
@@ -568,6 +603,7 @@ async def query_rag(
     start = time.time()
     request_id = _request_id()
     session_id = request_body.session_id
+    user_id = get_current_user_id(request, explicit_user_id=request_body.user_id)
 
     _rate_limit_check(request)
 
@@ -592,7 +628,7 @@ async def query_rag(
         pipeline_fn = _get_query_pipeline()
 
         result = await asyncio.to_thread(
-            pipeline_fn, query, session_id, request_body.sources
+            pipeline_fn, query, session_id, request_body.sources, user_id
         )
 
         if not isinstance(result, dict) or "answer" not in result:
@@ -752,11 +788,13 @@ async def upload_file(
     request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    session_id: str = "default",
+    session_id: str = Form("default"),
+    user_id: Optional[str] = Form(None),
 ) -> Dict[str, Any]:
     start = time.time()
     request_id = _request_id()
     file_path: Optional[Path] = None
+    user_id = get_current_user_id(request, explicit_user_id=user_id)
 
     _rate_limit_check(request)
 
@@ -776,9 +814,10 @@ async def upload_file(
         max_size = _size_limit(ext)
 
         # DISK SPACE GUARD
-        _check_disk_space(UPLOAD_DIR)
+        staging_dir = user_staging_dir(user_id)
+        _check_disk_space(staging_dir)
 
-        file_path = UPLOAD_DIR / f"{uuid.uuid4().hex}_{filename}"
+        file_path = staging_dir / f"{uuid.uuid4().hex}_{filename}"
         size = 0
 
         # STREAM SAVE WITH SIZE CHECK
@@ -808,6 +847,12 @@ async def upload_file(
                 detail="File rejected: malware detected",
             )
 
+        # PERSIST TO KNOWLEDGE BASE — copy original file before pipeline may clean staging
+        import shutil as _shutil
+        kb_dir = user_knowledge_base_dir(user_id)
+        kb_path = kb_dir / filename
+        _shutil.copy2(str(file_path), str(kb_path))
+
         _audit_log(
             "upload_received",
             request_id=request_id,
@@ -821,7 +866,7 @@ async def upload_file(
         # INGEST
         from app.pipeline.ingestion_pipeline import process_file
         try:
-            result = await asyncio.to_thread(process_file, str(file_path), session_id)
+            result = await asyncio.to_thread(process_file, str(file_path), session_id, user_id)
         except Exception as exc:
             err_str = str(exc).removeprefix("INGESTION_FAILED: ").strip()
             if any(err_str.startswith(p) for p in _INGEST_422_PREFIXES):
@@ -909,11 +954,12 @@ async def clear_memory(
 ) -> Dict[str, Any]:
     request_id = _request_id()
     session_id = request_body.session_id
+    user_id = get_current_user_id(request)
 
     try:
         from app.memory.memory_manager import MemoryManager
         manager = MemoryManager()
-        await asyncio.to_thread(manager.clear, session_id)
+        await asyncio.to_thread(manager.clear, session_id, user_id)
 
         _audit_log(
             "memory_cleared",
@@ -1120,3 +1166,116 @@ def model_health() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+
+
+# ─── KNOWLEDGE BASE ───────────────────────────────────────────────────────────
+
+@router.get("/knowledge-base")
+async def list_knowledge_base(
+    request: Request,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """List all files in the user's knowledge base. Pass ?user_id=user_2 to view another user."""
+    user_id = get_current_user_id(request, explicit_user_id=user_id)
+    from app.utils.paths import user_knowledge_base_dir
+    kb_dir = user_knowledge_base_dir(user_id)
+    files = []
+    for f in sorted(kb_dir.iterdir()):
+        if f.is_file():
+            stat = f.stat()
+            files.append({
+                "filename":      f.name,
+                "size_bytes":    stat.st_size,
+                "size_mb":       round(stat.st_size / (1024 * 1024), 3),
+                "uploaded_at":   stat.st_mtime,
+                "modality":      _EXT_MODALITY.get(f.suffix.lower(), "unknown"),
+            })
+    return {
+        "user_id":    user_id,
+        "file_count": len(files),
+        "files":      files,
+    }
+
+
+@router.delete("/knowledge-base/{filename}")
+async def delete_knowledge_base_file(
+    filename: str,
+    request: Request,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Permanently delete a file from the user's knowledge base AND purge its
+    vectors from Qdrant and BM25 so it no longer appears in query results.
+    Pass ?user_id=user_2 to delete from another user's KB.
+    """
+    user_id = get_current_user_id(request, explicit_user_id=user_id)
+    request_id = _request_id()
+
+    # Sanitize filename — prevent path traversal
+    safe_name = Path(filename).name
+    if safe_name != filename or ".." in filename or "/" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    from app.utils.paths import user_knowledge_base_dir
+    kb_dir = user_knowledge_base_dir(user_id)
+    file_path = kb_dir / safe_name
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {safe_name}")
+
+    # PURGE FROM QDRANT — delete all vectors whose source matches this filename
+    qdrant_deleted = 0
+    try:
+        vs = infra.get_vector_store()
+        if vs:
+            # Build source prefix: hash_filename pattern used during ingestion
+            from qdrant_client.models import Filter, FieldCondition, MatchText
+            deleted = vs.client.delete(
+                collection_name=vs.text_collection,
+                points_selector=Filter(
+                    must=[FieldCondition(key="source", match=MatchText(text=safe_name))]
+                ),
+            )
+            qdrant_deleted += getattr(deleted, "result", 0) or 0
+            # Also purge vision collection
+            try:
+                vs.client.delete(
+                    collection_name=vs.vision_collection,
+                    points_selector=Filter(
+                        must=[FieldCondition(key="source", match=MatchText(text=safe_name))]
+                    ),
+                )
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.warning(event="kb_delete_qdrant_failed", file=safe_name, error=str(exc))
+
+    # PURGE FROM BM25
+    try:
+        bm25 = infra.get_bm25()
+        if bm25 and hasattr(bm25, "delete_by_source"):
+            bm25.delete_by_source(safe_name, user_id=user_id)
+    except Exception as exc:
+        logger.warning(event="kb_delete_bm25_failed", file=safe_name, error=str(exc))
+
+    # DELETE FROM KNOWLEDGE BASE
+    file_path.unlink()
+
+    _audit_log(
+        "knowledge_base_delete",
+        request_id=request_id,
+        session_id=user_id,
+        file=safe_name,
+        ip=_client_ip(request),
+    )
+
+    logger.info(event="knowledge_base_file_deleted", user_id=user_id, file=safe_name)
+
+    return {
+        "request_id":     request_id,
+        "status":         "deleted",
+        "filename":       safe_name,
+        "user_id":        user_id,
+        "qdrant_purged":  True,
+        "bm25_purged":    True,
+    }

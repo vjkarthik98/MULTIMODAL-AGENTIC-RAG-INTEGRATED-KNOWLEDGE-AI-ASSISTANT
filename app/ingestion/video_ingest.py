@@ -691,11 +691,12 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         encoding="binary",
     )
 
-    audio_path:      Optional[str]  = None
-    frame_temp_dir:  Optional[Path] = None
-    recovered_path:  Optional[str]  = None
-    staging = settings.UPLOAD_STAGING_DIR
-    staging.mkdir(parents=True, exist_ok=True)
+    audio_path:       Optional[str]  = None
+    frame_temp_dir:   Optional[Path] = None
+    frame_staging_dir: Optional[Path] = None
+    recovered_path:   Optional[str]  = None
+    from app.utils.paths import resolved_staging_dir
+    staging = resolved_staging_dir()
 
     # FFMPEG AVAILABILITY CHECK — fail fast with clear message
     try:
@@ -953,18 +954,28 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     if _tonemap_frame(f_path, sdr_path):
                         processing_path = sdr_path
 
+                # COPY FRAME TO PERSISTENT STAGING SO CLIP EMBEDDING CAN READ IT
+                # (frame_temp_dir is cleaned in finally before pipeline embeds)
+                if frame_staging_dir is None:
+                    frame_staging_dir = staging / f"frames_{doc_id}"
+                    frame_staging_dir.mkdir(parents=True, exist_ok=True)
+                persistent_frame_path = str(
+                    frame_staging_dir / Path(processing_path).name
+                )
+                shutil.copy2(processing_path, persistent_frame_path)
+
                 # FRAME CAPTION
                 try:
                     from app.ingestion.frame_captioner import generate_caption
-                    caption = generate_caption(processing_path, session_id) or f"Scene at {ts:.1f}s"
+                    caption = generate_caption(persistent_frame_path, session_id) or f"Scene at {ts:.1f}s"
                 except Exception as e:
                     caption = f"Scene at {ts:.1f}s"
                     logger.debug(event="frame_caption_failed", error=str(e))
 
                 # FRAME OCR
-                ocr_text = _extract_frame_ocr(processing_path)
+                ocr_text = _extract_frame_ocr(persistent_frame_path)
 
-                blur    = _blur_score(processing_path)
+                blur    = _blur_score(persistent_frame_path)
                 linked  = _link_speech(ts, speech_segments)
                 align   = _alignment_score(caption, linked)
                 conflict_flag = bool(linked and ocr_text and align < 0.1)
@@ -986,7 +997,7 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                             frame_index=frame["frame_index"],
                             total_frames=total_frames_count,
                             caption=caption,
-                            asset_path=processing_path,
+                            asset_path=persistent_frame_path,
                             linked_speech=linked,
                             conflict_flag=conflict_flag,
                             alignment_score=align,
@@ -995,6 +1006,7 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                             video_duration=video_duration,
                             is_hdr=is_hdr,
                             content_type="video_frame",
+                            embedding_space="vision",
                             ingestion_time=time.time(),
                         ),
                         extra_metadata={

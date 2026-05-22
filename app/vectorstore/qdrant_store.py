@@ -171,6 +171,45 @@ class QdrantVectorStore:
 
     # ENSURE COLLECTION WITH PAYLOAD INDEXES
 
+    # Full list of payload fields that need a Qdrant index for filtered search.
+    # Adding a field here is enough — _ensure_collection runs on every startup
+    # and is idempotent (skips already-existing indexes).
+    _PAYLOAD_INDEXES = [
+        ("user_id",              PayloadSchemaType.KEYWORD),
+        ("session_id",           PayloadSchemaType.KEYWORD),
+        ("modality",             PayloadSchemaType.KEYWORD),
+        ("doc_id",               PayloadSchemaType.KEYWORD),
+        ("source",               PayloadSchemaType.KEYWORD),
+        ("language",             PayloadSchemaType.KEYWORD),
+        ("content_type",         PayloadSchemaType.KEYWORD),
+        ("embedding_space",      PayloadSchemaType.KEYWORD),
+        ("deleted_at",           PayloadSchemaType.KEYWORD),
+        ("checksum_sha256",      PayloadSchemaType.KEYWORD),
+        ("section_number",       PayloadSchemaType.INTEGER),
+        ("is_forward_looking",   PayloadSchemaType.BOOL),
+    ]
+
+    def _ensure_payload_indexes(self, name: str) -> None:
+        """Create payload indexes on an existing collection. Idempotent."""
+        for field, schema in self._PAYLOAD_INDEXES:
+            try:
+                self.client.create_payload_index(
+                    collection_name=name,
+                    field_name=field,
+                    field_schema=schema,
+                )
+            except Exception as exc:
+                err = str(exc).lower()
+                if "already exists" in err or "conflict" in err:
+                    pass  # already indexed — fine
+                else:
+                    logger.warning(
+                        "payload_index_failed",
+                        collection=name,
+                        field=field,
+                        error=str(exc),
+                    )
+
     def _ensure_collection(self, name: str, dim: int) -> None:
         if name in self._collection_cache:
             return
@@ -182,31 +221,9 @@ class QdrantVectorStore:
                 vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
             )
 
-            # CREATE FILTERABLE PAYLOAD INDEXES — PHASE 25
-            for field, schema in [
-                ("session_id",      PayloadSchemaType.KEYWORD),
-                ("modality",        PayloadSchemaType.KEYWORD),
-                ("doc_id",          PayloadSchemaType.KEYWORD),
-                ("source",          PayloadSchemaType.KEYWORD),
-                ("language",        PayloadSchemaType.KEYWORD),
-                ("content_type",    PayloadSchemaType.KEYWORD),
-                ("embedding_space", PayloadSchemaType.KEYWORD),
-                ("deleted_at",      PayloadSchemaType.KEYWORD),
-                ("checksum_sha256", PayloadSchemaType.KEYWORD),
-            ]:
-                try:
-                    self.client.create_payload_index(
-                        collection_name=name,
-                        field_name=field,
-                        field_schema=schema,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "payload_index_failed",
-                        field=field,
-                        error=str(exc),
-                    )
-
+        # Always (re-)create payload indexes — runs on new AND existing collections
+        # so that adding a new field to _PAYLOAD_INDEXES takes effect on restart.
+        self._ensure_payload_indexes(name)
         self._collection_cache.add(name)
 
     # EMBEDDING VALIDATION
@@ -228,11 +245,12 @@ class QdrantVectorStore:
 
     # PAYLOAD BUILDER
 
-    def _payload(self, d: Any) -> Dict[str, Any]:
+    def _payload(self, d: Any, user_id: Optional[str] = None) -> Dict[str, Any]:
         s = dict(getattr(d, "structure", {}) or {})
 
         return {
             "text":            str(getattr(d, "text", "") or "")[:settings.QDRANT_TEXT_MAX_CHARS],
+            "user_id":         user_id or s.get("user_id"),
             "doc_id":          s.get("doc_id"),
             "chunk_id":        getattr(d, "chunk_id", None),
             "modality":        getattr(d, "modality", "text"),
@@ -249,17 +267,19 @@ class QdrantVectorStore:
             "hierarchy_level": s.get("hierarchy_level"),
             "checksum":        s.get("file_hash"),
             "ingestion_time":  s.get("ingestion_time"),
-            "section_id":      s.get("section_id"),
-            "section_title":   s.get("section_title"),
-            "error_markers":   s.get("error_markers") or [],
-            "doc_version":     s.get("doc_version"),
-            "title_mismatch":  bool(s.get("title_mismatch", False)),
-            "deleted_at":      None,
+            "section_id":       s.get("section_id"),
+            "section_title":    s.get("section_title"),
+            "error_markers":    s.get("error_markers") or [],
+            "doc_version":      s.get("doc_version"),
+            "title_mismatch":   bool(s.get("title_mismatch", False)),
+            "section_number":   s.get("section_number"),
+            "is_forward_looking": bool(s.get("is_forward_looking", False)),
+            "deleted_at":       None,
         }
 
     # INSERT DOCUMENTS WITH IDEMPOTENT UPSERT
 
-    def insert_documents(self, documents: List[Any], session_id: str = "") -> None:
+    def insert_documents(self, documents: List[Any], session_id: str = "", user_id: Optional[str] = None) -> None:
 
         if not documents:
             return
@@ -291,7 +311,7 @@ class QdrantVectorStore:
                         PointStruct(
                             id=point_id,
                             vector=emb,
-                            payload=self._payload(d),
+                            payload=self._payload(d, user_id),
                         )
                     )
                 else:
@@ -302,7 +322,7 @@ class QdrantVectorStore:
                         PointStruct(
                             id=point_id,
                             vector=emb,
-                            payload=self._payload(d),
+                            payload=self._payload(d, user_id),
                         )
                     )
 
@@ -489,14 +509,21 @@ class QdrantVectorStore:
                     error=str(exc),
                 )
 
-    # FILTER BUILDER — EXCLUDES SOFT-DELETED DOCS
+    # FILTER BUILDER — EXCLUDES SOFT-DELETED DOCS, ISOLATES BY USER
 
     def _build_filter(
         self,
         session_id: Optional[str] = None,
         exclude_deleted: bool = True,
+        user_id: Optional[str] = None,
     ) -> Optional[Filter]:
         conditions = []
+
+        # user_id isolation is the primary tenant boundary
+        if user_id:
+            conditions.append(
+                FieldCondition(key="user_id", match=MatchValue(value=user_id))
+            )
 
         if session_id:
             conditions.append(
@@ -525,6 +552,7 @@ class QdrantVectorStore:
         session_id: Optional[str],
         score_threshold: float = 0.0,
         exclude_deleted: bool = True,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
 
         if collection not in self._collection_cache:
@@ -549,7 +577,7 @@ class QdrantVectorStore:
                     collection_name=collection,
                     query=vector,
                     limit=limit,
-                    query_filter=self._build_filter(session_id, exclude_deleted),
+                    query_filter=self._build_filter(session_id, exclude_deleted, user_id),
                     score_threshold=score_threshold if score_threshold > 0 else None,
                 )
                 points = getattr(res, "points", [])
@@ -604,6 +632,7 @@ class QdrantVectorStore:
         limit: int = None,
         session_id: Optional[str] = None,
         score_threshold: float = 0.0,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         return self._search(
             self.text_collection,
@@ -611,6 +640,7 @@ class QdrantVectorStore:
             limit or settings.RAG_TOP_K,
             session_id,
             score_threshold,
+            user_id=user_id,
         )
 
     # PUBLIC SEARCH — VISION COLLECTION
@@ -621,6 +651,7 @@ class QdrantVectorStore:
         limit: int = None,
         session_id: Optional[str] = None,
         score_threshold: float = 0.0,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         return self._search(
             self.vision_collection,
@@ -628,6 +659,7 @@ class QdrantVectorStore:
             limit or settings.RAG_TOP_K,
             session_id,
             score_threshold,
+            user_id=user_id,
         )
 
     # MODALITY FILTER SETTER
