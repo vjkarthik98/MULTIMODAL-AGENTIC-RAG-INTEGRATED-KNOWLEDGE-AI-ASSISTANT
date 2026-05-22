@@ -364,7 +364,8 @@ def _process_pdf(
     if has_xfa:
         logger.warning("pdf_xfa_dynamic_form_detected", file=source_name)
 
-    image_dir = Path(settings.PDF_IMAGE_DIR) / doc_id
+    from app.utils.paths import resolved_images_dir
+    image_dir = resolved_images_dir() / doc_id
     image_dir.mkdir(parents=True, exist_ok=True)
 
     header_footer_counts: Dict[str, int] = {}
@@ -683,7 +684,8 @@ def _ingest_embedded_image_bytes(
     if safe_ext not in {".png", ".jpg", ".bmp", ".gif", ".webp", ".tiff", ".tif"}:
         safe_ext = ".png"
 
-    tmp_dir = Path(settings.TEMP_DIR) / "embedded_images"
+    from app.utils.paths import resolved_temp_dir
+    tmp_dir = resolved_temp_dir() / "embedded_images"
     try:
         tmp_dir.mkdir(parents=True, exist_ok=True)
     except Exception:

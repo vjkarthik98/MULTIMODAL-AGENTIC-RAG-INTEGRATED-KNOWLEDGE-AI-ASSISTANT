@@ -483,7 +483,8 @@ def _generate_thumbnail(img: Image.Image, path: Path, session_id: str) -> Option
             (settings.THUMBNAIL_WIDTH, settings.THUMBNAIL_HEIGHT),
             Image.LANCZOS,
         )
-        thumb_path = settings.TEMP_DIR / f"thumb_{uuid.uuid4().hex}.jpg"
+        from app.utils.paths import resolved_temp_dir
+        thumb_path = resolved_temp_dir() / f"thumb_{uuid.uuid4().hex}.jpg"
         thumb.save(str(thumb_path), "JPEG", quality=85)
         logger.debug(event="thumbnail_generated", path=str(thumb_path), session_id=session_id)
         return str(thumb_path)

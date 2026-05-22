@@ -20,6 +20,13 @@ from app.utils.logger import get_logger, bind_request_context
 
 logger = get_logger(__name__)
 
+# Set CUDA TF32 + cuDNN benchmark flags before any model code runs
+try:
+    from app.core.startup_optimizer import set_cuda_performance_flags
+    set_cuda_performance_flags()
+except Exception:
+    pass
+
 # CONCURRENCY SEMAPHORE — SECTION 2.1
 semaphore = asyncio.Semaphore(settings.MAX_PARALLEL_REQUESTS)
 
@@ -73,20 +80,27 @@ def _setup_otel() -> None:
         logger.warning(event="otel_init_failed", error=str(e))
 
 
-# QDRANT INIT
+# QDRANT INIT — runs in background so it doesn't block Uvicorn ready signal
 
-def _init_qdrant() -> None:
+async def _init_qdrant_async() -> None:
     try:
-        from scripts.init_qdrant import initialize_qdrant
-        initialize_qdrant()
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _init_qdrant_sync)
         logger.info(event="qdrant_ready")
     except Exception as e:
         logger.warning(event="qdrant_init_failed", error=str(e))
 
 
-# INFRA WARMUP
+def _init_qdrant_sync() -> None:
+    from scripts.init_qdrant import initialize_qdrant
+    initialize_qdrant()
 
-async def _warmup_infra() -> None:
+
+# INFRA WARMUP — fires as a background task so Uvicorn is ready immediately.
+# Qdrant/Redis/Mongo connections establish concurrently while the first request
+# is being served; circuit breakers handle any transient failures gracefully.
+
+async def _warmup_infra_background() -> None:
     try:
         from app.core.infra_registry import infra
         await infra.warmup()
@@ -95,13 +109,12 @@ async def _warmup_infra() -> None:
         logger.warning(event="infra_warmup_failed", error=str(e))
 
 
-# MODEL WARMUP — OPT-IN VIA WARMUP_AT_STARTUP
-# Default is False so uvicorn cold-starts without paying any model-load cost.
-# When True, the registry warms only the models listed in WARMUP_MODELS
-# (or the text embedder as a sensible minimum). Per-modality ingestion
-# and the first query both load on demand through model_registry.
+# MODEL WARMUP — parallel GPU preload via ThreadPoolExecutor.
+# All GPU models are loaded concurrently into VRAM so the first query
+# has zero cold-start penalty. Uses model_registry._ensure() which is
+# already thread-safe and parallel-load aware.
 
-def _warmup_models_if_requested() -> None:
+async def _warmup_models_async() -> None:
     if not settings.WARMUP_AT_STARTUP:
         logger.info(
             event="startup_warmup_skipped",
@@ -110,10 +123,8 @@ def _warmup_models_if_requested() -> None:
         )
         return
     try:
-        from app.core.model_registry import model_registry
-        requested = list(settings.WARMUP_MODELS) or ["text_embedder"]
-        model_registry.ensure(requested)
-        logger.info(event="startup_warmup_complete", models=requested)
+        from app.core.startup_optimizer import preload_gpu_models
+        await preload_gpu_models()
     except Exception as e:
         logger.warning(event="startup_warmup_failed", error=str(e))
 
@@ -135,7 +146,23 @@ def _setup_audit_log() -> None:
 def _cleanup_temp_dirs() -> None:
     try:
         import shutil
-        for temp_dir in (settings.TEMP_DIR, settings.VIDEO_FRAMES_DIR):
+        from pathlib import Path
+
+        sweeps = [settings.TEMP_DIR, settings.VIDEO_FRAMES_DIR]
+
+        # Per-user temp/temp_frames/staging — sweep on startup so a crashed
+        # ingestion run doesn't leave orphan frame dirs lying around.
+        users_root = Path("data/users")
+        if users_root.exists():
+            for udir in users_root.iterdir():
+                if not udir.is_dir():
+                    continue
+                for sub in ("temp", "temp_frames", "staging"):
+                    p = udir / sub
+                    if p.exists():
+                        sweeps.append(p)
+
+        for temp_dir in sweeps:
             if temp_dir.exists():
                 for item in temp_dir.iterdir():
                     try:
@@ -164,44 +191,42 @@ async def lifespan(app: FastAPI):
         app=settings.APP_NAME,
     )
 
-    # CLEANUP LEFTOVER TEMP FILES FROM PREVIOUS RUN — SECTION 5
+    # SYNC FAST-PATH — only cheap, local operations that must finish before
+    # Uvicorn signals ready. Target: <500 ms total.
     _cleanup_temp_dirs()
-
-    # AUDIT LOG — SECTION 5
     _setup_audit_log()
-
-    # OPENTELEMETRY — SECTION 2.1
     _setup_otel()
-
-    # PROMETHEUS — SECTION 6
     _setup_prometheus()
 
-    # QDRANT COLLECTIONS INIT
-    _init_qdrant()
+    # BACKGROUND TASKS — network I/O and GPU model loads run concurrently
+    # after Uvicorn is already accepting requests. Circuit breakers and lazy
+    # getters mean the app degrades gracefully until each task completes.
+    background_tasks = []
 
-    # INFRA WARMUP (Qdrant + BM25 + Redis + Mongo)
-    await _warmup_infra()
+    # Qdrant collection init (network + retry — must not block ready signal)
+    background_tasks.append(asyncio.create_task(_init_qdrant_async()))
 
-    # MODEL WARMUP — OPT-IN. Default: nothing loads here; modality-scoped
-    # warmups handle it on first request. Set WARMUP_AT_STARTUP=true to
-    # preload (and use WARMUP_MODELS to pick which).
-    if settings.WARMUP_AT_STARTUP:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _warmup_models_if_requested)
-    else:
-        _warmup_models_if_requested()
+    # Infra warmup: Qdrant client + BM25 + Redis + Mongo — all concurrent
+    background_tasks.append(asyncio.create_task(_warmup_infra_background()))
+
+    # GPU model preload: all models load in parallel into VRAM
+    background_tasks.append(asyncio.create_task(_warmup_models_async()))
 
     startup_latency = round(time.time() - startup_start, 2)
     logger.info(
         event="app_ready",
         startup_latency=startup_latency,
         version=settings.APP_VERSION,
+        note="infra+models loading in background",
     )
 
     yield
 
-    # SHUTDOWN — SECTION 5 TEMP FILE CLEANUP
+    # SHUTDOWN
     logger.info(event="shutdown_begin")
+    for task in background_tasks:
+        if not task.done():
+            task.cancel()
     _cleanup_temp_dirs()
     logger.info(event="shutdown_complete")
 
@@ -294,11 +319,17 @@ async def request_logger(request: Request, call_next) -> Response:
         response = await call_next(request)
         latency  = round(time.time() - start, 3)
 
+        path_str = str(request.url.path)
+        # Skip noisy probe paths — /health is hit by load balancers, IDE probes,
+        # browser tabs, and Swagger UI; logging every hit drowns out real traffic.
+        _SKIP_LOG_PATHS = ("/health", "/infra/health", "/models/health", "/metrics")
+        skip_log = path_str in _SKIP_LOG_PATHS
+
         log_kwargs = dict(
             event=   "http_request",
             id=      request_id,
             method=  request.method,
-            path=    str(request.url.path),
+            path=    path_str,
             status=  response.status_code,
             latency= latency,
             ip=      client_ip,
@@ -306,7 +337,7 @@ async def request_logger(request: Request, call_next) -> Response:
 
         if latency > settings.SLOW_REQUEST_THRESHOLD:
             logger.warning(**log_kwargs)
-        else:
+        elif not skip_log:
             logger.info(**log_kwargs)
 
         response.headers[settings.CORRELATION_ID_HEADER] = request_id

@@ -228,13 +228,14 @@ class Retriever:
         wait=wait_exponential(multiplier=1, min=1, max=6),
         reraise=True,
     )
-    def _vector_search(self, q: str, session_id: str) -> List[Dict]:
+    def _vector_search(self, q: str, session_id: str, user_id: Optional[str] = None) -> List[Dict]:
         try:
             vec = self.embedder.embed_query(q, session_id=session_id)
             return self.vector_store.search_text(
                 query_vector=vec,
                 session_id=session_id,
                 limit=self.max_candidates,
+                user_id=user_id,
             )
         except Exception as exc:
             logger.error(
@@ -251,12 +252,13 @@ class Retriever:
         wait=wait_exponential(multiplier=1, min=1, max=6),
         reraise=True,
     )
-    def _bm25_search(self, q: str, session_id: str) -> List[Dict]:
+    def _bm25_search(self, q: str, session_id: str, user_id: Optional[str] = None) -> List[Dict]:
         try:
             return self.bm25.search(
                 q,
                 session_id=session_id,
                 top_k=self.max_candidates,
+                user_id=user_id,
             )
         except Exception as exc:
             logger.error(
@@ -413,6 +415,7 @@ class Retriever:
         date_to: Optional[float] = None,
         use_mmr: bool = True,
         use_rrf: bool = True,
+        user_id: Optional[str] = None,
     ) -> List[Dict]:
 
         if not query:
@@ -445,7 +448,7 @@ class Retriever:
 
                 for q in queries:
                     try:
-                        v_results = self._vector_search(q, session_id)
+                        v_results = self._vector_search(q, session_id, user_id)
                         vector_res.extend(v_results)
                     except Exception as exc:
                         logger.warning(
@@ -456,7 +459,7 @@ class Retriever:
                         )
 
                     try:
-                        b_results = self._bm25_search(q, session_id)
+                        b_results = self._bm25_search(q, session_id, user_id)
                         bm25_res.extend(b_results)
                     except Exception as exc:
                         logger.warning(
@@ -572,6 +575,7 @@ class Retriever:
         date_to: Optional[float] = None,
         use_mmr: bool = True,
         use_rrf: bool = True,
+        user_id: Optional[str] = None,
     ) -> List[Dict]:
 
         async with _semaphore:
@@ -587,6 +591,7 @@ class Retriever:
                     date_to,
                     use_mmr,
                     use_rrf,
+                    user_id,
                 ),
             )
 

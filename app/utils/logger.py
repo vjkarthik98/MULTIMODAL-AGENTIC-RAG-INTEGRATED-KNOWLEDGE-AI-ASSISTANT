@@ -385,6 +385,16 @@ def _suppress_noisy_loggers() -> None:
 
 # UVICORN INTEGRATION
 
+class _HealthAccessFilter(logging.Filter):
+    """Drop access-log lines for noisy probe endpoints (/health, /metrics)."""
+
+    _MUTED = ("/health", "/infra/health", "/models/health", "/metrics")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not any(p in msg for p in self._MUTED)
+
+
 def _configure_uvicorn_loggers(
     level: int,
     formatter: logging.Formatter,
@@ -394,6 +404,11 @@ def _configure_uvicorn_loggers(
         uv_logger.handlers.clear()
         uv_logger.propagate = True
         uv_logger.setLevel(level)
+
+    # Silence /health access spam — these probes are not useful in logs
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _HealthAccessFilter) for f in access_logger.filters):
+        access_logger.addFilter(_HealthAccessFilter())
 
 
 # OPENTELEMETRY CONTEXT INJECTION

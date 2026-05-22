@@ -225,7 +225,9 @@ class RedisMemory:
         m = str(modality or "text").lower().strip()
         return m if m in _VALID_MODALITIES else "text"
 
-    def _key(self, session_id: str) -> str:
+    def _key(self, session_id: str, user_id: Optional[str] = None) -> str:
+        if user_id:
+            return f"{self.prefix}:{user_id}:{session_id}:history"
         return f"{self.prefix}:{session_id}:history"
 
     def _hash_msg(self, msg: Dict) -> str:
@@ -269,6 +271,7 @@ class RedisMemory:
         modality: str = "text",
         importance: float = 1.0,
         extra: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
     ) -> None:
         if not self._enabled:
             return
@@ -280,7 +283,7 @@ class RedisMemory:
             return
 
         content = content[:settings.MAX_PROMPT_CHARS]
-        key = self._key(session_id)
+        key = self._key(session_id, user_id)
 
         message: Dict[str, Any] = {
             "role": self._role(role),
@@ -316,7 +319,7 @@ class RedisMemory:
 
     # APPEND ALIAS — USED BY MEMORY MANAGER
 
-    def append(self, session_id: str, message: Dict[str, Any]) -> None:
+    def append(self, session_id: str, message: Dict[str, Any], user_id: Optional[str] = None) -> None:
         if not self._enabled:
             return
         self.add_message(
@@ -325,14 +328,15 @@ class RedisMemory:
             content=message.get("content", ""),
             modality=message.get("modality", "text"),
             importance=message.get("importance", 1.0),
+            user_id=user_id or message.get("user_id"),
         )
 
     # GET HISTORY
 
-    def get_history(self, session_id: str) -> List[Dict[str, Any]]:
+    def get_history(self, session_id: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         if not self._enabled:
             return []
-        key = self._key(session_id)
+        key = self._key(session_id, user_id)
 
         if self._is_available():
             try:
@@ -354,8 +358,8 @@ class RedisMemory:
 
     # GET ALIAS — USED BY MEMORY MANAGER
 
-    def get(self, session_id: str) -> List[Dict[str, Any]]:
-        return self.get_history(session_id)
+    def get(self, session_id: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        return self.get_history(session_id, user_id)
 
     # GET LAST K MESSAGES
 
@@ -363,11 +367,12 @@ class RedisMemory:
         self,
         session_id: str,
         k: Optional[int] = None,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         if not self._enabled:
             return []
         k = k or settings.MEMORY_TOP_K
-        key = self._key(session_id)
+        key = self._key(session_id, user_id)
 
         if self._is_available():
             try:
@@ -420,10 +425,10 @@ class RedisMemory:
 
     # MEMORY SIZE
 
-    def get_memory_size(self, session_id: str) -> int:
+    def get_memory_size(self, session_id: str, user_id: Optional[str] = None) -> int:
         if not self._enabled:
             return 0
-        key = self._key(session_id)
+        key = self._key(session_id, user_id)
 
         if self._is_available():
             try:
@@ -438,10 +443,10 @@ class RedisMemory:
 
     # CLEAR MEMORY
 
-    def clear_memory(self, session_id: str) -> None:
+    def clear_memory(self, session_id: str, user_id: Optional[str] = None) -> None:
         if not self._enabled:
             return
-        key = self._key(session_id)
+        key = self._key(session_id, user_id)
 
         if self._is_available():
             try:
@@ -465,8 +470,8 @@ class RedisMemory:
 
     # DELETE ALIAS — USED BY MEMORY MANAGER
 
-    def delete(self, session_id: str) -> None:
-        self.clear_memory(session_id)
+    def delete(self, session_id: str, user_id: Optional[str] = None) -> None:
+        self.clear_memory(session_id, user_id)
 
     # GDPR PURGE — ALL DATA FOR USER_ID PREFIX
 
@@ -643,17 +648,18 @@ class RedisMemory:
         content: str,
         modality: str = "text",
         importance: float = 1.0,
+        user_id: Optional[str] = None,
     ) -> None:
         await asyncio.to_thread(
             self.add_message,
-            session_id, role, content, None, modality, importance,
+            session_id, role, content, None, modality, importance, None, user_id,
         )
 
-    async def async_get_history(self, session_id: str) -> List[Dict[str, Any]]:
-        return await asyncio.to_thread(self.get_history, session_id)
+    async def async_get_history(self, session_id: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        return await asyncio.to_thread(self.get_history, session_id, user_id)
 
-    async def async_clear_memory(self, session_id: str) -> None:
-        await asyncio.to_thread(self.clear_memory, session_id)
+    async def async_clear_memory(self, session_id: str, user_id: Optional[str] = None) -> None:
+        await asyncio.to_thread(self.clear_memory, session_id, user_id)
 
     async def async_purge_user(self, user_id: str) -> None:
         await asyncio.to_thread(self.purge_user, user_id)

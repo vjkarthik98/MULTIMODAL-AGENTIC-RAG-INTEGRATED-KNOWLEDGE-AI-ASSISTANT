@@ -93,19 +93,19 @@ class Settings:
     PROMETHEUS_PORT: int          = _int("PROMETHEUS_PORT", 9090)
     PROMETHEUS_METRICS_PATH: str  = _str("PROMETHEUS_METRICS_PATH", "/metrics")
 
-    # PERFORMANCE
-    THREAD_POOL_SIZE: int           = _int("THREAD_POOL_SIZE", 4)
-    ASYNC_SEMAPHORE_WORKERS: int    = _int("ASYNC_SEMAPHORE_WORKERS", 5)
-    MAX_PARALLEL_REQUESTS: int      = _int("MAX_PARALLEL_REQUESTS", 20)
+    # PERFORMANCE — defaults tuned for Tesla T4 GPU deployment
+    THREAD_POOL_SIZE: int           = _int("THREAD_POOL_SIZE", 8)
+    ASYNC_SEMAPHORE_WORKERS: int    = _int("ASYNC_SEMAPHORE_WORKERS", 10)
+    MAX_PARALLEL_REQUESTS: int      = _int("MAX_PARALLEL_REQUESTS", 32)
     REQUEST_TIMEOUT_SEC: int        = _int("REQUEST_TIMEOUT_SEC", 120)
-    FILE_PROCESSING_TIMEOUT_SEC: int = _int("FILE_PROCESSING_TIMEOUT_SEC", 120)
-    LLM_CALL_TIMEOUT_SEC: int       = _int("LLM_CALL_TIMEOUT_SEC", 30)
+    FILE_PROCESSING_TIMEOUT_SEC: int = _int("FILE_PROCESSING_TIMEOUT_SEC", 60)
+    LLM_CALL_TIMEOUT_SEC: int       = _int("LLM_CALL_TIMEOUT_SEC", 60)
     RETRIEVAL_TIMEOUT: int          = _int("RETRIEVAL_TIMEOUT", 10)
-    EMBEDDING_TIMEOUT: int          = _int("EMBEDDING_TIMEOUT", 15)
+    EMBEDDING_TIMEOUT: int          = _int("EMBEDDING_TIMEOUT", 5)
     VECTOR_DB_TIMEOUT: int          = _int("VECTOR_DB_TIMEOUT", 10)
     MODEL_TIMEOUT_SEC: int          = _int("MODEL_TIMEOUT_SEC", 120)
-    SLOW_REQUEST_THRESHOLD: float   = _float("SLOW_REQUEST_THRESHOLD", 3.0)
-    INGESTION_WORKER_COUNT: int     = _int("INGESTION_WORKER_COUNT", 3)
+    SLOW_REQUEST_THRESHOLD: float   = _float("SLOW_REQUEST_THRESHOLD", 2.0)
+    INGESTION_WORKER_COUNT: int     = _int("INGESTION_WORKER_COUNT", 6)
 
     # LLM
     LLM_MOCK_MODE: bool      = _bool("LLM_MOCK_MODE", False)
@@ -115,17 +115,18 @@ class Settings:
     LLM_TEMPERATURE: float   = _float("LLM_TEMPERATURE", 0.2)
     LLM_TOP_P: float         = _float("LLM_TOP_P", 0.9)
     MAX_PROMPT_CHARS: int    = _int("MAX_PROMPT_CHARS", 8000)
-    LLM_GPU_LAYERS: int      = _int("LLM_GPU_LAYERS", 20)
-    LLM_THREADS: int         = _int("LLM_THREADS", 8)
-    LLM_N_BATCH: int         = _int("LLM_N_BATCH", 512)
+    LLM_GPU_LAYERS: int      = _int("LLM_GPU_LAYERS", -1)
+    LLM_THREADS: int         = _int("LLM_THREADS", 4)
+    LLM_N_BATCH: int         = _int("LLM_N_BATCH", 1024)
+    LLM_USE_MLOCK: bool      = _bool("LLM_USE_MLOCK", True)
     LLM_MAX_RETRIES: int     = _int("LLM_MAX_RETRIES", 3)
     LLM_RETRY_WAIT_MIN: int  = _int("LLM_RETRY_WAIT_MIN", 1)
     LLM_RETRY_WAIT_MAX: int  = _int("LLM_RETRY_WAIT_MAX", 10)
 
     # EMBEDDINGS
     EMBEDDING_MODEL: str                = _str("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-    EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 32)
-    EMBEDDING_MAX_BATCH_SIZE: int       = _int("EMBEDDING_MAX_BATCH_SIZE", 100)
+    EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 128)
+    EMBEDDING_MAX_BATCH_SIZE: int       = _int("EMBEDDING_MAX_BATCH_SIZE", 256)
     EMBEDDING_CACHE_TTL: int            = _int("EMBEDDING_CACHE_TTL", 2_592_000)
     TEXT_EMBEDDING_DIM: int             = _int("TEXT_EMBEDDING_DIM", 384)
     MATRYOSHKA_SHORT_DIM: int           = _int("MATRYOSHKA_SHORT_DIM", 256)
@@ -135,24 +136,24 @@ class Settings:
     ENABLE_VISION: bool              = _bool("ENABLE_VISION", True)
     ENABLE_AUDIO: bool               = _bool("ENABLE_AUDIO", True)
 
-    # MODEL DEVICE / WARMUP — Lightning AI hybrid CPU+GPU profile
-    # Profiles: "auto" (CUDA → hybrid, else cpu), "hybrid", "all_gpu", "all_cpu"
-    MODELS_DEVICE_PROFILE: str       = _str("MODELS_DEVICE_PROFILE", "auto")
-    VRAM_BUDGET_GB: float            = _float("VRAM_BUDGET_GB", 14.0)
-    WARMUP_AT_STARTUP: bool          = _bool("WARMUP_AT_STARTUP", False)
-    WARMUP_MODELS: List[str]         = _list("WARMUP_MODELS", [])
+    # MODEL DEVICE / WARMUP — Tesla T4 all_gpu profile
+    # Profiles: "auto" (CUDA → all_gpu, else cpu), "hybrid", "all_gpu", "all_cpu"
+    MODELS_DEVICE_PROFILE: str       = _str("MODELS_DEVICE_PROFILE", "all_gpu")
+    VRAM_BUDGET_GB: float            = _float("VRAM_BUDGET_GB", 13.0)
+    WARMUP_AT_STARTUP: bool          = _bool("WARMUP_AT_STARTUP", True)
+    WARMUP_MODELS: List[str]         = _list("WARMUP_MODELS", ["text_embedder", "llm", "reranker", "clip", "blip", "whisper"])
     MODEL_PARALLEL_LOAD: bool        = _bool("MODEL_PARALLEL_LOAD", True)
     LLM_GPU_LAYERS_AUTO: bool        = _bool("LLM_GPU_LAYERS_AUTO", True)
     LLM_GPU_LAYERS_ALL: int          = _int("LLM_GPU_LAYERS_ALL", -1)
     EMBEDDER_HALF_PRECISION: bool    = _bool("EMBEDDER_HALF_PRECISION", True)
     VISION_HALF_PRECISION: bool      = _bool("VISION_HALF_PRECISION", True)
-    WHISPER_COMPUTE_TYPE: str        = _str("WHISPER_COMPUTE_TYPE", "")
-    EMBEDDER_DEVICE: str             = _str("EMBEDDER_DEVICE", "")
-    RERANKER_DEVICE: str             = _str("RERANKER_DEVICE", "")
-    CLIP_DEVICE: str                 = _str("CLIP_DEVICE", "")
-    BLIP_DEVICE: str                 = _str("BLIP_DEVICE", "")
-    WHISPER_DEVICE: str              = _str("WHISPER_DEVICE", "")
-    LLM_DEVICE_HINT: str             = _str("LLM_DEVICE_HINT", "")
+    WHISPER_COMPUTE_TYPE: str        = _str("WHISPER_COMPUTE_TYPE", "float16")
+    EMBEDDER_DEVICE: str             = _str("EMBEDDER_DEVICE", "cuda")
+    RERANKER_DEVICE: str             = _str("RERANKER_DEVICE", "cuda")
+    CLIP_DEVICE: str                 = _str("CLIP_DEVICE", "cuda")
+    BLIP_DEVICE: str                 = _str("BLIP_DEVICE", "cuda")
+    WHISPER_DEVICE: str              = _str("WHISPER_DEVICE", "cuda")
+    LLM_DEVICE_HINT: str             = _str("LLM_DEVICE_HINT", "cuda")
 
     # VISION MODELS
     CLIP_MODEL: str                  = _str("CLIP_MODEL", "openai/clip-vit-base-patch32")
@@ -169,7 +170,7 @@ class Settings:
     CLIP_MAX_LENGTH: int             = _int("CLIP_MAX_LENGTH", 77)
 
     # ASR WHISPER
-    WHISPER_MODEL: str              = _str("WHISPER_MODEL", "base")
+    WHISPER_MODEL: str              = _str("WHISPER_MODEL", "large-v3")
     AUDIO_SAMPLE_RATE: int          = _int("AUDIO_SAMPLE_RATE", 16000)
     MAX_AUDIO_DURATION_SEC: int     = _int("MAX_AUDIO_DURATION_SEC", 10800)
     MAX_AUDIO_SEGMENTS: int         = _int("MAX_AUDIO_SEGMENTS", 500)
@@ -187,7 +188,7 @@ class Settings:
 
     # RERANKER
     RERANKER_MODEL: str             = _str("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
-    RERANK_TOP_K: int               = _int("RERANK_TOP_K", 5)
+    RERANK_TOP_K: int               = _int("RERANK_TOP_K", 8)
     RERANK_MAX_INPUT: int           = _int("RERANK_MAX_INPUT", 20)
     RERANK_CONTEXT_MAX_CHARS: int   = _int("RERANK_CONTEXT_MAX_CHARS", 512)
     RERANK_MODEL_WEIGHT: float      = _float("RERANK_MODEL_WEIGHT", 0.5)
@@ -279,8 +280,8 @@ class Settings:
     TEXT_REPAIR_VERSION_TAG: bool    = _bool("TEXT_REPAIR_VERSION_TAG", True)
 
     # CHUNKING
-    CHUNK_SIZE: int                  = _int("CHUNK_SIZE", 512)
-    CHUNK_OVERLAP: int               = _int("CHUNK_OVERLAP", 50)
+    CHUNK_SIZE: int                  = _int("CHUNK_SIZE", 1024)
+    CHUNK_OVERLAP: int               = _int("CHUNK_OVERLAP", 128)
     CHUNK_OVERLAP_RATIO: float       = _float("CHUNK_OVERLAP_RATIO", 0.15)
     CHUNK_MIN_SIZE: int              = _int("CHUNK_MIN_SIZE", 50)
     MAX_CHUNKS: int                  = _int("MAX_CHUNKS", 200)
@@ -332,11 +333,11 @@ class Settings:
     }
 
     # RETRIEVAL
-    DEFAULT_TOP_K: int      = _int("DEFAULT_TOP_K", 5)
-    VECTOR_TOP_K: int       = _int("VECTOR_TOP_K", 10)
+    DEFAULT_TOP_K: int      = _int("DEFAULT_TOP_K", 8)
+    VECTOR_TOP_K: int       = _int("VECTOR_TOP_K", 15)
     MAX_CONTEXT_DOCS: int   = _int("MAX_CONTEXT_DOCS", 5)
     MAX_CONTEXT_CHARS: int  = _int("MAX_CONTEXT_CHARS", 4000)
-    RAG_TOP_K: int          = _int("RAG_TOP_K", 5)
+    RAG_TOP_K: int          = _int("RAG_TOP_K", 8)
     RAG_DOC_MAX_CHARS: int  = _int("RAG_DOC_MAX_CHARS", 1200)
 
     # QUERY DECOMPOSITION
@@ -479,6 +480,10 @@ class Settings:
     LANGFUSE_SECRET_KEY: Optional[str]  = _opt("LANGFUSE_SECRET_KEY")
     LANGFUSE_HOST: str                  = _str("LANGFUSE_HOST", "https://cloud.langfuse.com")
     LANGFUSE_ENABLED: bool              = _bool("LANGFUSE_ENABLED", False)
+
+    # MULTI-USER
+    DEFAULT_DEV_USER_ID: str = _str("DEFAULT_DEV_USER_ID", "a3f9c821-4b2e-11ef-9454-0242ac120002")
+    TEST_USER_2_ID: str      = _str("TEST_USER_2_ID",      "b7d2e109-4b2e-11ef-9454-0242ac120002")
 
     # SECURITY
     SECRET_KEY: str                        = _str("SECRET_KEY", "CHANGE_ME_IN_PRODUCTION")

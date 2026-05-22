@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from app.core.config import settings
 from app.utils.logger import get_logger
+from app.utils.paths import user_bm25_path
 
 logger = get_logger(__name__)
 
@@ -51,9 +52,9 @@ except ImportError:
     _breaker = _DummyBreaker()  # type: ignore[assignment]
 
 
-# INDEX PATHS
-_INDEX_DIR = Path(settings.BM25_INDEX_DIR) if hasattr(settings, "BM25_INDEX_DIR") else settings.DATA_DIR / "bm25_index"
-_INDEX_FILE = _INDEX_DIR / "bm25_index.pkl"
+# Legacy global index (kept for backward-compat during migration; per-user path used by default)
+_LEGACY_INDEX_DIR = Path(settings.BM25_INDEX_DIR) if hasattr(settings, "BM25_INDEX_DIR") else settings.DATA_DIR / "bm25_index"
+_LEGACY_INDEX_FILE = _LEGACY_INDEX_DIR / "bm25_index.pkl"
 
 # STOPWORDS
 _STOPWORDS: Set[str] = {
@@ -69,13 +70,20 @@ _STOPWORDS: Set[str] = {
 
 class BM25Retriever:
 
-    def __init__(self) -> None:
+    def __init__(self, user_id: Optional[str] = None) -> None:
+        self.user_id: Optional[str] = user_id
         self.documents: List[Any] = []
         self.tokenized_corpus: List[List[str]] = []
         self.bm25: Optional[BM25Okapi] = None
         self.modality_filter: Optional[str] = None
         self.max_docs: int = settings.BM25_MAX_DOCS
         self._index_loaded: bool = False
+
+    def _index_file(self, user_id: Optional[str] = None) -> Path:
+        uid = user_id or self.user_id
+        if uid:
+            return user_bm25_path(uid)
+        return _LEGACY_INDEX_FILE
 
     # HASH
 
@@ -108,6 +116,8 @@ class BM25Retriever:
             "timestamp_start": s.get("timestamp_start"),
             "ingestion_time": s.get("ingestion_time"),
             "checksum_sha256": s.get("checksum_sha256"),
+            "section_number": s.get("section_number"),
+            "is_forward_looking": s.get("is_forward_looking", False),
         }
 
     # MODALITY FILTER SETTER
@@ -117,22 +127,24 @@ class BM25Retriever:
 
     # CIRCUIT-BROKEN SAVE
 
-    def _save_index(self) -> None:
+    def _save_index(self, user_id: Optional[str] = None) -> None:
+        index_file = self._index_file(user_id)
+
         def _do_save() -> None:
-            _INDEX_DIR.mkdir(parents=True, exist_ok=True)
+            index_file.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "documents": self.documents,
                 "tokenized_corpus": self.tokenized_corpus,
                 "saved_at": time.time(),
                 "doc_count": len(self.documents),
             }
-            tmp_path = _INDEX_FILE.with_suffix(".tmp")
+            tmp_path = index_file.with_suffix(".tmp")
             with open(tmp_path, "wb") as f:
                 pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
-            tmp_path.replace(_INDEX_FILE)
+            tmp_path.replace(index_file)
             logger.info(
                 event="bm25_index_saved",
-                path=str(_INDEX_FILE),
+                path=str(index_file),
                 docs=len(self.documents),
             )
 
@@ -146,16 +158,18 @@ class BM25Retriever:
 
     # CIRCUIT-BROKEN LOAD
 
-    def _load_index(self) -> None:
+    def _load_index(self, user_id: Optional[str] = None) -> None:
         if self._index_loaded:
             return
 
-        if not _INDEX_FILE.exists():
-            logger.info(event="bm25_no_saved_index")
+        index_file = self._index_file(user_id)
+
+        if not index_file.exists():
+            logger.info(event="bm25_no_saved_index", path=str(index_file))
             return
 
         def _do_load() -> None:
-            with open(_INDEX_FILE, "rb") as f:
+            with open(index_file, "rb") as f:
                 payload = pickle.load(f)
             self.documents = payload.get("documents", [])
             self.tokenized_corpus = payload.get("tokenized_corpus", [])
@@ -164,7 +178,7 @@ class BM25Retriever:
                 logger.info(
                     event="bm25_index_loaded",
                     docs=len(self.documents),
-                    path=str(_INDEX_FILE),
+                    path=str(index_file),
                 )
             else:
                 logger.warning(event="bm25_saved_index_empty")
@@ -183,7 +197,7 @@ class BM25Retriever:
 
     # BUILD INDEX — FULL REBUILD
 
-    def build_index(self, documents: List[Any]) -> None:
+    def build_index(self, documents: List[Any], user_id: Optional[str] = None) -> None:
         if not documents:
             logger.warning(event="bm25_empty_input")
             return
@@ -227,7 +241,7 @@ class BM25Retriever:
             return
 
         self.bm25 = BM25Okapi(self.tokenized_corpus)
-        self._save_index()
+        self._save_index(user_id)
 
         logger.info(
             event="bm25_index_built",
@@ -237,7 +251,7 @@ class BM25Retriever:
 
     # ADD DOCUMENT — SINGLE DOC INCREMENTAL (called from ingestion pipeline)
 
-    def add_document(self, text: str, metadata: Dict[str, Any]) -> None:
+    def add_document(self, text: str, metadata: Dict[str, Any], user_id: Optional[str] = None) -> None:
         if not text or not text.strip():
             return
         text = text[:settings.BM25_MAX_TEXT_CHARS]
@@ -268,16 +282,17 @@ class BM25Retriever:
         self.documents.append(doc)
         self.tokenized_corpus.append(tokens)
         self.bm25 = BM25Okapi(self.tokenized_corpus)
-        self._save_index()
+        self._save_index(user_id)
         logger.info(
             event="bm25_document_added",
             session_id=metadata.get("session_id"),
+            user_id=user_id or self.user_id,
             total=len(self.documents),
         )
 
     # ADD DOCUMENTS — INCREMENTAL
 
-    def add_documents(self, documents: List[Any], session_id: str = "") -> None:
+    def add_documents(self, documents: List[Any], session_id: str = "", user_id: Optional[str] = None) -> None:
         if not documents:
             return
 
@@ -330,7 +345,7 @@ class BM25Retriever:
             return
 
         self.bm25 = BM25Okapi(self.tokenized_corpus)
-        self._save_index()
+        self._save_index(user_id)
 
         logger.info(
             event="bm25_documents_added",
@@ -338,6 +353,7 @@ class BM25Retriever:
             total=len(self.documents),
             latency=round(time.time() - start, 2),
             session_id=session_id,
+            user_id=user_id or self.user_id,
         )
 
     # SCORE NORMALIZATION
@@ -404,10 +420,11 @@ class BM25Retriever:
         session_id: Optional[str] = None,
         top_k: Optional[int] = None,
         filters: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
 
         if not self.bm25:
-            self._load_index()
+            self._load_index(user_id)
 
         if not self.bm25:
             logger.info(event="bm25_empty_index_returning_empty_list", session_id=session_id)
@@ -497,10 +514,30 @@ class BM25Retriever:
         session_id: Optional[str] = None,
         top_k: Optional[int] = None,
         filters: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        return await asyncio.to_thread(self.search, query, session_id, top_k, filters)
+        return await asyncio.to_thread(self.search, query, session_id, top_k, filters, user_id)
 
     # GDPR PURGE — REMOVE ALL DOCS BY SESSION OR USER
+
+    def delete_by_source(self, filename: str, user_id: Optional[str] = None) -> int:
+        """Remove all BM25 entries whose source filename contains `filename`."""
+        before = len(self.documents)
+        filtered_docs = []
+        filtered_corpus = []
+        for doc, tokens in zip(self.documents, self.tokenized_corpus):
+            source = getattr(doc, "source", "") or ""
+            if filename not in source:
+                filtered_docs.append(doc)
+                filtered_corpus.append(tokens)
+        self.documents = filtered_docs
+        self.tokenized_corpus = filtered_corpus
+        removed = before - len(self.documents)
+        if removed > 0:
+            self.bm25 = BM25Okapi(self.tokenized_corpus) if self.tokenized_corpus else None
+            self._save_index(user_id)
+            logger.info(event="bm25_delete_by_source", filename=filename, removed=removed)
+        return removed
 
     def purge_by_session(self, session_id: str) -> int:
         before = len(self.documents)
@@ -526,13 +563,15 @@ class BM25Retriever:
 
     # HEALTH CHECK
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(self, user_id: Optional[str] = None) -> Dict[str, Any]:
+        index_file = self._index_file(user_id)
         return {
             "ready": self.bm25 is not None,
             "doc_count": len(self.documents),
-            "index_exists": _INDEX_FILE.exists(),
-            "index_size_bytes": _INDEX_FILE.stat().st_size if _INDEX_FILE.exists() else 0,
-            "index_path": str(_INDEX_FILE),
+            "index_exists": index_file.exists(),
+            "index_size_bytes": index_file.stat().st_size if index_file.exists() else 0,
+            "index_path": str(index_file),
+            "user_id": user_id or self.user_id,
             "modality_filter": self.modality_filter,
             "bm25_available": _BM25_AVAILABLE,
             "numpy_available": _NP_AVAILABLE,
@@ -541,15 +580,16 @@ class BM25Retriever:
 
     # CLEAR
 
-    def clear(self) -> None:
+    def clear(self, user_id: Optional[str] = None) -> None:
         self.documents = []
         self.tokenized_corpus = []
         self.bm25 = None
         self._index_loaded = False
-        if _INDEX_FILE.exists():
+        index_file = self._index_file(user_id)
+        if index_file.exists():
             try:
-                _INDEX_FILE.unlink()
-                logger.info(event="bm25_index_cleared")
+                index_file.unlink()
+                logger.info(event="bm25_index_cleared", path=str(index_file))
             except Exception as exc:
                 logger.error(event="bm25_index_clear_failed", error=str(exc))
 

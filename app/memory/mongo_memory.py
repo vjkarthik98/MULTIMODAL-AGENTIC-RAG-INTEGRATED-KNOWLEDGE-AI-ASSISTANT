@@ -400,6 +400,7 @@ class MongoMemory:
         limit: Optional[int] = None,
         role_filter: Optional[str] = None,
         modality_filter: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         if not self._is_available():
             return []
@@ -408,6 +409,8 @@ class MongoMemory:
 
         try:
             query: Dict[str, Any] = {"session_id": session_id}
+            if user_id:
+                query["user_id"] = user_id
 
             if role_filter and role_filter in _VALID_ROLES:
                 query["role"] = role_filter
@@ -462,19 +465,23 @@ class MongoMemory:
 
     # GET ALIAS — USED BY MEMORY MANAGER
 
-    def get(self, session_id: str) -> List[Dict[str, Any]]:
-        return self.get_recent_history(session_id)
+    def get(self, session_id: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        return self.get_recent_history(session_id, user_id=user_id)
 
     # GET LATEST SUMMARY — USED BY MEMORY FUSION
 
-    def get_latest_summary(self, session_id: str) -> str:
+    def get_latest_summary(self, session_id: str, user_id: Optional[str] = None) -> str:
         if not self._is_available():
             return ""
 
         try:
+            _q: Dict[str, Any] = {"session_id": session_id}
+            if user_id:
+                _q["user_id"] = user_id
+
             def _do():
                 return self.summaries.find_one(
-                    {"session_id": session_id},
+                    _q,
                     {"_id": 0, "summary": 1},
                     sort=[("timestamp", DESCENDING)],
                 )
@@ -496,15 +503,20 @@ class MongoMemory:
         self,
         session_id: str,
         limit: int = 5,
+        user_id: Optional[str] = None,
     ) -> List[str]:
         if not self._is_available():
             return []
 
         try:
+            _q: Dict[str, Any] = {"session_id": session_id}
+            if user_id:
+                _q["user_id"] = user_id
+
             def _do():
                 return list(
                     self.summaries.find(
-                        {"session_id": session_id},
+                        _q,
                         {"_id": 0, "summary": 1},
                     )
                     .sort("timestamp", DESCENDING)
@@ -524,16 +536,20 @@ class MongoMemory:
 
     # CLEAR SESSION MEMORY
 
-    def clear_memory(self, session_id: str) -> None:
+    def clear_memory(self, session_id: str, user_id: Optional[str] = None) -> None:
         if not self._is_available():
             return
 
         try:
+            _q: Dict[str, Any] = {"session_id": session_id}
+            if user_id:
+                _q["user_id"] = user_id
+
             def _del_msgs():
-                return self.messages.delete_many({"session_id": session_id})
+                return self.messages.delete_many(_q)
 
             def _del_sums():
-                return self.summaries.delete_many({"session_id": session_id})
+                return self.summaries.delete_many(_q)
 
             r1 = self._retry(_del_msgs)
             r2 = self._retry(_del_sums)
@@ -554,8 +570,8 @@ class MongoMemory:
 
     # DELETE ALIAS — USED BY MEMORY MANAGER
 
-    def delete(self, session_id: str) -> None:
-        self.clear_memory(session_id)
+    def delete(self, session_id: str, user_id: Optional[str] = None) -> None:
+        self.clear_memory(session_id, user_id)
 
     # GDPR PURGE — ALL DATA FOR USER
 
@@ -608,8 +624,9 @@ class MongoMemory:
         self,
         session_id: str,
         limit: Optional[int] = None,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        return await asyncio.to_thread(self.get_recent_history, session_id, limit)
+        return await asyncio.to_thread(self.get_recent_history, session_id, limit, None, None, user_id)
 
     async def async_purge_user(self, user_id: str) -> None:
         await asyncio.to_thread(self.purge_user, user_id)

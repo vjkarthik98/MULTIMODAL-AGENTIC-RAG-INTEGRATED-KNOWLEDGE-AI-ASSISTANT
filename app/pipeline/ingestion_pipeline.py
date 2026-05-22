@@ -277,11 +277,11 @@ def _check_duplicate(file_hash: str, session_id: str) -> bool:
         vs = infra.get_vector_store()
         if vs is None:
             return False
-        # SEARCH BY CHECKSUM PAYLOAD FIELD
+        # GLOBAL dedup — no session_id filter so cross-session re-uploads are caught
         results = vs.search_by_payload(
             field="checksum_sha256",
             value=file_hash,
-            session_id=session_id,
+            session_id=None,
             limit=1,
         )
         return bool(results)
@@ -303,11 +303,17 @@ def _modality_counts(docs: List[IngestedDocument]) -> Dict[str, int]:
 # VALID CHUNK FILTER
 
 def _valid_chunks(docs: List[IngestedDocument]) -> List[IngestedDocument]:
-    return [
-        d for d in docs
-        if getattr(d, "text", "").strip()
-        and len(getattr(d, "text", "").strip()) >= settings.CHUNK_MIN_SIZE
-    ]
+    result = []
+    for d in docs:
+        text = getattr(d, "text", "").strip()
+        space = (getattr(d, "structure", {}) or {}).get("embedding_space", "text")
+        # Vision chunks (video frames, images) are kept even with short captions —
+        # their value is the CLIP image embedding, not the caption text length.
+        if space == "vision":
+            result.append(d)
+        elif text and len(text) >= settings.CHUNK_MIN_SIZE:
+            result.append(d)
+    return result
 
 
 # VALID EMBEDDING FILTER
@@ -441,11 +447,12 @@ class IngestionPipeline:
         self,
         file_path: str,
         session_id: str = "default",
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         async with self._semaphore:
             loop = asyncio.get_event_loop()
             return await asyncio.wait_for(
-                loop.run_in_executor(None, self.process_file, file_path, session_id),
+                loop.run_in_executor(None, self.process_file, file_path, session_id, user_id),
                 timeout=settings.FILE_PROCESSING_TIMEOUT_SEC,
             )
 
@@ -455,8 +462,9 @@ class IngestionPipeline:
         while True:
             item = await self._queue.get()
             try:
-                file_path, session_id, future = item
-                result = await self.process_file_async(file_path, session_id)
+                file_path, session_id, future = item[:3]
+                user_id = item[3] if len(item) > 3 else None
+                result = await self.process_file_async(file_path, session_id, user_id)
                 if not future.done():
                     future.set_result(result)
             except Exception as e:
@@ -472,10 +480,11 @@ class IngestionPipeline:
         self,
         file_path: str,
         session_id: str = "default",
+        user_id: Optional[str] = None,
     ) -> asyncio.Future:
         loop   = asyncio.get_event_loop()
         future: asyncio.Future = loop.create_future()
-        await self._queue.put((file_path, session_id, future))
+        await self._queue.put((file_path, session_id, future, user_id))
         _set_queue_depth(self._queue.qsize())
         return future
 
@@ -485,6 +494,7 @@ class IngestionPipeline:
         self,
         file_path: str,
         session_id: str = "default",
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
 
         if not session_id:
@@ -494,8 +504,14 @@ class IngestionPipeline:
         start     = time.time()
         progress  = _ProgressEmitter(file_name, session_id)
 
-        # OTEL SPAN STUB 
+        # OTEL SPAN STUB
         span_ctx: Dict[str, Any] = {"trace_id": str(uuid.uuid4())}
+
+        # SET ACTIVE USER FOR ALL DOWNSTREAM STORAGE — every ingestor's
+        # resolved_*_dir() helpers read this contextvar so PDF images,
+        # frames, OCR thumbs etc. all land under data/users/{user_id}/.
+        from app.utils.paths import set_current_user, reset_current_user
+        _user_token = set_current_user(user_id) if user_id else None
 
         try:
             # PRE-FLIGHT CHECKS
@@ -557,7 +573,7 @@ class IngestionPipeline:
             t_ingest = time.time()
 
             from app.ingestion.router import route_ingestion_sync
-            docs = route_ingestion_sync(file_path, session_id=session_id)
+            docs = route_ingestion_sync(file_path, session_id=session_id, user_id=user_id)
 
             if not docs:
                 raise ValueError("INGESTION_EMPTY")
@@ -611,13 +627,15 @@ class IngestionPipeline:
                 latency=chunk_latency,
             )
 
-            # STAMP FILE HASH ON ALL CHUNKS — SECTION 2.2
+            # STAMP FILE HASH AND USER_ID ON ALL CHUNKS — SECTION 2.2
             for c in chunks:
                 if not isinstance(c.structure, dict):
                     c.structure = {}
                 c.structure.setdefault("checksum_sha256", file_hash)
                 c.structure.setdefault("file_size_bytes", file_size)
                 c.structure.setdefault("ingestion_time",  time.time())
+                if user_id:
+                    c.structure["user_id"] = user_id
 
             # EMBED — SECTION 4.6
             progress.emit("embed", "started")
@@ -654,6 +672,19 @@ class IngestionPipeline:
             all_embedded = text_embedded + vision_embedded
             all_embedded, invalid_count = _valid_embeddings(all_embedded)
 
+            # CLEAN UP PERSISTENT FRAME STAGING DIR — frame images copied here by
+            # video_ingest so CLIP embedding can read them after frame_temp_dir cleanup.
+            # Safe to delete now — all embeddings are in memory.
+            if modality == "video":
+                import shutil as _shutil
+                for chunk in chunks:
+                    asset = (getattr(chunk, "structure", {}) or {}).get("asset_path", "")
+                    if asset:
+                        frame_stage = Path(asset).parent
+                        if frame_stage.name.startswith("frames_") and frame_stage.exists():
+                            _shutil.rmtree(frame_stage, ignore_errors=True)
+                            break
+
             if not all_embedded:
                 raise ValueError("NO_VALID_EMBEDDINGS")
 
@@ -674,7 +705,7 @@ class IngestionPipeline:
             for i in range(0, len(all_embedded), self.batch_size):
                 batch = all_embedded[i:i + self.batch_size]
                 try:
-                    self.vector_store.insert_documents(batch, session_id=session_id)
+                    self.vector_store.insert_documents(batch, session_id=session_id, user_id=user_id)
                     total += len(batch)
                 except Exception as e:
                     logger.error(
@@ -689,7 +720,7 @@ class IngestionPipeline:
             if total > 0:
                 try:
                     if self.bm25:
-                        self.bm25.add_documents(chunks, session_id=session_id)
+                        self.bm25.add_documents(chunks, session_id=session_id, user_id=user_id)
                 except Exception as e:
                     logger.error(
                         event="bm25_update_failed",
@@ -734,6 +765,7 @@ class IngestionPipeline:
                 "latency":     total_latency,
                 "modality":    modality,
                 "session_id":  session_id,
+                "user_id":     user_id,
                 "file_hash":   file_hash,
                 "trace_id":    span_ctx["trace_id"],
             }
@@ -781,6 +813,10 @@ class IngestionPipeline:
             )
             raise RuntimeError(f"INGESTION_FAILED: {e}") from e
 
+        finally:
+            if _user_token is not None:
+                reset_current_user(_user_token)
+
 
 # SINGLETON
 
@@ -790,12 +826,14 @@ pipeline = IngestionPipeline()
 def process_file(
     file_path: str,
     session_id: str = "default",
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return pipeline.process_file(file_path, session_id)
+    return pipeline.process_file(file_path, session_id, user_id)
 
 
 async def process_file_async(
     file_path: str,
     session_id: str = "default",
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return await pipeline.process_file_async(file_path, session_id)
+    return await pipeline.process_file_async(file_path, session_id, user_id)

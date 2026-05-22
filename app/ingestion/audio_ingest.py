@@ -452,7 +452,8 @@ def _chunk_audio_file(file_path: str, preloaded: Optional[Any] = None) -> List[s
     if total_ms <= chunk_duration_ms:
         return [file_path]
 
-    tmp_dir = settings.TEMP_DIR / f"audio_chunks_{uuid.uuid4().hex}"
+    from app.utils.paths import resolved_temp_dir
+    tmp_dir = resolved_temp_dir() / f"audio_chunks_{uuid.uuid4().hex}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     chunks: List[str] = []
 

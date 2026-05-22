@@ -257,7 +257,7 @@ class ModelLoader:
                     n_gpu_layers=n_gpu_layers,
                 )
 
-            self._llm = self._safe_load(_load_llm, "LLM")
+            self._llm = self._safe_load(_load_llm, "llm")
 
         return self._llm
 
@@ -291,7 +291,7 @@ class ModelLoader:
                         )
                 return emb
 
-            self._text_embedder = self._safe_load(_load, "TextEmbedder")
+            self._text_embedder = self._safe_load(_load, "text_embedder")
 
         return self._text_embedder
 
@@ -322,7 +322,7 @@ class ModelLoader:
                 model.eval()
                 return processor, model
 
-            self._clip_processor, self._clip_model = self._safe_load(_load, "CLIP")
+            self._clip_processor, self._clip_model = self._safe_load(_load, "clip")
             self._clip_device = decision.device
 
         return self._clip_processor, self._clip_model, self._clip_device
@@ -343,7 +343,7 @@ class ModelLoader:
                 from app.embeddings.image_embedder import ImageEmbedder  # local
                 return ImageEmbedder(model, processor, device)
 
-            self._image_embedder = self._safe_load(_load, "ImageEmbedder")
+            self._image_embedder = self._safe_load(_load, "image_embedder")
 
         return self._image_embedder
 
@@ -363,7 +363,7 @@ class ModelLoader:
                 from app.embeddings.clip_text_embedder import ClipTextEmbedder  # local
                 return ClipTextEmbedder(processor, model, device)
 
-            self._clip_text_embedder = self._safe_load(_load, "ClipTextEmbedder")
+            self._clip_text_embedder = self._safe_load(_load, "clip_text_embedder")
 
         return self._clip_text_embedder
 
@@ -407,7 +407,7 @@ class ModelLoader:
                     compute_type=compute_type,
                 )
 
-            self._whisper = self._safe_load(_load, "Whisper")
+            self._whisper = self._safe_load(_load, "whisper")
 
         return self._whisper
 
@@ -439,7 +439,7 @@ class ModelLoader:
                 model.eval()
                 return processor, model
 
-            self._blip_processor, self._blip_model = self._safe_load(_load, "BLIP")
+            self._blip_processor, self._blip_model = self._safe_load(_load, "blip")
             self._blip_device = decision.device
 
         return self._blip_processor, self._blip_model, self._blip_device
@@ -458,12 +458,19 @@ class ModelLoader:
 
             def _load():
                 from sentence_transformers import CrossEncoder  # local
-                return CrossEncoder(
+                ce = CrossEncoder(
                     settings.RERANKER_MODEL,
                     device=decision.device,
                 )
+                # Cast to float16 on GPU to halve VRAM and speed inference
+                if decision.device == "cuda" and decision.dtype == "float16":
+                    try:
+                        ce.model.half()
+                    except Exception as exc:
+                        logger.warning("reranker_fp16_failed", error=str(exc))
+                return ce
 
-            self._reranker = self._safe_load(_load, "Reranker")
+            self._reranker = self._safe_load(_load, "reranker")
 
         return self._reranker
 

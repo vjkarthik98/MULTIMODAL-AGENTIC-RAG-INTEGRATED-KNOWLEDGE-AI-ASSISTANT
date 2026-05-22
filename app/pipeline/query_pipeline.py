@@ -111,6 +111,46 @@ def _sanitize_query(query: str) -> str:
     return query
 
 
+# TEMPORAL BOOST — promote historical chunks, demote forward-looking chunks
+# when the query anchors to a specific past period.
+
+_TEMPORAL_ANCHOR_WORDS = frozenset([
+    "reported", "audited", "actual", "actuals", "achieved",
+    "fy2024", "fy2023", "fy2022", "fy2021", "fy2020",
+    "fiscal year 2024", "fiscal year 2023",
+    "revenue", "net revenue", "gross revenue",
+    "annual revenue", "total revenue",
+    "last year", "prior year", "previous year",
+    "q1 2024", "q2 2024", "q3 2024", "q4 2024",
+])
+
+_FORWARD_SECTION_THRESHOLD = 8  # section numbers >= this are treated as forward-looking
+
+
+def _is_temporal_query(query: str) -> bool:
+    lower = query.lower()
+    return any(w in lower for w in _TEMPORAL_ANCHOR_WORDS)
+
+
+def _apply_temporal_boost(docs: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+    """Re-score docs to demote forward-looking chunks when query is temporal."""
+    if not docs or not _is_temporal_query(query):
+        return docs
+
+    for doc in docs:
+        meta = doc.get("metadata", {}) or {}
+        is_forward = meta.get("is_forward_looking", False)
+        sec_num = meta.get("section_number")
+        if sec_num is not None and sec_num >= _FORWARD_SECTION_THRESHOLD:
+            is_forward = True
+        if is_forward:
+            doc["score"] = doc.get("score", 0.0) * 0.4
+        elif sec_num is not None and sec_num < _FORWARD_SECTION_THRESHOLD:
+            doc["score"] = min(doc.get("score", 0.0) * 1.3, 1.0)
+
+    return sorted(docs, key=lambda x: x.get("score", 0.0), reverse=True)
+
+
 # CACHE KEY — SECTION 4.6
 
 def _cache_key(session_id: str, query: str) -> str:
@@ -451,6 +491,7 @@ def query_pipeline(
     query: str,
     session_id: str = "default",
     sources: Optional[List[str]] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
 
     start      = time.time()
@@ -649,6 +690,7 @@ def query_pipeline(
                     session_id=session_id,
                     top_k=_retrieval_top_k,
                     filters=retrieval_filters,
+                    user_id=user_id,
                 )
                 retrieved.extend(results)
             except Exception as e:
@@ -723,6 +765,8 @@ def query_pipeline(
                 "trace_id":             trace_id,
             }
 
+        # TEMPORAL BOOST — demote forward-looking chunks when query is time-anchored
+        reranked = _apply_temporal_boost(reranked, query)
         final_docs = reranked[:settings.RAG_TOP_K]
 
         # HYBRID WEB SEARCH — fetch Tavily alongside RAG docs when decision is "hybrid"
@@ -738,9 +782,11 @@ def query_pipeline(
                     _tool_out = _search_tool.handler(query, {}, session_id) or {}
                     _hybrid_web_conf = float(_tool_out.get("confidence", 0.5))
                     _hybrid_web_docs = (_tool_out.get("documents") or [])[:3]
-                    for _url in (_tool_out.get("sources") or []):
+                    _web_urls = (_tool_out.get("sources") or [])
+                    for _idx, _url in enumerate(_web_urls[:3]):
+                        _web_snippet = _hybrid_web_docs[_idx][:300] if _idx < len(_hybrid_web_docs) else ""
                         _hybrid_web_sources.append({
-                            "text": "", "score": _hybrid_web_conf, "source": _url,
+                            "text": _web_snippet, "score": round(_hybrid_web_conf, 5), "source": _url,
                             "page_number": None, "start_time": None, "end_time": None,
                             "modality": "web", "doc_id": None,
                         })
@@ -804,7 +850,11 @@ def query_pipeline(
                     "- Prefer [Document] for stored facts about the specific entity being asked about\n"
                     "- Use [Web] only if those results are about the SAME entity or topic as the query\n"
                     "- If [Web] results are about a different company, person, or entity, ignore them entirely\n"
-                    "- Never mix information from unrelated companies or entities\n\n"
+                    "- Never mix information from unrelated companies or entities\n"
+                    "- TEMPORAL: if the question asks about a specific year/period, only use context\n"
+                    "  labeled for that period (audited/reported). Ignore guidance/outlook chunks.\n"
+                    "- Output ONLY the final answer. Do NOT output reasoning, brackets with\n"
+                    "  explanations, or internal summaries after the answer.\n\n"
                     f"{_combined}\n\nQUERY:\n{query}\n\nAnswer:"
                 )
                 _raw = llm.generate(
@@ -813,8 +863,11 @@ def query_pipeline(
                     temperature=0.1,
                     session_id=session_id,
                 )
+                # Strip leaked internal reasoning blocks like [Based on the document, ...]
+                import re as _re
+                _clean = _re.sub(r"\[Based on[^\]]{0,500}\]", "", (_raw or ""), flags=_re.DOTALL).strip()
                 output = {
-                    "answer":       (_raw or "").strip() or "No answer generated.",
+                    "answer":       _clean or "No answer generated.",
                     "confidence":   max(float(_hybrid_web_conf), 0.4),
                     "sources_used": len(final_docs) + len(_hybrid_web_docs),
                 }

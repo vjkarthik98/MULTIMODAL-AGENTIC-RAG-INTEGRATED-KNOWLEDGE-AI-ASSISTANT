@@ -290,6 +290,7 @@ class GGUFModel:
                     n_threads=settings.LLM_THREADS,
                     n_batch=settings.LLM_N_BATCH,
                     n_gpu_layers=self.n_gpu_layers,
+                    use_mlock=settings.LLM_USE_MLOCK,
                     verbose=False,
                 )
 
