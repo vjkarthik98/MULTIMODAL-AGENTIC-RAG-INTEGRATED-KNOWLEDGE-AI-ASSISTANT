@@ -271,13 +271,19 @@ def detect_modality(file_path: str) -> Tuple[str, str]:
     _check_disk_space(path)
 
     # MAGIC-BYTE MIME DETECTION
-    mime     = _detect_mime_magic(path)
-    modality = MIME_TO_MODALITY.get(mime)
+    mime          = _detect_mime_magic(path)
+    mime_modality = MIME_TO_MODALITY.get(mime)
+    ext           = path.suffix.lower()
+    ext_modality  = EXT_TO_MODALITY.get(ext)
 
-    if not modality:
-        # FALLBACK: EXTENSION-BASED DETECTION
-        ext      = path.suffix.lower()
-        modality = EXT_TO_MODALITY.get(ext)
+    # MISMATCH: magic bytes contradict the file extension — reject immediately
+    if mime_modality and ext_modality and mime_modality != ext_modality:
+        raise ValueError(
+            f"INVALID_FILE_TYPE: file extension {ext!r} claims {ext_modality} "
+            f"but magic bytes indicate {mime_modality} (mime={mime})"
+        )
+
+    modality = mime_modality or ext_modality
 
     if not modality:
         raise ValueError(f"UNSUPPORTED_TYPE: mime={mime}, ext={path.suffix.lower()}")
@@ -359,6 +365,7 @@ def _validate_documents(
 async def route_ingestion(
     file_path: str,
     session_id: str,
+    user_id: Optional[str] = None,
 ) -> List[IngestedDocument]:
 
     if not session_id:
@@ -366,6 +373,15 @@ async def route_ingestion(
 
     if not file_path:
         raise ValueError("FILE_PATH_REQUIRED")
+
+    # Re-set the contextvar inside this coroutine — covers the case where the
+    # caller spun up a fresh event loop via asyncio.run() in a worker thread,
+    # which would otherwise have an empty context.
+    _user_token = None
+    if user_id:
+        from app.utils.paths import set_current_user, get_current_user
+        if get_current_user() != user_id:
+            _user_token = set_current_user(user_id)
 
     start = time.time()
     path  = Path(file_path)
@@ -440,7 +456,9 @@ async def route_ingestion(
                 if not handler:
                     raise ValueError(f"HANDLER_NOT_FOUND: {modality}")
 
-                # RUN HANDLER — async handlers awaited directly, sync handlers run in thread pool
+                # RUN HANDLER — async handlers awaited directly, sync handlers run in thread pool.
+                # user_id is read from the contextvar set in IngestionPipeline.process_file
+                # so individual ingestor signatures don't need to change.
                 if asyncio.iscoroutinefunction(handler):
                     docs = await handler(file_path, session_id)
                 else:
@@ -511,12 +529,18 @@ async def route_ingestion(
             )
             raise
 
+        finally:
+            if _user_token is not None:
+                from app.utils.paths import reset_current_user
+                reset_current_user(_user_token)
+
 
 # SYNC WRAPPER FOR BACKWARD COMPATIBILITY WITH SYNC CALLERS
 
 def route_ingestion_sync(
     file_path: str,
     session_id: str,
+    user_id: Optional[str] = None,
 ) -> List[IngestedDocument]:
     try:
         loop = asyncio.get_event_loop()
@@ -525,11 +549,11 @@ def route_ingestion_sync(
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 future = pool.submit(
                     asyncio.run,
-                    route_ingestion(file_path, session_id),
+                    route_ingestion(file_path, session_id, user_id=user_id),
                 )
                 return future.result()
-        return loop.run_until_complete(route_ingestion(file_path, session_id))
+        return loop.run_until_complete(route_ingestion(file_path, session_id, user_id=user_id))
     except RuntimeError:
-        return asyncio.run(route_ingestion(file_path, session_id))
+        return asyncio.run(route_ingestion(file_path, session_id, user_id=user_id))
 
 

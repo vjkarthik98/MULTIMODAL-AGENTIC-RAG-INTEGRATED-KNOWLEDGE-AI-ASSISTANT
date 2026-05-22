@@ -372,9 +372,10 @@ class HybridRetriever:
         q_vec: List[float],
         candidate_k: int,
         session_id: str,
+        user_id: Optional[str] = None,
     ) -> List[Dict]:
         def _do():
-            return self.vector_store.search_text(q_vec, candidate_k, session_id)
+            return self.vector_store.search_text(q_vec, candidate_k, session_id, user_id=user_id)
 
         try:
             if _PYBREAKER_AVAILABLE:
@@ -397,9 +398,10 @@ class HybridRetriever:
         v_vec: List[float],
         candidate_k: int,
         session_id: str,
+        user_id: Optional[str] = None,
     ) -> List[Dict]:
         def _do():
-            return self.vector_store.search_vision(v_vec, candidate_k, session_id)
+            return self.vector_store.search_vision(v_vec, candidate_k, session_id, user_id=user_id)
 
         try:
             if _PYBREAKER_AVAILABLE:
@@ -423,6 +425,7 @@ class HybridRetriever:
         candidate_k: int,
         session_id: str,
         filters: Optional[Dict],
+        user_id: Optional[str] = None,
     ) -> List[Dict]:
         def _do():
             return self.bm25.search(
@@ -430,6 +433,7 @@ class HybridRetriever:
                 session_id=session_id,
                 top_k=candidate_k,
                 filters=filters,
+                user_id=user_id,
             )
 
         try:
@@ -454,6 +458,7 @@ class HybridRetriever:
         session_id: str,
         top_k: Optional[int] = None,
         filters: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
     ) -> List[Dict]:
         if not query or not session_id:
             return []
@@ -487,7 +492,7 @@ class HybridRetriever:
             bm25_res: List[Dict] = []
             seen_bm25_keys: set  = set()
             for variant in _expand_query_heuristic(query):
-                variant_res = self._bm25_search(variant, candidate_k, session_id, filters)
+                variant_res = self._bm25_search(variant, candidate_k, session_id, filters, user_id)
                 for r in variant_res:
                     meta = r.get("metadata") or {}
                     key  = self._hash(r.get("text", ""), meta)
@@ -499,14 +504,14 @@ class HybridRetriever:
             # VECTOR TEXT SEARCH
             vec_res: List[Dict] = []
             if q_vec:
-                vec_res = self._vector_search_text(q_vec, candidate_k, session_id)
+                vec_res = self._vector_search_text(q_vec, candidate_k, session_id, user_id)
 
             # VISION SEARCH — only when vision_collection has indexed points.
             vis_res: List[Dict] = []
             if self.vector_store.has_vision_data():
                 try:
                     v_vec = self._embed_vision_cached(query, session_id=session_id)
-                    vis_res = self._vector_search_vision(v_vec, candidate_k, session_id)
+                    vis_res = self._vector_search_vision(v_vec, candidate_k, session_id, user_id)
                 except Exception as exc:
                     logger.warning(
                         event="vision_search_skipped",
@@ -623,8 +628,9 @@ class HybridRetriever:
         session_id: str,
         top_k: Optional[int] = None,
         filters: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
     ) -> List[Dict]:
-        return await asyncio.to_thread(self.search, query, session_id, top_k, filters)
+        return await asyncio.to_thread(self.search, query, session_id, top_k, filters, user_id)
 
     # HEALTH CHECK
 

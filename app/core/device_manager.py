@@ -1,19 +1,32 @@
 """
 Central device + dtype policy for the model layer.
 
-Lightning AI deploy budget: 16 GB VRAM, 15 GB RAM. The default "hybrid"
-profile keeps the heavy attention models on GPU and the tiny CPU-friendly
-models (text embedder, cross-encoder reranker) off the card so the LLM
-and Whisper get the VRAM they need.
+Tesla T4 deploy budget: 14.6 GB VRAM, CUDA 13.2.
+
+GPU models (all_gpu profile):
+  - Mistral 7B Q4_K_M  ~4.1 GB  (llama-cpp n_gpu_layers=-1)
+  - CLIP ViT-B/32       ~0.6 GB  (float16)
+  - BLIP base           ~1.0 GB  (float16)
+  - Whisper large-v3    ~1.5 GB  (float16)
+  - CrossEncoder MiniLM ~0.1 GB  (float16)
+  - MiniLM text embed   ~0.09 GB (float16)
+  Total ≈ 7.4 GB  — fits comfortably in 14.6 GB
+
+CPU services (no VRAM needed):
+  - FastAPI / Uvicorn
+  - Qdrant client (network I/O only)
+  - Redis client (network I/O only)
+  - MongoDB client (network I/O only)
+  - BM25 (in-memory, CPU-bound)
 
 Profiles
 --------
-- auto      → hybrid on CUDA, all_cpu otherwise.
+- auto      → all_gpu on CUDA, all_cpu otherwise.
 - hybrid    → LLM / CLIP / BLIP / Whisper on CUDA; text embedder + reranker on CPU.
-- all_gpu   → every model on CUDA (only safe if CUDA + enough VRAM).
+- all_gpu   → every model on CUDA.
 - all_cpu   → every model on CPU.
 
-Each per-model setting (EMBEDDER_DEVICE, CLIP_DEVICE, ...) takes precedence
+Each per-model env var (EMBEDDER_DEVICE, CLIP_DEVICE, …) takes precedence
 over the profile when set.
 """
 
@@ -112,7 +125,8 @@ class DeviceManager:
     @property
     def profile(self) -> str:
         if self._profile == "auto":
-            return "hybrid" if self._cuda_ok else "all_cpu"
+            # On CUDA hosts default to all_gpu (Tesla T4 has plenty of VRAM)
+            return "all_gpu" if self._cuda_ok else "all_cpu"
         if self._profile in ("hybrid", "all_gpu") and not self._cuda_ok:
             return "all_cpu"
         return self._profile
@@ -196,6 +210,9 @@ class DeviceManager:
             if name in ("clip", "blip") and settings.VISION_HALF_PRECISION:
                 return "float16"
             if name == "text_embedder" and settings.EMBEDDER_HALF_PRECISION:
+                return "float16"
+            if name == "reranker":
+                # CrossEncoder benefits from float16 on GPU
                 return "float16"
             # LLM dtype is irrelevant — llama.cpp uses GGUF quant internally
             return "float32"

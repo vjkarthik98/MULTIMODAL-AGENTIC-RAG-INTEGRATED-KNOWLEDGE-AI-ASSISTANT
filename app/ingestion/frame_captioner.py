@@ -418,7 +418,8 @@ def generate_caption(
                 )
 
         # THUMBNAIL GENERATION — SECTION 4.1
-        thumb_path = settings.TEMP_DIR / "thumbs" / f"{_cache_key(image_path)}.jpg"
+        from app.utils.paths import resolved_temp_dir
+        thumb_path = resolved_temp_dir() / "thumbs" / f"{_cache_key(image_path)}.jpg"
         _generate_thumbnail(image, thumb_path)
 
         # BLIP LOCAL CAPTION — WITH REDIS CACHE

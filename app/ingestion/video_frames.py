@@ -864,9 +864,9 @@ def extract_frames(
     start = time.time()
     _ACTIVE.set(1)
 
-    # TEMP DIRECTORY FOR FRAMES
-    temp_root = settings.VIDEO_FRAMES_DIR
-    temp_root.mkdir(parents=True, exist_ok=True)
+    # TEMP DIRECTORY FOR FRAMES — routes to data/users/{user_id}/temp_frames/
+    from app.utils.paths import resolved_temp_frames_dir
+    temp_root = resolved_temp_frames_dir()
     _check_disk_space(str(temp_root))
 
     temp_dir = Path(tempfile.mkdtemp(prefix="frames_", dir=str(temp_root)))
