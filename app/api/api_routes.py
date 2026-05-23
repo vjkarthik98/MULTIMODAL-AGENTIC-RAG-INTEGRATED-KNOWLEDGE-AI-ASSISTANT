@@ -32,14 +32,6 @@ def get_current_user_id(request: Request, explicit_user_id: Optional[str] = None
         return explicit_user_id.strip()[:128]
     return request.headers.get("X-User-ID", settings.DEFAULT_DEV_USER_ID)
 
-# UPLOAD STAGING DIR — global fallback only; uploads now go to per-user dirs
-UPLOAD_DIR: Path = settings.UPLOAD_STAGING_DIR
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-# TEMP DIR
-TEMP_DIR: Path = settings.TEMP_DIR
-TEMP_DIR.mkdir(parents=True, exist_ok=True)
-
 # ALLOWED EXTENSIONS
 ALLOWED_EXTENSIONS = {
     ".pdf", ".txt", ".md", ".docx", ".xlsx", ".xls",
@@ -521,17 +513,21 @@ async def ingest_document(
         return JSONResponse(
             status_code=200,
             content={
-                "request_id":  request_id,
-                "status":      "success",
-                "duplicate":   False,
-                "filename":    filename,
-                "ext":         ext,
-                "modality":    modality,
-                "file_size":   size,
-                "file_hash":   pipeline_hash,
-                "chunks":      chunks,
-                "stored":      stored,
-                "latency":     latency,
+                "request_id":        request_id,
+                "status":            "success",
+                "duplicate":         False,
+                "doc_id":            result.get("doc_id", ""),
+                "filename":          filename,
+                "modality":          modality,
+                "chunks":            chunks,
+                "stored":            stored,
+                "session_id":        session_id,
+                "ingestion_time_sec": latency,
+                "pages":             result.get("pages"),
+                "warnings":          result.get("warnings", []),
+                "file_hash":         pipeline_hash,
+                "ext":               ext,
+                "file_size":         size,
             },
         )
 

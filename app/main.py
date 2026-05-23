@@ -148,7 +148,7 @@ def _cleanup_temp_dirs() -> None:
         import shutil
         from pathlib import Path
 
-        sweeps = [settings.TEMP_DIR, settings.VIDEO_FRAMES_DIR]
+        sweeps = []
 
         # Per-user temp/temp_frames/staging — sweep on startup so a crashed
         # ingestion run doesn't leave orphan frame dirs lying around.
