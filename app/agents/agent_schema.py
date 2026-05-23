@@ -313,7 +313,6 @@ class AgentDecision(BaseModel):
             "trace":           self.trace,
             "tool_calls":      [tc.to_dict() for tc in self.tool_calls],
             "query_type":      self.query_type,
-            "language":        self.language,
             "created_at":      self.created_at,
             "latency_ms":      self.latency_ms,
         }
@@ -326,7 +325,6 @@ class AgentDecision(BaseModel):
             "session_id": self.session_id,
             "latency_ms": self.latency_ms,
             "query_type": self.query_type,
-            "language":   self.language,
         }
 
 

@@ -99,35 +99,27 @@ def user_bm25_path(user_id: Optional[str] = None) -> Path:
 
 def resolved_staging_dir() -> Path:
     uid = _current_user_id.get()
-    if uid:
-        return user_staging_dir(uid)
-    from app.core.config import settings
-    settings.UPLOAD_STAGING_DIR.mkdir(parents=True, exist_ok=True)
-    return settings.UPLOAD_STAGING_DIR
+    if not uid:
+        raise ValueError("resolved_staging_dir called without active user context")
+    return user_staging_dir(uid)
 
 
 def resolved_temp_dir() -> Path:
     uid = _current_user_id.get()
-    if uid:
-        return user_temp_dir(uid)
-    from app.core.config import settings
-    settings.TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    return settings.TEMP_DIR
+    if not uid:
+        raise ValueError("resolved_temp_dir called without active user context")
+    return user_temp_dir(uid)
 
 
 def resolved_images_dir() -> Path:
     uid = _current_user_id.get()
-    if uid:
-        return user_images_dir(uid)
-    from app.core.config import settings
-    settings.PDF_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-    return settings.PDF_IMAGE_DIR
+    if not uid:
+        raise ValueError("resolved_images_dir called without active user context")
+    return user_images_dir(uid)
 
 
 def resolved_temp_frames_dir() -> Path:
     uid = _current_user_id.get()
-    if uid:
-        return user_temp_frames_dir(uid)
-    from app.core.config import settings
-    settings.VIDEO_FRAMES_DIR.mkdir(parents=True, exist_ok=True)
-    return settings.VIDEO_FRAMES_DIR
+    if not uid:
+        raise ValueError("resolved_temp_frames_dir called without active user context")
+    return user_temp_frames_dir(uid)
