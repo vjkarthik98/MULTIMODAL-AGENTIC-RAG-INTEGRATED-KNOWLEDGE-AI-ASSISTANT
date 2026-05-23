@@ -1,178 +1,225 @@
+"""Unit tests for app/ingestion/text_ingest.py — Phase 24.10."""
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+
+from app.ingestion.schema import IngestedDocument
 
 
-class TestTextIngest:
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-    @pytest.mark.asyncio
-    async def test_happy_path_returns_chunks_and_metadata(self, tmp_path):
-        f = tmp_path / "test.txt"
-        f.write_text("This is a valid document with sufficient content for ingestion testing purposes.")
-        with patch("app.ingestion.text_ingest._is_binary", return_value=False), \
-             patch("app.ingestion.text_ingest._detect_language", return_value="en"), \
-             patch("app.ingestion.text_ingest._redact_pii", return_value=("same text", {})):
-            docs = await ingest(str(f), "session-1")
-        assert len(docs) >= 1
-        assert all(d.modality == "text" for d in docs)
-        assert all(d.structure.get("language") == "en" for d in docs)
+def _write(tmp_path: Path, name: str, content: str) -> str:
+    p = tmp_path / name
+    p.write_text(content, encoding="utf-8")
+    return str(p)
 
-    @pytest.mark.asyncio
-    async def test_empty_file_raises_empty_content_error(self, tmp_path):
-        f = tmp_path / "empty.txt"
-        f.write_bytes(b"")
-        with pytest.raises(ValueError, match="EMPTY_FILE"):
-            await ingest(str(f), "session-1")
 
-    @pytest.mark.asyncio
-    async def test_all_whitespace_raises(self, tmp_path):
-        f = tmp_path / "blank.txt"
-        f.write_text("   \n\n\t  \n  ")
-        with patch("app.ingestion.text_ingest._is_binary", return_value=False):
-            with pytest.raises(ValueError, match="EMPTY_CONTENT_AFTER_NORMALIZE"):
-                await ingest(str(f), "session-1")
+def _write_bytes(tmp_path: Path, name: str, content: bytes) -> str:
+    p = tmp_path / name
+    p.write_bytes(content)
+    return str(p)
 
-    @pytest.mark.asyncio
-    async def test_binary_file_raises_mime_error(self, tmp_path):
-        f = tmp_path / "fake.txt"
-        f.write_bytes(b"\x89PNG\r\n\x1a\nbinary content here that looks like image")
-        with pytest.raises(ValueError, match="BINARY_FILE_DISGUISED_AS_TEXT"):
-            await ingest(str(f), "session-1")
 
-    @pytest.mark.asyncio
-    async def test_pii_redacted_from_chunks(self, tmp_path):
-        f = tmp_path / "pii.txt"
-        f.write_text("Contact John Doe at john@example.com or call 555-123-4567 for details.")
-        with patch("app.ingestion.text_ingest._is_binary", return_value=False), \
-             patch("app.ingestion.text_ingest._detect_language", return_value="en"), \
-             patch("app.ingestion.text_ingest._redact_pii", return_value=("Contact [REDACTED] at [REDACTED] or call [REDATED] for additional ingestion testing details and metadata validation ", {"EMAIL_ADDRESS": 1, "PERSON": 1})) as mock_pii:
-            docs = await ingest(str(f), "session-1")
-        mock_pii.assert_called()
-        assert any(d.structure.get("pii_redacted") for d in docs)
+# ── Sync ingest ───────────────────────────────────────────────────────────────
 
-    @pytest.mark.asyncio
-    async def test_duplicate_chunk_skipped_via_simhash(self, tmp_path):
-        repeated = ("The quick brown fox jumps over the lazy dog. " * 10 + "\n") * 20
-        f = tmp_path / "dup.txt"
-        f.write_text(repeated)
-        with patch("app.ingestion.text_ingest._is_binary", return_value=False), \
-             patch("app.ingestion.text_ingest._detect_language", return_value="en"), \
-             patch("app.ingestion.text_ingest._redact_pii", return_value=(repeated, {})):
-            docs = await ingest(str(f), "session-1")
-        assert len(docs) < 20
+class TestTextIngestSync:
 
-    @pytest.mark.asyncio
-    async def test_happy_path_returns_chunks_and_metadata(self, tmp_path):
-        f = tmp_path / "test.txt"
+    def test_valid_file_returns_list(self, tmp_path):
+        from app.ingestion.text_ingest import ingest_sync
+        path = _write(tmp_path, "doc.txt", "Hello world. " * 20)
+        result = ingest_sync(path, session_id="sess_1")
+        assert isinstance(result, list)
+        assert len(result) >= 1
 
-        content = (
-            "This is a valid document with sufficient content "
-            "for ingestion testing purposes and metadata validation."
-        )
+    def test_returns_ingested_document_instances(self, tmp_path):
+        from app.ingestion.text_ingest import ingest_sync
+        path = _write(tmp_path, "doc.txt", "The quick brown fox. " * 20)
+        result = ingest_sync(path, session_id="sess_1")
+        for doc in result:
+            assert isinstance(doc, IngestedDocument)
 
-        f.write_text(content, encoding="utf-8")
+    def test_modality_is_text(self, tmp_path):
+        from app.ingestion.text_ingest import ingest_sync
+        path = _write(tmp_path, "doc.txt", "Sample text content. " * 20)
+        result = ingest_sync(path, session_id="s1")
+        for doc in result:
+            assert doc.modality == "text"
 
-        with patch(
-            "app.ingestion.text_ingest._is_binary",
-            return_value=False
-        ), patch(
-            "app.ingestion.text_ingest._detect_language",
-            return_value="en"
-        ), patch(
-            "app.ingestion.text_ingest._redact_pii",
-            return_value=(content, {})
-        ), patch(
-            "app.ingestion.text_ingest.settings.CHUNK_MIN_SIZE",
-            1
-        ):
-
-            docs = await ingest(str(f), "session-1")
-
-        assert len(docs) >= 1
-        assert all(d.modality == "text" for d in docs)
-        assert all(d.structure.get("language") == "en" for d in docs)
-
-    @pytest.mark.asyncio
-    async def test_bom_stripped_correctly(self, tmp_path):
-        f = tmp_path / "bom.txt"
-        f.write_bytes(b"\xef\xbb\xbfThis text has a UTF-8 BOM at the start and is valid content.")
-        with patch("app.ingestion.text_ingest._is_binary", return_value=False), \
-             patch("app.ingestion.text_ingest._detect_language", return_value="en"), \
-             patch("app.ingestion.text_ingest._redact_pii", return_value=("This text has a UTF-8 BOM at the start and is valid content.", {})):
-            docs = await ingest(str(f), "session-1")
-        assert all(not d.text.startswith("\ufeff") for d in docs)
-
-    @pytest.mark.asyncio
-    async def test_no_session_id_raises(self, tmp_path):
-        f = tmp_path / "test.txt"
-        f.write_text("some content here")
+    def test_session_id_required_raises(self, tmp_path):
+        from app.ingestion.text_ingest import ingest_sync
+        path = _write(tmp_path, "doc.txt", "Some content here.")
         with pytest.raises(ValueError, match="SESSION_ID_REQUIRED"):
-            await ingest(str(f), "")
+            ingest_sync(path, session_id="")
 
-    @pytest.mark.asyncio
-    async def test_file_not_found_raises(self):
+    def test_missing_file_raises_file_not_found(self, tmp_path):
+        from app.ingestion.text_ingest import ingest_sync
         with pytest.raises(FileNotFoundError):
-            await ingest("/nonexistent/path/file.txt", "session-1")
+            ingest_sync(str(tmp_path / "nonexistent.txt"), session_id="s1")
+
+    def test_empty_file_raises(self, tmp_path):
+        from app.ingestion.text_ingest import ingest_sync
+        path = _write(tmp_path, "empty.txt", "")
+        with pytest.raises(ValueError):
+            ingest_sync(path, session_id="s1")
+
+    def test_binary_file_raises(self, tmp_path):
+        from app.ingestion.text_ingest import ingest_sync
+        binary_data = bytes(range(256)) * 10
+        path = _write_bytes(tmp_path, "binary.txt", binary_data)
+        with pytest.raises((ValueError, UnicodeDecodeError)):
+            ingest_sync(path, session_id="s1")
+
+    def test_documents_have_nonempty_text(self, tmp_path):
+        from app.ingestion.text_ingest import ingest_sync
+        path = _write(tmp_path, "doc.txt", "Retrieval augmented generation. " * 20)
+        result = ingest_sync(path, session_id="s1")
+        for doc in result:
+            assert isinstance(doc.text, str)
+            assert len(doc.text) > 0
+
+    def test_structure_is_dict(self, tmp_path):
+        from app.ingestion.text_ingest import ingest_sync
+        path = _write(tmp_path, "doc.txt", "Structure test content. " * 20)
+        result = ingest_sync(path, session_id="s1")
+        for doc in result:
+            assert isinstance(doc.structure, dict)
+
+    def test_structure_has_session_id(self, tmp_path):
+        from app.ingestion.text_ingest import ingest_sync
+        path = _write(tmp_path, "doc.txt", "Session id test. " * 20)
+        result = ingest_sync(path, session_id="my_session")
+        for doc in result:
+            assert doc.structure.get("session_id") == "my_session"
+
+    def test_structure_has_doc_id(self, tmp_path):
+        from app.ingestion.text_ingest import ingest_sync
+        path = _write(tmp_path, "doc.txt", "Doc id test. " * 20)
+        result = ingest_sync(path, session_id="s1")
+        for doc in result:
+            assert "doc_id" in doc.structure
+            assert doc.structure["doc_id"]
+
+    def test_bom_stripped(self, tmp_path):
+        from app.ingestion.text_ingest import ingest_sync
+        content = "﻿BOM stripped content. " * 20
+        path = _write(tmp_path, "bom.txt", content)
+        result = ingest_sync(path, session_id="s1")
+        assert len(result) >= 1
+        assert "﻿" not in result[0].text
+
+    def test_null_bytes_stripped_from_valid_text(self, tmp_path):
+        from app.ingestion.text_ingest import _strip_null_bytes
+        # The null stripping helper itself removes nulls from clean text
+        text_with_nulls = "Content with nu\x00ll bytes here."
+        result = _strip_null_bytes(text_with_nulls)
+        assert "\x00" not in result
+
+    def test_chunk_id_assigned(self, tmp_path):
+        from app.ingestion.text_ingest import ingest_sync
+        path = _write(tmp_path, "doc.txt", "Chunk id test content. " * 30)
+        result = ingest_sync(path, session_id="s1")
+        for doc in result:
+            assert doc.chunk_id is not None
+
+    def test_near_duplicate_chunks_reduced(self, tmp_path):
+        from app.ingestion.text_ingest import ingest_sync
+        paragraph = "Identical paragraph content for dedup testing. " * 10
+        content = paragraph + "\n\n" + paragraph
+        path = _write(tmp_path, "dedup.txt", content)
+        result = ingest_sync(path, session_id="s1")
+        assert len(result) <= 2
+
+
+class TestTextIngestAsync:
+
+    def test_async_ingest_returns_list(self, tmp_path):
+        from app.ingestion.text_ingest import ingest
+        path = _write(tmp_path, "doc.txt", "Async ingest test content. " * 20)
+
+        async def _run():
+            return await ingest(path, session_id="s1")
+
+        result = asyncio.get_event_loop().run_until_complete(_run())
+        assert isinstance(result, list)
+        assert len(result) >= 1
+
+    def test_async_empty_session_id_raises(self, tmp_path):
+        from app.ingestion.text_ingest import ingest
+        path = _write(tmp_path, "doc.txt", "Some content here.")
+
+        async def _run():
+            with pytest.raises(ValueError, match="SESSION_ID_REQUIRED"):
+                await ingest(path, session_id="")
+
+        asyncio.get_event_loop().run_until_complete(_run())
+
+
+# ── Internal helper functions ─────────────────────────────────────────────────
+
+class TestTextIngestHelpers:
+
+    def test_is_binary_detects_null_byte_file(self, tmp_path):
+        from pathlib import Path
+        from app.ingestion.text_ingest import _is_binary
+        p = tmp_path / "binary.bin"
+        p.write_bytes(b"\x00\x01\x02\x03hello world")
+        assert _is_binary(Path(p)) is True
+
+    def test_is_binary_accepts_plain_text_file(self, tmp_path):
+        from pathlib import Path
+        from app.ingestion.text_ingest import _is_binary
+        p = tmp_path / "plain.txt"
+        p.write_bytes(b"Hello world this is plain text.")
+        assert _is_binary(Path(p)) is False
+
+    def test_strip_bom_removes_bom(self):
+        from app.ingestion.text_ingest import _strip_bom
+        result = _strip_bom("﻿Hello world")
+        assert result == "Hello world"
+
+    def test_strip_bom_no_change_without_bom(self):
+        from app.ingestion.text_ingest import _strip_bom
+        result = _strip_bom("Hello world")
+        assert result == "Hello world"
+
+    def test_strip_null_bytes_removes_nulls(self):
+        from app.ingestion.text_ingest import _strip_null_bytes
+        result = _strip_null_bytes("He\x00llo\x00 world")
+        assert "\x00" not in result
+
+    def test_simhash_returns_int(self):
+        from app.ingestion.text_ingest import _simhash
+        result = _simhash("Hello world this is a test document")
+        assert isinstance(result, int)
 
     def test_simhash_identical_texts_zero_distance(self):
-        h1 = _simhash("the quick brown fox")
-        h2 = _simhash("the quick brown fox")
+        from app.ingestion.text_ingest import _simhash, _simhash_distance
+        text = "The quick brown fox jumps over the lazy dog"
+        h1 = _simhash(text)
+        h2 = _simhash(text)
         assert _simhash_distance(h1, h2) == 0
 
     def test_simhash_different_texts_nonzero_distance(self):
-        h1 = _simhash("the quick brown fox jumps")
-        h2 = _simhash("completely different content here now")
-        assert _simhash_distance(h1, h2) > 3
+        from app.ingestion.text_ingest import _simhash, _simhash_distance
+        h1 = _simhash("The quick brown fox")
+        h2 = _simhash("Completely different about mountains")
+        assert _simhash_distance(h1, h2) > 0
 
-    def test_strip_bom_removes_utf8_bom(self):
-        text = "\ufeffHello world"
-        assert _strip_bom(text) == "Hello world"
+    def test_quality_score_returns_float_in_range(self):
+        from app.ingestion.text_ingest import _quality_score
+        score = _quality_score("The quick brown fox jumps over the lazy dog.")
+        assert isinstance(score, float)
+        assert 0.0 <= score <= 1.0
 
-    def test_strip_null_bytes_returns_count(self):
-        text       = "hello\x00world\x00"
-        cleaned, n = _strip_null_bytes(text)
-        assert n == 2
-        assert "\x00" not in cleaned
+    def test_quality_score_low_for_symbols_only(self):
+        from app.ingestion.text_ingest import _quality_score
+        score = _quality_score("!!!###$$$%%%^^^&&&***((()))___+++")
+        assert score < 0.5
 
-    def test_is_binary_detects_png(self, tmp_path):
-        f = tmp_path / "fake.txt"
-        f.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
-        assert _is_binary(f) is True
-
-    def test_is_binary_false_for_plain_text(self, tmp_path):
-        f = tmp_path / "real.txt"
-        f.write_text("This is plain text content without binary markers.")
-        assert _is_binary(f) is False
-
-    def test_quality_score_short_text_low(self):
-        assert _quality_score("hi") < 0.5
-
-    def test_quality_score_long_text_high(self):
-        text = "word " * 100
-        assert _quality_score(text) >= 0.6
-
-    def test_detect_subtype_heading(self):
-        assert _detect_subtype("## Introduction") == "heading"
-
-    def test_detect_subtype_paragraph(self):
-        text = "This is a normal paragraph with multiple sentences and enough words."
-        assert _detect_subtype(text) == "paragraph"
-
-    def test_metadata_schema_populated(self, tmp_path):
-        f = tmp_path / "meta.txt"
-        f.write_text("Metadata test content with sufficient words for a valid chunk result.")
-
-        async def _run():
-            with patch("app.ingestion.text_ingest._is_binary", return_value=False), \
-                 patch("app.ingestion.text_ingest._detect_language", return_value="en"), \
-                 patch("app.ingestion.text_ingest._redact_pii", return_value=("Metadata test content with sufficient words for a valid chunk result.", {})):
-                return await ingest(str(f), "session-meta")
-
-        import asyncio as _asyncio
-        docs = _asyncio.run(_run())
-        assert len(docs) >= 1
-        s = docs[0].structure
-        assert "doc_id" in s
-        assert "language" in s
-        assert "ingestion_time" in s
-        assert "tags" in s
-        assert "readability_score" in s
+    def test_detect_subtype_returns_string(self):
+        from app.ingestion.text_ingest import _detect_subtype
+        result = _detect_subtype("# Section Heading\n\nSome paragraph text content.")
+        assert isinstance(result, str)

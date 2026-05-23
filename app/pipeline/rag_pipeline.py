@@ -145,6 +145,61 @@ def _normalize_docs(docs: List[Any]) -> List[Dict[str, Any]]:
     return out
 
 
+# PHASE 24.8 — STANDARDISED SOURCES ARRAY
+
+def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3) -> List[Dict[str, Any]]:
+    import os as _os
+    out: List[Dict[str, Any]] = []
+    for doc in docs[:max_items]:
+        meta  = doc.get("metadata") or {}
+        text  = doc.get("text") or ""
+        score = doc.get("final_score") if doc.get("final_score") is not None else doc.get("score")
+        try:
+            score = float(score) if score is not None else 0.0
+        except (TypeError, ValueError):
+            score = 0.0
+
+        src_raw = meta.get("source") or meta.get("filename") or meta.get("file_path") or "unknown"
+        source_name = _os.path.basename(str(src_raw)) if src_raw != "unknown" else "unknown"
+        modality = str(meta.get("modality") or "text")
+
+        page_number: Optional[int] = None
+        raw_page = meta.get("page_number") if meta.get("page_number") is not None else meta.get("page")
+        if isinstance(raw_page, int):
+            page_number = raw_page
+        elif raw_page is not None:
+            try:
+                page_number = int(raw_page)
+            except (TypeError, ValueError):
+                pass
+
+        start_time: Optional[float] = None
+        end_time:   Optional[float] = None
+        for sk, tk in (("start_time", "timestamp_start"), ("end_time", "timestamp_end")):
+            raw = meta.get(sk) if meta.get(sk) is not None else meta.get(tk)
+            if raw is not None:
+                try:
+                    val = float(raw)
+                    if sk == "start_time":
+                        start_time = val
+                    else:
+                        end_time = val
+                except (TypeError, ValueError):
+                    pass
+
+        out.append({
+            "text":        str(text)[:200],
+            "score":       round(score, 6),
+            "source":      source_name,
+            "page_number": page_number,
+            "start_time":  start_time,
+            "end_time":    end_time,
+            "modality":    modality,
+            "doc_id":      str(meta.get("doc_id") or meta.get("chunk_id") or ""),
+        })
+    return out
+
+
 # DEDUP DOCS
 
 def _dedup_docs(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -476,13 +531,13 @@ class RAGPipeline:
             # CONTEXT ASSEMBLY
             from app.core.response import build_sources
             canonical_sources = build_sources(docs)
-            # Attach 1-based index so callers can render Claude-style
-            # "[1] file.txt — DOC-001 (Title)" alongside answer text that
-            # contains "[1]" footnote markers.
             for i, s in enumerate(canonical_sources, start=1):
                 s["index"] = i
-            context      = _build_context(docs, settings.MAX_CONTEXT_CHARS)
-            sources      = canonical_sources
+            context = _build_context(docs, settings.MAX_CONTEXT_CHARS)
+
+            # Phase 24.8 — standardised sources array with page_number/start_time/end_time
+            p248_sources = _build_p248_sources(docs)
+            sources = p248_sources
             full_context = _compose(history_text, context)
             full_context = full_context[:settings.MAX_PROMPT_CHARS]
 
@@ -552,11 +607,18 @@ class RAGPipeline:
                 trace_id=trace_id,
             )
 
+            # Phase 24.8 — confidence + hallucination_warning
+            _scores = [s["score"] for s in sources[:3] if isinstance(s.get("score"), (int, float))]
+            confidence = round(max(0.0, min(sum(_scores) / len(_scores) if _scores else 0.0, 1.0)), 6)
+            hallucination_warning = confidence < settings.AGENT_LOW_CONFIDENCE
+
             return {
-                "answer":   answer,
-                "sources":  sources,
-                "latency":  total_latency,
-                "trace_id": trace_id,
+                "answer":               answer,
+                "sources":              sources,
+                "confidence":           confidence,
+                "hallucination_warning": hallucination_warning,
+                "latency":              total_latency,
+                "trace_id":             trace_id,
                 "metadata": {
                     "docs":              len(docs),
                     "retrieval_latency": retrieval_latency,

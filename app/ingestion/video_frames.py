@@ -803,9 +803,12 @@ async def extract_frames_async(
     Raises: VideoOpenError, NoFramesExtractedError, DiskSpaceError.
     """
     async with _get_semaphore():
+        import contextvars
         loop = asyncio.get_event_loop()
+        ctx = contextvars.copy_context()
         result = await loop.run_in_executor(
             None,
+            ctx.run,
             lambda: extract_frames(
                 video_path=video_path,
                 interval_sec=interval_sec or settings.VIDEO_FRAME_INTERVAL_SEC,

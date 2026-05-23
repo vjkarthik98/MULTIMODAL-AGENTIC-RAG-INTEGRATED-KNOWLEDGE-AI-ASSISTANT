@@ -386,3 +386,35 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Session leakage across memory and retrieval
 - Hybrid retriever score normalization bug
 - Edge-case ingestion and pipeline failures
+
+# [v0.21.0] - Production Hardening, Multimodal Edge-Case Robustness & Test Foundation
+
+### Features
+- Bounded agent execution (max-steps + wall-clock timeout + token budget)
+- Tenant isolation hook via Qdrant `user_id` payload filter (typed, not string-built)
+- Circuit breaker (`_CircuitBreaker`) on Qdrant calls with half-open probe
+- GDPR purge path across Qdrant + Redis + Mongo
+- Hallucination guard + numeric-faithfulness check in reasoning engine
+- Temporal-anchor boost for time-sensitive queries (FY/quarter/prior-year)
+- MMR diversity in retriever, modality-aware reranking
+- Standardised query response schema (answer, sources, confidence, trace)
+
+### Improved
+- Multilingual support removed (deferred); pipeline simplified to English path
+- Full `.env` ↔ `config.py` alignment; zero hardcoded literals in pipeline
+- Text/PDF/Word/Excel ingestion hardened against broken + edge-case files
+- Image/Audio/Video ingestion hardened (solid-color detect, OCR repair, frame dedup via pHash)
+- Retrieval + RAG pipeline end-to-end repair (Phase 24.7)
+- Startup latency cut (~25s → ~7s) via lazy device manager + deferred model loads
+- Per-model device routing (CPU/CUDA/MPS) with profile auto-resolve
+- Lifecycle management for models, infra and pipelines (lazy singletons + health)
+- Memory layer: sliding window + dedup + role/recency-weighted fusion
+- Caption sanitizer + prompt-injection scrub on BLIP/CLIP/web-search inputs
+
+### Fixed
+- Qdrant payload index on `user_id` for multi-user filtering
+- Section-aware chunking (preserves structure for temporal queries)
+- Warmup race + startup crashes on missing optional deps
+- Embedding cache key drift across modalities
+- Empty-context path now raises `EMPTY_CONTEXT_NO_DOCUMENTS_RETRIEVED` instead of silent stub
+

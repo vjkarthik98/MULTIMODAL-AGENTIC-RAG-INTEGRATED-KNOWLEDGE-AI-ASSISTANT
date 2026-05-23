@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import hashlib
 import mimetypes
 import os
@@ -186,7 +187,6 @@ def _guard_path(file_path: str) -> Path:
     resolved = Path(file_path).expanduser().resolve()
 
     allowed_roots = [
-        Path(settings.UPLOAD_STAGING_DIR).resolve(),
         Path(settings.DATA_DIR).resolve(),
         Path(tempfile.gettempdir()).resolve(),
         Path("C:/temp").resolve(),
@@ -378,10 +378,10 @@ async def route_ingestion(
     # caller spun up a fresh event loop via asyncio.run() in a worker thread,
     # which would otherwise have an empty context.
     _user_token = None
-    if user_id:
-        from app.utils.paths import set_current_user, get_current_user
-        if get_current_user() != user_id:
-            _user_token = set_current_user(user_id)
+    from app.utils.paths import set_current_user, get_current_user
+    effective_uid = user_id or settings.DEFAULT_DEV_USER_ID
+    if get_current_user() != effective_uid:
+        _user_token = set_current_user(effective_uid)
 
     start = time.time()
     path  = Path(file_path)
@@ -462,8 +462,9 @@ async def route_ingestion(
                 if asyncio.iscoroutinefunction(handler):
                     docs = await handler(file_path, session_id)
                 else:
+                    ctx = contextvars.copy_context()
                     docs = await asyncio.get_event_loop().run_in_executor(
-                        None, handler, file_path, session_id
+                        None, ctx.run, handler, file_path, session_id
                     )
 
                 if not docs:

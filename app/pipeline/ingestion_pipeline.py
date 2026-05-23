@@ -511,7 +511,8 @@ class IngestionPipeline:
         # resolved_*_dir() helpers read this contextvar so PDF images,
         # frames, OCR thumbs etc. all land under data/users/{user_id}/.
         from app.utils.paths import set_current_user, reset_current_user
-        _user_token = set_current_user(user_id) if user_id else None
+        effective_user_id = user_id or settings.DEFAULT_DEV_USER_ID
+        _user_token = set_current_user(effective_user_id)
 
         try:
             # PRE-FLIGHT CHECKS
@@ -757,17 +758,30 @@ class IngestionPipeline:
                 trace_id=span_ctx["trace_id"],
             )
 
+            # Phase 24.4 — collect doc_id, pages, warnings from ingested chunks
+            _doc_id   = chunks[0].doc_id() if chunks else ""
+            _pages    = chunks[0].structure.get("total_pages") if chunks else None
+            _warnings: List[str] = []
+            for _c in chunks:
+                for _w in (getattr(_c, "warnings", None) or []):
+                    if _w not in _warnings:
+                        _warnings.append(_w)
+
             return {
-                "status":      "success",
-                "chunks":      len(chunks),
-                "embedded":    len(all_embedded),
-                "stored":      total,
-                "latency":     total_latency,
-                "modality":    modality,
-                "session_id":  session_id,
-                "user_id":     user_id,
-                "file_hash":   file_hash,
-                "trace_id":    span_ctx["trace_id"],
+                "status":            "success",
+                "doc_id":            _doc_id,
+                "filename":          file_name,
+                "modality":          modality,
+                "chunks":            len(chunks),
+                "stored":            total,
+                "session_id":        session_id,
+                "ingestion_time_sec": total_latency,
+                "pages":             _pages,
+                "warnings":          _warnings,
+                "file_hash":         file_hash,
+                "embedded":          len(all_embedded),
+                "user_id":           user_id,
+                "trace_id":          span_ctx["trace_id"],
             }
 
         except DuplicateFileError as e:
@@ -814,8 +828,7 @@ class IngestionPipeline:
             raise RuntimeError(f"INGESTION_FAILED: {e}") from e
 
         finally:
-            if _user_token is not None:
-                reset_current_user(_user_token)
+            reset_current_user(_user_token)
 
 
 # SINGLETON

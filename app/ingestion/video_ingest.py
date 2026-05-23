@@ -633,8 +633,10 @@ def _attempt_recovery(file_path: str, output_path: str) -> bool:
 # MAIN ASYNC INGEST
 
 async def ingest_async(file_path: str, session_id: str) -> List[IngestedDocument]:
+    import contextvars
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, ingest, file_path, session_id)
+    ctx = contextvars.copy_context()
+    return await loop.run_in_executor(None, ctx.run, ingest, file_path, session_id)
 
 
 # MAIN SYNC INGEST
