@@ -18,12 +18,21 @@ from __future__ import annotations
 
 import asyncio
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
 from app.core.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# Dedicated executor so the GPU preload's multi-second blocking work
+# (Llama() mmap + GPU layer copy + cuBLAS warmup) does NOT compete with
+# user-request executors. Sharing the default pool with
+# `asyncio.to_thread(process_file, ...)` was causing uploads issued
+# during warmup to queue behind the LLM load and time out at 300 s.
+_warmup_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="gpu_warmup")
 
 
 async def preload_gpu_models() -> None:
@@ -44,21 +53,21 @@ async def preload_gpu_models() -> None:
 
     loop = asyncio.get_running_loop()
 
-    # Phase 1 — parallel model loads (each runs in a thread from ThreadPoolExecutor)
-    await loop.run_in_executor(None, _load_models_parallel, requested)
+    # Phase 1 — parallel model loads on the dedicated warmup executor
+    await loop.run_in_executor(_warmup_executor, _load_models_parallel, requested)
 
     load_latency = round(time.time() - start, 2)
     logger.info(event="gpu_models_loaded", latency=load_latency, models=requested)
 
     # Phase 2 — CUDA warm-up: run a tiny forward pass on each GPU model so
     # cuBLAS kernels are compiled and cached before the first real request.
-    await loop.run_in_executor(None, _warmup_cuda_kernels)
+    await loop.run_in_executor(_warmup_executor, _warmup_cuda_kernels)
 
     total_latency = round(time.time() - start, 2)
     logger.info(event="gpu_preload_complete", total_latency=total_latency)
 
     # Phase 3 — log VRAM usage after all models are loaded
-    await loop.run_in_executor(None, _log_vram_usage)
+    await loop.run_in_executor(_warmup_executor, _log_vram_usage)
 
 
 def _load_models_parallel(requested: List[str]) -> None:

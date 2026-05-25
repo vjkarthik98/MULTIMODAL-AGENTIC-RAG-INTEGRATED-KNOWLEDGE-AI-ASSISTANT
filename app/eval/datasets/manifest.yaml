@@ -1,0 +1,53 @@
+# Gold-set manifest — version-pins each gold file by SHA-256.
+# Updated automatically by: python -m app.eval.datasets.build_gold_set --validate
+# Never edit manually without also updating the sha256.
+
+dataset_version: "0.1.0"
+created_at: "2026-05-25"
+
+gold_files:
+  text_gold.jsonl:
+    sha256: ""
+    triples_total: 0
+    triples_curated: 0
+    note: "SEC 10-K/10-Q TXT + heliosphere/aquavolt/meridian benchmarks"
+  pdf_gold.jsonl:
+    sha256: ""
+    triples_total: 0
+    triples_curated: 0
+    note: "SEC 10-K/10-Q PDFs"
+  docx_gold.jsonl:
+    sha256: ""
+    triples_total: 0
+    triples_curated: 0
+    note: "Investor presentations"
+  xlsx_gold.jsonl:
+    sha256: ""
+    triples_total: 0
+    triples_curated: 0
+    note: "Financial statement tables"
+  image_gold.jsonl:
+    sha256: ""
+    triples_total: 0
+    triples_curated: 0
+    note: "Revenue charts, scanned 10-K covers"
+  audio_gold.jsonl:
+    sha256: ""
+    triples_total: 0
+    triples_curated: 0
+    note: "Earnings-call MP3 segments"
+  video_gold.jsonl:
+    sha256: ""
+    triples_total: 0
+    triples_curated: 0
+    note: "CNBC clips, IR earnings videos"
+  routing_gold.jsonl:
+    sha256: ""
+    triples_total: 0
+    triples_curated: 0
+    note: "{query, expected_route} labelled pairs"
+  e2e_gold.jsonl:
+    sha256: ""
+    triples_total: 0
+    triples_curated: 0
+    note: "Cross-modal multi-hop finance questions"

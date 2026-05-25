@@ -138,6 +138,15 @@ gradio>=4.0
 
 
 
+# EVALUATION — Phase 25 eval harness (ragas, jiwer, mlflow)
+# These ARE installed in production to allow `python -m app.eval.run` on any node.
+ragas==0.1.21
+jiwer>=3.0.0
+mlflow>=2.10.0
+PyYAML>=6.0
+
+
+
 # DEV / TEST (install with: pip install -r requirements-dev.txt)
 # Listed here for reference only — not installed in production
 pytest>=8.1

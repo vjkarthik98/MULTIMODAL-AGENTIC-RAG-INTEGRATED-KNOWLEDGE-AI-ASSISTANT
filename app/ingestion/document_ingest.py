@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import hashlib
 import os
 import shutil
@@ -400,12 +401,30 @@ def _process_pdf(
         page_area = max(rect.width * rect.height, 1)
         density   = _text_density(raw_text, page_area)
 
-        # OCR FALLBACK IF TEXT DENSITY TOO LOW
-        if density < 0.01 or not raw_text:
+        # OCR FALLBACK — only when fitz found no text at all (scanned/image PDF).
+        # Low density alone is not a reliable signal: a sparse text page on a
+        # large canvas still has real text. Replacing non-empty fitz output with
+        # a failed OCR result (empty string) caused NO_CONTENT_EXTRACTED on
+        # normal PDFs when tesseract is unavailable.
+        if not raw_text:
             _ocr_invocations.labels(doc_type="pdf").inc()
             try:
-                pix           = page.get_pixmap(dpi=200)
-                raw_text, ocr_conf = _ocr_page_image(pix, i)
+                pix = page.get_pixmap(dpi=200)
+                ocr_result, ocr_conf = _ocr_page_image(pix, i)
+                if ocr_result:
+                    raw_text = ocr_result
+            except Exception as exc:
+                logger.warning("pdf_ocr_fallback_failed", page=i, error=str(exc))
+        elif density < 0.01:
+            # Low density but text exists — OCR as a supplemental pass; keep
+            # whichever result is longer (fitz text may be complete, OCR adds
+            # nothing when tesseract is absent).
+            _ocr_invocations.labels(doc_type="pdf").inc()
+            try:
+                pix = page.get_pixmap(dpi=200)
+                ocr_result, ocr_conf = _ocr_page_image(pix, i)
+                if ocr_result and len(ocr_result) > len(raw_text):
+                    raw_text = ocr_result
             except Exception as exc:
                 logger.warning("pdf_ocr_fallback_failed", page=i, error=str(exc))
 
@@ -1324,29 +1343,39 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 doc_warnings: List[str] = []
 
                 # DISPATCH TO CORRECT PROCESSOR
+                # Copy the current contextvars (notably _current_user_id from
+                # app.utils.paths) into the executor thread so resolved_*_dir()
+                # helpers can find the active user. A bare lambda would lose it.
+                _ctx = contextvars.copy_context()
                 if ext == ".pdf":
                     docs = await asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda: _process_pdf(
-                            active_path, doc_id, session_id, source_name, source_path,
-                            file_size=file_size,
+                        lambda: _ctx.run(
+                            lambda: _process_pdf(
+                                active_path, doc_id, session_id, source_name, source_path,
+                                file_size=file_size,
+                            )
                         ),
                     )
                 elif ext in {".docx", ".doc"}:
                     docs = await asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda: _process_docx(
-                            active_path, doc_id, session_id, source_name, source_path,
-                            file_size=file_size,
+                        lambda: _ctx.run(
+                            lambda: _process_docx(
+                                active_path, doc_id, session_id, source_name, source_path,
+                                file_size=file_size,
+                            )
                         ),
                     )
                 elif ext in {".xlsx", ".xls"}:
                     docs = await asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda: _process_excel(
-                            active_path, doc_id, session_id, source_name, source_path,
-                            file_size=file_size,
-                            warnings=doc_warnings,
+                        lambda: _ctx.run(
+                            lambda: _process_excel(
+                                active_path, doc_id, session_id, source_name, source_path,
+                                file_size=file_size,
+                                warnings=doc_warnings,
+                            )
                         ),
                     )
                 else:
