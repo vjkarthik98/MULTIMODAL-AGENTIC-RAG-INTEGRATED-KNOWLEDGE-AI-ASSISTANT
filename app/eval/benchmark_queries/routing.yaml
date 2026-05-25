@@ -1,0 +1,39 @@
+# Routing benchmark query templates — tests agent router classification accuracy.
+# expected_route: rag | search | memory | direct | hybrid
+
+examples:
+  rag:
+    - query: "What was Apple's revenue in FY2023?"
+      rationale: "Fact exists in ingested 10-K corpus"
+    - query: "What are the main risk factors in JPMorgan's 10-K?"
+      rationale: "Document-grounded question"
+    - query: "Summarize Apple's business segments"
+      rationale: "Summarization over ingested document"
+
+  search:
+    - query: "What is Apple's stock price today?"
+      rationale: "Real-time data not in corpus"
+    - query: "What is the latest Federal Reserve interest rate decision?"
+      rationale: "Current events — web search required"
+    - query: "What is the current yield on 10-year US Treasuries?"
+      rationale: "Live market data"
+
+  memory:
+    - query: "What did we discuss earlier about Apple earnings?"
+      rationale: "References prior conversation context"
+    - query: "Remind me what the main points were from our last discussion"
+      rationale: "Session memory recall"
+
+  direct:
+    - query: "What is a P/E ratio?"
+      rationale: "General knowledge — no retrieval needed"
+    - query: "Hello, how are you?"
+      rationale: "Greeting — direct response"
+    - query: "Explain what compound interest means"
+      rationale: "Conceptual explanation — LLM can answer directly"
+
+  hybrid:
+    - query: "What is JPMorgan's net income AND what is today's credit default swap spread?"
+      rationale: "First part: corpus; second part: real-time web"
+    - query: "Compare Apple's FY2023 revenue to current analyst estimates"
+      rationale: "Historical (corpus) + forward-looking (web)"

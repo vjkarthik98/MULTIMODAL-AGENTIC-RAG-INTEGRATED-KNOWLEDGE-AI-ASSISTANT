@@ -494,10 +494,18 @@ def _extract_frames_opencv(
 
             # INTERVAL SAMPLING
             take_frame = (frame_idx % interval_frames == 0)
+            diff = 0.0
 
             # SCENE CHANGE DETECTION FALLBACK
             if prev_frame is not None:
-                diff = _frame_diff(prev_frame, frame)
+                # Ensure both frames share the same shape before absdiff
+                if prev_frame.shape != frame.shape:
+                    h, w = min(prev_frame.shape[0], frame.shape[0]), min(prev_frame.shape[1], frame.shape[1])
+                    _prev = cv2.resize(prev_frame, (w, h))
+                    _curr = cv2.resize(frame, (w, h))
+                else:
+                    _prev, _curr = prev_frame, frame
+                diff = _frame_diff(_prev, _curr)
                 if diff > scene_thresh:
                     take_frame    = True
                     scene_idx    += 1
@@ -571,8 +579,7 @@ def _extract_frames_opencv(
                     blur_score       = round(blur, 4),
                     brightness_mean  = round(brightness, 2),
                     phash            = ph,
-                    is_scene_boundary= (scene_idx > 0 and diff > scene_thresh
-                                        if prev_frame is not None else False),
+                    is_scene_boundary= (prev_frame is not None and scene_idx > 0 and diff > scene_thresh),
                     scene_index      = scene_idx,
                     shot_type        = shot_type,
                     hdr_detected     = hdr_detected,

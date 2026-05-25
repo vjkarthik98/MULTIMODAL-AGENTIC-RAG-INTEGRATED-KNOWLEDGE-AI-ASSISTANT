@@ -3,7 +3,7 @@ Central device + dtype policy for the model layer.
 
 Tesla T4 deploy budget: 14.6 GB VRAM, CUDA 13.2.
 
-GPU models (all_gpu profile):
+GPU models (all_gpu profile) — ALL models run on GPU:
   - Mistral 7B Q4_K_M  ~4.1 GB  (llama-cpp n_gpu_layers=-1)
   - CLIP ViT-B/32       ~0.6 GB  (float16)
   - BLIP base           ~1.0 GB  (float16)
@@ -12,7 +12,7 @@ GPU models (all_gpu profile):
   - MiniLM text embed   ~0.09 GB (float16)
   Total ≈ 7.4 GB  — fits comfortably in 14.6 GB
 
-CPU services (no VRAM needed):
+CPU services (no VRAM needed — not models):
   - FastAPI / Uvicorn
   - Qdrant client (network I/O only)
   - Redis client (network I/O only)
@@ -229,7 +229,11 @@ class DeviceManager:
         dtype = self.dtype_for(name, dev)
         return DeviceDecision(device=dev, dtype=dtype, notes=self.profile)
 
-    # GGUF n_gpu_layers — auto-pick -1 (all) on CUDA so Mistral fully offloads
+    # GGUF n_gpu_layers — auto-pick based on actual free VRAM at load time.
+    # Mistral Q4_K_M has 32 transformer blocks; each costs ~128 MB of VRAM.
+    # We reserve 512 MB headroom so other models (embedder, CLIP, Whisper) don't OOM.
+    _LAYERS_PER_GB = 7.5          # ~128 MB per layer → ~7.5 layers per GB
+    _VRAM_HEADROOM_GB = 0.3       # keep 300 MB free — tight but safe on T4
 
     def llm_gpu_layers(self) -> int:
         llm_device = self.device_for("llm")
@@ -237,7 +241,36 @@ class DeviceManager:
             return 0
         if not settings.LLM_GPU_LAYERS_AUTO:
             return settings.LLM_GPU_LAYERS
-        return settings.LLM_GPU_LAYERS_ALL  # -1 = offload everything
+
+        # Query actual free VRAM right now (other models may already be loaded).
+        try:
+            import torch
+            free_bytes = (
+                torch.cuda.get_device_properties(0).total_memory
+                - torch.cuda.memory_reserved(0)
+            )
+            free_gb = free_bytes / (1024 ** 3)
+        except Exception:
+            # Can't query VRAM — fall back to full offload and let llama_cpp try.
+            return settings.LLM_GPU_LAYERS_ALL
+
+        usable_gb = max(0.0, free_gb - self._VRAM_HEADROOM_GB)
+        layers = int(usable_gb * self._LAYERS_PER_GB)
+
+        if layers >= 32:
+            # All layers fit — use -1 so llama_cpp offloads embedding table too.
+            return settings.LLM_GPU_LAYERS_ALL  # -1
+
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "llm_gpu_layers_partial",
+            extra={
+                "free_gb": round(free_gb, 2),
+                "usable_gb": round(usable_gb, 2),
+                "layers": layers,
+            },
+        )
+        return max(0, layers)
 
     # SNAPSHOT — for /ready and logging
 
