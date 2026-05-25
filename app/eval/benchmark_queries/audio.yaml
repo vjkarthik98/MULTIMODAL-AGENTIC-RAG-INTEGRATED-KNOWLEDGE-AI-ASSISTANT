@@ -1,0 +1,27 @@
+# Audio benchmark queries — tests Whisper ASR accuracy on earnings call audio.
+
+metrics_to_measure:
+  - WER (Word Error Rate) vs gold transcript
+  - Finance jargon accuracy (ticker symbols, dollar amounts, percentages)
+
+known_challenges:
+  - Ticker symbols (AAPL, MSFT, JPM) may be mispronounced or misrecognized
+  - Dollar amounts ("eighty-five point two billion" → "$85.2B")
+  - CFO/CEO names and titles
+  - Analyst names during Q&A
+
+test_cases:
+  earnings_call_opening:
+    description: "CEO/CFO opening remarks — dense financial facts"
+    queries:
+      - "What financial results did the CEO announce?"
+      - "What revenue was reported in the earnings call?"
+    gold_transcript_source: "Official earnings call transcript from IR website"
+
+  analyst_qa:
+    description: "Analyst Q&A session — conversational, varied accents"
+    queries:
+      - "What questions did analysts ask about revenue guidance?"
+      - "What did management say about the services business outlook?"
+
+wer_threshold_note: "WER threshold 0.25 is lenient for v1 due to finance jargon. Tighten to 0.15 after testing with Whisper large-v3."

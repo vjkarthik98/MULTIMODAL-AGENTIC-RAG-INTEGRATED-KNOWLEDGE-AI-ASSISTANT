@@ -150,13 +150,23 @@ class ModelLoader:
         retry=retry_if_exception_type((FuturesTimeoutError, RuntimeError)),
         reraise=True,
     )
-    def _safe_load(self, load_fn, name: str) -> Any:
+    def _safe_load(self, load_fn, name: str, device: Optional[str] = None) -> Any:
         start  = time.time()
         future = self._executor.submit(load_fn)
 
+        # Use the provided device hint; fall back to device_manager only for
+        # known MODEL_NAMES — unknown aliases (image_embedder, clip_text_embedder)
+        # are not in MODEL_NAMES so device_for() would wrongly return "cpu".
+        from app.core.device_manager import MODEL_NAMES
+        resolved_device = device or (
+            device_manager.device_for(name.lower())
+            if name.lower() in MODEL_NAMES
+            else "unknown"
+        )
+
         with tracer.start_as_current_span(f"load_model_{name}") as span:
             span.set_attribute("model.name", name)
-            span.set_attribute("device", device_manager.device_for(name.lower()))
+            span.set_attribute("device", resolved_device)
 
             try:
                 obj     = future.result(timeout=settings.MODEL_TIMEOUT_SEC)
@@ -171,7 +181,7 @@ class ModelLoader:
                 logger.info(
                     "model_loaded",
                     model=name,
-                    device=device_manager.device_for(name.lower()),
+                    device=resolved_device,
                     latency=latency,
                 )
 
@@ -343,7 +353,7 @@ class ModelLoader:
                 from app.embeddings.image_embedder import ImageEmbedder  # local
                 return ImageEmbedder(model, processor, device)
 
-            self._image_embedder = self._safe_load(_load, "image_embedder")
+            self._image_embedder = self._safe_load(_load, "image_embedder", device=device)
 
         return self._image_embedder
 
@@ -363,7 +373,7 @@ class ModelLoader:
                 from app.embeddings.clip_text_embedder import ClipTextEmbedder  # local
                 return ClipTextEmbedder(processor, model, device)
 
-            self._clip_text_embedder = self._safe_load(_load, "clip_text_embedder")
+            self._clip_text_embedder = self._safe_load(_load, "clip_text_embedder", device=device)
 
         return self._clip_text_embedder
 

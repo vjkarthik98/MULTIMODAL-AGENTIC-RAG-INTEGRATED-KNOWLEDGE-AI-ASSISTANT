@@ -363,17 +363,22 @@ async def limit_concurrency(request: Request, call_next) -> Response:
         async with semaphore:
             return await call_next(request)
 
+    # Ingest endpoints process large files (embed 100+ chunks) — give them
+    # more time than regular API calls.
+    is_ingest = "/ingest" in request.url.path or "/upload" in request.url.path
+    timeout = settings.FILE_PROCESSING_TIMEOUT_SEC if is_ingest else settings.REQUEST_TIMEOUT_SEC
+
     try:
         return await asyncio.wait_for(
             _handle(),
-            timeout=settings.REQUEST_TIMEOUT_SEC,
+            timeout=timeout,
         )
     except asyncio.TimeoutError:
         request_id = getattr(request.state, "request_id", "unknown")
         logger.warning(
             event="request_timeout",
             path=str(request.url.path),
-            timeout=settings.REQUEST_TIMEOUT_SEC,
+            timeout=timeout,
             request_id=request_id,
         )
         return JSONResponse(

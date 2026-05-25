@@ -1,0 +1,33 @@
+# Generation benchmark queries — tests faithfulness, answer relevancy, and grounding.
+
+categories:
+  faithful_factual:
+    description: "Answer must exactly match a verifiable fact from the corpus"
+    examples:
+      - "What was Apple's net income in FY2023?"
+      - "What was JPMorgan's earnings per diluted share in 2023?"
+      - "What was Apple's R&D expense as reported in FY2023?"
+
+  grounded_multi_fact:
+    description: "Answer requires combining multiple facts — tests hallucination risk"
+    examples:
+      - "What was Apple's Services revenue as a percentage of total revenue in FY2023?"
+      - "How much more did JPMorgan earn in 2023 compared to 2022 in absolute terms?"
+
+  absence_of_hallucination:
+    description: "Query about a topic NOT in the corpus — system should say it doesn't know"
+    examples:
+      - "What was Apple's revenue in FY2019?"
+      - "What did Tesla report in their FY2023 10-K?"
+
+  forward_looking:
+    description: "Queries about future guidance — system should quote what was stated, not predict"
+    examples:
+      - "What is Apple's revenue outlook for FY2024?"
+      - "What is JPMorgan's NII guidance for 2024?"
+
+  citation_accuracy:
+    description: "System should cite the correct source document in response"
+    examples:
+      - "According to the filing, what was Apple's iPhone revenue?"
+      - "What does the 10-K say about JPMorgan's credit quality?"
