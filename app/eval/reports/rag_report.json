@@ -1,294 +1,1082 @@
 {
-  "generated_at": "2026-05-26T12:26:14Z",
-  "git_sha": "aa4da29",
+  "generated_at": "2026-05-27T02:16:52Z",
+  "git_sha": "0fa4e41",
   "weaken_spec": null,
   "suites": {
-    "full": {
-      "suite": "full",
+    "routing": {
+      "suite": "routing",
       "metrics": {
-        "retrieval.recall_at_5": {
-          "name": "retrieval.recall_at_5",
-          "value": 0.4404761904761904,
-          "n": 14,
-          "notes": "",
-          "sub": {}
-        },
-        "retrieval.recall_at_10": {
-          "name": "retrieval.recall_at_10",
-          "value": 0.6547619047619048,
-          "n": 14,
-          "notes": "",
-          "sub": {}
-        },
-        "retrieval.mrr": {
-          "name": "retrieval.mrr",
-          "value": 0.8149659863945579,
-          "n": 14,
-          "notes": "",
-          "sub": {}
-        },
-        "retrieval.ndcg_at_10": {
-          "name": "retrieval.ndcg_at_10",
-          "value": 0.6077091625229877,
-          "n": 14,
-          "notes": "",
-          "sub": {}
-        },
-        "retrieval.context_precision": {
-          "name": "retrieval.context_precision",
-          "value": 0.21014739229024942,
-          "n": 14,
-          "notes": "",
-          "sub": {}
-        },
-        "retrieval.hit_rate": {
-          "name": "retrieval.hit_rate",
-          "value": 1.0,
-          "n": 14,
-          "notes": "",
-          "sub": {}
-        },
-        "retrieval.retrieval_p50_sec": {
-          "name": "retrieval.retrieval_p50_sec",
-          "value": 0.1465829610824585,
-          "n": 16,
-          "notes": "min=0.15s max=34.19s",
-          "sub": {}
-        },
-        "retrieval.retrieval_p95_sec": {
-          "name": "retrieval.retrieval_p95_sec",
-          "value": 25.248923301696777,
-          "n": 16,
-          "notes": "",
-          "sub": {}
-        },
-        "retrieval.retrieval_p99_sec": {
-          "name": "retrieval.retrieval_p99_sec",
-          "value": 32.402051734924314,
-          "n": 16,
-          "notes": "",
-          "sub": {}
-        },
-        "generation.faithfulness": {
-          "name": "generation.faithfulness",
-          "value": NaN,
-          "n": 21,
-          "notes": "judge=gguf_mistral",
-          "sub": {}
-        },
-        "generation.answer_relevancy": {
-          "name": "generation.answer_relevancy",
-          "value": 0.17283495678256142,
-          "n": 21,
-          "notes": "judge=gguf_mistral",
-          "sub": {}
-        },
-        "generation.context_recall": {
-          "name": "generation.context_recall",
-          "value": 0.9583333333333333,
-          "n": 21,
-          "notes": "judge=gguf_mistral",
-          "sub": {}
-        },
-        "generation.context_precision": {
-          "name": "generation.context_precision",
-          "value": 0.8472222221636573,
-          "n": 21,
-          "notes": "judge=gguf_mistral",
-          "sub": {}
-        },
-        "generation.template_leak_rate": {
-          "name": "generation.template_leak_rate",
-          "value": 0.0,
-          "n": 21,
-          "notes": "leaky=0/21",
-          "sub": {}
-        },
-        "generation.citation_accuracy": {
-          "name": "generation.citation_accuracy",
-          "value": 1.0,
-          "n": 21,
-          "notes": "judge=heuristic",
-          "sub": {}
-        },
-        "generation.hallucination_rate": {
-          "name": "generation.hallucination_rate",
-          "value": 0.0,
-          "n": 21,
-          "notes": "flagged=0/21",
-          "sub": {}
-        },
-        "generation.generation_p50_sec": {
-          "name": "generation.generation_p50_sec",
-          "value": 0.3215980529785156,
-          "n": 21,
-          "notes": "min=0.31s max=14.84s",
-          "sub": {}
-        },
-        "generation.generation_p95_sec": {
-          "name": "generation.generation_p95_sec",
-          "value": 0.5982871055603027,
-          "n": 21,
-          "notes": "",
-          "sub": {}
-        },
-        "generation.generation_p99_sec": {
-          "name": "generation.generation_p99_sec",
-          "value": 11.990610027313243,
-          "n": 21,
-          "notes": "",
-          "sub": {}
-        },
-        "routing.route_accuracy": {
-          "name": "routing.route_accuracy",
-          "value": 1.0,
+        "route_accuracy": {
+          "name": "route_accuracy",
+          "value": 0.75,
           "n": 12,
-          "notes": "correct=12/12",
+          "notes": "correct=9/12 | misroutes:   'What did we discuss in our last conversation about' expected=memory got=rag;   'What is 2+2?' expected=direct got=rag;   'Hello, how are you?' expected=direct got=rag",
           "sub": {}
         },
-        "routing.hybrid_with_web_rate": {
-          "name": "routing.hybrid_with_web_rate",
+        "hybrid_with_web_rate": {
+          "name": "hybrid_with_web_rate",
           "value": 0.0,
           "n": 4,
           "notes": "hybrid_with_web=0/4 | P1-4 misses: ['What are the latest S&P 500 index levels today?', \"What is JPMorgan's latest credit rating and what r\", 'What is the current Federal Reserve interest rate?']",
           "sub": {}
         },
-        "routing.route_cm_rag_as_rag": {
-          "name": "routing.route_cm_rag_as_rag",
+        "route_cm_rag_as_rag": {
+          "name": "route_cm_rag_as_rag",
           "value": 5.0,
           "n": 12,
           "notes": "confusion matrix cell",
           "sub": {}
         },
-        "routing.route_cm_hybrid_as_hybrid": {
-          "name": "routing.route_cm_hybrid_as_hybrid",
+        "route_cm_hybrid_as_hybrid": {
+          "name": "route_cm_hybrid_as_hybrid",
           "value": 4.0,
           "n": 12,
           "notes": "confusion matrix cell",
           "sub": {}
         },
-        "routing.route_cm_memory_as_memory": {
-          "name": "routing.route_cm_memory_as_memory",
+        "route_cm_memory_as_rag": {
+          "name": "route_cm_memory_as_rag",
           "value": 1.0,
           "n": 12,
           "notes": "confusion matrix cell",
           "sub": {}
         },
-        "routing.route_cm_direct_as_direct": {
-          "name": "routing.route_cm_direct_as_direct",
+        "route_cm_direct_as_rag": {
+          "name": "route_cm_direct_as_rag",
           "value": 2.0,
           "n": 12,
           "notes": "confusion matrix cell",
           "sub": {}
+        }
+      },
+      "breached": {},
+      "duration_sec": 8.941063404083252,
+      "judge": null,
+      "dataset_version": null
+    },
+    "retrieval_pdf": {
+      "suite": "retrieval_pdf",
+      "modality": "pdf",
+      "metrics": {
+        "recall_at_5": {
+          "name": "recall_at_5",
+          "value": 0.9,
+          "n": 5,
+          "notes": "",
+          "sub": {}
         },
-        "ocr.ocr_cer": {
-          "name": "ocr.ocr_cer",
-          "value": 1.9593990755007704,
+        "recall_at_10": {
+          "name": "recall_at_10",
+          "value": 0.9,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "mrr": {
+          "name": "mrr",
+          "value": 0.5466666666666666,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "ndcg_at_10": {
+          "name": "ndcg_at_10",
+          "value": 0.5773705614469083,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "context_precision": {
+          "name": "context_precision",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: all queries had TODO relevant_chunk_ids",
+          "sub": {}
+        },
+        "hit_rate": {
+          "name": "hit_rate",
+          "value": 1.0,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval__p50_sec": {
+          "name": "retrieval__p50_sec",
+          "value": 0.18175196647644043,
+          "n": 5,
+          "notes": "min=0.14s max=4.52s",
+          "sub": {}
+        },
+        "retrieval__p95_sec": {
+          "name": "retrieval__p95_sec",
+          "value": 4.351194763183593,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval__p99_sec": {
+          "name": "retrieval__p99_sec",
+          "value": 4.486428527832031,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        }
+      }
+    },
+    "retrieval_docx": {
+      "suite": "retrieval_docx",
+      "modality": "docx",
+      "metrics": {
+        "recall_at_5": {
+          "name": "recall_at_5",
+          "value": 0.41666666666666663,
           "n": 2,
           "notes": "",
           "sub": {}
         },
-        "ocr.ocr_wer": {
-          "name": "ocr.ocr_wer",
-          "value": 2.7867647058823533,
+        "recall_at_10": {
+          "name": "recall_at_10",
+          "value": 0.41666666666666663,
           "n": 2,
           "notes": "",
           "sub": {}
         },
-        "ocr.ocr_exact_match": {
-          "name": "ocr.ocr_exact_match",
+        "mrr": {
+          "name": "mrr",
+          "value": 0.75,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "ndcg_at_10": {
+          "name": "ndcg_at_10",
+          "value": 0.4546145518656618,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "context_precision": {
+          "name": "context_precision",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: all queries had TODO relevant_chunk_ids",
+          "sub": {}
+        },
+        "hit_rate": {
+          "name": "hit_rate",
+          "value": 1.0,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval__p50_sec": {
+          "name": "retrieval__p50_sec",
+          "value": 0.15100431442260742,
+          "n": 2,
+          "notes": "min=0.14s max=0.16s",
+          "sub": {}
+        },
+        "retrieval__p95_sec": {
+          "name": "retrieval__p95_sec",
+          "value": 0.1607795715332031,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval__p99_sec": {
+          "name": "retrieval__p99_sec",
+          "value": 0.1616484832763672,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        }
+      }
+    },
+    "retrieval_xlsx": {
+      "suite": "retrieval_xlsx",
+      "modality": "xlsx",
+      "metrics": {
+        "recall_at_5": {
+          "name": "recall_at_5",
+          "value": 0.6666666666666666,
+          "n": 3,
+          "notes": "",
+          "sub": {}
+        },
+        "recall_at_10": {
+          "name": "recall_at_10",
+          "value": 0.6666666666666666,
+          "n": 3,
+          "notes": "",
+          "sub": {}
+        },
+        "mrr": {
+          "name": "mrr",
+          "value": 0.6666666666666666,
+          "n": 3,
+          "notes": "",
+          "sub": {}
+        },
+        "ndcg_at_10": {
+          "name": "ndcg_at_10",
+          "value": 0.6666666666666666,
+          "n": 3,
+          "notes": "",
+          "sub": {}
+        },
+        "context_precision": {
+          "name": "context_precision",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: all queries had TODO relevant_chunk_ids",
+          "sub": {}
+        },
+        "hit_rate": {
+          "name": "hit_rate",
+          "value": 0.6666666666666666,
+          "n": 3,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval_p50_sec": {
+          "name": "retrieval_p50_sec",
+          "value": 3.6829352378845215,
+          "n": 3,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval_p95_sec": {
+          "name": "retrieval_p95_sec",
+          "value": 4.5216450691223145,
+          "n": 3,
+          "notes": "",
+          "sub": {}
+        }
+      }
+    },
+    "retrieval_image": {
+      "suite": "retrieval_image",
+      "modality": "image",
+      "metrics": {
+        "recall_at_5": {
+          "name": "recall_at_5",
+          "value": 1.0,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "recall_at_10": {
+          "name": "recall_at_10",
+          "value": 1.0,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "mrr": {
+          "name": "mrr",
+          "value": 0.6666666666666666,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "ndcg_at_10": {
+          "name": "ndcg_at_10",
+          "value": 0.7104933122450374,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "context_precision": {
+          "name": "context_precision",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: all queries had TODO relevant_chunk_ids",
+          "sub": {}
+        },
+        "hit_rate": {
+          "name": "hit_rate",
+          "value": 1.0,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval_p50_sec": {
+          "name": "retrieval_p50_sec",
+          "value": 0.16981959342956543,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval_p95_sec": {
+          "name": "retrieval_p95_sec",
+          "value": 0.16981959342956543,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        }
+      }
+    },
+    "retrieval_audio": {
+      "suite": "retrieval_audio",
+      "modality": "audio",
+      "metrics": {
+        "recall_at_5": {
+          "name": "recall_at_5",
           "value": 0.0,
           "n": 2,
           "notes": "",
           "sub": {}
         },
-        "audio.audio_wer": {
-          "name": "audio.audio_wer",
-          "value": NaN,
-          "n": 0,
-          "notes": "empty: no completed transcript/reference pairs",
+        "recall_at_10": {
+          "name": "recall_at_10",
+          "value": 0.0,
+          "n": 2,
+          "notes": "",
           "sub": {}
         },
-        "regression.current.recall_at_5": {
-          "name": "regression.current.recall_at_5",
+        "mrr": {
+          "name": "mrr",
+          "value": 0.0,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "ndcg_at_10": {
+          "name": "ndcg_at_10",
+          "value": 0.0,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "context_precision": {
+          "name": "context_precision",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: all queries had TODO relevant_chunk_ids",
+          "sub": {}
+        },
+        "hit_rate": {
+          "name": "hit_rate",
+          "value": 0.0,
+          "n": 2,
+          "notes": "Audio transcript chunks ranked below text chunks in hybrid retrieval",
+          "sub": {}
+        },
+        "retrieval_p50_sec": {
+          "name": "retrieval_p50_sec",
+          "value": 0.1683659553527832,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval_p95_sec": {
+          "name": "retrieval_p95_sec",
+          "value": 0.1683659553527832,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        }
+      }
+    },
+    "retrieval_video": {
+      "suite": "retrieval_video",
+      "modality": "video",
+      "metrics": {
+        "recall_at_5": {
+          "name": "recall_at_5",
+          "value": 0.16666666666666666,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "recall_at_10": {
+          "name": "recall_at_10",
+          "value": 0.3333333333333333,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "mrr": {
+          "name": "mrr",
+          "value": 0.3333333333333333,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "ndcg_at_10": {
+          "name": "ndcg_at_10",
+          "value": 0.23162118296603373,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "context_precision": {
+          "name": "context_precision",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: all queries had TODO relevant_chunk_ids",
+          "sub": {}
+        },
+        "hit_rate": {
+          "name": "hit_rate",
+          "value": 1.0,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval_p50_sec": {
+          "name": "retrieval_p50_sec",
+          "value": 0.165008544921875,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval_p95_sec": {
+          "name": "retrieval_p95_sec",
+          "value": 0.165008544921875,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        }
+      }
+    },
+    "generation_txt": {
+      "suite": "generation_txt",
+      "judge": "lexical_fallback",
+      "modality": "txt",
+      "metrics": {
+        "faithfulness": {
+          "name": "faithfulness",
+          "value": 0.5168048654501857,
+          "n": 14,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "answer_relevancy": {
+          "name": "answer_relevancy",
+          "value": 0.48604828294954344,
+          "n": 14,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "context_recall": {
+          "name": "context_recall",
+          "value": 0.6558174719163027,
+          "n": 14,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "hallucination_rate": {
+          "name": "hallucination_rate",
+          "value": 0.14285714285714285,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "template_leak_rate": {
+          "name": "template_leak_rate",
+          "value": 0.0,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "gen_p50_sec": {
+          "name": "gen_p50_sec",
+          "value": 0.031740665435791016,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "gen_p95_sec": {
+          "name": "gen_p95_sec",
+          "value": 16.559439420700073,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "gen_p99_sec": {
+          "name": "gen_p99_sec",
+          "value": 16.559439420700073,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        }
+      },
+      "errors": [],
+      "per_query": [
+        {
+          "id": "txt-0001",
+          "query": "What was Apple's total net sales in fiscal year 2023?",
+          "answer": "Apple's total net sales for fiscal year 2023 were $383.3 billion, as stated in [d09e9451e7654a3486daf5d1592a9524_apple_10k_2023_excerpt.txt].",
+          "scores": {
+            "faithfulness": 0.7777777777777778,
+            "answer_relevancy": 0.6363636363636364,
+            "context_recall": 1.0,
+            "template_leak": false
+          },
+          "latency": 0.10847234725952148
+        },
+        {
+          "id": "txt-0002",
+          "query": "What was Apple's Services revenue in FY2023?",
+          "answer": "Apple's Services revenue in FY2023 was $85.2 billion. [d09e9451e7654a3486daf5d1592a9524_apple_10k_2023_excerpt.txt].",
+          "scores": {
+            "faithfulness": 0.8333333333333334,
+            "answer_relevancy": 0.4166666666666667,
+            "context_recall": 1.0,
+            "template_leak": false
+          },
+          "latency": 0.03153061866760254
+        },
+        {
+          "id": "txt-0003",
+          "query": "What was Apple's gross margin percentage in fiscal year 2023?",
+          "answer": "Apple's gross margin percentage in fiscal year 2023 was 44.1%. [d09e9451e7654a3486daf5d1592a9524_apple_10k_2023_excerpt.txt].",
+          "scores": {
+            "faithfulness": 0.5714285714285714,
+            "answer_relevancy": 0.6666666666666666,
+            "context_recall": 0.6,
+            "template_leak": false
+          },
+          "latency": 0.031044721603393555
+        },
+        {
+          "id": "txt-0004",
+          "query": "How much did Apple spend on research and development in FY2023?",
+          "answer": "Apple invested $1.2 billion in employee training and development in fiscal 2023 [d09e9451e7654a3486daf5d1592a9524_apple_10k_2023_excerpt.txt]. However, the QUERY asked about research and development, ",
+          "scores": {
+            "faithfulness": 0.4444444444444444,
+            "answer_relevancy": 0.35,
+            "context_recall": 0.65,
+            "template_leak": false
+          },
+          "latency": 8.434431076049805
+        },
+        {
+          "id": "txt-0005",
+          "query": "What were Apple's total capital returns to shareholders in fiscal year 2023?",
+          "answer": "The provided documents do not contain the information needed to answer this question.",
+          "scores": {
+            "faithfulness": 0.0,
+            "answer_relevancy": 0.0,
+            "context_recall": 0.43478260869565216,
+            "template_leak": false
+          },
+          "latency": 15.953511476516724
+        },
+        {
+          "id": "txt-0006",
+          "query": "What was JPMorgan Chase's net income in 2023?",
+          "answer": "JPMorgan Chase reported net income of $49.1 billion in 2023 for its Corporate & Investment Bank segment [915789f508c240259e073d8ba98cb1ea_jpm_10k_2023.txt]. However, the annual report does not provide",
+          "scores": {
+            "faithfulness": 0.3181818181818182,
+            "answer_relevancy": 0.4375,
+            "context_recall": 0.625,
+            "template_leak": false
+          },
+          "latency": 16.559439420700073
+        },
+        {
+          "id": "txt-0007",
+          "query": "What was JPMorgan's return on tangible common equity in 2023?",
+          "answer": "JPMorgan Chase's return on tangible common equity in 2023 was $15.8 billion. [fda5d5d16f104e9c92351584c45f19f0_jpmorgan_10k_2023_excerpt.txt].",
+          "scores": {
+            "faithfulness": 0.5,
+            "answer_relevancy": 0.5714285714285714,
+            "context_recall": 0.5714285714285714,
+            "template_leak": false
+          },
+          "latency": 0.030996084213256836
+        },
+        {
+          "id": "txt-0008",
+          "query": "What was JPMorgan's Consumer & Community Banking net revenue in 2023?",
+          "answer": "JPMorgan's Consumer & Community Banking net revenue in 2023 was $70.0 billion [fda5d5d16f104e9c92351584c45f19f0_jpmorgan_10k_2023_excerpt.txt].",
+          "scores": {
+            "faithfulness": 0.8666666666666667,
+            "answer_relevancy": 0.6111111111111112,
+            "context_recall": 1.0,
+            "template_leak": false
+          },
+          "latency": 0.03052544593811035
+        },
+        {
+          "id": "txt-0009",
+          "query": "What was JPMorgan's net interest income in 2023 and what drove the increase?",
+          "answer": "JPMorgan's net interest income was $89.3 billion in 2023, driven by higher interest rates. The Federal Reserve raised rates by 525 basis points from March 2022 through July 2023 [fda5d5d16f104e9c92351",
+          "scores": {
+            "faithfulness": 0.7586206896551724,
+            "answer_relevancy": 0.8888888888888888,
+            "context_recall": 0.8888888888888888,
+            "template_leak": false
+          },
+          "latency": 0.03026413917541504
+        },
+        {
+          "id": "txt-0010",
+          "query": "What is JPMorgan's 2024 net interest income outlook?",
+          "answer": "The provided documents do not contain the information needed to answer this question.",
+          "scores": {
+            "faithfulness": 0.16666666666666666,
+            "answer_relevancy": 0.11764705882352941,
+            "context_recall": 0.5294117647058824,
+            "template_leak": false
+          },
+          "latency": 15.92765188217163
+        },
+        {
+          "id": "txt-0011",
+          "query": "What was Apple's iPhone revenue in FY2023 compared to total revenue?",
+          "answer": "Apple's iPhone revenue in FY2023 was $200.6 billion, which represented approximately 52.3% of the company's total revenue of $383.3 billion in that fiscal year. [d09e9451e7654a3486daf5d1592a9524_apple",
+          "scores": {
+            "faithfulness": 0.48148148148148145,
+            "answer_relevancy": 0.7,
+            "context_recall": 0.65,
+            "template_leak": false
+          },
+          "latency": 0.031740665435791016
+        },
+        {
+          "id": "txt-0012",
+          "query": "Compare Apple's Greater China revenue to Americas revenue in FY2023",
+          "answer": "Greater China net sales were $72.6 billion in fiscal year 2023, while Americas revenue was $162.6 billion. [b76b9ba3df1d4303907bb1f2b544ef9a_aapl_revenue_chart.jpg, d09e9451e7654a3486daf5d1592a9524_ap",
+          "scores": {
+            "faithfulness": 0.6666666666666666,
+            "answer_relevancy": 0.7142857142857143,
+            "context_recall": 0.7142857142857143,
+            "template_leak": false
+          },
+          "latency": 0.03154277801513672
+        },
+        {
+          "id": "txt-retrieval-miss-001",
+          "query": "What is JPMorgan's CET1 capital ratio and how does it compare to regulatory minimums?",
+          "answer": "JPMorgan Chase's CET1 capital ratio is not explicitly stated in the provided knowledge chunk. However, the chunk indicates that JPMorgan Chase is required to maintain a sufficient level of capital to ",
+          "scores": {
+            "faithfulness": 0.35,
+            "answer_relevancy": 0.29411764705882354,
+            "context_recall": 0.11764705882352941,
+            "template_leak": false
+          },
+          "latency": 0.03113555908203125
+        },
+        {
+          "id": "txt-halluc-guard-001",
+          "query": "What was Apple's net income per diluted share in FY2023?",
+          "answer": "Apple's net income per diluted share in FY2023 was $6.13. [d09e9451e7654a3486daf5d1592a9524_apple_10k_2023_excerpt.txt].",
+          "scores": {
+            "faithfulness": 0.5,
+            "answer_relevancy": 0.4,
+            "context_recall": 0.4,
+            "template_leak": false
+          },
+          "latency": 0.03178668022155762
+        }
+      ]
+    },
+    "generation_pdf": {
+      "suite": "generation_pdf",
+      "judge": "lexical_fallback",
+      "modality": "pdf",
+      "metrics": {
+        "faithfulness": {
+          "name": "faithfulness",
+          "value": 0.39791979949874684,
+          "n": 5,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "answer_relevancy": {
+          "name": "answer_relevancy",
+          "value": 0.1962689643251293,
+          "n": 5,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "context_recall": {
+          "name": "context_recall",
+          "value": 0.5010284568881971,
+          "n": 5,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "hallucination_rate": {
+          "name": "hallucination_rate",
+          "value": 0.4,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "template_leak_rate": {
+          "name": "template_leak_rate",
+          "value": 0.0,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "gen_p50_sec": {
+          "name": "gen_p50_sec",
+          "value": 0.10059952735900879,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "gen_p95_sec": {
+          "name": "gen_p95_sec",
+          "value": 17.361557245254517,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        }
+      },
+      "errors": []
+    },
+    "generation_docx": {
+      "suite": "generation_docx",
+      "judge": "lexical_fallback",
+      "modality": "docx",
+      "metrics": {
+        "faithfulness": {
+          "name": "faithfulness",
+          "value": 0.6140350877192983,
+          "n": 2,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "answer_relevancy": {
+          "name": "answer_relevancy",
+          "value": 0.4004329004329005,
+          "n": 2,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "context_recall": {
+          "name": "context_recall",
+          "value": 0.5,
+          "n": 2,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "hallucination_rate": {
+          "name": "hallucination_rate",
+          "value": 0.0,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "template_leak_rate": {
+          "name": "template_leak_rate",
+          "value": 0.0,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "gen_p50_sec": {
+          "name": "gen_p50_sec",
+          "value": 0.03246641159057617,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "gen_p95_sec": {
+          "name": "gen_p95_sec",
+          "value": 0.03246641159057617,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        }
+      },
+      "errors": []
+    },
+    "generation_xlsx": {
+      "suite": "generation_xlsx",
+      "judge": "lexical_fallback",
+      "modality": "xlsx",
+      "metrics": {
+        "faithfulness": {
+          "name": "faithfulness",
+          "value": 0.335042735042735,
+          "n": 3,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "answer_relevancy": {
+          "name": "answer_relevancy",
+          "value": 0.2611111111111111,
+          "n": 3,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "context_recall": {
+          "name": "context_recall",
+          "value": 0.5902576489533011,
+          "n": 3,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "hallucination_rate": {
+          "name": "hallucination_rate",
+          "value": 0.3333333333333333,
+          "n": 3,
+          "notes": "",
+          "sub": {}
+        },
+        "template_leak_rate": {
+          "name": "template_leak_rate",
+          "value": 0.0,
+          "n": 3,
+          "notes": "",
+          "sub": {}
+        },
+        "gen_p50_sec": {
+          "name": "gen_p50_sec",
+          "value": 0.10007596015930176,
+          "n": 3,
+          "notes": "",
+          "sub": {}
+        },
+        "gen_p95_sec": {
+          "name": "gen_p95_sec",
+          "value": 24.169490337371826,
+          "n": 3,
+          "notes": "",
+          "sub": {}
+        }
+      },
+      "errors": []
+    },
+    "generation_image": {
+      "suite": "generation_image",
+      "judge": "lexical_fallback",
+      "modality": "image",
+      "metrics": {
+        "faithfulness": {
+          "name": "faithfulness",
+          "value": 0.40749601275917063,
+          "n": 2,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "answer_relevancy": {
+          "name": "answer_relevancy",
+          "value": 0.6274038461538461,
+          "n": 2,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "context_recall": {
+          "name": "context_recall",
+          "value": 0.5144230769230769,
+          "n": 2,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "hallucination_rate": {
+          "name": "hallucination_rate",
+          "value": 0.0,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "template_leak_rate": {
+          "name": "template_leak_rate",
+          "value": 0.0,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "gen_p50_sec": {
+          "name": "gen_p50_sec",
+          "value": 0.03400444984436035,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "gen_p95_sec": {
+          "name": "gen_p95_sec",
+          "value": 0.03400444984436035,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        }
+      },
+      "errors": []
+    },
+    "generation_audio": {
+      "suite": "generation_audio",
+      "judge": "lexical_fallback",
+      "modality": "audio",
+      "metrics": {
+        "faithfulness": {
+          "name": "faithfulness",
+          "value": 0.3076923076923077,
+          "n": 2,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "answer_relevancy": {
+          "name": "answer_relevancy",
+          "value": 0.10344827586206896,
+          "n": 2,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "context_recall": {
+          "name": "context_recall",
+          "value": 0.3303670745272525,
+          "n": 2,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "hallucination_rate": {
+          "name": "hallucination_rate",
+          "value": 0.5,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "template_leak_rate": {
+          "name": "template_leak_rate",
+          "value": 0.0,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "gen_p50_sec": {
+          "name": "gen_p50_sec",
+          "value": 24.078370571136475,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "gen_p95_sec": {
+          "name": "gen_p95_sec",
+          "value": 24.078370571136475,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        }
+      },
+      "errors": []
+    },
+    "generation_video": {
+      "suite": "generation_video",
+      "judge": "lexical_fallback",
+      "modality": "video",
+      "metrics": {
+        "faithfulness": {
+          "name": "faithfulness",
+          "value": 0.5800000000000001,
+          "n": 2,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "answer_relevancy": {
+          "name": "answer_relevancy",
+          "value": 0.4044334975369458,
+          "n": 2,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "context_recall": {
+          "name": "context_recall",
+          "value": 0.4044334975369458,
+          "n": 2,
+          "notes": "lexical judge",
+          "sub": {}
+        },
+        "hallucination_rate": {
+          "name": "hallucination_rate",
+          "value": 0.0,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "template_leak_rate": {
+          "name": "template_leak_rate",
+          "value": 0.0,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "gen_p50_sec": {
+          "name": "gen_p50_sec",
+          "value": 0.030752897262573242,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        },
+        "gen_p95_sec": {
+          "name": "gen_p95_sec",
+          "value": 0.030752897262573242,
+          "n": 2,
+          "notes": "",
+          "sub": {}
+        }
+      },
+      "errors": []
+    },
+    "retrieval_txt": {
+      "suite": "retrieval_txt",
+      "modality": "txt",
+      "metrics": {
+        "recall_at_5": {
+          "name": "recall_at_5",
           "value": 0.4404761904761904,
           "n": 14,
           "notes": "",
           "sub": {}
         },
-        "regression.current.recall_at_10": {
-          "name": "regression.current.recall_at_10",
-          "value": 0.6785714285714286,
+        "recall_at_10": {
+          "name": "recall_at_10",
+          "value": 0.6547619047619048,
           "n": 14,
           "notes": "",
           "sub": {}
         },
-        "regression.current.mrr": {
-          "name": "regression.current.mrr",
+        "mrr": {
+          "name": "mrr",
           "value": 0.8149659863945579,
           "n": 14,
           "notes": "",
           "sub": {}
         },
-        "regression.current.ndcg_at_10": {
-          "name": "regression.current.ndcg_at_10",
-          "value": 0.6177996605844039,
+        "ndcg_at_10": {
+          "name": "ndcg_at_10",
+          "value": 0.6069424330259435,
           "n": 14,
           "notes": "",
           "sub": {}
         },
-        "regression.current.context_precision": {
-          "name": "regression.current.context_precision",
-          "value": 0.2159297052154195,
+        "context_precision": {
+          "name": "context_precision",
+          "value": 0.20158730158730157,
           "n": 14,
           "notes": "",
           "sub": {}
         },
-        "regression.current.hit_rate": {
-          "name": "regression.current.hit_rate",
+        "hit_rate": {
+          "name": "hit_rate",
           "value": 1.0,
           "n": 14,
           "notes": "",
           "sub": {}
         },
-        "regression.current.retrieval_p50_sec": {
-          "name": "regression.current.retrieval_p50_sec",
-          "value": 1.4794671535491943,
-          "n": 16,
-          "notes": "min=1.15s max=2.29s",
-          "sub": {}
-        },
-        "regression.current.retrieval_p95_sec": {
-          "name": "regression.current.retrieval_p95_sec",
-          "value": 2.2913636565208435,
+        "retrieval_p50_sec": {
+          "name": "retrieval_p50_sec",
+          "value": 0.1444,
           "n": 16,
           "notes": "",
           "sub": {}
         },
-        "regression.current.retrieval_p99_sec": {
-          "name": "regression.current.retrieval_p99_sec",
-          "value": 2.2931459307670594,
+        "retrieval_p95_sec": {
+          "name": "retrieval_p95_sec",
+          "value": 3.8389,
           "n": 16,
           "notes": "",
-          "sub": {}
-        },
-        "regression.baseline_path": {
-          "name": "regression.baseline_path",
-          "value": 0.0,
-          "n": 0,
-          "notes": "/home/ubuntu/multimodal-rag-assistant-1/app/eval/baselines/rag_report_v1.json",
           "sub": {}
         }
-      },
-      "breached": {
-        "e2e.server_unreachable": "FastAPI server not reachable at http://127.0.0.1:8000. Start the server with: uvicorn app.main:app before running the e2e suite.",
-        "audio.ingest_error_audio-0001": "NO_VALID_AUDIO_SEGMENTS",
-        "audio.ingest_error_audio-0002": "NO_VALID_AUDIO_SEGMENTS",
-        "video.runner_error": "unsupported operand type(s) for /: 'PosixPath' and 'NoneType'"
-      },
-      "duration_sec": 5253.132787704468,
-      "judge": null,
-      "dataset_version": null
+      }
     }
   }
 }

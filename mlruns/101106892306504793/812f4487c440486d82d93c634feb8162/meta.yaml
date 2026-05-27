@@ -1,0 +1,14 @@
+artifact_uri: /home/ubuntu/multimodal-rag-assistant-1/mlruns/101106892306504793/812f4487c440486d82d93c634feb8162/artifacts
+end_time: 1779847717484
+entry_point_name: ''
+experiment_id: '101106892306504793'
+lifecycle_stage: active
+run_id: 812f4487c440486d82d93c634feb8162
+run_name: monumental-hen-519
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1779847717456
+status: 3
+tags: []
+user_id: ubuntu
