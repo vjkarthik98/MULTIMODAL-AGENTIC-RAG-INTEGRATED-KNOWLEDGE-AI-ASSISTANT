@@ -1,0 +1,14 @@
+artifact_uri: /home/ubuntu/multimodal-rag-assistant-1/mlruns/101106892306504793/dc414c9c6ce64aa4a8e67614b6a3b8d0/artifacts
+end_time: 1779846488134
+entry_point_name: ''
+experiment_id: '101106892306504793'
+lifecycle_stage: active
+run_id: dc414c9c6ce64aa4a8e67614b6a3b8d0
+run_name: blushing-bird-63
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1779846488100
+status: 3
+tags: []
+user_id: ubuntu

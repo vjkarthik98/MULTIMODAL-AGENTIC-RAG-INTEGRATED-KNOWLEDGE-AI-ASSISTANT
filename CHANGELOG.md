@@ -418,3 +418,37 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Embedding cache key drift across modalities
 - Empty-context path now raises `EMPTY_CONTEXT_NO_DOCUMENTS_RETRIEVED` instead of silent stub
 
+## [v0.22.0] - Evaluation Harness & RAG Quality Metrics
+
+### Added
+- Eval CLI (`python -m app.eval.run --suite <name>`) with exit-code gate (0=pass, 1=breach, 2=infra error)
+- 54 hand-curated gold triples across all 7 modalities (TXT/PDF/DOCX/XLSX/IMAGE/AUDIO/VIDEO)
+- Real-world finance corpus: SEC 10-K filings, Berkshire letter, FRED macro data, earnings call MP3, CNBC MP4
+- Retrieval metrics: recall@k, MRR, nDCG@10, context_precision, hit_rate against real `Retriever.retrieval()`
+- Generation metrics: faithfulness, answer_relevancy, context_recall, template_leak_rate via lexical judge
+- Hallucination detector: ungrounded-claim rate reported per suite, per modality
+- Routing benchmark: route_accuracy + hybrid_with_web_rate over 12 labelled queries
+- MLflow file-backend tracking: git_sha, dataset_version, all metrics logged per run
+- Committed baseline (`baselines/rag_report_v1.json`) — regressions show in PR diffs
+- Regression runner: diffs current run vs baseline, flags drops > 5% tolerance
+- Phase 31 stubs: `drift_detection.md`, `online_eval.md`, `human_eval.md`
+
+### Improved
+- HTTP judge routing (`gguf_judge.py`) — eval calls live server instead of loading second GGUF, preventing T4 VRAM conflict
+- `model_registry.ensure_for_query()` — skips LLM warmup when `EVAL_SKIP_LLM_WARMUP=true`
+- All 9 gold JSONL files — chunk IDs kept in sync with corpus re-ingest via scroll-based hash discovery
+- Modality-by-modality eval execution — prevents GPU stress and server crashes during long runs
+
+### Fixed
+- `clip_text_embedder._prepare_texts()` — `KeyError: 'language'` on SigLIP text embedding path
+- Gold chunk ID staleness — SHA-256 hashes updated across all modalities after fresh ingest
+
+### Baseline Metrics (v3 — real corpus, lexical fallback judge)
+- TXT retrieval hit@10: 1.000 · MRR: 0.815 · faithfulness: 0.517 · hallucination: 14%
+- PDF retrieval hit@10: 1.000 · MRR: 0.547 · faithfulness: 0.398 · hallucination: 40%
+- DOCX retrieval hit@10: 1.000 · MRR: 0.750 · faithfulness: 0.614 · hallucination: 0%
+- XLSX retrieval hit@10: 0.667 · MRR: 0.667 · faithfulness: 0.335 · hallucination: 33%
+- IMAGE retrieval hit@10: 1.000 · MRR: 0.667 · faithfulness: 0.408 · hallucination: 0%
+- AUDIO retrieval hit@10: 0.000 · MRR: 0.000 · faithfulness: 0.308 · hallucination: 50%
+- VIDEO retrieval hit@10: 1.000 · MRR: 0.333 · faithfulness: 0.580 · hallucination: 0%
+- Routing accuracy: 0.750 (threshold 0.917 — breach logged for Phase 26)
