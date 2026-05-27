@@ -497,7 +497,4 @@ The format follows Keep a Changelog and Semantic Versioning.
 - OWASP LLM Top 10 (2025): **10 / 10 threats addressed**
 - Test suite: **257 passed, 7 skipped, 0 failures**
 
-### Known Gaps (Phase 27+)
-- Jailbreak Tier 2 semantic corpus: 0 examples loaded (TextEmbedder init signature mismatch — Phase 27)
-- Rate limiter is in-process only; Redis upgrade needed for multi-instance deploy (Phase 30)
-- Whisper audio transcript path not yet sanitized (low risk — Phase 27)
+
