@@ -124,6 +124,8 @@ python-magic>=0.4.14
 bleach>=6.1
 presidio-analyzer>=2.2
 presidio-anonymizer>=2.2
+spacy>=3.7                  # Presidio NLP engine (Phase 26 — PII detection)
+# After install, download the model:  python -m spacy download en_core_web_lg
 pyclamd>=0.4.0
 
 
@@ -150,7 +152,7 @@ PyYAML>=6.0
 # DEV / TEST (install with: pip install -r requirements-dev.txt)
 # Listed here for reference only — not installed in production
 pytest>=8.1
-pytest-asyncio>=0.23
+pytest-asyncio>=0.23       # Phase 26 guardrails test suite uses asyncio fixtures
 pytest-cov>=5.0
 black>=24.3
 ruff>=0.4
