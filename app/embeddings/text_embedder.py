@@ -109,22 +109,9 @@ def _sanitize(text: str) -> Optional[str]:
     if not text:
         return None
 
-    # PROMPT INJECTION SANITIZATION — SECTION 5
-    _INJECTION_PATTERNS = [
-        "ignore previous instructions",
-        "ignore all instructions",
-        "disregard the above",
-        "forget everything",
-        "you are now",
-        "act as",
-        "jailbreak",
-    ]
-    lower = text.lower()
-    for pattern in _INJECTION_PATTERNS:
-        if pattern in lower:
-            idx = lower.find(pattern)
-            text = text[:idx].strip()
-            break
+    # PROMPT INJECTION SANITIZATION — delegates to unified guardrail (Phase 26)
+    from app.guardrails.input_guard import sanitize as _guard_sanitize
+    text = _guard_sanitize(text, surface="text_embedder") or text
 
     if len(text) > settings.MAX_PROMPT_CHARS:
         text = text[:settings.MAX_PROMPT_CHARS]

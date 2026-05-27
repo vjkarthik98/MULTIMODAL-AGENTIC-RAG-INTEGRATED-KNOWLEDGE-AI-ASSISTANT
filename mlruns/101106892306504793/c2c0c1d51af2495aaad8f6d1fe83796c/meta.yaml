@@ -1,0 +1,14 @@
+artifact_uri: /home/ubuntu/multimodal-rag-assistant-1/mlruns/101106892306504793/c2c0c1d51af2495aaad8f6d1fe83796c/artifacts
+end_time: 1779881241056
+entry_point_name: ''
+experiment_id: '101106892306504793'
+lifecycle_stage: active
+run_id: c2c0c1d51af2495aaad8f6d1fe83796c
+run_name: serious-sloth-961
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1779881241024
+status: 3
+tags: []
+user_id: ubuntu

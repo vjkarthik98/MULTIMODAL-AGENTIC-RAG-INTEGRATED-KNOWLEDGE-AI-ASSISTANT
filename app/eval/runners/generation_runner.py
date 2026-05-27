@@ -88,8 +88,10 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
         })
 
     if eval_rows:
-        # Generation metrics (Ragas + GGUF judge, lexical fallback)
-        gen_metrics = compute_generation_metrics(eval_rows, prefer_ragas=True)
+        # Generation metrics — prefer_ragas=False when server not running (Phase 26 regression)
+        import os as _os
+        _prefer_ragas = _os.environ.get("EVAL_PREFER_RAGAS", "true").lower() == "true"
+        gen_metrics = compute_generation_metrics(eval_rows, prefer_ragas=_prefer_ragas)
         for m in gen_metrics.values():
             result.add(m)
 

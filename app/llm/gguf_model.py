@@ -182,17 +182,7 @@ _STRIP_PREFIXES = [
     "ASSISTANT:",
 ]
 
-# PROMPT INJECTION PATTERNS — SECTION 5
-
-_INJECTION_PATTERNS = [
-    "ignore previous instructions",
-    "ignore all instructions",
-    "disregard the above",
-    "forget everything",
-    "you are now",
-    "act as",
-    "jailbreak",
-]
+# PROMPT INJECTION PATTERNS — consolidated into app/guardrails/policies.yaml (Phase 26)
 
 
 # GGUF MODEL CLASS
@@ -226,20 +216,14 @@ class GGUFModel:
         text = text.lstrip("\ufeff\ufffe")
         return " ".join(text.strip().split())
 
-    # PROMPT INJECTION SANITIZATION — SECTION 5
+    # PROMPT INJECTION SANITIZATION — delegates to unified guardrail (Phase 26)
 
     def _sanitize_prompt(self, prompt: str) -> str:
-        lower = prompt.lower()
-        for pattern in _INJECTION_PATTERNS:
-            if pattern in lower:
-                idx    = lower.find(pattern)
-                prompt = prompt[:idx].strip()
-                logger.warning(
-                    event="gguf_prompt_injection_stripped",
-                    pattern=pattern,
-                )
-                break
-        return prompt
+        from app.guardrails.input_guard import sanitize as _guard_sanitize
+        cleaned = _guard_sanitize(prompt, surface="gguf_model")
+        if cleaned != prompt:
+            logger.warning(event="gguf_prompt_injection_stripped")
+        return cleaned
 
     # CLEAN OUTPUT
 

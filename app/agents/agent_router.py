@@ -51,7 +51,7 @@ def _get_semaphore() -> asyncio.Semaphore:
 
 # HARD RULE KEYWORD SETS
 _RECENT_WORDS     = {"latest", "today", "news", "recent", "update", "current", "now", "live"}
-_MEMORY_WORDS     = {"earlier", "previous", "last time", "we discussed", "you said", "before"}
+_MEMORY_WORDS     = {"earlier", "previous", "last time", "we discussed", "you said", "before", "you mentioned", "earlier you"}
 _COMPLEX_KEYWORDS = {"compare", "difference", "process", "steps", "vs", "versus", "explain"}
 _REASONING_WORDS  = {"why", "how", "explain", "reason", "cause", "because"}
 _MULTIMODAL_WORDS = {"image", "video", "diagram", "chart", "audio", "photo", "picture", "figure"}
@@ -68,28 +68,12 @@ def _normalize(query: str) -> str:
     return " ".join(query.strip().split())
 
 
-# INJECTION PATTERN DETECTION
-
-_INJECTION_PATTERNS = [
-    "ignore previous instructions",
-    "ignore all instructions",
-    "disregard the above",
-    "forget everything",
-    "you are now",
-    "act as",
-    "jailbreak",
-    "override instructions",
-    "new instructions",
-    "system prompt",
-    "developer mode",
-    "bypass",
-    "admin override",
-]
-
+# INJECTION PATTERN DETECTION — delegates to unified guardrail (Issue A fix)
 
 def _detect_injection(query: str) -> bool:
-    lower = query.lower()
-    return any(p in lower for p in _INJECTION_PATTERNS)
+    from app.guardrails.input_guard import _check_injection, _load_policy
+    _load_policy()
+    return _check_injection(query) is not None
 
 
 class AgentRouter:
@@ -240,7 +224,10 @@ class AgentRouter:
 
         return {
             "is_recent":           bool(tokens & _RECENT_WORDS),
-            "is_memory":           any(w in q for w in _MEMORY_WORDS),
+            "is_memory":           any(
+                re.search(r"\b" + re.escape(w) + r"\b", q)
+                for w in _MEMORY_WORDS
+            ),
             "is_complex":          (
                 len(tokens) > settings.DECOMPOSITION_MIN_WORDS or
                 bool(tokens & _COMPLEX_KEYWORDS)

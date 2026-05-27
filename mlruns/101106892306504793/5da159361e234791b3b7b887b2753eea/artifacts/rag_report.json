@@ -1,0 +1,23 @@
+{
+  "generated_at": "2026-05-27T12:26:05Z",
+  "git_sha": "ce24c17",
+  "weaken_spec": null,
+  "suites": {
+    "audio": {
+      "suite": "audio",
+      "metrics": {
+        "audio_wer": {
+          "name": "audio_wer",
+          "value": 1.0,
+          "n": 2,
+          "notes": "min=1.000 max=1.000",
+          "sub": {}
+        }
+      },
+      "breached": {},
+      "duration_sec": 58.38652968406677,
+      "judge": null,
+      "dataset_version": null
+    }
+  }
+}

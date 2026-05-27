@@ -747,7 +747,14 @@ def ingest(
         documents: List[IngestedDocument] = []
 
         # CAPTION DOCUMENT
-        caption_clean = sanitize_prompt_injection(redact_pii(normalize_text(caption)))
+        # PRE-04/POST-03: Use unified guardrail sanitizer (Phase 26) instead of
+        # the local pattern list — covers all injection variants including homoglyphs.
+        _norm_caption = redact_pii(normalize_text(caption))
+        try:
+            from app.guardrails.input_guard import sanitize as _guard_sanitize
+            caption_clean = _guard_sanitize(_norm_caption, surface="image_ingest")
+        except Exception:
+            caption_clean = sanitize_prompt_injection(_norm_caption)
         cap_conf = _compute_caption_confidence(caption_clean) if caption_clean != "[Image: no caption generated]" else 0.0
         documents.append(
             IngestedDocument(
