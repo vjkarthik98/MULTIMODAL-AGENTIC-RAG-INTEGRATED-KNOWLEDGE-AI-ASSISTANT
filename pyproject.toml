@@ -5,8 +5,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "multimodal-rag-assistant"
-version         = "0.22.0"
-description     = "Production Multimodal RAG + Agentic AI System — Phase 24"
+version         = "0.23.0"
+description     = "Production Multimodal RAG + Agentic AI System — Phase 26"
 readme          = "README.md"
 requires-python = ">=3.10"
 
@@ -92,6 +92,21 @@ dependencies = [
 
     # SERIALIZATION
     "orjson>=3.9",
+
+    # OBSERVABILITY
+    "structlog>=24.1",
+    "prometheus-client>=0.20",
+    "opentelemetry-api>=1.24",
+    "opentelemetry-sdk>=1.24",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.24",
+
+    # SECURITY / GUARDRAILS — Phase 26
+    "presidio-analyzer>=2.2",
+    "presidio-anonymizer>=2.2",
+    "spacy>=3.7",               # Presidio NLP engine; run: python -m spacy download en_core_web_lg
+    "python-magic>=0.4.14",
+    "bleach>=6.1",
+    "PyYAML>=6.0",
 
     # SYSTEM
     "psutil>=5.9",
@@ -198,6 +213,7 @@ markers = [
     "integration: tests requiring live services (Qdrant, Redis, Mongo)",
     "slow: tests that take > 5 seconds",
     "multimodal: tests covering image/audio/video pipelines",
+    "guardrails: Phase 26 security and injection defence tests",
 ]
 
 asyncio_mode = "auto"
@@ -231,6 +247,10 @@ module = [
     "tavily.*",
     "upstash_redis.*",
     "langfuse.*",
+    "presidio_analyzer.*",
+    "presidio_anonymizer.*",
+    "spacy.*",
+    "yaml.*",
 ]
 ignore_missing_imports = true
 
