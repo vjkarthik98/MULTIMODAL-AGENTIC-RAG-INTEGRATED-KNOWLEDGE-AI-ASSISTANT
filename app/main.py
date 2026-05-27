@@ -128,6 +128,24 @@ async def _warmup_models_async() -> None:
     except Exception as e:
         logger.warning(event="startup_warmup_failed", error=str(e))
 
+    # Guardrail warm-up — pre-initializes Presidio PII engine + jailbreak
+    # corpus embeddings so first request doesn't pay cold-start latency.
+    try:
+        import asyncio as _asyncio
+        loop = _asyncio.get_running_loop()
+        await loop.run_in_executor(None, _warmup_guardrails)
+    except Exception as e:
+        logger.warning(event="guardrail_warmup_failed", error=str(e))
+
+
+def _warmup_guardrails() -> None:
+    try:
+        from app.guardrails import warm_up as guardrail_warm_up
+        guardrail_warm_up()
+        logger.info(event="guardrail_warmup_complete")
+    except Exception as e:
+        logger.warning(event="guardrail_warmup_failed", error=str(e))
+
 
 # AUDIT LOG SETUP — SECTION 5
 

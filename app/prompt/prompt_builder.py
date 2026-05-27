@@ -43,30 +43,7 @@ _MEM_RATIO   = 0.20
 _CTX_RATIO   = 0.55
 _QUERY_MAX   = 0.15
 
-# PROMPT INJECTION PATTERNS — COMPREHENSIVE LIST
-_INJECTION_PATTERNS = [
-    "ignore previous instructions",
-    "ignore all instructions",
-    "disregard the above",
-    "forget everything",
-    "you are now",
-    "act as",
-    "jailbreak",
-    "override instructions",
-    "new instructions",
-    "system prompt",
-    "pretend you are",
-    "roleplay as",
-    "simulate being",
-    "your true self",
-    "developer mode",
-    "dan mode",
-    "ignore the guidelines",
-    "bypass",
-    "sudo",
-    "admin override",
-    "unlock mode",
-]
+# PROMPT INJECTION PATTERNS — consolidated into app/guardrails/policies.yaml (Phase 26)
 
 # STRUCTURED KEYWORDS
 _STRUCTURED_KEYWORDS = [
@@ -111,29 +88,17 @@ def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-# PROMPT INJECTION DETECTION AND SANITIZATION
+# PROMPT INJECTION DETECTION AND SANITIZATION — delegates to unified guardrail (Phase 26)
 
 def _sanitize_query(query: str) -> Tuple[str, bool]:
-    """
-    RETURNS (SANITIZED_QUERY, WAS_INJECTION_DETECTED).
-    STRIPS INJECTION PATTERNS AND TRUNCATES AT FIRST MATCH.
-    """
-    lower    = query.lower()
-    detected = False
-
-    for pattern in _INJECTION_PATTERNS:
-        if pattern in lower:
-            _injection_detections.inc()
-            detected = True
-            logger.warning(
-                "prompt_injection_detected",
-                pattern=pattern,
-                query_prefix=query[:80],
-            )
-            idx   = query.lower().find(pattern)
-            query = query[:idx].strip()
-            break
-
+    """Returns (sanitized_query, was_injection_detected)."""
+    from app.guardrails.input_guard import sanitize as _guard_sanitize
+    original = query
+    query = _guard_sanitize(query, surface="prompt_builder")
+    detected = query != original
+    if detected:
+        _injection_detections.inc()
+        logger.warning("prompt_injection_detected", query_prefix=original[:80])
     return query, detected
 
 

@@ -245,29 +245,11 @@ def _malware_scan(file_path: str) -> bool:
         return True
 
 
-# PROMPT INJECTION CHECK
+# PROMPT INJECTION CHECK — delegates to unified guardrail (Phase 26)
 
-def _check_prompt_injection(query: str) -> str:
-    patterns = getattr(settings, "PROMPT_INJECTION_PATTERNS", [
-        "ignore previous instructions",
-        "ignore all instructions",
-        "disregard the above",
-        "forget everything",
-        "you are now",
-        "act as",
-        "jailbreak",
-    ])
-    lower = query.lower()
-    for pattern in patterns:
-        if pattern in lower:
-            logger.warning(
-                event="prompt_injection_detected",
-                pattern=pattern,
-            )
-            idx = lower.find(pattern)
-            query = query[:idx].strip()
-            break
-    return query
+def _check_prompt_injection(query: str, correlation_id: str = "", session_id: str = "") -> str:
+    from app.guardrails.input_guard import sanitize as _guard_sanitize
+    return _guard_sanitize(query, surface="api", session_id=session_id, correlation_id=correlation_id)
 
 
 # CLEANUP TEMP FILE

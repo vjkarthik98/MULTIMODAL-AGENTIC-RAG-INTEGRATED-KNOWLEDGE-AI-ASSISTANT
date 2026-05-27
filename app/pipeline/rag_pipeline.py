@@ -98,28 +98,11 @@ def _normalize(query: str) -> str:
     return " ".join(query.strip().split())
 
 
-# PROMPT INJECTION SANITIZATION — SECTION 5
-
-_INJECTION_PATTERNS = [
-    "ignore previous instructions",
-    "ignore all instructions",
-    "disregard the above",
-    "forget everything",
-    "you are now",
-    "act as",
-    "jailbreak",
-]
-
+# PROMPT INJECTION SANITIZATION — delegates to unified guardrail (Phase 26)
 
 def _sanitize(query: str) -> str:
-    lower = query.lower()
-    for pattern in _INJECTION_PATTERNS:
-        if pattern in lower:
-            idx   = lower.find(pattern)
-            query = query[:idx].strip()
-            logger.warning(event="rag_injection_stripped", pattern=pattern)
-            break
-    return query
+    from app.guardrails.input_guard import sanitize as _guard_sanitize
+    return _guard_sanitize(query, surface="rag_pipeline")
 
 
 # HASH FOR DEDUP
@@ -559,6 +542,15 @@ class RAGPipeline:
                 )
             _record_stage("prompt_build", round(time.time() - t_prompt, 3))
 
+            # PII PROMPT STRIP — Phase 26 P1: scrub PII from prompt before LLM sees it
+            try:
+                from app.guardrails.pii import strip_pii_from_prompt
+                prompt, _pii_stripped = strip_pii_from_prompt(prompt)
+                if _pii_stripped:
+                    logger.info(event="rag_pipeline_pii_stripped_from_prompt", session_id=session_id)
+            except Exception as _pii_err:
+                logger.warning(event="rag_pipeline_pii_prompt_strip_failed", error=str(_pii_err))
+
             # LLM GENERATE — SECTION 4.6 FALLBACK CHAIN
             t_llm  = time.time()
             answer = ""
@@ -591,6 +583,29 @@ class RAGPipeline:
             _record_stage("llm", llm_latency)
 
             answer = (answer or "").strip() or "I don't know based on available data."
+
+            # OUTPUT GUARD — Phase 26: scrub artifacts, citations, PII before memory write
+            ctx_texts = [d.page_content if hasattr(d, "page_content") else str(d) for d in docs]
+            try:
+                from app.guardrails.output_guard import check as _output_guard_check
+                _og = _output_guard_check(
+                    answer,
+                    context_chunks=ctx_texts,
+                    sources=sources,
+                    session_id=session_id,
+                    correlation_id=trace_id,
+                )
+                answer = _og.text
+                if _og.hallucination_warning:
+                    logger.warning(event="rag_pipeline_hallucination_flagged", session_id=session_id)
+                if _og.fabricated_citations:
+                    logger.warning(
+                        event="rag_pipeline_fabricated_citations_removed",
+                        citations=_og.fabricated_citations[:5],
+                        session_id=session_id,
+                    )
+            except Exception as _og_err:
+                logger.warning(event="rag_pipeline_output_guard_failed", error=str(_og_err), session_id=session_id)
 
             # MEMORY WRITE — SECTION 4.7
             self._store_memory(session_id, query, answer)
@@ -690,11 +705,22 @@ class RAGPipeline:
                     session_id=session_id,
                 ):
                     collected_tokens.append(token)
-                    yield token
 
-                # MEMORY WRITE AFTER STREAM COMPLETES
+                # OUTPUT GUARD — Phase 26 P1b: scrub full answer before yielding.
+                # Cannot scrub mid-stream token-by-token (PII/citations span tokens),
+                # so we collect all tokens, guard the complete answer, then yield.
                 answer = "".join(collected_tokens).strip()
+                try:
+                    from app.guardrails.output_guard import check as _og_check
+                    _sources = [{"filename": d.get("source", "") if isinstance(d, dict) else ""} for d in docs]
+                    _ctx = [d.page_content if hasattr(d, "page_content") else str(d) for d in docs]
+                    _og = _og_check(answer, context_chunks=_ctx, sources=_sources, session_id=session_id)
+                    answer = _og.text
+                except Exception as _og_err:
+                    logger.warning(event="rag_stream_output_guard_failed", error=str(_og_err))
+
                 if answer:
+                    yield answer
                     self._store_memory(session_id, query, answer)
 
             except Exception as e:

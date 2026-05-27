@@ -70,7 +70,9 @@ def run_video_suite(cfg: EvalConfig) -> SuiteResult:
         if not has_gold_caps and not has_gold_transcript:
             continue
 
-        source_file = row.get("source_file", "")
+        source_file = row.get("source_file") or ""
+        if not source_file:
+            continue
         video_path = raw_corpus_dir / source_file
         if not video_path.exists():
             result.breached[f"missing_file_{row['id']}"] = str(video_path)
@@ -113,7 +115,9 @@ def run_video_suite(cfg: EvalConfig) -> SuiteResult:
     # BLIP repetition detection (P1-9) — run on ALL captions regardless of gold
     all_captions_flat: List[str] = []
     for row in gold_rows:
-        source_file = row.get("source_file", "")
+        source_file = row.get("source_file") or ""
+        if not source_file:
+            continue
         video_path = raw_corpus_dir / source_file
         if video_path.exists():
             session_id = f"{cfg.session_prefix}_video_rep_{row['id']}"

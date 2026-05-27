@@ -172,32 +172,17 @@ def _sanitize_text(text: str) -> str:
 
 # PROMPT INJECTION GUARD
 
-_INJECTION_PATTERNS = [
-    "ignore previous instructions",
-    "ignore all instructions",
-    "disregard the above",
-    "forget everything",
-    "you are now",
-    "act as ",
-    "jailbreak",
-    "system prompt",
-    "new instructions",
-]
-
-
 def _sanitize_injection(text: str) -> str:
-    """Strip prompt injection patterns before embedding."""
-    lower = text.lower()
-    for pattern in _INJECTION_PATTERNS:
-        if pattern in lower:
-            idx  = lower.find(pattern)
-            text = text[:idx].strip()
-            lower = text.lower()
-            logger.warning(
-                event="siglip_text_injection_pattern_stripped",
-                pattern=pattern,
-            )
-    return text
+    """Strip prompt injection patterns before embedding — delegates to unified guardrail (Phase 26)."""
+    from app.guardrails.input_guard import sanitize as _guard_sanitize
+    cleaned = _guard_sanitize(text, surface="clip_text_embedder")
+    if cleaned != text:
+        logger.warning(
+            event="siglip_text_injection_pattern_stripped",
+            original_len=len(text),
+            cleaned_len=len(cleaned),
+        )
+    return cleaned
 
 
 # TOKEN ESTIMATE (WORD-BASED PROXY)

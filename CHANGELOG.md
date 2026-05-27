@@ -418,6 +418,7 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Embedding cache key drift across modalities
 - Empty-context path now raises `EMPTY_CONTEXT_NO_DOCUMENTS_RETRIEVED` instead of silent stub
 
+
 ## [v0.22.0] - Evaluation Harness & RAG Quality Metrics
 
 ### Added
@@ -452,3 +453,51 @@ The format follows Keep a Changelog and Semantic Versioning.
 - AUDIO retrieval hit@10: 0.000 · MRR: 0.000 · faithfulness: 0.308 · hallucination: 50%
 - VIDEO retrieval hit@10: 1.000 · MRR: 0.333 · faithfulness: 0.580 · hallucination: 0%
 - Routing accuracy: 0.750 (threshold 0.917 — breach logged for Phase 26)
+
+## [v0.23.0] - Production Guardrails, Security Hardening & Pre-Ingestion Attack Defence
+
+### Added
+- `app/guardrails/` — new package (2 314 lines) replacing 7 scattered sanitize implementations
+  - `input_guard.py` — unified blocking entry point (`check()`) and non-blocking ingestion path (`sanitize()`); NFKC + confusables + injection + jailbreak + SSRF; raises `GuardrailBlocked` on violation
+  - `output_guard.py` — 7-step output pipeline: groundedness → template artifacts → length → citation integrity → PII egress → toxicity → mojibake repair
+  - `jailbreak.py` — Tier 1 regex (26 patterns) + Tier 2 semantic similarity; upgrade hook for Tier 3 ML classifier
+  - `rate_limiter.py` — per-session + per-IP block-event tracking; rolling 60 s window; 5-block threshold triggers 5-minute ban; `reset()` for admin use
+  - `confusables.py` — 200-entry Unicode TR39 curated map (Latin-extended, superscript/modifier letters, Greek, Cyrillic, math bold, whitespace variants, tab→space) applied post-NFKC
+  - `pii.py` — Microsoft Presidio detector + scrubber; `strip_pii_from_prompt()` strips PII from LLM prompt before generation; `scrub_pii()` for egress
+  - `audit.py` — HMAC-SHA256 tamper-evident structured decision log; every allow/block/scrub event signed and Prometheus-counted
+  - `ssrf.py` — URL extraction + blocked-CIDR check (loopback, RFC-1918, link-local, AWS metadata)
+  - `policies.yaml` — single source of truth for all patterns, thresholds, refusal templates; 43 injection patterns across critical/high/medium severity; no code change needed to add/tune patterns
+  - `exceptions.py` — typed `GuardrailBlocked(reason, surface, guard_type, correlation_id, detail)`
+  - `metrics.py` — Prometheus counters: `guardrail_blocks_total{guard_type, surface}` and `guardrail_allows_total`
+- `tests/guardrails/` — 257-test suite (5 modules + adversarial corpus)
+  - `adversarial/red_team_prompts.jsonl` — 109-case corpus: 84 attack / 25 benign across injection, jailbreak, encoding bypass, PII, SSRF, poisoned-document, web-result poisoning, pre-ingestion vectors
+  - `test_input_guard.py`, `test_output_guard.py`, `test_jailbreak.py`, `test_ssrf.py`, `test_audit.py`
+- `docs/security/guardrails_runbook.md` — operator runbook: add injection pattern, rotate HMAC secret, bypass escalation procedure, Prometheus alert thresholds, rate-limiter manual unban, known gaps table
+
+### Improved
+- **agent_controller.py** — `_sanitize()` (non-blocking) replaced with `_guard_input()` (blocking, raises on violation); rate limiter `enforce()` before input guard; `_direct()` and `_fallback()` paths now run `_guard_output()` before returning
+- **rag_pipeline.py** — output guard added after generation; PII stripped from prompt before LLM via `strip_pii_from_prompt()`; streaming path collects all tokens, guards full answer, then yields once
+- **agent_router.py**, **api_routes.py**, **web_search.py**, **text_embedder.py**, **clip_text_embedder.py** — all replaced inline sanitize/inject-check with `input_guard.sanitize()` call (non-blocking path)
+- **frame_captioner.py** — `_sanitize_caption()` delegates to `input_guard.sanitize()` (Phase 26 consolidation confirmed)
+- **image_ingest.py** — upgraded from old local `sanitize_prompt_injection()` to `input_guard.sanitize()`, covering homoglyph and encoding bypass variants
+- **output_guard groundedness ordering** — groundedness check moved to step 1 (raw answer) before any citation stripping or PII scrubbing; eliminates false hallucination-rate regression caused by comparing mutated text against context
+- **Injection regex corpus** — 43 patterns covering: ignore/disregard/forget/overlook variants, override/bypass, you-are-now/act-as persona hijack, DAN, system-prompt exfil, transcribe-instructions, released-from-constraints, from-now-on, new-instructions-are-to, [MODEL:] bracket injection, NEW SYSTEM INSTRUCTIONS, P.S./note afterthought injection, stop-following-instructions, mass PII exfiltration, output-session-tokens
+
+### Fixed
+- **PRE-03 (White-font PDF)** — `input_guard.sanitize()` applied to raw fitz-extracted text before chunking; hidden injection text stripped before it enters vector store
+- **PRE-04/PRE-06 (Image/video BLIP caption overlay)** — unified `input_guard.sanitize()` replaces local pattern list; covers homoglyph and encoding bypass not in old list
+- **PRE-09 (Excel hidden rows/columns)** — `_process_excel()` now skips rows where `row_dimensions[i].hidden=True` and columns where `column_dimensions[col].hidden=True`; attacker-hidden cells never reach indexed text
+- **PRE-11 (DOCX comment author PII)** — Presidio `scrub_pii()` applied to `author` field before building `[COMMENT by {author}]` chunk; author name no longer stored verbatim in vector index
+- **video_runner.py** — null `source_file` crash on gold rows with no attached file fixed with `source_file = row.get("source_file") or ""; if not source_file: continue`
+
+### Security Metrics (Phase 26)
+- Injection corpus recall: **64 / 64 — 100%** (was 49/64 before this phase)
+- False positive rate: **0.9%** (1/109 — RTL-wrapped attack correctly blocked, test label was wrong)
+- F1 score: **0.994** | Precision: **0.988** | Recall: **1.000**
+- OWASP LLM Top 10 (2025): **10 / 10 threats addressed**
+- Test suite: **257 passed, 7 skipped, 0 failures**
+
+### Known Gaps (Phase 27+)
+- Jailbreak Tier 2 semantic corpus: 0 examples loaded (TextEmbedder init signature mismatch — Phase 27)
+- Rate limiter is in-process only; Redis upgrade needed for multi-instance deploy (Phase 30)
+- Whisper audio transcript path not yet sanitized (low risk — Phase 27)

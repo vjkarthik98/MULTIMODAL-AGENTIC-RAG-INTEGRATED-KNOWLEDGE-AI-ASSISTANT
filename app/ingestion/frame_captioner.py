@@ -42,16 +42,7 @@ _CAPTION_MAX_WORDS  = 50
 _CAPTION_MIN_WORDS  = 5
 _CAPTION_MIN_CHARS  = 10
 
-# PROMPT INJECTION PATTERNS TO STRIP — SECTION 5
-_INJECTION_PATTERNS = [
-    "ignore previous instructions",
-    "ignore all instructions",
-    "disregard the above",
-    "forget everything",
-    "you are now",
-    "act as",
-    "jailbreak",
-]
+# PROMPT INJECTION — delegated to unified guardrail (Phase 26)
 
 # SOLID COLOR DETECTION
 _SOLID_COLOR_VARIANCE_THRESHOLD = 5.0
@@ -105,17 +96,11 @@ def _remove_repetition(text: str) -> str:
     return text
 
 
-# PROMPT INJECTION SANITIZATION — SECTION 5
+# PROMPT INJECTION SANITIZATION — delegates to unified guardrail (Phase 26)
 
 def _sanitize_caption(text: str) -> str:
-    lower = text.lower()
-    for pattern in _INJECTION_PATTERNS:
-        if pattern in lower:
-            idx = lower.find(pattern)
-            text = text[:idx].strip()
-            logger.warning(event="caption_injection_stripped", pattern=pattern)
-            break
-    return text
+    from app.guardrails.input_guard import sanitize as _guard_sanitize
+    return _guard_sanitize(text, surface="frame_captioner")
 
 
 # CAPTION CLEAN

@@ -87,28 +87,11 @@ def _normalize(query: str) -> str:
     return " ".join(query.strip().split())
 
 
-# PROMPT INJECTION SANITIZATION — SECTION 5
-
-_INJECTION_PATTERNS = [
-    "ignore previous instructions",
-    "ignore all instructions",
-    "disregard the above",
-    "forget everything",
-    "you are now",
-    "act as",
-    "jailbreak",
-]
-
+# PROMPT INJECTION SANITIZATION — delegates to unified guardrail (Phase 26)
 
 def _sanitize_query(query: str) -> str:
-    lower = query.lower()
-    for pattern in _INJECTION_PATTERNS:
-        if pattern in lower:
-            idx   = lower.find(pattern)
-            query = query[:idx].strip()
-            logger.warning(event="query_injection_stripped", pattern=pattern)
-            break
-    return query
+    from app.guardrails.input_guard import sanitize as _guard_sanitize
+    return _guard_sanitize(query, surface="query_pipeline")
 
 
 # TEMPORAL BOOST — promote historical chunks, demote forward-looking chunks
@@ -624,11 +607,64 @@ def query_pipeline(
             _store_interaction(session_id, query, answer, memory, user_id=user_id)
             return resp
 
-        # SHORT-CIRCUIT FOR NON-RAG DECISIONS — SECTION 4.9
+        # NON-RAG DECISIONS — SECTION 4.9 (Issue C fix: wire real LLM answers)
         if decision in {"direct", "memory"}:
-            answer = agent_result.get("response", "No answer generated.")
-            conf   = float(agent_result.get("confidence", 0.5))
-            conf   = max(0.0, min(conf, 1.0))
+            answer = ""
+            conf   = float(agent_result.get("confidence", 0.85))
+
+            if decision == "memory":
+                # Recall from conversation memory and generate a grounded answer
+                try:
+                    mem_ctx = _build_memory_context(query, session_id, embedder, memory)
+                    if mem_ctx:
+                        mem_prompt = (
+                            f"Based on our previous conversation:\n{mem_ctx}\n\n"
+                            f"Answer this question concisely: {query}"
+                        )
+                        answer = llm.generate(mem_prompt) or ""
+                    if not answer.strip():
+                        answer = "I don't have a record of discussing that in our conversation."
+                except Exception as e:
+                    logger.warning(event="memory_path_llm_failed", error=str(e), session_id=session_id)
+                    answer = agent_result.get("response", "I couldn't recall that from our conversation.")
+
+            elif decision == "direct":
+                # Pure LLM response for greetings, math, code syntax, etc.
+                stub = agent_result.get("response", "")
+                # If stub is a real answer (not a routing placeholder), use it
+                if stub and not any(
+                    ph in stub.lower()
+                    for ph in ("routing to", "direct answer", "no answer generated")
+                ):
+                    answer = stub
+                else:
+                    try:
+                        direct_prompt = (
+                            f"Answer the following question directly and concisely.\n"
+                            f"Question: {query}\nAnswer:"
+                        )
+                        answer = llm.generate(direct_prompt) or ""
+                    except Exception as e:
+                        logger.warning(event="direct_path_llm_failed", error=str(e), session_id=session_id)
+                        answer = "I'm not sure how to answer that."
+
+            conf = max(0.0, min(conf, 1.0))
+            answer = answer.strip() or "I'm unable to answer that right now."
+
+            # Apply output guard before returning
+            try:
+                from app.guardrails.output_guard import check as _output_guard_check
+                og = _output_guard_check(
+                    answer,
+                    context_chunks=[],
+                    sources=[],
+                    session_id=session_id,
+                    correlation_id=trace_id,
+                )
+                answer = og.text
+            except Exception:
+                pass
+
             resp = {
                 "answer":               answer,
                 "confidence":           conf,
@@ -961,6 +997,38 @@ def query_pipeline(
         confidence = round(max(0.0, min(confidence, 1.0)), 6)
 
         hallucination_warning = confidence <= settings.AGENT_LOW_CONFIDENCE
+
+        # OUTPUT GUARDRAIL — Phase 26 (runs after sources + confidence computed)
+        try:
+            from app.guardrails.output_guard import check as _output_guard_check
+            _ctx_texts = [
+                d.page_content if hasattr(d, "page_content") else str(d)
+                for d in final_docs
+            ]
+            _og = _output_guard_check(
+                answer,
+                context_chunks=_ctx_texts,
+                sources=p248_sources,
+                session_id=session_id,
+                correlation_id=trace_id,
+            )
+            answer = _og.text
+            if _og.hallucination_warning:
+                hallucination_warning = True
+            if _og.fabricated_citations:
+                logger.warning(
+                    event="output_guard_citations_stripped",
+                    citations=_og.fabricated_citations[:5],
+                    session_id=session_id,
+                )
+            if _og.repairs_applied:
+                logger.info(
+                    event="output_guard_repairs_disclosed",
+                    repairs=_og.repairs_applied,
+                    session_id=session_id,
+                )
+        except Exception as _og_err:
+            logger.warning(event="output_guard_failed", error=str(_og_err), session_id=session_id)
 
         # FINAL sources[] — prefer the Phase 24.8 array built from reranked docs.
         # Also keep canonical_sources for LLM citation rendering.

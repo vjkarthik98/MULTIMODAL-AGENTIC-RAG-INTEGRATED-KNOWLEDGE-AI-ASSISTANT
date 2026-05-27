@@ -1,0 +1,79 @@
+{
+  "generated_at": "2026-05-27T12:24:46Z",
+  "git_sha": "ce24c17",
+  "weaken_spec": null,
+  "suites": {
+    "generation": {
+      "suite": "generation",
+      "metrics": {
+        "faithfulness": {
+          "name": "faithfulness",
+          "value": 0.5532440240989384,
+          "n": 21,
+          "notes": "judge=lexical_fallback",
+          "sub": {}
+        },
+        "answer_relevancy": {
+          "name": "answer_relevancy",
+          "value": 0.3304671811754586,
+          "n": 21,
+          "notes": "judge=lexical_fallback",
+          "sub": {}
+        },
+        "context_recall": {
+          "name": "context_recall",
+          "value": 0.6288450004906327,
+          "n": 21,
+          "notes": "judge=lexical_fallback",
+          "sub": {}
+        },
+        "citation_accuracy": {
+          "name": "citation_accuracy",
+          "value": 1.0,
+          "n": 12,
+          "notes": "judge=lexical_fallback",
+          "sub": {}
+        },
+        "template_leak_rate": {
+          "name": "template_leak_rate",
+          "value": 0.0,
+          "n": 21,
+          "notes": "leaky=0/21",
+          "sub": {}
+        },
+        "hallucination_rate": {
+          "name": "hallucination_rate",
+          "value": 0.6666666666666666,
+          "n": 21,
+          "notes": "flagged=14/21 | examples:   'What was Apple's total net sales in fisc': [\"missing_reference_numbers: ['394.3 billion', '2022']\"];   'What was Apple's Services revenue in FY2': [\"ungrounded_numbers: ['85.2 billion']\", \"missing_reference_numbers: ['2023']\"]",
+          "sub": {}
+        },
+        "generation_p50_sec": {
+          "name": "generation_p50_sec",
+          "value": 0.0023102760314941406,
+          "n": 21,
+          "notes": "min=0.00s max=56.08s",
+          "sub": {}
+        },
+        "generation_p95_sec": {
+          "name": "generation_p95_sec",
+          "value": 19.963001489639282,
+          "n": 21,
+          "notes": "",
+          "sub": {}
+        },
+        "generation_p99_sec": {
+          "name": "generation_p99_sec",
+          "value": 48.85683579444888,
+          "n": 21,
+          "notes": "",
+          "sub": {}
+        }
+      },
+      "breached": {},
+      "duration_sec": 131.47890615463257,
+      "judge": "gguf_mistral",
+      "dataset_version": null
+    }
+  }
+}
