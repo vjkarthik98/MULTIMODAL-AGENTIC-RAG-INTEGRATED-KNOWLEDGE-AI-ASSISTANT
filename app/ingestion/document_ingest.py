@@ -396,6 +396,16 @@ def _process_pdf(
 
         raw_text = (page.get_text() or "").strip()
 
+        # PRE-03/POST-02: Sanitize extracted PDF text before chunking.
+        # pypdf/fitz extracts all text including white-font hidden injection.
+        # sanitize() strips injection payloads non-blocking so ingestion continues.
+        if raw_text:
+            try:
+                from app.guardrails.input_guard import sanitize as _guard_sanitize
+                raw_text = _guard_sanitize(raw_text, surface="pdf_ingest")
+            except Exception:
+                pass
+
         # PAGE AREA FOR DENSITY CHECK
         rect      = page.rect
         page_area = max(rect.width * rect.height, 1)
@@ -880,6 +890,12 @@ def _process_docx(
                 body_text = " ".join(
                     p.text for p in comment.iter() if hasattr(p, "text") and p.text
                 ).strip()
+                # PRE-11: Author name is PII — scrub before it enters indexed text.
+                try:
+                    from app.guardrails.pii import scrub_pii
+                    author, _ = scrub_pii(author)
+                except Exception:
+                    pass
                 if body_text:
                     documents.append(
                         IngestedDocument(
@@ -1034,10 +1050,27 @@ def _process_excel(
             try:
                 ws = wb[sheet_name]
 
-                all_rows = [
-                    [str(c if c is not None else "").strip() for c in row]
-                    for row in ws.iter_rows(values_only=True)
-                ]
+                # PRE-09: Skip hidden rows/columns — openpyxl reads ALL rows
+                # including those hidden by the author; attacker can embed injection
+                # text in hidden cells invisible to the end user.
+                from openpyxl.utils import get_column_letter
+                hidden_col_letters = {
+                    col_letter
+                    for col_letter, cd in ws.column_dimensions.items()
+                    if cd.hidden
+                }
+
+                all_rows = []
+                for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+                    rd = ws.row_dimensions.get(row_idx)
+                    if rd and rd.hidden:
+                        continue
+                    cells = [
+                        str(c if c is not None else "").strip()
+                        for col_idx, c in enumerate(row, start=1)
+                        if get_column_letter(col_idx) not in hidden_col_letters
+                    ]
+                    all_rows.append(cells)
 
                 non_empty = [r for r in all_rows if any(c for c in r)]
 

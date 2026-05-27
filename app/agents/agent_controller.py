@@ -72,39 +72,33 @@ def _normalize(q: str) -> str:
     return " ".join(q.strip().split())
 
 
-# INJECT SANITIZATION — STRIP PROMPT INJECTION PATTERNS
+# INPUT GUARD — blocking check (raises GuardrailBlocked on injection/jailbreak/SSRF)
 
-_INJECTION_PATTERNS = [
-    "ignore previous instructions",
-    "ignore all instructions",
-    "disregard the above",
-    "forget everything",
-    "you are now",
-    "act as",
-    "jailbreak",
-    "override instructions",
-    "new instructions",
-    "system prompt",
-    "developer mode",
-    "dan mode",
-    "admin override",
-    "bypass",
-]
+def _guard_input(query: str, session_id: str = "", correlation_id: str = "") -> str:
+    """Full blocking input check. Returns safe query text or raises GuardrailBlocked."""
+    from app.guardrails.input_guard import check as _input_check
+    from app.guardrails.exceptions import GuardrailBlocked
+    guarded = _input_check(query, surface="agent_controller", session_id=session_id, correlation_id=correlation_id)
+    return guarded.text
 
 
-def _sanitize(query: str) -> str:
-    lower = query.lower()
-    for pattern in _INJECTION_PATTERNS:
-        if pattern in lower:
-            idx   = query.lower().find(pattern)
-            query = query[:idx].strip()
-            logger.warning(
-                "controller_injection_detected",
-                pattern=pattern,
-                query_prefix=query[:80],
-            )
-            break
-    return query
+# OUTPUT GUARD — scrubs template artifacts, PII, fabricated citations before return
+
+def _guard_output(response: str, session_id: str = "", correlation_id: str = "") -> str:
+    """Non-blocking output scrub. Returns cleaned response text."""
+    try:
+        from app.guardrails.output_guard import check as _output_check
+        og = _output_check(
+            response,
+            context_chunks=[],
+            sources=[],
+            session_id=session_id,
+            correlation_id=correlation_id,
+            surface="agent_controller_output",
+        )
+        return og.text
+    except Exception:
+        return response
 
 
 class AgentExecutor:
@@ -189,6 +183,7 @@ class AgentExecutor:
         except Exception:
             response = "I can help with that. Please ask a more specific question."
 
+        response = _guard_output(response, session_id=session_id)
         return {
             "response": response,
             "source":   "llm",
@@ -227,10 +222,41 @@ class AgentController:
         request_id = str(uuid.uuid4())
         query      = self._normalize(query)[:settings.MAX_PROMPT_CHARS]
 
-        # INJECTION SANITIZATION
-        query = _sanitize(query)
+        # RATE LIMIT CHECK — reject banned sessions before any processing
+        try:
+            from app.guardrails.exceptions import GuardrailBlocked
+            from app.guardrails.output_guard import safe_refusal
+            from app.guardrails.rate_limiter import enforce as _rl_enforce, check_and_record as _rl_record
+            _rl_enforce(session_id=session_id, surface="agent_controller", correlation_id=request_id)
+        except GuardrailBlocked as gb:
+            return {
+                "response":   "Too many blocked requests. Please wait before retrying.",
+                "source":     "guardrail",
+                "decision":   "reject",
+                "reason":     gb.reason,
+                "confidence": 0.0,
+                "request_id": request_id,
+                "latency":    round(time.time() - start, 3),
+                "metadata":   {"guard_type": gb.guard_type},
+            }
+
+        # INPUT GUARD — blocking: raises GuardrailBlocked on injection/jailbreak/SSRF
+        try:
+            query = _guard_input(query, session_id=session_id, correlation_id=request_id)
+        except GuardrailBlocked as gb:
+            _rl_record(session_id=session_id, surface="agent_controller", correlation_id=request_id)
+            return {
+                "response":   safe_refusal(gb.reason),
+                "source":     "guardrail",
+                "decision":   "reject",
+                "reason":     gb.reason,
+                "confidence": 0.0,
+                "request_id": request_id,
+                "latency":    round(time.time() - start, 3),
+                "metadata":   {"guard_type": gb.guard_type},
+            }
         if not query.strip():
-            return self._reject("injection_detected")
+            return self._reject("empty_after_normalization")
 
         _active_requests.inc()
 
@@ -436,6 +462,7 @@ class AgentController:
             )
             response = "Unable to process your request at this time."
 
+        response = _guard_output(response, session_id=session_id, correlation_id=request_id)
         return {
             "response":    response,
             "source":      "fallback",

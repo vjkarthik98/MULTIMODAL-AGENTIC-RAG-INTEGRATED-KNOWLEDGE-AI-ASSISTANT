@@ -54,32 +54,7 @@ _BLOCKED_DOMAINS: Set[str] = {
     "linkedin.com",
 }
 
-# SSRF PREVENTION — BLOCK PRIVATE IP RANGES
-_PRIVATE_IP_PATTERNS = [
-    "127.",
-    "192.168.",
-    "10.",
-    "172.16.",
-    "172.17.",
-    "172.18.",
-    "172.19.",
-    "172.20.",
-    "172.21.",
-    "172.22.",
-    "172.23.",
-    "172.24.",
-    "172.25.",
-    "172.26.",
-    "172.27.",
-    "172.28.",
-    "172.29.",
-    "172.30.",
-    "172.31.",
-    "localhost",
-    "0.0.0.0",
-    "::1",
-    "169.254.",
-]
+# SSRF PREVENTION — delegated to consolidated ssrf.py guard (Phase 26)
 
 
 # NORMALIZE QUERY
@@ -95,13 +70,11 @@ def _hash(text: str) -> str:
     return hashlib.sha256(text[:300].encode("utf-8")).hexdigest()
 
 
-# SSRF GUARD — BLOCK PRIVATE IP RANGES AND LOCALHOST
+# SSRF GUARD — delegates to consolidated ssrf.py (Phase 26)
 
 def _is_ssrf_risk(url: str) -> bool:
-    if not url:
-        return False
-    url_lower = url.lower()
-    return any(pattern in url_lower for pattern in _PRIVATE_IP_PATTERNS)
+    from app.guardrails.ssrf import is_ssrf_risk
+    return is_ssrf_risk(url)
 
 
 # DOMAIN BLOCK CHECK
@@ -117,27 +90,9 @@ def _is_blocked(url: Optional[str]) -> bool:
 
 # INJECTION SANITIZATION FOR SEARCH QUERIES
 
-_INJECTION_PATTERNS = [
-    "ignore previous",
-    "ignore all instructions",
-    "disregard",
-    "forget everything",
-    "you are now",
-    "act as",
-    "jailbreak",
-    "system prompt",
-]
-
-
 def _sanitize_query(query: str) -> str:
-    lower = query.lower()
-    for pattern in _INJECTION_PATTERNS:
-        if pattern in lower:
-            idx   = query.lower().find(pattern)
-            query = query[:idx].strip()
-            logger.warning("web_search_injection_sanitized", pattern=pattern)
-            break
-    return query
+    from app.guardrails.input_guard import sanitize as _guard_sanitize
+    return _guard_sanitize(query, surface="web_search")
 
 
 # RESULT QUALITY SCORING
