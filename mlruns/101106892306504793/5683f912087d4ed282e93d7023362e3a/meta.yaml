@@ -1,0 +1,14 @@
+artifact_uri: /home/ubuntu/multimodal-rag-assistant-1/mlruns/101106892306504793/5683f912087d4ed282e93d7023362e3a/artifacts
+end_time: 1779776493700
+entry_point_name: ''
+experiment_id: '101106892306504793'
+lifecycle_stage: active
+run_id: 5683f912087d4ed282e93d7023362e3a
+run_name: bittersweet-gull-913
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1779776493665
+status: 3
+tags: []
+user_id: ubuntu

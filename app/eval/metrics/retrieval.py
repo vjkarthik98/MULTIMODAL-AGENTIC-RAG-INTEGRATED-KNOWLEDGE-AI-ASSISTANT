@@ -128,10 +128,12 @@ def context_precision(
         return MetricResult(name="context_precision", value=0.0, n=0, notes="no docs returned")
 
     def _get_id(doc: Dict) -> Optional[str]:
-        cid = doc.get("chunk_id") or doc.get("id")
-        if not cid:
-            meta = doc.get("metadata") or {}
-            cid = meta.get("chunk_id") or meta.get("doc_id")
+        meta = doc.get("metadata") or {}
+        source = meta.get("source", "")
+        cid = meta.get("chunk_id")
+        if source and cid is not None:
+            return f"{source}::chunk_{cid}"
+        cid = cid or doc.get("chunk_id") or doc.get("id") or meta.get("doc_id")
         return str(cid) if cid else None
 
     relevant_count = sum(1 for d in retrieved_docs if _get_id(d) in rel)

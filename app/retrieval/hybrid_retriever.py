@@ -205,7 +205,7 @@ class HybridRetriever:
             return self._vision_cache[cache_key]
 
         from app.core.model_loader import model_loader
-        clip = self.clip_text_embedder or model_loader.get_clip_text_embedder()
+        clip = self.clip_text_embedder or model_loader.get_siglip_text_embedder()
         vec = clip.embed_single(q, session_id=session_id)
 
         self._vision_cache[cache_key] = vec

@@ -68,6 +68,39 @@ _STOPWORDS: Set[str] = {
 }
 
 
+class BM25Document:
+    """Picklable document wrapper for BM25 index storage."""
+    __slots__ = [
+        "text", "structure", "modality", "subtype",
+        "source", "source_type", "chunk_id", "page",
+    ]
+
+    @classmethod
+    def from_payload(cls, p: Dict[str, Any]) -> "BM25Document":
+        obj = cls()
+        obj.text = p.get("text") or p.get("content") or ""
+        obj.structure = {
+            "doc_id": p.get("doc_id"),
+            "chunk_id": p.get("chunk_id"),
+            "session_id": p.get("session_id"),
+            "content_type": p.get("content_type"),
+            "language": p.get("language"),
+            "timestamp_start": p.get("timestamp_start"),
+            "ingestion_time": p.get("ingestion_time"),
+            "checksum_sha256": p.get("checksum_sha256"),
+            "section_number": p.get("section_number"),
+            "is_forward_looking": p.get("is_forward_looking", False),
+            "embedding_space": "text",
+        }
+        obj.modality = p.get("modality", "text")
+        obj.subtype = p.get("subtype")
+        obj.source = p.get("source")
+        obj.source_type = p.get("source_type")
+        obj.chunk_id = p.get("chunk_id")
+        obj.page = p.get("page")
+        return obj
+
+
 class BM25Retriever:
 
     def __init__(self, user_id: Optional[str] = None) -> None:
@@ -78,6 +111,7 @@ class BM25Retriever:
         self.modality_filter: Optional[str] = None
         self.max_docs: int = settings.BM25_MAX_DOCS
         self._index_loaded: bool = False
+        self._loaded_user_id: Optional[str] = None  # tracks which user's index is loaded
 
     def _index_file(self, user_id: Optional[str] = None) -> Path:
         uid = user_id or self.user_id
@@ -159,8 +193,15 @@ class BM25Retriever:
     # CIRCUIT-BROKEN LOAD
 
     def _load_index(self, user_id: Optional[str] = None) -> None:
-        if self._index_loaded:
+        effective_uid = user_id or self.user_id
+        # Reload if a different user's index is requested
+        if self._index_loaded and self._loaded_user_id == effective_uid:
             return
+        if self._index_loaded and self._loaded_user_id != effective_uid:
+            self._index_loaded = False
+            self.documents = []
+            self.tokenized_corpus = []
+            self.bm25 = None
 
         index_file = self._index_file(user_id)
 
@@ -183,6 +224,7 @@ class BM25Retriever:
             else:
                 logger.warning(event="bm25_saved_index_empty")
             self._index_loaded = True
+            self._loaded_user_id = effective_uid
 
         try:
             if _PYBREAKER_AVAILABLE:
@@ -266,18 +308,15 @@ class BM25Retriever:
         if not tokens:
             return
 
-        class _Doc:
-            pass
-
-        doc = _Doc()
-        doc.text = text  # type: ignore[attr-defined]
-        doc.structure = metadata  # type: ignore[attr-defined]
-        doc.modality = metadata.get("modality", "text")  # type: ignore[attr-defined]
-        doc.subtype = metadata.get("subtype")  # type: ignore[attr-defined]
-        doc.source = metadata.get("source")  # type: ignore[attr-defined]
-        doc.source_type = metadata.get("source_type")  # type: ignore[attr-defined]
-        doc.chunk_id = metadata.get("chunk_id")  # type: ignore[attr-defined]
-        doc.page = metadata.get("page")  # type: ignore[attr-defined]
+        doc = BM25Document()
+        doc.text = text
+        doc.structure = metadata
+        doc.modality = metadata.get("modality", "text")
+        doc.subtype = metadata.get("subtype")
+        doc.source = metadata.get("source")
+        doc.source_type = metadata.get("source_type")
+        doc.chunk_id = metadata.get("chunk_id")
+        doc.page = metadata.get("page")
 
         self.documents.append(doc)
         self.tokenized_corpus.append(tokens)
@@ -395,10 +434,6 @@ class BM25Retriever:
         session_id: Optional[str],
         filters: Optional[Dict[str, Any]],
     ) -> bool:
-        # SESSION ISOLATION — always enforce when session_id is provided
-        if session_id and meta.get("session_id") != session_id:
-            return False
-
         if self.modality_filter and meta.get("modality") != self.modality_filter:
             return False
 

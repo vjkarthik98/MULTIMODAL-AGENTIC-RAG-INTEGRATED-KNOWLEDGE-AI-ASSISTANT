@@ -4,12 +4,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.embeddings.clip_text_embedder import (
-    ClipTextEmbeddingResult,
+    SiglipTextEmbeddingResult as ClipTextEmbeddingResult,
     _estimate_tokens,
     _normalize_text,
     _sanitize_injection,
     _sanitize_text,
-    _truncate_to_clip_limit,
+    _truncate_to_siglip_limit as _truncate_to_clip_limit,
     _valid_embedding,
 )
 
@@ -172,9 +172,9 @@ class TestClipTextEmbeddingResult:
     def _make_result(self):
         return ClipTextEmbeddingResult(
             text_preview="test text",
-            embedding=[0.1] * 512,
-            embedding_dim=512,
-            model_name="openai/clip-vit-base-patch32",
+            embedding=[0.1] * 1152,
+            embedding_dim=1152,
+            model_name="google/siglip-so400m-patch14-384",
             checksum_sha256="abc123",
             token_count_estimate=2,
             was_truncated=False,
@@ -197,7 +197,7 @@ class TestClipTextEmbeddingResult:
 
     def test_attributes_stored(self):
         result = self._make_result()
-        assert result.model_name == "openai/clip-vit-base-patch32"
+        assert result.model_name == "google/siglip-so400m-patch14-384"
         assert result.was_truncated is False
         assert result.cache_hit is False
 
@@ -217,20 +217,19 @@ class TestClipTextEmbedder:
 
         with patch("app.embeddings.clip_text_embedder.TORCH_AVAILABLE", True), \
              patch("app.embeddings.clip_text_embedder.settings") as mock_cfg:
-            mock_cfg.CLIP_MODEL           = "openai/clip-vit-base-patch32"
-            mock_cfg.VISION_EMBEDDING_DIM = 512
+            mock_cfg.SIGLIP_MODEL         = "google/siglip-so400m-patch14-384"
+            mock_cfg.VISION_EMBEDDING_DIM = 1152
             mock_cfg.EMBEDDING_BATCH_SIZE = 16
-            mock_cfg.CLIP_MAX_LENGTH      = 77
 
             embedder = ClipTextEmbedder.__new__(ClipTextEmbedder)
             embedder.processor    = mock_processor
             embedder.model        = mock_model
             embedder.device       = "cpu"
-            embedder.model_name   = "openai/clip-vit-base-patch32"
-            embedder.expected_dim = 512
+            embedder.model_name   = "google/siglip-so400m-patch14-384"
+            embedder.expected_dim = 1152
             embedder.batch_size   = 16
-            embedder.max_length   = 77
-            embedder._max_chars   = 308
+            embedder.max_length   = 64
+            embedder._max_chars   = 256
 
         return embedder
 

@@ -13,7 +13,7 @@ def _make_manager(cuda=False, mps=False, vram=0.0, profile="auto"):
         mock_cfg.LLM_DEVICE_HINT = ""
         mock_cfg.EMBEDDER_DEVICE = ""
         mock_cfg.RERANKER_DEVICE = ""
-        mock_cfg.CLIP_DEVICE = ""
+        mock_cfg.SIGLIP_DEVICE = ""
         mock_cfg.BLIP_DEVICE = ""
         mock_cfg.WHISPER_DEVICE = ""
 

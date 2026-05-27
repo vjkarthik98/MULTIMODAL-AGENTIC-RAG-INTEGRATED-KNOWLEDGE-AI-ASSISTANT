@@ -277,14 +277,10 @@ class Retriever:
         language: Optional[str] = None,
         date_from: Optional[float] = None,
         date_to: Optional[float] = None,
-        session_id: Optional[str] = None,
     ) -> List[Dict]:
         filtered = []
         for r in results:
             meta = r.get("metadata", {}) or {}
-
-            if session_id and meta.get("session_id") != session_id:
-                continue
 
             if modality and meta.get("modality") != modality:
                 continue
@@ -482,12 +478,12 @@ class Retriever:
                 bm25_res   = _normalize_scores(bm25_res)
 
                 # METADATA FILTER
-                if modality or language or date_from or date_to or session_id:
+                if modality or language or date_from or date_to:
                     vector_res = self._apply_metadata_filter(
-                        vector_res, modality, language, date_from, date_to, session_id
+                        vector_res, modality, language, date_from, date_to
                     )
                     bm25_res = self._apply_metadata_filter(
-                        bm25_res, modality, language, date_from, date_to, session_id
+                        bm25_res, modality, language, date_from, date_to
                     )
 
                 # MERGE — RRF OR WEIGHTED

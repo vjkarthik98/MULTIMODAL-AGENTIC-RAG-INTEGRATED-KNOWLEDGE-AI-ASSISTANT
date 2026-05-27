@@ -10,7 +10,7 @@ Design goals (Lightning AI hybrid CPU+GPU deploy):
     not a single global self._device.
   * GGUF Mistral fully offloads to GPU when CUDA is available
     (n_gpu_layers=-1), giving the largest single latency win on Lightning.
-  * CLIP / BLIP / Whisper run on GPU with float16 (or int8 on CPU Whisper)
+  * SigLIP / BLIP / Whisper run on GPU with float16 (or int8 on CPU Whisper)
     so vision/audio ingestion is fast without crowding the LLM's VRAM.
   * Text embedder + cross-encoder reranker stay on CPU under the default
     hybrid profile — both are tiny and that gives back ~1 GB of VRAM.
@@ -111,19 +111,19 @@ class ModelLoader:
             thread_name_prefix="model_loader",
         )
 
-        self._llm:                Optional[Any] = None
-        self._text_embedder:      Optional[Any] = None
-        self._clip_text_embedder: Optional[Any] = None
-        self._image_embedder:     Optional[Any] = None
-        self._multimodal:         Optional[Any] = None
-        self._whisper:            Optional[Any] = None
-        self._reranker:           Optional[Any] = None
-        self._clip_model                       = None
-        self._clip_processor                   = None
-        self._clip_device:        Optional[str] = None
-        self._blip_model                       = None
-        self._blip_processor                   = None
-        self._blip_device:        Optional[str] = None
+        self._llm:                  Optional[Any] = None
+        self._text_embedder:        Optional[Any] = None
+        self._siglip_text_embedder: Optional[Any] = None
+        self._image_embedder:       Optional[Any] = None
+        self._multimodal:           Optional[Any] = None
+        self._whisper:              Optional[Any] = None
+        self._reranker:             Optional[Any] = None
+        self._siglip_model                       = None
+        self._siglip_processor                   = None
+        self._siglip_device:        Optional[str] = None
+        self._blip_model                         = None
+        self._blip_processor                     = None
+        self._blip_device:          Optional[str] = None
 
         self._initialized = False
 
@@ -155,7 +155,7 @@ class ModelLoader:
         future = self._executor.submit(load_fn)
 
         # Use the provided device hint; fall back to device_manager only for
-        # known MODEL_NAMES — unknown aliases (image_embedder, clip_text_embedder)
+        # known MODEL_NAMES — unknown aliases (image_embedder, siglip_text_embedder)
         # are not in MODEL_NAMES so device_for() would wrongly return "cpu".
         from app.core.device_manager import MODEL_NAMES
         resolved_device = device or (
@@ -309,35 +309,39 @@ class ModelLoader:
     def get_text_embedder(self):
         return self.get_embedder()
 
-    # CLIP MODEL + PROCESSOR
+    # SIGLIP MODEL + PROCESSOR
 
-    def get_clip(self) -> Tuple:
-        if self._clip_model:
-            return self._clip_processor, self._clip_model, self._clip_device
+    def get_siglip(self) -> Tuple:
+        if self._siglip_model:
+            return self._siglip_processor, self._siglip_model, self._siglip_device
 
         with self._lock:
-            if self._clip_model:
-                return self._clip_processor, self._clip_model, self._clip_device
+            if self._siglip_model:
+                return self._siglip_processor, self._siglip_model, self._siglip_device
 
-            decision = device_manager.decision_for("clip")
+            decision = device_manager.decision_for("siglip")
 
             def _load():
-                from transformers import CLIPModel, CLIPProcessor  # local
-                processor = CLIPProcessor.from_pretrained(settings.CLIP_MODEL)
+                from transformers import SiglipModel, SiglipProcessor  # local
                 kwargs = {}
                 if decision.device == "cuda" and decision.dtype == "float16":
                     kwargs["torch_dtype"] = _torch_dtype("float16")
-                model = CLIPModel.from_pretrained(settings.CLIP_MODEL, **kwargs)
+                processor = SiglipProcessor.from_pretrained(settings.SIGLIP_MODEL)
+                model = SiglipModel.from_pretrained(settings.SIGLIP_MODEL, **kwargs)
                 model.to(decision.device)
                 model.eval()
                 return processor, model
 
-            self._clip_processor, self._clip_model = self._safe_load(_load, "clip")
-            self._clip_device = decision.device
+            self._siglip_processor, self._siglip_model = self._safe_load(_load, "siglip")
+            self._siglip_device = decision.device
 
-        return self._clip_processor, self._clip_model, self._clip_device
+        return self._siglip_processor, self._siglip_model, self._siglip_device
 
-    # IMAGE EMBEDDER — CLIP VISUAL
+    # Backward-compat alias — callers that spelled it get_clip() still work.
+    def get_clip(self) -> Tuple:
+        return self.get_siglip()
+
+    # IMAGE EMBEDDER — SIGLIP VISUAL
 
     def get_image_embedder(self):
         if self._image_embedder:
@@ -347,7 +351,7 @@ class ModelLoader:
             if self._image_embedder:
                 return self._image_embedder
 
-            processor, model, device = self.get_clip()
+            processor, model, device = self.get_siglip()
 
             def _load():
                 from app.embeddings.image_embedder import ImageEmbedder  # local
@@ -357,25 +361,29 @@ class ModelLoader:
 
         return self._image_embedder
 
-    # CLIP TEXT EMBEDDER — CROSS-MODAL
+    # SIGLIP TEXT EMBEDDER — CROSS-MODAL
 
-    def get_clip_text_embedder(self):
-        if self._clip_text_embedder:
-            return self._clip_text_embedder
+    def get_siglip_text_embedder(self):
+        if self._siglip_text_embedder:
+            return self._siglip_text_embedder
 
         with self._lock:
-            if self._clip_text_embedder:
-                return self._clip_text_embedder
+            if self._siglip_text_embedder:
+                return self._siglip_text_embedder
 
-            processor, model, device = self.get_clip()
+            processor, model, device = self.get_siglip()
 
             def _load():
                 from app.embeddings.clip_text_embedder import ClipTextEmbedder  # local
                 return ClipTextEmbedder(processor, model, device)
 
-            self._clip_text_embedder = self._safe_load(_load, "clip_text_embedder", device=device)
+            self._siglip_text_embedder = self._safe_load(_load, "siglip_text_embedder", device=device)
 
-        return self._clip_text_embedder
+        return self._siglip_text_embedder
+
+    # Backward-compat alias.
+    def get_clip_text_embedder(self):
+        return self.get_siglip_text_embedder()
 
     # MULTIMODAL EMBEDDER — ORCHESTRATES TEXT + IMAGE
 
@@ -488,43 +496,43 @@ class ModelLoader:
 
     def health_check(self) -> Dict[str, Any]:
         return {
-            "llm":            self._llm is not None,
-            "embedder":       self._text_embedder is not None,
-            "clip":           self._clip_model is not None,
-            "clip_text":      self._clip_text_embedder is not None,
-            "image_embedder": self._image_embedder is not None,
-            "multimodal":     self._multimodal is not None,
-            "whisper":        self._whisper is not None,
-            "blip":           self._blip_model is not None,
-            "reranker":       self._reranker is not None,
-            "device":         device_manager.device_for("llm"),
-            "profile":        device_manager.profile,
-            "vram_total_gb":  device_manager.vram_total_gb,
-            "initialized":    self._initialized,
-            "devices":        device_manager.snapshot(),
+            "llm":                  self._llm is not None,
+            "embedder":             self._text_embedder is not None,
+            "siglip":               self._siglip_model is not None,
+            "siglip_text":          self._siglip_text_embedder is not None,
+            "image_embedder":       self._image_embedder is not None,
+            "multimodal":           self._multimodal is not None,
+            "whisper":              self._whisper is not None,
+            "blip":                 self._blip_model is not None,
+            "reranker":             self._reranker is not None,
+            "device":               device_manager.device_for("llm"),
+            "profile":              device_manager.profile,
+            "vram_total_gb":        device_manager.vram_total_gb,
+            "initialized":          self._initialized,
+            "devices":              device_manager.snapshot(),
         }
 
     # RESET ALL MODELS
 
     def reset(self) -> None:
         with self._lock:
-            self._llm                = None
-            self._text_embedder      = None
-            self._clip_text_embedder = None
-            self._image_embedder     = None
-            self._multimodal         = None
-            self._whisper            = None
-            self._reranker           = None
-            self._clip_model         = None
-            self._clip_processor     = None
-            self._clip_device        = None
-            self._blip_model         = None
-            self._blip_processor     = None
-            self._blip_device        = None
-            self._initialized        = False
+            self._llm                  = None
+            self._text_embedder        = None
+            self._siglip_text_embedder = None
+            self._image_embedder       = None
+            self._multimodal           = None
+            self._whisper              = None
+            self._reranker             = None
+            self._siglip_model         = None
+            self._siglip_processor     = None
+            self._siglip_device        = None
+            self._blip_model           = None
+            self._blip_processor       = None
+            self._blip_device          = None
+            self._initialized          = False
 
             for name in (
-                "LLM", "TextEmbedder", "CLIP", "ClipTextEmbedder",
+                "LLM", "TextEmbedder", "SigLIP", "SigLIPText",
                 "ImageEmbedder", "MultimodalEmbedder", "Whisper",
                 "BLIP", "Reranker",
             ):

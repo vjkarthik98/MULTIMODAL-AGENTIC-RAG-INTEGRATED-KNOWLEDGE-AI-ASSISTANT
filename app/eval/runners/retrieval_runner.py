@@ -65,12 +65,16 @@ def run_retrieval_suite(cfg: EvalConfig) -> SuiteResult:
         q_elapsed = time.time() - q_start
         latencies.append(q_elapsed)
 
-        # Extract chunk IDs from retrieved results
+        # Extract chunk IDs from retrieved results — format: "{source}::chunk_{chunk_id}"
+        # to match the gold set format produced by fill_gold_chunk_ids.py
         retrieved_ids = []
         for doc in retrieved:
             meta = doc.get("metadata") or {}
-            cid = doc.get("chunk_id") or meta.get("chunk_id") or meta.get("doc_id") or meta.get("id")
-            if cid:
+            source = meta.get("source", "")
+            cid = meta.get("chunk_id")
+            if source and cid is not None:
+                retrieved_ids.append(f"{source}::chunk_{cid}")
+            elif cid is not None:
                 retrieved_ids.append(str(cid))
 
         eval_results.append({

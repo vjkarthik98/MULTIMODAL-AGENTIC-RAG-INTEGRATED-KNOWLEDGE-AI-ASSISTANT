@@ -42,6 +42,53 @@ def _check_server(base_url: str) -> bool:
         return False
 
 
+def _resolve_chunk_ids(sources: List[Dict]) -> List[str]:
+    """Build composite IDs (source::chunk_N) from API response sources.
+
+    The /query API returns source filename and text but not chunk_id.
+    We look up each returned text in Qdrant to find the actual chunk_id.
+    Falls back to source::chunk_0 if lookup fails.
+    """
+    try:
+        from app.vectorstore.qdrant_store import QdrantVectorStore
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        qs = QdrantVectorStore()
+        coll = qs.text_collection
+    except Exception:
+        return []
+
+    ids: List[str] = []
+    for s in sources:
+        if not isinstance(s, dict):
+            continue
+        src = s.get("source", "")
+        text_snippet = (s.get("text") or "")[:80].strip()
+        if not src or not text_snippet:
+            continue
+        try:
+            res = qs.client.scroll(
+                collection_name=coll,
+                scroll_filter=Filter(must=[FieldCondition(key="source", match=MatchValue(value=src))]),
+                limit=50,
+                with_payload=True,
+                with_vectors=False,
+            )
+            best_cid = None
+            for point in res[0]:
+                stored_text = (point.payload.get("text") or "")[:80].strip()
+                if stored_text and text_snippet[:40] in stored_text:
+                    best_cid = point.payload.get("chunk_id")
+                    break
+            if best_cid is not None:
+                ids.append(f"{src}::chunk_{best_cid}")
+            else:
+                ids.append(f"{src}::chunk_0")
+        except Exception:
+            if src:
+                ids.append(f"{src}::chunk_0")
+    return ids
+
+
 def run_e2e_suite(cfg: EvalConfig) -> SuiteResult:
     """Run the end-to-end benchmark via the live /query API."""
     t0 = time.time()
@@ -93,7 +140,7 @@ def run_e2e_suite(cfg: EvalConfig) -> SuiteResult:
 
         q_start = time.time()
         try:
-            resp = requests.post(f"{base_url}/query", json=payload, timeout=120)
+            resp = requests.post(f"{base_url}/rag/query", json=payload, timeout=120)
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
@@ -106,16 +153,12 @@ def run_e2e_suite(cfg: EvalConfig) -> SuiteResult:
         answer = data.get("answer") or data.get("response") or ""
         sources = data.get("sources") or []
         context_texts = [s.get("text") or "" for s in sources if isinstance(s, dict)]
-        action = data.get("route") or data.get("action") or ""
+        action = data.get("decision") or data.get("route") or data.get("action") or ""
 
-        retrieved_ids = []
-        for s in sources:
-            if not isinstance(s, dict):
-                continue
-            meta = s.get("metadata") or {}
-            cid = s.get("chunk_id") or meta.get("chunk_id") or meta.get("id")
-            if cid:
-                retrieved_ids.append(str(cid))
+        # Build composite IDs matching gold format: "{source}::chunk_{chunk_id}".
+        # The /query API response exposes `source` (filename) but not chunk_id.
+        # We approximate by looking up each returned text in Qdrant to find its chunk_id.
+        retrieved_ids = _resolve_chunk_ids(sources)
 
         relevant_ids = row.get("relevant_chunk_ids", [])
         if isinstance(relevant_ids, str):

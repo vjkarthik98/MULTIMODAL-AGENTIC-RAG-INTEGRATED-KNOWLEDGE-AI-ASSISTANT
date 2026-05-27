@@ -956,7 +956,7 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     if _tonemap_frame(f_path, sdr_path):
                         processing_path = sdr_path
 
-                # COPY FRAME TO PERSISTENT STAGING SO CLIP EMBEDDING CAN READ IT
+                # COPY FRAME TO PERSISTENT STAGING SO SIGLIP EMBEDDING CAN READ IT
                 # (frame_temp_dir is cleaned in finally before pipeline embeds)
                 if frame_staging_dir is None:
                     frame_staging_dir = staging / f"frames_{doc_id}"

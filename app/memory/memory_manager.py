@@ -173,6 +173,7 @@ class MemoryManager:
         modality:    str   = "text",
         importance:  float = 1.0,
         embedding:   Optional[List[float]] = None,
+        user_id:     Optional[str] = None,
     ) -> None:
 
         if not session_id:
@@ -195,6 +196,7 @@ class MemoryManager:
             "timestamp":  time.time(),
             "modality":   modality,
             "importance": importance,
+            "user_id":    user_id or None,
         }
 
         if embedding is not None and isinstance(embedding, list):
@@ -236,6 +238,7 @@ class MemoryManager:
         query:      str,
         response:   str,
         modality:   str = "text",
+        user_id:    Optional[str] = None,
     ) -> None:
         try:
             self.add_message(
@@ -243,12 +246,14 @@ class MemoryManager:
                 "user",
                 query,
                 modality=modality,
+                user_id=user_id,
             )
             self.add_message(
                 session_id,
                 "assistant",
                 response,
                 modality=modality,
+                user_id=user_id,
             )
         except Exception as e:
             logger.error(
@@ -265,11 +270,12 @@ class MemoryManager:
         query:      str,
         response:   str,
         modality:   str = "text",
+        user_id:    Optional[str] = None,
     ) -> None:
         async with self._semaphore:
             await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: self.add_interaction(session_id, query, response, modality),
+                lambda: self.add_interaction(session_id, query, response, modality, user_id),
             )
 
     # GET HISTORY — SECTION 4.7

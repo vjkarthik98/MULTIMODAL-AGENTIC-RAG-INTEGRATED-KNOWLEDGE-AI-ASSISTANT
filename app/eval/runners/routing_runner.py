@@ -51,14 +51,15 @@ def run_routing_suite(cfg: EvalConfig) -> SuiteResult:
             result.breached[f"handle_error_{row['id']}"] = str(exc)
             continue
 
-        # Extract action from AgentDecision nested in response
+        # Extract action — controller.handle() returns {"decision": "rag"|"search"|..., ...}
         decision = response.get("decision") or {}
-        if hasattr(decision, "action"):
+        if isinstance(decision, str):
+            action = decision
+        elif hasattr(decision, "action"):
             action = decision.action
         elif isinstance(decision, dict):
             action = decision.get("action", "")
         else:
-            # Fallback: check top-level response
             action = response.get("action") or response.get("route") or ""
 
         sources = response.get("sources") or []

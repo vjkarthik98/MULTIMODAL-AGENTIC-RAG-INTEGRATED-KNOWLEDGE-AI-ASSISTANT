@@ -134,6 +134,17 @@ class QdrantVectorStore:
         self.modality_filter: Optional[str] = None
 
         logger.info("qdrant_initialized")
+        self._warm_cache()
+
+    def _warm_cache(self) -> None:
+        """Populate _collection_cache from live Qdrant collections so searches work
+        in fresh processes (e.g. eval scripts) that never called _ensure_collection."""
+        try:
+            existing = {c.name for c in self.client.get_collections().collections}
+            for name in existing:
+                self._collection_cache.add(name)
+        except Exception:
+            pass  # non-fatal — cache stays empty, searches degrade gracefully
 
     # CIRCUIT BREAKER GUARD
 
@@ -247,13 +258,14 @@ class QdrantVectorStore:
 
     def _payload(self, d: Any, user_id: Optional[str] = None) -> Dict[str, Any]:
         s = dict(getattr(d, "structure", {}) or {})
+        modality = getattr(d, "modality", "text")
 
-        return {
+        payload: Dict[str, Any] = {
             "text":            str(getattr(d, "text", "") or "")[:settings.QDRANT_TEXT_MAX_CHARS],
             "user_id":         user_id or s.get("user_id"),
             "doc_id":          s.get("doc_id"),
             "chunk_id":        getattr(d, "chunk_id", None),
-            "modality":        getattr(d, "modality", "text"),
+            "modality":        modality,
             "subtype":         getattr(d, "subtype", None),
             "content_type":    s.get("content_type"),
             "session_id":      s.get("session_id"),
@@ -276,6 +288,99 @@ class QdrantVectorStore:
             "is_forward_looking": bool(s.get("is_forward_looking", False)),
             "deleted_at":       None,
         }
+
+        # AUDIO TEMPORAL FIELDS — top-level so reranker can read them directly
+        if modality == "audio":
+            if s.get("timestamp_start") is not None:
+                payload["timestamp_start"] = float(s["timestamp_start"])
+            if s.get("timestamp_end") is not None:
+                payload["timestamp_end"] = float(s["timestamp_end"])
+            if s.get("speaker"):
+                payload["speaker"] = str(s["speaker"])
+
+        # VISION QUALITY FIELDS — stored for image and video frame chunks so
+        # retrieval can filter/rank on content quality rather than blind similarity.
+        if modality in ("image", "video"):
+            # Sharpness proxy: 0.0 = very blurry, 1.0 = sharp
+            if s.get("blur_score") is not None:
+                payload["blur_score"] = float(s["blur_score"])
+
+            # Caption richness: word diversity × length, [0, 1]
+            if s.get("caption_confidence") is not None:
+                payload["caption_confidence"] = float(s["caption_confidence"])
+
+            # Overall ingest quality composite score
+            if s.get("quality_score") is not None:
+                payload["quality_score"] = float(s["quality_score"])
+
+            # Low-content flag (solid background, test patterns, etc.)
+            if s.get("solid_color") is not None:
+                payload["solid_color"] = bool(s["solid_color"])
+
+            # Watermark / confidential stamp detected in OCR/caption
+            if s.get("watermark_detected") is not None:
+                payload["watermark_detected"] = bool(s["watermark_detected"])
+
+            # Face count (anonymised — count only, never identity)
+            if s.get("face_count") is not None:
+                payload["face_count"] = int(s["face_count"])
+
+            # Perceptual hash for near-duplicate detection at query time
+            if s.get("perceptual_hash") is not None:
+                payload["perceptual_hash"] = str(s["perceptual_hash"])
+
+            # Dominant palette — list of up to 5 hex colour strings
+            if s.get("dominant_colors"):
+                payload["dominant_colors"] = list(s["dominant_colors"])[:5]
+
+            # Pixel dimensions after resize
+            if s.get("image_width") is not None:
+                payload["image_width"]  = int(s["image_width"])
+                payload["image_height"] = int(s.get("image_height", 0))
+
+            # Caption text stored for display / hybrid re-rank
+            if s.get("caption"):
+                payload["caption"] = str(s["caption"])[:500]
+
+            # Asset path so the UI can render the original file / frame
+            if s.get("asset_path"):
+                payload["asset_path"] = str(s["asset_path"])
+            elif s.get("frame_path"):
+                payload["asset_path"] = str(s["frame_path"])
+
+            # Video-specific quality signals
+            if s.get("timestamp_sec") is not None:
+                payload["timestamp_sec"] = float(s["timestamp_sec"])
+
+            # Segment timestamps (video frames and audio chunks share these)
+            if s.get("timestamp_start") is not None:
+                payload["timestamp_start"] = float(s["timestamp_start"])
+
+            if s.get("timestamp_end") is not None:
+                payload["timestamp_end"] = float(s["timestamp_end"])
+
+            if s.get("speaker"):
+                payload["speaker"] = str(s["speaker"])
+
+            if s.get("alignment_score") is not None:
+                payload["alignment_score"] = float(s["alignment_score"])
+
+            if s.get("is_hdr") is not None:
+                payload["is_hdr"] = bool(s["is_hdr"])
+
+            if s.get("conflict_flag") is not None:
+                payload["conflict_flag"] = bool(s["conflict_flag"])
+
+            if s.get("video_duration") is not None:
+                payload["video_duration"] = float(s["video_duration"])
+
+            if s.get("fps") is not None:
+                payload["fps"] = float(s["fps"])
+
+            if s.get("frame_index") is not None:
+                payload["frame_index"] = int(s["frame_index"])
+
+        return payload
 
     # INSERT DOCUMENTS WITH IDEMPOTENT UPSERT
 
@@ -523,11 +628,6 @@ class QdrantVectorStore:
         if user_id:
             conditions.append(
                 FieldCondition(key="user_id", match=MatchValue(value=user_id))
-            )
-
-        if session_id:
-            conditions.append(
-                FieldCondition(key="session_id", match=MatchValue(value=session_id))
             )
 
         if self.modality_filter:

@@ -6,7 +6,7 @@ minimal set of models that must be warm before its handler runs. Same for
 the query path. The registry calls `model_loader.get_*` lazily — nothing
 heavy is touched until an ingest/query path actually needs it.
 
-This is what makes "upload a .txt file" stop pulling CLIP/BLIP/Whisper
+This is what makes "upload a .txt file" stop pulling SigLIP/BLIP/Whisper
 into memory.
 """
 
@@ -29,14 +29,14 @@ logger = get_logger(__name__)
 MODALITY_MODELS: Dict[str, Tuple[str, ...]] = {
     "text":     ("text_embedder",),
     "document": ("text_embedder",),
-    "image":    ("text_embedder", "blip", "clip", "image_embedder", "clip_text_embedder"),
+    "image":    ("text_embedder", "blip", "siglip", "image_embedder", "siglip_text_embedder"),
     "audio":    ("text_embedder", "whisper"),
-    "video":    ("text_embedder", "blip", "clip", "image_embedder", "clip_text_embedder", "whisper"),
+    "video":    ("text_embedder", "blip", "siglip", "image_embedder", "siglip_text_embedder", "whisper"),
 }
 
 # Models the query path needs (no upload).
 QUERY_MODELS:        Tuple[str, ...] = ("text_embedder", "llm", "reranker")
-QUERY_VISION_MODELS: Tuple[str, ...] = ("clip_text_embedder",)
+QUERY_VISION_MODELS: Tuple[str, ...] = ("siglip_text_embedder",)
 
 
 class ModelRegistry:
@@ -59,9 +59,14 @@ class ModelRegistry:
         return self._ensure(names, scope=f"modality:{modality}")
 
     # PUBLIC: warm the query path. Pass needs_vision=True for cross-modal queries.
+    # EVAL_SKIP_LLM_WARMUP=true prevents loading the LLM in eval subprocesses
+    # where the server already holds the GPU — avoids double-load VRAM crash.
 
     def ensure_for_query(self, needs_vision: bool = False) -> List[str]:
+        import os
         names = list(QUERY_MODELS)
+        if os.getenv("EVAL_SKIP_LLM_WARMUP", "").lower() == "true":
+            names = [n for n in names if n != "llm"]
         if needs_vision:
             names += list(QUERY_VISION_MODELS)
         return self._ensure(tuple(names), scope="query")
@@ -139,9 +144,9 @@ class ModelRegistry:
         return loaded
 
     def _is_enabled(self, name: str) -> bool:
-        # CLIP/BLIP/image_embedder/clip_text_embedder gated by ENABLE_VISION.
+        # SigLIP/BLIP/image_embedder gated by ENABLE_VISION.
         # Whisper gated by ENABLE_AUDIO.
-        if name in ("clip", "blip", "image_embedder", "clip_text_embedder"):
+        if name in ("siglip", "blip", "image_embedder", "siglip_text_embedder"):
             return bool(settings.ENABLE_VISION)
         if name == "whisper":
             return bool(settings.ENABLE_AUDIO)
@@ -154,10 +159,10 @@ class ModelRegistry:
         loaders: Dict[str, Callable[[], object]] = {
             "llm":                  model_loader.get_llm,
             "text_embedder":        model_loader.get_embedder,
-            "clip":                 model_loader.get_clip,
+            "siglip":               model_loader.get_siglip,
             "blip":                 model_loader.get_blip,
             "image_embedder":       model_loader.get_image_embedder,
-            "clip_text_embedder":   model_loader.get_clip_text_embedder,
+            "siglip_text_embedder": model_loader.get_siglip_text_embedder,
             "whisper":              model_loader.get_whisper,
             "reranker":             model_loader.get_reranker,
         }
@@ -168,8 +173,8 @@ class ModelRegistry:
 
     def snapshot(self) -> Dict[str, bool]:
         all_known = (
-            "llm", "text_embedder", "clip", "blip",
-            "image_embedder", "clip_text_embedder", "whisper", "reranker",
+            "llm", "text_embedder", "siglip", "blip",
+            "image_embedder", "siglip_text_embedder", "whisper", "reranker",
         )
         return {n: n in self._loaded for n in all_known}
 

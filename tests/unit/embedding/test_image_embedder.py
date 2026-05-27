@@ -67,8 +67,8 @@ class TestImageEmbedder:
         embedder.model        = mock_model
         embedder.processor    = mock_proc
         embedder.device       = "cpu"
-        embedder.model_name   = "openai/clip-vit-base-patch32"
-        embedder.expected_dim = 512
+        embedder.model_name   = "google/siglip-so400m-patch14-384"
+        embedder.expected_dim = 1152
         embedder.batch_size   = 16
         embedder._cache       = MagicMock()
 

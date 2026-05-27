@@ -1,0 +1,14 @@
+artifact_uri: /home/ubuntu/multimodal-rag-assistant-1/mlruns/101106892306504793/0ea0d9e62c394f3794788b9a3cce34aa/artifacts
+end_time: 1779759495788
+entry_point_name: ''
+experiment_id: '101106892306504793'
+lifecycle_stage: active
+run_id: 0ea0d9e62c394f3794788b9a3cce34aa
+run_name: efficient-shark-484
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1779759495753
+status: 3
+tags: []
+user_id: ubuntu
