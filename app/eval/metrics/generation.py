@@ -154,17 +154,23 @@ async def compute_generation_metrics_ragas(
             context_recall,
             faithfulness,
         )
+        from ragas.embeddings import HuggingfaceEmbeddings
+        from ragas.run_config import RunConfig
         from app.eval.judges.gguf_judge import get_judge
         from app.eval.config import EVAL_JUDGE_TEMPERATURE
+        from app.core.config import settings as app_settings
 
+        # max_workers=1: llama.cpp is not thread-safe; serialise all judge calls.
+        run_config = RunConfig(max_workers=1, timeout=300)
         judge = get_judge(temperature=EVAL_JUDGE_TEMPERATURE)
+        embeddings = HuggingfaceEmbeddings(model_name=app_settings.EMBEDDING_MODEL)
 
-        # Build ragas-compatible dataset
-        data = {
+        # Build ragas-compatible dataset (use ground_truth, not deprecated ground_truths)
+        data: Dict[str, List] = {
             "question": [],
             "answer": [],
             "contexts": [],
-            "ground_truths": [],
+            "ground_truth": [],
         }
         for row in eval_rows:
             data["question"].append(row.get("query") or "")
@@ -172,13 +178,15 @@ async def compute_generation_metrics_ragas(
             ctx = _extract_context_texts(row.get("contexts") or [])
             data["contexts"].append(ctx if ctx else [""])
             ref = row.get("reference_answer") or ""
-            data["ground_truths"].append([ref] if ref and ref != "TODO" else [""])
+            data["ground_truth"].append(ref if ref and ref != "TODO" else "")
 
         dataset = Dataset.from_dict(data)
         result = evaluate(
             dataset,
             metrics=[faithfulness, answer_relevancy, context_recall, context_precision],
             llm=judge,
+            embeddings=embeddings,
+            run_config=run_config,
         )
 
         metrics_out: Dict[str, MetricResult] = {}

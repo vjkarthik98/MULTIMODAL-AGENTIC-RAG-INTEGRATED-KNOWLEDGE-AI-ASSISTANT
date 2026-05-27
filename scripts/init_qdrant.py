@@ -120,7 +120,7 @@ class QdrantInitializer:
             CollectionSpec(
                 name        = settings.VISION_COLLECTION_NAME,
                 dim         = settings.VISION_EMBEDDING_DIM,
-                description = "CLIP visual embeddings (images + video frames)",
+                description = "SigLIP visual embeddings (images + video frames)",
             ),
         ]
 

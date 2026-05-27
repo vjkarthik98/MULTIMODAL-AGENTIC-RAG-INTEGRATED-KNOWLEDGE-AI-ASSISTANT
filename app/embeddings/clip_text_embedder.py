@@ -23,9 +23,8 @@ except ImportError:
 logger = get_logger(__name__)
 
 
-# CLIP ARCHITECTURE HARD LIMIT
-
-_CLIP_MAX_TOKEN_LENGTH: int = 77
+# SigLIP token hard limit — read from tokenizer.model_max_length at runtime.
+_SIGLIP_MAX_TOKEN_LENGTH: int = 64
 
 
 # PROMETHEUS METRICS
@@ -41,22 +40,22 @@ def _make_metrics():
     try:
         from prometheus_client import Counter, Histogram
         embed_latency = Histogram(
-            "clip_text_embedding_latency_seconds",
-            "CLIP text embedding batch latency",
+            "siglip_text_embedding_latency_seconds",
+            "SigLIP text embedding batch latency",
             ["batch_size"],
         )
         embed_errors = Counter(
-            "clip_text_embedding_errors_total",
-            "CLIP text embedding failures",
+            "siglip_text_embedding_errors_total",
+            "SigLIP text embedding failures",
             ["reason"],
         )
         embed_total = Counter(
-            "clip_text_embeddings_produced_total",
-            "Total CLIP text embeddings produced",
+            "siglip_text_embeddings_produced_total",
+            "Total SigLIP text embeddings produced",
         )
         cache_hits = Counter(
-            "clip_text_embedding_cache_hits_total",
-            "Redis CLIP text embedding cache hits",
+            "siglip_text_embedding_cache_hits_total",
+            "Redis SigLIP text embedding cache hits",
         )
         return embed_latency, embed_errors, embed_total, cache_hits
     except Exception:
@@ -85,26 +84,29 @@ def _get_semaphore() -> asyncio.Semaphore:
 
 # CUSTOM EXCEPTIONS
 
-class ClipTextEmbedderError(Exception):
-    """Base exception for CLIP text embedding errors."""
+class SiglipTextEmbedderError(Exception):
+    """Base exception for SigLIP text embedding errors."""
+
+# Backward-compat alias.
+ClipTextEmbedderError = SiglipTextEmbedderError
 
 
-class DimensionMismatchError(ClipTextEmbedderError):
+class DimensionMismatchError(SiglipTextEmbedderError):
     """Raised when embedding dimension does not match expected."""
 
 
-class NoValidTextsError(ClipTextEmbedderError):
+class NoValidTextsError(SiglipTextEmbedderError):
     """Raised when all input texts fail validation."""
 
 
-class TorchNotAvailableError(ClipTextEmbedderError):
+class TorchNotAvailableError(SiglipTextEmbedderError):
     """Raised when PyTorch is not installed."""
 
 
 # EMBEDDING RESULT MODEL
 
-class ClipTextEmbeddingResult:
-    """Structured result for a single CLIP text embedding."""
+class SiglipTextEmbeddingResult:
+    """Structured result for a single SigLIP text embedding."""
 
     def __init__(
         self,
@@ -192,7 +194,7 @@ def _sanitize_injection(text: str) -> str:
             text = text[:idx].strip()
             lower = text.lower()
             logger.warning(
-                event="clip_text_injection_pattern_stripped",
+                event="siglip_text_injection_pattern_stripped",
                 pattern=pattern,
             )
     return text
@@ -204,11 +206,11 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text.split()))
 
 
-# TRUNCATION TO CLIP TOKEN LIMIT
+# TRUNCATION TO SIGLIP TOKEN LIMIT
 
-def _truncate_to_clip_limit(text: str, max_chars: int) -> tuple[str, bool]:
+def _truncate_to_siglip_limit(text: str, max_chars: int) -> tuple[str, bool]:
     """
-    Truncate text to stay within CLIP's 77-token hard limit.
+    Truncate text to stay within SigLIP's 64-token hard limit.
     Returns (truncated_text, was_truncated).
     """
     if len(text) <= max_chars:
@@ -235,7 +237,7 @@ def _sha256(text: str) -> str:
 # REDIS CACHE HELPERS
 
 def _cache_key(checksum: str) -> str:
-    return f"clip_txt_emb:{checksum}"
+    return f"siglip_txt_emb:{checksum}"
 
 
 def _cache_get(checksum: str) -> Optional[List[float]]:
@@ -279,16 +281,16 @@ def _valid_embedding(emb: List[float], expected_dim: int) -> bool:
     return True
 
 
-# CLIP TEXT EMBEDDER CLASS
+# SIGLIP TEXT EMBEDDER CLASS
 
-class ClipTextEmbedder:
+class SiglipTextEmbedder:
     """
-    CLIP text-side embedder for cross-modal retrieval.
+    SigLIP text-side embedder for cross-modal retrieval.
 
     Responsibilities:
-      - Normalise, sanitize, truncate to CLIP 77-token limit.
+      - Normalise, sanitize, truncate to SigLIP 64-token limit.
       - Redis embedding cache keyed by SHA-256 of cleaned text.
-      - Batch CLIP text inference with L2 normalisation.
+      - Batch SigLIP text inference with L2 normalisation.
       - Dimension consistency enforcement.
       - Full Phase 24 metadata on every result.
       - Prompt injection guard on all inputs.
@@ -296,26 +298,28 @@ class ClipTextEmbedder:
 
     def __init__(self, processor, model, device: str) -> None:
         if not TORCH_AVAILABLE:
-            raise TorchNotAvailableError("TORCH_REQUIRED_FOR_CLIP_TEXT_EMBEDDER")
+            raise TorchNotAvailableError("TORCH_REQUIRED_FOR_SIGLIP_TEXT_EMBEDDER")
 
         self.processor    = processor
         self.model        = model
         self.device       = device
-        self.model_name   = settings.CLIP_MODEL
+        self.model_name   = settings.SIGLIP_MODEL
         self.expected_dim = settings.VISION_EMBEDDING_DIM
         self.batch_size   = settings.EMBEDDING_BATCH_SIZE
 
-        # CLIP HARD LIMIT — NEVER EXCEED
-        self.max_length = min(
-            getattr(settings, "CLIP_MAX_LENGTH", _CLIP_MAX_TOKEN_LENGTH),
-            _CLIP_MAX_TOKEN_LENGTH,
-        )
+        # SigLIP tokenizer reports model_max_length=64; read it at runtime so
+        # truncation is always correct.  Sentinels > 10k mean "unlimited" — cap at 64.
+        tokenizer = getattr(processor, "tokenizer", None)
+        model_max = getattr(tokenizer, "model_max_length", _SIGLIP_MAX_TOKEN_LENGTH)
+        if model_max > 10_000:
+            model_max = _SIGLIP_MAX_TOKEN_LENGTH
+        self.max_length = model_max
 
-        # CONSERVATIVE CHAR LIMIT (CLIP 77 TOKENS ≈ 300 CHARS ON AVERAGE)
+        # ~4 chars per token on average
         self._max_chars = self.max_length * 4
 
         logger.info(
-            event="clip_text_embedder_initialized",
+            event="siglip_text_embedder_initialized",
             device=device,
             model=self.model_name,
             expected_dim=self.expected_dim,
@@ -354,8 +358,8 @@ class ClipTextEmbedder:
             if len(text) > settings.MAX_PROMPT_CHARS:
                 text = text[:settings.MAX_PROMPT_CHARS]
 
-            # TRUNCATE TO CLIP HARD LIMIT
-            text, was_truncated = _truncate_to_clip_limit(text, self._max_chars)
+            # TRUNCATE TO SIGLIP HARD LIMIT
+            text, was_truncated = _truncate_to_siglip_limit(text, self._max_chars)
 
             if not text:
                 _EMBED_ERRORS.labels(reason="empty_after_truncation").inc()
@@ -376,6 +380,7 @@ class ClipTextEmbedder:
                 "token_estimate": token_estimate,
                 "was_truncated":  was_truncated,
                 "text_preview":   text[:80],
+                "language":       None,
             })
 
         return prepared
@@ -399,18 +404,18 @@ class ClipTextEmbedder:
         self,
         texts: Union[str, List[str]],
         session_id: str = "default",
-    ) -> List[ClipTextEmbeddingResult]:
+    ) -> List[SiglipTextEmbeddingResult]:
         """
-        Embed one or more text strings via CLIP.
+        Embed one or more text strings via SigLIP.
 
         Steps:
           1. Normalise + sanitize + injection guard + dedup.
           2. Check Redis cache per text (SHA-256 keyed).
-          3. Batch CLIP inference for cache-miss texts.
+          3. Batch SigLIP inference for cache-miss texts.
           4. L2 normalise all vectors.
           5. Validate embedding dimensions.
           6. Cache results in Redis.
-          7. Return ClipTextEmbeddingResult list.
+          7. Return SiglipTextEmbeddingResult list.
         """
         if not session_id:
             raise ValueError("SESSION_ID_REQUIRED")
@@ -420,15 +425,15 @@ class ClipTextEmbedder:
             raise NoValidTextsError("NO_VALID_TEXTS_AFTER_PREPARATION")
 
         start_total    = time.time()
-        cached_results: List[ClipTextEmbeddingResult] = []
-        miss_items:     List[Dict[str, Any]]           = []
+        cached_results: List[SiglipTextEmbeddingResult] = []
+        miss_items:     List[Dict[str, Any]]             = []
 
         # CACHE CHECK
         for item in prepared:
             cached_emb = _cache_get(item["checksum"])
             if cached_emb and _valid_embedding(cached_emb, self.expected_dim):
                 _CACHE_HITS.inc()
-                cached_results.append(ClipTextEmbeddingResult(
+                cached_results.append(SiglipTextEmbeddingResult(
                     text_preview         = item["text_preview"],
                     embedding            = cached_emb,
                     embedding_dim        = self.expected_dim,
@@ -446,7 +451,7 @@ class ClipTextEmbedder:
                 miss_items.append(item)
 
         # BATCH INFERENCE FOR CACHE MISSES
-        fresh_results: List[ClipTextEmbeddingResult] = []
+        fresh_results: List[SiglipTextEmbeddingResult] = []
 
         for i in range(0, len(miss_items), self.batch_size):
             batch = miss_items[i:i + self.batch_size]
@@ -464,11 +469,10 @@ class ClipTextEmbedder:
 
                 with torch.no_grad():
                     features = self.model.get_text_features(**inputs)
-                    # Some transformers versions return BaseModelOutputWithPooling
-                    # instead of a plain tensor when output_hidden_states is set.
-                    if not isinstance(features, torch.Tensor):
+                    # SigLIP returns BaseModelOutputWithPooling — use pooler_output.
+                    if hasattr(features, "pooler_output"):
                         features = features.pooler_output
-                    features = F.normalize(features, p=2, dim=-1)
+                    features = F.normalize(features.float(), p=2, dim=-1)
 
                 embeddings    = features.detach().cpu().numpy().tolist()
                 batch_latency = round((time.time() - t_batch) * 1000, 1)
@@ -477,7 +481,7 @@ class ClipTextEmbedder:
                 target_ms = settings.LATENCY_TARGET_IMAGE_MS
                 if batch_latency > target_ms:
                     logger.warning(
-                        event="clip_text_batch_latency_exceeded",
+                        event="siglip_text_batch_latency_exceeded",
                         latency_ms=batch_latency,
                         target_ms=target_ms,
                         batch_size=len(batch_texts),
@@ -494,7 +498,7 @@ class ClipTextEmbedder:
                     # DIMENSION CONSISTENCY CHECK
                     if len(emb_list) != self.expected_dim:
                         logger.error(
-                            event="clip_text_dim_mismatch",
+                            event="siglip_text_dim_mismatch",
                             got=len(emb_list),
                             expected=self.expected_dim,
                             text_preview=item["text_preview"],
@@ -509,7 +513,7 @@ class ClipTextEmbedder:
                     # NaN / Inf GUARD
                     if not _valid_embedding(emb_list, self.expected_dim):
                         logger.warning(
-                            event="clip_text_invalid_values",
+                            event="siglip_text_invalid_values",
                             text_preview=item["text_preview"],
                             session_id=session_id,
                         )
@@ -520,7 +524,7 @@ class ClipTextEmbedder:
                     _cache_set(item["checksum"], emb_list)
                     _EMBED_TOTAL.inc()
 
-                    fresh_results.append(ClipTextEmbeddingResult(
+                    fresh_results.append(SiglipTextEmbeddingResult(
                         text_preview         = item["text_preview"],
                         embedding            = emb_list,
                         embedding_dim        = self.expected_dim,
@@ -540,7 +544,7 @@ class ClipTextEmbedder:
 
             except Exception as exc:
                 logger.error(
-                    event="clip_text_batch_failed",
+                    event="siglip_text_batch_failed",
                     batch_start=i,
                     error=str(exc),
                     session_id=session_id,
@@ -550,13 +554,13 @@ class ClipTextEmbedder:
         all_results = cached_results + fresh_results
 
         if not all_results:
-            raise NoValidTextsError("NO_CLIP_TEXT_EMBEDDINGS_PRODUCED")
+            raise NoValidTextsError("NO_SIGLIP_TEXT_EMBEDDINGS_PRODUCED")
 
         total_latency = round(time.time() - start_total, 3)
         throughput    = round(len(all_results) / max(total_latency, 1e-6), 1)
 
         logger.info(
-            event="clip_text_embed_success",
+            event="siglip_text_embed_success",
             total=len(all_results),
             cached=len(cached_results),
             fresh=len(fresh_results),
@@ -618,3 +622,6 @@ class ClipTextEmbedder:
         }
 
 
+# Backward-compat aliases — callers importing ClipTextEmbedder still work.
+ClipTextEmbedder = SiglipTextEmbedder
+ClipTextEmbeddingResult = SiglipTextEmbeddingResult

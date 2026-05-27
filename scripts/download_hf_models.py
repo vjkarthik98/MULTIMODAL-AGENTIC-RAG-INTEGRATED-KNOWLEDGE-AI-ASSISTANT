@@ -44,7 +44,7 @@ def main() -> None:
     p.add_argument("--hf-home",   required=True)
     p.add_argument("--hf-token",  default="")
     p.add_argument("--embedding", required=True)
-    p.add_argument("--clip",      required=True)
+    p.add_argument("--siglip",    required=True)
     p.add_argument("--blip",      required=True)
     p.add_argument("--reranker",  required=True)
     p.add_argument("--whisper",   required=True)
@@ -53,7 +53,7 @@ def main() -> None:
     os.environ["HF_HOME"] = args.hf_home
     token = args.hf_token or None
 
-    hf_models = [args.embedding, args.clip, args.blip, args.reranker]
+    hf_models = [args.embedding, args.siglip, args.blip, args.reranker]
     for model_id in hf_models:
         if is_cached(args.hf_home, model_id):
             print(f"[ensure_models] HF model present: {model_id}")

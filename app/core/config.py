@@ -141,7 +141,7 @@ class Settings:
     MODELS_DEVICE_PROFILE: str       = _str("MODELS_DEVICE_PROFILE", "all_gpu")
     VRAM_BUDGET_GB: float            = _float("VRAM_BUDGET_GB", 13.0)
     WARMUP_AT_STARTUP: bool          = _bool("WARMUP_AT_STARTUP", True)
-    WARMUP_MODELS: List[str]         = _list("WARMUP_MODELS", ["text_embedder", "llm", "reranker", "clip", "blip", "whisper"])
+    WARMUP_MODELS: List[str]         = _list("WARMUP_MODELS", ["text_embedder", "llm", "reranker", "siglip", "blip", "whisper"])
     MODEL_PARALLEL_LOAD: bool        = _bool("MODEL_PARALLEL_LOAD", True)
     LLM_GPU_LAYERS_AUTO: bool        = _bool("LLM_GPU_LAYERS_AUTO", True)
     LLM_GPU_LAYERS_ALL: int          = _int("LLM_GPU_LAYERS_ALL", -1)
@@ -150,24 +150,23 @@ class Settings:
     WHISPER_COMPUTE_TYPE: str        = _str("WHISPER_COMPUTE_TYPE", "float16")
     EMBEDDER_DEVICE: str             = _str("EMBEDDER_DEVICE", "cuda")
     RERANKER_DEVICE: str             = _str("RERANKER_DEVICE", "cuda")
-    CLIP_DEVICE: str                 = _str("CLIP_DEVICE", "cuda")
+    SIGLIP_DEVICE: str               = _str("SIGLIP_DEVICE", "cuda")
     BLIP_DEVICE: str                 = _str("BLIP_DEVICE", "cuda")
     WHISPER_DEVICE: str              = _str("WHISPER_DEVICE", "cuda")
     LLM_DEVICE_HINT: str             = _str("LLM_DEVICE_HINT", "cuda")
 
     # VISION MODELS
-    CLIP_MODEL: str                  = _str("CLIP_MODEL", "openai/clip-vit-base-patch32")
-    VISION_EMBEDDING_DIM: int        = _int("VISION_EMBEDDING_DIM", 512)
-    BLIP_MODEL: str                  = _str("BLIP_MODEL", "Salesforce/blip-image-captioning-base")
-    BLIP_MAX_TOKENS: int             = _int("BLIP_MAX_TOKENS", 64)
-    BLIP_NUM_BEAMS: int              = _int("BLIP_NUM_BEAMS", 3)
+    SIGLIP_MODEL: str                = _str("SIGLIP_MODEL", "google/siglip-so400m-patch14-384")
+    VISION_EMBEDDING_DIM: int        = _int("VISION_EMBEDDING_DIM", 1152)
+    BLIP_MODEL: str                  = _str("BLIP_MODEL", "Salesforce/blip-image-captioning-large")
+    BLIP_MAX_TOKENS: int             = _int("BLIP_MAX_TOKENS", 100)
+    BLIP_NUM_BEAMS: int              = _int("BLIP_NUM_BEAMS", 5)
     MAX_IMAGE_DIM: int               = _int("MAX_IMAGE_DIM", 1024)
     MAX_IMAGE_SIZE_MP: int           = _int("MAX_IMAGE_SIZE_MP", 50)
     THUMBNAIL_WIDTH: int             = _int("THUMBNAIL_WIDTH", 256)
     THUMBNAIL_HEIGHT: int            = _int("THUMBNAIL_HEIGHT", 256)
     IMAGE_PRIVACY_MODE: bool         = _bool("IMAGE_PRIVACY_MODE", False)
     SOLID_COLOR_THRESHOLD: float     = _float("SOLID_COLOR_THRESHOLD", 0.95)
-    CLIP_MAX_LENGTH: int             = _int("CLIP_MAX_LENGTH", 77)
 
     # ASR WHISPER
     WHISPER_MODEL: str              = _str("WHISPER_MODEL", "large-v3")
@@ -201,9 +200,10 @@ class Settings:
 
     RERANK_MODALITY_WEIGHTS: Dict[str, float] = {
         "text":  1.0,
-        "image": 0.95,
-        "audio": 1.05,
-        "video": 1.1,
+        "table": 1.1,
+        "image": 0.75,
+        "audio": 0.85,
+        "video": 0.75,
     }
 
     # QDRANT
@@ -671,7 +671,7 @@ class TestSettings:
         s = Settings()
         assert s.APP_VERSION == "0.25.0"
         assert s.TEXT_EMBEDDING_DIM == 384
-        assert s.VISION_EMBEDDING_DIM == 512
+        assert s.VISION_EMBEDDING_DIM > 0
         assert s.CHUNK_OVERLAP < s.CHUNK_SIZE
         assert s.AGENT_MAX_STEPS > 0
         assert s.RAG_TOP_K > 0

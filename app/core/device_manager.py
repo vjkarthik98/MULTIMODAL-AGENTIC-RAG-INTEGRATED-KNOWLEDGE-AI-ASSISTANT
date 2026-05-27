@@ -4,13 +4,13 @@ Central device + dtype policy for the model layer.
 Tesla T4 deploy budget: 14.6 GB VRAM, CUDA 13.2.
 
 GPU models (all_gpu profile) — ALL models run on GPU:
-  - Mistral 7B Q4_K_M  ~4.1 GB  (llama-cpp n_gpu_layers=-1)
-  - CLIP ViT-B/32       ~0.6 GB  (float16)
-  - BLIP base           ~1.0 GB  (float16)
-  - Whisper large-v3    ~1.5 GB  (float16)
-  - CrossEncoder MiniLM ~0.1 GB  (float16)
-  - MiniLM text embed   ~0.09 GB (float16)
-  Total ≈ 7.4 GB  — fits comfortably in 14.6 GB
+  - Mistral 7B Q4_K_M      ~4.1 GB  (llama-cpp n_gpu_layers=-1)
+  - SigLIP SO400M/14@384px ~1.74 GB (float16)
+  - BLIP large              ~1.5 GB  (float16)
+  - Whisper large-v3        ~1.5 GB  (float16)
+  - CrossEncoder MiniLM     ~0.1 GB  (float16)
+  - MiniLM text embed       ~0.09 GB (float16)
+  Total ≈ 8.9 GB  — fits comfortably in 14.6 GB
 
 CPU services (no VRAM needed — not models):
   - FastAPI / Uvicorn
@@ -22,11 +22,11 @@ CPU services (no VRAM needed — not models):
 Profiles
 --------
 - auto      → all_gpu on CUDA, all_cpu otherwise.
-- hybrid    → LLM / CLIP / BLIP / Whisper on CUDA; text embedder + reranker on CPU.
+- hybrid    → LLM / SigLIP / BLIP / Whisper on CUDA; text embedder + reranker on CPU.
 - all_gpu   → every model on CUDA.
 - all_cpu   → every model on CPU.
 
-Each per-model env var (EMBEDDER_DEVICE, CLIP_DEVICE, …) takes precedence
+Each per-model env var (EMBEDDER_DEVICE, SIGLIP_DEVICE, …) takes precedence
 over the profile when set.
 """
 
@@ -46,7 +46,7 @@ logger = get_logger(__name__)
 MODEL_NAMES = (
     "llm",
     "text_embedder",
-    "clip",
+    "siglip",
     "blip",
     "whisper",
     "reranker",
@@ -55,7 +55,7 @@ MODEL_NAMES = (
 # Hybrid profile: heavy attention models on GPU, tiny models on CPU.
 _HYBRID_MAP: Dict[str, str] = {
     "llm":            "cuda",
-    "clip":           "cuda",
+    "siglip":         "cuda",
     "blip":           "cuda",
     "whisper":        "cuda",
     "text_embedder":  "cpu",
@@ -161,7 +161,7 @@ class DeviceManager:
             "llm":           settings.LLM_DEVICE_HINT,
             "text_embedder": settings.EMBEDDER_DEVICE,
             "reranker":      settings.RERANKER_DEVICE,
-            "clip":          settings.CLIP_DEVICE,
+            "siglip":        settings.SIGLIP_DEVICE,
             "blip":          settings.BLIP_DEVICE,
             "whisper":       settings.WHISPER_DEVICE,
         }
@@ -207,7 +207,7 @@ class DeviceManager:
             if name == "whisper":
                 ct = (settings.WHISPER_COMPUTE_TYPE or "").strip().lower()
                 return ct or "float16"
-            if name in ("clip", "blip") and settings.VISION_HALF_PRECISION:
+            if name in ("siglip", "blip") and settings.VISION_HALF_PRECISION:
                 return "float16"
             if name == "text_embedder" and settings.EMBEDDER_HALF_PRECISION:
                 return "float16"
@@ -231,7 +231,7 @@ class DeviceManager:
 
     # GGUF n_gpu_layers — auto-pick based on actual free VRAM at load time.
     # Mistral Q4_K_M has 32 transformer blocks; each costs ~128 MB of VRAM.
-    # We reserve 512 MB headroom so other models (embedder, CLIP, Whisper) don't OOM.
+    # We reserve 512 MB headroom so other models (embedder, SigLIP, Whisper) don't OOM.
     _LAYERS_PER_GB = 7.5          # ~128 MB per layer → ~7.5 layers per GB
     _VRAM_HEADROOM_GB = 0.3       # keep 300 MB free — tight but safe on T4
 

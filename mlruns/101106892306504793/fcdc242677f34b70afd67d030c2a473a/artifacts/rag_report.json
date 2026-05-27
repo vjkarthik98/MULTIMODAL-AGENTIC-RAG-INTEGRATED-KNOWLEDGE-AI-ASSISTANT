@@ -1,0 +1,408 @@
+{
+  "generated_at": "2026-05-26T01:55:18Z",
+  "git_sha": "aa4da29",
+  "weaken_spec": null,
+  "suites": {
+    "full": {
+      "suite": "full",
+      "metrics": {
+        "retrieval.recall_at_5": {
+          "name": "retrieval.recall_at_5",
+          "value": 0.2857142857142857,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval.recall_at_10": {
+          "name": "retrieval.recall_at_10",
+          "value": 0.5714285714285714,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval.mrr": {
+          "name": "retrieval.mrr",
+          "value": 0.4714285714285714,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval.ndcg_at_10": {
+          "name": "retrieval.ndcg_at_10",
+          "value": 0.41881211351234426,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval.context_precision": {
+          "name": "retrieval.context_precision",
+          "value": 0.19523809523809524,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval.hit_rate": {
+          "name": "retrieval.hit_rate",
+          "value": 0.8571428571428571,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval.retrieval_p50_sec": {
+          "name": "retrieval.retrieval_p50_sec",
+          "value": 1.4988844394683838,
+          "n": 15,
+          "notes": "min=1.17s max=4.22s",
+          "sub": {}
+        },
+        "retrieval.retrieval_p95_sec": {
+          "name": "retrieval.retrieval_p95_sec",
+          "value": 2.94115881919861,
+          "n": 15,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval.retrieval_p99_sec": {
+          "name": "retrieval.retrieval_p99_sec",
+          "value": 3.966583356857299,
+          "n": 15,
+          "notes": "",
+          "sub": {}
+        },
+        "generation.faithfulness": {
+          "name": "generation.faithfulness",
+          "value": 0.5751035191877091,
+          "n": 14,
+          "notes": "judge=lexical_fallback (ragas_error: Can't instantiate abstract class GGUFJudge without an implementation for abstract method 'generate_text')",
+          "sub": {}
+        },
+        "generation.answer_relevancy": {
+          "name": "generation.answer_relevancy",
+          "value": 0.4085648422661912,
+          "n": 14,
+          "notes": "judge=lexical_fallback (ragas_error: Can't instantiate abstract class GGUFJudge without an implementation for abstract method 'generate_text')",
+          "sub": {}
+        },
+        "generation.context_recall": {
+          "name": "generation.context_recall",
+          "value": 0.4925821527799301,
+          "n": 14,
+          "notes": "judge=lexical_fallback (ragas_error: Can't instantiate abstract class GGUFJudge without an implementation for abstract method 'generate_text')",
+          "sub": {}
+        },
+        "generation.citation_accuracy": {
+          "name": "generation.citation_accuracy",
+          "value": 1.0,
+          "n": 5,
+          "notes": "judge=lexical_fallback (ragas_error: Can't instantiate abstract class GGUFJudge without an implementation for abstract method 'generate_text')",
+          "sub": {}
+        },
+        "generation.template_leak_rate": {
+          "name": "generation.template_leak_rate",
+          "value": 0.0,
+          "n": 14,
+          "notes": "leaky=0/14",
+          "sub": {}
+        },
+        "generation.hallucination_rate": {
+          "name": "generation.hallucination_rate",
+          "value": 0.7857142857142857,
+          "n": 14,
+          "notes": "flagged=11/14 | examples:   'What was Apple's total net sales in fisc': [\"missing_reference_numbers: ['394.3 billion', '2022']\"];   'What was Apple's gross margin percentage': [\"missing_reference_numbers: ['169.1 billion']\"]",
+          "sub": {}
+        },
+        "generation.generation_p50_sec": {
+          "name": "generation.generation_p50_sec",
+          "value": 0.002084493637084961,
+          "n": 14,
+          "notes": "min=0.00s max=15.91s",
+          "sub": {}
+        },
+        "generation.generation_p95_sec": {
+          "name": "generation.generation_p95_sec",
+          "value": 15.444899368286134,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "generation.generation_p99_sec": {
+          "name": "generation.generation_p99_sec",
+          "value": 15.817151222229004,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "routing.route_accuracy": {
+          "name": "routing.route_accuracy",
+          "value": 1.0,
+          "n": 12,
+          "notes": "correct=12/12",
+          "sub": {}
+        },
+        "routing.hybrid_with_web_rate": {
+          "name": "routing.hybrid_with_web_rate",
+          "value": 0.0,
+          "n": 4,
+          "notes": "hybrid_with_web=0/4 | P1-4 misses: ['What are the latest S&P 500 index levels today?', \"What is JPMorgan's latest credit rating and what r\", 'What is the current Federal Reserve interest rate?']",
+          "sub": {}
+        },
+        "routing.route_cm_rag_as_rag": {
+          "name": "routing.route_cm_rag_as_rag",
+          "value": 5.0,
+          "n": 12,
+          "notes": "confusion matrix cell",
+          "sub": {}
+        },
+        "routing.route_cm_hybrid_as_hybrid": {
+          "name": "routing.route_cm_hybrid_as_hybrid",
+          "value": 4.0,
+          "n": 12,
+          "notes": "confusion matrix cell",
+          "sub": {}
+        },
+        "routing.route_cm_memory_as_memory": {
+          "name": "routing.route_cm_memory_as_memory",
+          "value": 1.0,
+          "n": 12,
+          "notes": "confusion matrix cell",
+          "sub": {}
+        },
+        "routing.route_cm_direct_as_direct": {
+          "name": "routing.route_cm_direct_as_direct",
+          "value": 2.0,
+          "n": 12,
+          "notes": "confusion matrix cell",
+          "sub": {}
+        },
+        "e2e.recall_at_5": {
+          "name": "e2e.recall_at_5",
+          "value": 0.0,
+          "n": 17,
+          "notes": "",
+          "sub": {}
+        },
+        "e2e.recall_at_10": {
+          "name": "e2e.recall_at_10",
+          "value": 0.0,
+          "n": 17,
+          "notes": "",
+          "sub": {}
+        },
+        "e2e.mrr": {
+          "name": "e2e.mrr",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: all queries had TODO relevant_chunk_ids",
+          "sub": {}
+        },
+        "e2e.ndcg_at_10": {
+          "name": "e2e.ndcg_at_10",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: all queries had TODO relevant_chunk_ids",
+          "sub": {}
+        },
+        "e2e.context_precision": {
+          "name": "e2e.context_precision",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: all queries had TODO relevant_chunk_ids",
+          "sub": {}
+        },
+        "e2e.hit_rate": {
+          "name": "e2e.hit_rate",
+          "value": 0.0,
+          "n": 17,
+          "notes": "",
+          "sub": {}
+        },
+        "e2e.faithfulness": {
+          "name": "e2e.faithfulness",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: insufficient data",
+          "sub": {}
+        },
+        "e2e.answer_relevancy": {
+          "name": "e2e.answer_relevancy",
+          "value": 0.012131519274376416,
+          "n": 30,
+          "notes": "judge=lexical_fallback (ragas_error: Can't instantiate abstract class GGUFJudge without an implementation for abstract method 'generate_text')",
+          "sub": {}
+        },
+        "e2e.context_recall": {
+          "name": "e2e.context_recall",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: insufficient data",
+          "sub": {}
+        },
+        "e2e.citation_accuracy": {
+          "name": "e2e.citation_accuracy",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: insufficient data",
+          "sub": {}
+        },
+        "e2e.template_leak_rate": {
+          "name": "e2e.template_leak_rate",
+          "value": 0.0,
+          "n": 30,
+          "notes": "leaky=0/30",
+          "sub": {}
+        },
+        "e2e.hallucination_rate": {
+          "name": "e2e.hallucination_rate",
+          "value": 0.0,
+          "n": 30,
+          "notes": "flagged=0/30",
+          "sub": {}
+        },
+        "e2e.route_accuracy": {
+          "name": "e2e.route_accuracy",
+          "value": 0.0,
+          "n": 30,
+          "notes": "correct=0/30 | misroutes:   'What was Apple's total net sales in fiscal year 20' expected=rag got=;   'What was Apple's Services revenue in FY2023?' expected=rag got=;   'What was Apple's gross margin percentage in fiscal' expected=rag got=",
+          "sub": {}
+        },
+        "e2e.p50_sec": {
+          "name": "e2e.p50_sec",
+          "value": 0.8708615303039551,
+          "n": 30,
+          "notes": "min=0.26s max=7.04s",
+          "sub": {}
+        },
+        "e2e.p95_sec": {
+          "name": "e2e.p95_sec",
+          "value": 2.4190277338027952,
+          "n": 30,
+          "notes": "",
+          "sub": {}
+        },
+        "e2e.p99_sec": {
+          "name": "e2e.p99_sec",
+          "value": 5.699744119644169,
+          "n": 30,
+          "notes": "",
+          "sub": {}
+        },
+        "ocr.ocr_cer": {
+          "name": "ocr.ocr_cer",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: no curated image gold rows; run download_eval_corpus.sh first",
+          "sub": {}
+        },
+        "ocr.ocr_wer": {
+          "name": "ocr.ocr_wer",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: no curated image gold rows",
+          "sub": {}
+        },
+        "ocr.ocr_exact_match": {
+          "name": "ocr.ocr_exact_match",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: no curated image gold rows",
+          "sub": {}
+        },
+        "audio.audio_wer": {
+          "name": "audio.audio_wer",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: no curated audio gold rows; run download_eval_corpus.sh first",
+          "sub": {}
+        },
+        "video.frame_caption_recall": {
+          "name": "video.frame_caption_recall",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: no curated video gold rows; run download_eval_corpus.sh first",
+          "sub": {}
+        },
+        "video.caption_repetition_rate": {
+          "name": "video.caption_repetition_rate",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: no curated video gold rows",
+          "sub": {}
+        },
+        "regression.current.recall_at_5": {
+          "name": "regression.current.recall_at_5",
+          "value": 0.2857142857142857,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "regression.current.recall_at_10": {
+          "name": "regression.current.recall_at_10",
+          "value": 0.5714285714285714,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "regression.current.mrr": {
+          "name": "regression.current.mrr",
+          "value": 0.4714285714285714,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "regression.current.ndcg_at_10": {
+          "name": "regression.current.ndcg_at_10",
+          "value": 0.41881211351234426,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "regression.current.context_precision": {
+          "name": "regression.current.context_precision",
+          "value": 0.19523809523809524,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "regression.current.hit_rate": {
+          "name": "regression.current.hit_rate",
+          "value": 0.8571428571428571,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "regression.current.retrieval_p50_sec": {
+          "name": "regression.current.retrieval_p50_sec",
+          "value": 1.526167631149292,
+          "n": 15,
+          "notes": "min=1.21s max=2.65s",
+          "sub": {}
+        },
+        "regression.current.retrieval_p95_sec": {
+          "name": "regression.current.retrieval_p95_sec",
+          "value": 2.513440871238709,
+          "n": 15,
+          "notes": "",
+          "sub": {}
+        },
+        "regression.current.retrieval_p99_sec": {
+          "name": "regression.current.retrieval_p99_sec",
+          "value": 2.61872058391571,
+          "n": 15,
+          "notes": "",
+          "sub": {}
+        },
+        "regression.baseline_path": {
+          "name": "regression.baseline_path",
+          "value": 0.0,
+          "n": 0,
+          "notes": "/home/ubuntu/multimodal-rag-assistant-1/app/eval/baselines/rag_report_v1.json",
+          "sub": {}
+        }
+      },
+      "breached": {},
+      "duration_sec": 151.95724081993103,
+      "judge": null,
+      "dataset_version": null
+    }
+  }
+}

@@ -330,12 +330,12 @@ def _load_image(
 
 class ImageEmbedder:
     """
-    CLIP-based image embedder.
+    SigLIP-based image embedder.
 
     Responsibilities:
       - Load and validate images (size, dimension, mode).
       - Redis embedding cache keyed by SHA-256 file hash.
-      - Batch CLIP inference with L2 normalisation.
+      - Batch SigLIP inference with L2 normalisation.
       - Dimension consistency enforcement.
       - Full Phase 24 metadata on every result.
     """
@@ -347,7 +347,7 @@ class ImageEmbedder:
         self.model        = model
         self.processor    = processor
         self.device       = device
-        self.model_name   = settings.CLIP_MODEL
+        self.model_name   = settings.SIGLIP_MODEL
         self.expected_dim = settings.VISION_EMBEDDING_DIM
         self.batch_size   = settings.EMBEDDING_BATCH_SIZE
         self.max_dim      = settings.MAX_IMAGE_DIM
@@ -386,7 +386,7 @@ class ImageEmbedder:
         Steps:
           1. Validate + load each image.
           2. Check Redis cache per image (SHA-256 keyed).
-          3. Batch CLIP inference for cache-miss images.
+          3. Batch SigLIP inference for cache-miss images.
           4. L2 normalise all vectors.
           5. Validate embedding dimensions.
           6. Cache results in Redis.
@@ -472,9 +472,10 @@ class ImageEmbedder:
 
                 with torch.no_grad():
                     features = self.model.get_image_features(**inputs)
-                    if not isinstance(features, torch.Tensor):
+                    # SigLIP returns BaseModelOutputWithPooling — use pooler_output.
+                    if hasattr(features, "pooler_output"):
                         features = features.pooler_output
-                    features = F.normalize(features, p=2, dim=-1)
+                    features = F.normalize(features.float(), p=2, dim=-1)
 
                 embeddings    = features.detach().cpu().numpy().tolist()
                 batch_latency = round((time.time() - t_batch) * 1000, 1)

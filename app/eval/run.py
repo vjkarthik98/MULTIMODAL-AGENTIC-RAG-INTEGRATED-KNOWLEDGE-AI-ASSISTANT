@@ -14,11 +14,16 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 # Ensure repo root is on path when run as `python -m app.eval.run`
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+# Prevent the eval subprocess from loading GGUF into VRAM — the live server
+# already holds the model. The eval judge routes through HTTP (/rag/query).
+os.environ.setdefault("EVAL_SKIP_LLM_WARMUP", "true")
 
 
 def main() -> int:

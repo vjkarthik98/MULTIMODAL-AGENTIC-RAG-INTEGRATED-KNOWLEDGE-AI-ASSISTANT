@@ -435,7 +435,7 @@ async def route_ingestion(
 
                 # PER-MODALITY MODEL WARM — load ONLY the models this
                 # modality needs (e.g. .txt → text embedder; .mp3 →
-                # whisper + text embedder; .png → BLIP/CLIP/text embedder).
+                # whisper + text embedder; .png → BLIP/SigLIP/text embedder).
                 # Other models stay unloaded so VRAM/RAM stay free.
                 try:
                     from app.core.model_registry import model_registry

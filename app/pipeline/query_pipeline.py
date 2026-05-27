@@ -318,6 +318,7 @@ def _store_interaction(
     query: str,
     answer: str,
     memory: Any,
+    user_id: Optional[str] = None,
 ) -> None:
     if not answer.strip():
         return
@@ -325,7 +326,7 @@ def _store_interaction(
         from app.memory.memory_manager import MemoryManager
         from app.core.infra_registry import infra
         mgr = MemoryManager()
-        mgr.add_interaction(session_id, query, answer)
+        mgr.add_interaction(session_id, query, answer, user_id=user_id)
 
         # AUTO-SUMMARIZE AFTER EVERY N TURNS — fires in background thread
         size = mgr.get_memory_size(session_id)
@@ -620,7 +621,7 @@ def query_pipeline(
                 "metadata":             {"source": "web_search"},
             }
             _cache_set(session_id, query, resp)
-            _store_interaction(session_id, query, answer, memory)
+            _store_interaction(session_id, query, answer, memory, user_id=user_id)
             return resp
 
         # SHORT-CIRCUIT FOR NON-RAG DECISIONS — SECTION 4.9
@@ -644,7 +645,7 @@ def query_pipeline(
                 "metadata":             {"source": "agent"},
             }
             _cache_set(session_id, query, resp)
-            _store_interaction(session_id, query, answer, memory)
+            _store_interaction(session_id, query, answer, memory, user_id=user_id)
             return resp
 
         # MEMORY CONTEXT — SECTION 4.7
@@ -1011,7 +1012,7 @@ def query_pipeline(
             and cache_conf > 0.15
         ):
             _cache_set(session_id, query, response)
-        _store_interaction(session_id, query, answer, memory)
+        _store_interaction(session_id, query, answer, memory, user_id=user_id)
 
         logger.info(
             event="query_pipeline_success",

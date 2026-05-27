@@ -308,7 +308,7 @@ def _valid_chunks(docs: List[IngestedDocument]) -> List[IngestedDocument]:
         text = getattr(d, "text", "").strip()
         space = (getattr(d, "structure", {}) or {}).get("embedding_space", "text")
         # Vision chunks (video frames, images) are kept even with short captions —
-        # their value is the CLIP image embedding, not the caption text length.
+        # their value is the SigLIP image embedding, not the caption text length.
         if space == "vision":
             result.append(d)
         elif text and len(text) >= settings.CHUNK_MIN_SIZE:
@@ -661,7 +661,7 @@ class IngestionPipeline:
                     )
                     vision_embedded = vis_embedded
                     text_embedded.extend(txt_from_vis)
-                    _record_embed_latency(settings.CLIP_MODEL, round(time.time() - t_vis, 3))
+                    _record_embed_latency(settings.SIGLIP_MODEL, round(time.time() - t_vis, 3))
                 except Exception as e:
                     logger.warning(
                         event="vision_embedding_failed",
@@ -674,7 +674,7 @@ class IngestionPipeline:
             all_embedded, invalid_count = _valid_embeddings(all_embedded)
 
             # CLEAN UP PERSISTENT FRAME STAGING DIR — frame images copied here by
-            # video_ingest so CLIP embedding can read them after frame_temp_dir cleanup.
+            # video_ingest so SigLIP embedding can read them after frame_temp_dir cleanup.
             # Safe to delete now — all embeddings are in memory.
             if modality == "video":
                 import shutil as _shutil

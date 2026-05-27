@@ -1,0 +1,14 @@
+artifact_uri: /home/ubuntu/multimodal-rag-assistant-1/mlruns/101106892306504793/e7c9e42178dd44c0b868beed21936cb8/artifacts
+end_time: 1779772494358
+entry_point_name: ''
+experiment_id: '101106892306504793'
+lifecycle_stage: active
+run_id: e7c9e42178dd44c0b868beed21936cb8
+run_name: bold-trout-320
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1779772494320
+status: 3
+tags: []
+user_id: ubuntu

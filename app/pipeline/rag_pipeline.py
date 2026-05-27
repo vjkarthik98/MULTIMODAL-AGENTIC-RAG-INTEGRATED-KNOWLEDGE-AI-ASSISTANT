@@ -356,9 +356,9 @@ class RAGPipeline:
             clip_embed   = None
             if settings.ENABLE_VISION:
                 try:
-                    clip_embed = model_loader.get_clip_text_embedder()
+                    clip_embed = model_loader.get_siglip_text_embedder()
                 except Exception as exc:
-                    logger.warning(event="clip_text_embedder_unavailable", error=str(exc))
+                    logger.warning(event="siglip_text_embedder_unavailable", error=str(exc))
 
             self._retriever = HybridRetriever(
                 bm25=bm25,

@@ -1,0 +1,14 @@
+artifact_uri: /home/ubuntu/multimodal-rag-assistant-1/mlruns/101106892306504793/320df56e08a04b11b1d1da15b61914e3/artifacts
+end_time: 1779759550284
+entry_point_name: ''
+experiment_id: '101106892306504793'
+lifecycle_stage: active
+run_id: 320df56e08a04b11b1d1da15b61914e3
+run_name: popular-snipe-310
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1779759550250
+status: 3
+tags: []
+user_id: ubuntu

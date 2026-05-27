@@ -1,0 +1,99 @@
+# Phase 25 — Eval thresholds.
+#
+# Thresholds set from FIRST REAL BASELINE RUN (2026-05-26) at baseline * 0.95.
+# This gives a 5% noise band — a regression gate, not an aspirational target.
+# Every line carries a one-line rationale per engineering-standards.md.
+#
+# Format: <metric>: { min: <float> | max: <float>, why: <string> }
+# `min` = value must be >= this. `max` = value must be <= this.
+# Missing metric = no threshold (informational only).
+#
+# Baseline v1 (retrieval suite, 2026-05-26):
+#   recall@5=0.286  recall@10=0.571  mrr=0.471  ndcg@10=0.419
+#   context_precision=0.195  hit_rate=0.857
+#   p50=1.50s  p95=2.97s  p99=3.98s
+
+retrieval:
+  recall_at_5:
+    min: 0.272  # baseline 0.286 * 0.95 — catches chunking/embedding regressions
+    why: "Regression gate: 5% below v1 baseline (0.286). Below this retrieval has degraded."
+  recall_at_10:
+    min: 0.543  # baseline 0.571 * 0.95
+    why: "Regression gate: 5% below v1 baseline (0.571). Top-10 breadth floor."
+  mrr:
+    min: 0.448  # baseline 0.471 * 0.95
+    why: "Regression gate: 5% below v1 baseline (0.471). Rerank order degradation signal."
+  ndcg_at_10:
+    min: 0.398  # baseline 0.419 * 0.95
+    why: "Regression gate: 5% below v1 baseline (0.419). Ordering quality floor."
+  context_precision:
+    min: 0.185  # baseline 0.195 * 0.95
+    why: "Regression gate: 5% below v1 baseline (0.195). On-topic chunk rate floor."
+
+# Baseline v1 (generation suite, 2026-05-26, lexical_fallback judge):
+#   faithfulness=0.575  answer_relevancy=0.409  context_recall=0.493
+#   citation_accuracy=1.0  template_leak_rate=0.0  hallucination_rate=0.786
+#   Note: hallucination_rate is high (0.786) — lexical judge overcounts. Real value
+#   will improve when Ragas+GGUF judge is wired. Threshold set to catch regressions only.
+
+generation:
+  faithfulness:
+    min: 0.547  # baseline 0.575 * 0.95 — lexical_fallback judge; tightens with Ragas
+    why: "Regression gate: 5% below v1 baseline (0.575). Hallucination leak signal."
+  answer_relevancy:
+    min: 0.389  # baseline 0.409 * 0.95
+    why: "Regression gate: 5% below v1 baseline (0.409). Off-topic drift signal."
+  context_recall:
+    min: 0.468  # baseline 0.493 * 0.95
+    why: "Regression gate: 5% below v1 baseline (0.493). Retrieval coverage signal."
+  citation_accuracy:
+    min: 0.95   # baseline 1.0 * 0.95 — citations always point to retrieved chunks
+    why: "Regression gate: 5% below v1 baseline (1.0). Phase-26 citation-integrity check."
+  template_leak_rate:
+    max: 0.05
+    why: "Prompt-template artifacts (e.g. '[sic]', 'Sources Used: 1') in answers (P1-7)"
+
+hallucination:
+  hallucination_rate:
+    max: 0.85   # baseline 0.786 — lexical judge overcounts; gate set loose for v1
+    why: "Regression gate only: v1 baseline 0.786 with lexical judge. Tightens with Ragas."
+
+ocr:
+  ocr_cer:
+    max: 0.15
+    why: "Char-error rate on dense finance docs; no v1 baseline yet (image gold TODO)"
+  ocr_wer:
+    max: 0.30
+    why: "Word-error rate on rendered text; no v1 baseline yet"
+
+audio:
+  audio_wer:
+    max: 0.25
+    why: "Whisper WER on finance jargon; no v1 baseline yet (audio gold TODO)"
+
+video:
+  frame_caption_recall:
+    min: 0.50
+    why: "Half of gold key-frames should produce a matching caption; no v1 baseline yet"
+  caption_repetition_rate:
+    max: 0.10
+    why: "Catches BLIP repetition loop (P1-9); no v1 baseline yet"
+
+# Baseline v1 (routing suite, 2026-05-26):
+#   route_accuracy=1.0  hybrid_with_web_rate=0.0 (P1-4 open bug — hybrid routes not executing web)
+
+routing:
+  route_accuracy:
+    min: 0.917  # baseline 1.0 * 0.95 — 12/12 correct after gold label corrections
+    why: "Regression gate: 5% below v1 baseline (1.0). Router degradation signal."
+  hybrid_with_web_rate:
+    min: 0.0    # baseline 0.0 — P1-4 open bug: hybrid routes don't execute web search
+    why: "No gate yet: P1-4 (hybrid-without-web) is an open bug. Threshold = 0 until fixed."
+
+latency:
+  p95_sec:
+    max: 60.0
+    why: "Current production-observed ceiling on this hardware (project_perf_baselines.md)"
+  p50_sec:
+    max: 20.0
+    why: "Median should be well below ceiling — degradation signal before p95 breaches"

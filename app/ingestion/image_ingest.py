@@ -799,11 +799,14 @@ def ingest(
                 ).finalize()
             )
 
-        # VISION EMBEDDING DOCUMENT (CLIP) — text field carries the image path so
-        # _dedup_chunks() keys differ from the caption doc and BM25 is not indexed twice.
+        # VISION EMBEDDING DOCUMENT — SigLIP embeds the pixel content; the text
+        # field stores the caption so Qdrant payloads and BM25 are both useful.
+        # Prefix "[image] " makes the SHA-256 hash differ from the caption doc
+        # so the multimodal embedder's text-dedup does not collapse the two.
+        vision_text = f"[image] {caption_clean}" if caption_clean else f"[image] {source_name}"
         documents.append(
             IngestedDocument(
-                text=source_path,
+                text=vision_text,
                 modality="image",
                 subtype="image_frame",
                 source_type="image",
@@ -811,9 +814,20 @@ def ingest(
                 metadata=metadata,
                 structure={
                     **base_structure,
-                    "content_type": "image_semantic",
-                    "embedding_space": "vision",
-                    "frame_path": source_path,
+                    "content_type":      "image_semantic",
+                    "embedding_space":   "vision",
+                    "frame_path":        source_path,
+                    "caption":           caption_clean,
+                    "caption_confidence": cap_conf,
+                    "blur_score":        blur,
+                    "quality_score":     quality,
+                    "solid_color":       solid,
+                    "watermark_detected": watermark,
+                    "face_count":        face_count,
+                    "perceptual_hash":   ph,
+                    "dominant_colors":   colors,
+                    "image_width":       width,
+                    "image_height":      height,
                 },
                 extra_metadata={
                     "modality_weight": 1.0,

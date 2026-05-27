@@ -1,0 +1,85 @@
+# Phase 25 — Eval thresholds.
+#
+# IMPORTANT: These are INITIAL GUESSES. After the first baseline run we will rewrite
+# them to `baseline_value * 0.95` (5% noise tolerance). Every line carries a one-line
+# rationale per engineering-standards.md.
+#
+# Format: <metric>: { min: <float> | max: <float>, why: <string> }
+# `min` = value must be >= this. `max` = value must be <= this.
+# Missing metric = no threshold (informational only).
+
+retrieval:
+  recall_at_5:
+    min: 0.65
+    why: "Below this hybrid fusion is no better than BM25 alone (engineering-standards.md RAG Golden Rules)"
+  recall_at_10:
+    min: 0.80
+    why: "Top-10 should cover most relevant chunks; lower = retrieval breadth problem"
+  mrr:
+    min: 0.45
+    why: "First relevant hit should be in top 3 on average; lower = rerank not helping"
+  ndcg_at_10:
+    min: 0.55
+    why: "Ordering quality; degrades when CrossEncoder rerank misfires"
+  context_precision:
+    min: 0.50
+    why: "At least half of retrieved chunks should be on-topic; lower poisons LLM context"
+
+generation:
+  faithfulness:
+    min: 0.70
+    why: "Claims-entailed-by-context floor; below this hallucinations leak into answers"
+  answer_relevancy:
+    min: 0.65
+    why: "Answer should address the question; lower = generation drifts off-topic"
+  context_recall:
+    min: 0.60
+    why: "Retrieved context contained gold answer info; lower = retrieval missed the source"
+  citation_accuracy:
+    min: 0.80
+    why: "Citations point to real retrieved chunks; lower = phase-26 citation-integrity gap"
+  template_leak_rate:
+    max: 0.05
+    why: "Prompt-template artifacts (e.g. '[sic]', 'Sources Used: 1') bleeding into answers (P1-7)"
+
+hallucination:
+  hallucination_rate:
+    max: 0.20
+    why: "Less than 1 in 5 answers carries an ungrounded claim"
+
+ocr:
+  ocr_cer:
+    max: 0.15
+    why: "Char-error rate on dense finance docs; loose v1 baseline given P1-8 OCR issues"
+  ocr_wer:
+    max: 0.30
+    why: "Word-error rate on rendered text; tightens after Phase 26 OCR fixes"
+
+audio:
+  audio_wer:
+    max: 0.25
+    why: "Whisper WER on finance jargon — ticker mispronunciation common"
+
+video:
+  frame_caption_recall:
+    min: 0.50
+    why: "Half of gold key-frames should produce a matching caption"
+  caption_repetition_rate:
+    max: 0.10
+    why: "Catches BLIP repetition loop (P1-9: 'invoice invoice invoice...')"
+
+routing:
+  route_accuracy:
+    min: 0.85
+    why: "Router is the gatekeeper; 85% is the floor we don't drop below"
+  hybrid_with_web_rate:
+    min: 0.90
+    why: "When decision=hybrid, web sources MUST be present (P1-4 surfaces this)"
+
+latency:
+  p95_sec:
+    max: 60.0
+    why: "Current production-observed ceiling on this hardware (project_perf_baselines.md)"
+  p50_sec:
+    max: 20.0
+    why: "Median should be well below ceiling — degradation signal before p95 breaches"

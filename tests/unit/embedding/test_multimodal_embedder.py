@@ -26,7 +26,7 @@ def _make_embedder():
     embedder.max_docs           = 1000
     embedder.batch_size         = 32
     embedder._text_model_name   = "all-MiniLM-L6-v2"
-    embedder._vision_model_name = "openai/clip-vit-base-patch32"
+    embedder._vision_model_name = "google/siglip-so400m-patch14-384"
     return embedder
 
 

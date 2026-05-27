@@ -78,10 +78,15 @@ def run_video_suite(cfg: EvalConfig) -> SuiteResult:
 
         session_id = f"{cfg.session_prefix}_video_{row['id']}"
         try:
-            docs = video_ingest.ingest(
-                file_path=str(video_path),
-                session_id=session_id,
-            )
+            from app.utils.paths import set_current_user, reset_current_user
+            _token = set_current_user(cfg.user_id)
+            try:
+                docs = video_ingest.ingest(
+                    file_path=str(video_path),
+                    session_id=session_id,
+                )
+            finally:
+                reset_current_user(_token)
         except Exception as exc:
             result.breached[f"ingest_error_{row['id']}"] = str(exc)
             continue
@@ -113,7 +118,12 @@ def run_video_suite(cfg: EvalConfig) -> SuiteResult:
         if video_path.exists():
             session_id = f"{cfg.session_prefix}_video_rep_{row['id']}"
             try:
-                docs = video_ingest.ingest(str(video_path), session_id=session_id)
+                from app.utils.paths import set_current_user, reset_current_user
+                _tok = set_current_user(cfg.user_id)
+                try:
+                    docs = video_ingest.ingest(str(video_path), session_id=session_id)
+                finally:
+                    reset_current_user(_tok)
                 caps, _ = _split_by_subtype(docs)
                 all_captions_flat.extend(caps)
             except Exception:

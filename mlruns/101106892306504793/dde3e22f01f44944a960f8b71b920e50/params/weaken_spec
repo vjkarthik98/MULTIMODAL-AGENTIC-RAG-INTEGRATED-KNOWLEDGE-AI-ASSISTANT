@@ -1,0 +1,1 @@
+WeakenSpec(top_k=1, no_rerank=True, no_mmr=False, no_rrf=False)
