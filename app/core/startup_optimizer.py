@@ -86,7 +86,7 @@ def _warmup_cuda_kernels() -> None:
     """
     _warmup_text_embedder()
     _warmup_llm()
-    _warmup_clip()
+    _warmup_siglip()
     _warmup_blip()
     _warmup_reranker()
 
@@ -119,24 +119,25 @@ def _warmup_llm() -> None:
         logger.warning(event="cuda_warmup_failed", model="llm", error=str(exc))
 
 
-def _warmup_clip() -> None:
+def _warmup_siglip() -> None:
     if not settings.ENABLE_VISION:
         return
     try:
         from app.core.model_loader import model_loader
-        result = model_loader.get_clip()
+        result = model_loader.get_siglip()
         if result is None or result[1] is None:
             return
         processor, model, device = result
         if device != "cuda":
             return
         import torch
-        dummy = torch.zeros(1, 3, 224, 224, device=device, dtype=torch.float16)
+        # SigLIP SO400M uses 384×384 input — match the real resolution.
+        dummy = torch.zeros(1, 3, 384, 384, device=device, dtype=torch.float16)
         with torch.no_grad():
             model.vision_model(pixel_values=dummy)
-        logger.debug(event="cuda_warmup_done", model="clip")
+        logger.debug(event="cuda_warmup_done", model="siglip")
     except Exception as exc:
-        logger.warning(event="cuda_warmup_failed", model="clip", error=str(exc))
+        logger.warning(event="cuda_warmup_failed", model="siglip", error=str(exc))
 
 
 def _warmup_blip() -> None:

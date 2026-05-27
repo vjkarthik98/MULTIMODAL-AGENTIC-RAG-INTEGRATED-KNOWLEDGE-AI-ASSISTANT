@@ -1,0 +1,127 @@
+# Phase 25 — Eval thresholds.
+#
+# Thresholds set from SECOND REAL BASELINE RUN (2026-05-26) at baseline * 0.95.
+# This run uses the real Ragas+GGUF Mistral judge (GPU, n_gpu_layers=-1).
+# First run used lexical_fallback — those numbers are superseded.
+# Every line carries a one-line rationale per engineering-standards.md.
+#
+# Format: <metric>: { min: <float> | max: <float>, why: <string> }
+# `min` = value must be >= this. `max` = value must be <= this.
+# Missing metric = no threshold (informational only).
+#
+# Baseline v2 (retrieval suite, 2026-05-26, n=14 gold rows):
+#   recall@5=0.286  recall@10=0.571  mrr=0.471  ndcg@10=0.419
+#   context_precision=0.196  hit_rate=0.857
+#   p50=1.50s  p95=2.93s  p99=3.95s
+
+retrieval:
+  recall_at_5:
+    min: 0.272  # baseline 0.286 * 0.95 — catches chunking/embedding regressions
+    why: "Regression gate: 5% below v2 baseline (0.286). Below this retrieval has degraded."
+  recall_at_10:
+    min: 0.543  # baseline 0.571 * 0.95
+    why: "Regression gate: 5% below v2 baseline (0.571). Top-10 breadth floor."
+  mrr:
+    min: 0.448  # baseline 0.471 * 0.95
+    why: "Regression gate: 5% below v2 baseline (0.471). Rerank order degradation signal."
+  ndcg_at_10:
+    min: 0.398  # baseline 0.419 * 0.95
+    why: "Regression gate: 5% below v2 baseline (0.419). Ordering quality floor."
+  context_precision:
+    min: 0.186  # baseline 0.196 * 0.95
+    why: "Regression gate: 5% below v2 baseline (0.196). On-topic chunk rate floor."
+
+# Baseline v2 (generation suite, 2026-05-26, judge=gguf_mistral, n=14):
+#   faithfulness=0.464  answer_relevancy=0.525  context_recall=0.976
+#   context_precision=0.780  citation_accuracy=1.0
+#   hallucination_rate=0.643 (pipeline-level numeric guard fires on dates/numbers)
+#   template_leak_rate=0.0
+#
+# Note: faithfulness=0.464 reflects the pipeline's numeric hallucination guard
+# flagging answers that include unsupported numbers (years, figures). This is
+# conservative but real — threshold set at baseline*0.95 as regression gate.
+# hallucination_rate=0.643 is the pipeline guard rate, not Ragas; tightens in Phase 26.
+
+generation:
+  faithfulness:
+    min: 0.441  # baseline 0.464 * 0.95 — Ragas+GGUF judge (real, not lexical)
+    why: "Regression gate: 5% below v2 baseline (0.464). Faithfulness degradation signal."
+  answer_relevancy:
+    min: 0.499  # baseline 0.525 * 0.95
+    why: "Regression gate: 5% below v2 baseline (0.525). Off-topic drift signal."
+  context_recall:
+    min: 0.927  # baseline 0.976 * 0.95
+    why: "Regression gate: 5% below v2 baseline (0.976). Retrieval coverage signal."
+  context_precision:
+    min: 0.741  # baseline 0.780 * 0.95
+    why: "Regression gate: 5% below v2 baseline (0.780). Precision floor."
+  citation_accuracy:
+    min: 0.95   # baseline 1.0 * 0.95 — citations always point to retrieved chunks
+    why: "Regression gate: 5% below v2 baseline (1.0). Phase-26 citation-integrity check."
+  template_leak_rate:
+    max: 0.05
+    why: "Prompt-template artifacts (e.g. '[sic]', 'Sources Used: 1') in answers (P1-7)"
+
+hallucination:
+  hallucination_rate:
+    max: 0.72   # baseline 0.643 * 1.12 — pipeline numeric guard; tightens with Phase 26
+    why: "Regression gate: pipeline guard baseline 0.643. Tightens when Ragas halluc metric added."
+
+ocr:
+  ocr_cer:
+    max: 0.15
+    why: "Char-error rate on dense finance docs; no v2 baseline yet (image gold TODO)"
+  ocr_wer:
+    max: 0.30
+    why: "Word-error rate on rendered text; no v2 baseline yet"
+
+audio:
+  audio_wer:
+    max: 0.25
+    why: "Whisper WER on finance jargon; no v2 baseline yet (audio gold TODO)"
+
+video:
+  frame_caption_recall:
+    min: 0.50
+    why: "Half of gold key-frames should produce a matching caption; no v2 baseline yet"
+  caption_repetition_rate:
+    max: 0.10
+    why: "Catches BLIP repetition loop (P1-9); no v2 baseline yet"
+
+# Baseline v2 (routing suite, 2026-05-26):
+#   route_accuracy=1.0  hybrid_with_web_rate=0.0 (P1-4 open bug — hybrid routes not executing web)
+
+routing:
+  route_accuracy:
+    min: 0.917  # baseline 1.0 * 0.95 — 12/12 correct
+    why: "Regression gate: 5% below v2 baseline (1.0). Router degradation signal."
+  hybrid_with_web_rate:
+    min: 0.0    # baseline 0.0 — P1-4 open bug: hybrid routes don't execute web search
+    why: "No gate yet: P1-4 (hybrid-without-web) is an open bug. Threshold = 0 until fixed."
+
+# Baseline v2 (e2e suite, 2026-05-26, judge=gguf_mistral, n=30):
+#   faithfulness=0.728  answer_relevancy=0.521  context_recall=0.764
+#   context_precision=0.571  hallucination_rate=0.300  template_leak_rate=0.0
+#   p50=11.1s  p95=23.2s  p99=30.9s
+
+e2e:
+  faithfulness:
+    min: 0.692  # baseline 0.728 * 0.95
+    why: "Regression gate: 5% below v2 e2e baseline (0.728)."
+  answer_relevancy:
+    min: 0.495  # baseline 0.521 * 0.95
+    why: "Regression gate: 5% below v2 e2e baseline (0.521)."
+  context_recall:
+    min: 0.726  # baseline 0.764 * 0.95
+    why: "Regression gate: 5% below v2 e2e baseline (0.764)."
+  hallucination_rate:
+    max: 0.40   # baseline 0.300 + 33% buffer — e2e guard fires on dates/numbers
+    why: "Regression gate: e2e baseline 0.300. Buffer for numeric guard sensitivity."
+
+latency:
+  p95_sec:
+    max: 60.0
+    why: "Current production-observed ceiling on this hardware (project_perf_baselines.md)"
+  p50_sec:
+    max: 20.0
+    why: "Median should be well below ceiling — degradation signal before p95 breaches"

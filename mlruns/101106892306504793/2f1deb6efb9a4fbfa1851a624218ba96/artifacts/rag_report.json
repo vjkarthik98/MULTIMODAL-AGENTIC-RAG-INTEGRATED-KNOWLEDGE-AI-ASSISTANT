@@ -1,0 +1,79 @@
+{
+  "generated_at": "2026-05-26T04:46:12Z",
+  "git_sha": "aa4da29",
+  "weaken_spec": null,
+  "suites": {
+    "retrieval": {
+      "suite": "retrieval",
+      "metrics": {
+        "recall_at_5": {
+          "name": "recall_at_5",
+          "value": 0.2857142857142857,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "recall_at_10": {
+          "name": "recall_at_10",
+          "value": 0.5714285714285714,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "mrr": {
+          "name": "mrr",
+          "value": 0.4714285714285714,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "ndcg_at_10": {
+          "name": "ndcg_at_10",
+          "value": 0.41881211351234426,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "context_precision": {
+          "name": "context_precision",
+          "value": 0.19623015873015873,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "hit_rate": {
+          "name": "hit_rate",
+          "value": 0.8571428571428571,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval_p50_sec": {
+          "name": "retrieval_p50_sec",
+          "value": 1.5040040016174316,
+          "n": 15,
+          "notes": "min=1.19s max=4.19s",
+          "sub": {}
+        },
+        "retrieval_p95_sec": {
+          "name": "retrieval_p95_sec",
+          "value": 2.9437811851501476,
+          "n": 15,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval_p99_sec": {
+          "name": "retrieval_p99_sec",
+          "value": 3.9410795783996573,
+          "n": 15,
+          "notes": "",
+          "sub": {}
+        }
+      },
+      "breached": {},
+      "duration_sec": 47.17690300941467,
+      "judge": null,
+      "dataset_version": null
+    }
+  }
+}

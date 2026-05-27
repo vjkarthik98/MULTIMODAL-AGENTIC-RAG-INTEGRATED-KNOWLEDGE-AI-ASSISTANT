@@ -677,7 +677,7 @@ def _has_macros(file_path: str) -> bool:
 # DOCX PROCESSOR
 
 # EMBEDDED IMAGE HELPER — write image bytes to a temp file and route through
-# image_ingest so we get caption + OCR (text_collection) + CLIP (vision_collection)
+# image_ingest so we get caption + OCR (text_collection) + SigLIP (vision_collection)
 # all linked back to the parent docx/xlsx via parent_* fields.
 
 def _ingest_embedded_image_bytes(
@@ -965,7 +965,7 @@ def _process_docx(
     except Exception:
         pass
 
-    # EMBEDDED IMAGES — route each through image_ingest (caption + OCR + CLIP).
+    # EMBEDDED IMAGES — route each through image_ingest (caption + OCR + SigLIP).
     try:
         related = getattr(doc.part, "related_parts", {}) or {}
         seen_blobs: set = set()

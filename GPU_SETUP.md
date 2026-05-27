@@ -6,12 +6,12 @@
 | Model | VRAM | dtype |
 |-------|------|-------|
 | Mistral 7B Q4_K_M (llama-cpp) | ~4.1 GB | GGUF quant (n_gpu_layers=-1) |
-| CLIP ViT-B/32 | ~0.6 GB | float16 |
-| BLIP base (captioning) | ~1.0 GB | float16 |
+| SigLIP SO400M/14@384px | ~1.74 GB | float16 |
+| BLIP large (captioning) | ~1.5 GB | float16 |
 | Whisper large-v3 | ~1.5 GB | float16 |
 | CrossEncoder MiniLM | ~0.1 GB | float16 |
 | MiniLM text embedder | ~0.09 GB | float16 |
-| **Total** | **~7.4 GB** | leaves 7+ GB free |
+| **Total** | **~8.9 GB** | leaves 5+ GB free |
 
 ### Services on CPU (unchanged)
 - FastAPI / Uvicorn

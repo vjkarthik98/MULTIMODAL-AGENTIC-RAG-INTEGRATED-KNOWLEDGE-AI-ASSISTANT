@@ -209,8 +209,8 @@ def _route_documents(docs: List[Any]) -> Tuple[List[Any], List[Any]]:
       - modality: video, subtype: speech | ocr
 
     VISION PATH:
-      - modality: image,  subtype: caption  (has asset_path → CLIP image embed)
-      - modality: video,  subtype: frame    (has asset_path → CLIP image embed)
+      - modality: image,  subtype: caption  (has asset_path → SigLIP image embed)
+      - modality: video,  subtype: frame    (has asset_path → SigLIP image embed)
 
     A document can appear in BOTH lists (text embed + vision embed).
     """
@@ -257,13 +257,13 @@ def _route_documents(docs: List[Any]) -> Tuple[List[Any], List[Any]]:
 
 class MultimodalEmbedder:
     """
-    Orchestrates text + image + CLIP embedding pipelines.
+    Orchestrates text + image + SigLIP embedding pipelines.
 
     Responsibilities:
       - Route IngestedDocument objects to correct embedder (text vs vision).
       - SHA-256 deduplication before embedding.
       - Batch text embedding via TextEmbedder.
-      - Batch vision embedding via ImageEmbedder (CLIP).
+      - Batch vision embedding via ImageEmbedder (SigLIP).
       - Per-modality Prometheus metrics.
       - Full Phase 24 metadata stamped on every embedded document.
       - Graceful degradation: partial failure returns partial result.
@@ -277,7 +277,7 @@ class MultimodalEmbedder:
         self.max_docs       = settings.INGESTION_BATCH_SIZE * 10
 
         self._text_model_name   = settings.EMBEDDING_MODEL
-        self._vision_model_name = settings.CLIP_MODEL
+        self._vision_model_name = settings.SIGLIP_MODEL
 
         logger.info(
             event="multimodal_embedder_initialized",
@@ -487,7 +487,7 @@ class MultimodalEmbedder:
         session_id: str,
     ) -> List[Any]:
         """
-        Embed vision documents (images/video frames) in sub-batches via CLIP.
+        Embed vision documents (images/video frames) in sub-batches via SigLIP.
         Resolves asset path, validates embedding, stamps embedding_space = 'vision'.
         Skips documents with missing or invalid asset paths.
         """
@@ -596,16 +596,16 @@ class MultimodalEmbedder:
         session_id: str = "default",
     ) -> float:
         """
-        Cosine similarity between a text query and a CLIP image embedding.
-        Both vectors are projected into CLIP's shared 512-dim space by encoding
-        the query with the CLIP text encoder rather than the MiniLM text encoder.
+        Cosine similarity between a text query and a SigLIP image embedding.
+        Both vectors are projected into SigLIP's shared 1152-dim space by encoding
+        the query with the SigLIP text encoder rather than the MiniLM text encoder.
         """
         if not query_text or not image_embedding:
             return 0.0
         try:
             import numpy as np
             from app.core.model_loader import model_loader
-            clip_text_emb = model_loader.get_clip_text_embedder().embed_query(
+            clip_text_emb = model_loader.get_siglip_text_embedder().embed_query(
                 query_text, session_id=session_id
             )
             if not clip_text_emb or len(clip_text_emb) != len(image_embedding):

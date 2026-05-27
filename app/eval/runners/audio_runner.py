@@ -69,10 +69,15 @@ def run_audio_suite(cfg: EvalConfig) -> SuiteResult:
 
         session_id = f"{cfg.session_prefix}_audio_{row['id']}"
         try:
-            docs = audio_ingest.ingest(
-                file_path=str(audio_path),
-                session_id=session_id,
-            )
+            from app.utils.paths import set_current_user, reset_current_user
+            _token = set_current_user(cfg.user_id)
+            try:
+                docs = audio_ingest.ingest(
+                    file_path=str(audio_path),
+                    session_id=session_id,
+                )
+            finally:
+                reset_current_user(_token)
         except Exception as exc:
             result.breached[f"ingest_error_{row['id']}"] = str(exc)
             continue

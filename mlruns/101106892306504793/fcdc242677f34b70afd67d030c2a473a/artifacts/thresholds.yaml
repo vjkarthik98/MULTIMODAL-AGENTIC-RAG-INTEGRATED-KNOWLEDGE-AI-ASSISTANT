@@ -1,0 +1,90 @@
+# Phase 25 — Eval thresholds.
+#
+# Thresholds set from FIRST REAL BASELINE RUN (2026-05-26) at baseline * 0.95.
+# This gives a 5% noise band — a regression gate, not an aspirational target.
+# Every line carries a one-line rationale per engineering-standards.md.
+#
+# Format: <metric>: { min: <float> | max: <float>, why: <string> }
+# `min` = value must be >= this. `max` = value must be <= this.
+# Missing metric = no threshold (informational only).
+#
+# Baseline v1 (retrieval suite, 2026-05-26):
+#   recall@5=0.286  recall@10=0.571  mrr=0.471  ndcg@10=0.419
+#   context_precision=0.195  hit_rate=0.857
+#   p50=1.50s  p95=2.97s  p99=3.98s
+
+retrieval:
+  recall_at_5:
+    min: 0.272  # baseline 0.286 * 0.95 — catches chunking/embedding regressions
+    why: "Regression gate: 5% below v1 baseline (0.286). Below this retrieval has degraded."
+  recall_at_10:
+    min: 0.543  # baseline 0.571 * 0.95
+    why: "Regression gate: 5% below v1 baseline (0.571). Top-10 breadth floor."
+  mrr:
+    min: 0.448  # baseline 0.471 * 0.95
+    why: "Regression gate: 5% below v1 baseline (0.471). Rerank order degradation signal."
+  ndcg_at_10:
+    min: 0.398  # baseline 0.419 * 0.95
+    why: "Regression gate: 5% below v1 baseline (0.419). Ordering quality floor."
+  context_precision:
+    min: 0.185  # baseline 0.195 * 0.95
+    why: "Regression gate: 5% below v1 baseline (0.195). On-topic chunk rate floor."
+
+generation:
+  faithfulness:
+    min: 0.70
+    why: "Claims-entailed-by-context floor; below this hallucinations leak into answers"
+  answer_relevancy:
+    min: 0.65
+    why: "Answer should address the question; lower = generation drifts off-topic"
+  context_recall:
+    min: 0.60
+    why: "Retrieved context contained gold answer info; lower = retrieval missed the source"
+  citation_accuracy:
+    min: 0.80
+    why: "Citations point to real retrieved chunks; lower = phase-26 citation-integrity gap"
+  template_leak_rate:
+    max: 0.05
+    why: "Prompt-template artifacts (e.g. '[sic]', 'Sources Used: 1') bleeding into answers (P1-7)"
+
+hallucination:
+  hallucination_rate:
+    max: 0.20
+    why: "Less than 1 in 5 answers carries an ungrounded claim"
+
+ocr:
+  ocr_cer:
+    max: 0.15
+    why: "Char-error rate on dense finance docs; loose v1 baseline given P1-8 OCR issues"
+  ocr_wer:
+    max: 0.30
+    why: "Word-error rate on rendered text; tightens after Phase 26 OCR fixes"
+
+audio:
+  audio_wer:
+    max: 0.25
+    why: "Whisper WER on finance jargon — ticker mispronunciation common"
+
+video:
+  frame_caption_recall:
+    min: 0.50
+    why: "Half of gold key-frames should produce a matching caption"
+  caption_repetition_rate:
+    max: 0.10
+    why: "Catches BLIP repetition loop (P1-9: 'invoice invoice invoice...')"
+
+routing:
+  route_accuracy:
+    min: 0.85
+    why: "Router is the gatekeeper; 85% is the floor we don't drop below"
+  hybrid_with_web_rate:
+    min: 0.90
+    why: "When decision=hybrid, web sources MUST be present (P1-4 surfaces this)"
+
+latency:
+  p95_sec:
+    max: 60.0
+    why: "Current production-observed ceiling on this hardware (project_perf_baselines.md)"
+  p50_sec:
+    max: 20.0
+    why: "Median should be well below ceiling — degradation signal before p95 breaches"

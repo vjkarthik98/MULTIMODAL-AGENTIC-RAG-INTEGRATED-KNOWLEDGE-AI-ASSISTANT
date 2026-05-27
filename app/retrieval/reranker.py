@@ -37,12 +37,14 @@ except ImportError:
 
 
 # MODALITY WEIGHTS FOR FINAL SCORE BOOSTING
+# Image/video OCR is noisy; penalise relative to clean text so fact-retrieval
+# queries don't get dominated by ticker-display captions or cover-scan fragments.
 _DEFAULT_MODALITY_WEIGHTS: Dict[str, float] = {
     "text":  1.0,
     "table": 1.1,
-    "image": 1.05,
-    "audio": 1.1,
-    "video": 1.1,
+    "image": 0.75,
+    "audio": 0.85,
+    "video": 0.75,
 }
 
 
@@ -110,12 +112,12 @@ class Reranker:
 
     def _context(self, doc: Dict) -> str:
         meta = doc.get("metadata", {}) or {}
-        structure = meta.get("structure", {}) or {}
 
         modality = meta.get("modality", "text")
-        page = meta.get("page") or structure.get("page")
-        speaker = structure.get("speaker")
-        ts_start = structure.get("timestamp_start")
+        page = meta.get("page")
+        # timestamp_start and speaker are stored as top-level Qdrant payload fields
+        speaker  = meta.get("speaker")
+        ts_start = meta.get("timestamp_start")
 
         header_parts: List[str] = []
 
