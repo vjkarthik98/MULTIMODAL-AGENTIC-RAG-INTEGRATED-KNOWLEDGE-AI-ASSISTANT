@@ -8,10 +8,12 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
+from app.auth.dependencies import get_current_user
+from app.auth.models import UserPublic
 from app.core.config import settings
 from app.core.infra_registry import infra
 from app.utils.logger import get_logger
@@ -24,13 +26,14 @@ router = APIRouter()
 
 def get_current_user_id(request: Request, explicit_user_id: Optional[str] = None) -> str:
     """
-    Resolve current user id.
-    Priority: explicit arg (eg. form field) → X-User-ID header → dev default.
-    Phase 27 will replace this with JWT decode.
+    Resolve current user id from request.state.user (set by AuthMiddleware from JWT).
+    The explicit_user_id form-field parameter is ignored — user_id is always
+    sourced from the verified JWT to prevent spoofing.
+    Falls back to DEFAULT_DEV_USER_ID only when AUTH_ENABLED=false (dev mode).
     """
-    if explicit_user_id and explicit_user_id.strip():
-        return explicit_user_id.strip()[:128]
-    return request.headers.get("X-User-ID", settings.DEFAULT_DEV_USER_ID)
+    if request.state.user is not None:
+        return request.state.user.user_id
+    return settings.DEFAULT_DEV_USER_ID
 
 # ALLOWED EXTENSIONS
 ALLOWED_EXTENSIONS = {
@@ -315,12 +318,12 @@ async def ingest_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     session_id: str = Form("default"),
-    user_id: Optional[str] = Form(None),
+    current_user: UserPublic = Depends(get_current_user),
 ) -> JSONResponse:
     start = time.time()
     request_id = _request_id()
     file_path: Optional[Path] = None
-    user_id = get_current_user_id(request, explicit_user_id=user_id)
+    user_id = current_user.user_id
 
     _rate_limit_check(request)
 
@@ -529,6 +532,39 @@ async def ingest_document(
         background_tasks.add_task(_cleanup_file, file_path)
 
 
+# DIRECT LLM GENERATE — eval judge endpoint (no RAG, no guardrails, raw LLM output)
+# Only accessible internally; used by GGUFJudge to score Ragas metrics.
+
+class GenerateRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=16000)
+    max_tokens: int = Field(default=512, ge=1, le=2048)
+    temperature: float = Field(default=0.1, ge=0.0, le=1.0)
+
+
+@router.post("/llm/generate")
+async def llm_generate(
+    request_body: GenerateRequest,
+    current_user: UserPublic = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Direct LLM generation — bypasses RAG pipeline. Used by eval judge."""
+    try:
+        from app.core.model_loader import model_loader
+        llm = model_loader.get_llm()
+        if llm is None:
+            raise HTTPException(status_code=503, detail="LLM not loaded")
+        result = await asyncio.to_thread(
+            llm.generate,
+            request_body.prompt,
+            max_tokens=request_body.max_tokens,
+            temperature=request_body.temperature,
+        )
+        return {"text": result or "", "status": "ok"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 # HEALTH
 
 @router.get("/health")
@@ -577,11 +613,12 @@ async def query_rag(
     request_body: QueryRequest,
     request: Request,
     background_tasks: BackgroundTasks,
+    current_user: UserPublic = Depends(get_current_user),
 ) -> Dict[str, Any]:
     start = time.time()
     request_id = _request_id()
     session_id = request_body.session_id
-    user_id = get_current_user_id(request, explicit_user_id=request_body.user_id)
+    user_id = current_user.user_id
 
     _rate_limit_check(request)
 
@@ -699,6 +736,7 @@ async def query_rag(
 async def stream_query(
     request_body: QueryRequest,
     request: Request,
+    current_user: UserPublic = Depends(get_current_user),
 ) -> StreamingResponse:
     request_id = _request_id()
     session_id = request_body.session_id
@@ -767,12 +805,12 @@ async def upload_file(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     session_id: str = Form("default"),
-    user_id: Optional[str] = Form(None),
+    current_user: UserPublic = Depends(get_current_user),
 ) -> Dict[str, Any]:
     start = time.time()
     request_id = _request_id()
     file_path: Optional[Path] = None
-    user_id = get_current_user_id(request, explicit_user_id=user_id)
+    user_id = current_user.user_id
 
     _rate_limit_check(request)
 
@@ -929,10 +967,11 @@ async def upload_file(
 async def clear_memory(
     request_body: ClearMemoryRequest,
     request: Request,
+    current_user: UserPublic = Depends(get_current_user),
 ) -> Dict[str, Any]:
     request_id = _request_id()
     session_id = request_body.session_id
-    user_id = get_current_user_id(request)
+    user_id = current_user.user_id
 
     try:
         from app.memory.memory_manager import MemoryManager
@@ -1015,9 +1054,14 @@ async def clear_query_cache(
 async def gdpr_purge(
     request_body: GDPRPurgeRequest,
     request: Request,
+    current_user: UserPublic = Depends(get_current_user),
 ) -> Dict[str, Any]:
     request_id = _request_id()
-    user_id = request_body.user_id
+    # Admins may purge any user_id; regular users may only purge their own data
+    if current_user.role.value == "admin":
+        user_id = request_body.user_id
+    else:
+        user_id = current_user.user_id
 
     if not getattr(settings, "GDPR_PURGE_ENABLED", True):
         raise HTTPException(status_code=403, detail="GDPR purge not enabled")
@@ -1151,10 +1195,10 @@ def model_health() -> Dict[str, Any]:
 @router.get("/knowledge-base")
 async def list_knowledge_base(
     request: Request,
-    user_id: Optional[str] = None,
+    current_user: UserPublic = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    """List all files in the user's knowledge base. Pass ?user_id=user_2 to view another user."""
-    user_id = get_current_user_id(request, explicit_user_id=user_id)
+    """List all files in the authenticated user's knowledge base."""
+    user_id = current_user.user_id
     from app.utils.paths import user_knowledge_base_dir
     kb_dir = user_knowledge_base_dir(user_id)
     files = []
@@ -1179,14 +1223,13 @@ async def list_knowledge_base(
 async def delete_knowledge_base_file(
     filename: str,
     request: Request,
-    user_id: Optional[str] = None,
+    current_user: UserPublic = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
-    Permanently delete a file from the user's knowledge base AND purge its
-    vectors from Qdrant and BM25 so it no longer appears in query results.
-    Pass ?user_id=user_2 to delete from another user's KB.
+    Permanently delete a file from the authenticated user's knowledge base AND
+    purge its vectors from Qdrant and BM25 so it no longer appears in query results.
     """
-    user_id = get_current_user_id(request, explicit_user_id=user_id)
+    user_id = current_user.user_id
     request_id = _request_id()
 
     # Sanitize filename — prevent path traversal

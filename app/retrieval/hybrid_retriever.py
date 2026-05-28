@@ -558,10 +558,44 @@ class HybridRetriever:
             fused = self._apply_filters(fused, filters, session_id)
 
             # MODALITY BOOST FOR AUDIO/VIDEO QUERIES
+            # Audio/video chunks score low in dense search (embedding space skew).
+            # Apply a strong boost so they surface into reranker view, then
+            # let the cross-encoder make the final relevance call.
             if modality_filter:
+                boost = 2.5 if modality_filter == "audio" else 1.5
+                boosted_any = False
                 for r in fused:
                     if r.get("metadata", {}).get("modality") == modality_filter:
-                        r["score"] = min(r["score"] * 1.2, 1.0)
+                        r["score"] = min(r["score"] * boost, 1.0)
+                        boosted_any = True
+                # If no audio/video chunks reached fused at all, do a direct
+                # modality-filtered Qdrant search and inject the results.
+                if not boosted_any and modality_filter == "audio":
+                    try:
+                        from app.auth.tenancy import qdrant_user_filter
+                        from qdrant_client.models import Filter, FieldCondition, MatchValue
+                        audio_filter = Filter(must=[
+                            FieldCondition(key="modality", match=MatchValue(value="audio")),
+                        ])
+                        if user_id:
+                            audio_filter.must.append(
+                                FieldCondition(key="user_id", match=MatchValue(value=user_id))
+                            )
+                        q_vec = self.embedder.embed_query(query, session_id=session_id)
+                        audio_hits = self.vector_store.search_text(
+                            q_vec, top_k, session_id, user_id=user_id,
+                            extra_filter=audio_filter,
+                        )
+                        for hit in audio_hits:
+                            hit["score"] = min(hit.get("score", 0.3) * boost, 1.0)
+                            fused.append(hit)
+                        logger.info(
+                            event="audio_modality_direct_inject",
+                            injected=len(audio_hits),
+                            session_id=session_id,
+                        )
+                    except Exception as _ae:
+                        logger.warning(event="audio_modality_inject_failed", error=str(_ae))
                 fused.sort(key=lambda x: x["score"], reverse=True)
 
             # NOTE: We deliberately do NOT clip to top_k here. The downstream

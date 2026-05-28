@@ -653,6 +653,7 @@ class QdrantVectorStore:
         score_threshold: float = 0.0,
         exclude_deleted: bool = True,
         user_id: Optional[str] = None,
+        extra_filter: Optional["Filter"] = None,
     ) -> List[Dict[str, Any]]:
 
         if collection not in self._collection_cache:
@@ -672,12 +673,21 @@ class QdrantVectorStore:
             span.set_attribute("limit", limit)
 
             try:
+                base_filter = self._build_filter(session_id, exclude_deleted, user_id)
+                if extra_filter is not None and base_filter is not None:
+                    merged_must = list(base_filter.must or []) + list(extra_filter.must or [])
+                    from qdrant_client.models import Filter as _Filter
+                    query_filter = _Filter(must=merged_must) if merged_must else None
+                elif extra_filter is not None:
+                    query_filter = extra_filter
+                else:
+                    query_filter = base_filter
                 res    = self._retry(
                     self.client.query_points,
                     collection_name=collection,
                     query=vector,
                     limit=limit,
-                    query_filter=self._build_filter(session_id, exclude_deleted, user_id),
+                    query_filter=query_filter,
                     score_threshold=score_threshold if score_threshold > 0 else None,
                 )
                 points = getattr(res, "points", [])
@@ -733,6 +743,7 @@ class QdrantVectorStore:
         session_id: Optional[str] = None,
         score_threshold: float = 0.0,
         user_id: Optional[str] = None,
+        extra_filter=None,
     ) -> List[Dict[str, Any]]:
         return self._search(
             self.text_collection,
@@ -741,6 +752,7 @@ class QdrantVectorStore:
             session_id,
             score_threshold,
             user_id=user_id,
+            extra_filter=extra_filter,
         )
 
     # PUBLIC SEARCH — VISION COLLECTION

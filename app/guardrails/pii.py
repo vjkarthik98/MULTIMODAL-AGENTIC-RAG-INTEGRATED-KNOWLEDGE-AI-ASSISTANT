@@ -45,11 +45,40 @@ def warm_up() -> None:
         if _analyzer is not None:
             return
         try:
-            from presidio_analyzer import AnalyzerEngine
+            import logging as _logging
+            import warnings as _warnings
+
+            # Suppress Presidio's noisy multilingual warnings before any import.
+            # These fire when the registry skips non-English recognizers — expected
+            # behaviour, not errors. Both the Python warnings and logging channels
+            # need to be silenced because Presidio uses both.
+            _warnings.filterwarnings("ignore", category=UserWarning, module="presidio")
+            for _plog in ("presidio-analyzer", "presidio_analyzer",
+                          "presidio-anonymizer", "presidio_anonymizer"):
+                _logging.getLogger(_plog).setLevel(_logging.ERROR)
+
+            from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
+            from presidio_analyzer.nlp_engine import NlpEngineProvider
             from presidio_anonymizer import AnonymizerEngine
-            _analyzer = AnalyzerEngine()
+
+            # English-only NLP engine — no multilingual models loaded.
+            nlp_config = {
+                "nlp_engine_name": "spacy",
+                "models": [{"lang_code": "en", "model_name": "en_core_web_lg"}],
+            }
+            nlp_engine = NlpEngineProvider(nlp_configuration=nlp_config).create_engine()
+
+            # English-only registry — non-en recognizers are skipped (warnings now suppressed).
+            registry = RecognizerRegistry()
+            registry.load_predefined_recognizers(languages=["en"], nlp_engine=nlp_engine)
+
+            _analyzer = AnalyzerEngine(
+                nlp_engine=nlp_engine,
+                registry=registry,
+                supported_languages=["en"],
+            )
             _anonymizer = AnonymizerEngine()
-            logger.info("pii_presidio_warmed_up")
+            logger.info("pii_presidio_warmed_up", language="en")
         except Exception as e:
             logger.warning("pii_presidio_warmup_failed", error=str(e))
 

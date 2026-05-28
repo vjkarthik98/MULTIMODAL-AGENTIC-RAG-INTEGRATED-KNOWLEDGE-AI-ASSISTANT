@@ -197,7 +197,10 @@ def _is_docx_encrypted(file_path: str) -> bool:
                 return True
         return False
     except zipfile.BadZipFile:
-        return True
+        # BadZipFile means the file is corrupt, NOT encrypted — return False
+        # so the caller falls through to the repair/corrupt path instead of
+        # raising PASSWORD_PROTECTED_DOCX on a file that is simply broken.
+        return False
     except Exception:
         return False
 
@@ -1078,10 +1081,17 @@ def _process_excel(
                     warnings.append(f"Empty sheet skipped: {sheet_name}")
                     continue
 
+                # Treat first non-empty row as header so subsequent chunks stay interpretable
+                header_row = non_empty[0] if non_empty else None
+
                 for batch_start in range(0, len(non_empty), ROWS_PER_CHUNK):
                     batch     = non_empty[batch_start:batch_start + ROWS_PER_CHUNK]
                     row_start = batch_start + 1
                     row_end   = batch_start + len(batch)
+
+                    # Prepend header to continuation batches so each chunk is self-contained
+                    if batch_start > 0 and header_row and batch[0] != header_row:
+                        batch = [header_row] + batch
 
                     txt = _table_to_text(batch)
                     if not txt.strip():

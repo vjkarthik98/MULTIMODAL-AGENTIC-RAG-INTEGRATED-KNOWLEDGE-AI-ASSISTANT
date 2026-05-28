@@ -485,6 +485,16 @@ class Settings:
     DEFAULT_DEV_USER_ID: str = _str("DEFAULT_DEV_USER_ID", "a3f9c821-4b2e-11ef-9454-0242ac120002")
     TEST_USER_2_ID: str      = _str("TEST_USER_2_ID",      "b7d2e109-4b2e-11ef-9454-0242ac120002")
 
+    # JWT AUTHENTICATION — Phase 27
+    JWT_SECRET_KEY: str                  = _str("JWT_SECRET_KEY", "CHANGE_ME_IN_PRODUCTION")
+    JWT_ALGORITHM: str                   = _str("JWT_ALGORITHM", "HS256")
+    ACCESS_TOKEN_EXPIRE_MINUTES: int     = _int("ACCESS_TOKEN_EXPIRE_MINUTES", 30)
+    REFRESH_TOKEN_EXPIRE_DAYS: int       = _int("REFRESH_TOKEN_EXPIRE_DAYS", 7)
+    AUTH_COLLECTION: str                 = _str("AUTH_COLLECTION", "users")
+    PASSWORD_MIN_ZXCVBN_SCORE: int       = _int("PASSWORD_MIN_ZXCVBN_SCORE", 2)
+    PASSWORD_MIN_LENGTH: int             = _int("PASSWORD_MIN_LENGTH", 8)
+    AUTH_ENABLED: bool                   = _bool("AUTH_ENABLED", True)
+
     # SECURITY
     SECRET_KEY: str                        = _str("SECRET_KEY", "CHANGE_ME_IN_PRODUCTION")
     DATABASE_URL: str                      = _str("DATABASE_URL", "sqlite:///./data/rag_users.db")
@@ -612,6 +622,12 @@ class Settings:
 
         if self.ENV != "development" and self.SECRET_KEY == "CHANGE_ME_IN_PRODUCTION":
             errors.append("SECRET_KEY must be changed from default in non-development environments")
+
+        if self.ENV != "development" and self.JWT_SECRET_KEY == "CHANGE_ME_IN_PRODUCTION":
+            errors.append("JWT_SECRET_KEY must be changed from default in non-development environments")
+
+        if self.AUTH_ENABLED and len(self.JWT_SECRET_KEY) < 32:
+            errors.append("JWT_SECRET_KEY must be at least 32 characters long")
 
         if self.CROSS_MODAL_FUSION_TIMEOUT <= 0:
             errors.append("CROSS_MODAL_FUSION_TIMEOUT must be > 0")

@@ -180,6 +180,15 @@ class WebSearchTool:
                     logger.warning("web_search_no_documents", session_id=session_id)
                     return self._empty()
 
+                # RERANK WEB RESULTS BY QUERY RELEVANCE (H-04)
+                reranked_docs, reranked_sources = self._rerank_web_docs(
+                    query,
+                    processed["_raw_docs"],
+                    processed["_raw_sources"],
+                )
+                processed["documents"] = reranked_docs[:self.max_docs]
+                processed["sources"]   = reranked_sources[:self.max_docs]
+
                 # LLM SUMMARIZATION
                 t_llm       = time.time()
                 answer      = self._summarize(query, processed["documents"], session_id)
@@ -302,7 +311,37 @@ class WebSearchTool:
         return {
             "documents": documents[:self.max_docs],
             "sources":   list(dict.fromkeys(sources))[:self.max_docs],
+            "_raw_docs": documents,  # kept for reranking
+            "_raw_sources": list(dict.fromkeys(sources)),
         }
+
+    def _rerank_web_docs(
+        self,
+        query: str,
+        documents: List[str],
+        sources: List[str],
+    ) -> tuple[List[str], List[str]]:
+        """Rerank web documents by relevance to the query using CrossEncoder."""
+        if len(documents) <= 1:
+            return documents, sources
+        try:
+            from app.core.model_loader import model_loader
+            reranker = model_loader.get_reranker()
+            if reranker is None:
+                return documents, sources
+            pairs = [(query, doc[:512]) for doc in documents]
+            scores = reranker.predict(pairs)
+            ranked = sorted(
+                zip(scores, documents, sources + [""] * len(documents)),
+                key=lambda x: x[0],
+                reverse=True,
+            )
+            docs_out    = [r[1] for r in ranked][:self.max_docs]
+            sources_out = [r[2] for r in ranked if r[2]][:self.max_docs]
+            return docs_out, sources_out
+        except Exception as exc:
+            logger.warning("web_rerank_failed", error=str(exc))
+            return documents, sources
 
     # LLM SUMMARIZATION OF SEARCH RESULTS
 

@@ -278,6 +278,14 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
+# AUTH MIDDLEWARE — Phase 27
+# Must be added AFTER CORSMiddleware and GZipMiddleware so it runs first on ingress.
+# Populates request.state.user from the Bearer JWT on every request.
+
+from app.api.middleware import AuthMiddleware
+app.add_middleware(AuthMiddleware)
+
+
 # GLOBAL EXCEPTION HANDLER
 
 @app.exception_handler(Exception)
@@ -485,6 +493,12 @@ def _write_audit_log(
 
 from app.api.api_routes import router as rag_router
 app.include_router(rag_router, prefix="/rag", tags=["RAG"])
+
+from app.auth.router import router as auth_router
+app.include_router(auth_router)  # mounts at /auth (prefix defined in router.py)
+
+from app.auth.admin_router import router as admin_router
+app.include_router(admin_router)  # mounts at /admin — requires role=admin JWT
 
 
 # ROOT

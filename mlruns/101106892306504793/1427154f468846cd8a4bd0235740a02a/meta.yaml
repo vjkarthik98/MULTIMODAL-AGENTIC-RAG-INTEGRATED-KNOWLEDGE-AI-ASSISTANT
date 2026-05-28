@@ -1,0 +1,14 @@
+artifact_uri: /home/ubuntu/multimodal-rag-assistant-1/mlruns/101106892306504793/1427154f468846cd8a4bd0235740a02a/artifacts
+end_time: 1779963658664
+entry_point_name: ''
+experiment_id: '101106892306504793'
+lifecycle_stage: active
+run_id: 1427154f468846cd8a4bd0235740a02a
+run_name: enthused-moose-385
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1779963658629
+status: 3
+tags: []
+user_id: ubuntu

@@ -51,13 +51,21 @@ def _get_semaphore() -> asyncio.Semaphore:
 
 # HARD RULE KEYWORD SETS
 _RECENT_WORDS     = {"latest", "today", "news", "recent", "update", "current", "now", "live"}
-_MEMORY_WORDS     = {"earlier", "previous", "last time", "we discussed", "you said", "before", "you mentioned", "earlier you"}
+_MEMORY_WORDS     = {
+    "earlier", "previous", "last time", "we discussed", "you said", "before",
+    "you mentioned", "earlier you", "last conversation", "what did we",
+    "you told me", "earlier you said", "what did we talk", "we talked about",
+    "our conversation", "you mentioned earlier", "recall", "remember when",
+    "previously you", "in our last",
+}
 _COMPLEX_KEYWORDS = {"compare", "difference", "process", "steps", "vs", "versus", "explain"}
 _REASONING_WORDS  = {"why", "how", "explain", "reason", "cause", "because"}
 _MULTIMODAL_WORDS = {"image", "video", "diagram", "chart", "audio", "photo", "picture", "figure"}
 _CODE_WORDS       = {"code", "function", "implement", "script", "syntax", "class", "debug"}
-_GREETING_WORDS   = {"hello", "hi", "hey", "thanks", "thank you", "bye", "goodbye"}
+_GREETING_WORDS   = {"hello", "hi", "hey", "thanks", "thank you", "bye", "goodbye", "good morning", "good evening", "how are you", "how r you"}
 _MATH_WORDS       = {"calculate", "compute", "solve", "equation", "formula", "integral", "derivative"}
+# Arithmetic pattern: digits with operators e.g. "2+2", "10 * 5", "100/4"
+_ARITHMETIC_RE    = re.compile(r"^\s*\d[\d\s]*[+\-*/^%]\s*\d[\d\s]*[=?]?\s*$")
 _SECURITY_WORDS   = {"password", "credential", "secret", "token", "api key", "hack", "exploit"}
 
 
@@ -225,7 +233,7 @@ class AgentRouter:
         return {
             "is_recent":           bool(tokens & _RECENT_WORDS),
             "is_memory":           any(
-                re.search(r"\b" + re.escape(w) + r"\b", q)
+                re.search(r"\b" + re.escape(w) + r"\b", q, re.IGNORECASE)
                 for w in _MEMORY_WORDS
             ),
             "is_complex":          (
@@ -235,8 +243,9 @@ class AgentRouter:
             "is_reasoning":        bool(tokens & _REASONING_WORDS),
             "has_multimodal_hint": bool(tokens & _MULTIMODAL_WORDS),
             "is_code":             bool(tokens & _CODE_WORDS),
-            "is_greeting":         bool(tokens & _GREETING_WORDS) and len(tokens) <= 4,
-            "is_math":             bool(tokens & _MATH_WORDS),
+            "is_greeting":         (bool(tokens & _GREETING_WORDS) and len(tokens) <= 6)
+                                   or bool(re.search(r"\bhow are you\b", q)),
+            "is_math":             bool(tokens & _MATH_WORDS) or bool(_ARITHMETIC_RE.match(q)),
             "is_security":         bool(tokens & _SECURITY_WORDS),
             "token_count":         len(tokens),
             "has_question_mark":   "?" in query,

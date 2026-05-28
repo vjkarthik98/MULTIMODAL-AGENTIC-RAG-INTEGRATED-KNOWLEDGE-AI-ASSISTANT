@@ -1,13 +1,20 @@
 """Generation suite runner.
 
-Calls app/pipeline/query_pipeline.py:query_pipeline() directly — the same path
-production uses. Scores faithfulness, answer_relevancy, context_recall, citation_accuracy,
+Calls the live FastAPI server's /rag/query endpoint (HTTP) instead of
+importing query_pipeline directly. This prevents double-loading GPU models
+when the server is already running — same pattern as GGUFJudge.
+
+Falls back to direct pipeline import if EVAL_SERVER_URL is not reachable.
+Scores faithfulness, answer_relevancy, context_recall, citation_accuracy,
 template_leak_rate, and hallucination_rate.
 """
 from __future__ import annotations
 
+import os
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+import httpx
 
 from app.eval.config import EvalConfig
 from app.eval.datasets.gold_loader import load_all_gold
@@ -15,6 +22,55 @@ from app.eval.metrics.base import SuiteResult
 from app.eval.metrics.generation import compute_generation_metrics
 from app.eval.metrics.hallucination import hallucination_rate
 from app.eval.metrics.latency import latency_stats
+
+_SERVER_URL = os.getenv("EVAL_SERVER_URL", "http://127.0.0.1:8000")
+_HTTP_TIMEOUT = 300
+
+
+def _server_available() -> bool:
+    """Quick check if the FastAPI server is reachable."""
+    try:
+        with httpx.Client(timeout=5) as client:
+            r = client.get(f"{_SERVER_URL}/rag/health")
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
+def _query_via_server(
+    query: str,
+    session_id: str,
+    user_id: str,
+    access_token: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Call /rag/query on the running server. Reuses server's GPU models."""
+    headers = {}
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
+
+    payload = {
+        "query": query,
+        "session_id": session_id,
+        "user_id": user_id,
+    }
+    with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
+        resp = client.post(
+            f"{_SERVER_URL}/rag/query",
+            json=payload,
+            headers=headers,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+def _query_via_pipeline(
+    query: str,
+    session_id: str,
+    user_id: str,
+) -> Dict[str, Any]:
+    """Fallback: call pipeline directly (loads models in-process)."""
+    from app.pipeline.query_pipeline import query_pipeline
+    return query_pipeline(query=query, session_id=session_id, user_id=user_id)
 
 
 def _load_eval_rows(cfg: EvalConfig) -> List[Dict[str, Any]]:
@@ -34,15 +90,27 @@ def _load_eval_rows(cfg: EvalConfig) -> List[Dict[str, Any]]:
 
 
 def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
-    """Run the generation benchmark against the real query_pipeline()."""
+    """Run the generation benchmark.
+
+    Prefers HTTP server mode to avoid GPU OOM when server is already running.
+    Falls back to direct pipeline if server is not reachable.
+    """
     t0 = time.time()
     result = SuiteResult(suite="generation", judge=cfg.judge_model)
 
-    try:
-        from app.pipeline.query_pipeline import query_pipeline
-    except ImportError as e:
-        result.breached["import_error"] = str(e)
-        return result
+    # Decide execution mode
+    use_server = _server_available()
+    access_token = os.getenv("EVAL_ACCESS_TOKEN", "")
+
+    if use_server:
+        print(f"[eval] Server reachable at {_SERVER_URL} — using HTTP mode (no GPU duplication)")
+    else:
+        print(f"[eval] Server not reachable — falling back to direct pipeline mode")
+        try:
+            from app.pipeline.query_pipeline import query_pipeline  # noqa: F401
+        except ImportError as e:
+            result.breached["import_error"] = str(e)
+            return result
 
     gold_rows = _load_eval_rows(cfg)
     if not gold_rows:
@@ -61,11 +129,19 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
 
         q_start = time.time()
         try:
-            pipeline_result = query_pipeline(
-                query=query,
-                session_id=session_id,
-                user_id=cfg.user_id,
-            )
+            if use_server:
+                pipeline_result = _query_via_server(
+                    query=query,
+                    session_id=session_id,
+                    user_id=cfg.user_id,
+                    access_token=access_token,
+                )
+            else:
+                pipeline_result = _query_via_pipeline(
+                    query=query,
+                    session_id=session_id,
+                    user_id=cfg.user_id,
+                )
         except Exception as exc:
             result.breached[f"pipeline_error_{row['id']}"] = str(exc)
             continue
@@ -88,17 +164,13 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
         })
 
     if eval_rows:
-        # Generation metrics — prefer_ragas=False when server not running (Phase 26 regression)
-        import os as _os
-        _prefer_ragas = _os.environ.get("EVAL_PREFER_RAGAS", "true").lower() == "true"
+        _prefer_ragas = os.environ.get("EVAL_PREFER_RAGAS", "true").lower() == "true"
         gen_metrics = compute_generation_metrics(eval_rows, prefer_ragas=_prefer_ragas)
         for m in gen_metrics.values():
             result.add(m)
 
-        # Hallucination rate
         result.add(hallucination_rate(eval_rows))
 
-    # Latency stats
     for m in latency_stats(latencies, prefix="generation").values():
         result.add(m)
 
@@ -110,7 +182,6 @@ def run_hallucination_suite(cfg: EvalConfig) -> SuiteResult:
     """Standalone hallucination suite — runs generation and focuses on ungrounded claims."""
     result = run_generation_suite(cfg)
     result.suite = "hallucination"
-    # Keep only hallucination-related metrics
     h_metrics = {k: v for k, v in result.metrics.items()
                  if "halluc" in k or "template" in k or "citation" in k}
     result.metrics = h_metrics

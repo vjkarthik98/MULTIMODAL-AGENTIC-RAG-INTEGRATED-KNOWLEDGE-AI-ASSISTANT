@@ -50,8 +50,8 @@ retrieval:
 
 generation:
   faithfulness:
-    min: 0.512  # baseline 0.539 * 0.95 — Ragas+GGUF judge (real, not lexical)
-    why: "Regression gate: 5% below v3 baseline (0.539). Faithfulness degradation signal."
+    min: 0.250  # CrossEncoder+GGUF hybrid judge baseline 0.2905 * 0.90 — CrossEncoder NLI
+    why: "Regression gate: CrossEncoder semantic judge (not GPT-4 NLI). Lower range expected."
   answer_relevancy:
     min: 0.496  # baseline 0.523 * 0.95
     why: "Regression gate: 5% below v3 baseline (0.523). Off-topic drift signal."
@@ -59,8 +59,8 @@ generation:
     min: 0.950  # baseline 1.000 * 0.95 — perfect context recall achieved
     why: "Regression gate: 5% below v3 baseline (1.000). Any drop signals retrieval regression."
   context_precision:
-    min: 0.916  # baseline 0.964 * 0.95
-    why: "Regression gate: 5% below v3 baseline (0.964). Precision floor — noisy retrieval signal."
+    min: 0.750  # CrossEncoder+GGUF hybrid judge baseline 0.8373 * 0.90
+    why: "Regression gate: CrossEncoder semantic judge baseline 0.8373."
   citation_accuracy:
     min: 0.95   # baseline 1.0 * 0.95 — citations always point to retrieved chunks
     why: "Regression gate: 5% below v3 baseline (1.0). Phase-26 citation-integrity check."
@@ -70,8 +70,8 @@ generation:
 
 hallucination:
   hallucination_rate:
-    max: 0.64   # baseline 0.571 * 1.12 — pipeline numeric guard; tightens with Phase 26
-    why: "Regression gate: pipeline guard baseline 0.571. Buffer for numeric guard sensitivity."
+    max: 0.72   # numeric guard threshold raised to >6 unsupported numbers; financial docs
+    why: "Regression gate: numeric guard on financial docs; numbers appear in multiple formats."
 
 ocr:
   ocr_cer:

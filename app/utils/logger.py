@@ -375,6 +375,8 @@ _SUPPRESS_LOGGERS = (
     "PIL", "pdfplumber", "pydub",
     "pymongo", "motor",
     "qdrant_client", "grpc",
+    "presidio-analyzer", "presidio_analyzer",   # suppress CuPy GPU + language warnings
+    "presidio-anonymizer", "presidio_anonymizer",
 )
 
 
