@@ -1,6 +1,8 @@
 """Routing suite runner.
 
-Calls app/agents/agent_controller.py:AgentController.handle() directly.
+Calls query_pipeline directly (same path as the API) so that hybrid
+queries actually execute web search and return web sources.
+Route decision is extracted from the pipeline response's 'decision' field.
 Measures route_accuracy, confusion matrix, and the P1-4 hybrid probe
 (hybrid route must show actual web sources, not be labelled-only).
 """
@@ -16,18 +18,19 @@ from app.eval.metrics.routing import confusion_matrix, hybrid_with_web_rate, rou
 
 
 def run_routing_suite(cfg: EvalConfig) -> SuiteResult:
-    """Run the routing benchmark against real AgentController.handle()."""
+    """Run the routing benchmark against the full query_pipeline."""
     t0 = time.time()
     result = SuiteResult(suite="routing")
 
     try:
-        from app.agents.agent_controller import AgentController
+        from app.pipeline.query_pipeline import query_pipeline
     except ImportError as e:
         result.breached["import_error"] = str(e)
         return result
 
     try:
-        controller = AgentController()
+        # warm up pipeline
+        _ = query_pipeline  # noqa
     except Exception as e:
         result.breached["controller_init"] = str(e)
         return result
@@ -46,13 +49,13 @@ def run_routing_suite(cfg: EvalConfig) -> SuiteResult:
         session_id = f"{cfg.session_prefix}_routing_{row['id']}"
 
         try:
-            response = controller.handle(query=query, session_id=session_id)
+            response = query_pipeline(query, session_id, None, cfg.user_id)
         except Exception as exc:
             result.breached[f"handle_error_{row['id']}"] = str(exc)
             continue
 
-        # Extract action — controller.handle() returns {"decision": "rag"|"search"|..., ...}
-        decision = response.get("decision") or {}
+        # Extract action — query_pipeline returns {"decision": "rag"|"search"|..., ...}
+        decision = response.get("decision") or ""
         if isinstance(decision, str):
             action = decision
         elif hasattr(decision, "action"):
@@ -63,7 +66,13 @@ def run_routing_suite(cfg: EvalConfig) -> SuiteResult:
             action = response.get("action") or response.get("route") or ""
 
         sources = response.get("sources") or []
-        web_sources = [s for s in sources if isinstance(s, dict) and s.get("type") == "web"]
+        # Pipeline sets modality="web" on web sources; also check type="web" for compatibility
+        web_sources = [
+            s for s in sources
+            if isinstance(s, dict) and (
+                s.get("modality") == "web" or s.get("type") == "web"
+            )
+        ]
 
         routing_results.append({
             "row_id": row["id"],

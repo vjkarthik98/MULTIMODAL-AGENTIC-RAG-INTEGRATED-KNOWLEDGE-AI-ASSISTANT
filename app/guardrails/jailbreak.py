@@ -107,7 +107,12 @@ def _load_corpus_embeddings() -> None:
 
         # Reuse the project's SentenceTransformer singleton
         from app.embeddings.text_embedder import TextEmbedder
-        embedder = TextEmbedder()
+        from app.core.config import settings as _cfg
+        embedder = TextEmbedder(
+            model_name=_cfg.EMBEDDING_MODEL,
+            batch_size=_cfg.EMBEDDING_BATCH_SIZE,
+            device=_cfg.EMBEDDER_DEVICE,
+        )
         import numpy as np
         embeddings = embedder.embed_texts(texts)
         if embeddings is not None and len(embeddings) > 0:
@@ -160,8 +165,13 @@ def _semantic_check(query: str) -> Optional[float]:
     try:
         import numpy as np
         from app.embeddings.text_embedder import TextEmbedder
+        from app.core.config import settings as _cfg
 
-        embedder = TextEmbedder()
+        embedder = TextEmbedder(
+            model_name=_cfg.EMBEDDING_MODEL,
+            batch_size=_cfg.EMBEDDING_BATCH_SIZE,
+            device=_cfg.EMBEDDER_DEVICE,
+        )
         q_emb = embedder.embed_texts([query])
         if q_emb is None or len(q_emb) == 0:
             return None
