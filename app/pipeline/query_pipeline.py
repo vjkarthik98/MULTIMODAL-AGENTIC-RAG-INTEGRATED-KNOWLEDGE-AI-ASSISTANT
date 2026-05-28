@@ -806,6 +806,15 @@ def query_pipeline(
         reranked = _apply_temporal_boost(reranked, query)
         final_docs = reranked[:settings.RAG_TOP_K]
 
+        # H-05: Drop RAG chunks below relevance threshold in hybrid context.
+        # Prevents off-topic document noise from diluting the LLM context window.
+        if decision == "hybrid":
+            _HYBRID_CHUNK_THRESHOLD = 0.3
+            filtered = [d for d in final_docs if d.get("score", 0.0) >= _HYBRID_CHUNK_THRESHOLD]
+            if filtered:
+                final_docs = filtered
+            # If all chunks are below threshold, keep top-1 to avoid empty context
+
         # HYBRID WEB SEARCH — fetch Tavily alongside RAG docs when decision is "hybrid"
         _hybrid_web_docs: List[str] = []
         _hybrid_web_sources: List[Dict[str, Any]] = []
@@ -1029,6 +1038,33 @@ def query_pipeline(
                 )
         except Exception as _og_err:
             logger.warning(event="output_guard_failed", error=str(_og_err), session_id=session_id)
+
+        # H-03: Stricter numeric grounding gate.
+        # If the answer contains specific numbers/dollar amounts that are NOT
+        # present in any retrieved chunk, flag as hallucination_warning.
+        # This catches parametric-knowledge leakage (e.g. MSFT $211.9B from training data).
+        try:
+            import re as _re
+            _answer_numbers = set(_re.findall(r"\b\d[\d,\.]*[BMKbmk%]?\b", answer))
+            if _answer_numbers and final_docs:
+                _ctx_combined = " ".join(
+                    d.get("text", "") if isinstance(d, dict)
+                    else (d.page_content if hasattr(d, "page_content") else str(d))
+                    for d in final_docs
+                )
+                _unsupported = [
+                    n for n in _answer_numbers
+                    if len(n) >= 3 and n not in _ctx_combined
+                ]
+                if len(_unsupported) > 6:
+                    hallucination_warning = True
+                    logger.warning(
+                        event="grounding_numeric_mismatch",
+                        unsupported_numbers=_unsupported[:5],
+                        session_id=session_id,
+                    )
+        except Exception:
+            pass
 
         # FINAL sources[] — prefer the Phase 24.8 array built from reranked docs.
         # Also keep canonical_sources for LLM citation rendering.

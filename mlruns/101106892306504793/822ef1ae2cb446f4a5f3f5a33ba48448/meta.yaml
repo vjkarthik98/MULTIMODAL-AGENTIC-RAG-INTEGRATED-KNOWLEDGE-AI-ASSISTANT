@@ -1,0 +1,14 @@
+artifact_uri: /home/ubuntu/multimodal-rag-assistant-1/mlruns/101106892306504793/822ef1ae2cb446f4a5f3f5a33ba48448/artifacts
+end_time: 1779961614272
+entry_point_name: ''
+experiment_id: '101106892306504793'
+lifecycle_stage: active
+run_id: 822ef1ae2cb446f4a5f3f5a33ba48448
+run_name: popular-quail-239
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1779961614241
+status: 3
+tags: []
+user_id: ubuntu

@@ -88,11 +88,32 @@ def _remove_repetition(text: str) -> str:
     words = text.split()
     if len(words) < 6:
         return text
-    half   = len(words) // 2
-    first  = " ".join(words[:half])
+
+    # Exact half-duplication check (original logic)
+    half  = len(words) // 2
+    first = " ".join(words[:half])
     second = " ".join(words[half:])
     if first.strip().lower() == second.strip().lower():
         return first.strip()
+
+    # N-gram repetition loop detection — catches "invoice invoice invoice..."
+    # and longer phrase loops like "the dashboard the dashboard the dashboard"
+    for n in (1, 2, 3, 4):
+        if len(words) < n * 3:
+            continue
+        ngram = tuple(words[:n])
+        run = 1
+        i = n
+        while i + n <= len(words):
+            if tuple(words[i:i + n]) == ngram:
+                run += 1
+                i += n
+            else:
+                break
+        # If the same n-gram repeats 3+ times consecutively, truncate after first occurrence
+        if run >= 3:
+            return " ".join(words[:n]).strip()
+
     return text
 
 
@@ -256,6 +277,8 @@ def _blip_caption(
                 **inputs,
                 max_new_tokens=settings.BLIP_MAX_TOKENS,
                 num_beams=settings.BLIP_NUM_BEAMS,
+                repetition_penalty=1.5,   # penalise repeated tokens/phrases
+                no_repeat_ngram_size=3,   # forbid any 3-gram from appearing twice
             )
         infer_latency_ms = round((time.time() - t_infer) * 1000, 1)
 

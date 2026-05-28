@@ -156,13 +156,13 @@ async def compute_generation_metrics_ragas(
         )
         from ragas.embeddings import HuggingfaceEmbeddings
         from ragas.run_config import RunConfig
-        from app.eval.judges.gguf_judge import get_judge
-        from app.eval.config import EVAL_JUDGE_TEMPERATURE
+        from app.eval.judges.phi3_judge import get_judge
         from app.core.config import settings as app_settings
 
-        # max_workers=1: llama.cpp is not thread-safe; serialise all judge calls.
+        # Phi-3-mini-4k-instruct judge — dedicated eval judge, outputs strict JSON.
+        # Loads ~2.3GB alongside Mistral 7B on GPU.
         run_config = RunConfig(max_workers=1, timeout=300)
-        judge = get_judge(temperature=EVAL_JUDGE_TEMPERATURE)
+        judge = get_judge()
         embeddings = HuggingfaceEmbeddings(model_name=app_settings.EMBEDDING_MODEL)
 
         # Build ragas-compatible dataset (use ground_truth, not deprecated ground_truths)
@@ -183,21 +183,21 @@ async def compute_generation_metrics_ragas(
         dataset = Dataset.from_dict(data)
         result = evaluate(
             dataset,
-            metrics=[faithfulness, answer_relevancy, context_recall, context_precision],
+            metrics=[faithfulness, answer_relevancy, context_recall],
             llm=judge,
             embeddings=embeddings,
             run_config=run_config,
         )
 
         metrics_out: Dict[str, MetricResult] = {}
-        for key in ("faithfulness", "answer_relevancy", "context_recall", "context_precision"):
+        for key in ("faithfulness", "answer_relevancy", "context_recall"):
             val = result.get(key)
             if val is not None:
                 metrics_out[key] = MetricResult(
                     name=key,
                     value=float(val),
                     n=len(eval_rows),
-                    notes="judge=gguf_mistral",
+                    notes="judge=phi3_mini",
                 )
 
         # Add metrics Ragas doesn't compute
