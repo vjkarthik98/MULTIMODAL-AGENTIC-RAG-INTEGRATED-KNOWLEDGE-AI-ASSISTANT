@@ -49,7 +49,7 @@ def _load_phi3():
             _llm = Llama(
                 model_path=_MODEL_PATH,
                 n_ctx=4096,
-                n_gpu_layers=10,    # partial GPU offload — fits alongside Mistral
+                n_gpu_layers=32,    # full GPU offload for Phi-3-mini
                 n_threads=4,
                 verbose=False,
             )
@@ -172,9 +172,9 @@ def _generate(prompt_text: str) -> str:
     try:
         output = llm(
             full_prompt,
-            max_tokens=256,
+            max_tokens=1024,
             temperature=0.0,    # deterministic JSON output
-            stop=["<|end|>", "<|user|>", "<|system|>", "\n\n"],
+            stop=["<|end|>", "<|user|>", "<|system|>"],
         )
         raw = output["choices"][0]["text"].strip()
         return _extract_json(raw)
