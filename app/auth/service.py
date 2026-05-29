@@ -132,6 +132,25 @@ class AuthService:
             created_at=doc.get("created_at", datetime.now(timezone.utc)),
         )
 
+    def change_password(self, user_id: str, current_password: str, new_password: str) -> None:
+        """Verify current password then update to new one. Raises ValueError on failure."""
+        col = _get_mongo_collection()
+        doc = col.find_one({"user_id": user_id})
+        if not doc:
+            raise ValueError("User not found")
+
+        if not _verify_password(current_password, doc["hashed_password"]):
+            raise ValueError("Current password is incorrect")
+
+        email = doc.get("email", "")
+        _check_password_strength(new_password, email)
+
+        col.update_one(
+            {"user_id": user_id},
+            {"$set": {"hashed_password": _hash_password(new_password)}},
+        )
+        logger.info(event="auth_password_changed", user_id=user_id)
+
     def deactivate(self, user_id: str) -> None:
         col = _get_mongo_collection()
         col.update_one({"user_id": user_id}, {"$set": {"is_active": False}})

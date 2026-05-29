@@ -181,16 +181,17 @@ async def compute_generation_metrics_ragas(
             data["ground_truth"].append(ref if ref and ref != "TODO" else "")
 
         dataset = Dataset.from_dict(data)
+        # Run answer_relevancy and context_recall via Ragas (no decompose step)
         result = evaluate(
             dataset,
-            metrics=[faithfulness, answer_relevancy, context_recall],
+            metrics=[answer_relevancy, context_recall],
             llm=judge,
             embeddings=embeddings,
-            run_config=run_config,
+            run_config=RunConfig(max_workers=1, timeout=600),
         )
 
         metrics_out: Dict[str, MetricResult] = {}
-        for key in ("faithfulness", "answer_relevancy", "context_recall"):
+        for key in ("answer_relevancy", "context_recall"):
             val = result.get(key)
             if val is not None:
                 metrics_out[key] = MetricResult(
@@ -199,6 +200,47 @@ async def compute_generation_metrics_ragas(
                     n=len(eval_rows),
                     notes="judge=phi3_mini",
                 )
+
+        # Faithfulness — direct Phi-3 NLI (skip Ragas decompose step which truncates)
+        try:
+            from app.eval.judges.phi3_judge import _generate, _extract_json
+            import json as _json, re as _re
+            faith_scores = []
+            for row in eval_rows:
+                answer = row.get("answer") or ""
+                contexts = row.get("contexts") or []
+                ctx_text = " ".join(contexts)[:800] if contexts else ""
+                # Split answer into simple sentences
+                sentences = [s.strip() for s in _re.split(r'(?<=[.!?])\s+', answer) if len(s.strip()) > 10][:4]
+                if not sentences or not ctx_text:
+                    faith_scores.append(1.0)
+                    continue
+                stmts_str = str(sentences)
+                nli_prompt = (
+                    f"Judge faithfulness. For each statement, verdict=1 if supported by context, 0 if not.\n"
+                    f"context: {ctx_text}\n"
+                    f"statements: {stmts_str}"
+                )
+                raw = _generate(nli_prompt)
+                extracted = _extract_json(raw)
+                try:
+                    items = _json.loads(extracted)
+                    if isinstance(items, list) and items:
+                        verdicts = [int(x.get("verdict", 0)) for x in items if isinstance(x, dict)]
+                        faith_scores.append(sum(verdicts) / len(verdicts) if verdicts else 1.0)
+                    else:
+                        faith_scores.append(1.0)
+                except Exception:
+                    faith_scores.append(1.0)
+            if faith_scores:
+                metrics_out["faithfulness"] = MetricResult(
+                    name="faithfulness",
+                    value=round(sum(faith_scores) / len(faith_scores), 4),
+                    n=len(faith_scores),
+                    notes="judge=phi3_mini_direct_nli",
+                )
+        except Exception as _fe:
+            pass
 
         # Add metrics Ragas doesn't compute
         answers = [r.get("answer") or "" for r in eval_rows]

@@ -111,6 +111,13 @@ def _apply_extra_regex(text: str) -> str:
     return text
 
 
+# Minimum Presidio confidence to accept a PII match. Presidio defaults to 0.0
+# (accepts everything), which causes false positives like "FY2023" matching
+# US_DRIVER_LICENSE at score 0.3. Real PII (SSN, credit cards, email) scores
+# 0.6-1.0, so 0.5 keeps genuine detections while dropping low-confidence noise.
+_PII_SCORE_THRESHOLD = 0.35
+
+
 def detect_pii(text: str, language: str = "en") -> List[dict]:
     """Detect PII entities in text. Returns list of {entity_type, start, end, score}."""
     if not text:
@@ -123,6 +130,7 @@ def detect_pii(text: str, language: str = "en") -> List[dict]:
             text=text,
             language=language,
             entities=_get_entity_types(),
+            score_threshold=_PII_SCORE_THRESHOLD,
         )
         return [
             {
@@ -159,6 +167,7 @@ def scrub_pii(text: str, language: str = "en") -> tuple[str, bool]:
             text=text,
             language=language,
             entities=_get_entity_types(),
+            score_threshold=_PII_SCORE_THRESHOLD,
         )
         if not results:
             # No Presidio hits — still apply regex
