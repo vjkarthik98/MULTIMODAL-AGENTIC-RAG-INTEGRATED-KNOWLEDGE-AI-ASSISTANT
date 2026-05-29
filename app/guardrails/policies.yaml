@@ -265,7 +265,9 @@ pii:
     - URL
     - US_BANK_NUMBER
     - US_PASSPORT
-    - US_DRIVER_LICENSE
+    # US_DRIVER_LICENSE removed — Presidio's lowest-precision recognizer,
+    # false-positives on fiscal years (FY2023), quarters (Q4), ticker codes
+    # at score 0.3. No value for financial-document RAG.
   # Regex patterns for additional PII not covered by Presidio
   extra_regex_patterns:
     - name: "indian_aadhaar"

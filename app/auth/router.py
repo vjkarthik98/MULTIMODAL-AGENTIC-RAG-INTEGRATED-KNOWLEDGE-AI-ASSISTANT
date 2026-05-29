@@ -7,16 +7,19 @@ from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 
 from app.auth.dependencies import get_current_user
-from app.auth.jwt_handler import issue_tokens, refresh_access_token
+from app.auth.jwt_handler import issue_tokens, refresh_access_token, verify_token
 from app.auth.models import LoginRequest, RefreshRequest, RegisterRequest, TokenPair, UserPublic
+from app.auth.mfa import MFAService
 from app.auth.oauth import build_google_auth_url, exchange_google_code, get_or_create_oauth_user, google_oauth_enabled
 from app.auth.service import AuthService
+from app.auth.token_blacklist import revoke_all_user_tokens, revoke_token
 from app.core.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
-_svc = AuthService()
+_svc  = AuthService()
+_mfa  = MFAService()
 
 
 # ── Register ──────────────────────────────────────────────────────────────────
@@ -33,9 +36,13 @@ async def register(req: RegisterRequest) -> UserPublic:
 
 # ── Login (JSON body) ─────────────────────────────────────────────────────────
 
-@router.post("/login", response_model=TokenPair)
-async def login(req: LoginRequest) -> TokenPair:
-    """Authenticate with email + password. Returns JWT access + refresh tokens."""
+@router.post("/login")
+async def login(req: LoginRequest):
+    """
+    Authenticate with email + password.
+    If MFA is enabled, returns {"mfa_required": true, "mfa_token": "..."}.
+    Otherwise returns a full TokenPair.
+    """
     try:
         user = await asyncio.to_thread(_svc.authenticate, req.email, req.password)
     except ValueError as exc:
@@ -44,6 +51,13 @@ async def login(req: LoginRequest) -> TokenPair:
             detail=str(exc),
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # Check if MFA is enabled for this user
+    mfa_enabled = await asyncio.to_thread(_mfa.is_enabled, user.user_id)
+    if mfa_enabled:
+        mfa_token = await asyncio.to_thread(_mfa.begin_login, user.user_id)
+        return {"mfa_required": True, "mfa_token": mfa_token}
+
     tokens = issue_tokens(user.user_id, user.email, user.role.value)
     return TokenPair(**tokens)
 
@@ -154,6 +168,168 @@ async def google_callback(
     return TokenPair(**tokens)
 
 
+# ── Logout (revoke current token) ────────────────────────────────────────────
+
+@router.post("/logout", status_code=status.HTTP_200_OK)
+async def logout(
+    request: Request,
+    current_user: UserPublic = Depends(get_current_user),
+) -> dict:
+    """Revoke the current access token immediately via Redis blacklist."""
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    if token:
+        try:
+            payload = verify_token(token, expected_type="access")
+            jti = payload.get("jti", "")
+            exp = payload.get("exp", 0)
+            if jti:
+                revoke_token(jti, exp)
+        except ValueError:
+            pass   # already invalid — no-op
+    logger.info(event="user_logged_out", user_id=current_user.user_id)
+    return {"status": "ok", "message": "Logged out successfully"}
+
+
+# ── Logout-all (revoke ALL tokens via generation bump) ────────────────────────
+
+@router.post("/logout-all", status_code=status.HTTP_200_OK)
+async def logout_all(
+    current_user: UserPublic = Depends(get_current_user),
+) -> dict:
+    """Invalidate ALL active tokens for this user (useful if account compromised)."""
+    revoke_all_user_tokens(current_user.user_id)
+    logger.info(event="user_all_tokens_revoked", user_id=current_user.user_id)
+    return {"status": "ok", "message": "All sessions have been terminated"}
+
+
+# ── Password change ───────────────────────────────────────────────────────────
+
+from pydantic import BaseModel as _BM, Field as _F
+
+
+class PasswordChangeRequest(_BM):
+    current_password: str = _F(..., min_length=1, max_length=128)
+    new_password:     str = _F(..., min_length=8, max_length=128)
+
+
+@router.post("/password", status_code=status.HTTP_200_OK)
+async def change_password(
+    req: PasswordChangeRequest,
+    current_user: UserPublic = Depends(get_current_user),
+) -> dict:
+    """
+    Change password after verifying the current one.
+    Revokes ALL existing tokens (forces re-login on all devices).
+    """
+    try:
+        await asyncio.to_thread(
+            _svc.change_password,
+            current_user.user_id,
+            req.current_password,
+            req.new_password,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    # Invalidate all tokens — user must log in again
+    revoke_all_user_tokens(current_user.user_id)
+    logger.info(event="password_changed", user_id=current_user.user_id)
+    return {"status": "ok", "message": "Password changed. All sessions have been terminated."}
+
+
+# ── MFA — Enrol ───────────────────────────────────────────────────────────────
+
+class MFACodeRequest(_BM):
+    code: str = _F(..., min_length=6, max_length=10)
+
+
+class MFAVerifyLoginRequest(_BM):
+    mfa_token: str = _F(..., min_length=10)
+    code:      str = _F(..., min_length=6, max_length=10)
+
+
+@router.post("/mfa/enroll", status_code=status.HTTP_200_OK)
+async def mfa_enroll(
+    current_user: UserPublic = Depends(get_current_user),
+) -> dict:
+    """
+    Step 1 of MFA enrolment.
+    Returns TOTP secret + QR code URI. Show the QR in the UI.
+    User must scan with an authenticator app then confirm via /mfa/verify-enroll.
+    """
+    try:
+        data = await asyncio.to_thread(_mfa.enroll_start, current_user.user_id, current_user.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return data
+
+
+@router.post("/mfa/verify-enroll", status_code=status.HTTP_200_OK)
+async def mfa_verify_enroll(
+    req: MFACodeRequest,
+    current_user: UserPublic = Depends(get_current_user),
+) -> dict:
+    """
+    Step 2 of MFA enrolment — confirm with first TOTP code.
+    Returns single-use backup codes (show once, store safely).
+    """
+    try:
+        backup_codes = await asyncio.to_thread(_mfa.verify_enroll, current_user.user_id, req.code)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return {
+        "status": "ok",
+        "message": "MFA enabled successfully",
+        "backup_codes": backup_codes,
+    }
+
+
+@router.post("/mfa/verify", response_model=TokenPair)
+async def mfa_verify_login(req: MFAVerifyLoginRequest) -> TokenPair:
+    """
+    After password login returns mfa_required=true, verify the TOTP code here.
+    Returns the full JWT access + refresh token pair.
+    """
+    try:
+        user_id = await asyncio.to_thread(_mfa.verify_login, req.mfa_token, req.code)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(exc),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = _svc.get_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    tokens = issue_tokens(user.user_id, user.email, user.role.value)
+    return TokenPair(**tokens)
+
+
+@router.post("/mfa/disable", status_code=status.HTTP_200_OK)
+async def mfa_disable(
+    req: MFACodeRequest,
+    current_user: UserPublic = Depends(get_current_user),
+) -> dict:
+    """Disable MFA after confirming with a valid TOTP code."""
+    try:
+        await asyncio.to_thread(_mfa.disable, current_user.user_id, req.code)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return {"status": "ok", "message": "MFA disabled"}
+
+
+@router.get("/mfa/status", status_code=status.HTTP_200_OK)
+async def mfa_status(
+    current_user: UserPublic = Depends(get_current_user),
+) -> dict:
+    """Check whether MFA is enabled for the current user."""
+    enabled = await asyncio.to_thread(_mfa.is_enabled, current_user.user_id)
+    return {"mfa_enabled": enabled}
+
+
 # ── GDPR self-delete ──────────────────────────────────────────────────────────
 
 @router.delete("/me", status_code=status.HTTP_200_OK)
@@ -186,6 +362,9 @@ async def delete_me(
         await asyncio.to_thread(_svc.deactivate, user_id)
     except Exception as exc:
         logger.warning(event="gdpr_deactivate_failed", user_id=user_id, error=str(exc))
+
+    # Revoke all tokens — account is gone
+    revoke_all_user_tokens(user_id)
 
     logger.info(event="gdpr_self_purge_completed", user_id=user_id)
 

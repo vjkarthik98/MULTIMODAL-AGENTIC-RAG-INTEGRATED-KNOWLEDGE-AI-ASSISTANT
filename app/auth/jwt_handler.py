@@ -21,28 +21,35 @@ def _utcnow() -> datetime:
 
 def issue_tokens(user_id: str, email: str, role: str) -> Dict[str, Any]:
     """Issue an access + refresh token pair for the given user."""
+    from app.auth.token_blacklist import get_user_token_generation
     now = _utcnow()
-    access_exp = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_exp  = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     refresh_exp = now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
+    # gen = token generation counter; incremented on password change / logout-all.
+    # Tokens with gen < current generation are rejected even if not individually revoked.
+    gen = get_user_token_generation(user_id)
+
     access_payload = {
-        "sub": user_id,
+        "sub":   user_id,
         "email": email,
-        "role": role,
-        "type": "access",
-        "jti": str(uuid.uuid4()),
-        "iat": int(now.timestamp()),
-        "exp": int(access_exp.timestamp()),
+        "role":  role,
+        "type":  "access",
+        "jti":   str(uuid.uuid4()),
+        "gen":   gen,
+        "iat":   int(now.timestamp()),
+        "exp":   int(access_exp.timestamp()),
     }
 
     refresh_payload = {
-        "sub": user_id,
+        "sub":   user_id,
         "email": email,
-        "role": role,
-        "type": "refresh",
-        "jti": str(uuid.uuid4()),
-        "iat": int(now.timestamp()),
-        "exp": int(refresh_exp.timestamp()),
+        "role":  role,
+        "type":  "refresh",
+        "jti":   str(uuid.uuid4()),
+        "gen":   gen,
+        "iat":   int(now.timestamp()),
+        "exp":   int(refresh_exp.timestamp()),
     }
 
     access_token = jwt.encode(access_payload, _SECRET, algorithm=_ALGORITHM)
@@ -58,7 +65,9 @@ def issue_tokens(user_id: str, email: str, role: str) -> Dict[str, Any]:
 
 def verify_token(token: str, expected_type: str = "access") -> Dict[str, Any]:
     """
-    Decode and verify a JWT. Returns the payload dict.
+    Decode and verify a JWT.
+    Also checks the Redis blacklist (individual revocation) and token
+    generation (bulk revocation on password change / logout-all).
     Raises ValueError with a safe message on any failure.
     """
     try:
@@ -72,6 +81,24 @@ def verify_token(token: str, expected_type: str = "access") -> Dict[str, Any]:
 
     if not payload.get("sub"):
         raise ValueError("Token missing subject")
+
+    # ── Blacklist check (individual revocation via logout) ────────────────────
+    jti = payload.get("jti", "")
+    if jti:
+        from app.auth.token_blacklist import is_revoked
+        if is_revoked(jti):
+            logger.warning(event="jwt_revoked_token_rejected", jti=jti[:8])
+            raise ValueError("Token has been revoked")
+
+    # ── Generation check (bulk revocation via password change / logout-all) ──
+    user_id = payload["sub"]
+    token_gen = payload.get("gen", 0)
+    from app.auth.token_blacklist import get_user_token_generation
+    current_gen = get_user_token_generation(user_id)
+    if current_gen > 0 and token_gen < current_gen:
+        logger.warning(event="jwt_stale_generation_rejected", user_id=user_id,
+                       token_gen=token_gen, current_gen=current_gen)
+        raise ValueError("Token has been invalidated — please log in again")
 
     return payload
 

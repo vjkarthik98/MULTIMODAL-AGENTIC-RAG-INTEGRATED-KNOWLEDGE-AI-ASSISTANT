@@ -498,3 +498,59 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Test suite: **257 passed, 7 skipped, 0 failures**
 
 
+# [v0.27.0] — Authentication, MFA & Tenant Security
+
+### Features
+
+- Full JWT authentication system with access tokens (30 min) and refresh
+  tokens (7 days) — every protected route now requires a Bearer token
+- Argon2id password hashing (OWASP recommended) with zxcvbn strength
+  enforcement at registration — weak passwords rejected before storage
+- TOTP multi-factor authentication (RFC 6238) — enrol via QR code, verify
+  with any authenticator app (Google Authenticator, Authy, 1Password)
+- Eight single-use backup codes generated at MFA enrolment, stored as
+  bcrypt hashes — shown once, never kept in plaintext
+- Token revocation via Redis blacklist — logout is now real, not cosmetic;
+  jti added to Redis with TTL matching remaining token lifetime
+- Logout-all via generation counter in Redis — one atomic bump invalidates
+  every active session across all devices instantly
+- Password change automatically triggers logout-all — old sessions can
+  never be reused after a credential update
+- Google OAuth2 sign-in — redirect → code exchange → JWT pair; links to
+  existing account if email matches, creates new account otherwise
+- Admin panel with user management — list accounts, promote/demote roles,
+  deactivate users, purge data; all routes role-gated beyond standard auth
+- Multi-tenant data isolation enforced at every storage layer — Qdrant
+  user_id filter injected from JWT (never from request body), Redis keys
+  namespaced per user, MongoDB queries scoped by user_id
+- Per-user BM25 index — keyword search isolated the same way as vector
+  search; cross-tenant keyword leakage is impossible
+- GDPR self-delete (DELETE /auth/me) — purges Qdrant vectors, Redis
+  cache, MongoDB history, deactivates account, revokes all tokens in one
+  call
+
+### Improved
+
+- Constant-time password verification even on missing-user path — dummy
+  hash always verified to prevent timing-based account enumeration
+- Refresh token exchange now issues a full new token pair (rotation) —
+  refresh tokens are single-use by design
+- All pipeline routes receive user_id exclusively from the verified JWT
+  payload — form fields and headers can no longer forge tenant identity
+- Redis blacklist fails open on outage — a Redis outage logs a warning
+  and allows the token rather than locking all users out of the system
+- Admin routes return 403 (not 404) on role mismatch — avoids leaking
+  which endpoints exist to unprivileged callers
+
+### Fixed
+
+- Cross-tenant retrieval now impossible through any path — Qdrant filter,
+  Redis namespace, and Mongo query all enforce user_id from JWT
+- Argon2 dummy-hash path on login miss prevents timing attacks that could
+  confirm whether an email address has an account
+- MFA challenge token scoped to `mfa_challenge` type — cannot be reused
+  as an access or refresh token
+- Backup code burned immediately on use — replaced with empty string in
+  stored hash array; replay attacks blocked
+- AUTH_ENABLED=false dev bypass preserved for local development and eval
+  runs — never ships in production config
