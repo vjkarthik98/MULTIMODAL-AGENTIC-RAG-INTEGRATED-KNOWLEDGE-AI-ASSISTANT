@@ -1,0 +1,762 @@
+"""
+ui/gradio_app.py — Phase 28 Gradio UI
+Multimodal AGENTIC RAG Knowledge AI Assistant
+
+Layout (Claude-inspired dark UI):
+  ┌─────────────────┬──────────────────────────────────────────┐
+  │  Sidebar        │  Main Chat Area                           │
+  │  • Brand logo   │  Welcome: "Good afternoon, <name>"        │
+  │  • New Chat     │  Chatbot (messages type)                  │
+  │  • KB file list │  Transparency panel (route/conf/sources)  │
+  │  • Upload files │  Feedback row (👍 👎)                      │
+  │  • Delete file  │  Message input + Send button              │
+  │  • User / Logout│                                           │
+  └─────────────────┴──────────────────────────────────────────┘
+
+Hard rule: every API call routes through ui/client.py → FastAPI.
+Never import app.* directly.
+"""
+from __future__ import annotations
+
+import os
+import uuid
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+import gradio as gr
+
+from ui import client
+from ui.feedback import save_feedback
+from ui.theme import CSS
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+MODALITY_ICONS: Dict[str, str] = {
+    "pdf":     "📄",
+    "text":    "📝",
+    "docx":    "📝",
+    "xlsx":    "📊",
+    "image":   "🖼️",
+    "audio":   "🎵",
+    "video":   "🎬",
+    "unknown": "📎",
+}
+
+ALLOWED_EXTENSIONS = [
+    ".pdf", ".txt", ".md", ".docx", ".xlsx", ".xls",
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp",
+    ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac",
+    ".mp4", ".avi", ".mov", ".mkv", ".webm",
+]
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _greeting() -> str:
+    h = datetime.now().hour
+    if h < 12:
+        return "Good morning"
+    elif h < 17:
+        return "Good afternoon"
+    return "Good evening"
+
+
+def _email_initial(email: str) -> str:
+    return email[0].upper() if email else "?"
+
+
+def _email_name(email: str) -> str:
+    return email.split("@")[0] if "@" in email else email
+
+
+def _welcome_html(email: str) -> str:
+    name = _email_name(email).replace(".", " ").title()
+    return (
+        f'<div class="welcome-header">'
+        f'<span class="welcome-star">✦</span>'
+        f'<h2>{_greeting()}, <strong>{name}</strong></h2>'
+        f'</div>'
+    )
+
+
+def _user_chip_html(email: str) -> str:
+    initial = _email_initial(email)
+    return (
+        f'<div class="user-chip">'
+        f'<div class="user-avatar">{initial}</div>'
+        f'<span class="user-email" title="{email}">{email}</span>'
+        f'</div>'
+    )
+
+
+def _kb_html(files: List[Dict]) -> str:
+    if not files:
+        return '<p class="kb-empty">No files uploaded yet</p>'
+    rows = []
+    for f in files:
+        icon = MODALITY_ICONS.get(f.get("modality", "unknown"), "📎")
+        name = f.get("filename", "")
+        size = f.get("size_mb", 0.0)
+        rows.append(
+            f'<div class="kb-file-row">'
+            f'<span class="kb-icon">{icon}</span>'
+            f'<span class="kb-name" title="{name}">{name}</span>'
+            f'<span class="kb-size">{size:.2f}MB</span>'
+            f'</div>'
+        )
+    return '<div class="kb-file-list">' + "\n".join(rows) + "</div>"
+
+
+def _kb_choices(files: List[Dict]) -> List[str]:
+    return [f["filename"] for f in files if "filename" in f]
+
+
+def _format_transparency(result: Dict) -> str:
+    decision    = (result.get("decision") or "rag").upper()
+    confidence  = result.get("confidence", 0.0)
+    latency     = result.get("latency", 0.0)
+    sources     = result.get("sources") or []
+    hw          = result.get("hallucination_warning", False)
+    cache_hit   = result.get("cache_hit", False)
+
+    badges = [
+        f"**Route:** `{decision}`",
+        f"**Confidence:** `{confidence:.0%}`",
+        f"**Latency:** `{latency:.1f}s`",
+    ]
+    if cache_hit:
+        badges.append("⚡ **Cache Hit**")
+    if hw:
+        badges.append("⚠️ **Low Confidence**")
+
+    header = "  ·  ".join(badges)
+
+    src_lines: List[str] = []
+    for i, s in enumerate(sources[:5], 1):
+        if isinstance(s, dict):
+            name    = s.get("source") or s.get("filename") or "Unknown"
+            snippet = (s.get("content") or s.get("text") or "")[:140]
+            src_lines.append(f"**{i}.** `{name}` — {snippet}{'…' if len(snippet) >= 140 else ''}")
+        elif isinstance(s, str):
+            src_lines.append(f"**{i}.** {s[:140]}")
+
+    if src_lines:
+        return header + "\n\n**Sources:**\n" + "\n".join(src_lines)
+    return header
+
+
+# ── Event Handlers ────────────────────────────────────────────────────────────
+
+def _no_auth_return(error_msg: str) -> Tuple:
+    """Helper — return a failed login state (keeps login view visible)."""
+    return (
+        None,
+        gr.update(visible=True),
+        gr.update(visible=False),
+        f'<p class="login-error">{error_msg}</p>',
+        "", "",
+        '<p class="kb-empty">No files uploaded yet</p>',
+        gr.update(choices=[], value=None),
+    )
+
+
+def _handle_login(email: str, password: str) -> Tuple:
+    """
+    Step 1 of login — just authenticate and switch views.
+    KB load happens in a separate .then() so it never blocks the view switch.
+    """
+    try:
+        email    = (email or "").strip()
+        password = (password or "").strip()
+
+        if not email or not password:
+            return _no_auth_return("Email and password are required.")
+
+        result = client.login(email, password)
+
+        if "access_token" not in result:
+            detail = result.get("detail", result.get("msg", "Invalid email or password"))
+            return _no_auth_return(detail)
+
+        token      = result["access_token"]
+        session_id = str(uuid.uuid4())
+        auth       = {"token": token, "email": email, "session_id": session_id}
+
+        return (
+            auth,
+            gr.update(visible=False),          # hide login
+            gr.update(visible=True),            # show main
+            "",                                 # clear login error
+            _welcome_html(email),
+            _user_chip_html(email),
+            '<p class="kb-empty">Loading knowledge base…</p>',
+            gr.update(choices=[], value=None),  # refreshed by .then()
+        )
+    except Exception as exc:
+        return _no_auth_return(f"Error: {str(exc)[:160]}")
+
+
+def _refresh_kb(auth_state: Optional[Dict]) -> Tuple:
+    """Step 2 of login — load KB file list after views have switched."""
+    if not auth_state or not auth_state.get("token"):
+        return '<p class="kb-empty">Not logged in</p>', gr.update(choices=[], value=None)
+    kb_html, kb_choices = _load_kb(auth_state["token"])
+    return kb_html, gr.update(choices=kb_choices, value=None)
+
+
+def _handle_register(email: str, password: str) -> str:
+    email    = (email or "").strip()
+    password = (password or "").strip()
+
+    if not email or not password:
+        return '<p class="login-error">Email and password are required.</p>'
+    if len(password) < 8:
+        return '<p class="login-error">Password must be at least 8 characters.</p>'
+
+    try:
+        result = client.register(email, password)
+    except Exception as e:
+        return f'<p class="login-error">Connection error: {str(e)[:120]}</p>'
+
+    if "user_id" in result or "email" in result:
+        return '<p class="login-success">✓ Account created — sign in above.</p>'
+
+    detail = result.get("detail", "Registration failed")
+    return f'<p class="login-error">{detail}</p>'
+
+
+def _handle_logout(auth_state: Optional[Dict]) -> Tuple:
+    """Revoke token and return to login view."""
+    if auth_state and auth_state.get("token"):
+        try:
+            client.logout_user(auth_state["token"])
+        except Exception:
+            pass
+
+    return (
+        None,                         # clear auth state
+        [],                           # clear chat history
+        {},                           # clear transparency state
+        gr.update(visible=True),      # show login
+        gr.update(visible=False),     # hide main
+        "",                           # clear login error
+        '<p class="kb-empty">No files uploaded yet</p>',
+        [],                           # clear delete dropdown
+    )
+
+
+def _new_chat(auth_state: Optional[Dict]) -> Tuple:
+    """Start a fresh conversation (new session_id, empty history, clear memory)."""
+    if not auth_state:
+        return auth_state, [], {}
+
+    new_session = str(uuid.uuid4())
+    new_auth    = {**auth_state, "session_id": new_session}
+
+    try:
+        client.clear_memory(new_session, auth_state["token"])
+    except Exception:
+        pass
+
+    return new_auth, [], {}
+
+
+def _handle_chat(
+    message: str,
+    history: List[Dict],
+    auth_state: Optional[Dict],
+    transparency_state: Dict,
+):
+    """
+    Generator — yields (history, transparency_md, msg_input_clear, trans_state).
+    Step 1: immediately adds user msg + "Thinking…" placeholder.
+    Step 2: calls /query, replaces placeholder with real answer + metadata.
+    """
+    message = (message or "").strip()
+    if not message:
+        yield history, gr.update(), "", transparency_state
+        return
+
+    token      = (auth_state or {}).get("token")
+    session_id = (auth_state or {}).get("session_id", "default")
+
+    if not token:
+        error_history = history + [
+            {"role": "user",      "content": message},
+            {"role": "assistant", "content": "⚠️ Please login to use the assistant."},
+        ]
+        yield error_history, gr.update(), "", transparency_state
+        return
+
+    # ── Step 1: show user msg + thinking indicator ────────────────────────
+    base_history = history + [{"role": "user", "content": message}]
+    thinking_history = base_history + [{"role": "assistant", "content": "⏳ Thinking…"}]
+    yield thinking_history, gr.update(), "", transparency_state
+
+    # ── Step 2: call /query (non-streaming, returns full metadata) ────────
+    try:
+        result = client.query(message, session_id, token)
+        answer = result.get("answer") or "No response returned."
+
+        trans_md  = _format_transparency(result)
+        new_trans = {
+            "query":      message,
+            "answer":     answer,
+            "decision":   result.get("decision", "rag"),
+            "sources":    result.get("sources", []),
+            "confidence": result.get("confidence", 0.0),
+            "session_id": session_id,
+        }
+
+        # ── Step 3: stream the answer word-by-word ────────────────────────
+        words     = answer.split(" ")
+        displayed = ""
+        for i, word in enumerate(words):
+            displayed += ("" if i == 0 else " ") + word
+            stream_history = base_history + [{"role": "assistant", "content": displayed + " ▌"}]
+            yield stream_history, gr.update(), "", transparency_state
+
+        # Final yield — remove cursor, show transparency
+        final_history = base_history + [{"role": "assistant", "content": answer}]
+        yield final_history, trans_md, "", new_trans
+
+    except Exception as exc:
+        error_history = base_history + [
+            {"role": "assistant", "content": f"❌ Error: {str(exc)[:300]}"}
+        ]
+        yield error_history, gr.update(), "", transparency_state
+
+
+def _load_kb(token: str) -> Tuple[str, List[str]]:
+    """Fetch KB file list; return (html_str, [filename, ...])."""
+    try:
+        data  = client.list_kb(token)
+        files = data.get("files", [])
+        return _kb_html(files), _kb_choices(files)
+    except Exception:
+        return '<p class="kb-empty">Could not load knowledge base</p>', []
+
+
+def _handle_upload(
+    files,                          # Gradio UploadButton returns list of temp paths
+    auth_state: Optional[Dict],
+) -> Tuple[str, str, List[str]]:
+    """Upload every selected file to /ingest; return (status_html, kb_html, choices)."""
+    if not auth_state or not auth_state.get("token"):
+        return (
+            '<span class="upload-status" style="color:#e05252">Not logged in</span>',
+            '<p class="kb-empty">No files uploaded yet</p>',
+            [],
+        )
+
+    token      = auth_state["token"]
+    session_id = auth_state.get("session_id", "default")
+
+    if not files:
+        return (
+            '<span class="upload-status" style="color:#888">No files selected</span>',
+            *_load_kb(token)[0:2],
+        )
+
+    # Gradio passes a list of temp file paths (strings or NamedString objects)
+    paths = [f if isinstance(f, str) else f.name for f in (files if isinstance(files, list) else [files])]
+
+    results, ok, fail = [], 0, 0
+    for path in paths:
+        try:
+            r = client.ingest(path, session_id, token)
+            status = r.get("status", "")
+            if status in ("success", "partial_failure"):
+                fname = r.get("filename", path.split("/")[-1])
+                chunks = r.get("chunks", 0)
+                results.append(f"✓ {fname} ({chunks} chunks)")
+                ok += 1
+            elif status == "duplicate":
+                fname = r.get("filename", path.split("/")[-1])
+                results.append(f"≡ {fname} (duplicate)")
+                ok += 1
+            else:
+                ec = r.get("error_code", r.get("detail", "failed"))
+                results.append(f"✗ {path.split('/')[-1]}: {ec}")
+                fail += 1
+        except Exception as e:
+            results.append(f"✗ {path.split('/')[-1]}: {str(e)[:80]}")
+            fail += 1
+
+    color  = "#4caf50" if fail == 0 else "#e05252"
+    summary = f"{ok} uploaded" + (f", {fail} failed" if fail else "")
+    detail_lines = "<br>".join(results[:8])
+    status_html  = (
+        f'<span class="upload-status" style="color:{color}">{summary}</span>'
+        f'<div style="font-size:11px;color:#666;margin-top:2px">{detail_lines}</div>'
+    )
+
+    kb_html, kb_choices = _load_kb(token)
+    return status_html, kb_html, gr.update(choices=kb_choices, value=None)
+
+
+def _handle_delete(
+    filename: Optional[str],
+    auth_state: Optional[Dict],
+) -> Tuple[str, str, List[str]]:
+    """Delete one file from the KB; refresh list."""
+    if not auth_state or not auth_state.get("token"):
+        return (
+            '<span class="delete-status" style="color:#e05252">Not logged in</span>',
+            '<p class="kb-empty">No files uploaded yet</p>',
+            [],
+        )
+    if not filename:
+        return (
+            '<span class="delete-status" style="color:#888">Select a file first</span>',
+            *_load_kb(auth_state["token"])[0:2],
+        )
+
+    token = auth_state["token"]
+    try:
+        client.delete_kb_file(filename, token)
+        status_html = f'<span class="delete-status" style="color:#4caf50">✓ Deleted "{filename}"</span>'
+    except Exception as e:
+        status_html = f'<span class="delete-status" style="color:#e05252">✗ {str(e)[:120]}</span>'
+
+    kb_html, kb_choices = _load_kb(token)
+    return status_html, kb_html, gr.update(choices=kb_choices, value=None)
+
+
+def _handle_feedback(
+    rating: str,
+    transparency_state: Dict,
+    auth_state: Optional[Dict],
+) -> str:
+    """Save thumbs feedback to gold JSONL; return status string."""
+    if not transparency_state or not transparency_state.get("query"):
+        return '<span class="feedback-status">No response to rate yet</span>'
+
+    try:
+        save_feedback(
+            query      = transparency_state.get("query", ""),
+            answer     = transparency_state.get("answer", ""),
+            rating     = rating,
+            route      = transparency_state.get("decision", "rag"),
+            sources    = transparency_state.get("sources", []),
+            session_id = transparency_state.get("session_id", ""),
+            confidence = transparency_state.get("confidence", 0.0),
+        )
+        icon = "👍" if rating == "positive" else "👎"
+        return f'<span class="feedback-status">{icon} Feedback saved</span>'
+    except Exception as e:
+        return f'<span class="feedback-status" style="color:#e05252">Save failed: {str(e)[:60]}</span>'
+
+
+# ── Build the App ─────────────────────────────────────────────────────────────
+
+def build_app() -> gr.Blocks:
+    with gr.Blocks(
+        title="Multimodal AGENTIC RAG Knowledge AI Assistant",
+        analytics_enabled=False,
+    ) as demo:
+
+        # ── Global State ──────────────────────────────────────────────────
+        auth_state          = gr.State(None)   # {token, email, session_id}
+        transparency_state  = gr.State({})     # last query result metadata
+
+        # ══════════════════════════════════════════════════════════════════
+        # LOGIN VIEW
+        # ══════════════════════════════════════════════════════════════════
+        with gr.Column(visible=True, elem_id="login-view") as login_view:
+            with gr.Column(elem_id="login-card"):
+
+                gr.HTML(
+                    '<div class="login-logo">'
+                    '<span class="star">✦</span>'
+                    '<h1>Multimodal AGENTIC RAG<br>Knowledge AI Assistant</h1>'
+                    '<p>Sign in to your knowledge workspace</p>'
+                    '</div>'
+                )
+
+                with gr.Tabs(elem_id="login-tabs"):
+
+                    with gr.Tab("Sign In"):
+                        login_email    = gr.Textbox(
+                            label="Email",
+                            placeholder="you@example.com",
+                            elem_id="login-email",
+                        )
+                        login_password = gr.Textbox(
+                            label="Password",
+                            type="password",
+                            placeholder="Your password",
+                            elem_id="login-password",
+                        )
+                        login_btn      = gr.Button("Sign In", variant="primary", elem_id="login-btn")
+                        login_error    = gr.HTML("")
+
+                    with gr.Tab("Register"):
+                        reg_email    = gr.Textbox(
+                            label="Email",
+                            placeholder="you@example.com",
+                            elem_id="reg-email",
+                        )
+                        reg_password = gr.Textbox(
+                            label="Password",
+                            type="password",
+                            placeholder="Minimum 8 characters",
+                            elem_id="reg-password",
+                        )
+                        reg_btn  = gr.Button("Create Account", variant="primary", elem_id="reg-btn")
+                        reg_msg  = gr.HTML("")
+
+        # ══════════════════════════════════════════════════════════════════
+        # MAIN VIEW
+        # ══════════════════════════════════════════════════════════════════
+        with gr.Column(visible=False, elem_id="main-view") as main_view:
+            with gr.Row(elem_id="app-row", equal_height=True):
+
+                # ── Sidebar ───────────────────────────────────────────────
+                with gr.Column(scale=1, min_width=260, elem_id="sidebar"):
+
+                    gr.HTML(
+                        '<div class="sidebar-brand">'
+                        '<span class="star">✦</span>'
+                        '<div>'
+                        '<div class="brand-name">RAG Assistant</div>'
+                        '<div class="brand-sub">Multimodal · Agentic</div>'
+                        '</div>'
+                        '</div>'
+                    )
+
+                    new_chat_btn = gr.Button("＋  New Chat", elem_id="new-chat-btn")
+
+                    gr.HTML('<div class="section-header">Knowledge Base</div>')
+
+                    kb_list_html = gr.HTML(
+                        '<p class="kb-empty">No files uploaded yet</p>',
+                        elem_id="kb-list",
+                    )
+
+                    upload_files = gr.File(
+                        file_count="multiple",
+                        label="Drop files here to upload",
+                        file_types=ALLOWED_EXTENSIONS,
+                        elem_id="upload-zone",
+                        height=80,
+                    )
+                    upload_btn    = gr.Button("Upload to Knowledge Base", elem_id="upload-btn", size="sm")
+                    upload_status = gr.HTML("", elem_id="upload-status")
+
+                    gr.HTML('<div class="section-header" style="margin-top:8px">Delete File</div>')
+                    delete_select = gr.Dropdown(
+                        choices=[],
+                        label="File to delete",
+                        interactive=True,
+                        elem_id="delete-select",
+                    )
+                    delete_btn    = gr.Button("Delete from Knowledge Base", elem_id="delete-btn", size="sm", variant="stop")
+                    delete_status = gr.HTML("", elem_id="delete-status")
+
+                    # Spacer pushes user chip to bottom
+                    gr.HTML('<div style="flex:1"></div>')
+
+                    with gr.Column(elem_id="sidebar-footer"):
+                        user_chip_html = gr.HTML("", elem_id="user-chip")
+                        logout_btn     = gr.Button("Log out", elem_id="logout-btn", size="sm")
+
+                # ── Main Chat Area ────────────────────────────────────────
+                with gr.Column(scale=4, elem_id="main-area"):
+
+                    welcome_html = gr.HTML("", elem_id="welcome-html")
+
+                    chatbot = gr.Chatbot(
+                        elem_id="chatbot-window",
+                        show_label=False,
+                        height=480,
+                        placeholder=(
+                            "Upload documents using the sidebar, then ask anything about them.\n\n"
+                            "Supports PDF · Word · Excel · Image · Audio · Video · Text"
+                        ),
+                        render_markdown=True,
+                    )
+
+                    # Transparency / Response Detail accordion
+                    with gr.Accordion(
+                        "Response Details",
+                        open=False,
+                        elem_id="transparency-panel",
+                    ) as trans_accordion:
+                        transparency_md = gr.Markdown(
+                            "",
+                            elem_id="transparency-content",
+                        )
+
+                    # Feedback row
+                    with gr.Row(elem_id="feedback-row"):
+                        thumbs_up_btn   = gr.Button("👍", elem_id="thumbs-up-btn",   size="sm")
+                        thumbs_down_btn = gr.Button("👎", elem_id="thumbs-down-btn", size="sm")
+                        feedback_status = gr.HTML("", elem_id="feedback-status")
+
+                    # Message input row
+                    with gr.Row(elem_id="input-row"):
+                        msg_box = gr.Textbox(
+                            placeholder="How can I help you today?",
+                            show_label=False,
+                            lines=1,
+                            max_lines=6,
+                            elem_id="msg-input",
+                            scale=10,
+                            submit_btn=False,
+                        )
+                        send_btn = gr.Button(
+                            "↑",
+                            variant="primary",
+                            elem_id="send-btn",
+                            scale=0,
+                            min_width=44,
+                        )
+
+        # ══════════════════════════════════════════════════════════════════
+        # WIRING — Login
+        # ══════════════════════════════════════════════════════════════════
+
+        _login_outputs = [
+            auth_state,
+            login_view,
+            main_view,
+            login_error,
+            welcome_html,
+            user_chip_html,
+            kb_list_html,
+            delete_select,
+        ]
+
+        # Step 1: authenticate and switch views (fast)
+        # Step 2: load KB in a .then() so it never blocks the view switch
+        login_btn.click(
+            fn=_handle_login,
+            inputs=[login_email, login_password],
+            outputs=_login_outputs,
+        ).then(
+            fn=_refresh_kb,
+            inputs=[auth_state],
+            outputs=[kb_list_html, delete_select],
+        )
+        login_password.submit(
+            fn=_handle_login,
+            inputs=[login_email, login_password],
+            outputs=_login_outputs,
+        ).then(
+            fn=_refresh_kb,
+            inputs=[auth_state],
+            outputs=[kb_list_html, delete_select],
+        )
+
+        # ── Register ──────────────────────────────────────────────────────
+        reg_btn.click(
+            fn=_handle_register,
+            inputs=[reg_email, reg_password],
+            outputs=[reg_msg],
+        )
+
+        # ── Logout ────────────────────────────────────────────────────────
+        _logout_outputs = [
+            auth_state,
+            chatbot,
+            transparency_state,
+            login_view,
+            main_view,
+            login_error,
+            kb_list_html,
+            delete_select,
+        ]
+        logout_btn.click(
+            fn=_handle_logout,
+            inputs=[auth_state],
+            outputs=_logout_outputs,
+        )
+
+        # ── New Chat ──────────────────────────────────────────────────────
+        new_chat_btn.click(
+            fn=_new_chat,
+            inputs=[auth_state],
+            outputs=[auth_state, chatbot, transparency_state],
+        ).then(
+            fn=lambda: ("", ""),
+            outputs=[transparency_md, feedback_status],
+        )
+
+        # ══════════════════════════════════════════════════════════════════
+        # WIRING — Chat
+        # ══════════════════════════════════════════════════════════════════
+
+        _chat_outputs = [chatbot, transparency_md, msg_box, transparency_state]
+
+        send_btn.click(
+            fn=_handle_chat,
+            inputs=[msg_box, chatbot, auth_state, transparency_state],
+            outputs=_chat_outputs,
+        )
+        msg_box.submit(
+            fn=_handle_chat,
+            inputs=[msg_box, chatbot, auth_state, transparency_state],
+            outputs=_chat_outputs,
+        )
+
+        # ── Transparency accordion auto-open when new content arrives ─────
+        transparency_md.change(
+            fn=lambda md: gr.update(open=bool(md and md.strip())),
+            inputs=[transparency_md],
+            outputs=[trans_accordion],
+        )
+
+        # ══════════════════════════════════════════════════════════════════
+        # WIRING — Knowledge Base
+        # ══════════════════════════════════════════════════════════════════
+
+        _upload_outputs = [upload_status, kb_list_html, delete_select]
+
+        upload_btn.click(
+            fn=_handle_upload,
+            inputs=[upload_files, auth_state],
+            outputs=_upload_outputs,
+        )
+
+        _delete_outputs = [delete_status, kb_list_html, delete_select]
+
+        delete_btn.click(
+            fn=_handle_delete,
+            inputs=[delete_select, auth_state],
+            outputs=_delete_outputs,
+        )
+
+        # ══════════════════════════════════════════════════════════════════
+        # WIRING — Feedback
+        # ══════════════════════════════════════════════════════════════════
+
+        thumbs_up_btn.click(
+            fn=lambda ts, auth: _handle_feedback("positive", ts, auth),
+            inputs=[transparency_state, auth_state],
+            outputs=[feedback_status],
+        )
+        thumbs_down_btn.click(
+            fn=lambda ts, auth: _handle_feedback("negative", ts, auth),
+            inputs=[transparency_state, auth_state],
+            outputs=[feedback_status],
+        )
+
+    return demo
+
+
+# ── Entry Point ───────────────────────────────────────────────────────────────
+
+app = build_app()
+
+if __name__ == "__main__":
+    port       = int(os.getenv("GRADIO_PORT", "7860"))
+    share      = os.getenv("GRADIO_SHARE", "false").lower() == "true"
+    server_name = os.getenv("GRADIO_HOST", "0.0.0.0")
+
+    app.launch(
+        server_name=server_name,
+        server_port=port,
+        share=share,
+        show_error=True,
+    )

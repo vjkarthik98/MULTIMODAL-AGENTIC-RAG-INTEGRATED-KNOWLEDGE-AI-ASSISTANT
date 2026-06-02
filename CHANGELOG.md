@@ -6,6 +6,22 @@ The format follows Keep a Changelog and Semantic Versioning.
 
 ---
 
+# [0.28.0] - 2026-06-02 — Phase 28: Gradio UI
+
+### Added
+
+- `ui/gradio_app.py` — Gradio 6 Blocks app: login gate, sidebar KB management, streaming chat, transparency panel, thumbs feedback
+- `ui/client.py` — synchronous httpx thin client over all FastAPI endpoints (auth, query, ingest, KB CRUD)
+- `ui/theme.py` — Claude-inspired dark CSS theme (injected via gr.HTML)
+- `ui/feedback.py` — thumbs up/down persists to `app/eval/datasets/gold/feedback_gold.jsonl` (grows Phase-25 gold set)
+- `ui/run.py` — `python ui/run.py` entry point; respects BACKEND_URL / GRADIO_PORT / GRADIO_HOST env vars
+- Login/register tabs; JWT token stored in Gradio State (never in URL)
+- KB sidebar: file list with modality icons, multi-file upload, per-file delete (purges Qdrant + BM25 via API)
+- Transparency accordion: route · confidence · latency · top-5 sources, auto-opens after each response
+- New Chat clears session_id and Redis short-term memory via POST /memory/clear
+
+---
+
 # [0.1.0] - Initial Setup
 
 ### Added
@@ -498,7 +514,7 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Test suite: **257 passed, 7 skipped, 0 failures**
 
 
-# [v0.27.0] — Authentication, MFA & Tenant Security
+# [v0.24.0] — Authentication, MFA & Tenant Security
 
 ### Features
 
