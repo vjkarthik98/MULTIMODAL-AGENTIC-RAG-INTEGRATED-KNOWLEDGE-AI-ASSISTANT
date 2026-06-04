@@ -5,7 +5,7 @@ Set BACKEND_URL env var to override.
 """
 import os
 from ui.gradio_app import app
-from ui.theme import CSS
+from ui.theme import CSS, SHOW_PASSWORD_JS
 
 if __name__ == "__main__":
     app.launch(
@@ -14,4 +14,5 @@ if __name__ == "__main__":
         share=os.getenv("GRADIO_SHARE", "false").lower() == "true",
         show_error=True,
         css=CSS,
+        js=SHOW_PASSWORD_JS,
     )

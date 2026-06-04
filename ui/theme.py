@@ -30,70 +30,312 @@ body, .gradio-container {
 
 footer { display: none !important; }
 
-/* ─── Login View ────────────────────────────────────────────────────────── */
+/* ─── Login View ─────────────────────────────────────────────────────────── */
 #login-view {
     min-height: 100vh;
-    background: #1a1a1a;
-    padding: 24px;
+    background: #0e0e0e;
+    display: flex !important;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 40px 24px 60px;
+}
+
+/* Stop Gradio's flex children from stretching vertically */
+#login-view > .gap,
+#login-view > .block {
+    width: 100% !important;
+    flex: 0 0 auto !important;
+    height: auto !important;
 }
 
 #login-card {
-    background: #242424;
-    border: 1px solid #333;
-    border-radius: 16px;
-    padding: 48px 40px;
-    width: 100%;
-    max-width: 440px;
-    margin: 60px auto;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
-}
-
-.login-logo {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    width: 100% !important;
+    max-width: 480px !important;
+    margin: 0 auto !important;
+    padding: 0 !important;
     text-align: center;
-    margin-bottom: 8px;
+    flex: 0 0 auto !important;
+    height: auto !important;
 }
 
-.login-logo .star {
+/* Stop login-card inner gap from stretching */
+#login-card > .gap,
+#login-card > .block > .gap {
+    flex: 0 0 auto !important;
+    height: auto !important;
+    gap: 0 !important;
+}
+
+/* Brand section */
+.login-brand-section {
+    padding-top: 16px;
+    margin-bottom: 28px;
+}
+
+.login-brand-icon {
     font-size: 36px;
     color: #d4774e;
     display: block;
-    margin-bottom: 6px;
+    margin: 0 auto 16px;
+    line-height: 1;
 }
 
-.login-logo h1 {
-    color: #ececec;
-    font-size: 20px;
+.login-heading {
+    font-size: 42px;
+    font-weight: 400;
+    color: #f2f2f2;
+    font-family: Georgia, 'Times New Roman', serif;
+    line-height: 1.15;
+    margin: 0 0 10px;
+    letter-spacing: -0.02em;
+}
+
+.login-subtitle {
+    color: #999;
+    font-size: 15px;
+    margin: 0;
+    line-height: 1.4;
+}
+
+/* ─── Form card — MUST be height:auto so it doesn't fill the page ── */
+#login-form-container {
+    background: #181818 !important;
+    border: 1px solid #282828 !important;
+    border-radius: 20px !important;
+    padding: 24px 28px 20px !important;
+    height: auto !important;
+    flex: 0 0 auto !important;
+    overflow: visible !important;
+}
+
+/* Inner gap: use column layout with 10px gap, no stretching */
+#login-form-container > .gap,
+#login-form-container > .block > .gap {
+    flex: 0 0 auto !important;
+    height: auto !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 10px !important;
+}
+
+/* Google button */
+.google-btn-link {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 11px;
+    background: #1e1e1e;
+    border: 1px solid #363636;
+    border-radius: 32px;
+    color: #e8e8e8;
+    font-size: 15px;
+    font-weight: 500;
+    padding: 13px 24px;
+    text-decoration: none !important;
+    width: 100%;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+    box-sizing: border-box;
+}
+.google-btn-link:hover {
+    background: #262626;
+    border-color: #555;
+    color: #fff;
+    text-decoration: none !important;
+}
+.google-btn-link svg { flex-shrink: 0; }
+
+/* OR divider */
+.or-divider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 4px 0;
+    color: #555;
+    font-size: 12px;
     font-weight: 600;
-    margin: 0 0 4px;
-    line-height: 1.3;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+.or-divider::before, .or-divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: #282828;
 }
 
-.login-logo p {
-    color: #888;
-    font-size: 13px;
-    margin: 0 0 32px;
+/* ─── Login inputs — CRITICAL: target input/textarea only, NOT the label ─── */
+/* In Gradio 6 the <label> wraps the entire input — never hide it              */
+#login-email input,
+#login-email textarea {
+    background: #1e1e1e !important;
+    border: 1px solid #333 !important;
+    border-radius: 12px !important;
+    color: #ececec !important;
+    font-size: 15px !important;
+    padding: 13px 16px !important;
+    transition: border-color 0.15s !important;
+    pointer-events: all !important;
+    cursor: text !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+}
+#login-password input,
+#login-password textarea {
+    background: #1e1e1e !important;
+    border: 1px solid #333 !important;
+    border-radius: 12px !important;
+    color: #ececec !important;
+    font-size: 15px !important;
+    padding: 13px 44px 13px 16px !important;  /* right pad for eye icon */
+    transition: border-color 0.15s !important;
+    pointer-events: all !important;
+    cursor: text !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+}
+#login-email input:focus,
+#login-email textarea:focus,
+#login-password input:focus,
+#login-password textarea:focus {
+    border-color: #555 !important;
+    box-shadow: 0 0 0 3px rgba(212,119,78,0.12) !important;
+    outline: none !important;
+}
+#login-email input::placeholder,
+#login-email textarea::placeholder,
+#login-password input::placeholder,
+#login-password textarea::placeholder {
+    color: #555 !important;
 }
 
+/* Hide the label text only (not the label element which wraps the input) */
+#login-email .label-wrap,
+#login-password .label-wrap { display: none !important; }
+#login-email, #login-password { margin-bottom: 0 !important; }
+
+/* Make the label wrapper itself transparent so the input is directly accessible */
+#login-email label,
+#login-password label {
+    display: block !important;
+    position: relative !important;
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+}
+
+/* Relative wrapper for the eye toggle */
+#login-password .wrap,
+#login-password [class*="wrap"] {
+    position: relative !important;
+}
+
+/* Eye toggle button — injected by JavaScript */
+.pwd-eye-btn {
+    position: absolute !important;
+    right: 13px !important;
+    top: 50% !important;
+    transform: translateY(-50%) !important;
+    background: none !important;
+    border: none !important;
+    color: #666 !important;
+    cursor: pointer !important;
+    padding: 4px !important;
+    z-index: 20 !important;
+    line-height: 1 !important;
+    font-size: 15px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    transition: color 0.15s !important;
+}
+.pwd-eye-btn:hover { color: #d4774e !important; }
+
+/* "Continue with email" button — solid white pill */
+#continue-email-btn {
+    background: #f0f0f0 !important;
+    color: #111 !important;
+    border: none !important;
+    border-radius: 32px !important;
+    font-size: 15px !important;
+    font-weight: 500 !important;
+    padding: 13px 24px !important;
+    width: 100% !important;
+    transition: background 0.15s !important;
+}
+#continue-email-btn:hover { background: #ddd !important; }
+
+/* Sign In button — brand orange pill */
+#signin-btn {
+    background: #d4774e !important;
+    color: #fff !important;
+    border: none !important;
+    border-radius: 32px !important;
+    font-size: 15px !important;
+    font-weight: 500 !important;
+    padding: 13px 24px !important;
+    width: 100% !important;
+    transition: background 0.15s !important;
+}
+#signin-btn:hover { background: #c06840 !important; }
+
+/* Create Account button */
+#reg-btn {
+    background: #d4774e !important;
+    color: #fff !important;
+    border: none !important;
+    border-radius: 32px !important;
+    font-size: 15px !important;
+    font-weight: 500 !important;
+    padding: 13px 24px !important;
+    width: 100% !important;
+    transition: background 0.15s !important;
+}
+#reg-btn:hover { background: #c06840 !important; }
+
+/* Login footer link-style buttons */
+#create-account-btn, #back-signin-btn {
+    background: transparent !important;
+    border: none !important;
+    color: #777 !important;
+    font-size: 13px !important;
+    padding: 4px 8px !important;
+    min-width: unset !important;
+    transition: color 0.15s !important;
+    text-decoration: underline !important;
+    text-underline-offset: 3px !important;
+}
+#create-account-btn:hover, #back-signin-btn:hover {
+    color: #d4774e !important;
+    background: transparent !important;
+}
+
+/* Login footer row — centered */
+#login-footer {
+    justify-content: center !important;
+    gap: 8px !important;
+    flex-wrap: wrap !important;
+}
+
+/* Error / success messages */
 .login-error {
     color: #e05252;
     font-size: 13px;
     text-align: center;
-    min-height: 20px;
-    margin-top: 8px;
+    min-height: 18px;
+    margin: 2px 0 0;
 }
-
 .login-success {
     color: #4caf50;
     font-size: 13px;
     text-align: center;
-    margin-top: 8px;
+    margin: 2px 0 0;
 }
-
-/* Tab styling inside login card */
-#login-card .tabs { background: transparent !important; border: none !important; }
-#login-card .tab-nav { background: #1e1e1e !important; border-radius: 8px !important; border: 1px solid #333 !important; padding: 3px !important; }
-#login-card .tab-nav button { color: #888 !important; border-radius: 6px !important; padding: 7px 20px !important; font-size: 14px !important; border: none !important; background: transparent !important; }
-#login-card .tab-nav button.selected { background: #2f2f2f !important; color: #ececec !important; }
 
 /* ─── Main View ─────────────────────────────────────────────────────────── */
 #main-view {
@@ -384,4 +626,76 @@ label.svelte-1b6s6xi, .label-wrap span {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #444; }
+"""
+
+# ── Show-password eye-toggle (injected via launch(js=...)) ──────────────────
+# Uses MutationObserver so it fires whenever Gradio makes #login-password
+# visible (e.g. after "Continue with email" is clicked).
+SHOW_PASSWORD_JS = """
+() => {
+    function tryAddEyeToggle() {
+        const container = document.getElementById('login-password');
+        if (!container) return;
+
+        // Don't add twice
+        if (container.querySelector('.pwd-eye-btn')) return;
+
+        // Gradio 6 may render <input> or <textarea> inside the password field
+        const input = container.querySelector('input, textarea');
+        if (!input) return;
+
+        // Find the innermost wrapper to position relative to
+        const wrap = (
+            input.closest('.wrap-inner') ||
+            input.closest('[class*="wrap"]') ||
+            input.parentElement
+        );
+        if (!wrap) return;
+        wrap.style.position = 'relative';
+
+        const SVG_EYE = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+            <circle cx="12" cy="12" r="3"/>
+        </svg>`;
+        const SVG_EYE_OFF = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8
+                a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8
+                a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/>
+            <line x1="1" y1="1" x2="23" y2="23"/>
+        </svg>`;
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'pwd-eye-btn';
+        btn.innerHTML = SVG_EYE;
+        btn.title = 'Show password';
+        btn.setAttribute('aria-label', 'Toggle password visibility');
+        wrap.appendChild(btn);
+
+        btn.addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const inp = container.querySelector('input, textarea');
+            if (!inp) return;
+            if (inp.type === 'password') {
+                inp.type = 'text';
+                btn.innerHTML = SVG_EYE_OFF;
+                btn.title = 'Hide password';
+            } else {
+                inp.type = 'password';
+                btn.innerHTML = SVG_EYE;
+                btn.title = 'Show password';
+            }
+        });
+    }
+
+    // Watch for the password container to appear or change visibility
+    const obs = new MutationObserver(tryAddEyeToggle);
+    obs.observe(document.body, { childList: true, subtree: true });
+
+    // Also try immediately (in case already mounted)
+    tryAddEyeToggle();
+}
 """

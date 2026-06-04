@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import urllib.parse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
@@ -124,35 +126,37 @@ async def google_login() -> RedirectResponse:
     return RedirectResponse(url=url)
 
 
-@router.get("/callback/google", response_model=TokenPair, summary="Google OAuth2 callback")
+@router.get("/callback/google", summary="Google OAuth2 callback")
 async def google_callback(
     code: str = "",
     state: str = "",
     error: str = "",
-) -> TokenPair:
+) -> RedirectResponse:
     """
     Step 2 — Google redirects back here with ?code=...&state=...
-    We exchange the code for user info, get-or-create the account,
-    and return a JWT TokenPair exactly like a normal login.
+    Exchanges the code for user info, get-or-creates the account, issues a JWT,
+    then redirects the browser to the Gradio UI with the token in URL params.
     """
+    _gradio_url = os.getenv("GRADIO_URL", "http://localhost:7860")
+
     if error:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Google login was cancelled or failed: {error}",
+        return RedirectResponse(
+            url=f"{_gradio_url}?oauth_error={urllib.parse.quote(error, safe='')}",
+            status_code=302,
         )
 
     if not code or not state:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Missing code or state parameter from Google",
+        return RedirectResponse(
+            url=f"{_gradio_url}?oauth_error=missing_params",
+            status_code=302,
         )
 
     try:
         userinfo = await exchange_google_code(code, state)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=str(exc),
+        return RedirectResponse(
+            url=f"{_gradio_url}?oauth_error={urllib.parse.quote(str(exc), safe='')}",
+            status_code=302,
         )
 
     email = userinfo["email"]
@@ -161,11 +165,20 @@ async def google_callback(
         user = await asyncio.to_thread(get_or_create_oauth_user, email, "google")
     except Exception as exc:
         logger.error(event="google_oauth_user_create_failed", error=str(exc))
-        raise HTTPException(status_code=500, detail="Failed to create user account")
+        return RedirectResponse(
+            url=f"{_gradio_url}?oauth_error=account_creation_failed",
+            status_code=302,
+        )
 
     tokens = issue_tokens(user.user_id, user.email, user.role.value)
     logger.info(event="google_oauth_login_success", email=email, user_id=user.user_id)
-    return TokenPair(**tokens)
+
+    redirect_url = (
+        f"{_gradio_url}"
+        f"?magik_token={urllib.parse.quote(tokens['access_token'], safe='')}"
+        f"&magik_email={urllib.parse.quote(email, safe='')}"
+    )
+    return RedirectResponse(url=redirect_url, status_code=302)
 
 
 # ── Logout (revoke current token) ────────────────────────────────────────────

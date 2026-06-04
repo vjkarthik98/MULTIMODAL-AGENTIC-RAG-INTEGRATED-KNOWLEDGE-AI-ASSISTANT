@@ -1,6 +1,6 @@
 """
 ui/gradio_app.py — Phase 28 Gradio UI
-Multimodal AGENTIC RAG Knowledge AI Assistant
+Multimodal AGENTIC RAG Knowledge AI Assistant (MAGIK-AI)
 
 Layout (Claude-inspired dark UI):
   ┌─────────────────┬──────────────────────────────────────────┐
@@ -13,12 +13,21 @@ Layout (Claude-inspired dark UI):
   │  • User / Logout│                                           │
   └─────────────────┴──────────────────────────────────────────┘
 
+Login flow:
+  1. "Continue with Google" — browser navigates to /auth/google, OAuth completes,
+     backend redirects to Gradio with ?magik_token=...&magik_email=...
+     demo.load() picks these up and auto-logs the user in.
+  2. "Continue with email" — reveals password field → Sign In
+  3. "Create an account" — switches to register form
+  4. "Back to sign in" — returns to entry mode
+
 Hard rule: every API call routes through ui/client.py → FastAPI.
 Never import app.* directly.
 """
 from __future__ import annotations
 
 import os
+import urllib.parse
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -27,7 +36,9 @@ import gradio as gr
 
 from ui import client
 from ui.feedback import save_feedback
-from ui.theme import CSS
+from ui.theme import CSS, SHOW_PASSWORD_JS
+
+BACKEND_URL: str = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -145,6 +156,42 @@ def _format_transparency(result: Dict) -> str:
     return header
 
 
+# ── Login Flow Helpers ────────────────────────────────────────────────────────
+
+_GOOGLE_SVG = (
+    '<svg width="18" height="18" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg">'
+    '<path d="M17.64 9.205c0-.639-.057-1.252-.164-1.841H9v3.481h4.844a4.14 4.14 0 01-1.796'
+    ' 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z" fill="#4285F4"/>'
+    '<path d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86'
+    '-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z" fill="#34A853"/>'
+    '<path d="M3.964 10.71A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996'
+    ' 8.996 0 000 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" fill="#FBBC05"/>'
+    '<path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9'
+    ' 0A8.997 8.997 0 00.957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z" fill="#EA4335"/>'
+    '</svg>'
+)
+
+
+def _login_brand_html() -> str:
+    return (
+        '<div class="login-brand-section">'
+        '<span class="login-brand-icon">✦</span>'
+        '<h1 class="login-heading">Think smart,<br>build knowledge</h1>'
+        '<p class="login-subtitle">Multimodal Agentic Knowledge AI Assistant</p>'
+        '</div>'
+    )
+
+
+def _google_btn_html() -> str:
+    return (
+        f'<a href="{BACKEND_URL}/auth/google" class="google-btn-link">'
+        f'{_GOOGLE_SVG}'
+        f'<span>Continue with Google</span>'
+        f'</a>'
+        f'<div class="or-divider"><span>OR</span></div>'
+    )
+
+
 # ── Event Handlers ────────────────────────────────────────────────────────────
 
 def _no_auth_return(error_msg: str) -> Tuple:
@@ -204,29 +251,149 @@ def _refresh_kb(auth_state: Optional[Dict]) -> Tuple:
     return kb_html, gr.update(choices=kb_choices, value=None)
 
 
-def _handle_register(email: str, password: str) -> str:
+def _handle_register(email: str, password: str) -> Tuple:
+    """Register a new account. On success, switch to sign-in mode."""
     email    = (email or "").strip()
     password = (password or "").strip()
 
     if not email or not password:
-        return '<p class="login-error">Email and password are required.</p>'
+        return (
+            '<p class="login-error">Email and password are required.</p>',
+            gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+        )
     if len(password) < 8:
-        return '<p class="login-error">Password must be at least 8 characters.</p>'
+        return (
+            '<p class="login-error">Password must be at least 8 characters.</p>',
+            gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+        )
 
     try:
         result = client.register(email, password)
     except Exception as e:
-        return f'<p class="login-error">Connection error: {str(e)[:120]}</p>'
+        return (
+            f'<p class="login-error">Connection error: {str(e)[:120]}</p>',
+            gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+        )
 
     if "user_id" in result or "email" in result:
-        return '<p class="login-success">✓ Account created — sign in above.</p>'
+        # Switch to sign-in mode so user can immediately log in
+        return (
+            '<p class="login-success">✓ Account created — sign in below.</p>',
+            gr.update(interactive=False),       # lock email
+            gr.update(visible=False),           # hide continue btn
+            gr.update(visible=True, value=""),  # show password (cleared)
+            gr.update(visible=True),            # show signin btn
+            gr.update(visible=False),           # hide reg btn
+            gr.update(visible=False),           # hide back btn
+        )
 
     detail = result.get("detail", "Registration failed")
-    return f'<p class="login-error">{detail}</p>'
+    return (
+        f'<p class="login-error">{detail}</p>',
+        gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+    )
+
+
+def _continue_with_email(email: str) -> Tuple:
+    """Validate email then reveal password field and Sign In button."""
+    email = (email or "").strip()
+    if not email or "@" not in email:
+        return (
+            '<p class="login-error">Please enter a valid email address.</p>',
+            gr.update(),            # login_email
+            gr.update(visible=True),   # continue_email_btn
+            gr.update(visible=False),  # login_password
+            gr.update(visible=False),  # signin_btn
+        )
+    return (
+        "",                              # clear error
+        gr.update(interactive=False),    # lock email
+        gr.update(visible=False),        # hide continue btn
+        gr.update(visible=True),         # show password
+        gr.update(visible=True),         # show signin btn
+    )
+
+
+def _switch_to_register(email: str) -> Tuple:
+    """Switch login form to Create Account mode."""
+    return (
+        "",                                                         # clear error
+        gr.update(interactive=True, value=(email or "").strip()),   # unlock email
+        gr.update(visible=False),                                   # hide continue btn
+        gr.update(visible=True, value="", placeholder="Password (min 8 characters)"),  # password
+        gr.update(visible=False),                                   # hide signin btn
+        gr.update(visible=True),                                    # show reg btn
+        gr.update(visible=False),                                   # hide create-account btn
+        gr.update(visible=True),                                    # show back btn
+    )
+
+
+def _back_to_entry() -> Tuple:
+    """Return from register/signin mode back to the initial email-entry state."""
+    return (
+        "",                                           # clear error
+        gr.update(interactive=True, value=""),        # reset email
+        gr.update(visible=True),                      # show continue btn
+        gr.update(visible=False, value=""),           # hide + clear password
+        gr.update(visible=False),                     # hide signin btn
+        gr.update(visible=False),                     # hide reg btn
+        gr.update(visible=True),                      # show create-account btn
+        gr.update(visible=False),                     # hide back btn
+    )
+
+
+def _on_load(request: gr.Request) -> Tuple:
+    """
+    Fires on every page load.  If Google OAuth redirected here with
+    ?magik_token=...&magik_email=..., auto-log the user in.
+    """
+    params = dict(request.query_params) if request else {}
+
+    oauth_error = urllib.parse.unquote(params.get("oauth_error", "")).strip()
+    token       = params.get("magik_token", "").strip()
+    email_raw   = params.get("magik_email", "").strip()
+
+    if oauth_error:
+        return (
+            None,
+            gr.update(visible=True),
+            gr.update(visible=False),
+            f'<p class="login-error">Google login failed: {oauth_error[:120]}</p>',
+            "", "",
+            '<p class="kb-empty">No files uploaded yet</p>',
+            gr.update(choices=[], value=None),
+        )
+
+    if token and email_raw:
+        email      = urllib.parse.unquote(email_raw)
+        session_id = str(uuid.uuid4())
+        auth       = {"token": token, "email": email, "session_id": session_id}
+        return (
+            auth,
+            gr.update(visible=False),
+            gr.update(visible=True),
+            "",
+            _welcome_html(email),
+            _user_chip_html(email),
+            '<p class="kb-empty">Loading knowledge base…</p>',
+            gr.update(choices=[], value=None),
+        )
+
+    # Normal page load — show login, clear everything
+    return (
+        None,
+        gr.update(visible=True),
+        gr.update(visible=False),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+        gr.update(),
+    )
 
 
 def _handle_logout(auth_state: Optional[Dict]) -> Tuple:
-    """Revoke token and return to login view."""
+    """Revoke token, return to login view, and reset the login form to entry state."""
     if auth_state and auth_state.get("token"):
         try:
             client.logout_user(auth_state["token"])
@@ -234,14 +401,22 @@ def _handle_logout(auth_state: Optional[Dict]) -> Tuple:
             pass
 
     return (
-        None,                         # clear auth state
-        [],                           # clear chat history
-        {},                           # clear transparency state
-        gr.update(visible=True),      # show login
-        gr.update(visible=False),     # hide main
-        "",                           # clear login error
+        None,                                       # clear auth state
+        [],                                         # clear chat history
+        {},                                         # clear transparency state
+        gr.update(visible=True),                    # show login view
+        gr.update(visible=False),                   # hide main view
+        "",                                         # clear login error
         '<p class="kb-empty">No files uploaded yet</p>',
-        [],                           # clear delete dropdown
+        [],                                         # clear delete dropdown
+        # ── Reset login form to entry state ──────────────────────────────
+        gr.update(interactive=True, value=""),      # reset email field
+        gr.update(visible=True),                    # show continue-email btn
+        gr.update(visible=False, value=""),         # hide + clear password
+        gr.update(visible=False),                   # hide signin btn
+        gr.update(visible=False),                   # hide reg btn
+        gr.update(visible=True),                    # show create-account btn
+        gr.update(visible=False),                   # hide back btn
     )
 
 
@@ -452,7 +627,7 @@ def _handle_feedback(
 
 def build_app() -> gr.Blocks:
     with gr.Blocks(
-        title="Multimodal AGENTIC RAG Knowledge AI Assistant",
+        title="MAGIK-AI — Multimodal Agentic Knowledge AI",
         analytics_enabled=False,
     ) as demo:
 
@@ -461,50 +636,75 @@ def build_app() -> gr.Blocks:
         transparency_state  = gr.State({})     # last query result metadata
 
         # ══════════════════════════════════════════════════════════════════
-        # LOGIN VIEW
+        # LOGIN VIEW  —  Claude-inspired design
         # ══════════════════════════════════════════════════════════════════
         with gr.Column(visible=True, elem_id="login-view") as login_view:
             with gr.Column(elem_id="login-card"):
 
-                gr.HTML(
-                    '<div class="login-logo">'
-                    '<span class="star">✦</span>'
-                    '<h1>Multimodal AGENTIC RAG<br>Knowledge AI Assistant</h1>'
-                    '<p>Sign in to your knowledge workspace</p>'
-                    '</div>'
-                )
+                # ── Brand header ──────────────────────────────────────────
+                gr.HTML(_login_brand_html())
 
-                with gr.Tabs(elem_id="login-tabs"):
+                # ── Form card ─────────────────────────────────────────────
+                with gr.Column(elem_id="login-form-container"):
 
-                    with gr.Tab("Sign In"):
-                        login_email    = gr.Textbox(
-                            label="Email",
-                            placeholder="you@example.com",
-                            elem_id="login-email",
-                        )
-                        login_password = gr.Textbox(
-                            label="Password",
-                            type="password",
-                            placeholder="Your password",
-                            elem_id="login-password",
-                        )
-                        login_btn      = gr.Button("Sign In", variant="primary", elem_id="login-btn")
-                        login_error    = gr.HTML("")
+                    # Google OAuth button
+                    gr.HTML(_google_btn_html())
 
-                    with gr.Tab("Register"):
-                        reg_email    = gr.Textbox(
-                            label="Email",
-                            placeholder="you@example.com",
-                            elem_id="reg-email",
+                    # Email input (always visible)
+                    login_email = gr.Textbox(
+                        placeholder="Enter your email",
+                        show_label=False,
+                        elem_id="login-email",
+                    )
+
+                    # "Continue with email" — reveals password step
+                    continue_email_btn = gr.Button(
+                        "Continue with email",
+                        elem_id="continue-email-btn",
+                        variant="primary",
+                    )
+
+                    # Password (hidden until "Continue with email" is clicked)
+                    login_password = gr.Textbox(
+                        type="password",
+                        placeholder="Password",
+                        show_label=False,
+                        elem_id="login-password",
+                        visible=False,
+                    )
+
+                    # Sign In button (hidden initially)
+                    signin_btn = gr.Button(
+                        "Sign In",
+                        elem_id="signin-btn",
+                        variant="primary",
+                        visible=False,
+                    )
+
+                    # Register button (hidden initially, shown in register mode)
+                    reg_btn = gr.Button(
+                        "Create Account",
+                        elem_id="reg-btn",
+                        variant="primary",
+                        visible=False,
+                    )
+
+                    # Error / success feedback
+                    login_error = gr.HTML("")
+
+                    # Footer nav — toggle between sign-in and create-account
+                    with gr.Row(elem_id="login-footer"):
+                        create_account_btn = gr.Button(
+                            "Create an account",
+                            elem_id="create-account-btn",
+                            size="sm",
                         )
-                        reg_password = gr.Textbox(
-                            label="Password",
-                            type="password",
-                            placeholder="Minimum 8 characters",
-                            elem_id="reg-password",
+                        back_signin_btn = gr.Button(
+                            "← Back to sign in",
+                            elem_id="back-signin-btn",
+                            size="sm",
+                            visible=False,
                         )
-                        reg_btn  = gr.Button("Create Account", variant="primary", elem_id="reg-btn")
-                        reg_msg  = gr.HTML("")
 
         # ══════════════════════════════════════════════════════════════════
         # MAIN VIEW
@@ -519,8 +719,8 @@ def build_app() -> gr.Blocks:
                         '<div class="sidebar-brand">'
                         '<span class="star">✦</span>'
                         '<div>'
-                        '<div class="brand-name">RAG Assistant</div>'
-                        '<div class="brand-sub">Multimodal · Agentic</div>'
+                        '<div class="brand-name">MAGIK-AI</div>'
+                        '<div class="brand-sub">Multimodal · Agentic · Knowledge</div>'
                         '</div>'
                         '</div>'
                     )
@@ -628,9 +828,32 @@ def build_app() -> gr.Blocks:
             delete_select,
         ]
 
-        # Step 1: authenticate and switch views (fast)
-        # Step 2: load KB in a .then() so it never blocks the view switch
-        login_btn.click(
+        # ── OAuth auto-login on page load ─────────────────────────────────
+        demo.load(
+            fn=_on_load,
+            inputs=None,
+            outputs=_login_outputs,
+        ).then(
+            fn=_refresh_kb,
+            inputs=[auth_state],
+            outputs=[kb_list_html, delete_select],
+        )
+
+        # ── "Continue with email" — reveal password step ──────────────────
+        _continue_outputs = [login_error, login_email, continue_email_btn, login_password, signin_btn]
+        continue_email_btn.click(
+            fn=_continue_with_email,
+            inputs=[login_email],
+            outputs=_continue_outputs,
+        )
+        login_email.submit(
+            fn=_continue_with_email,
+            inputs=[login_email],
+            outputs=_continue_outputs,
+        )
+
+        # ── Sign In ───────────────────────────────────────────────────────
+        signin_btn.click(
             fn=_handle_login,
             inputs=[login_email, login_password],
             outputs=_login_outputs,
@@ -649,11 +872,34 @@ def build_app() -> gr.Blocks:
             outputs=[kb_list_html, delete_select],
         )
 
-        # ── Register ──────────────────────────────────────────────────────
+        # ── Switch to Create Account mode ─────────────────────────────────
+        _mode_outputs = [
+            login_error, login_email, continue_email_btn,
+            login_password, signin_btn, reg_btn,
+            create_account_btn, back_signin_btn,
+        ]
+        create_account_btn.click(
+            fn=_switch_to_register,
+            inputs=[login_email],
+            outputs=_mode_outputs,
+        )
+
+        # ── Back to Sign In ────────────────────────────────────────────────
+        back_signin_btn.click(
+            fn=_back_to_entry,
+            inputs=None,
+            outputs=_mode_outputs,
+        )
+
+        # ── Register / Create Account ──────────────────────────────────────
+        _register_outputs = [
+            login_error, login_email, continue_email_btn,
+            login_password, signin_btn, reg_btn, back_signin_btn,
+        ]
         reg_btn.click(
             fn=_handle_register,
-            inputs=[reg_email, reg_password],
-            outputs=[reg_msg],
+            inputs=[login_email, login_password],
+            outputs=_register_outputs,
         )
 
         # ── Logout ────────────────────────────────────────────────────────
@@ -666,6 +912,14 @@ def build_app() -> gr.Blocks:
             login_error,
             kb_list_html,
             delete_select,
+            # Reset login form to entry state
+            login_email,
+            continue_email_btn,
+            login_password,
+            signin_btn,
+            reg_btn,
+            create_account_btn,
+            back_signin_btn,
         ]
         logout_btn.click(
             fn=_handle_logout,
@@ -759,4 +1013,6 @@ if __name__ == "__main__":
         server_port=port,
         share=share,
         show_error=True,
+        css=CSS,
+        js=SHOW_PASSWORD_JS,
     )
