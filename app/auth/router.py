@@ -137,7 +137,7 @@ async def google_callback(
     Exchanges the code for user info, get-or-creates the account, issues a JWT,
     then redirects the browser to the Gradio UI with the token in URL params.
     """
-    _gradio_url = os.getenv("GRADIO_URL", "http://localhost:7860")
+    _gradio_url = os.getenv("FRONTEND_URL", os.getenv("GRADIO_URL", "http://localhost:5173"))
 
     if error:
         return RedirectResponse(
