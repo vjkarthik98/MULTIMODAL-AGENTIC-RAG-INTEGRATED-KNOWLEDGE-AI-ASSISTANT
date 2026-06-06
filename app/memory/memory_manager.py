@@ -440,10 +440,15 @@ class MemoryManager:
                 logger.error(event="gdpr_purge_redis_failed", user_id=user_id, error=str(e))
 
         # MONGO PURGE — SECTION 4.7 / SECTION 5
+        # NOTE: must filter by user_id (not session_id) — clear_memory(session_id, ...)
+        # takes a session id as its first arg, so calling it with user_id would query
+        # {"session_id": user_id}, which never matches real session ids and silently
+        # purges nothing. purge_user(user_id) is the correctly user-scoped method —
+        # it covers messages, summaries AND chat_sessions (Recents transcripts).
         if self.mongo_memory:
             try:
-                if hasattr(self.mongo_memory, "clear_memory"):
-                    self.mongo_memory.clear_memory(user_id)
+                if hasattr(self.mongo_memory, "purge_user"):
+                    self.mongo_memory.purge_user(user_id)
                 else:
                     self.mongo_memory.delete(user_id)
                 purged["mongo"] = True

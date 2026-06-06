@@ -95,6 +95,12 @@ class RefreshRequest(BaseModel):
     refresh_token: str = Field(..., min_length=10)
 
 
+class LogoutRequest(BaseModel):
+    """Optional body for /auth/logout — lets the client surrender its refresh
+    token too, so logout fully ends the session rather than just the access token."""
+    refresh_token: Optional[str] = Field(None, min_length=10)
+
+
 class TokenPayload(BaseModel):
     sub: str          # user_id
     email: str

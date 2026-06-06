@@ -71,6 +71,9 @@ _VALID_ROLES = {"user", "assistant", "system"}
 # VALID MODALITIES
 _VALID_MODALITIES = {"text", "image", "audio", "video", "table", "document"}
 
+# CAP ON EMBEDDED MESSAGES PER CHAT SESSION DOCUMENT (≈200 turns)
+_MAX_SESSION_MESSAGES = 400
+
 
 class MongoMemory:
 
@@ -81,6 +84,7 @@ class MongoMemory:
         self.db = None
         self.messages = None
         self.summaries = None
+        self.sessions = None
 
         if not self._enabled:
             logger.info(event="mongo_disabled_no_uri_or_flag")
@@ -108,6 +112,7 @@ class MongoMemory:
             self.db = self.client[settings.MONGO_DB_NAME]
             self.messages = self.db[settings.MONGO_MEMORY_COLLECTION]
             self.summaries = self.db[settings.MONGO_SUMMARY_COLLECTION]
+            self.sessions = self.db[settings.MONGO_SESSIONS_COLLECTION]
 
             self._ensure_indexes()
             self._mongo_ok = True
@@ -248,6 +253,19 @@ class MongoMemory:
             self.summaries.create_index(
                 [("user_id", ASCENDING)],
                 name="idx_summary_user_id",
+                background=True,
+            )
+
+            # CHAT SESSION INDEXES — RECENTS (permanent transcripts, no TTL)
+            self.sessions.create_index(
+                [("user_id", ASCENDING), ("session_id", ASCENDING)],
+                name="idx_session_user_session",
+                unique=True,
+                background=True,
+            )
+            self.sessions.create_index(
+                [("user_id", ASCENDING), ("updated_at", DESCENDING)],
+                name="idx_session_user_updated",
                 background=True,
             )
 
@@ -586,14 +604,19 @@ class MongoMemory:
             def _del_sums():
                 return self.summaries.delete_many({"user_id": user_id})
 
+            def _del_sessions():
+                return self.sessions.delete_many({"user_id": user_id})
+
             r1 = self._retry(_del_msgs)
             r2 = self._retry(_del_sums)
+            r3 = self._retry(_del_sessions)
 
             logger.info(
                 event="mongo_user_purged",
                 user_id=user_id,
                 messages_deleted=r1.deleted_count,
                 summaries_deleted=r2.deleted_count,
+                sessions_deleted=r3.deleted_count,
             )
 
         except Exception as exc:
@@ -602,6 +625,172 @@ class MongoMemory:
                 user_id=user_id,
                 error=str(exc),
             )
+
+    # CHAT SESSIONS — RECENTS (permanent transcripts, decoupled from the
+    # short-term `messages` TTL so old chats stay browsable indefinitely)
+
+    def _auto_title(self, text: str, max_words: int = 8, max_chars: int = 48) -> str:
+        text = self._clean(text)
+        if not text:
+            return "New chat"
+        words = text.split(" ")[:max_words]
+        title = " ".join(words)
+        if len(title) > max_chars:
+            title = title[:max_chars].rstrip()
+        return f"{title}…" if len(title) < len(text) else title
+
+    def save_chat_turn(
+        self,
+        session_id: str,
+        user_id: Optional[str],
+        query: str,
+        answer: str,
+    ) -> None:
+        if not session_id or not query.strip() or not answer.strip():
+            return
+        if not self._enabled or not self._is_available():
+            return
+
+        try:
+            now = self._utcnow()
+            q = self._clean(query)[:settings.MAX_PROMPT_CHARS]
+            a = self._clean(answer)[:settings.MAX_PROMPT_CHARS]
+
+            def _do():
+                self.sessions.update_one(
+                    {"user_id": user_id, "session_id": session_id},
+                    {
+                        "$setOnInsert": {
+                            "title": self._auto_title(q),
+                            "created_at": now,
+                            "pinned": False,
+                            "archived": False,
+                        },
+                        "$set": {"updated_at": now},
+                        "$inc": {"message_count": 2},
+                        "$push": {
+                            "messages": {
+                                "$each": [
+                                    {"role": "user", "content": q, "timestamp": now},
+                                    {"role": "assistant", "content": a, "timestamp": now},
+                                ],
+                                "$slice": -_MAX_SESSION_MESSAGES,
+                            }
+                        },
+                    },
+                    upsert=True,
+                )
+
+            self._retry(_do)
+
+        except Exception as exc:
+            logger.warning(
+                event="chat_session_save_failed",
+                session_id=session_id,
+                error=str(exc),
+            )
+
+    def list_chat_sessions(self, user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        if not user_id or not self._is_available():
+            return []
+        try:
+            def _do():
+                cursor = (
+                    self.sessions.find({"user_id": user_id}, {"messages": 0, "_id": 0})
+                    .sort([("pinned", DESCENDING), ("updated_at", DESCENDING)])
+                    .limit(limit)
+                )
+                return list(cursor)
+
+            docs = self._retry(_do)
+            return [
+                {
+                    "session_id":    d.get("session_id"),
+                    "title":         d.get("title") or "New chat",
+                    "created_at":    d.get("created_at"),
+                    "updated_at":    d.get("updated_at"),
+                    "message_count": d.get("message_count", 0),
+                    "pinned":        bool(d.get("pinned", False)),
+                    "archived":      bool(d.get("archived", False)),
+                }
+                for d in docs
+            ]
+
+        except Exception as exc:
+            logger.warning(event="chat_sessions_list_failed", user_id=user_id, error=str(exc))
+            return []
+
+    def get_chat_session(self, user_id: str, session_id: str) -> Optional[Dict[str, Any]]:
+        if not user_id or not session_id or not self._is_available():
+            return None
+        try:
+            def _do():
+                return self.sessions.find_one(
+                    {"user_id": user_id, "session_id": session_id}, {"_id": 0}
+                )
+
+            doc = self._retry(_do)
+            if not doc:
+                return None
+
+            return {
+                "session_id": doc.get("session_id"),
+                "title":      doc.get("title") or "New chat",
+                "created_at": doc.get("created_at"),
+                "updated_at": doc.get("updated_at"),
+                "messages": [
+                    {
+                        "role":      m.get("role"),
+                        "content":   m.get("content", ""),
+                        "timestamp": m.get("timestamp"),
+                    }
+                    for m in doc.get("messages", [])
+                ],
+            }
+
+        except Exception as exc:
+            logger.warning(event="chat_session_fetch_failed", session_id=session_id, error=str(exc))
+            return None
+
+    def delete_chat_session(self, user_id: str, session_id: str) -> bool:
+        if not user_id or not session_id or not self._is_available():
+            return False
+        try:
+            def _do():
+                return self.sessions.delete_one({"user_id": user_id, "session_id": session_id})
+
+            result = self._retry(_do)
+            return bool(result and result.deleted_count)
+
+        except Exception as exc:
+            logger.warning(event="chat_session_delete_failed", session_id=session_id, error=str(exc))
+            return False
+
+    _SESSION_UPDATABLE_FIELDS = {"title", "pinned", "archived"}
+
+    def update_chat_session(self, user_id: str, session_id: str, fields: Dict[str, Any]) -> bool:
+        """Rename / pin / archive a chat. Does not touch updated_at so the
+        Recents ordering by recency is preserved (pinned sorts separately)."""
+        if not user_id or not session_id or not self._is_available():
+            return False
+
+        updates = {k: v for k, v in fields.items() if k in self._SESSION_UPDATABLE_FIELDS}
+        if not updates:
+            return False
+
+        try:
+            def _do():
+                return self.sessions.update_one(
+                    {"user_id": user_id, "session_id": session_id},
+                    {"$set": updates},
+                )
+
+            result = self._retry(_do)
+            return bool(result and result.matched_count)
+
+        except Exception as exc:
+            logger.warning(event="chat_session_update_failed", session_id=session_id, error=str(exc))
+            return False
 
     # ASYNC WRAPPERS
 
@@ -656,6 +845,7 @@ class MongoMemory:
             try:
                 status["messages_count"] = self.messages.estimated_document_count()
                 status["summaries_count"] = self.summaries.estimated_document_count()
+                status["sessions_count"] = self.sessions.estimated_document_count()
                 status["db_name"] = settings.MONGO_DB_NAME
             except Exception:
                 status["count_error"] = True

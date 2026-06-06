@@ -36,6 +36,30 @@ export async function getMe(token) {
   return res.json()  // { user_id, email, ... }
 }
 
+// Exchanges a refresh token for a fresh access + refresh token pair — keeps the
+// user signed in past the short access-token lifetime without re-entering credentials.
+export async function refreshAccessToken(refreshToken) {
+  const res = await fetch(`${API}/auth/refresh`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  })
+  if (!res.ok) throw new Error('Refresh token expired')
+  return res.json()  // { access_token, refresh_token, token_type, expires_in }
+}
+
+export async function logout(token, refreshToken) {
+  try {
+    await fetch(`${API}/auth/logout`, {
+      method: 'POST',
+      headers: { ...bearer(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refreshToken || null }),
+    })
+  } catch {
+    // best-effort server-side revocation — local sign-out proceeds regardless
+  }
+}
+
 export async function listKB(token) {
   const res = await fetch(`${API}/rag/knowledge-base`, { headers: bearer(token) })
   if (!res.ok) throw new Error('Failed to load knowledge base')
@@ -72,12 +96,104 @@ export async function ingestFile(token, file, sessionId = 'default') {
 }
 
 // Returns the raw fetch Response so caller can stream the body
-export function streamQuery(token, query, sessionId) {
+export function streamQuery(token, query, sessionId, signal) {
   return fetch(`${API}/rag/query/stream`, {
     method: 'POST',
     headers: { ...bearer(token), 'Content-Type': 'application/json' },
     body: JSON.stringify({ query, session_id: sessionId }),
+    signal,
   })
+}
+
+export async function changePassword(token, currentPassword, newPassword) {
+  const res = await fetch(`${API}/auth/password`, {
+    method: 'POST',
+    headers: { ...bearer(token), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `Password change failed (${res.status})`)
+  }
+  return res.json()
+}
+
+export async function logoutAll(token) {
+  const res = await fetch(`${API}/auth/logout-all`, {
+    method: 'POST',
+    headers: bearer(token),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `Failed to sign out other sessions (${res.status})`)
+  }
+  return res.json()
+}
+
+export async function deleteAccount(token) {
+  const res = await fetch(`${API}/auth/me`, {
+    method: 'DELETE',
+    headers: bearer(token),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `Account deletion failed (${res.status})`)
+  }
+  return res.json()
+}
+
+export async function clearMemory(token, sessionId) {
+  const res = await fetch(`${API}/rag/memory/clear`, {
+    method: 'POST',
+    headers: { ...bearer(token), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `Failed to clear memory (${res.status})`)
+  }
+  return res.json()
+}
+
+export async function listChatSessions(token) {
+  const res = await fetch(`${API}/rag/sessions`, { headers: bearer(token) })
+  if (!res.ok) throw new Error('Failed to load chat history')
+  const data = await res.json()
+  return data.sessions || []
+}
+
+export async function getChatSession(token, sessionId) {
+  const res = await fetch(`${API}/rag/sessions/${encodeURIComponent(sessionId)}`, { headers: bearer(token) })
+  if (!res.ok) {
+    if (res.status === 404) return null
+    throw new Error('Failed to load chat')
+  }
+  return res.json()  // { session_id, title, messages: [{ role, content, timestamp }] }
+}
+
+export async function updateChatSession(token, sessionId, fields) {
+  const res = await fetch(`${API}/rag/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    headers: { ...bearer(token), 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to update chat')
+  }
+  return res.json()
+}
+
+export async function deleteChatSession(token, sessionId) {
+  const res = await fetch(`${API}/rag/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+    headers: bearer(token),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to delete chat')
+  }
+  return res.json()
 }
 
 // Called after streaming to get sources + metadata (hits Redis cache)

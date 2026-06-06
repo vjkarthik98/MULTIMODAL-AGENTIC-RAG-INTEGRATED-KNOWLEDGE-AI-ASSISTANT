@@ -264,6 +264,7 @@ class Settings:
     MONGO_MEMORY_COLLECTION: str         = _str("MONGO_MEMORY_COLLECTION", "messages")
     MONGO_SUMMARY_COLLECTION: str        = _str("MONGO_SUMMARY_COLLECTION", "summaries")
     MONGO_AUDIT_COLLECTION: str          = _str("MONGO_AUDIT_COLLECTION", "audit_log")
+    MONGO_SESSIONS_COLLECTION: str       = _str("MONGO_SESSIONS_COLLECTION", "chat_sessions")
 
     # TEXT REPAIR — per-pass toggles for the broken-corpus hardening layer
     # (mojibake fix, noise-line strip, whitespace recovery, OCR normalization,

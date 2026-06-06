@@ -311,6 +311,16 @@ def _store_interaction(
         mgr = MemoryManager()
         mgr.add_interaction(session_id, query, answer, user_id=user_id)
 
+        # PERSIST TURN TO THE PERMANENT CHAT-SESSION TRANSCRIPT (Recents).
+        # Decoupled from the short-term `messages` TTL so old chats remain
+        # browsable indefinitely — see MongoMemory.save_chat_turn.
+        try:
+            mongo = infra.get_mongo()
+            if mongo:
+                mongo.save_chat_turn(session_id, user_id, query, answer)
+        except Exception as exc:
+            logger.warning(event="chat_session_persist_failed", session_id=session_id, error=str(exc))
+
         # AUTO-SUMMARIZE AFTER EVERY N TURNS — fires in background thread
         size = mgr.get_memory_size(session_id)
         every_n = settings.MEMORY_SUMMARY_EVERY_N_TURNS * 2  # each turn = 2 messages

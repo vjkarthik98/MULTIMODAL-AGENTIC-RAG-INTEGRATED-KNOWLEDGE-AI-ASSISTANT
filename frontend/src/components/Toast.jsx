@@ -2,8 +2,8 @@ import { useToast } from '../context/ToastContext'
 import { CheckCircle, AlertCircle, Info, X } from 'lucide-react'
 
 const ICONS = {
-  success: <CheckCircle size={15} className="text-green-400 flex-shrink-0" />,
-  error:   <AlertCircle  size={15} className="text-red-400   flex-shrink-0" />,
+  success: <CheckCircle size={15} className="flex-shrink-0" style={{ color: 'var(--t-success)' }} />,
+  error:   <AlertCircle  size={15} className="flex-shrink-0" style={{ color: 'var(--t-danger)' }} />,
   info:    <Info         size={15} className="flex-shrink-0" style={{ color: 'var(--t-accent)' }} />,
 }
 

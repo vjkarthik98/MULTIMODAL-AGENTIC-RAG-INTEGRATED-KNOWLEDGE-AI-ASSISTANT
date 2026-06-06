@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import urllib.parse
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
@@ -10,7 +11,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 
 from app.auth.dependencies import get_current_user
 from app.auth.jwt_handler import issue_tokens, refresh_access_token, verify_token
-from app.auth.models import LoginRequest, RefreshRequest, RegisterRequest, TokenPair, UserPublic
+from app.auth.models import LoginRequest, LogoutRequest, RefreshRequest, RegisterRequest, TokenPair, UserPublic
 from app.auth.mfa import MFAService
 from app.auth.oauth import build_google_auth_url, exchange_google_code, get_or_create_oauth_user, google_oauth_enabled
 from app.auth.service import AuthService
@@ -176,6 +177,7 @@ async def google_callback(
     redirect_url = (
         f"{_gradio_url}"
         f"?magik_token={urllib.parse.quote(tokens['access_token'], safe='')}"
+        f"&magik_refresh={urllib.parse.quote(tokens['refresh_token'], safe='')}"
         f"&magik_email={urllib.parse.quote(email, safe='')}"
     )
     return RedirectResponse(url=redirect_url, status_code=302)
@@ -186,9 +188,12 @@ async def google_callback(
 @router.post("/logout", status_code=status.HTTP_200_OK)
 async def logout(
     request: Request,
+    body: Optional[LogoutRequest] = None,
     current_user: UserPublic = Depends(get_current_user),
 ) -> dict:
-    """Revoke the current access token immediately via Redis blacklist."""
+    """Revoke the current access token — and the refresh token, if surrendered —
+    immediately via the Redis blacklist, so logout fully ends the session rather
+    than leaving a long-lived refresh token usable until it naturally expires."""
     auth_header = request.headers.get("Authorization", "")
     token = auth_header.removeprefix("Bearer ").strip()
     if token:
@@ -200,6 +205,17 @@ async def logout(
                 revoke_token(jti, exp)
         except ValueError:
             pass   # already invalid — no-op
+
+    if body and body.refresh_token:
+        try:
+            r_payload = verify_token(body.refresh_token, expected_type="refresh")
+            r_jti = r_payload.get("jti", "")
+            r_exp = r_payload.get("exp", 0)
+            if r_jti:
+                revoke_token(r_jti, r_exp)
+        except ValueError:
+            pass   # already invalid — no-op
+
     logger.info(event="user_logged_out", user_id=current_user.user_id)
     return {"status": "ok", "message": "Logged out successfully"}
 

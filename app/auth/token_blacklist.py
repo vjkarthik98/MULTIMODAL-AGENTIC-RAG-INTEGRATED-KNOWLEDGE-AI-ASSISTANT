@@ -24,9 +24,12 @@ _REVOKED_PREFIX = "REVOKED_TOKEN:"
 def _redis():
     try:
         from app.core.infra_registry import infra
-        return infra.get_redis()
+        mem = infra.get_memory()
+        if mem is not None and mem.client is not None:
+            return mem.client
     except Exception:
-        return None
+        pass
+    return None
 
 
 def revoke_token(jti: str, exp: int) -> None:

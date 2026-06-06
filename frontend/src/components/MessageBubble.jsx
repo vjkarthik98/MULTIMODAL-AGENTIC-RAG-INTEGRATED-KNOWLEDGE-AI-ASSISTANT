@@ -23,7 +23,7 @@ SyntaxHighlighter.registerLanguage('sql',        sql)
 SyntaxHighlighter.registerLanguage('markdown',   markdown)
 SyntaxHighlighter.registerLanguage('yaml',       yaml)
 SyntaxHighlighter.registerLanguage('yml',        yaml)
-import { FileText, Copy, ThumbsUp, ThumbsDown, Check } from 'lucide-react'
+import { FileText, Copy, ThumbsUp, ThumbsDown, Check, RotateCcw, Pencil } from 'lucide-react'
 import { useToast } from '../context/ToastContext'
 
 /* ── Source chip ── */
@@ -37,27 +37,6 @@ function SourceChip({ source }) {
       <FileText size={10} className="flex-shrink-0" style={{ color: 'var(--t-tx5)' }} />
       <span className="truncate max-w-[180px]">{label}{page}</span>
     </span>
-  )
-}
-
-/* ── Meta bar ── */
-function MetaBar({ meta }) {
-  if (!meta) return null
-  const items = [
-    meta.decision           && { label: 'Route',   value: meta.decision },
-    meta.confidence != null && { label: 'Conf',    value: `${(meta.confidence * 100).toFixed(0)}%` },
-    meta.latency            && { label: 'Latency', value: `${meta.latency}s` },
-    meta.cache_hit          && { label: 'Cache',   value: 'hit' },
-  ].filter(Boolean)
-  if (!items.length) return null
-  return (
-    <div className="flex flex-wrap items-center gap-3 mt-2.5 px-1">
-      {items.map(it => (
-        <span key={it.label} className="text-[10px] font-mono" style={{ color: 'var(--t-met)' }}>
-          {it.label}:<span className="ml-0.5" style={{ color: 'var(--t-metv)' }}>{it.value}</span>
-        </span>
-      ))}
-    </div>
   )
 }
 
@@ -109,11 +88,13 @@ function CodeBlock({ dark, inline, className, children }) {
 }
 
 /* ── Main component ── */
-export default function MessageBubble({ message, isStreaming, dark }) {
+export default function MessageBubble({ message, isStreaming, dark, onRegenerate, onEdit, showSources = true }) {
   const isUser = message.role === 'user'
   const { addToast } = useToast()
   const [copied, setCopied]   = useState(false)
   const [vote, setVote]       = useState(null)   // 'up' | 'down' | null
+  const [isEditing, setIsEditing] = useState(false)
+  const [editText, setEditText]   = useState('')
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(message.content || '')
@@ -122,8 +103,61 @@ export default function MessageBubble({ message, isStreaming, dark }) {
     setTimeout(() => setCopied(false), 2000)
   }
 
+  const startEdit = () => { setEditText(message.content || ''); setIsEditing(true) }
+  const cancelEdit = () => setIsEditing(false)
+  const saveEdit = () => {
+    const text = editText.trim()
+    if (!text) return
+    setIsEditing(false)
+    onEdit?.(text)
+  }
+
   /* ── User bubble ── */
   if (isUser) {
+    if (isEditing) {
+      return (
+        <div className="flex justify-end">
+          <div className="flex flex-col items-end gap-2 max-w-[72%] w-full">
+            <div className="w-full rounded-2xl rounded-tr-sm px-5 py-3.5"
+              style={{ background: 'var(--t-ubg)', border: '1px solid var(--t-accent)' }}>
+              <textarea
+                value={editText}
+                onChange={e => setEditText(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveEdit() }
+                  if (e.key === 'Escape') cancelEdit()
+                }}
+                autoFocus
+                rows={Math.min(8, Math.max(2, editText.split('\n').length))}
+                className="w-full bg-transparent outline-none resize-none text-[16px] leading-relaxed"
+                style={{ color: 'var(--t-tx1)' }}
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={cancelEdit}
+                className="text-sm rounded-lg px-3.5 py-1.5 transition-colors"
+                style={{ color: 'var(--t-tx4)' }}
+                onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov2)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveEdit}
+                className="text-sm font-medium rounded-lg px-4 py-1.5 text-white transition-opacity"
+                style={{ background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)' }}
+                onMouseEnter={e => e.currentTarget.style.opacity = '0.85'}
+                onMouseLeave={e => e.currentTarget.style.opacity = '1'}
+              >
+                Save & submit
+              </button>
+            </div>
+          </div>
+        </div>
+      )
+    }
+
     return (
       <div className="flex justify-end group">
         <div className="flex flex-col items-end gap-1 max-w-[72%]">
@@ -131,10 +165,33 @@ export default function MessageBubble({ message, isStreaming, dark }) {
             style={{ background: 'var(--t-ubg)', border: '1px solid var(--t-ubd)', color: 'var(--t-tx1)' }}>
             {message.content}
           </div>
-          {message.ts && (
-            <span className="text-[10px] opacity-0 group-hover:opacity-100 transition-opacity pr-1"
-              style={{ color: 'var(--t-tx5)' }}>{formatTime(message.ts)}</span>
-          )}
+          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity pr-0.5">
+            {onEdit && (
+              <button
+                onClick={startEdit}
+                className="w-6 h-6 rounded-md flex items-center justify-center transition-colors"
+                style={{ color: 'var(--t-tx5)' }}
+                onMouseEnter={e => { e.currentTarget.style.background = 'var(--t-hov2)'; e.currentTarget.style.color = 'var(--t-tx2)' }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--t-tx5)' }}
+                title="Edit message"
+              >
+                <Pencil size={12} />
+              </button>
+            )}
+            <button
+              onClick={handleCopy}
+              className="w-6 h-6 rounded-md flex items-center justify-center transition-colors"
+              style={{ color: copied ? 'var(--t-success)' : 'var(--t-tx5)' }}
+              onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov2)'}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+              title="Copy"
+            >
+              {copied ? <Check size={12} /> : <Copy size={12} />}
+            </button>
+            {message.ts && (
+              <span className="text-[10px] ml-1" style={{ color: 'var(--t-tx5)' }}>{formatTime(message.ts)}</span>
+            )}
+          </div>
         </div>
       </div>
     )
@@ -144,20 +201,14 @@ export default function MessageBubble({ message, isStreaming, dark }) {
 
   /* ── Bot bubble ── */
   return (
-    <div className="flex justify-start gap-2.5 group">
-
-      {/* Bot avatar */}
-      <div className="w-7 h-7 rounded-full flex-shrink-0 mt-0.5 flex items-center justify-center shadow-sm"
-        style={{ background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)' }}>
-        <span className="text-white text-[10px] font-bold leading-none">✦</span>
-      </div>
+    <div className="flex justify-start group">
 
       <div className="flex-1 min-w-0 max-w-[84%]">
         {/* Bubble */}
         <div className="rounded-2xl rounded-tl-sm px-5 py-3.5 text-[16px] leading-relaxed"
           style={
             message.error
-              ? { background: 'rgba(127,29,29,0.15)', border: '1px solid rgba(153,27,27,0.4)', color: '#fca5a5' }
+              ? { background: 'var(--t-err-bg)', border: '1px solid var(--t-err-bd)', color: 'var(--t-err-tx)' }
               : { background: 'var(--t-bbg)', border: '1px solid var(--t-bbd)', color: 'var(--t-tx2)' }
           }
         >
@@ -181,13 +232,11 @@ export default function MessageBubble({ message, isStreaming, dark }) {
         </div>
 
         {/* Source chips */}
-        {message.sources?.length > 0 && (
+        {showSources && message.sources?.length > 0 && (
           <div className="mt-2 flex flex-wrap">
             {message.sources.map((src, i) => <SourceChip key={i} source={src} />)}
           </div>
         )}
-
-        <MetaBar meta={message.meta} />
 
         {/* Action row — hover reveal */}
         {!isEmpty && !isStreaming && (
@@ -196,7 +245,7 @@ export default function MessageBubble({ message, isStreaming, dark }) {
             <button
               onClick={handleCopy}
               className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors"
-              style={{ color: copied ? '#4ade80' : 'var(--t-tx5)' }}
+              style={{ color: copied ? 'var(--t-success)' : 'var(--t-tx5)' }}
               onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov2)'}
               onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
               title="Copy"
@@ -220,13 +269,27 @@ export default function MessageBubble({ message, isStreaming, dark }) {
             <button
               onClick={() => setVote(v => v === 'down' ? null : 'down')}
               className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors"
-              style={{ color: vote === 'down' ? '#f87171' : 'var(--t-tx5)' }}
+              style={{ color: vote === 'down' ? 'var(--t-danger)' : 'var(--t-tx5)' }}
               onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov2)'}
               onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
               title="Bad response"
             >
               <ThumbsDown size={13} fill={vote === 'down' ? 'currentColor' : 'none'} />
             </button>
+
+            {/* Regenerate */}
+            {onRegenerate && (
+              <button
+                onClick={onRegenerate}
+                className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors"
+                style={{ color: 'var(--t-tx5)' }}
+                onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov2)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                title="Regenerate response"
+              >
+                <RotateCcw size={13} />
+              </button>
+            )}
 
             {/* Timestamp */}
             {message.ts && (

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Eye, EyeOff, Loader2, Sun, Moon } from 'lucide-react'
+import { Eye, EyeOff, Loader2, Sun, Moon, BrainCircuit } from 'lucide-react'
 import { login, register } from '../api/client'
 
 const GoogleG = () => (
@@ -39,10 +39,10 @@ export default function LoginPage({ onLogin, dark, onToggleTheme }) {
         await register(email, password)
         setSuccess('Account created! Signing you in…')
         const data = await login(email, password)
-        onLogin({ token: data.access_token, email })
+        onLogin({ token: data.access_token, refreshToken: data.refresh_token, email })
       } else {
         const data = await login(email, password)
-        onLogin({ token: data.access_token, email })
+        onLogin({ token: data.access_token, refreshToken: data.refresh_token, email })
       }
     } catch (err) {
       setError(err.message)
@@ -99,7 +99,7 @@ export default function LoginPage({ onLogin, dark, onToggleTheme }) {
       {/* Brand */}
       <div className="flex flex-col items-center mb-10 gap-4">
         <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-500 to-blue-500 flex items-center justify-center shadow-lg">
-          <span className="text-white text-3xl font-bold leading-none">✦</span>
+          <BrainCircuit size={32} strokeWidth={1.7} className="text-white" />
         </div>
         <div className="text-center">
           <h1 className="text-4xl font-bold tracking-tight" style={{
@@ -185,8 +185,8 @@ export default function LoginPage({ onLogin, dark, onToggleTheme }) {
             />
           )}
 
-          {error   && <p className="text-red-400 text-sm py-1">{error}</p>}
-          {success && <p className="text-green-400 text-sm py-1">{success}</p>}
+          {error   && <p className="text-sm py-1" style={{ color: 'var(--t-danger)' }}>{error}</p>}
+          {success && <p className="text-sm py-1" style={{ color: 'var(--t-success)' }}>{success}</p>}
 
           <button
             type="submit"

@@ -1,9 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Send, Paperclip, Sparkles, ChevronDown, RotateCcw } from 'lucide-react'
+import { Send, Square, Sparkles, ChevronDown } from 'lucide-react'
 import Sidebar from '../components/Sidebar'
+import SettingsModal from '../components/SettingsModal'
 import MessageBubble from '../components/MessageBubble'
 import TypingIndicator from '../components/TypingIndicator'
-import { streamQuery, queryMeta, ingestFile, listKB } from '../api/client'
+import { streamQuery, queryMeta, getChatSession } from '../api/client'
+import { useToast } from '../context/ToastContext'
 
 const CHAT_ICON = (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -37,14 +39,21 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
   const [autoScroll, setAutoScroll]       = useState(true)
   const [showScrollBtn, setShowScrollBtn] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [sessionId]                       = useState(() => crypto.randomUUID())
+  const [sessionId, setSessionId]         = useState(() => crypto.randomUUID())
+  const [loadingSession, setLoadingSession] = useState(false)
   const [inputFocused, setInputFocused]   = useState(false)
   const [placeholderIdx, setPlaceholderIdx] = useState(0)
+  const [settingsOpen, setSettingsOpen]   = useState(false)
+  const [showSources, setShowSources]     = useState(() => localStorage.getItem('magik_show_sources') !== 'false')
+
+  useEffect(() => { localStorage.setItem('magik_show_sources', String(showSources)) }, [showSources])
+
+  const { addToast } = useToast()
 
   const scrollAreaRef  = useRef(null)
   const messagesEndRef = useRef(null)
   const inputRef       = useRef(null)
-  const attachRef      = useRef(null)
+  const abortRef       = useRef(null)
 
   // Rotate placeholder every 3s when input is empty and not focused
   useEffect(() => {
@@ -82,7 +91,7 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
     setShowScrollBtn(false)
   }
 
-  const handleSend = useCallback(async (overrideText) => {
+  const handleSend = useCallback(async (overrideText, { skipUserMessage = false } = {}) => {
     const text = (overrideText ?? input).trim()
     if (!text || streaming) return
     setInput('')
@@ -90,17 +99,24 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
 
     const botId = Date.now()
     const ts    = Date.now()
-    setMessages(prev => [
-      ...prev,
-      { role: 'user', content: text, ts },
-      { role: 'assistant', content: '', id: botId, pending: true, ts: ts + 1 },
-    ])
+    setMessages(prev => skipUserMessage
+      ? [...prev, { role: 'assistant', content: '', id: botId, pending: true, ts }]
+      : [
+          ...prev,
+          { role: 'user', content: text, ts },
+          { role: 'assistant', content: '', id: botId, pending: true, ts: ts + 1 },
+        ]
+    )
     setStreaming(true)
     setStreamingId(botId)
     onStreamingChange?.(true)
 
+    const controller = new AbortController()
+    abortRef.current = controller
+    let fullText = ''
+
     try {
-      const res = await streamQuery(auth.token, text, sessionId)
+      const res = await streamQuery(auth.token, text, sessionId, controller.signal)
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}))
         throw new Error(errBody.detail || `Server error ${res.status}`)
@@ -108,7 +124,7 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
 
       const reader  = res.body.getReader()
       const decoder = new TextDecoder()
-      let buf = '', fullText = '', done = false
+      let buf = '', done = false
 
       while (!done) {
         const { done: readerDone, value } = await reader.read()
@@ -120,8 +136,12 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
         for (const block of parts) {
           for (const line of block.split('\n')) {
             if (!line.startsWith('data: ')) continue
-            const token = line.slice(6)
-            if (token === '[DONE]' || token === '[Stream interrupted]') { done = true; break }
+            const raw = line.slice(6)
+            if (raw === '[DONE]' || raw === '[Stream interrupted]') { done = true; break }
+            // Chunks arrive JSON-encoded so embedded newlines survive the
+            // SSE "\n\n" framing; fall back to the raw string for safety.
+            let token = raw
+            try { token = JSON.parse(raw) } catch { /* not JSON — use raw */ }
             if (token) {
               fullText += token
               setMessages(prev => prev.map(m =>
@@ -139,28 +159,35 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
           ...m,
           content:  meta?.answer || fullText,
           sources:  meta?.sources || [],
-          meta: meta ? {
-            decision:   meta.decision,
-            confidence: meta.confidence,
-            latency:    meta.latency,
-            cache_hit:  meta.cache_hit,
-          } : null,
           pending: false, streaming: false,
         } : m
       ))
     } catch (err) {
-      setMessages(prev => prev.map(m =>
-        m.id === botId
-          ? { ...m, content: `Something went wrong: ${err.message}`, error: true, pending: false, streaming: false }
-          : m
-      ))
+      if (err.name === 'AbortError') {
+        setMessages(prev => prev.map(m =>
+          m.id === botId
+            ? { ...m, content: fullText || '_Generation stopped._', pending: false, streaming: false }
+            : m
+        ))
+      } else {
+        setMessages(prev => prev.map(m =>
+          m.id === botId
+            ? { ...m, content: `Something went wrong: ${err.message}`, error: true, pending: false, streaming: false }
+            : m
+        ))
+      }
     } finally {
+      abortRef.current = null
       setStreaming(false)
       setStreamingId(null)
       onStreamingChange?.(false)
       setTimeout(() => inputRef.current?.focus(), 50)
     }
   }, [input, streaming, auth.token, sessionId])
+
+  const handleStop = useCallback(() => {
+    abortRef.current?.abort()
+  }, [])
 
   // Regenerate: re-send the last user message
   const handleRegenerate = useCallback(() => {
@@ -171,19 +198,15 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
       const lastBotIdx = [...prev].map((m,i) => m.role === 'assistant' ? i : -1).filter(i => i >= 0).pop()
       return lastBotIdx != null ? prev.filter((_, i) => i !== lastBotIdx) : prev
     })
-    handleSend(lastUser.content)
+    handleSend(lastUser.content, { skipUserMessage: true })
   }, [messages, streaming, handleSend])
 
-  const handleAttach = async (e) => {
-    const files = Array.from(e.target.files)
-    if (!files.length) return
-    for (const file of files) {
-      try { await ingestFile(auth.token, file, sessionId) } catch {}
-    }
-    const fresh = await listKB(auth.token).catch(() => [])
-    setKbFiles(fresh)
-    if (attachRef.current) attachRef.current.value = ''
-  }
+  // Edit a past user message: drop everything from that point on, then resend the edited text
+  const handleEditMessage = useCallback((index, newText) => {
+    if (streaming) return
+    setMessages(prev => prev.slice(0, index))
+    handleSend(newText)
+  }, [streaming, handleSend])
 
   const handleNewChat = () => {
     setMessages([])
@@ -191,11 +214,41 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
     setStreamingId(null)
     setAutoScroll(true)
     setShowScrollBtn(false)
+    setSessionId(crypto.randomUUID())
     setTimeout(() => inputRef.current?.focus(), 50)
   }
 
+  // Open a chat from Recents — fetches its saved transcript and switches to it
+  const handleLoadSession = useCallback(async (targetId) => {
+    if (streaming || loadingSession || !targetId || targetId === sessionId) return
+    setLoadingSession(true)
+    try {
+      const session = await getChatSession(auth.token, targetId)
+      if (!session) {
+        addToast('That chat is no longer available', 'error')
+        return
+      }
+      const loaded = (session.messages || []).map((m, i) => ({
+        role:    m.role,
+        content: m.content,
+        ts:      m.timestamp ? new Date(m.timestamp).getTime() : Date.now(),
+        id:      `${targetId}-${i}`,
+      }))
+      setMessages(loaded)
+      setSessionId(targetId)
+      setInput('')
+      setStreamingId(null)
+      setAutoScroll(true)
+      setShowScrollBtn(false)
+      setTimeout(() => inputRef.current?.focus(), 50)
+    } catch (err) {
+      addToast(err.message || 'Failed to load chat', 'error')
+    } finally {
+      setLoadingSession(false)
+    }
+  }, [streaming, loadingSession, sessionId, auth.token, addToast])
+
   const suggestions    = buildSuggestions(kbFiles)
-  const lastIsAssistant = messages.length > 0 && messages.at(-1)?.role === 'assistant' && !streaming
 
   return (
     <div className="flex h-screen overflow-hidden" style={{ background: 'var(--t-bg)' }}>
@@ -209,12 +262,30 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
           setKbFiles={setKbFiles}
           onLogout={onLogout}
           onNewChat={handleNewChat}
+          currentSessionId={sessionId}
+          onSelectSession={handleLoadSession}
+          streaming={streaming}
           collapsed={sidebarCollapsed}
           onToggleCollapse={() => setSidebarCollapsed(c => !c)}
           dark={dark}
           onToggleTheme={onToggleTheme}
+          onOpenSettings={() => setSettingsOpen(true)}
         />
       </div>
+
+      <SettingsModal
+        isOpen={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        auth={auth}
+        onLogout={onLogout}
+        dark={dark}
+        onToggleTheme={onToggleTheme}
+        kbFiles={kbFiles}
+        setKbFiles={setKbFiles}
+        sessionId={sessionId}
+        showSources={showSources}
+        setShowSources={setShowSources}
+      />
 
       {/* Main column */}
       <div className="flex-1 flex flex-col min-w-0 relative" style={{ background: 'var(--t-sur)' }}>
@@ -257,31 +328,19 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
             <div className="max-w-3xl mx-auto space-y-5">
               {messages.map((msg, i) => {
                 if (msg.pending && msg.content === '') return <TypingIndicator key={msg.id || i} />
+                const isLastAssistant = i === messages.length - 1 && msg.role === 'assistant' && !streaming
                 return (
                   <MessageBubble
                     key={msg.id || i}
                     message={msg}
                     isStreaming={msg.id === streamingId && streaming}
                     dark={dark}
+                    onRegenerate={isLastAssistant ? handleRegenerate : null}
+                    onEdit={msg.role === 'user' && !streaming ? (text) => handleEditMessage(i, text) : null}
+                    showSources={showSources}
                   />
                 )
               })}
-
-              {/* Regenerate button below last assistant message */}
-              {lastIsAssistant && (
-                <div className="flex justify-start pl-9">
-                  <button
-                    onClick={handleRegenerate}
-                    className="flex items-center gap-1.5 text-[12px] rounded-lg px-3 py-1.5 transition-all"
-                    style={{ color: 'var(--t-tx5)', border: '1px solid var(--t-bd2)' }}
-                    onMouseEnter={e => { e.currentTarget.style.color='var(--t-tx3)'; e.currentTarget.style.background='var(--t-hov)' }}
-                    onMouseLeave={e => { e.currentTarget.style.color='var(--t-tx5)'; e.currentTarget.style.background='transparent' }}
-                  >
-                    <RotateCcw size={12} />
-                    Regenerate
-                  </button>
-                </div>
-              )}
 
               <div ref={messagesEndRef} />
             </div>
@@ -311,18 +370,6 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
                 border: `1px solid ${streaming ? 'var(--t-bd3)' : 'var(--t-bd2)'}`,
               }}
             >
-              <button
-                type="button"
-                onClick={() => attachRef.current?.click()}
-                disabled={streaming}
-                className="flex-shrink-0 transition-colors disabled:opacity-40"
-                style={{ color: 'var(--t-ph)' }}
-                title="Attach file"
-              >
-                <Paperclip size={17} />
-              </button>
-              <input ref={attachRef} type="file" multiple className="hidden" onChange={handleAttach} />
-
               <input
                 ref={inputRef}
                 type="text"
@@ -341,23 +388,26 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
 
               <button
                 type="button"
-                onClick={() => handleSend()}
-                disabled={!input.trim() || streaming}
+                onClick={() => streaming ? handleStop() : handleSend()}
+                disabled={!streaming && !input.trim()}
+                title={streaming ? 'Stop generating' : 'Send'}
                 className="w-8 h-8 flex items-center justify-center rounded-full flex-shrink-0 transition-all"
                 style={
-                  input.trim() && !streaming
-                    ? { background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)', color: '#fff' }
-                    : { background: 'var(--t-hov3)', color: 'var(--t-tx5)' }
+                  streaming
+                    ? { background: 'var(--t-tx1)', color: 'var(--t-bg)' }
+                    : input.trim()
+                      ? { background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)', color: '#fff' }
+                      : { background: 'var(--t-hov3)', color: 'var(--t-tx5)' }
                 }
               >
-                <Send size={14} />
+                {streaming ? <Square size={12} fill="currentColor" /> : <Send size={14} />}
               </button>
             </div>
 
-            <p className="text-center text-[11px] mt-2" style={{ color: 'var(--t-tx6)' }}>
-              MAGIK can make mistakes. Verify important information.
-              <span className="ml-2 opacity-50">⌘K focus · ⌘⇧N new chat</span>
-            </p>
+            <div className="mt-3 rounded-t-2xl px-6 py-2.5 text-center text-[11.5px] leading-relaxed"
+              style={{ background: 'var(--t-card)', border: '1px solid var(--t-bd2)', borderBottom: 'none', color: 'var(--t-tx5)' }}>
+              MAGIK is AI and can make mistakes. Please double-check important information.
+            </div>
           </div>
         </div>
       </div>

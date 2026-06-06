@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 import unicodedata
@@ -157,6 +158,22 @@ class ClearMemoryRequest(BaseModel):
 
 class GDPRPurgeRequest(BaseModel):
     user_id: str = Field(..., min_length=1, max_length=128)
+
+
+class SessionUpdateRequest(BaseModel):
+    title: Optional[str] = Field(None, max_length=200)
+    pinned: Optional[bool] = None
+    archived: Optional[bool] = None
+
+    @field_validator("title")
+    @classmethod
+    def _strip_title(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            raise ValueError("Title cannot be empty")
+        return v
 
 
 # HELPERS
@@ -344,8 +361,14 @@ async def ingest_document(
         staging_dir = user_staging_dir(user_id)
         _check_disk_space(staging_dir)
 
-        # Write to user staging first (temp), then copy to knowledge_base on success
-        file_path = staging_dir / f"{uuid.uuid4().hex}_{filename}"
+        # Write to user staging first (temp), then copy to knowledge_base on success.
+        # NOTE: the uniqueness token lives in the DIRECTORY name, not the filename —
+        # os.path.basename(file_path) becomes the chunk's `source` / citation tag
+        # downstream, so a prefixed filename would leak the random token into every
+        # answer's citations and source chips (e.g. "[3f9a1b..._report.pdf]").
+        upload_dir = staging_dir / uuid.uuid4().hex
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        file_path = upload_dir / filename
         size = 0
 
         with open(file_path, "wb") as f:
@@ -732,6 +755,26 @@ async def query_rag(
 
 # STREAM
 
+# The guarded answer arrives from rag.stream() as a single completed string
+# (output_guard must see the whole thing before anything reaches the client —
+# see the comment in RAGPipeline.stream). To still give the UI a live,
+# token-by-token feel, we re-chunk it here and pace the chunks with
+# asyncio.sleep (non-blocking, so other requests keep flowing on the loop).
+_STREAM_CHUNK_CHARS = 4
+_STREAM_CHUNK_DELAY_SEC = 0.012
+
+
+def _stream_chunks(text: str):
+    for i in range(0, len(text), _STREAM_CHUNK_CHARS):
+        yield text[i:i + _STREAM_CHUNK_CHARS]
+
+
+def _sse(payload: str) -> str:
+    # JSON-encode so embedded newlines/quotes can't be mistaken for SSE
+    # framing ("\n\n" terminates an event, breaking `data: <raw text>`).
+    return f"data: {json.dumps(payload)}\n\n"
+
+
 @router.post("/query/stream")
 async def stream_query(
     request_body: QueryRequest,
@@ -763,8 +806,11 @@ async def stream_query(
         async def event_stream():
             try:
                 for token in generator:
-                    if token:
-                        yield f"data: {token}\n\n"
+                    if not token:
+                        continue
+                    for piece in _stream_chunks(token):
+                        yield _sse(piece)
+                        await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
                 yield "data: [DONE]\n\n"
             except Exception as exc:
                 logger.error(
@@ -833,7 +879,11 @@ async def upload_file(
         staging_dir = user_staging_dir(user_id)
         _check_disk_space(staging_dir)
 
-        file_path = staging_dir / f"{uuid.uuid4().hex}_{filename}"
+        # See ingest(): uniqueness token goes in the directory, not the filename,
+        # so the clean basename flows through to citations / source chips.
+        upload_dir = staging_dir / uuid.uuid4().hex
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        file_path = upload_dir / filename
         size = 0
 
         # STREAM SAVE WITH SIZE CHECK
@@ -1249,12 +1299,15 @@ async def delete_knowledge_base_file(
     try:
         vs = infra.get_vector_store()
         if vs:
-            # Build source prefix: hash_filename pattern used during ingestion
-            from qdrant_client.models import Filter, FieldCondition, MatchText
+            # `source` is payload-indexed as KEYWORD (exact match), not `text`
+            # (full-text/substring) — MatchText raises a 400 "Index required
+            # but not found ... [text]" here, which the broad except below was
+            # silently swallowing as a warning, so deletes never purged Qdrant.
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
             deleted = vs.client.delete(
                 collection_name=vs.text_collection,
                 points_selector=Filter(
-                    must=[FieldCondition(key="source", match=MatchText(text=safe_name))]
+                    must=[FieldCondition(key="source", match=MatchValue(value=safe_name))]
                 ),
             )
             qdrant_deleted += getattr(deleted, "result", 0) or 0
@@ -1263,7 +1316,7 @@ async def delete_knowledge_base_file(
                 vs.client.delete(
                     collection_name=vs.vision_collection,
                     points_selector=Filter(
-                        must=[FieldCondition(key="source", match=MatchText(text=safe_name))]
+                        must=[FieldCondition(key="source", match=MatchValue(value=safe_name))]
                     ),
                 )
             except Exception:
@@ -1300,3 +1353,119 @@ async def delete_knowledge_base_file(
         "qdrant_purged":  True,
         "bm25_purged":    True,
     }
+
+
+# ─── CHAT SESSIONS (RECENTS) ──────────────────────────────────────────────────
+
+@router.get("/sessions")
+async def list_chat_sessions(
+    current_user: UserPublic = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """List the authenticated user's saved chats for the Recents sidebar."""
+    user_id = current_user.user_id
+    request_id = _request_id()
+
+    try:
+        mongo = infra.get_mongo()
+        sessions = await asyncio.to_thread(mongo.list_chat_sessions, user_id) if mongo else []
+        return {
+            "request_id": request_id,
+            "status":     "ok",
+            "count":      len(sessions),
+            "sessions":   sessions,
+        }
+    except Exception as exc:
+        logger.error(event="api_sessions_list_failed", request_id=request_id, error=str(exc))
+        raise HTTPException(status_code=500, detail="Failed to load chat history")
+
+
+@router.get("/sessions/{session_id}")
+async def get_chat_session(
+    session_id: str,
+    current_user: UserPublic = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Fetch one chat's full transcript — used when a Recents entry is opened."""
+    user_id = current_user.user_id
+    request_id = _request_id()
+
+    try:
+        mongo = infra.get_mongo()
+        session = await asyncio.to_thread(mongo.get_chat_session, user_id, session_id) if mongo else None
+        if not session:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        return {"request_id": request_id, "status": "ok", **session}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(event="api_session_fetch_failed", request_id=request_id, session_id=session_id, error=str(exc))
+        raise HTTPException(status_code=500, detail="Failed to load chat")
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_chat_session(
+    session_id: str,
+    request: Request,
+    current_user: UserPublic = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Remove a chat from Recents. Does not affect the live memory store."""
+    user_id = current_user.user_id
+    request_id = _request_id()
+
+    try:
+        mongo = infra.get_mongo()
+        deleted = await asyncio.to_thread(mongo.delete_chat_session, user_id, session_id) if mongo else False
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Chat not found")
+
+        _audit_log(
+            "chat_session_delete",
+            request_id=request_id,
+            session_id=user_id,
+            chat_session_id=session_id,
+            ip=_client_ip(request),
+        )
+
+        return {"request_id": request_id, "status": "ok", "deleted": True, "session_id": session_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(event="api_session_delete_failed", request_id=request_id, session_id=session_id, error=str(exc))
+        raise HTTPException(status_code=500, detail="Failed to delete chat")
+
+
+@router.patch("/sessions/{session_id}")
+async def update_chat_session(
+    session_id: str,
+    body: SessionUpdateRequest,
+    request: Request,
+    current_user: UserPublic = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Rename, pin/unpin, or archive/unarchive a chat in Recents."""
+    user_id = current_user.user_id
+    request_id = _request_id()
+
+    fields = body.model_dump(exclude_unset=True, exclude_none=True)
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    try:
+        mongo = infra.get_mongo()
+        updated = await asyncio.to_thread(mongo.update_chat_session, user_id, session_id, fields) if mongo else False
+        if not updated:
+            raise HTTPException(status_code=404, detail="Chat not found")
+
+        _audit_log(
+            "chat_session_update",
+            request_id=request_id,
+            session_id=user_id,
+            chat_session_id=session_id,
+            fields=list(fields.keys()),
+            ip=_client_ip(request),
+        )
+
+        return {"request_id": request_id, "status": "ok", "session_id": session_id, **fields}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(event="api_session_update_failed", request_id=request_id, session_id=session_id, error=str(exc))
+        raise HTTPException(status_code=500, detail="Failed to update chat")

@@ -574,63 +574,6 @@ def metrics() -> Dict[str, Any]:
         return {"status": "error", "error": str(e)}
 
 
-# GDPR PURGE ENDPOINT — SECTION 5
-
-@app.delete("/gdpr/purge/{user_id}", tags=["Compliance"])
-async def gdpr_purge(user_id: str, request: Request) -> Dict[str, Any]:
-    if not user_id or len(user_id.strip()) < 3:
-        return JSONResponse(
-            status_code=400,
-            content={"status": "error", "message": "Invalid user_id"},
-        )
-
-    request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
-
-    logger.info(
-        event="gdpr_purge_requested",
-        user_id=user_id,
-        request_id=request_id,
-    )
-
-    try:
-        from app.memory.memory_manager import MemoryManager
-        mgr    = MemoryManager()
-        result = await mgr.gdpr_purge_async(user_id)
-
-        # QDRANT PURGE — SECTION 4.4
-        try:
-            from app.core.infra_registry import infra
-            vs = infra.get_vector_store()
-            if vs and hasattr(vs, "delete_by_session"):
-                vs.delete_by_session(user_id)
-                result["qdrant"] = True
-        except Exception as e:
-            result["qdrant"] = False
-            result.setdefault("errors", []).append(f"qdrant: {e}")
-
-        return {
-            "status":     "ok",
-            "result":     result,
-            "request_id": request_id,
-        }
-
-    except Exception as e:
-        logger.error(
-            event="gdpr_purge_failed",
-            user_id=user_id,
-            error=str(e),
-            request_id=request_id,
-        )
-        return JSONResponse(
-            status_code=500,
-            content={
-                "status":     "error",
-                "message":    "GDPR purge failed",
-                "request_id": request_id,
-            },
-        )
-
-
 # INFRA HEALTH — SECTION 6
 
 @app.get("/infra/health", tags=["System"])
