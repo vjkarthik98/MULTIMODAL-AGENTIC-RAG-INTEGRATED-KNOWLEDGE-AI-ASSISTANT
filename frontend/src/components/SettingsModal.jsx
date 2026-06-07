@@ -2,10 +2,11 @@ import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import {
   X, User, Database, ShieldCheck, ShieldAlert, Sun, Moon,
-  Loader2, Trash2, FileText, LogOut, RotateCcw, AlertTriangle,
+  Loader2, Trash2, FileText, LogOut, RotateCcw, AlertTriangle, ChevronRight, ChevronLeft,
 } from 'lucide-react'
 import { listKB, deleteKBFile, getMe, changePassword, logoutAll, deleteAccount, clearMemory } from '../api/client'
 import { useToast } from '../context/ToastContext'
+import useIsMobile from '../hooks/useIsMobile'
 
 const NAV = [
   { id: 'account',  label: 'Account',         Icon: User },
@@ -325,7 +326,7 @@ function PrivacySection({ auth, onLogout, addToast }) {
         <p className="text-[12.5px] mb-2" style={{ color: 'var(--t-err-tx)', opacity: 0.85 }}>
           Type <span className="font-mono font-semibold">delete my account</span> to confirm
         </p>
-        <div className="flex items-center gap-2.5">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
           <input
             value={confirmText}
             onChange={e => setConfirmText(e.target.value)}
@@ -336,7 +337,7 @@ function PrivacySection({ auth, onLogout, addToast }) {
           <button
             onClick={handleDelete}
             disabled={!ready || deleting}
-            className="flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium text-white transition-opacity disabled:opacity-50 flex-shrink-0"
+            className="flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium text-white transition-opacity disabled:opacity-50 sm:flex-shrink-0"
             style={{ background: 'var(--t-danger)' }}
           >
             {deleting && <Loader2 size={14} className="animate-spin" />}
@@ -356,7 +357,9 @@ export default function SettingsModal({
   sessionId,
   showSources, setShowSources,
 }) {
-  const [section, setSection] = useState('account')
+  const [section, setSection]       = useState('account')
+  const [mobileView, setMobileView] = useState('nav')  // 'nav' | 'content'
+  const isMobile  = useIsMobile()
   const { addToast } = useToast()
   const onCloseRef = useRef(onClose)
   useEffect(() => { onCloseRef.current = onClose })
@@ -364,6 +367,7 @@ export default function SettingsModal({
   useEffect(() => {
     if (!isOpen) return
     setSection('account')
+    setMobileView('nav')
     const onEsc = e => { if (e.key === 'Escape') onCloseRef.current() }
     document.addEventListener('keydown', onEsc)
     return () => document.removeEventListener('keydown', onEsc)
@@ -371,75 +375,152 @@ export default function SettingsModal({
 
   if (!isOpen) return null
 
+  const selectSection = (id) => {
+    setSection(id)
+    if (isMobile) setMobileView('content')
+  }
+
+  const sectionContent = (
+    <>
+      {section === 'account' && (
+        <AccountSection
+          auth={auth} dark={dark} onToggleTheme={onToggleTheme}
+          showSources={showSources} setShowSources={setShowSources}
+          sessionId={sessionId} addToast={addToast}
+        />
+      )}
+      {section === 'kb'       && <KBSection auth={auth} kbFiles={kbFiles} setKbFiles={setKbFiles} addToast={addToast} />}
+      {section === 'security' && <SecuritySection auth={auth} onLogout={onLogout} addToast={addToast} />}
+      {section === 'privacy'  && <PrivacySection  auth={auth} onLogout={onLogout} addToast={addToast} />}
+    </>
+  )
+
   return createPortal(
     <div
       onClick={onClose}
-      className="fixed inset-0 z-[100] flex items-center justify-center p-4"
+      className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4"
       style={{ background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(2px)' }}
     >
       <div
         onClick={e => e.stopPropagation()}
-        className="w-full max-w-3xl rounded-2xl flex overflow-hidden shadow-2xl"
-        style={{ height: 'min(640px, 88vh)', background: 'var(--t-sur)', border: '1px solid var(--t-bd2)' }}
+        className="w-full max-w-3xl rounded-2xl overflow-hidden shadow-2xl"
+        style={{
+          height: 'min(640px, 92vh)',
+          background: 'var(--t-sur)',
+          border: '1px solid var(--t-bd2)',
+          display: 'flex',
+          flexDirection: isMobile ? 'column' : 'row',
+        }}
       >
-        {/* Left nav */}
-        <div className="w-56 flex-shrink-0 flex flex-col py-5 px-3 overflow-y-auto"
-          style={{ background: 'var(--t-sb)', borderRight: '1px solid var(--t-bd1)' }}>
-          <h2 className="text-[15px] font-semibold px-3 mb-4" style={{ color: 'var(--t-tx1)' }}>Settings</h2>
-          {NAV.map(({ id, label, Icon }) => (
-            <button
-              key={id}
-              onClick={() => setSection(id)}
-              className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-[13.5px] text-left transition-colors mb-0.5"
-              style={{
-                background: section === id ? 'var(--t-hov)' : 'transparent',
-                color:      section === id ? 'var(--t-tx1)' : 'var(--t-tx4)',
-              }}
-              onMouseEnter={e => { if (section !== id) e.currentTarget.style.background = 'var(--t-hov)' }}
-              onMouseLeave={e => { if (section !== id) e.currentTarget.style.background = 'transparent' }}
-            >
-              <Icon size={15} />
-              {label}
-            </button>
-          ))}
-        </div>
+        {/* ── MOBILE: nav list (full-width, shown when mobileView==='nav') ── */}
+        {isMobile && mobileView === 'nav' && (
+          <div className="flex flex-col h-full" style={{ background: 'var(--t-sb)' }}>
+            <div className="flex items-center justify-between px-5 pt-5 pb-3 flex-shrink-0">
+              <h2 className="text-[17px] font-semibold" style={{ color: 'var(--t-tx1)' }}>Settings</h2>
+              <button
+                onClick={onClose}
+                className="w-8 h-8 rounded-lg flex items-center justify-center"
+                style={{ color: 'var(--t-tx5)' }}
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-3 pb-4">
+              {NAV.map(({ id, label, Icon }) => (
+                <button
+                  key={id}
+                  onClick={() => selectSection(id)}
+                  className="w-full flex items-center justify-between px-4 py-3.5 rounded-xl text-[15px] text-left transition-colors mb-1"
+                  style={{ background: 'var(--t-card)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx2)' }}
+                >
+                  <span className="flex items-center gap-3">
+                    <Icon size={17} style={{ color: 'var(--t-tx5)' }} />
+                    {label}
+                  </span>
+                  <ChevronRight size={15} style={{ color: 'var(--t-tx5)' }} />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
-        {/* Content */}
-        <div className="flex-1 min-w-0 flex flex-col">
-          <div className="flex items-center justify-between px-7 pt-5 pb-2 flex-shrink-0">
-            <h3 className="text-[17px] font-semibold" style={{ color: 'var(--t-tx1)' }}>
-              {NAV.find(n => n.id === section)?.label}
-            </h3>
-            <button
-              onClick={onClose}
-              className="w-8 h-8 rounded-lg flex items-center justify-center transition-colors"
-              style={{ color: 'var(--t-tx5)' }}
-              onMouseEnter={e => { e.currentTarget.style.background = 'var(--t-hov2)'; e.currentTarget.style.color = 'var(--t-tx2)' }}
-              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--t-tx5)' }}
-              title="Close"
-            >
-              <X size={16} />
-            </button>
+        {/* ── MOBILE: section content (full-width, shown when mobileView==='content') ── */}
+        {isMobile && mobileView === 'content' && (
+          <div className="flex flex-col h-full min-w-0">
+            <div className="flex items-center justify-between px-4 pt-4 pb-2 flex-shrink-0">
+              <button
+                onClick={() => setMobileView('nav')}
+                className="flex items-center gap-1 text-[13px] py-1 pr-2 rounded-lg"
+                style={{ color: 'var(--t-accent)' }}
+              >
+                <ChevronLeft size={16} />
+                Settings
+              </button>
+              <h3 className="text-[15px] font-semibold" style={{ color: 'var(--t-tx1)' }}>
+                {NAV.find(n => n.id === section)?.label}
+              </h3>
+              <button
+                onClick={onClose}
+                className="w-8 h-8 rounded-lg flex items-center justify-center"
+                style={{ color: 'var(--t-tx5)' }}
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-4 pb-6 pt-1">
+              {sectionContent}
+            </div>
           </div>
-          <div className="flex-1 overflow-y-auto px-7 pb-6 pt-2">
-            {section === 'account' && (
-              <AccountSection
-                auth={auth} dark={dark} onToggleTheme={onToggleTheme}
-                showSources={showSources} setShowSources={setShowSources}
-                sessionId={sessionId} addToast={addToast}
-              />
-            )}
-            {section === 'kb' && (
-              <KBSection auth={auth} kbFiles={kbFiles} setKbFiles={setKbFiles} addToast={addToast} />
-            )}
-            {section === 'security' && (
-              <SecuritySection auth={auth} onLogout={onLogout} addToast={addToast} />
-            )}
-            {section === 'privacy' && (
-              <PrivacySection auth={auth} onLogout={onLogout} addToast={addToast} />
-            )}
-          </div>
-        </div>
+        )}
+
+        {/* ── DESKTOP: side-by-side (unchanged) ── */}
+        {!isMobile && (
+          <>
+            {/* Left nav */}
+            <div className="w-56 flex-shrink-0 flex flex-col py-5 px-3 overflow-y-auto"
+              style={{ background: 'var(--t-sb)', borderRight: '1px solid var(--t-bd1)' }}>
+              <h2 className="text-[15px] font-semibold px-3 mb-4" style={{ color: 'var(--t-tx1)' }}>Settings</h2>
+              {NAV.map(({ id, label, Icon }) => (
+                <button
+                  key={id}
+                  onClick={() => selectSection(id)}
+                  className="flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-[13.5px] text-left transition-colors mb-0.5"
+                  style={{
+                    background: section === id ? 'var(--t-hov)' : 'transparent',
+                    color:      section === id ? 'var(--t-tx1)' : 'var(--t-tx4)',
+                  }}
+                  onMouseEnter={e => { if (section !== id) e.currentTarget.style.background = 'var(--t-hov)' }}
+                  onMouseLeave={e => { if (section !== id) e.currentTarget.style.background = 'transparent' }}
+                >
+                  <Icon size={15} />
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* Content */}
+            <div className="flex-1 min-w-0 flex flex-col">
+              <div className="flex items-center justify-between px-7 pt-5 pb-2 flex-shrink-0">
+                <h3 className="text-[17px] font-semibold" style={{ color: 'var(--t-tx1)' }}>
+                  {NAV.find(n => n.id === section)?.label}
+                </h3>
+                <button
+                  onClick={onClose}
+                  className="w-8 h-8 rounded-lg flex items-center justify-center transition-colors"
+                  style={{ color: 'var(--t-tx5)' }}
+                  onMouseEnter={e => { e.currentTarget.style.background = 'var(--t-hov2)'; e.currentTarget.style.color = 'var(--t-tx2)' }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--t-tx5)' }}
+                  title="Close"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto px-7 pb-6 pt-2">
+                {sectionContent}
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>,
     document.body

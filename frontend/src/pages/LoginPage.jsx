@@ -97,25 +97,25 @@ export default function LoginPage({ onLogin, dark, onToggleTheme }) {
       {/* Content — above the glow layer */}
       <div className="relative z-10 w-full flex flex-col items-center">
       {/* Brand */}
-      <div className="flex flex-col items-center mb-10 gap-4">
-        <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-500 to-blue-500 flex items-center justify-center shadow-lg">
-          <BrainCircuit size={32} strokeWidth={1.7} className="text-white" />
+      <div className="flex flex-col items-center mb-6 sm:mb-10 gap-3 sm:gap-4">
+        <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl bg-gradient-to-br from-violet-500 to-blue-500 flex items-center justify-center shadow-lg">
+          <BrainCircuit size={28} strokeWidth={1.7} className="text-white" />
         </div>
         <div className="text-center">
-          <h1 className="text-4xl font-bold tracking-tight" style={{
+          <h1 className="text-3xl sm:text-4xl font-bold tracking-tight" style={{
             background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)',
             WebkitBackgroundClip: 'text',
             WebkitTextFillColor: 'transparent',
             backgroundClip: 'text',
           }}>MAGIK</h1>
-          <p className="text-base mt-2" style={{ color: 'var(--t-tx4)' }}>
+          <p className="text-sm sm:text-base mt-2" style={{ color: 'var(--t-tx4)' }}>
             Multimodal · Agentic · RAG · Integrated · Knowledge
           </p>
         </div>
       </div>
 
       {/* Card */}
-      <div className="w-full max-w-[440px] rounded-2xl p-10"
+      <div className="w-full max-w-[440px] rounded-2xl p-6 sm:p-10"
         style={{ background: 'var(--t-card)', border: '1px solid var(--t-bd2)' }}>
 
         {/* Google */}
@@ -185,7 +185,17 @@ export default function LoginPage({ onLogin, dark, onToggleTheme }) {
             />
           )}
 
-          {error   && <p className="text-sm py-1" style={{ color: 'var(--t-danger)' }}>{error}</p>}
+          {error && (
+            error.toLowerCase().includes('google sign-in') ? (
+              <div className="flex items-center gap-2.5 rounded-xl px-4 py-3 text-sm"
+                style={{ background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.25)', color: 'var(--t-tx3)' }}>
+                <GoogleG />
+                <span>{error}</span>
+              </div>
+            ) : (
+              <p className="text-sm py-1" style={{ color: 'var(--t-danger)' }}>{error}</p>
+            )
+          )}
           {success && <p className="text-sm py-1" style={{ color: 'var(--t-success)' }}>{success}</p>}
 
           <button

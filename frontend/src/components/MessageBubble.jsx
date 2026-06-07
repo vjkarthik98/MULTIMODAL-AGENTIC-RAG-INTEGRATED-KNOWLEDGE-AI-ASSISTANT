@@ -23,19 +23,90 @@ SyntaxHighlighter.registerLanguage('sql',        sql)
 SyntaxHighlighter.registerLanguage('markdown',   markdown)
 SyntaxHighlighter.registerLanguage('yaml',       yaml)
 SyntaxHighlighter.registerLanguage('yml',        yaml)
-import { FileText, Copy, ThumbsUp, ThumbsDown, Check, RotateCcw, Pencil } from 'lucide-react'
+import { FileText, Globe, Copy, ThumbsUp, ThumbsDown, Check, RotateCcw, Pencil } from 'lucide-react'
 import { useToast } from '../context/ToastContext'
+import useIsMobile from '../hooks/useIsMobile'
 
-/* ── Source chip ── */
+// Extract inline citations like [filename.pdf] from LLM output
+const CITATION_RE = /\[([^\]\n]{1,120}\.(pdf|txt|docx|xlsx|csv|png|jpg|jpeg|mp4|mp3|wav|pptx|md))\]/gi
+function parseInlineCitations(content) {
+  if (!content) return { cleanContent: content, inlineSources: [] }
+  const found = []
+  const clean = content.replace(CITATION_RE, (_, name) => { found.push(name); return '' }).trimEnd()
+  return { cleanContent: clean, inlineSources: found }
+}
+
+// Deduplicate sources by key: web sources by URL, file sources by basename
+function deduplicateSources(messageSources, inlineSources) {
+  const seen = new Set()
+  const result = []
+  const add = (src) => {
+    const raw = typeof src === 'string' ? src : (src.source || src.filename || src.file || '')
+    const key = raw.toLowerCase().replace(/^.*[/\\]/, '')   // basename (or full URL for web)
+    if (!key || seen.has(key)) return
+    seen.add(key)
+    result.push(src)
+  }
+  ;(messageSources || []).forEach(add)
+  inlineSources.forEach(add)
+  return result
+}
+
+/* ── Source chip ──
+   Source object shape (from backend):
+   KB docs:  { source: "filename.pdf", page_number: 4,    start_time: 83.5, modality: "text"|"audio"|"video" }
+   Web:      { source: "https://...",  page_number: null, start_time: null, modality: "web" }
+*/
 function SourceChip({ source }) {
-  const raw   = typeof source === 'string' ? source : source.filename || source.source || source.file || String(source)
-  const page  = typeof source === 'object' && source.page ? ` · p.${source.page}` : ''
-  const label = raw.includes('/') ? raw.split('/').pop() : raw
+  const isWeb  = typeof source === 'object' && source.modality === 'web'
+  const raw    = typeof source === 'string' ? source : (source.source || source.filename || source.file || String(source))
+
+  let label  = raw.replace(/^.*[/\\]/, '')   // basename
+  let suffix = ''
+
+  if (isWeb) {
+    // Show hostname without www. prefix
+    try { label = new URL(raw).hostname.replace(/^www\./, '') } catch { /* keep raw */ }
+  } else if (typeof source === 'object') {
+    if (source.page_number != null) {
+      suffix = ` · p.${source.page_number}`
+    } else if (source.start_time != null) {
+      const t = parseFloat(source.start_time)
+      if (!isNaN(t)) {
+        const m = Math.floor(t / 60)
+        const s = Math.floor(t % 60).toString().padStart(2, '0')
+        suffix = ` · ${m}:${s}`
+      }
+    }
+  }
+
+  const chipClass = "inline-flex items-center gap-1.5 text-[11px] rounded-full px-2.5 py-1 mr-1.5 mb-1 select-none transition-colors"
+  const chipStyle = { background: 'var(--t-chp)', border: '1px solid var(--t-chpb)', color: 'var(--t-tx4)' }
+  const chipIcon  = isWeb
+    ? <Globe   size={10} className="flex-shrink-0" style={{ color: 'var(--t-tx5)' }} />
+    : <FileText size={10} className="flex-shrink-0" style={{ color: 'var(--t-tx5)' }} />
+  const chipText  = <span className="truncate max-w-[200px]">{label}{suffix}</span>
+
+  if (isWeb) {
+    return (
+      <a
+        href={raw}
+        target="_blank"
+        rel="noopener noreferrer"
+        title={raw}
+        className={`${chipClass} cursor-pointer hover:opacity-80`}
+        style={{ ...chipStyle, textDecoration: 'none' }}
+        onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--t-accent)'}
+        onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--t-chpb)'}
+      >
+        {chipIcon}{chipText}
+      </a>
+    )
+  }
+
   return (
-    <span className="inline-flex items-center gap-1.5 text-[11px] rounded-full px-3 py-1 mr-1.5 mb-1.5 transition-colors cursor-default select-none"
-      style={{ background: 'var(--t-chp)', border: '1px solid var(--t-chpb)', color: 'var(--t-tx4)' }}>
-      <FileText size={10} className="flex-shrink-0" style={{ color: 'var(--t-tx5)' }} />
-      <span className="truncate max-w-[180px]">{label}{page}</span>
+    <span className={`${chipClass} cursor-default`} style={chipStyle}>
+      {chipIcon}{chipText}
     </span>
   )
 }
@@ -91,10 +162,15 @@ function CodeBlock({ dark, inline, className, children }) {
 export default function MessageBubble({ message, isStreaming, dark, onRegenerate, onEdit, showSources = true }) {
   const isUser = message.role === 'user'
   const { addToast } = useToast()
+  const isMobile = useIsMobile()
   const [copied, setCopied]   = useState(false)
   const [vote, setVote]       = useState(null)   // 'up' | 'down' | null
   const [isEditing, setIsEditing] = useState(false)
   const [editText, setEditText]   = useState('')
+
+  // Parse inline citations from LLM content and merge with structured sources, deduped
+  const { cleanContent, inlineSources } = parseInlineCitations(message.content)
+  const allSources = deduplicateSources(message.sources, inlineSources)
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(message.content || '')
@@ -163,9 +239,9 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
         <div className="flex flex-col items-end gap-1 max-w-[72%]">
           <div className="rounded-2xl rounded-tr-sm px-5 py-3.5 text-[16px] leading-relaxed"
             style={{ background: 'var(--t-ubg)', border: '1px solid var(--t-ubd)', color: 'var(--t-tx1)' }}>
-            {message.content}
+            {cleanContent}
           </div>
-          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity pr-0.5">
+          <div className={`flex items-center gap-1 transition-opacity pr-0.5 ${isMobile ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
             {onEdit && (
               <button
                 onClick={startEdit}
@@ -215,32 +291,34 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
           {isEmpty ? (
             <span className="italic text-sm" style={{ color: 'var(--t-tx6)' }}>Thinking…</span>
           ) : (
-            <div className={`prose-chat ${isStreaming ? 'streaming-cursor' : ''}`}>
-              <ReactMarkdown
-                components={{
-                  code: ({ inline, className, children, ...props }) => (
-                    <CodeBlock dark={dark} inline={inline} className={className} {...props}>
-                      {children}
-                    </CodeBlock>
-                  ),
-                }}
-              >
-                {message.content}
-              </ReactMarkdown>
-            </div>
+            <>
+              <div className={`prose-chat ${isStreaming ? 'streaming-cursor' : ''}`}>
+                <ReactMarkdown
+                  components={{
+                    code: ({ inline, className, children, ...props }) => (
+                      <CodeBlock dark={dark} inline={inline} className={className} {...props}>
+                        {children}
+                      </CodeBlock>
+                    ),
+                  }}
+                >
+                  {cleanContent}
+                </ReactMarkdown>
+              </div>
+
+              {/* Sources inside the bubble */}
+              {showSources && allSources.length > 0 && !isStreaming && (
+                <div className="mt-3 pt-2.5 flex flex-wrap" style={{ borderTop: '1px solid var(--t-bbd)' }}>
+                  {allSources.map((src, i) => <SourceChip key={i} source={src} />)}
+                </div>
+              )}
+            </>
           )}
         </div>
 
-        {/* Source chips */}
-        {showSources && message.sources?.length > 0 && (
-          <div className="mt-2 flex flex-wrap">
-            {message.sources.map((src, i) => <SourceChip key={i} source={src} />)}
-          </div>
-        )}
-
-        {/* Action row — hover reveal */}
+        {/* Action row — always visible on mobile, hover-reveal on desktop */}
         {!isEmpty && !isStreaming && (
-          <div className="flex items-center gap-1 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+          <div className={`flex items-center gap-1 mt-1.5 transition-opacity ${isMobile ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
             {/* Copy */}
             <button
               onClick={handleCopy}

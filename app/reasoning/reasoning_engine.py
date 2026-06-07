@@ -227,17 +227,46 @@ def _scrub_answer_pii(text: str) -> str:
     if not settings.PII_DETECTION_ENABLED:
         return text
     try:
-        from presidio_analyzer import AnalyzerEngine
-        from presidio_anonymizer import AnonymizerEngine
-        entities   = getattr(settings, "PII_ENTITIES", [
-            "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER",
-            "US_SSN", "CREDIT_CARD", "LOCATION", "IP_ADDRESS",
-        ])
-        analyzer   = AnalyzerEngine()
-        anonymizer = AnonymizerEngine()
-        results    = analyzer.analyze(text=text, entities=entities, language="en")
+        from app.guardrails.pii import _get_engines
+        analyzer, anonymizer = _get_engines()
+        if analyzer is None or anonymizer is None:
+            return text
+
+        # Protect citation tags like [file.docx p.4] before scrubbing.
+        # Presidio's URL recognizer matches file extensions that are valid TLDs:
+        # .do (Dominican Republic) inside .docx, .jp (Japan) inside .jpg, etc.
+        # PERSON recognizer also fires on product names like "Mac", "iPad".
+        # Replace all [bracket] tags with opaque tokens, scrub, then restore.
+        slots: dict = {}
+        protected = text
+        for i, m in enumerate(re.finditer(r'\[[^\]]{1,300}\]', text)):
+            token = f'__CITE_{i}__'
+            slots[token] = m.group()
+        for token, tag in slots.items():
+            protected = protected.replace(tag, token)
+
+        # Use a narrow entity list — URL and PERSON cause false positives on
+        # financial-document answers (filename TLDs, product names, tickers).
+        safe_entities = [
+            "EMAIL_ADDRESS", "PHONE_NUMBER", "US_SSN",
+            "CREDIT_CARD", "IBAN_CODE", "IP_ADDRESS",
+            "US_BANK_NUMBER", "US_PASSPORT",
+        ]
+        results = analyzer.analyze(text=protected, entities=safe_entities, language="en",
+                                   score_threshold=0.6)
         if results:
-            text = anonymizer.anonymize(text=text, analyzer_results=results).text
+            from presidio_anonymizer.entities import OperatorConfig
+            operators = {e: OperatorConfig("replace", {"new_value": f"<{e}>"})
+                         for e in safe_entities}
+            protected = anonymizer.anonymize(
+                text=protected, analyzer_results=results, operators=operators,
+            ).text
+
+        # Restore citation tags
+        for token, tag in slots.items():
+            protected = protected.replace(token, tag)
+        return protected
+
     except ImportError:
         pass
     except Exception as exc:
@@ -387,8 +416,8 @@ def _build_cot_prompt(
         "   convert, paraphrase, or substitute numbers. If KNOWLEDGE says '31.4%',\n"
         "   you MUST write '31.4%' — never '33.9%', '~31%', or 'about 31'.\n"
         "2. Do NOT use prior training knowledge. If a fact is not in KNOWLEDGE,\n"
-        "   you do not know it. Say 'The provided documents do not contain this\n"
-        "   information.'\n"
+        "   you do not know it. Say 'No relevant information was found in your\n"
+        "   knowledge base to answer this question.'\n"
         "3. You MAY combine facts from multiple chunks, but every individual fact\n"
         "   in the combination must still come from KNOWLEDGE verbatim.\n"
         "4. The MEMORY section is prior conversation context only. NEVER cite\n"
@@ -430,21 +459,23 @@ def _build_cot_prompt(
     # leak into the answer. Mistral-7B Q4 has been observed copying numeric
     # tokens from the example into the answer.
     example_tag = cite_keys[0] if cite_keys else "[source.txt]"
+    example_tag2 = cite_keys[1] if len(cite_keys) > 1 else example_tag
     example_block = (
-        "EXAMPLE OF CORRECT OUTPUT FORMAT (structure only — do NOT copy any words from this example):\n"
-        f"Answer: <subject> <verb> <object stated verbatim from KNOWLEDGE> {example_tag}.\n"
-        f"Answer Tags: {example_tag}\n"
+        "EXAMPLE OUTPUT (structure only — never copy these words):\n"
+        f"Answer: The subject performed the action. {example_tag} "
+        f"The second fact follows. {example_tag2}\n"
+        f"Answer Tags: {example_tag}, {example_tag2}\n"
         "Confidence: 0.9\n"
-        "Sources Used: 1\n\n"
-        "Now answer the actual QUERY below. Copy numbers and names character-for-character from KNOWLEDGE.\n\n"
+        "Sources Used: 2\n\n"
+        "Now answer the actual QUERY. Use only numbers and names from KNOWLEDGE verbatim.\n\n"
     )
 
     output_format = (
-        "Respond in exactly this format (replace each <...> with real content):\n"
-        "Answer: <one or more complete sentences answering the QUERY, with source tags appended>\n"
-        "Answer Tags: <comma-separated list of tags you used>\n"
-        "Confidence: <number between 0.0 and 1.0>\n"
-        "Sources Used: <integer count>\n"
+        "Output format — fill in each field, do NOT write the field description:\n"
+        "Answer: [your prose answer with inline source tags]\n"
+        "Answer Tags: [tags used, comma-separated]\n"
+        "Confidence: [0.0–1.0]\n"
+        "Sources Used: [integer]\n"
     )
 
     return (
@@ -584,9 +615,8 @@ def _parse_response(
 
             elif ll.startswith("answer:") or ll.startswith("answer "):
                 val = line.split(":", 1)[-1].strip()
-                # strip placeholder <answer> prefix if LLM echoed it
-                if val.startswith("<answer>"):
-                    val = val[len("<answer>"):].strip()
+                # strip any leading placeholder the LLM echoed from the format template
+                val = re.sub(r'^[\[<][^\]>]{4,140}[\]>]\s*', '', val).strip()
                 answer_lines = [val] if val else []
                 in_answer = True
 
@@ -616,6 +646,12 @@ def _parse_response(
                 answer_lines.append(line)
 
         answer = " ".join(answer_lines).strip()
+
+        # Strip leading <placeholder> text Mistral sometimes copies from the
+        # output-format instructions (e.g. "<your prose answer with inline...>").
+        # Real source tags use square brackets, so angle-bracket content at the
+        # start of the answer is always an echoed instruction fragment.
+        answer = re.sub(r'^<[^>]{4,140}>\s*', '', answer).strip()
 
         # POST-CLEAN — strip any trailing format key fragments that survived.
         # Mistral emits these in several bracket variants:
@@ -734,8 +770,8 @@ def _parse_response(
                     answer_prefix=(answer or "")[:120],
                 )
                 answer = (
-                    "The provided documents do not contain the information "
-                    "needed to answer this question."
+                    "No relevant information was found in your knowledge base "
+                    "to answer this question."
                 )
 
         # REJECT CITATION-ONLY ANSWERS — Mistral sometimes echoes only the
@@ -1012,8 +1048,8 @@ class ReasoningEngine:
                         "anywhere in KNOWLEDGE. You MUST use only numbers that "
                         "appear verbatim in KNOWLEDGE. If KNOWLEDGE does not "
                         "contain the value the QUERY asks for, respond with "
-                        "exactly: 'The provided documents do not contain the "
-                        "information needed to answer this question.' Do NOT "
+                        "exactly: 'No relevant information was found in your "
+                        "knowledge base to answer this question.' Do NOT "
                         "invent a substitute number.\n"
                     )
                     retry_response = self._call_llm(
@@ -1046,8 +1082,8 @@ class ReasoningEngine:
                         session_id=session_id,
                     )
                     parsed["answer"] = (
-                        "The provided documents do not contain the "
-                        "information needed to answer this question."
+                        "No relevant information was found in your knowledge base "
+                        "to answer this question."
                     )
                     parsed["cited_tags"] = []
                     cited_tags = []
@@ -1117,6 +1153,8 @@ class ReasoningEngine:
                     # New: phrases emitted by the post-repair refusal path
                     # in _parse_response, plus general document-doesn't-contain
                     # language Mistral itself may emit.
+                    "no relevant information was found",
+                    "not found in your knowledge base",
                     "do not contain the information",
                     "does not contain the information",
                     "do not contain this information",

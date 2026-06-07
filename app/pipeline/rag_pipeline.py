@@ -393,13 +393,11 @@ class RAGPipeline:
         if not answer or len(answer.strip()) < 5:
             return
         try:
+            # add_interaction writes user + assistant to both Redis and MongoDB
+            # via MemoryManager internally — do NOT call mongo.store_message()
+            # separately or every turn gets written twice to the messages collection.
             mgr = self._get_memory_manager()
             mgr.add_interaction(session_id, query, answer)
-
-            mongo = self._get_mongo()
-            if mongo:
-                mongo.store_message(session_id, "user",      query)
-                mongo.store_message(session_id, "assistant", answer)
 
         except Exception as e:
             logger.warning(

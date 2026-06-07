@@ -82,6 +82,7 @@ def _phi3(prompt: str) -> str:
 
 
 _REFUSAL_MARKERS = [
+    "no relevant information was found", "not found in your knowledge base",
     "do not contain", "does not contain", "not contain the information",
     "cannot find", "could not find", "no information", "not available in",
     "unable to answer", "don't have", "do not have enough",

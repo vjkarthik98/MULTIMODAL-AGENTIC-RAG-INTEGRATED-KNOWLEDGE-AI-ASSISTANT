@@ -74,10 +74,20 @@ class AuthService:
             created_at=user.created_at,
         )
 
+    def mark_oauth_only(self, email: str) -> None:
+        """Tag an account as OAuth-only so email/password login returns a clear error."""
+        col = _get_mongo_collection()
+        col.update_one({"email": email}, {"$set": {"oauth_only": True}})
+
     def authenticate(self, email: str, password: str) -> UserPublic:
         """Verify credentials. Raises ValueError on wrong email/password."""
         col = _get_mongo_collection()
         doc = col.find_one({"email": email})
+
+        # OAuth-only accounts have no usable password — give a clear error before hashing
+        if doc and doc.get("oauth_only"):
+            logger.warning(event="auth_login_failed_oauth_only", email=email)
+            raise ValueError("This account uses Google sign-in. Please click 'Continue with Google' to log in.")
 
         # Constant-time failure — always verify even on miss to prevent timing attacks
         dummy_hash = "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"

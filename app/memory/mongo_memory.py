@@ -753,14 +753,35 @@ class MongoMemory:
             return None
 
     def delete_chat_session(self, user_id: str, session_id: str) -> bool:
+        """Delete a chat session and ALL associated data from every collection.
+
+        Removes from:
+          - sessions   (metadata / Recents entry)
+          - messages   (full Q&A history)
+          - summaries  (compressed context summaries)
+        Returns True only if the sessions record was found and deleted.
+        """
         if not user_id or not session_id or not self._is_available():
             return False
         try:
-            def _do():
-                return self.sessions.delete_one({"user_id": user_id, "session_id": session_id})
+            q = {"user_id": user_id, "session_id": session_id}
 
-            result = self._retry(_do)
-            return bool(result and result.deleted_count)
+            def _do():
+                session_result  = self.sessions.delete_one(q)
+                messages_result = self.messages.delete_many(q)
+                summaries_result = self.summaries.delete_many(q) if self.summaries else None
+                return session_result, messages_result, summaries_result
+
+            session_r, msg_r, sum_r = self._retry(_do)
+            found = bool(session_r and session_r.deleted_count)
+            logger.info(
+                event="chat_session_deleted",
+                session_id=session_id,
+                user_id=user_id,
+                messages_deleted=msg_r.deleted_count if msg_r else 0,
+                summaries_deleted=sum_r.deleted_count if sum_r else 0,
+            )
+            return found
 
         except Exception as exc:
             logger.warning(event="chat_session_delete_failed", session_id=session_id, error=str(exc))

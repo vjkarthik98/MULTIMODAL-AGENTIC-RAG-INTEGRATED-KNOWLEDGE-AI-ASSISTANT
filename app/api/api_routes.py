@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 import unicodedata
 import uuid
@@ -651,6 +652,15 @@ async def query_rag(
         if not query:
             raise HTTPException(status_code=400, detail="Empty query after cleaning")
 
+        # GIBBERISH GUARD
+        if _is_gibberish(query):
+            logger.info(event="query_gibberish_rejected", session_id=session_id)
+            return {
+                "request_id": request_id, "answer": _GIBBERISH_MSG,
+                "confidence": 0.0, "sources": [], "cache_hit": False,
+                "decision": "gibberish_rejected", "latency": round(time.time() - start, 3),
+            }
+
         # PROMPT INJECTION CHECK
         query = _check_prompt_injection(query)
         query = query[:settings.MAX_PROMPT_CHARS]
@@ -769,6 +779,45 @@ def _stream_chunks(text: str):
         yield text[i:i + _STREAM_CHUNK_CHARS]
 
 
+_VOWELS = frozenset('aeiou')
+_GIBBERISH_MSG = (
+    "Your query doesn't appear to contain a meaningful question. "
+    "Please ask something specific about your documents — for example, "
+    "\"What was the revenue in Q3?\" or \"Summarise the key risks.\""
+)
+# Stale fallback messages produced by old code versions — treat as cache misses
+_STALE_CACHE_PHRASES = [
+    "The provided documents do not contain the information needed to answer this question.",
+]
+
+def _is_gibberish(query: str) -> bool:
+    """Return True for random-character or number-jumble inputs that can't be answered."""
+    q = query.strip().lower()
+    words = q.split()
+    if not words or len(q) < 3:
+        return False
+    # Multi-word queries are almost never gibberish
+    if len(words) > 1:
+        return False
+    token = words[0]
+    alpha = re.sub(r'[^a-z]', '', token)
+    # Short single tokens are fine (acronyms, tickers like "AAPL", "RAG")
+    if len(alpha) < 7:
+        return False
+    # Digits mixed with random letters (e.g. "12348fdgsfdg")
+    if re.search(r'\d', token):
+        return True
+    # Very low vowel ratio — English averages ~38%; gibberish drops below 18%
+    vowel_count = sum(1 for c in alpha if c in _VOWELS)
+    if vowel_count / len(alpha) < 0.18:
+        return True
+    # Long consonant run (5+) — extremely rare in real English words
+    max_run = max((len(m.group()) for m in re.finditer(r'[^aeiou]+', alpha)), default=0)
+    if max_run >= 5:
+        return True
+    return False
+
+
 def _sse(payload: str) -> str:
     # JSON-encode so embedded newlines/quotes can't be mistaken for SSE
     # framing ("\n\n" terminates an event, breaking `data: <raw text>`).
@@ -795,6 +844,61 @@ async def stream_query(
         query = _check_prompt_injection(query)
         query = query[:settings.MAX_PROMPT_CHARS]
 
+        # GIBBERISH GUARD — reject random-character inputs before any pipeline work
+        if _is_gibberish(query):
+            logger.info(event="stream_gibberish_rejected", session_id=session_id)
+
+            async def gibberish_stream():
+                for piece in _stream_chunks(_GIBBERISH_MSG):
+                    yield _sse(piece)
+                    await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                gibberish_stream(),
+                media_type="text/event-stream",
+                headers={"X-Request-ID": request_id, "Cache-Control": "no-cache",
+                         "X-Accel-Buffering": "no"},
+            )
+
+        # REDIS CACHE CHECK — must happen before touching the LLM.
+        # The cache is keyed on (session_id, normalised query); on a hit we
+        # stream the cached answer immediately so the user sees an instant
+        # response with no LLM round-trip.
+        try:
+            from app.pipeline.query_pipeline import _cache_get
+            cached = _cache_get(session_id, query)
+        except Exception:
+            cached = None
+
+        # Invalidate stale cache entries that contain old fallback message text
+        if cached and any(p in (cached.get("answer") or "") for p in _STALE_CACHE_PHRASES):
+            logger.info(event="stream_stale_cache_evicted", session_id=session_id)
+            cached = None
+
+        if cached and cached.get("answer"):
+            cached_answer = str(cached["answer"])
+            logger.debug(event="stream_cache_hit", session_id=session_id)
+
+            async def cached_event_stream():
+                # Emit in small chunks to preserve the streaming UX, then done.
+                for piece in _stream_chunks(cached_answer):
+                    yield _sse(piece)
+                    await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                cached_event_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "X-Request-ID":      request_id,
+                    "X-Cache":           "HIT",
+                    "Cache-Control":     "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        # Cache miss — run the full LLM pipeline
         rag = _get_rag_pipeline()
 
         generator = await asyncio.to_thread(
@@ -1294,45 +1398,46 @@ async def delete_knowledge_base_file(
     if not file_path.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {safe_name}")
 
-    # PURGE FROM QDRANT — delete all vectors whose source matches this filename
-    qdrant_deleted = 0
+    # PURGE FROM QDRANT — must succeed before the file is removed from disk.
+    # Failing silently here would leave orphaned vectors that keep appearing in
+    # query results for a file the user believes is deleted.
+    qdrant_purged = False
     try:
         vs = infra.get_vector_store()
         if vs:
-            # `source` is payload-indexed as KEYWORD (exact match), not `text`
-            # (full-text/substring) — MatchText raises a 400 "Index required
-            # but not found ... [text]" here, which the broad except below was
-            # silently swallowing as a warning, so deletes never purged Qdrant.
             from qdrant_client.models import Filter, FieldCondition, MatchValue
-            deleted = vs.client.delete(
-                collection_name=vs.text_collection,
-                points_selector=Filter(
-                    must=[FieldCondition(key="source", match=MatchValue(value=safe_name))]
-                ),
+            _filter = Filter(
+                must=[FieldCondition(key="source", match=MatchValue(value=safe_name))]
             )
-            qdrant_deleted += getattr(deleted, "result", 0) or 0
-            # Also purge vision collection
+            vs.client.delete(collection_name=vs.text_collection, points_selector=_filter)
+            # Vision collection is best-effort — missing collection is not fatal
             try:
-                vs.client.delete(
-                    collection_name=vs.vision_collection,
-                    points_selector=Filter(
-                        must=[FieldCondition(key="source", match=MatchValue(value=safe_name))]
-                    ),
-                )
+                vs.client.delete(collection_name=vs.vision_collection, points_selector=_filter)
             except Exception:
                 pass
+            qdrant_purged = True
+        else:
+            # No vector store configured — treat as purged so deletion can proceed
+            qdrant_purged = True
     except Exception as exc:
-        logger.warning(event="kb_delete_qdrant_failed", file=safe_name, error=str(exc))
+        logger.error(event="kb_delete_qdrant_failed", file=safe_name, error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to purge vectors from the knowledge base index. File was NOT deleted. Please try again.",
+        )
 
-    # PURGE FROM BM25
+    # PURGE FROM BM25 — best-effort; missing BM25 index entry does not block deletion
+    bm25_purged = False
     try:
         bm25 = infra.get_bm25()
         if bm25 and hasattr(bm25, "delete_by_source"):
             bm25.delete_by_source(safe_name, user_id=user_id)
+        bm25_purged = True
     except Exception as exc:
+        # BM25 failure is non-fatal — Qdrant is the primary store. Log and continue.
         logger.warning(event="kb_delete_bm25_failed", file=safe_name, error=str(exc))
 
-    # DELETE FROM KNOWLEDGE BASE
+    # DELETE FILE — only reached if Qdrant purge succeeded
     file_path.unlink()
 
     _audit_log(
@@ -1343,15 +1448,16 @@ async def delete_knowledge_base_file(
         ip=_client_ip(request),
     )
 
-    logger.info(event="knowledge_base_file_deleted", user_id=user_id, file=safe_name)
+    logger.info(event="knowledge_base_file_deleted", user_id=user_id, file=safe_name,
+                qdrant_purged=qdrant_purged, bm25_purged=bm25_purged)
 
     return {
-        "request_id":     request_id,
-        "status":         "deleted",
-        "filename":       safe_name,
-        "user_id":        user_id,
-        "qdrant_purged":  True,
-        "bm25_purged":    True,
+        "request_id":    request_id,
+        "status":        "deleted",
+        "filename":      safe_name,
+        "user_id":       user_id,
+        "qdrant_purged": qdrant_purged,
+        "bm25_purged":   bm25_purged,
     }
 
 
@@ -1407,15 +1513,25 @@ async def delete_chat_session(
     request: Request,
     current_user: UserPublic = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    """Remove a chat from Recents. Does not affect the live memory store."""
+    """Permanently delete a chat session — removes the session record, all
+    messages, all summaries from MongoDB, and the live Redis context."""
     user_id = current_user.user_id
     request_id = _request_id()
 
     try:
+        # 1. Wipe MongoDB: sessions + messages + summaries
         mongo = infra.get_mongo()
         deleted = await asyncio.to_thread(mongo.delete_chat_session, user_id, session_id) if mongo else False
         if not deleted:
             raise HTTPException(status_code=404, detail="Chat not found")
+
+        # 2. Clear Redis live context so the session can't be resumed from cache
+        try:
+            redis_mem = infra.get_memory()
+            if redis_mem is not None:
+                await asyncio.to_thread(redis_mem.delete, session_id)
+        except Exception as exc:
+            logger.warning(event="session_delete_redis_failed", session_id=session_id, error=str(exc))
 
         _audit_log(
             "chat_session_delete",

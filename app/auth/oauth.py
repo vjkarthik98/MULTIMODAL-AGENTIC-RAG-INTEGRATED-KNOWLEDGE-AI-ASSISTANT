@@ -161,5 +161,6 @@ def get_or_create_oauth_user(email: str, provider: str):
     dummy_password = secrets.token_urlsafe(32) + "Aa1!"
     req = RegisterRequest(email=email, password=dummy_password)
     user = svc.register(req)
+    svc.mark_oauth_only(email)   # ensures email/password login gives a clear error
     logger.info(event="oauth_user_auto_registered", email=email, provider=provider)
     return user

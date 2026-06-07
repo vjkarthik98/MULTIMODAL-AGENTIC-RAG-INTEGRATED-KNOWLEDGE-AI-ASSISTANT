@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Send, Square, Sparkles, ChevronDown } from 'lucide-react'
+import { Send, Square, Sparkles, ChevronDown, Menu } from 'lucide-react'
 import Sidebar from '../components/Sidebar'
 import SettingsModal from '../components/SettingsModal'
 import MessageBubble from '../components/MessageBubble'
 import TypingIndicator from '../components/TypingIndicator'
 import { streamQuery, queryMeta, getChatSession } from '../api/client'
 import { useToast } from '../context/ToastContext'
+import useIsMobile from '../hooks/useIsMobile'
 
 const CHAT_ICON = (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -39,6 +40,8 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
   const [autoScroll, setAutoScroll]       = useState(true)
   const [showScrollBtn, setShowScrollBtn] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+  const isMobile = useIsMobile()
   const [sessionId, setSessionId]         = useState(() => crypto.randomUUID())
   const [loadingSession, setLoadingSession] = useState(false)
   const [inputFocused, setInputFocused]   = useState(false)
@@ -68,6 +71,7 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
       const mod = e.metaKey || e.ctrlKey
       if (mod && e.key === 'k') { e.preventDefault(); inputRef.current?.focus() }
       if (mod && e.shiftKey && e.key === 'N') { e.preventDefault(); handleNewChat() }
+      if (e.key === 'Escape') setMobileSidebarOpen(false)
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
@@ -90,6 +94,15 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
     setAutoScroll(true)
     setShowScrollBtn(false)
   }
+
+  // Strip LLM format artifacts from the streamed text so users never see
+  // raw numeric citation indices, format fields, or summary epilogues.
+  const cleanStreamText = (raw) => raw
+    .replace(/\s*\[\d+(?:,\s*\d+)*\]/g, '')                               // [1,3] [1,2,4]
+    .replace(/\n?(Confidence|Sources Used|Answer Tags|Reasoning)\s*:\s*[^\n]*/gi, '')
+    .replace(/\n?Therefore,?\s+the\s+answer\s+is\s*:?\s*<text>[\s\S]*?<\/text>/gi, '')
+    .replace(/\n?Therefore,?\s+the\s+answer\s+is\s*:?[^\n]*/gi, '')
+    .trim()
 
   const handleSend = useCallback(async (overrideText, { skipUserMessage = false } = {}) => {
     const text = (overrideText ?? input).trim()
@@ -145,7 +158,7 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
             if (token) {
               fullText += token
               setMessages(prev => prev.map(m =>
-                m.id === botId ? { ...m, content: fullText, pending: false } : m
+                m.id === botId ? { ...m, content: cleanStreamText(fullText), pending: false } : m
               ))
             }
           }
@@ -253,23 +266,34 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
   return (
     <div className="flex h-screen overflow-hidden" style={{ background: 'var(--t-bg)' }}>
 
-      {/* Sidebar */}
-      <div className={`flex-shrink-0 transition-all duration-300 ease-in-out overflow-hidden
-        ${sidebarCollapsed ? 'w-[72px]' : 'w-80'}`}>
+      {/* Mobile backdrop — tap anywhere outside sidebar to close */}
+      {isMobile && mobileSidebarOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-black/60"
+          onClick={() => setMobileSidebarOpen(false)}
+        />
+      )}
+
+      {/* Sidebar — inline on desktop, slide-in overlay on mobile */}
+      <div className={
+        isMobile
+          ? `fixed inset-y-0 left-0 z-40 transition-transform duration-300 ease-in-out ${mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`
+          : `flex-shrink-0 transition-all duration-300 ease-in-out overflow-hidden ${sidebarCollapsed ? 'w-[72px]' : 'w-80'}`
+      }>
         <Sidebar
           auth={auth}
           kbFiles={kbFiles}
           setKbFiles={setKbFiles}
           onLogout={onLogout}
-          onNewChat={handleNewChat}
+          onNewChat={isMobile ? () => { handleNewChat(); setMobileSidebarOpen(false) } : handleNewChat}
           currentSessionId={sessionId}
-          onSelectSession={handleLoadSession}
+          onSelectSession={isMobile ? (id) => { handleLoadSession(id); setMobileSidebarOpen(false) } : handleLoadSession}
           streaming={streaming}
-          collapsed={sidebarCollapsed}
-          onToggleCollapse={() => setSidebarCollapsed(c => !c)}
+          collapsed={isMobile ? false : sidebarCollapsed}
+          onToggleCollapse={isMobile ? () => setMobileSidebarOpen(false) : () => setSidebarCollapsed(c => !c)}
           dark={dark}
           onToggleTheme={onToggleTheme}
-          onOpenSettings={() => setSettingsOpen(true)}
+          onOpenSettings={() => { setSettingsOpen(true); if (isMobile) setMobileSidebarOpen(false) }}
         />
       </div>
 
@@ -290,18 +314,32 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
       {/* Main column */}
       <div className="flex-1 flex flex-col min-w-0 relative" style={{ background: 'var(--t-sur)' }}>
 
+        {/* Mobile top bar — hamburger to open sidebar */}
+        {isMobile && (
+          <div className="flex items-center px-3 pt-3 pb-1 flex-shrink-0">
+            <button
+              onClick={() => setMobileSidebarOpen(true)}
+              className="w-9 h-9 flex items-center justify-center rounded-xl"
+              style={{ background: 'var(--t-card)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx4)' }}
+              aria-label="Open sidebar"
+            >
+              <Menu size={18} />
+            </button>
+          </div>
+        )}
+
         {/* Message area */}
         {messages.length === 0 ? (
-          <div className="flex-1 flex flex-col items-center justify-center px-8 text-center select-none">
-            <div className="mb-6" style={{ color: 'var(--t-accent)' }}>
-              <Sparkles size={52} strokeWidth={1.3} />
+          <div className="flex-1 flex flex-col items-center justify-center px-6 text-center select-none">
+            <div className="mb-5" style={{ color: 'var(--t-accent)' }}>
+              <Sparkles size={40} strokeWidth={1.3} />
             </div>
-            <h2 className="text-4xl font-bold mb-3 leading-tight" style={{ color: 'var(--t-tx1)' }}>
+            <h2 className="text-2xl sm:text-4xl font-bold mb-3 leading-tight" style={{ color: 'var(--t-tx1)' }}>
               {kbFiles.length > 0
                 ? `${kbFiles.length} file${kbFiles.length !== 1 ? 's' : ''} loaded. Ask anything.`
                 : 'Upload files to get started.'}
             </h2>
-            <p className="text-[17px] mb-10 max-w-md leading-relaxed" style={{ color: 'var(--t-tx5)' }}>
+            <p className="text-[15px] sm:text-[17px] mb-7 sm:mb-10 max-w-md leading-relaxed" style={{ color: 'var(--t-tx5)' }}>
               {kbFiles.length > 0
                 ? 'Your knowledge base is ready. Try one of these to get started:'
                 : 'Drop files into the sidebar to build your knowledge base, then ask questions.'}
@@ -406,7 +444,7 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
 
             <div className="mt-3 rounded-t-2xl px-6 py-2.5 text-center text-[11.5px] leading-relaxed"
               style={{ background: 'var(--t-card)', border: '1px solid var(--t-bd2)', borderBottom: 'none', color: 'var(--t-tx5)' }}>
-              MAGIK is AI and can make mistakes. Please double-check important information.
+              Responses are generated from your knowledge base and may not be fully accurate. Verify critical information before use.
             </div>
           </div>
         </div>
