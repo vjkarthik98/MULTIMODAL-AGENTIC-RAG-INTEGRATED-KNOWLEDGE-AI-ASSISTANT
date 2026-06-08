@@ -1117,11 +1117,18 @@ def query_pipeline(
         cache_conf = output.get("confidence")
         if cache_conf is None:
             cache_conf = confidence
+        _REFUSAL_PHRASES = (
+            "no relevant documents", "something went wrong", "no answer generated",
+            "could not find", "cannot find", "i couldn't find", "couldn't find",
+            "no relevant information", "not in the provided", "not found in",
+            "did not complete", "no acquisition", "not mention",
+            "no information", "not available", "not present",
+        )
+        _is_refusal_answer = any(p in answer.lower() for p in _REFUSAL_PHRASES)
         if (
             answer
-            and "No relevant documents" not in answer
-            and "Something went wrong" not in answer
-            and "No answer generated" not in answer
+            and not _is_refusal_answer
+            and not hallucination_warning
             and isinstance(cache_conf, (int, float))
             and cache_conf > 0.15
         ):

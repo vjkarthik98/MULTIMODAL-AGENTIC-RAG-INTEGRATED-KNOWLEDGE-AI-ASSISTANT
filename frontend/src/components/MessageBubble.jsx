@@ -27,22 +27,58 @@ import { FileText, Globe, Copy, ThumbsUp, ThumbsDown, Check, RotateCcw, Pencil }
 import { useToast } from '../context/ToastContext'
 import useIsMobile from '../hooks/useIsMobile'
 
-// Extract inline citations like [filename.pdf] from LLM output
-const CITATION_RE = /\[([^\]\n]{1,120}\.(pdf|txt|docx|xlsx|csv|png|jpg|jpeg|mp4|mp3|wav|pptx|md))\]/gi
+// Extract inline citations from LLM output. Handles both the bare form
+// [filename.pdf] and the page-tagged forms the CoT path emits:
+//   [filename.pdf p.6]  [report.pdf, p.12]  [data.csv page 3]
+// The page number is captured so the rendered chip can show "· p.6".
+const CITATION_RE = /\[\s*([^\]\n]{1,120}?\.(?:pdf|txt|docx|xlsx|csv|png|jpg|jpeg|mp4|mp3|wav|pptx|md))(?:[\s,]+(?:pp?\.?|pg\.?|page)\s*(\d+))?\s*\]/gi
+// Numeric citations like [1], [2,3], [1, 2, 4] — carry no filename, so they
+// are simply removed from the text (the source chips come from message.sources
+// or the filename citations above). Without this, reopened chats show stray
+// "[1]" markers inline.
+const NUMERIC_CITATION_RE = /\s*\[\s*\d+(?:\s*,\s*\d+)*\s*\]/g
+// Mangled cite tags where the PII/URL scrubber ate part of the filename,
+// e.g. [aapl_def14a_<URL>cx] (from aapl_def14a_2023.docx). The real source
+// still comes through cleanly in message.sources, so just remove the tag.
+const MANGLED_CITATION_RE = /\s*\[[^\]\n]*<[A-Z_]{2,20}>[^\]\n]*\]/g
+// Bare PII placeholder tags that leaked into the prose (e.g. a webcast "<URL>").
+const PII_TAG_RE = /<(?:PERSON|LOCATION|ORG|NRP|GPE|DATE_TIME|AGE|ID|URL|IP_ADDRESS|US_SSN|CREDIT_CARD|PHONE_NUMBER|EMAIL_ADDRESS)>/gi
+
 function parseInlineCitations(content) {
   if (!content) return { cleanContent: content, inlineSources: [] }
   const found = []
-  const clean = content.replace(CITATION_RE, (_, name) => { found.push(name); return '' }).trimEnd()
+  let clean = content.replace(CITATION_RE, (_, name, page) => {
+    const src = { source: name }
+    if (page) src.page_number = parseInt(page, 10)
+    found.push(src)
+    return ''
+  })
+  // Strip mangled cite tags, bare numeric citations, and leftover PII tags so
+  // no citation/placeholder marker remains in the response text — all sources
+  // live only in the chips below.
+  clean = clean
+    .replace(MANGLED_CITATION_RE, '')
+    .replace(NUMERIC_CITATION_RE, '')
+    .replace(PII_TAG_RE, '')
+  // Tidy whitespace left where markers were removed: " ." → "." and
+  // collapse any double spaces, then trim the trailing edge.
+  clean = clean.replace(/\s+([.,;!?])/g, '$1').replace(/[ \t]{2,}/g, ' ').trimEnd()
   return { cleanContent: clean, inlineSources: found }
 }
 
-// Deduplicate sources by key: web sources by URL, file sources by basename
+// Deduplicate sources: web sources by hostname, file sources by basename
 function deduplicateSources(messageSources, inlineSources) {
   const seen = new Set()
   const result = []
   const add = (src) => {
     const raw = typeof src === 'string' ? src : (src.source || src.filename || src.file || '')
-    const key = raw.toLowerCase().replace(/^.*[/\\]/, '')   // basename (or full URL for web)
+    const isWeb = typeof src === 'object' && src.modality === 'web'
+    let key
+    if (isWeb) {
+      try { key = new URL(raw).hostname.toLowerCase().replace(/^www\./, '') } catch { key = raw.toLowerCase() }
+    } else {
+      key = raw.toLowerCase().replace(/^.*[/\\]/, '')  // basename
+    }
     if (!key || seen.has(key)) return
     seen.add(key)
     result.push(src)
@@ -61,7 +97,7 @@ function SourceChip({ source }) {
   const isWeb  = typeof source === 'object' && source.modality === 'web'
   const raw    = typeof source === 'string' ? source : (source.source || source.filename || source.file || String(source))
 
-  let label  = raw.replace(/^.*[/\\]/, '')   // basename
+  let label  = raw.replace(/^.*[/\\]/, '').replace(/<[A-Z_]{2,20}>/g, '')   // basename, strip PII tags
   let suffix = ''
 
   if (isWeb) {
@@ -77,6 +113,10 @@ function SourceChip({ source }) {
         const s = Math.floor(t % 60).toString().padStart(2, '0')
         suffix = ` · ${m}:${s}`
       }
+    } else if (source.section_title) {
+      // DOCX/Word have no page numbers — the nearest heading is the locator.
+      const st = String(source.section_title).trim()
+      if (st) suffix = ` · ${st}`
     }
   }
 
@@ -85,7 +125,7 @@ function SourceChip({ source }) {
   const chipIcon  = isWeb
     ? <Globe   size={10} className="flex-shrink-0" style={{ color: 'var(--t-tx5)' }} />
     : <FileText size={10} className="flex-shrink-0" style={{ color: 'var(--t-tx5)' }} />
-  const chipText  = <span className="truncate max-w-[200px]">{label}{suffix}</span>
+  const chipText  = <span className="whitespace-nowrap">{label}{suffix}</span>
 
   if (isWeb) {
     return (

@@ -295,6 +295,32 @@ class GGUFModel:
 
         return self._llm
 
+    # TOKEN-SAFE TRUNCATION
+    # Character limits are unreliable for financial/numeric text where one token
+    # can be as short as 1 char (e.g. "3,787,464%" → ~7 tokens for 10 chars).
+    # This method uses the actual SentencePiece tokenizer baked into the loaded
+    # model to count tokens precisely, then truncates to fit within the context
+    # window. Hard floor of 150 output tokens reserved regardless of max_tokens.
+    def _truncate_to_token_budget(self, prompt: str, max_tokens: int) -> str:
+        try:
+            llm = self._load()
+            # tokenize/detokenize touch the shared llama.cpp context — they MUST
+            # hold the inference lock so they never run concurrently with an
+            # in-flight generate()/stream() on another thread (that races the
+            # KV cache and crashes the process with SIGSEGV).
+            with self._lock:
+                token_ids = llm.tokenize(prompt.encode("utf-8", errors="replace"))
+                budget = settings.CONTEXT_MAX_TOKENS - max(max_tokens, 150) - 64  # 64-token safety margin
+                if len(token_ids) <= budget:
+                    return prompt
+                token_ids = token_ids[:budget]
+                return llm.detokenize(token_ids).decode("utf-8", errors="replace")
+        except Exception as _e:
+            # Tokenizer unavailable — fall back to conservative char truncation
+            logger.warning(event="gguf_token_truncation_failed", error=str(_e))
+            safe_chars = (settings.CONTEXT_MAX_TOKENS - max(max_tokens, 150) - 64) * 3
+            return prompt[:safe_chars]
+
     # GENERATE WITH RETRY + CIRCUIT BREAKER — SECTION 2.1
 
     def generate(
@@ -313,12 +339,15 @@ class GGUFModel:
         if not prompt:
             return ""
 
-        if len(prompt) > self.max_prompt_chars:
-            prompt = prompt[:self.max_prompt_chars]
-
         max_tokens_  = max_tokens   if max_tokens   is not None else settings.LLM_MAX_TOKENS
         temperature_ = temperature  if temperature  is not None else settings.LLM_TEMPERATURE
         top_p_       = top_p        if top_p        is not None else settings.LLM_TOP_P
+
+        # TOKEN-SAFE TRUNCATION — must happen before the llama.cpp call.
+        # Character limits fail for financial/numeric text (1–2 chars/token).
+        # This uses the model's own tokenizer to guarantee the prompt fits
+        # within the context window and never triggers a SIGSEGV in llama.cpp.
+        prompt = self._truncate_to_token_budget(prompt, max_tokens_)
 
         # CIRCUIT BREAKER CHECK — SECTION 2.1
         if self._circuit.is_open:
@@ -336,13 +365,19 @@ class GGUFModel:
                     llm   = self._load()
                     start = time.time()
 
-                    res = llm(
-                        prompt,
-                        max_tokens=max_tokens_,
-                        temperature=temperature_,
-                        top_p=top_p_,
-                        stop=_STOP_TOKENS,
-                    )
+                    # INFERENCE LOCK — llama.cpp is NOT thread-safe. The parallel
+                    # streaming + meta requests share one model context; without
+                    # this lock two concurrent llm() calls corrupt the KV cache
+                    # and SIGSEGV the process. Serializing them is the only safe
+                    # option on a single shared context.
+                    with self._lock:
+                        res = llm(
+                            prompt,
+                            max_tokens=max_tokens_,
+                            temperature=temperature_,
+                            top_p=top_p_,
+                            stop=_STOP_TOKENS,
+                        )
 
                     elapsed = time.time() - start
 
@@ -438,8 +473,8 @@ class GGUFModel:
         if not prompt:
             return
 
-        if len(prompt) > self.max_prompt_chars:
-            prompt = prompt[:self.max_prompt_chars]
+        _max_tok = max_tokens if max_tokens is not None else settings.LLM_MAX_TOKENS
+        prompt = self._truncate_to_token_budget(prompt, _max_tok)
 
         # CIRCUIT BREAKER CHECK
         if self._circuit.is_open:
@@ -454,7 +489,11 @@ class GGUFModel:
             token_count = 0
             buffer      = ""
 
-            with self._circuit:
+            # INFERENCE LOCK — held for the full token loop so no concurrent
+            # generate()/stream() touches the shared llama.cpp context. rag_pipeline
+            # consumes this generator to completion on its worker thread before
+            # yielding, so the lock is held for one bounded generation then freed.
+            with self._circuit, self._lock:
                 for chunk in llm(
                     prompt,
                     max_tokens=max_tokens   if max_tokens   is not None else settings.LLM_MAX_TOKENS,

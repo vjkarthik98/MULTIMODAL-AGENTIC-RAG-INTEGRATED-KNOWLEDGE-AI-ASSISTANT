@@ -151,6 +151,12 @@ class BM25Retriever:
             "ingestion_time": s.get("ingestion_time"),
             "checksum_sha256": s.get("checksum_sha256"),
             "section_number": s.get("section_number"),
+            # section_id / section_title are the locators the UI uses for the
+            # source chip (DOCX has no page numbers). Without these, a chunk
+            # retrieved via BM25 loses its heading and the chip shows only the
+            # filename — even though the vector path carries it.
+            "section_id": s.get("section_id"),
+            "section_title": s.get("section_title"),
             "is_forward_looking": s.get("is_forward_looking", False),
         }
 

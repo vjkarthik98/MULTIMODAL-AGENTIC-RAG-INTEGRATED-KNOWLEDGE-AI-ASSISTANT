@@ -4,7 +4,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -19,7 +19,8 @@ class UserRole(str, Enum):
 class UserInDB(BaseModel):
     user_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     email: str
-    hashed_password: str
+    hashed_password: Optional[str] = None   # None for Google-only accounts
+    auth_providers: List[str] = Field(default_factory=list)  # ["email"], ["google"], ["email","google"]
     role: UserRole = UserRole.USER
     is_active: bool = True
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -767,13 +767,13 @@ class MongoMemory:
             q = {"user_id": user_id, "session_id": session_id}
 
             def _do():
-                session_result  = self.sessions.delete_one(q)
-                messages_result = self.messages.delete_many(q)
-                summaries_result = self.summaries.delete_many(q) if self.summaries else None
+                session_result   = self.sessions.delete_one(q)
+                messages_result  = self.messages.delete_many(q)
+                summaries_result = self.summaries.delete_many(q) if self.summaries is not None else None
                 return session_result, messages_result, summaries_result
 
             session_r, msg_r, sum_r = self._retry(_do)
-            found = bool(session_r and session_r.deleted_count)
+            found = (session_r is not None and session_r.deleted_count > 0)
             logger.info(
                 event="chat_session_deleted",
                 session_id=session_id,
@@ -786,6 +786,35 @@ class MongoMemory:
         except Exception as exc:
             logger.warning(event="chat_session_delete_failed", session_id=session_id, error=str(exc))
             return False
+
+    def delete_chat_session_all(self, user_id: str, session_id: str) -> None:
+        """Unconditional wipe: removes the session from every collection.
+        Never raises — errors are logged and swallowed so the API can always
+        return 200 OK (idempotent delete)."""
+        if not user_id or not session_id:
+            return
+        if not self._is_available():
+            return
+        try:
+            q = {"user_id": user_id, "session_id": session_id}
+
+            def _do():
+                s_r = self.sessions.delete_one(q)
+                m_r = self.messages.delete_many(q)
+                sum_r = self.summaries.delete_many(q) if self.summaries is not None else None
+                return s_r, m_r, sum_r
+
+            s_r, m_r, sum_r = self._retry(_do)
+            logger.info(
+                event="chat_session_deleted",
+                session_id=session_id,
+                user_id=user_id,
+                sessions_deleted=s_r.deleted_count if s_r else 0,
+                messages_deleted=m_r.deleted_count if m_r else 0,
+                summaries_deleted=sum_r.deleted_count if sum_r else 0,
+            )
+        except Exception as exc:
+            logger.warning(event="chat_session_delete_failed", session_id=session_id, error=str(exc))
 
     _SESSION_UPDATABLE_FIELDS = {"title", "pinned", "archived"}
 

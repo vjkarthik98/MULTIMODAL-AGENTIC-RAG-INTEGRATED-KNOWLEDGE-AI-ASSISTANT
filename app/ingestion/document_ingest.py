@@ -151,8 +151,8 @@ def _redact_pii(text: str) -> Tuple[str, Dict[str, int]]:
         from presidio_anonymizer import AnonymizerEngine
 
         entities = getattr(settings, "PII_ENTITIES", [
-            "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER",
-            "US_SSN", "CREDIT_CARD", "LOCATION", "IP_ADDRESS",
+            "EMAIL_ADDRESS", "PHONE_NUMBER",
+            "US_SSN", "CREDIT_CARD", "IP_ADDRESS",
         ])
 
         analyzer   = AnalyzerEngine()

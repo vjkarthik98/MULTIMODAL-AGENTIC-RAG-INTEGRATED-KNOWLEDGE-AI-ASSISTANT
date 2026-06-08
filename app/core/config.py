@@ -50,9 +50,9 @@ class Settings:
     PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 
     # CORE APPLICATION
-    APP_NAME: str        = _str("APP_NAME", "Multimodal RAG Agentic Knowledge AI Assistant")
+    APP_NAME: str        = _str("APP_NAME", "Multimodal Agentic RAG Integrated Knowledge AI Assistant")
     APP_VERSION: str     = _str("APP_VERSION", "0.22.0")
-    APP_DESCRIPTION: str = _str("APP_DESCRIPTION", "Production Multimodal RAG + Agentic AI System — Phase 24")
+    APP_DESCRIPTION: str = _str("APP_DESCRIPTION", "Production Multimodal Agentic RAG Integrated AI System")
     ENV: str             = _str("ENV", "development")
     DEBUG: bool          = _bool("DEBUG", False)
 
@@ -114,7 +114,7 @@ class Settings:
     CONTEXT_MAX_TOKENS: int  = _int("CONTEXT_MAX_TOKENS", 4096)
     LLM_TEMPERATURE: float   = _float("LLM_TEMPERATURE", 0.2)
     LLM_TOP_P: float         = _float("LLM_TOP_P", 0.9)
-    MAX_PROMPT_CHARS: int    = _int("MAX_PROMPT_CHARS", 8000)
+    MAX_PROMPT_CHARS: int    = _int("MAX_PROMPT_CHARS", 6000)
     LLM_GPU_LAYERS: int      = _int("LLM_GPU_LAYERS", -1)
     LLM_THREADS: int         = _int("LLM_THREADS", 4)
     LLM_N_BATCH: int         = _int("LLM_N_BATCH", 1024)

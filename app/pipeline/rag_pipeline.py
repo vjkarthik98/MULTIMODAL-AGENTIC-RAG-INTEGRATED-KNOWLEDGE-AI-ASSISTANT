@@ -89,6 +89,29 @@ def _record_retrieval(retriever_type: str, latency: float) -> None:
         pass
 
 
+# STREAM RERANKER SINGLETON — loaded once, shared across all streaming requests
+import threading as _threading
+_stream_reranker      = None
+_stream_reranker_lock = _threading.Lock()
+
+
+def _get_stream_reranker():
+    """Return the pre-warmed Reranker singleton used by the streaming path.
+    Uses the same underlying cross-encoder model as query_pipeline."""
+    global _stream_reranker
+    if _stream_reranker is not None:
+        return _stream_reranker
+    with _stream_reranker_lock:
+        if _stream_reranker is not None:
+            return _stream_reranker
+        try:
+            from app.retrieval.reranker import Reranker
+            _stream_reranker = Reranker()
+        except Exception as _e:
+            logger.warning(event="rag_stream_reranker_init_failed", error=str(_e))
+    return _stream_reranker
+
+
 # NORMALIZE — SECTION 2.3
 
 def _normalize(query: str) -> str:
@@ -170,15 +193,22 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3) -> List[
                 except (TypeError, ValueError):
                     pass
 
+        # DOCX/Word have no page numbers (Word paginates at render time), so the
+        # nearest heading is the best human-readable locator. Surface it so the UI
+        # can show "· <section>" where a PDF would show "· p.N".
+        raw_section = meta.get("section_title")
+        section_title = str(raw_section).strip() if raw_section else None
+
         out.append({
-            "text":        str(text)[:200],
-            "score":       round(score, 6),
-            "source":      source_name,
-            "page_number": page_number,
-            "start_time":  start_time,
-            "end_time":    end_time,
-            "modality":    modality,
-            "doc_id":      str(meta.get("doc_id") or meta.get("chunk_id") or ""),
+            "text":          str(text)[:200],
+            "score":         round(score, 6),
+            "source":        source_name,
+            "page_number":   page_number,
+            "section_title": section_title,
+            "start_time":    start_time,
+            "end_time":      end_time,
+            "modality":      modality,
+            "doc_id":        str(meta.get("doc_id") or meta.get("chunk_id") or ""),
         })
     return out
 
@@ -263,6 +293,58 @@ def _build_context(
         total += len(chunk)
 
     return "\n\n".join(parts)
+
+
+# KEY-FACT EXTRACTOR — for queries that ask about specific events (acquisitions,
+# mergers, dates) the LLM often misses sentences buried mid-chunk because the
+# prompt is flattened to a single line. Prepending a "KEY FACT" line surfaces
+# the most relevant sentence right after "CONTEXT:" where the LLM reads first.
+
+_MA_QUERY_KEYWORDS  = frozenset(["acquisition", "merger", "acquired", "deal", "takeover", "purchased"])
+_MA_CHUNK_KEYWORDS  = frozenset(["acquired", "acquisition", "merger", "assumed", "fdic", "purchase"])
+
+# Phrases that mark an LLM refusal (model declined to answer despite context).
+# Used by the streaming path: a refusal here is suppressed and the accurate
+# meta-path answer is streamed instead, so the user never sees the flash.
+_LLM_REFUSAL_PHRASES = (
+    "could not find this in the provided sources",
+    "could not find", "cannot find", "couldn't find",
+    "no relevant information", "not in the provided", "not found in",
+    "not mentioned in", "not provided in", "is not available",
+    "i don't know", "i do not know", "no information about",
+)
+
+def _is_llm_refusal(text: str) -> bool:
+    if not text:
+        return True
+    t = text.lower()
+    return any(p in t for p in _LLM_REFUSAL_PHRASES)
+
+def _prepend_key_facts(docs: List[Dict[str, Any]], query: str, context: str) -> str:
+    """If the query is about an M&A event, extract the most relevant sentences
+    from the top chunks and prepend them so they land first in the flat prompt."""
+    if not query or not docs:
+        return context
+    ql = query.lower()
+    if not any(kw in ql for kw in _MA_QUERY_KEYWORDS):
+        return context
+    facts = []
+    for doc in docs[:3]:
+        text = doc.get("text", "") or ""
+        # Split on sentence boundaries and collect M&A sentences
+        for sent in text.replace(". ", ".|").replace("! ", "!|").replace("? ", "?|").split("|"):
+            sl = sent.lower()
+            if any(kw in sl for kw in _MA_CHUNK_KEYWORDS) and len(sent.strip()) > 30:
+                facts.append(sent.strip())
+        if len(facts) >= 3:
+            break
+    if not facts:
+        return context
+    # Cap prefix at 300 chars to avoid pushing total prompt past llama.cpp's
+    # token context window (4096 tokens) on dense documents like PDFs.
+    prefix_body = " | ".join(facts[:3])[:300]
+    prefix = "KEY FACTS (answer the query from these): " + prefix_body + " "
+    return prefix + context
 
 
 # COMPOSE CONTEXT + HISTORY
@@ -605,9 +687,6 @@ class RAGPipeline:
             except Exception as _og_err:
                 logger.warning(event="rag_pipeline_output_guard_failed", error=str(_og_err), session_id=session_id)
 
-            # MEMORY WRITE — SECTION 4.7
-            self._store_memory(session_id, query, answer)
-
             total_latency = round(time.time() - start, 2)
 
             logger.info(
@@ -662,6 +741,7 @@ class RAGPipeline:
         self,
         query: str,
         session_id: str = "default",
+        user_id: Optional[str] = None,
     ) -> Iterator[str]:
 
         query = _normalize(query)
@@ -674,12 +754,52 @@ class RAGPipeline:
                 raw_docs  = retriever.search(
                     query=query,
                     session_id=session_id,
-                    top_k=min(3, settings.DEFAULT_TOP_K),
+                    top_k=settings.DEFAULT_TOP_K,
+                    user_id=user_id,
                 )
 
                 docs    = _normalize_docs(raw_docs)
                 docs    = _dedup_docs(docs)
+
+                # RETRIEVAL GATE — the genuine "no documents" case is decided
+                # HERE, deterministically. The retriever already applies
+                # HYBRID_MIN_SCORE / BM25_MIN_SCORE, so an empty result means
+                # nothing relevant exists: emit the canonical message and skip
+                # the LLM. When docs DO exist and the model still refuses, that
+                # refusal is caught below and the accurate meta answer is used
+                # instead — so the user never sees a spurious refusal flash.
+                if not docs:
+                    logger.info(
+                        event="rag_stream_no_relevant_docs",
+                        session_id=session_id,
+                    )
+                    yield (
+                        "I could not find any relevant documents in your "
+                        "knowledge base to answer this question."
+                    )
+                    return
+
+                # RERANK — use the module-level singleton so the cross-encoder model
+                # is loaded once and shared across all streaming requests. Fixes
+                # "lost in the middle" failures where BM25/Qdrant cosine rank 1
+                # differs from semantic rank 1 (e.g. quantum-computing chunk beats
+                # Business-Segments for acquisition queries without reranking).
+                try:
+                    _rer = _get_stream_reranker()
+                    if _rer is not None:
+                        _reranked = _rer.rerank(query, docs, top_k=settings.RAG_TOP_K, session_id=session_id)
+                        if _reranked:
+                            docs = _reranked
+                        else:
+                            docs = sorted(docs, key=lambda d: d.get("score", 0.0), reverse=True)[:settings.RAG_TOP_K]
+                    else:
+                        docs = sorted(docs, key=lambda d: d.get("score", 0.0), reverse=True)[:settings.RAG_TOP_K]
+                except Exception as _re_err:
+                    logger.warning(event="rag_stream_rerank_failed", error=str(_re_err))
+                    docs = sorted(docs, key=lambda d: d.get("score", 0.0), reverse=True)[:settings.RAG_TOP_K]
+
                 context = _build_context(docs, settings.MAX_CONTEXT_CHARS)
+                context = _prepend_key_facts(docs, query, context)
 
                 builder = self._get_prompt_builder()
                 prompt  = builder.build_prompt(
@@ -710,16 +830,39 @@ class RAGPipeline:
                 answer = "".join(collected_tokens).strip()
                 try:
                     from app.guardrails.output_guard import check as _og_check
-                    _sources = [{"filename": d.get("source", "") if isinstance(d, dict) else ""} for d in docs]
-                    _ctx = [d.page_content if hasattr(d, "page_content") else str(d) for d in docs]
+                    _sources = [{"filename": d.get("metadata", {}).get("source", "") if isinstance(d, dict) else ""} for d in docs]
+                    _ctx = [d.get("text", "") if isinstance(d, dict) else (d.page_content if hasattr(d, "page_content") else "") for d in docs]
                     _og = _og_check(answer, context_chunks=_ctx, sources=_sources, session_id=session_id)
                     answer = _og.text
                 except Exception as _og_err:
                     logger.warning(event="rag_stream_output_guard_failed", error=str(_og_err))
 
-                if answer:
-                    yield answer
-                    self._store_memory(session_id, query, answer)
+                # REFUSAL HANDLING — docs WERE retrieved (we passed the retrieval
+                # gate above), so a refusal here means the model declined despite
+                # relevant context. Do NOT stream the refusal text: it would flash
+                # letter-by-letter and then be replaced, which is the exact UX bug
+                # we are fixing. Instead emit a sentinel so the client streams the
+                # accurate meta-path answer (CrossEncoder + CoT) it already has in
+                # flight. The genuine "no documents" case never reaches here — it
+                # is handled by the deterministic retrieval gate above.
+                if not answer or _is_llm_refusal(answer):
+                    logger.info(event="rag_stream_llm_refused_using_meta", session_id=session_id)
+                    yield "\x00REFUSAL\x00"
+                    return
+
+                yield answer
+                # Memory write is handled by query_pipeline._store_interaction()
+                # which is always called by the /query endpoint after streaming.
+                # Writing here too causes every exchange to appear twice in MongoDB.
+
+                # Emit sources so the client can display them immediately
+                # without waiting for the separate /rag/query round-trip.
+                try:
+                    import json as _json
+                    _p248 = _build_p248_sources(docs)
+                    yield "\x00SOURCES\x00" + _json.dumps(_p248)
+                except Exception:
+                    pass
 
             except Exception as e:
                 logger.error(

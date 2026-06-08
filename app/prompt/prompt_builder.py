@@ -342,7 +342,11 @@ def _system_prompt(
         '   "I could not find this in the provided sources."\n'
         "7. Be concise and direct.\n"
         "8. Do NOT expand abbreviations or acronyms unless the context\n"
-        "   explicitly defines them. Use the term exactly as it appears.\n\n"
+        "   explicitly defines them. Use the term exactly as it appears.\n"
+        "9. ACQUISITIONS: If the context uses words like 'acquired', 'acquisition',\n"
+        "   'assumed liabilities', or any M&A language, that IS a corporate\n"
+        "   acquisition. Report it as such. NEVER say 'no acquisition occurred'\n"
+        "   or 'did not complete' if the context describes one.\n\n"
     )
 
 

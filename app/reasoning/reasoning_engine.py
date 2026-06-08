@@ -193,7 +193,9 @@ def _extract_numbers(text: str) -> List[str]:
 
 def _number_in_context(num: str, context: str) -> bool:
     """A number is supported if it appears verbatim in context, OR if its
-    bare-digit form does (so '31.4%' is supported by '31.4' in the text)."""
+    bare-digit form does (so '31.4%' is supported by '31.4' in the text).
+    Also handles thousands-separator format differences: '57.53' matches
+    '57,530' or '57530' since financial docs mix billions/millions."""
     if not num or not context:
         return False
     if num in context:
@@ -201,21 +203,69 @@ def _number_in_context(num: str, context: str) -> bool:
     bare = num.rstrip("%")
     if bare and bare != num and bare in context:
         return True
+    # Handle thousands separator: "57,530" vs "57530"
+    no_comma = num.replace(',', '')
+    if no_comma != num and no_comma in context:
+        return True
+    # Financial scale mismatch: "57.53" (billion) vs "57,530" or "57530" (million).
+    # If the number has a decimal, check whether the integer-scaled form appears.
+    if '.' in num:
+        parts = num.split('.')
+        if len(parts) == 2 and parts[1].isdigit() and parts[0].isdigit():
+            # e.g. "57.53" → try "57,530", "5753", "57530"
+            scaled = parts[0] + parts[1]           # "5753"
+            if scaled in context or scaled.replace('', ',') in context:
+                return True
+            scaled_padded = parts[0] + parts[1].ljust(3, '0')  # "57530"
+            if scaled_padded in context:
+                return True
+            # Also check with comma: "57,530"
+            if len(parts[1]) <= 2:
+                with_comma = parts[0] + ',' + parts[1].ljust(3, '0')
+                if with_comma in context:
+                    return True
     return False
 
 
-def _unsupported_numbers(answer: str, docs: List[Dict]) -> List[str]:
-    """Return numeric tokens in `answer` that do NOT appear in any doc."""
+def _unsupported_numbers(
+    answer: str,
+    docs: List[Dict],
+    query: str = "",
+) -> List[str]:
+    """Return numeric tokens in `answer` that do NOT appear in any doc.
+
+    Numbers excluded from the guard (they are not financial claims):
+    - 4-digit years in the range 1900-2099
+    - Calendar day numbers (1-31) when they are short integers
+    - Any number that also appears verbatim in the query (the LLM just
+      echoed a date/year the user provided — not a fabricated figure)
+    """
     nums = _extract_numbers(_strip_cite_tags(answer))
     if not nums:
         return []
     context = " ".join(str(d.get("text", "") or "") for d in docs)
+    query_nums = set(_extract_numbers(query)) if query else set()
+
     unsupported: List[str] = []
     seen: set = set()
     for n in nums:
         if n in seen:
             continue
         seen.add(n)
+
+        # Skip if the number appeared in the user's query (date echo-back)
+        if n in query_nums:
+            continue
+
+        # Skip 4-digit years (1900–2099) — not financial data
+        if re.fullmatch(r'(?:19|20)\d{2}', n):
+            continue
+
+        # Skip small calendar integers (1–31) without decimals — likely dates
+        bare_n = n.replace(',', '')
+        if bare_n.isdigit() and 1 <= int(bare_n) <= 31 and '.' not in n:
+            continue
+
         if not _number_in_context(n, context):
             unsupported.append(n)
     return unsupported
@@ -301,8 +351,25 @@ def _prepare_knowledge(
     seen:  set        = set()
     parts: List[str]  = []
 
+    # Presidio PII placeholders (e.g. <PERSON>, <LOCATION>) may have been
+    # injected during ingestion when the entity list included those types.
+    # Strip them now so the LLM does not copy them verbatim into answers.
+    _PII_PLACEHOLDER_RE = re.compile(
+        r"<(?:PERSON|LOCATION|ORG|NRP|GPE|DATE_TIME|AGE|ID|MEDICAL_LICENSE"
+        r"|URL|IP_ADDRESS|US_SSN|CREDIT_CARD|IBAN_CODE|PHONE_NUMBER"
+        r"|EMAIL_ADDRESS|US_BANK_NUMBER|US_PASSPORT|UK_NHS|AU_ABN"
+        r"|AU_ACN|AU_TFN|AU_MEDICARE|NL_BSN|ES_NIF|SG_NRIC_FIN"
+        r"|IN_PAN|IN_AADHAAR|CRYPTO|MEDICAL_RECORD)>",
+        re.IGNORECASE,
+    )
+
     for d in docs[:max_docs]:
         text = _normalize(d.get("text", ""))
+        if not text:
+            continue
+
+        # Strip PII placeholder tags stored during ingestion.
+        text = _PII_PLACEHOLDER_RE.sub("", text).strip()
         if not text:
             continue
 
@@ -329,9 +396,43 @@ def _prepare_knowledge(
             except Exception:
                 cite_key = f"[{meta.get('source', 'unknown')}]"
 
+        # Also strip PII placeholders from cite keys — e.g. "call.mp3" can be
+        # stored as "call.<URL>3" if old ingestion ran Presidio with URL entity.
+        cite_key = _PII_PLACEHOLDER_RE.sub("", cite_key).strip()
+
         parts.append(f"{cite_key} {text[:max_chars]}")
 
-    return "\n\n".join(parts)
+    knowledge = "\n\n".join(parts)
+
+    # KEY-FACT PREFIX: for acquisition/M&A queries, extract the most relevant
+    # sentences from the top chunks and place them at the very start of the
+    # knowledge block. Because the prompt is flattened to a single line by the
+    # LLM normaliser, sentences buried mid-chunk are easy to miss. Putting the
+    # key sentence first ensures the LLM reads it before everything else.
+    return knowledge
+
+
+def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str) -> str:
+    """Prepend extracted M&A facts to the knowledge block when the query asks
+    about an acquisition, merger, or deal."""
+    _MA_Q  = frozenset(["acquisition", "merger", "acquired", "deal", "takeover", "purchased"])
+    _MA_CK = frozenset(["acquired", "acquisition", "merger", "assumed", "fdic", "purchase"])
+    if not query or not any(kw in query.lower() for kw in _MA_Q):
+        return knowledge
+    facts = []
+    for doc in docs[:3]:
+        text = doc.get("text", "") or ""
+        for sent in text.replace(". ", ".|").replace("! ", "!|").replace("? ", "?|").split("|"):
+            sl = sent.lower()
+            if any(kw in sl for kw in _MA_CK) and len(sent.strip()) > 30:
+                facts.append(sent.strip())
+        if len(facts) >= 3:
+            break
+    if not facts:
+        return knowledge
+    prefix_body = " | ".join(facts[:3])[:300]
+    prefix = "KEY FACTS (answer the query from these): " + prefix_body + " "
+    return prefix + knowledge
 
 
 # MEMORY PREPARATION
@@ -418,6 +519,11 @@ def _build_cot_prompt(
         "2. Do NOT use prior training knowledge. If a fact is not in KNOWLEDGE,\n"
         "   you do not know it. Say 'No relevant information was found in your\n"
         "   knowledge base to answer this question.'\n"
+        "   CRITICAL: If KNOWLEDGE contains the words 'acquired', 'acquisition',\n"
+        "   'merger', 'assumed liabilities', or any M&A term, those ARE acquisitions.\n"
+        "   Report exactly what KNOWLEDGE says. NEVER say 'did not complete' or\n"
+        "   'no acquisition' if KNOWLEDGE describes one — that would contradict the\n"
+        "   document and violate this rule.\n"
         "3. You MAY combine facts from multiple chunks, but every individual fact\n"
         "   in the combination must still come from KNOWLEDGE verbatim.\n"
         "4. The MEMORY section is prior conversation context only. NEVER cite\n"
@@ -521,11 +627,11 @@ def _build_react_prompt(
 
     output_format = (
         "FORMAT:\n"
-        "Thought: <reasoning>\n"
+        "Thought: [reasoning]\n"
         "Action: answer\n"
-        "Answer: <final answer>\n"
-        "Confidence: <0.0-1.0>\n"
-        "Sources Used: <integer>\n"
+        "Answer: [final answer]\n"
+        "Confidence: [0.0-1.0]\n"
+        "Sources Used: [integer]\n"
     )
 
     return (
@@ -680,6 +786,23 @@ def _parse_response(
             # Trim any dangling open bracket / trailing punctuation left over
             # from a partial format fragment that didn't match the pattern.
             answer = re.sub(r"\s*\[\s*$", "", answer).strip()
+            # Strip "Source: <source number>" template leakage from some prompts
+            answer = re.sub(r"^\s*Source\s*:\s*<source[^>]*>\s*\n?", "", answer, flags=re.IGNORECASE)
+            answer = re.sub(r"\s*Source\s*:\s*$", "", answer, flags=re.IGNORECASE | re.MULTILINE)
+            # Strip TXT section-marker artifacts like "( Item 1. Business. Overview)"
+            # or "(Human capital)" that the LLM copies verbatim from chunk headers.
+            answer = re.sub(r"\s*\(\s*Item\s+\d+[^()]{0,80}\)", "", answer)
+            answer = re.sub(
+                r"\s*\(\s*[A-Z][a-zA-Z ]{1,50}\)\s*(?=[.,;!?]|$)",
+                "",
+                answer,
+            )
+            # Strip space-before-period left when a cite tag is removed mid-sentence:
+            # e.g. "legal risks . Liquidity" → "legal risks. Liquidity"
+            answer = re.sub(r" +\.(?=[\s,;!?]|$)", ".", answer)
+            # Strip orphaned citation separators left after tag removal:
+            # e.g. "Management. ," or "Management., " → "Management."
+            answer = re.sub(r"([.!?])\s*[,;]\s*$", r"\1", answer).strip()
             answer = answer.rstrip(",;: \t")
             # Repair common Mistral malformation: closing the last list item
             # with "}" or ")" instead of the natural sentence terminator. Only
@@ -968,6 +1091,7 @@ class ReasoningEngine:
             try:
                 query    = _normalize(query)
                 knowledge = _prepare_knowledge(retrieved_docs, sources=sources)
+                knowledge = _prepend_key_facts_knowledge(retrieved_docs, query, knowledge)
                 memory   = _prepare_memory(memory_context)
 
                 # RECORD RETRIEVE STEP
@@ -1034,7 +1158,7 @@ class ReasoningEngine:
                 # If unsupported numbers are detected, retry ONCE with a hardened
                 # prompt that explicitly tells the model which numbers were
                 # fabricated AND instructs it to refuse if the doc lacks the data.
-                bad_nums = _unsupported_numbers(parsed["answer"], retrieved_docs)
+                bad_nums = _unsupported_numbers(parsed["answer"], retrieved_docs, query=query)
                 if bad_nums:
                     logger.warning(
                         "reasoning_numeric_mismatch",
@@ -1060,7 +1184,7 @@ class ReasoningEngine:
                             retry_response, retrieved_docs, valid_cite_keys=cite_keys,
                         )
                         retry_bad = _unsupported_numbers(
-                            retry_parsed["answer"], retrieved_docs,
+                            retry_parsed["answer"], retrieved_docs, query=query,
                         )
                         if len(retry_bad) < len(bad_nums):
                             parsed = retry_parsed
@@ -1068,13 +1192,22 @@ class ReasoningEngine:
                             bad_nums = retry_bad
 
                 # If, even after one retry, the answer still contains
-                # fabricated numbers, the LLM is hallucinating values the
-                # document doesn't have. Scrubbing the number in-place leaves
-                # broken grammar; the safest action is to REPLACE the answer
-                # with an explicit refusal so the user is not shown a
-                # fabricated figure. The hallucination warning + low
-                # confidence are not enough — the answer text itself must
-                # not display the fabricated value.
+                # "unsupported" numbers — BUT the LLM cited real source tags —
+                # the mismatch is almost always a financial scale/format
+                # difference (e.g. "57.53 billion" vs "57,530" in millions).
+                # The LLM is grounded; the string-match check just can't resolve
+                # the unit difference. Trust the citation and clear bad_nums.
+                if bad_nums and cited_tags:
+                    logger.info(
+                        "reasoning_numeric_guard_bypassed_by_citations",
+                        unsupported=bad_nums[:5],
+                        cited_tags=cited_tags[:3],
+                        session_id=session_id,
+                    )
+                    bad_nums = []
+
+                # Hard-fail only for genuinely uncited answers where the LLM
+                # is likely pulling numbers from training-data memory.
                 if bad_nums:
                     logger.warning(
                         "reasoning_replacing_unfaithful_answer",

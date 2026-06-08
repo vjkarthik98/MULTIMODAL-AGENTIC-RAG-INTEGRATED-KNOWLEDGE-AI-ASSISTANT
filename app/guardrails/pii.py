@@ -91,13 +91,16 @@ def _get_engines():
 
 
 def _get_entity_types() -> List[str]:
+    # PERSON is intentionally excluded — CEO names, author names, and other
+    # public figures are not PII in this context and cause false positives.
+    _SAFE = ["EMAIL_ADDRESS", "PHONE_NUMBER", "US_SSN", "CREDIT_CARD", "IP_ADDRESS"]
     try:
         from app.guardrails._policy_loader import get_policy
-        return get_policy().get("pii", {}).get("entity_types", [
-            "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "US_SSN", "CREDIT_CARD",
-        ])
+        policy_types = get_policy().get("pii", {}).get("entity_types", _SAFE)
+        # Always strip PERSON even if policy re-adds it
+        return [e for e in policy_types if e != "PERSON"]
     except Exception:
-        return ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "US_SSN", "CREDIT_CARD"]
+        return _SAFE
 
 
 def _apply_extra_regex(text: str) -> str:

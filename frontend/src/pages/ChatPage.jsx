@@ -14,6 +14,18 @@ const CHAT_ICON = (
   </svg>
 )
 
+const _REFUSALS = [
+  'could not find', 'cannot find', 'no relevant information',
+  'not provided in', 'not mentioned in', "i don't know",
+  'i do not know', "couldn't find", 'not available in',
+  'not in the provided', 'not found in',
+]
+// Kept only as an end-of-stream safety net: if the model ever ignores the
+// extractive prompt and still refuses on a doc-present query, the parallel
+// meta answer replaces it after the stream ends. This is the rare path now,
+// not the common one — the backend handles refusal deterministically.
+const isRefusal = (t) => !t || _REFUSALS.some(p => t.toLowerCase().includes(p))
+
 const PLACEHOLDERS = [
   'Ask anything about your files…',
   'Summarise a document…',
@@ -98,10 +110,28 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
   // Strip LLM format artifacts from the streamed text so users never see
   // raw numeric citation indices, format fields, or summary epilogues.
   const cleanStreamText = (raw) => raw
+    .replace(/\(\s*[\d.]+\s+is\s+(?:the\s+)?most\s+confident\s*\)/gi, '')  // "(1.0 is most confident)" confidence-field leak
+    .replace(/\(\s*confidence\s*[:=]?\s*[\d.]+\s*\)/gi, '')                // "(confidence: 0.9)"
+    .replace(/^\s*(?:Timeline|Overview|Summary|Context)\s*:\s*\n?/i, '')   // "Timeline:" header label
+    .replace(/^\s*Source\s*:\s*<source[^>]*>\s*\n?/i, '')                  // "Source: <source number>"
+    .replace(/\s*Source\s*:\s*$/im, '')                                     // Trailing bare "Source:" label
+    .replace(/^\s*\[?\s*Answer\s*\]?\s*:\s*/i, '')                         // Leading "Answer:" or "[Answer:"
+    .replace(/\n\s*\[?\s*Answer\s*\]?\s*:\s*/gi, '\n')                     // Mid-text "Answer:" on its own line
     .replace(/\s*\[\d+(?:,\s*\d+)*\]/g, '')                               // [1,3] [1,2,4]
-    .replace(/\n?(Confidence|Sources Used|Answer Tags|Reasoning)\s*:\s*[^\n]*/gi, '')
+    .replace(/\s+\(\d+\)(?=[\s.,;!?]|$)/g, '')                           // "(1)" footnote markers after words
+    .replace(/\s*\[[^\]]{3,120}\.(txt|pdf|docx?|xlsx?|csv|mp3|mp4|wav|png|jpg|jpeg)\s*[^\]]{0,60}\]/gi, '')  // inline [filename.ext] cite tags
+    .replace(/\s*\[[^\]\n]*<[A-Z_]{2,20}>[^\]\n]*\]/g, '')                // mangled cite tag, e.g. [aapl_def14a_<URL>cx] (scrubber ate the .docx)
+    .replace(/\n?(Answer Tags|Confidence|Sources Used|Reasoning)\s*:\s*[^\n]*/gi, '')
+    .replace(/\n?\s*Sources?\s*:\s*$/im, '')                              // trailing "Sources:" or "Source:" the LLM appended
     .replace(/\n?Therefore,?\s+the\s+answer\s+is\s*:?\s*<text>[\s\S]*?<\/text>/gi, '')
     .replace(/\n?Therefore,?\s+the\s+answer\s+is\s*:?[^\n]*/gi, '')
+    .replace(/<(?:PERSON|LOCATION|ORG|NRP|GPE|DATE_TIME|AGE|ID|URL|IP_ADDRESS|US_SSN|CREDIT_CARD|PHONE_NUMBER|EMAIL_ADDRESS)>/gi, '')
+    .replace(/\s*\[No source[^\]]{0,120}\]/gi, '')                         // "[No source for X]" cite-miss artifacts
+    .replace(/\s*\(\s*Item\s+\d+[^()]{0,80}\)/g, '')                      // "(Item 1. Business. Overview)"
+    .replace(/\s*\(\s*[A-Z][a-zA-Z ]{1,50}\)\s*(?=[.,;!?]|$)/g, '')      // "(Overview)" "(Human capital)" as sentence-end section refs
+    .replace(/ +\.(?=[\s,;!?]|$)/g, '.')      // "legal risks ." → "legal risks."
+    .replace(/([.!?])\s*[,;]\s*$/g, '$1')   // "Management. ," → "Management."
+    .replace(/[,;]\s*$/, '')                  // bare trailing comma/semicolon
     .trim()
 
   const handleSend = useCallback(async (overrideText, { skipUserMessage = false } = {}) => {
@@ -127,6 +157,31 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
     const controller = new AbortController()
     abortRef.current = controller
     let fullText = ''
+    let streamedSources = null
+    let refused = false
+
+    // Fire queryMeta in parallel with streaming so sources + fallback answer
+    // are ready the moment streaming finishes — no sequential wait.
+    const metaPromise = queryMeta(auth.token, text, sessionId)
+
+    // Animate a completed string into the bubble letter-by-letter (8ms/char,
+    // matching the backend's re-chunk pacing). Used for the meta answer when
+    // the streaming model refused — so the fallback still feels like live
+    // streaming instead of appearing all at once.
+    const streamTextIntoBubble = async (full) => {
+      const clean = cleanStreamText(full)
+      for (let i = 1; i <= clean.length; i++) {
+        if (controller.signal.aborted) break
+        const shown = clean.slice(0, i)
+        setMessages(prev => prev.map(m =>
+          m.id === botId ? { ...m, content: shown, pending: false } : m
+        ))
+        await new Promise(r => setTimeout(r, 8))
+      }
+      setMessages(prev => prev.map(m =>
+        m.id === botId ? { ...m, content: clean, pending: false } : m
+      ))
+    }
 
     try {
       const res = await streamQuery(auth.token, text, sessionId, controller.signal)
@@ -151,12 +206,30 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
             if (!line.startsWith('data: ')) continue
             const raw = line.slice(6)
             if (raw === '[DONE]' || raw === '[Stream interrupted]') { done = true; break }
-            // Chunks arrive JSON-encoded so embedded newlines survive the
-            // SSE "\n\n" framing; fall back to the raw string for safety.
-            let token = raw
-            try { token = JSON.parse(raw) } catch { /* not JSON — use raw */ }
-            if (token) {
+            let parsed
+            try { parsed = JSON.parse(raw) } catch { parsed = raw }
+            // Refusal signal: the streaming model declined despite relevant
+            // docs. Keep the typing indicator (don't render the refusal text)
+            // and stream the accurate meta answer once the stream ends.
+            if (parsed && typeof parsed === 'object' && parsed.__type__ === 'refusal') {
+              refused = true
+              continue
+            }
+            // Sources event emitted by the stream after text is complete
+            if (parsed && typeof parsed === 'object' && parsed.__type__ === 'sources') {
+              streamedSources = parsed.data || []
+              setMessages(prev => prev.map(m =>
+                m.id === botId ? { ...m, sources: streamedSources } : m
+              ))
+              continue
+            }
+            const token = typeof parsed === 'string' ? parsed : raw
+            if (token && !refused) {
               fullText += token
+              // Letter-by-letter from char 1. A genuine "no documents" case is
+              // the correct canonical message and streams normally; a wrong
+              // refusal never reaches here (backend sends a refusal signal
+              // instead), so there is no flash to hide.
               setMessages(prev => prev.map(m =>
                 m.id === botId ? { ...m, content: cleanStreamText(fullText), pending: false } : m
               ))
@@ -166,15 +239,57 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
         }
       }
 
-      const meta = await queryMeta(auth.token, text, sessionId)
-      setMessages(prev => prev.map(m =>
-        m.id === botId ? {
-          ...m,
-          content:  meta?.answer || fullText,
-          sources:  meta?.sources || [],
-          pending: false, streaming: false,
-        } : m
-      ))
+      const streamedAnswer = cleanStreamText(fullText)
+
+      // Fall back to the meta answer when the backend signalled a refusal OR the
+      // streamed answer cleaned down to empty/refusal. The empty case is the
+      // bug behind the blank bubble: the model sometimes emits only a citation
+      // tag or a bare "Answer:" label, which passes the backend's non-empty
+      // check but strips to "" here. isRefusal("") is true, so this catches it.
+      // The meta answer is the same one persisted to redis/mongo, so the user
+      // sees the real response instead of an empty bubble.
+      if (refused || isRefusal(streamedAnswer)) {
+        // Reset to the typing indicator while we wait for the meta answer. In
+        // the refused case the bubble was already showing dots; in the empty
+        // case it briefly showed a blank bubble, so this removes that flash.
+        setMessages(prev => prev.map(m =>
+          m.id === botId ? { ...m, content: '', pending: true } : m
+        ))
+        // Stream the accurate meta-path answer letter-by-letter. Sources are set
+        // first so they render the moment `streaming` flips off in `finally`.
+        const meta = await metaPromise
+        const metaAnswer = cleanStreamText(meta?.answer || '')
+        const finalText = metaAnswer ||
+          'I could not find relevant information in your knowledge base to answer this question.'
+        const metaSources = (meta?.sources?.length > 0) ? meta.sources : (streamedSources || [])
+        setMessages(prev => prev.map(m =>
+          m.id === botId ? { ...m, sources: metaSources } : m
+        ))
+        await streamTextIntoBubble(finalText)
+      } else {
+        // The streamed answer is the accurate one — finalize immediately so the
+        // citation chips render the instant the answer completes, without
+        // waiting on the parallel meta pipeline.
+        setMessages(prev => prev.map(m =>
+          m.id === botId ? {
+            ...m,
+            content: streamedAnswer,
+            sources: streamedSources || [],
+            pending: false, streaming: false,
+          } : m
+        ))
+
+        // Background (non-blocking): backfill richer sources (e.g. web queries
+        // whose stream carried none) without touching the answer text.
+        metaPromise.then(meta => {
+          const richerSources = (meta?.sources?.length > 0) ? meta.sources : null
+          if (richerSources && (!streamedSources || streamedSources.length === 0)) {
+            setMessages(prev => prev.map(m =>
+              m.id === botId ? { ...m, sources: richerSources } : m
+            ))
+          }
+        }).catch(() => {})
+      }
     } catch (err) {
       if (err.name === 'AbortError') {
         setMessages(prev => prev.map(m =>

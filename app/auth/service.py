@@ -34,7 +34,6 @@ def _check_password_strength(password: str, email: str) -> None:
             hint = suggestions[0] if suggestions else "Choose a stronger password."
             raise ValueError(f"Password too weak (score {score}/4). {hint}")
     except ImportError:
-        # zxcvbn not available — fall back to basic length check only
         pass
 
 
@@ -47,117 +46,163 @@ def _get_mongo_collection():
     return db[settings.AUTH_COLLECTION]
 
 
+def _doc_to_public(doc: dict) -> UserPublic:
+    return UserPublic(
+        user_id=doc["user_id"],
+        email=doc["email"],
+        role=doc.get("role", "user"),
+        is_active=doc.get("is_active", True),
+        created_at=doc.get("created_at", datetime.now(timezone.utc)),
+    )
+
+
 class AuthService:
 
     def register(self, req: RegisterRequest) -> UserPublic:
-        """Create a new user account. Raises ValueError on duplicate email or weak password."""
-        _check_password_strength(req.password, req.email)
+        """
+        Create or link an email/password account.
 
+        - New email → create account with auth_providers=["email"]
+        - Email exists, Google-only → link: add password + add "email" provider
+        - Email exists, already has email provider → reject (account exists)
+        """
         col = _get_mongo_collection()
+        existing = col.find_one({"email": req.email})
 
-        if col.find_one({"email": req.email}):
-            raise ValueError("An account with this email already exists")
+        if existing:
+            providers = existing.get("auth_providers") or (
+                # Migrate legacy documents that used oauth_only flag
+                ["google"] if existing.get("oauth_only") else ["email"]
+            )
 
+            if "email" in providers:
+                raise ValueError("An account with this email already exists.")
+
+            # Google-only account — user is now adding a password to enable
+            # email/password login as well. Link the two methods.
+            _check_password_strength(req.password, req.email)
+            col.update_one(
+                {"email": req.email},
+                {
+                    "$set":      {"hashed_password": _hash_password(req.password)},
+                    "$addToSet": {"auth_providers": "email"},
+                    "$unset":    {"oauth_only": ""},   # remove legacy flag
+                },
+            )
+            logger.info(
+                event="auth_email_linked_to_google_account",
+                email=req.email,
+                user_id=existing["user_id"],
+            )
+            # Re-fetch to get the updated document
+            doc = col.find_one({"email": req.email})
+            return _doc_to_public(doc)
+
+        # Brand-new account
+        _check_password_strength(req.password, req.email)
         user = UserInDB(
             email=req.email,
             hashed_password=_hash_password(req.password),
+            auth_providers=["email"],
         )
-
         col.insert_one(user.model_dump())
         logger.info(event="auth_user_registered", email=req.email, user_id=user.user_id)
-
-        return UserPublic(
-            user_id=user.user_id,
-            email=user.email,
-            role=user.role,
-            is_active=user.is_active,
-            created_at=user.created_at,
-        )
-
-    def mark_oauth_only(self, email: str) -> None:
-        """Tag an account as OAuth-only so email/password login returns a clear error."""
-        col = _get_mongo_collection()
-        col.update_one({"email": email}, {"$set": {"oauth_only": True}})
+        return _doc_to_public(user.model_dump())
 
     def authenticate(self, email: str, password: str) -> UserPublic:
-        """Verify credentials. Raises ValueError on wrong email/password."""
+        """
+        Verify email/password credentials.
+
+        - Google-only account (no "email" provider) → clear error directing to Google,
+          or inviting them to register with their email to add a password.
+        - Wrong password → generic error (constant-time).
+        """
         col = _get_mongo_collection()
         doc = col.find_one({"email": email})
 
-        # OAuth-only accounts have no usable password — give a clear error before hashing
-        if doc and doc.get("oauth_only"):
-            logger.warning(event="auth_login_failed_oauth_only", email=email)
-            raise ValueError("This account uses Google sign-in. Please click 'Continue with Google' to log in.")
+        if doc:
+            providers = doc.get("auth_providers") or (
+                ["google"] if doc.get("oauth_only") else ["email"]
+            )
+            has_email_provider = "email" in providers
+            has_password = bool(doc.get("hashed_password"))
+
+            if not has_email_provider or not has_password:
+                logger.warning(event="auth_login_failed_no_password", email=email)
+                raise ValueError(
+                    "This account was created with Google sign-in and has no password. "
+                    "Sign in with Google, or use the registration form with this email "
+                    "to add a password to your account."
+                )
 
         # Constant-time failure — always verify even on miss to prevent timing attacks
-        dummy_hash = "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        stored_hash = doc["hashed_password"] if doc else dummy_hash
+        dummy = "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        stored = doc["hashed_password"] if doc else dummy
 
-        if not _verify_password(password, stored_hash) or doc is None:
+        if not _verify_password(password, stored) or doc is None:
             logger.warning(event="auth_login_failed", email=email)
-            raise ValueError("Incorrect email or password")
+            raise ValueError("Incorrect email or password.")
 
         if not doc.get("is_active", True):
-            raise ValueError("Account is disabled")
+            raise ValueError("Account is disabled.")
 
-        # Update last_login
         col.update_one(
             {"email": email},
             {"$set": {"last_login": datetime.now(timezone.utc)}},
         )
-
         logger.info(event="auth_login_success", email=email, user_id=doc["user_id"])
+        return _doc_to_public(doc)
 
-        return UserPublic(
-            user_id=doc["user_id"],
-            email=doc["email"],
-            role=doc.get("role", "user"),
-            is_active=doc.get("is_active", True),
-            created_at=doc.get("created_at", datetime.now(timezone.utc)),
+    # ── Kept for backwards compatibility (called from older code paths) ────────
+
+    def mark_oauth_only(self, email: str) -> None:
+        """Legacy shim — new code uses auth_providers. Sets google provider if not set."""
+        col = _get_mongo_collection()
+        col.update_one(
+            {"email": email},
+            {
+                "$addToSet": {"auth_providers": "google"},
+                "$set":      {"oauth_only": True},   # keep for old readers
+            },
         )
+
+    # ── Lookups ────────────────────────────────────────────────────────────────
 
     def get_by_id(self, user_id: str) -> Optional[UserPublic]:
         col = _get_mongo_collection()
         doc = col.find_one({"user_id": user_id})
-        if not doc:
-            return None
-        return UserPublic(
-            user_id=doc["user_id"],
-            email=doc["email"],
-            role=doc.get("role", "user"),
-            is_active=doc.get("is_active", True),
-            created_at=doc.get("created_at", datetime.now(timezone.utc)),
-        )
+        return _doc_to_public(doc) if doc else None
 
     def get_by_email(self, email: str) -> Optional[UserPublic]:
         col = _get_mongo_collection()
         doc = col.find_one({"email": email})
-        if not doc:
-            return None
-        return UserPublic(
-            user_id=doc["user_id"],
-            email=doc["email"],
-            role=doc.get("role", "user"),
-            is_active=doc.get("is_active", True),
-            created_at=doc.get("created_at", datetime.now(timezone.utc)),
-        )
+        return _doc_to_public(doc) if doc else None
 
     def change_password(self, user_id: str, current_password: str, new_password: str) -> None:
-        """Verify current password then update to new one. Raises ValueError on failure."""
+        """Verify current password then update to new one."""
         col = _get_mongo_collection()
         doc = col.find_one({"user_id": user_id})
         if not doc:
-            raise ValueError("User not found")
+            raise ValueError("User not found.")
+
+        if not doc.get("hashed_password"):
+            raise ValueError(
+                "This account has no password yet. "
+                "Use the registration form with your email to add one."
+            )
 
         if not _verify_password(current_password, doc["hashed_password"]):
-            raise ValueError("Current password is incorrect")
+            raise ValueError("Current password is incorrect.")
 
         email = doc.get("email", "")
         _check_password_strength(new_password, email)
 
         col.update_one(
             {"user_id": user_id},
-            {"$set": {"hashed_password": _hash_password(new_password)}},
+            {
+                "$set":      {"hashed_password": _hash_password(new_password)},
+                "$addToSet": {"auth_providers": "email"},
+            },
         )
         logger.info(event="auth_password_changed", user_id=user_id)
 

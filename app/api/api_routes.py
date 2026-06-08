@@ -656,7 +656,7 @@ async def query_rag(
         if _is_gibberish(query):
             logger.info(event="query_gibberish_rejected", session_id=session_id)
             return {
-                "request_id": request_id, "answer": _GIBBERISH_MSG,
+                "request_id": request_id, "answer": _gibberish_msg(query),
                 "confidence": 0.0, "sources": [], "cache_hit": False,
                 "decision": "gibberish_rejected", "latency": round(time.time() - start, 3),
             }
@@ -770,8 +770,8 @@ async def query_rag(
 # see the comment in RAGPipeline.stream). To still give the UI a live,
 # token-by-token feel, we re-chunk it here and pace the chunks with
 # asyncio.sleep (non-blocking, so other requests keep flowing on the loop).
-_STREAM_CHUNK_CHARS = 4
-_STREAM_CHUNK_DELAY_SEC = 0.012
+_STREAM_CHUNK_CHARS = 1
+_STREAM_CHUNK_DELAY_SEC = 0.008
 
 
 def _stream_chunks(text: str):
@@ -780,11 +780,12 @@ def _stream_chunks(text: str):
 
 
 _VOWELS = frozenset('aeiou')
-_GIBBERISH_MSG = (
-    "Your query doesn't appear to contain a meaningful question. "
-    "Please ask something specific about your documents — for example, "
-    "\"What was the revenue in Q3?\" or \"Summarise the key risks.\""
-)
+def _gibberish_msg(query: str) -> str:
+    return (
+        f'It looks like you typed “{query}”, which doesn’t appear to be '
+        "a complete question or message. "
+        "Could you please clarify what you need help with?"
+    )
 # Stale fallback messages produced by old code versions — treat as cache misses
 _STALE_CACHE_PHRASES = [
     "The provided documents do not contain the information needed to answer this question.",
@@ -801,15 +802,18 @@ def _is_gibberish(query: str) -> bool:
         return False
     token = words[0]
     alpha = re.sub(r'[^a-z]', '', token)
-    # Short single tokens are fine (acronyms, tickers like "AAPL", "RAG")
-    if len(alpha) < 7:
+    # Short single tokens are fine (acronyms, tickers: "AAPL", "RAG", "AI")
+    if len(alpha) < 4:
         return False
     # Digits mixed with random letters (e.g. "12348fdgsfdg")
     if re.search(r'\d', token):
         return True
-    # Very low vowel ratio — English averages ~38%; gibberish drops below 18%
     vowel_count = sum(1 for c in alpha if c in _VOWELS)
-    if vowel_count / len(alpha) < 0.18:
+    # Zero vowels of any length → definite gibberish ("hhshs", "qwrty", "pfft")
+    if vowel_count == 0:
+        return True
+    # Very low vowel ratio — English averages ~38%; gibberish drops below 18%
+    if len(alpha) >= 5 and vowel_count / len(alpha) < 0.18:
         return True
     # Long consonant run (5+) — extremely rare in real English words
     max_run = max((len(m.group()) for m in re.finditer(r'[^aeiou]+', alpha)), default=0)
@@ -848,8 +852,10 @@ async def stream_query(
         if _is_gibberish(query):
             logger.info(event="stream_gibberish_rejected", session_id=session_id)
 
+            _gmsg = _gibberish_msg(query)
+
             async def gibberish_stream():
-                for piece in _stream_chunks(_GIBBERISH_MSG):
+                for piece in _stream_chunks(_gmsg):
                     yield _sse(piece)
                     await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
                 yield "data: [DONE]\n\n"
@@ -861,10 +867,67 @@ async def stream_query(
                          "X-Accel-Buffering": "no"},
             )
 
-        # REDIS CACHE CHECK — must happen before touching the LLM.
-        # The cache is keyed on (session_id, normalised query); on a hit we
-        # stream the cached answer immediately so the user sees an instant
-        # response with no LLM round-trip.
+        # REAL-TIME QUERY DETECTION — must run BEFORE the cache check so stale
+        # KB answers don't mask live Tavily results. Real-time queries should
+        # never be served from cache (stock prices, earnings, news change daily).
+        _REALTIME_SIGNALS = {
+            "today", "now", "current", "latest", "live", "right now",
+            "stock price", "share price", "price today", "news today",
+            "this week", "this month", "currently trading",
+        }
+        _q_lower = query.lower()
+        _is_realtime = any(sig in _q_lower for sig in _REALTIME_SIGNALS)
+
+        if _is_realtime:
+            try:
+                from app.pipeline.query_pipeline import _get_tool_registry
+                _reg = _get_tool_registry()
+                _search_tool = _reg.get_optional("search")
+                if _search_tool is not None:
+                    _tool_out = await asyncio.to_thread(
+                        _search_tool.handler, query, {}, session_id
+                    ) or {}
+                    _web_answer = (_tool_out.get("answer") or "").strip()
+                    if _web_answer:
+                        logger.info(event="stream_realtime_web_search", session_id=session_id)
+
+                        _web_sources = _tool_out.get("sources") or []
+
+                        async def web_event_stream():
+                            for piece in _stream_chunks(_web_answer):
+                                yield _sse(piece)
+                                await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
+                            # Emit the web source URLs as a typed sources event so
+                            # the client renders them as clickable web chips below
+                            # the answer (same contract as the KB path's sentinel).
+                            if _web_sources:
+                                _payload = [
+                                    {"source": u, "modality": "web",
+                                     "page_number": None, "start_time": None}
+                                    for u in _web_sources if u
+                                ]
+                                yield f'data: {{"__type__":"sources","data":{json.dumps(_payload)}}}\n\n'
+                            yield "data: [DONE]\n\n"
+
+                        return StreamingResponse(
+                            web_event_stream(),
+                            media_type="text/event-stream",
+                            headers={
+                                "X-Request-ID":      request_id,
+                                "Cache-Control":     "no-cache",
+                                "X-Accel-Buffering": "no",
+                            },
+                        )
+            except Exception as _web_err:
+                logger.warning(
+                    event="stream_realtime_web_search_failed",
+                    error=str(_web_err),
+                    session_id=session_id,
+                )
+                # Fall through to cache check / normal RAG if web search fails
+
+        # REDIS CACHE CHECK — only for non-realtime queries (realtime bypassed above).
+        # On a cache hit we stream the cached answer immediately.
         try:
             from app.pipeline.query_pipeline import _cache_get
             cached = _cache_get(session_id, query)
@@ -878,13 +941,16 @@ async def stream_query(
 
         if cached and cached.get("answer"):
             cached_answer = str(cached["answer"])
+            cached_sources = cached.get("sources") or []
             logger.debug(event="stream_cache_hit", session_id=session_id)
 
             async def cached_event_stream():
-                # Emit in small chunks to preserve the streaming UX, then done.
                 for piece in _stream_chunks(cached_answer):
                     yield _sse(piece)
                     await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
+                if cached_sources:
+                    import json as _json
+                    yield f'data: {{"__type__":"sources","data":{_json.dumps(cached_sources)}}}\n\n'
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(
@@ -900,17 +966,31 @@ async def stream_query(
 
         # Cache miss — run the full LLM pipeline
         rag = _get_rag_pipeline()
+        _stream_user_id = current_user.user_id
 
         generator = await asyncio.to_thread(
             rag.stream,
             query,
             session_id,
+            _stream_user_id,
         )
 
         async def event_stream():
             try:
                 for token in generator:
                     if not token:
+                        continue
+                    if token.startswith("\x00REFUSAL\x00"):
+                        # The model refused despite relevant docs. Do NOT stream
+                        # the refusal text (that is the flash bug). Signal the
+                        # client to stream the accurate meta-path answer instead.
+                        yield 'data: {"__type__":"refusal"}\n\n'
+                        continue
+                    if token.startswith("\x00SOURCES\x00"):
+                        # Emit sources as a typed JSON event so the client can
+                        # display them immediately without a second round-trip.
+                        # Sentinel is 9 bytes (\x00SOURCES\x00) — slice at [9:]
+                        yield f'data: {{"__type__":"sources","data":{token[9:]}}}\n\n'
                         continue
                     for piece in _stream_chunks(token):
                         yield _sse(piece)
@@ -1130,7 +1210,7 @@ async def clear_memory(
     try:
         from app.memory.memory_manager import MemoryManager
         manager = MemoryManager()
-        await asyncio.to_thread(manager.clear, session_id, user_id)
+        await asyncio.to_thread(manager.clear, session_id)
 
         _audit_log(
             "memory_cleared",
@@ -1406,8 +1486,12 @@ async def delete_knowledge_base_file(
         vs = infra.get_vector_store()
         if vs:
             from qdrant_client.models import Filter, FieldCondition, MatchValue
+            # Include user_id so one user's delete never touches another user's vectors.
             _filter = Filter(
-                must=[FieldCondition(key="source", match=MatchValue(value=safe_name))]
+                must=[
+                    FieldCondition(key="source",  match=MatchValue(value=safe_name)),
+                    FieldCondition(key="user_id", match=MatchValue(value=user_id)),
+                ]
             )
             vs.client.delete(collection_name=vs.text_collection, points_selector=_filter)
             # Vision collection is best-effort — missing collection is not fatal
@@ -1437,6 +1521,17 @@ async def delete_knowledge_base_file(
         # BM25 failure is non-fatal — Qdrant is the primary store. Log and continue.
         logger.warning(event="kb_delete_bm25_failed", file=safe_name, error=str(exc))
 
+    # FLUSH QUERY CACHE — stale cached answers that referenced this file must not
+    # be served after deletion. Flush all qresp:* entries for this user's session.
+    cache_flushed = 0
+    try:
+        memory = infra.get_memory()
+        if memory and hasattr(memory, "cache_flush_query_cache"):
+            cache_flushed = await asyncio.to_thread(memory.cache_flush_query_cache)
+            logger.info(event="kb_delete_cache_flushed", file=safe_name, entries=cache_flushed)
+    except Exception as exc:
+        logger.warning(event="kb_delete_cache_flush_failed", file=safe_name, error=str(exc))
+
     # DELETE FILE — only reached if Qdrant purge succeeded
     file_path.unlink()
 
@@ -1449,7 +1544,8 @@ async def delete_knowledge_base_file(
     )
 
     logger.info(event="knowledge_base_file_deleted", user_id=user_id, file=safe_name,
-                qdrant_purged=qdrant_purged, bm25_purged=bm25_purged)
+                qdrant_purged=qdrant_purged, bm25_purged=bm25_purged,
+                cache_flushed=cache_flushed)
 
     return {
         "request_id":    request_id,
@@ -1458,6 +1554,7 @@ async def delete_knowledge_base_file(
         "user_id":       user_id,
         "qdrant_purged": qdrant_purged,
         "bm25_purged":   bm25_purged,
+        "cache_flushed": cache_flushed,
     }
 
 
@@ -1519,11 +1616,12 @@ async def delete_chat_session(
     request_id = _request_id()
 
     try:
-        # 1. Wipe MongoDB: sessions + messages + summaries
+        # 1. Wipe MongoDB: sessions + messages + summaries.
+        # Treat as idempotent: if the sessions doc was already gone but messages
+        # remain, we still clean everything and return 200 — never 404.
         mongo = infra.get_mongo()
-        deleted = await asyncio.to_thread(mongo.delete_chat_session, user_id, session_id) if mongo else False
-        if not deleted:
-            raise HTTPException(status_code=404, detail="Chat not found")
+        if mongo:
+            await asyncio.to_thread(mongo.delete_chat_session_all, user_id, session_id)
 
         # 2. Clear Redis live context so the session can't be resumed from cache
         try:

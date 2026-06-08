@@ -282,13 +282,21 @@ export default function Sidebar({
   const handleDeleteSession = async (e, id) => {
     e.stopPropagation()
     setSessionMenuId(null)
+    // Optimistic: remove from sidebar and switch away immediately
+    setSessions(prev => prev.filter(s => s.session_id !== id))
+    if (id === currentSessionId) onNewChat?.()
     try {
       await deleteChatSession(auth.token, id)
-      setSessions(prev => prev.filter(s => s.session_id !== id))
-      addToast('Chat removed from Recents', 'success')
-      if (id === currentSessionId) onNewChat?.()
+      addToast('Chat deleted', 'success')
     } catch (err) {
-      addToast(err.message || 'Failed to delete chat', 'error')
+      // 404 = already gone on server — still a success from the user's perspective
+      const alreadyGone = err.message?.toLowerCase().includes('not found') ||
+                          err.message?.includes('404')
+      if (alreadyGone) {
+        addToast('Chat deleted', 'success')
+      } else {
+        addToast(err.message || 'Failed to delete chat', 'error')
+      }
     }
   }
 

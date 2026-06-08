@@ -18,6 +18,7 @@ from typing import Optional
 from urllib.parse import urlencode
 
 import httpx
+from datetime import datetime, timezone
 
 from app.utils.logger import get_logger
 
@@ -144,23 +145,56 @@ async def exchange_google_code(code: str, state: str) -> dict:
 
 def get_or_create_oauth_user(email: str, provider: str):
     """
-    Look up a user by email. If not found, auto-register them.
-    OAuth users get a random unusable password — they always log in via Google.
+    Account-linking login (Option B):
+
+    - Email already exists (any provider) → add this provider to their list,
+      then return the existing account. One user, multiple sign-in methods.
+    - Email not seen before → create a new account with this provider only.
+
     Returns UserPublic.
     """
-    from app.auth.models import RegisterRequest
-    from app.auth.service import AuthService
+    from app.auth.service import _get_mongo_collection, _doc_to_public
+    from app.auth.models import UserInDB
 
-    svc = AuthService()
-    user = svc.get_by_email(email)
-    if user:
-        logger.info(event="oauth_existing_user_login", email=email, provider=provider)
-        return user
+    col = _get_mongo_collection()
+    doc = col.find_one({"email": email})
 
-    # Auto-register: random password they'll never use
-    dummy_password = secrets.token_urlsafe(32) + "Aa1!"
-    req = RegisterRequest(email=email, password=dummy_password)
-    user = svc.register(req)
-    svc.mark_oauth_only(email)   # ensures email/password login gives a clear error
+    if doc:
+        providers = doc.get("auth_providers") or (
+            ["google"] if doc.get("oauth_only") else ["email"]
+        )
+        if provider not in providers:
+            # Link this OAuth provider to the existing account
+            col.update_one(
+                {"email": email},
+                {
+                    "$addToSet": {"auth_providers": provider},
+                    "$unset":    {"oauth_only": ""},   # remove legacy flag
+                    "$set":      {"last_login": datetime.now(timezone.utc)},
+                },
+            )
+            logger.info(
+                event="oauth_provider_linked",
+                email=email,
+                provider=provider,
+                existing_providers=providers,
+            )
+        else:
+            col.update_one(
+                {"email": email},
+                {"$set": {"last_login": datetime.now(timezone.utc)}},
+            )
+            logger.info(event="oauth_existing_user_login", email=email, provider=provider)
+
+        doc = col.find_one({"email": email})
+        return _doc_to_public(doc)
+
+    # New user — create account with this OAuth provider, no password
+    user = UserInDB(
+        email=email,
+        hashed_password=None,
+        auth_providers=[provider],
+    )
+    col.insert_one(user.model_dump())
     logger.info(event="oauth_user_auto_registered", email=email, provider=provider)
-    return user
+    return _doc_to_public(user.model_dump())
