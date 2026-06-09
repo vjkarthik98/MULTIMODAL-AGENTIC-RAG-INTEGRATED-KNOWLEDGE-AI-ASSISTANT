@@ -1,31 +1,11 @@
 import { useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-import { PrismLight as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { oneDark, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism'
-import python     from 'react-syntax-highlighter/dist/esm/languages/prism/python'
-import javascript from 'react-syntax-highlighter/dist/esm/languages/prism/javascript'
-import typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript'
-import bash       from 'react-syntax-highlighter/dist/esm/languages/prism/bash'
-import json       from 'react-syntax-highlighter/dist/esm/languages/prism/json'
-import sql        from 'react-syntax-highlighter/dist/esm/languages/prism/sql'
-import markdown   from 'react-syntax-highlighter/dist/esm/languages/prism/markdown'
-import yaml       from 'react-syntax-highlighter/dist/esm/languages/prism/yaml'
-
-SyntaxHighlighter.registerLanguage('python',     python)
-SyntaxHighlighter.registerLanguage('javascript', javascript)
-SyntaxHighlighter.registerLanguage('js',         javascript)
-SyntaxHighlighter.registerLanguage('typescript', typescript)
-SyntaxHighlighter.registerLanguage('ts',         typescript)
-SyntaxHighlighter.registerLanguage('bash',       bash)
-SyntaxHighlighter.registerLanguage('sh',         bash)
-SyntaxHighlighter.registerLanguage('json',       json)
-SyntaxHighlighter.registerLanguage('sql',        sql)
-SyntaxHighlighter.registerLanguage('markdown',   markdown)
-SyntaxHighlighter.registerLanguage('yaml',       yaml)
-SyntaxHighlighter.registerLanguage('yml',        yaml)
-import { FileText, Globe, Copy, ThumbsUp, ThumbsDown, Check, RotateCcw, Pencil } from 'lucide-react'
+import remarkGfm from 'remark-gfm'
+import { FileText, Globe, Copy, ThumbsUp, ThumbsDown, Check, RotateCcw, Pencil,
+         Image, Sheet, FileVideo, FileAudio, FileType, LetterText, File } from 'lucide-react'
 import { useToast } from '../context/ToastContext'
 import useIsMobile from '../hooks/useIsMobile'
+import { submitFeedback } from '../api/client'
 
 // Extract inline citations from LLM output. Handles both the bare form
 // [filename.pdf] and the page-tagged forms the CoT path emits:
@@ -66,9 +46,15 @@ function parseInlineCitations(content) {
   return { cleanContent: clean, inlineSources: found }
 }
 
-// Deduplicate sources: web sources by hostname, file sources by basename
+// Deduplicate sources: web sources by hostname, file sources by basename.
+// When a key is seen again, keep whichever entry has more locator info
+// (section_title / page_number / start_time) so the richer chip wins.
+function sourceRichness(src) {
+  if (typeof src !== 'object') return 0
+  return (src.section_title ? 2 : 0) + (src.page_number != null ? 2 : 0) + (src.start_time != null ? 1 : 0)
+}
 function deduplicateSources(messageSources, inlineSources) {
-  const seen = new Set()
+  const seen = new Map()   // key → index in result
   const result = []
   const add = (src) => {
     const raw = typeof src === 'string' ? src : (src.source || src.filename || src.file || '')
@@ -79,13 +65,80 @@ function deduplicateSources(messageSources, inlineSources) {
     } else {
       key = raw.toLowerCase().replace(/^.*[/\\]/, '')  // basename
     }
-    if (!key || seen.has(key)) return
-    seen.add(key)
-    result.push(src)
+    if (!key) return
+    if (seen.has(key)) {
+      // Replace if newcomer is richer
+      const idx = seen.get(key)
+      if (sourceRichness(src) > sourceRichness(result[idx])) result[idx] = src
+    } else {
+      seen.set(key, result.length)
+      result.push(src)
+    }
   }
   ;(messageSources || []).forEach(add)
   inlineSources.forEach(add)
   return result
+}
+
+/* ── Detect "no info" responses — sources should never appear with these ── */
+const NO_INFO_PATTERNS = [
+  'no relevant information was found',
+  'no relevant documents found',
+  'could not find any relevant documents',
+  'i could not find any relevant',
+  'no information found in your knowledge base',
+  'please ingest documents first',
+  'no documents found',
+  'nothing relevant was found',
+  'no relevant information',
+]
+function isNoInfoResponse(content) {
+  if (!content) return false
+  const lc = content.toLowerCase()
+  return NO_INFO_PATTERNS.some(p => lc.includes(p))
+}
+
+/* ── Modality colour + icon — single source of truth for both icon and chip text ── */
+function getModalityColor(source, isWeb) {
+  if (isWeb) return '#22d3ee'
+  const modality = typeof source === 'object' ? (source.modality || '') : ''
+  const raw = typeof source === 'string' ? source : (source.source || source.filename || source.file || '')
+  const ext = (raw.split('.').pop() || '').toUpperCase()
+  if (modality === 'audio' || ['MP3','WAV','M4A','OGG','FLAC','OPUS','AIFF','WMA'].includes(ext)) return '#a78bfa'
+  if (modality === 'video' || ['MP4','MOV','AVI','MKV','WEBM'].includes(ext))                    return '#60a5fa'
+  if (modality === 'image' || ['PNG','JPG','JPEG','GIF','WEBP'].includes(ext))                    return '#34d399'
+  if (['table','excel'].includes(modality) || ['XLS','XLSX','CSV'].includes(ext))                 return '#4ade80'
+  if (ext === 'PDF')                                                                               return '#f87171'
+  if (['DOC','DOCX'].includes(ext))                                                               return '#93c5fd'
+  if (ext === 'TXT')                                                                              return '#94a3b8'
+  return '#94a3b8'
+}
+
+function SourceIcon({ source, isWeb }) {
+  const cls   = "flex-shrink-0 mt-[3px]"
+  const color = getModalityColor(source, isWeb)
+  const s     = { color }
+  if (isWeb) return <Globe size={10} className={cls} style={s} />
+
+  const modality = typeof source === 'object' ? (source.modality || '') : ''
+  const raw = typeof source === 'string' ? source : (source.source || source.filename || source.file || '')
+  const ext = (raw.split('.').pop() || '').toUpperCase()
+
+  if (modality === 'audio' || ['MP3','WAV','M4A','OGG','FLAC','OPUS','AIFF','WMA'].includes(ext))
+    return <FileAudio size={10} className={cls} style={s} />
+  if (modality === 'video' || ['MP4','MOV','AVI','MKV','WEBM'].includes(ext))
+    return <FileVideo size={10} className={cls} style={s} />
+  if (modality === 'image' || ['PNG','JPG','JPEG','GIF','WEBP'].includes(ext))
+    return <Image size={10} className={cls} style={s} />
+  if (['table','excel'].includes(modality) || ['XLS','XLSX','CSV'].includes(ext))
+    return <Sheet size={10} className={cls} style={s} />
+  if (ext === 'PDF')
+    return <FileText size={10} className={cls} style={s} />
+  if (['DOC','DOCX'].includes(ext))
+    return <LetterText size={10} className={cls} style={s} />
+  if (ext === 'TXT')
+    return <FileType size={10} className={cls} style={s} />
+  return <File size={10} className={cls} style={s} />
 }
 
 /* ── Source chip ──
@@ -104,6 +157,8 @@ function SourceChip({ source }) {
     // Show hostname without www. prefix
     try { label = new URL(raw).hostname.replace(/^www\./, '') } catch { /* keep raw */ }
   } else if (typeof source === 'object') {
+    const srcExt = (raw.split('.').pop() || '').toUpperCase()
+    const isTxt  = srcExt === 'TXT' || source.modality === 'text'
     if (source.page_number != null) {
       suffix = ` · p.${source.page_number}`
     } else if (source.start_time != null) {
@@ -113,19 +168,23 @@ function SourceChip({ source }) {
         const s = Math.floor(t % 60).toString().padStart(2, '0')
         suffix = ` · ${m}:${s}`
       }
-    } else if (source.section_title) {
-      // DOCX/Word have no page numbers — the nearest heading is the locator.
+    } else if (source.section_title && !isTxt) {
+      // TXT files: filename alone is sufficient citation
       const st = String(source.section_title).trim()
       if (st) suffix = ` · ${st}`
     }
   }
 
-  const chipClass = "inline-flex items-center gap-1.5 text-[11px] rounded-full px-2.5 py-1 mr-1.5 mb-1 select-none transition-colors"
-  const chipStyle = { background: 'var(--t-chp)', border: '1px solid var(--t-chpb)', color: 'var(--t-tx4)' }
-  const chipIcon  = isWeb
-    ? <Globe   size={10} className="flex-shrink-0" style={{ color: 'var(--t-tx5)' }} />
-    : <FileText size={10} className="flex-shrink-0" style={{ color: 'var(--t-tx5)' }} />
-  const chipText  = <span className="whitespace-nowrap">{label}{suffix}</span>
+  const chipClass   = "inline-flex items-start gap-1.5 text-[11px] leading-4 rounded-2xl px-2.5 py-1 mr-1.5 mb-1 select-none transition-colors max-w-full"
+  const chipStyle   = { background: 'var(--t-chp)', border: '1px solid var(--t-chpb)', color: 'var(--t-tx4)' }
+  const color       = getModalityColor(source, isWeb)
+  const chipIcon    = <SourceIcon source={source} isWeb={isWeb} />
+  const chipText    = (
+    <span className="break-words">
+      <span style={{ color }}>{label}</span>
+      {suffix && <span style={{ color, opacity: 0.85 }}>{suffix}</span>}
+    </span>
+  )
 
   if (isWeb) {
     return (
@@ -158,55 +217,47 @@ function formatTime(ts) {
 }
 
 /* ── Code renderer for ReactMarkdown ── */
-function CodeBlock({ dark, inline, className, children }) {
-  const match = /language-(\w+)/.exec(className || '')
-  const lang  = match ? match[1] : 'text'
-  const code  = String(children).replace(/\n$/, '')
-
-  if (inline) {
-    return (
-      <code style={{
-        background: 'var(--t-inp)',
-        border: '1px solid var(--t-bd4)',
-        borderRadius: 4,
-        padding: '1px 5px',
-        fontSize: '0.85em',
-        fontFamily: 'ui-monospace, Consolas, monospace',
-      }}>
-        {children}
-      </code>
-    )
+function CodeBlock({ inline, children }) {
+  const style = {
+    background: 'var(--t-inp)',
+    border: '1px solid var(--t-bd4)',
+    borderRadius: inline ? 4 : 8,
+    padding: inline ? '1px 5px' : '10px 14px',
+    fontSize: '0.85em',
+    fontFamily: 'ui-monospace, Consolas, monospace',
+    display: inline ? 'inline' : 'block',
+    overflowX: inline ? undefined : 'auto',
+    margin: inline ? 0 : '0.6em 0',
   }
-
-  return (
-    <div style={{ position: 'relative', margin: '0.6em 0' }}>
-      <SyntaxHighlighter
-        language={lang}
-        style={dark ? oneDark : oneLight}
-        customStyle={{
-          margin: 0,
-          borderRadius: 10,
-          fontSize: '0.82em',
-          border: `1px solid var(--t-bd3)`,
-        }}
-        showLineNumbers={code.split('\n').length > 4}
-        wrapLongLines={false}
-      >
-        {code}
-      </SyntaxHighlighter>
-    </div>
-  )
+  return inline
+    ? <code style={style}>{children}</code>
+    : <pre style={style}><code>{children}</code></pre>
 }
 
 /* ── Main component ── */
-export default function MessageBubble({ message, isStreaming, dark, onRegenerate, onEdit, showSources = true }) {
+export default function MessageBubble({ message, isStreaming, dark, onRegenerate, onEdit, showSources = true, authToken, sessionId, precedingQuery }) {
   const isUser = message.role === 'user'
   const { addToast } = useToast()
   const isMobile = useIsMobile()
   const [copied, setCopied]   = useState(false)
-  const [vote, setVote]       = useState(null)   // 'up' | 'down' | null
+  const [vote, setVote]       = useState(message.vote ?? null)  // 'up' | 'down' | null — restored from session
   const [isEditing, setIsEditing] = useState(false)
   const [editText, setEditText]   = useState('')
+
+  function handleVote(newVote) {
+    const next = vote === newVote ? null : newVote
+    setVote(next)
+    if (next && authToken && sessionId) {
+      submitFeedback(
+        authToken,
+        sessionId,
+        next,
+        message.id || null,
+        precedingQuery || null,
+        typeof message.content === 'string' ? message.content.slice(0, 500) : null,
+      )
+    }
+  }
 
   // Parse inline citations from LLM content and merge with structured sources, deduped
   const { cleanContent, inlineSources } = parseInlineCitations(message.content)
@@ -334,11 +385,10 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
             <>
               <div className={`prose-chat ${isStreaming ? 'streaming-cursor' : ''}`}>
                 <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
                   components={{
-                    code: ({ inline, className, children, ...props }) => (
-                      <CodeBlock dark={dark} inline={inline} className={className} {...props}>
-                        {children}
-                      </CodeBlock>
+                    code: ({ inline, children }) => (
+                      <CodeBlock inline={inline}>{children}</CodeBlock>
                     ),
                   }}
                 >
@@ -346,8 +396,8 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
                 </ReactMarkdown>
               </div>
 
-              {/* Sources inside the bubble */}
-              {showSources && allSources.length > 0 && !isStreaming && (
+              {/* Sources inside the bubble — hidden when answer says no info was found */}
+              {showSources && allSources.length > 0 && !isStreaming && !isNoInfoResponse(cleanContent) && (
                 <div className="mt-3 pt-2.5 flex flex-wrap" style={{ borderTop: '1px solid var(--t-bbd)' }}>
                   {allSources.map((src, i) => <SourceChip key={i} source={src} />)}
                 </div>
@@ -373,7 +423,7 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
 
             {/* Thumbs up */}
             <button
-              onClick={() => setVote(v => v === 'up' ? null : 'up')}
+              onClick={() => handleVote('up')}
               className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors"
               style={{ color: vote === 'up' ? 'var(--t-accent)' : 'var(--t-tx5)' }}
               onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov2)'}
@@ -385,7 +435,7 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
 
             {/* Thumbs down */}
             <button
-              onClick={() => setVote(v => v === 'down' ? null : 'down')}
+              onClick={() => handleVote('down')}
               className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors"
               style={{ color: vote === 'down' ? 'var(--t-danger)' : 'var(--t-tx5)' }}
               onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov2)'}

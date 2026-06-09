@@ -79,28 +79,41 @@ export async function deleteKBFile(token, filename) {
   return res.json()
 }
 
-export async function ingestFile(token, file, sessionId = 'default') {
-  const form = new FormData()
-  form.append('file', file)
-  form.append('session_id', sessionId)
-  const res = await fetch(`${API}/rag/ingest`, {
-    method: 'POST',
-    headers: bearer(token),
-    body: form,
+export function ingestFile(token, file, sessionId = 'default', abortController = null) {
+  return new Promise((resolve, reject) => {
+    const form = new FormData()
+    form.append('file', file)
+    form.append('session_id', sessionId)
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `${API}/rag/ingest`)
+    xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+    if (abortController) {
+      abortController.signal.addEventListener('abort', () => xhr.abort(), { once: true })
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(JSON.parse(xhr.responseText))
+      } else {
+        const err = (() => { try { return JSON.parse(xhr.responseText) } catch { return {} } })()
+        reject(new Error(err.detail || `Upload failed (${xhr.status})`))
+      }
+    }
+    xhr.onerror = () => reject(new Error('Network error — upload failed'))
+    xhr.onabort = () => reject(new DOMException('Upload cancelled', 'AbortError'))
+    xhr.ontimeout = () => reject(new Error('Upload timed out'))
+    xhr.timeout = 300000 // 5 min for large files
+    xhr.send(form)
   })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}))
-    throw new Error(err.detail || `Upload failed (${res.status})`)
-  }
-  return res.json()
 }
 
 // Returns the raw fetch Response so caller can stream the body
-export function streamQuery(token, query, sessionId, signal) {
+export function streamQuery(token, query, sessionId, signal, noCache = false, sources = null) {
+  const body = { query, session_id: sessionId, no_cache: noCache }
+  if (sources && sources.length) body.sources = sources
   return fetch(`${API}/rag/query/stream`, {
     method: 'POST',
     headers: { ...bearer(token), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, session_id: sessionId }),
+    body: JSON.stringify(body),
     signal,
   })
 }
@@ -197,13 +210,54 @@ export async function deleteChatSession(token, sessionId) {
 }
 
 // Called after streaming to get sources + metadata (hits Redis cache)
-export async function queryMeta(token, query, sessionId) {
+export async function queryMeta(token, query, sessionId, noCache = false, sources = null) {
+  const body = { query, session_id: sessionId, no_cache: noCache }
+  if (sources && sources.length) body.sources = sources
   const res = await fetch(`${API}/rag/query`, {
     method: 'POST',
     headers: { ...bearer(token), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, session_id: sessionId }),
+    body: JSON.stringify(body),
   })
   if (!res.ok) return null
   return res.json()
   // { answer, sources, confidence, decision, latency, ... }
+}
+
+export async function deleteAllChatSessions(token) {
+  const res = await fetch(`${API}/rag/sessions`, {
+    method: 'DELETE',
+    headers: bearer(token),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to clear history')
+  }
+  return res.json()
+}
+
+export async function submitFeedback(token, sessionId, vote, messageId, query, responseSnippet) {
+  try {
+    await fetch(`${API}/rag/feedback`, {
+      method: 'POST',
+      headers: { ...bearer(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        vote,
+        message_id: messageId || null,
+        query: query || null,
+        response_snippet: responseSnippet ? responseSnippet.slice(0, 500) : null,
+      }),
+    })
+  } catch (_) {}  // fire-and-forget — feedback failure must never interrupt the user
+}
+
+// Overwrite the last assistant message in the session so reload = what user saw.
+export async function patchLastMessage(token, sessionId, content, sources, msgId = null) {
+  try {
+    await fetch(`${API}/rag/sessions/${encodeURIComponent(sessionId)}/last-message`, {
+      method: 'PATCH',
+      headers: { ...bearer(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, sources: sources || [], msg_id: msgId }),
+    })
+  } catch (_) {}  // fire-and-forget — failure is non-critical
 }

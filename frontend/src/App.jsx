@@ -75,7 +75,22 @@ export default function App() {
     const storedRefresh = localStorage.getItem('magik_refresh')
     const storedEmail   = localStorage.getItem('magik_email')
     if (storedToken && storedEmail) {
-      getMe(storedToken)
+      // Retry getMe up to 5× with 3s back-off to survive the ~40s uvicorn model-load
+      // window on instance restart.  Only treat a genuine 401/403 as "logged out" —
+      // network errors (backend still booting) keep the spinner until it's ready.
+      const getMeWithRetry = async (token, attempts = 5) => {
+        for (let i = 0; i < attempts; i++) {
+          try {
+            await getMe(token)
+            return 'ok'
+          } catch (err) {
+            const isAuthError = err?.message?.includes('Session expired') || err?.message?.includes('401') || err?.message?.includes('403')
+            if (isAuthError || i === attempts - 1) throw err
+            await new Promise(r => setTimeout(r, 3000))
+          }
+        }
+      }
+      getMeWithRetry(storedToken)
         .then(() => setAuth({ token: storedToken, refreshToken: storedRefresh, email: storedEmail }))
         .catch(async () => {
           // Access token expired (e.g. the browser was closed for a while) —

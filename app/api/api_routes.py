@@ -127,6 +127,7 @@ class QueryRequest(BaseModel):
     # contains any of these substrings. Use this to scope a query to a
     # specific uploaded file when the session has many ingested documents.
     sources: Optional[List[str]] = Field(default=None, max_length=20)
+    no_cache: bool = Field(default=False)
 
     @field_validator("query")
     @classmethod
@@ -151,6 +152,14 @@ class QueryRequest(BaseModel):
             return None
         cleaned = [s.strip()[:256] for s in v if s and s.strip()]
         return cleaned or None
+
+
+class FeedbackRequest(BaseModel):
+    session_id: str = Field(..., min_length=1, max_length=128)
+    vote: str = Field(..., pattern="^(up|down)$")
+    message_id: Optional[str] = Field(default=None, max_length=128)
+    query: Optional[str] = Field(default=None, max_length=500)
+    response_snippet: Optional[str] = Field(default=None, max_length=500)
 
 
 class ClearMemoryRequest(BaseModel):
@@ -416,12 +425,6 @@ async def ingest_document(
                 },
             )
 
-        # PERSIST TO KNOWLEDGE BASE — copy original file before pipeline may clean staging
-        kb_dir = user_knowledge_base_dir(user_id)
-        kb_path = kb_dir / filename
-        import shutil as _shutil
-        _shutil.copy2(str(file_path), str(kb_path))
-
         _audit_log(
             "ingest_received",
             request_id=request_id,
@@ -489,6 +492,14 @@ async def ingest_document(
                     "detail":     "No usable content extracted from file",
                 },
             )
+
+        # PERSIST TO KNOWLEDGE BASE — only after pipeline confirms content was indexed.
+        # Copying before the pipeline (old behaviour) caused failed uploads to appear
+        # in the sidebar because listKB reads from this directory.
+        import shutil as _shutil
+        kb_dir = user_knowledge_base_dir(user_id)
+        kb_path = kb_dir / filename
+        _shutil.copy2(str(file_path), str(kb_path))
 
         # REGISTER DEDUP AFTER SUCCESSFUL PIPELINE
         pipeline_hash = result.get("file_hash", file_hash)
@@ -676,7 +687,8 @@ async def query_rag(
         pipeline_fn = _get_query_pipeline()
 
         result = await asyncio.to_thread(
-            pipeline_fn, query, session_id, request_body.sources, user_id
+            pipeline_fn, query, session_id, request_body.sources, user_id,
+            request_body.no_cache,
         )
 
         if not isinstance(result, dict) or "answer" not in result:
@@ -867,18 +879,30 @@ async def stream_query(
                          "X-Accel-Buffering": "no"},
             )
 
-        # REAL-TIME QUERY DETECTION — must run BEFORE the cache check so stale
-        # KB answers don't mask live Tavily results. Real-time queries should
-        # never be served from cache (stock prices, earnings, news change daily).
+        # WEB SEARCH DETECTION — must run BEFORE the cache check so stale
+        # KB answers never mask live web results. Triggers on:
+        #   • explicit user intent ("from web", "search online", etc.)
+        #   • real-time signals ("today", "stock price", "latest", etc.)
+        # When triggered the web tool is called directly and ONLY web source
+        # chips are emitted — no KB file sources are shown at all.
+        _EXPLICIT_WEB_PHRASES = frozenset({
+            "from web", "from the web", "search web", "search the web",
+            "get from web", "get it from web", "web search", "find online",
+            "search online", "look online", "from internet", "from the internet",
+            "find on the internet", "look it up",
+        })
         _REALTIME_SIGNALS = {
             "today", "now", "current", "latest", "live", "right now",
             "stock price", "share price", "price today", "news today",
             "this week", "this month", "currently trading",
         }
         _q_lower = query.lower()
-        _is_realtime = any(sig in _q_lower for sig in _REALTIME_SIGNALS)
+        _is_web_request = (
+            any(phrase in _q_lower for phrase in _EXPLICIT_WEB_PHRASES)
+            or any(sig in _q_lower for sig in _REALTIME_SIGNALS)
+        )
 
-        if _is_realtime:
+        if _is_web_request:
             try:
                 from app.pipeline.query_pipeline import _get_tool_registry
                 _reg = _get_tool_registry()
@@ -889,7 +913,7 @@ async def stream_query(
                     ) or {}
                     _web_answer = (_tool_out.get("answer") or "").strip()
                     if _web_answer:
-                        logger.info(event="stream_realtime_web_search", session_id=session_id)
+                        logger.info(event="stream_web_search", session_id=session_id)
 
                         _web_sources = _tool_out.get("sources") or []
 
@@ -920,17 +944,17 @@ async def stream_query(
                         )
             except Exception as _web_err:
                 logger.warning(
-                    event="stream_realtime_web_search_failed",
+                    event="stream_web_search_failed",
                     error=str(_web_err),
                     session_id=session_id,
                 )
                 # Fall through to cache check / normal RAG if web search fails
 
-        # REDIS CACHE CHECK — only for non-realtime queries (realtime bypassed above).
+        # REDIS CACHE CHECK — skip for web requests and explicit no_cache (regenerate).
         # On a cache hit we stream the cached answer immediately.
         try:
             from app.pipeline.query_pipeline import _cache_get
-            cached = _cache_get(session_id, query)
+            cached = None if request_body.no_cache else _cache_get(session_id, query)
         except Exception:
             cached = None
 
@@ -973,6 +997,7 @@ async def stream_query(
             query,
             session_id,
             _stream_user_id,
+            request_body.sources,
         )
 
         async def event_stream():
@@ -1647,6 +1672,66 @@ async def delete_chat_session(
         raise HTTPException(status_code=500, detail="Failed to delete chat")
 
 
+@router.delete("/sessions")
+async def delete_all_chat_sessions(
+    request: Request,
+    current_user: UserPublic = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Permanently delete ALL chat sessions for the current user."""
+    user_id = current_user.user_id
+    request_id = _request_id()
+    try:
+        mongo = infra.get_mongo()
+        count = await asyncio.to_thread(mongo.delete_all_chat_sessions, user_id) if mongo else 0
+
+        # Also flush Redis short-term memory for this user
+        try:
+            redis_mem = infra.get_redis_memory()
+            if redis_mem:
+                await asyncio.to_thread(redis_mem.delete_all_user_sessions, user_id)
+        except Exception:
+            pass
+
+        _audit_log("all_sessions_deleted", request_id=request_id,
+                   session_id=user_id, count=count, ip=_client_ip(request))
+        return {"request_id": request_id, "status": "ok", "deleted": count}
+    except Exception as exc:
+        logger.error(event="api_delete_all_sessions_failed", request_id=request_id, error=str(exc))
+        raise HTTPException(status_code=500, detail="Failed to delete history")
+
+
+class LastMessagePatchRequest(BaseModel):
+    content: str = Field(..., min_length=1, max_length=50000)
+    sources: Optional[List[Dict[str, Any]]] = Field(default=None)
+    msg_id: Optional[str] = Field(default=None, max_length=128)
+
+
+@router.patch("/sessions/{session_id}/last-message")
+async def patch_last_message(
+    session_id: str,
+    body: LastMessagePatchRequest,
+    current_user: UserPublic = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Overwrite the last assistant message content + sources so reload shows
+    exactly what the user saw during streaming."""
+    user_id = current_user.user_id
+    try:
+        mongo = infra.get_mongo()
+        if mongo:
+            await asyncio.to_thread(
+                mongo.patch_last_assistant_message,
+                session_id,
+                user_id,
+                body.content,
+                body.sources or [],
+                body.msg_id,
+            )
+        return {"status": "ok"}
+    except Exception as exc:
+        logger.warning(event="api_patch_last_msg_failed", session_id=session_id, error=str(exc))
+        return {"status": "error"}
+
+
 @router.patch("/sessions/{session_id}")
 async def update_chat_session(
     session_id: str,
@@ -1683,3 +1768,46 @@ async def update_chat_session(
     except Exception as exc:
         logger.error(event="api_session_update_failed", request_id=request_id, session_id=session_id, error=str(exc))
         raise HTTPException(status_code=500, detail="Failed to update chat")
+
+
+@router.post("/feedback")
+async def submit_feedback(
+    body: FeedbackRequest,
+    request: Request,
+    current_user: UserPublic = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Record a thumbs-up / thumbs-down rating for an assistant message."""
+    user_id = current_user.user_id
+    request_id = _request_id()
+
+    try:
+        mongo = infra.get_mongo()
+        if mongo:
+            saved, _ = await asyncio.gather(
+                asyncio.to_thread(
+                    mongo.save_feedback,
+                    user_id, body.session_id, body.vote,
+                    body.message_id, body.query, body.response_snippet,
+                ),
+                asyncio.to_thread(
+                    mongo.patch_message_vote,
+                    user_id, body.session_id, body.message_id or "", body.vote,
+                ) if body.message_id else asyncio.sleep(0),
+            )
+        else:
+            saved = False
+
+        _audit_log(
+            "feedback_submitted",
+            request_id=request_id,
+            session_id=user_id,
+            chat_session_id=body.session_id,
+            vote=body.vote,
+            ip=_client_ip(request),
+        )
+
+        return {"request_id": request_id, "status": "ok", "saved": saved}
+
+    except Exception as exc:
+        logger.error(event="api_feedback_failed", request_id=request_id, error=str(exc))
+        raise HTTPException(status_code=500, detail="Failed to save feedback")

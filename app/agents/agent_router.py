@@ -51,6 +51,18 @@ def _get_semaphore() -> asyncio.Semaphore:
 
 # HARD RULE KEYWORD SETS
 _RECENT_WORDS     = {"latest", "today", "news", "recent", "update", "current", "now", "live"}
+# Web/market-data signals — queries mentioning these almost certainly need live external
+# data that won't be inside an ingested document (stock prices, analyst ratings, etc.).
+_WEB_WORDS        = {"stock", "stocks", "analyst", "analysts", "consensus", "sentiment",
+                     "shares", "market cap", "ticker", "earnings reaction", "post-earnings"}
+# Explicit web-request phrases — user directly asked to fetch from the internet.
+# These force a pure "search" route (not hybrid) so file citations never mix in.
+_EXPLICIT_WEB_PHRASES = frozenset({
+    "from web", "from the web", "search web", "search the web",
+    "get from web", "get it from web", "web search", "find online",
+    "search online", "look online", "from internet", "from the internet",
+    "find on the internet", "look it up",
+})
 _MEMORY_WORDS     = {
     "earlier", "previous", "last time", "we discussed", "you said", "before",
     "you mentioned", "earlier you", "last conversation", "what did we",
@@ -121,6 +133,14 @@ class AgentRouter:
 
                 signals = self._analyze(query)
 
+                # HARD RULE: EXPLICIT WEB REQUEST — "get from web", "search online" etc.
+                # Force pure search so no file citations contaminate the result.
+                if any(phrase in query.lower() for phrase in _EXPLICIT_WEB_PHRASES):
+                    d = self._decision("search", "explicit_web_request", 0.98, session_id)
+                    _router_decisions.labels(action="search", method="hard_rule").inc()
+                    self._log_decision(d, signals, start, session_id)
+                    return d
+
                 # HARD RULE: GREETING / CHITCHAT
                 if signals["is_greeting"]:
                     d = self._decision("direct", "greeting_detected", 0.95, session_id)
@@ -153,6 +173,14 @@ class AgentRouter:
                 if signals["is_memory"]:
                     d = self._decision("memory", "memory_reference", 0.9, session_id)
                     _router_decisions.labels(action="memory", method="hard_rule").inc()
+                    self._log_decision(d, signals, start, session_id)
+                    return d
+
+                # HARD RULE: WEB/MARKET DATA — stock prices, analyst reactions,
+                # consensus ratings are live external data not found in any document.
+                if signals["is_web"]:
+                    d = self._decision("hybrid", "web_market_signal", 0.88, session_id)
+                    _router_decisions.labels(action="hybrid", method="hard_rule").inc()
                     self._log_decision(d, signals, start, session_id)
                     return d
 
@@ -232,6 +260,7 @@ class AgentRouter:
 
         return {
             "is_recent":           bool(tokens & _RECENT_WORDS),
+            "is_web":              bool(tokens & _WEB_WORDS),
             "is_memory":           any(
                 re.search(r"\b" + re.escape(w) + r"\b", q, re.IGNORECASE)
                 for w in _MEMORY_WORDS

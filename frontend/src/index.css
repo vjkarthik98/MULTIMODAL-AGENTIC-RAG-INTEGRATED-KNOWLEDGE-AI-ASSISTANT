@@ -133,6 +133,29 @@ html, body, #root {
 }
 .prose-chat a { color: var(--t-accent); text-decoration: underline; }
 
+/* ── Markdown tables ─────────────────────────────── */
+.prose-chat table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75em 0;
+  font-size: 0.88em;
+  overflow-x: auto;
+  display: block;
+}
+.prose-chat th,
+.prose-chat td {
+  border: 1px solid var(--t-bd3);
+  padding: 6px 12px;
+  text-align: left;
+  white-space: nowrap;
+}
+.prose-chat th {
+  background: var(--t-hov);
+  font-weight: 600;
+  color: var(--t-tx2);
+}
+.prose-chat tr:nth-child(even) td { background: var(--t-sur); }
+
 /* Accent-coloured focus ring for themed inputs */
 .t-focus:focus { outline: none; border-color: var(--t-accent) !important; }
 .prose-chat strong { font-weight: 600; color: var(--t-tx1); }
@@ -163,6 +186,15 @@ html, body, #root {
   background-size: 800px 100%;
   animation: shimmer 1.4s ease-in-out infinite;
   border-radius: 8px;
+}
+
+/* ── Upload processing sweep bar ────────────────── */
+@keyframes upload-sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+.upload-sweep {
+  animation: upload-sweep 1.4s ease-in-out infinite;
 }
 
 /* ── Fade-in for new KB file rows ────────────────── */

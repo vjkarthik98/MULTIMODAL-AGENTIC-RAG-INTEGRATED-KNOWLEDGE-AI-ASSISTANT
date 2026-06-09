@@ -3,16 +3,18 @@ import { createPortal } from 'react-dom'
 import {
   X, User, Database, ShieldCheck, ShieldAlert, Sun, Moon,
   Loader2, Trash2, FileText, LogOut, RotateCcw, AlertTriangle, ChevronRight, ChevronLeft,
+  Keyboard,
 } from 'lucide-react'
-import { listKB, deleteKBFile, getMe, changePassword, logoutAll, deleteAccount, clearMemory } from '../api/client'
+import { listKB, deleteKBFile, getMe, changePassword, logoutAll, deleteAccount, clearMemory, deleteAllChatSessions } from '../api/client'
 import { useToast } from '../context/ToastContext'
 import useIsMobile from '../hooks/useIsMobile'
 
 const NAV = [
-  { id: 'account',  label: 'Account',         Icon: User },
-  { id: 'kb',       label: 'Knowledge base',  Icon: Database },
-  { id: 'security', label: 'Security',        Icon: ShieldCheck },
-  { id: 'privacy',  label: 'Privacy & data',  Icon: ShieldAlert },
+  { id: 'account',   label: 'Account',         Icon: User },
+  { id: 'kb',        label: 'Knowledge base',  Icon: Database },
+  { id: 'security',  label: 'Security',        Icon: ShieldCheck },
+  { id: 'privacy',   label: 'Privacy & data',  Icon: ShieldAlert },
+  { id: 'shortcuts', label: 'Shortcuts',       Icon: Keyboard },
 ]
 
 function initialsOf(email) {
@@ -82,9 +84,11 @@ const inputStyle = { background: 'var(--t-inp)', border: '1px solid var(--t-bd2)
 const inputCls   = 'w-full rounded-xl px-4 py-2.5 text-sm outline-none transition-colors t-focus'
 
 /* ── Account ───────────────────────────────────────── */
-function AccountSection({ auth, dark, onToggleTheme, showSources, setShowSources, sessionId, addToast }) {
+function AccountSection({ auth, dark, onToggleTheme, showSources, setShowSources, sessionId, addToast, onClearConversation, onClearAllHistory }) {
   const [profile, setProfile] = useState(null)
   const [clearing, setClearing] = useState(false)
+  const [clearingHistory, setClearingHistory] = useState(false)
+  const [confirmClearHistory, setConfirmClearHistory] = useState(false)
 
   useEffect(() => { getMe(auth.token).then(setProfile).catch(() => {}) }, [auth.token])
 
@@ -96,11 +100,27 @@ function AccountSection({ auth, dark, onToggleTheme, showSources, setShowSources
     setClearing(true)
     try {
       await clearMemory(auth.token, sessionId)
-      addToast('Conversation memory cleared', 'success')
+      addToast('Conversation cleared', 'success')
+      onClearConversation?.()
     } catch (err) {
       addToast(err.message, 'error')
     } finally {
       setClearing(false)
+    }
+  }
+
+  const handleClearAllHistory = async () => {
+    if (!confirmClearHistory) { setConfirmClearHistory(true); return }
+    setClearingHistory(true)
+    setConfirmClearHistory(false)
+    try {
+      await deleteAllChatSessions(auth.token)
+      addToast('All chat history deleted', 'success')
+      onClearAllHistory?.()
+    } catch (err) {
+      addToast(err.message, 'error')
+    } finally {
+      setClearingHistory(false)
     }
   }
 
@@ -136,6 +156,17 @@ function AccountSection({ auth, dark, onToggleTheme, showSources, setShowSources
         <Row title="Conversation memory" desc="Reset what MAGIK remembers from this conversation — your knowledge base stays intact">
           <GhostButton onClick={handleClearMemory} disabled={clearing} spinning={clearing} icon={RotateCcw}>
             Clear memory
+          </GhostButton>
+        </Row>
+        <Row title="Chat history" desc="Permanently delete all conversations from Recents — cannot be undone">
+          <GhostButton
+            onClick={handleClearAllHistory}
+            disabled={clearingHistory}
+            spinning={clearingHistory}
+            icon={Trash2}
+            style={{ color: confirmClearHistory ? 'var(--t-danger)' : undefined, borderColor: confirmClearHistory ? 'var(--t-danger)' : undefined }}
+          >
+            {confirmClearHistory ? 'Confirm delete' : 'Clear all history'}
           </GhostButton>
         </Row>
       </Card>
@@ -349,6 +380,40 @@ function PrivacySection({ auth, onLogout, addToast }) {
   )
 }
 
+/* ── Shortcuts ─────────────────────────────────────── */
+function ShortcutsSection() {
+  const kbdStyle = {
+    background: 'var(--t-hov2)',
+    color: 'var(--t-tx3)',
+    border: '1px solid var(--t-bd3)',
+  }
+  const Keys = ({ keys }) => (
+    <div className="flex items-center gap-1 flex-shrink-0">
+      {keys.map(k => (
+        <kbd key={k} className="text-[11px] px-1.5 py-0.5 rounded font-mono min-w-[22px] text-center" style={kbdStyle}>{k}</kbd>
+      ))}
+    </div>
+  )
+
+  return (
+    <div className="space-y-5">
+      <Card title="Chat">
+        <Row title="Focus input" desc="Jump cursor to the chat box"><Keys keys={['⌘', 'K']} /></Row>
+        <Row title="Send message" desc="Submit your typed message"><Keys keys={['Enter']} /></Row>
+        <Row title="New line" desc="Insert a line break without sending"><Keys keys={['⇧', 'Enter']} /></Row>
+        <Row title="New chat" desc="Start a fresh conversation"><Keys keys={['⌘', '⇧', 'N']} /></Row>
+        <Row title="Scope to file" desc="Type @ to pick a specific KB file for your query"><Keys keys={['@']} /></Row>
+      </Card>
+      <Card title="Interface">
+        <Row title="Collapse sidebar" desc="Close or collapse the left sidebar"><Keys keys={['Esc']} /></Row>
+      </Card>
+      <p className="text-[12px] px-1" style={{ color: 'var(--t-tx6)' }}>
+        ⌘ = Cmd on Mac · Ctrl on Windows/Linux
+      </p>
+    </div>
+  )
+}
+
 /* ── Modal shell ───────────────────────────────────── */
 export default function SettingsModal({
   isOpen, onClose, auth, onLogout,
@@ -356,6 +421,9 @@ export default function SettingsModal({
   kbFiles, setKbFiles,
   sessionId,
   showSources, setShowSources,
+  initialSection = 'account',
+  onClearConversation,
+  onClearAllHistory,
 }) {
   const [section, setSection]       = useState('account')
   const [mobileView, setMobileView] = useState('nav')  // 'nav' | 'content'
@@ -366,8 +434,8 @@ export default function SettingsModal({
 
   useEffect(() => {
     if (!isOpen) return
-    setSection('account')
-    setMobileView('nav')
+    setSection(initialSection)
+    setMobileView(initialSection !== 'account' ? 'content' : 'nav')
     const onEsc = e => { if (e.key === 'Escape') onCloseRef.current() }
     document.addEventListener('keydown', onEsc)
     return () => document.removeEventListener('keydown', onEsc)
@@ -387,11 +455,14 @@ export default function SettingsModal({
           auth={auth} dark={dark} onToggleTheme={onToggleTheme}
           showSources={showSources} setShowSources={setShowSources}
           sessionId={sessionId} addToast={addToast}
+          onClearConversation={onClearConversation}
+          onClearAllHistory={onClearAllHistory}
         />
       )}
-      {section === 'kb'       && <KBSection auth={auth} kbFiles={kbFiles} setKbFiles={setKbFiles} addToast={addToast} />}
-      {section === 'security' && <SecuritySection auth={auth} onLogout={onLogout} addToast={addToast} />}
-      {section === 'privacy'  && <PrivacySection  auth={auth} onLogout={onLogout} addToast={addToast} />}
+      {section === 'kb'        && <KBSection auth={auth} kbFiles={kbFiles} setKbFiles={setKbFiles} addToast={addToast} />}
+      {section === 'security'  && <SecuritySection auth={auth} onLogout={onLogout} addToast={addToast} />}
+      {section === 'privacy'   && <PrivacySection  auth={auth} onLogout={onLogout} addToast={addToast} />}
+      {section === 'shortcuts' && <ShortcutsSection />}
     </>
   )
 

@@ -193,11 +193,23 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3) -> List[
                 except (TypeError, ValueError):
                     pass
 
-        # DOCX/Word have no page numbers (Word paginates at render time), so the
-        # nearest heading is the best human-readable locator. Surface it so the UI
-        # can show "· <section>" where a PDF would show "· p.N".
+        # DOCX/Word: nearest heading is the locator (no page numbers at render time).
+        # Excel/table: sheet name extracted from the chunk text prefix "[Sheet: X, Rows Y-Z]"
+        # so existing indexed data works without re-upload.
         raw_section = meta.get("section_title")
         section_title = str(raw_section).strip() if raw_section else None
+
+        if not section_title and modality in ("table", "excel"):
+            import re as _re
+            _m = _re.match(r'\[Sheet:\s*([^,\]\n]+)', str(text))
+            if _m:
+                section_title = _m.group(1).strip()
+
+        # Image: use BLIP caption as the locator so chip reads "gdp.jpg · Graph showing..."
+        if not section_title and modality == "image":
+            caption = meta.get("caption")
+            if caption:
+                section_title = str(caption).strip()
 
         out.append({
             "text":          str(text)[:200],
@@ -742,6 +754,7 @@ class RAGPipeline:
         query: str,
         session_id: str = "default",
         user_id: Optional[str] = None,
+        sources: Optional[List[str]] = None,
     ) -> Iterator[str]:
 
         query = _normalize(query)
@@ -756,6 +769,7 @@ class RAGPipeline:
                     session_id=session_id,
                     top_k=settings.DEFAULT_TOP_K,
                     user_id=user_id,
+                    filters={"sources": sources} if sources else None,
                 )
 
                 docs    = _normalize_docs(raw_docs)

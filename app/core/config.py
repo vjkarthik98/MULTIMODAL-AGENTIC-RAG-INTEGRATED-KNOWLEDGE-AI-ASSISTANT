@@ -265,6 +265,7 @@ class Settings:
     MONGO_SUMMARY_COLLECTION: str        = _str("MONGO_SUMMARY_COLLECTION", "summaries")
     MONGO_AUDIT_COLLECTION: str          = _str("MONGO_AUDIT_COLLECTION", "audit_log")
     MONGO_SESSIONS_COLLECTION: str       = _str("MONGO_SESSIONS_COLLECTION", "chat_sessions")
+    MONGO_FEEDBACK_COLLECTION: str       = _str("MONGO_FEEDBACK_COLLECTION", "feedback")
 
     # TEXT REPAIR — per-pass toggles for the broken-corpus hardening layer
     # (mojibake fix, noise-line strip, whitespace recovery, OCR normalization,
@@ -495,6 +496,7 @@ class Settings:
     PASSWORD_MIN_ZXCVBN_SCORE: int       = _int("PASSWORD_MIN_ZXCVBN_SCORE", 2)
     PASSWORD_MIN_LENGTH: int             = _int("PASSWORD_MIN_LENGTH", 8)
     AUTH_ENABLED: bool                   = _bool("AUTH_ENABLED", True)
+
 
     # SECURITY
     SECRET_KEY: str                        = _str("SECRET_KEY", "CHANGE_ME_IN_PRODUCTION")

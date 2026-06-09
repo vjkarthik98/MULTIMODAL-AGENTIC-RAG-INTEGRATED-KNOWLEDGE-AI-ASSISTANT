@@ -25,8 +25,8 @@ const EXT_BADGE = {
   MP4:  { label: 'VID', bg: 'bg-blue-700' },
   MOV:  { label: 'VID', bg: 'bg-blue-700' },
   TXT:  { label: 'TXT', bg: 'bg-gray-600' },
-  DOCX: { label: 'DOC', bg: 'bg-blue-700' },
-  DOC:  { label: 'DOC', bg: 'bg-blue-700' },
+  DOCX: { label: 'DOC', bg: 'bg-indigo-700' },
+  DOC:  { label: 'DOC', bg: 'bg-indigo-700' },
 }
 
 function getInitials(email) {
@@ -40,6 +40,69 @@ function getInitials(email) {
 function badge(filename) {
   const ext = (filename.split('.').pop() || '').toUpperCase()
   return EXT_BADGE[ext] || { label: ext.slice(0, 3) || '?', bg: 'bg-gray-700' }
+}
+
+function formatSize(bytes) {
+  if (!bytes) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+const EXT_CARD_COLOR = {
+  PDF:  '#dc2626',
+  PNG:  '#0f766e', JPG: '#0f766e', JPEG: '#0f766e', GIF: '#0f766e', WEBP: '#0f766e',
+  XLS:  '#15803d', XLSX: '#15803d', CSV: '#166534',
+  MP3:  '#7e22ce', WAV: '#7e22ce', M4A: '#7e22ce', OGG: '#7e22ce', FLAC: '#7e22ce',
+  MP4:  '#1d4ed8', MOV: '#1d4ed8', AVI: '#1d4ed8', MKV: '#1d4ed8', WEBM: '#1d4ed8',
+  TXT:  '#475569',
+  DOCX: '#4338ca', DOC: '#4338ca',
+}
+function uploadCardColor(filename) {
+  const ext = (filename.split('.').pop() || '').toUpperCase()
+  return EXT_CARD_COLOR[ext] || '#475569'
+}
+
+function CircularProgress({ pct }) {
+  const size  = 16
+  const sw    = 2.2
+  const r     = (size - sw) / 2
+  const circ  = 2 * Math.PI * r
+  const offset = circ * (1 - Math.min(pct, 100) / 100)
+  const cx = size / 2
+  const cy = size / 2
+
+  if (pct >= 100) {
+    return (
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="flex-shrink-0">
+        <circle cx={cx} cy={cy} r={r} fill="none" stroke="#22c55e" strokeWidth={sw} />
+      </svg>
+    )
+  }
+
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="flex-shrink-0">
+      <circle cx={cx} cy={cy} r={r} fill="none" stroke="var(--t-bd4)" strokeWidth={sw} />
+      <circle cx={cx} cy={cy} r={r} fill="none" stroke="#8b5cf6" strokeWidth={sw}
+        strokeDasharray={circ}
+        strokeDashoffset={offset}
+        strokeLinecap="round"
+        transform={`rotate(-90 ${cx} ${cy})`}
+        style={{ transition: 'stroke-dashoffset 0.4s ease' }} />
+    </svg>
+  )
+}
+
+function UploadCardIcon({ filename }) {
+  const ext = (filename.split('.').pop() || '').toUpperCase()
+  if (['PNG','JPG','JPEG','GIF','WEBP'].includes(ext)) return <Image size={20} className="text-white" />
+  if (['XLS','XLSX','CSV'].includes(ext))              return <Sheet size={20} className="text-white" />
+  if (ext === 'PDF')                                   return <FileText size={20} className="text-white" />
+  if (['MP4','MOV','AVI','MKV','WEBM'].includes(ext)) return <FileVideo size={20} className="text-white" />
+  if (['MP3','WAV','M4A','OGG','FLAC'].includes(ext)) return <FileAudio size={20} className="text-white" />
+  if (ext === 'TXT')                                   return <FileType size={20} className="text-white" />
+  if (['DOC','DOCX'].includes(ext))                    return <LetterText size={20} className="text-white" />
+  return <File size={20} className="text-white" />
 }
 
 function FileIcon({ filename }) {
@@ -89,6 +152,8 @@ export default function Sidebar({
   collapsed, onToggleCollapse,
   dark, onToggleTheme,
   onOpenSettings,
+  onSetUploadHandler,
+  historyClearedAt,
 }) {
   const [dragOver, setDragOver]           = useState(false)
   const [sessions, setSessions]           = useState([])
@@ -102,9 +167,13 @@ export default function Sidebar({
   const sessionMenuPanelRef                = useRef(null)
   const renameInputRef                     = useRef(null)
   const [uploadingFiles, setUploadingFiles] = useState(new Set())
+  const [uploadProgress, setUploadProgress] = useState({}) // filename → 0-100
+  const uploadControllers = useRef({}) // filename → AbortController
   const [uploadError, setUploadError]     = useState('')
+  const [dupPrompt, setDupPrompt]         = useState(null) // { fresh: File[], dups: File[] }
   const [loadingKB, setLoadingKB]         = useState(true)
   const [newFiles, setNewFiles]           = useState(new Set())
+  const [kbTooltip, setKbTooltip]         = useState({ text: '', x: 0, y: 0 })
   const [menuOpen, setMenuOpen]           = useState(false)
   const [menuPos, setMenuPos]             = useState(null)
   const fileInputRef                      = useRef(null)
@@ -279,6 +348,9 @@ export default function Sidebar({
   // only moment a session's title/recency in Mongo can actually have changed.
   useEffect(() => { if (!streaming) refreshSessions() }, [streaming])
 
+  // When all history is cleared, empty the list instantly without a round-trip.
+  useEffect(() => { if (historyClearedAt) setSessions([]) }, [historyClearedAt])
+
   const handleDeleteSession = async (e, id) => {
     e.stopPropagation()
     setSessionMenuId(null)
@@ -355,24 +427,85 @@ export default function Sidebar({
     }
   }
 
-  const handleUpload = async (files) => {
+  const handleUpload = (filesInput) => {
+    const files = Array.isArray(filesInput) ? filesInput : Array.from(filesInput)
+    if (!files.length) return
+    const existingNames = new Set(kbFiles.map(f => f.filename))
+    const dups  = files.filter(f => existingNames.has(f.name))
+    const fresh = files.filter(f => !existingNames.has(f.name))
+    if (dups.length > 0) { setDupPrompt({ fresh, dups }); return }
+    _doUpload(files)
+  }
+
+  const handleDupSkip = () => {
+    const fresh = dupPrompt?.fresh ?? []
+    setDupPrompt(null)
+    if (fresh.length) _doUpload(fresh)
+  }
+
+  const handleDupReplace = () => {
+    const { fresh, dups } = dupPrompt
+    setDupPrompt(null)
+    _doUpload([...fresh, ...dups])
+  }
+
+  const _doUpload = async (files) => {
     setUploadError('')
     const errors = []
     for (const file of files) {
+      const ctrl = new AbortController()
+      uploadControllers.current[file.name] = ctrl
+
       setUploadingFiles(prev => new Set([...prev, file.name]))
+      setUploadProgress(prev => ({ ...prev, [file.name]: 0 }))
+
+      // Exponential-ease simulation (0→90%) drives the ring while the backend
+      // processes. XHR byte-transfer is instant on localhost so we don't use
+      // onprogress — it fires at 100% before the server is done.
+      let tick = 0
+      const sim = setInterval(() => {
+        tick++
+        const fake = Math.min(Math.round(90 * (1 - Math.exp(-tick / 25))), 90)
+        setUploadProgress(prev =>
+          file.name in prev
+            ? { ...prev, [file.name]: Math.max(prev[file.name], fake) }
+            : prev
+        )
+      }, 200)
+
       try {
-        await ingestFile(auth.token, file)
+        await ingestFile(auth.token, file, 'default', ctrl)
+        clearInterval(sim)
+        setUploadProgress(prev => ({ ...prev, [file.name]: 100 }))
         addToast(`Uploaded: ${file.name}`, 'success')
       } catch (err) {
-        errors.push(`${file.name}: ${err.message}`)
-        addToast(`Failed: ${file.name}`, 'error')
+        clearInterval(sim)
+        if (err.name === 'AbortError') {
+          addToast(`Cancelled: ${file.name}`, 'info')
+          // Best-effort: delete any partial chunks the server may have stored
+          // before the connection was aborted (fire-and-forget, non-blocking).
+          deleteKBFile(auth.token, file.name).catch(() => {})
+        } else {
+          errors.push(`${file.name}: ${err.message}`)
+          addToast(`Failed: ${file.name}`, 'error')
+        }
+      } finally {
+        delete uploadControllers.current[file.name]
       }
       setUploadingFiles(prev => { const s = new Set(prev); s.delete(file.name); return s })
+      setUploadProgress(prev => { const p = { ...prev }; delete p[file.name]; return p })
     }
     if (errors.length) setUploadError(errors.join('; '))
     await refreshKB()
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
+
+  const handleCancelUpload = (filename) => {
+    uploadControllers.current[filename]?.abort()
+  }
+
+  // Wire to parent so drag-drop onto the chat area triggers KB uploads
+  if (onSetUploadHandler) onSetUploadHandler.current = handleUpload
 
   const handleDelete = async (filename) => {
     try {
@@ -465,6 +598,7 @@ export default function Sidebar({
 
   /* ── EXPANDED — full sidebar ── */
   return (
+    <>
     <div className="w-80 flex-shrink-0 flex flex-col h-full select-none" style={sidebarStyle}>
 
       {/* Logo row */}
@@ -507,8 +641,7 @@ export default function Sidebar({
       </div>
 
       {/* Recents */}
-      {(loadingSessions || sessions.length > 0) && (
-        <div className="px-4 mb-1">
+      <div className="px-4 mb-1">
           <div className="px-1 mb-2 flex items-center justify-between gap-2">
             <span className="text-xs font-semibold tracking-widest uppercase" style={{ color: 'var(--t-tx5)' }}>
               {showArchived ? 'Archived' : 'Recents'}
@@ -540,6 +673,18 @@ export default function Sidebar({
               [0, 1].map(i => (
                 <div key={i} className="skeleton h-9 mx-1 mb-1" style={{ opacity: 1 - i * 0.25 }} />
               ))
+            )}
+            {!loadingSessions && !showArchived && sessions.length === 0 && (
+              <div className="px-2.5 py-3 text-sm text-center leading-relaxed" style={{ color: 'var(--t-tx6)' }}>
+                No chats yet.<br />
+                <button
+                  onClick={onNewChat}
+                  className="text-xs mt-1.5"
+                  style={{ color: 'var(--t-accent)' }}
+                >
+                  Start your first chat →
+                </button>
+              </div>
             )}
             {!loadingSessions && showArchived && visibleSessions.length === 0 && (
               <div className="px-2.5 py-4 text-sm text-center" style={{ color: 'var(--t-tx5)' }}>
@@ -602,7 +747,6 @@ export default function Sidebar({
           </div>
           <div className="h-px mt-3 mx-1" style={{ background: 'var(--t-bd1)' }} />
         </div>
-      )}
 
       {/* Per-row session menu — portalled so it escapes the scroll container */}
       {menuSession && sessionMenuPos && createPortal(
@@ -648,7 +792,22 @@ export default function Sidebar({
                 ? <Loader2 size={15} className="animate-spin flex-shrink-0" style={{ color: 'var(--t-accent)' }} />
                 : <FileIcon filename={f.filename} />
               }
-              <span className="flex-1 text-sm truncate min-w-0" style={{ color: 'var(--t-tx3)' }}>{f.filename}</span>
+              <span
+                className="flex-1 text-sm truncate min-w-0"
+                style={{ color: 'var(--t-tx3)' }}
+                onMouseEnter={e => {
+                  const r = e.currentTarget.getBoundingClientRect()
+                  setKbTooltip({ text: f.filename, x: r.left, y: r.bottom + 6 })
+                }}
+                onMouseLeave={() => setKbTooltip({ text: '', x: 0, y: 0 })}
+              >
+                {f.filename}
+              </span>
+              {f.size_bytes > 0 && (
+                <span className="text-[10px] flex-shrink-0" style={{ color: 'var(--t-tx6)' }}>
+                  {formatSize(f.size_bytes)}
+                </span>
+              )}
               <span className={`${b.bg} text-white text-[10px] font-bold px-1.5 py-0.5 rounded flex-shrink-0`}>{b.label}</span>
               <button
                 onClick={() => handleDelete(f.filename)}
@@ -660,6 +819,81 @@ export default function Sidebar({
               >
                 <X size={13} />
               </button>
+            </div>
+          )
+        })}
+
+        {/* Duplicate-file warning */}
+        {dupPrompt && (
+          <div className="mt-2 rounded-xl p-3"
+            style={{ background: 'rgba(234,179,8,0.07)', border: '1px solid rgba(234,179,8,0.28)' }}>
+            <div className="flex items-start gap-2 mb-2.5">
+              <AlertCircle size={14} className="flex-shrink-0 mt-0.5" style={{ color: '#ca8a04' }} />
+              <div className="min-w-0">
+                <p className="text-xs font-semibold mb-1" style={{ color: '#ca8a04' }}>
+                  {dupPrompt.dups.length === 1 ? 'File already in KB' : `${dupPrompt.dups.length} files already in KB`}
+                </p>
+                {dupPrompt.dups.map(f => (
+                  <p key={f.name} className="text-[11px] truncate" style={{ color: 'var(--t-tx4)' }}>{f.name}</p>
+                ))}
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={handleDupSkip}
+                className="flex-1 text-[11px] py-1.5 rounded-lg font-medium transition-colors"
+                style={{ background: 'var(--t-hov2)', color: 'var(--t-tx3)' }}
+                onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov3)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'var(--t-hov2)'}>
+                Skip
+              </button>
+              <button onClick={handleDupReplace}
+                className="flex-1 text-[11px] py-1.5 rounded-lg font-medium transition-colors"
+                style={{ background: 'rgba(234,179,8,0.15)', color: '#ca8a04' }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(234,179,8,0.25)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'rgba(234,179,8,0.15)'}>
+                Replace
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Per-file upload cards */}
+        {Object.entries(uploadProgress).map(([name, pct]) => {
+          const b = badge(name)
+          return (
+            <div key={name} className="mt-2 rounded-xl overflow-hidden"
+              style={{ background: 'var(--t-card)', border: '1px solid var(--t-bd2)' }}>
+              <div className="flex items-center gap-3 px-3 py-2.5">
+                <div className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0"
+                  style={{ background: uploadCardColor(name) }}>
+                  <UploadCardIcon filename={name} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium truncate" style={{ color: 'var(--t-tx2)' }}>{name}</p>
+                  <p className="text-[11px] mt-0.5 flex items-center gap-1.5" style={{ color: 'var(--t-tx5)' }}>
+                    <CircularProgress pct={pct} />
+                    {pct < 100 ? `Uploading ${pct}%` : 'Processing…'}
+                  </p>
+                </div>
+                <span className={`${b.bg} text-white text-[10px] font-bold px-1.5 py-0.5 rounded flex-shrink-0`}>
+                  {b.label}
+                </span>
+                <button
+                  onClick={() => handleCancelUpload(name)}
+                  title="Cancel upload"
+                  aria-label="Cancel upload"
+                  className="flex-shrink-0 rounded p-1 transition-colors"
+                  style={{ color: 'var(--t-tx5)' }}
+                  onMouseEnter={e => { e.currentTarget.style.color = 'var(--t-danger)'; e.currentTarget.style.background = 'var(--t-hov)' }}
+                  onMouseLeave={e => { e.currentTarget.style.color = 'var(--t-tx5)'; e.currentTarget.style.background = 'transparent' }}
+                >
+                  <X size={13} />
+                </button>
+              </div>
+              <div className="h-[3px]" style={{ background: 'var(--t-bd2)' }}>
+                <div className="h-full transition-all duration-300"
+                  style={{ width: `${pct}%`, background: 'linear-gradient(90deg, #8b5cf6, #3b82f6)' }} />
+              </div>
             </div>
           )
         })}
@@ -677,15 +911,14 @@ export default function Sidebar({
           }}
           onMouseEnter={e => { if (!isUploading && !dragOver) e.currentTarget.style.borderColor = 'var(--t-bd4)' }}
           onMouseLeave={e => { if (!dragOver) e.currentTarget.style.borderColor = 'var(--t-bd2)' }}
+          aria-label="Upload files to knowledge base"
+          role="button"
         >
-          {isUploading
-            ? <Loader2 size={18} className="animate-spin" style={{ color: 'var(--t-accent)' }} />
-            : <Upload size={18} style={{ color: 'var(--t-tx5)' }} />
-          }
+          <Upload size={18} style={{ color: isUploading ? 'var(--t-accent)' : 'var(--t-tx5)' }} />
           <span className="text-sm text-center leading-snug px-3" style={{ color: 'var(--t-ph)' }}>
-            {isUploading ? 'Uploading…' : 'Drop files or click to add'}
+            {isUploading ? 'Drop more files' : 'Drop files or click to add'}
           </span>
-          <input ref={fileInputRef} type="file" multiple className="hidden" onChange={e => handleUpload(Array.from(e.target.files))} />
+          <input ref={fileInputRef} type="file" multiple className="hidden" aria-label="File input" onChange={e => handleUpload(Array.from(e.target.files))} />
         </div>
 
         {uploadError && (
@@ -732,5 +965,24 @@ export default function Sidebar({
         </div>
       </div>
     </div>
+
+    {/* KB filename tooltip — portalled to escape overflow container */}
+    {kbTooltip.text && createPortal(
+      <div
+        className="fixed z-[300] text-xs px-2.5 py-1.5 rounded-lg pointer-events-none break-all max-w-[280px]"
+        style={{
+          top:        kbTooltip.y,
+          left:       kbTooltip.x,
+          background: 'var(--t-card)',
+          border:     '1px solid var(--t-bd3)',
+          color:      'var(--t-tx1)',
+          boxShadow:  '0 4px 16px rgba(0,0,0,0.35)',
+        }}
+      >
+        {kbTooltip.text}
+      </div>,
+      document.body
+    )}
+    </>
   )
 }

@@ -94,6 +94,21 @@ def _sanitize_query(query: str) -> str:
     return _guard_sanitize(query, surface="query_pipeline")
 
 
+# MODALITY KEYWORD DETECTOR — image-intent queries should retrieve image chunks,
+# not compete against text-heavy DOCX/MP3 chunks from the same company.
+_IMAGE_QUERY_KEYWORDS = frozenset([
+    "chart", "graph", "image", "diagram", "visual", "picture",
+    "figure", "photo", "illustration", "plot",
+])
+
+
+def _detect_modality_filter(query: str) -> Optional[str]:
+    tokens = set(query.lower().split())
+    if tokens & _IMAGE_QUERY_KEYWORDS:
+        return "image"
+    return None
+
+
 # TEMPORAL BOOST — promote historical chunks, demote forward-looking chunks
 # when the query anchors to a specific past period.
 
@@ -302,6 +317,7 @@ def _store_interaction(
     answer: str,
     memory: Any,
     user_id: Optional[str] = None,
+    sources: Optional[list] = None,
 ) -> None:
     if not answer.strip():
         return
@@ -312,19 +328,22 @@ def _store_interaction(
         mgr.add_interaction(session_id, query, answer, user_id=user_id)
 
         # PERSIST TURN TO THE PERMANENT CHAT-SESSION TRANSCRIPT (Recents).
-        # Decoupled from the short-term `messages` TTL so old chats remain
-        # browsable indefinitely — see MongoMemory.save_chat_turn.
+        # This is the canonical save — the meta path always completes, even when
+        # the stream refusal path fires and the frontend falls back to meta.
         try:
             mongo = infra.get_mongo()
             if mongo:
-                mongo.save_chat_turn(session_id, user_id, query, answer)
+                mongo.save_chat_turn(session_id, user_id, query, answer, sources=sources or [])
         except Exception as exc:
             logger.warning(event="chat_session_persist_failed", session_id=session_id, error=str(exc))
 
-        # AUTO-SUMMARIZE AFTER EVERY N TURNS — fires in background thread
+        # AUTO-SUMMARIZE AFTER EVERY N TURNS — fires in background thread.
+        # Use raw message count (not sliding-window trimmed) so we never skip
+        # past the threshold. Accept size % every_n in {0, 1} to tolerate the
+        # two-message-per-turn increment landing one over a clean multiple.
         size = mgr.get_memory_size(session_id)
         every_n = settings.MEMORY_SUMMARY_EVERY_N_TURNS * 2  # each turn = 2 messages
-        if every_n > 0 and size > 0 and size % every_n == 0:
+        if every_n > 0 and size >= every_n and size % every_n <= 1:
             import threading
             def _run_summary():
                 try:
@@ -400,15 +419,28 @@ def _build_sources_array(docs: List[Dict[str, Any]], max_items: int = 3) -> List
 
         doc_id = str(meta.get("doc_id") or meta.get("chunk_id") or "")
 
+        raw_section = meta.get("section_title")
+        section_title = str(raw_section).strip() if raw_section else None
+        if not section_title and modality in ("table", "excel"):
+            import re as _re
+            _m = _re.match(r'\[Sheet:\s*([^,\]\n]+)', str(text))
+            if _m:
+                section_title = _m.group(1).strip()
+        if not section_title and modality == "image":
+            caption = meta.get("caption")
+            if caption:
+                section_title = str(caption).strip()
+
         out.append({
-            "text":        str(text)[:200],
-            "score":       round(score, 6),
-            "source":      source_name,
-            "page_number": page_number,
-            "start_time":  start_time,
-            "end_time":    end_time,
-            "modality":    modality,
-            "doc_id":      doc_id,
+            "text":          str(text)[:200],
+            "score":         round(score, 6),
+            "source":        source_name,
+            "page_number":   page_number,
+            "section_title": section_title,
+            "start_time":    start_time,
+            "end_time":      end_time,
+            "modality":      modality,
+            "doc_id":        doc_id,
         })
     return out
 
@@ -486,6 +518,7 @@ def query_pipeline(
     session_id: str = "default",
     sources: Optional[List[str]] = None,
     user_id: Optional[str] = None,
+    no_cache: bool = False,
 ) -> Dict[str, Any]:
 
     start      = time.time()
@@ -513,8 +546,8 @@ def query_pipeline(
     query = _sanitize_query(query)
     query = query[:settings.MAX_PROMPT_CHARS]
 
-    # CACHE HIT — SECTION 4.6
-    cached = _cache_get(session_id, query)
+    # CACHE HIT — SECTION 4.6 (skipped when no_cache=True, e.g. regenerate)
+    cached = None if no_cache else _cache_get(session_id, query)
     if cached:
         cached["latency"]   = round(time.time() - start, 3)
         cached["cache_hit"] = True
@@ -614,7 +647,7 @@ def query_pipeline(
                 "metadata":             {"source": "web_search"},
             }
             _cache_set(session_id, query, resp)
-            _store_interaction(session_id, query, answer, memory, user_id=user_id)
+            _store_interaction(session_id, query, answer, memory, user_id=user_id, sources=sources_out)
             return resp
 
         # NON-RAG DECISIONS — SECTION 4.9 (Issue C fix: wire real LLM answers)
@@ -691,7 +724,7 @@ def query_pipeline(
                 "metadata":             {"source": "agent"},
             }
             _cache_set(session_id, query, resp)
-            _store_interaction(session_id, query, answer, memory, user_id=user_id)
+            _store_interaction(session_id, query, answer, memory, user_id=user_id, sources=[])
             return resp
 
         # MEMORY CONTEXT — SECTION 4.7
@@ -716,12 +749,16 @@ def query_pipeline(
         t_ret     = time.time()
         retrieved: List[Dict[str, Any]] = []
 
-        # Build per-query filter dict. Currently only `sources` is exposed
-        # via the public API; future filters (modality, language, date range)
-        # can be plugged in here.
+        # Build per-query filter dict.
+        # sources: explicit file scope from the user (UI file-scope selector).
+        # modality: auto-detected from query keywords when no file is explicitly scoped.
         retrieval_filters: Optional[Dict[str, Any]] = None
         if sources:
             retrieval_filters = {"sources": sources}
+        else:
+            detected_modality = _detect_modality_filter(query)
+            if detected_modality:
+                retrieval_filters = {"modality": detected_modality}
 
         # Hybrid decisions retrieve deeper so adjacent section chunks can surface.
         _retrieval_top_k = (
@@ -1133,7 +1170,7 @@ def query_pipeline(
             and cache_conf > 0.15
         ):
             _cache_set(session_id, query, response)
-        _store_interaction(session_id, query, answer, memory, user_id=user_id)
+        _store_interaction(session_id, query, answer, memory, user_id=user_id, sources=p248_sources)
 
         logger.info(
             event="query_pipeline_success",

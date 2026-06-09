@@ -86,6 +86,7 @@ class BM25Document:
             "content_type": p.get("content_type"),
             "language": p.get("language"),
             "timestamp_start": p.get("timestamp_start"),
+            "timestamp_end": p.get("timestamp_end"),
             "ingestion_time": p.get("ingestion_time"),
             "checksum_sha256": p.get("checksum_sha256"),
             "section_number": p.get("section_number"),
@@ -148,6 +149,7 @@ class BM25Retriever:
             "page": getattr(doc, "page", None),
             "language": s.get("language"),
             "timestamp_start": s.get("timestamp_start"),
+            "timestamp_end": s.get("timestamp_end"),
             "ingestion_time": s.get("ingestion_time"),
             "checksum_sha256": s.get("checksum_sha256"),
             "section_number": s.get("section_number"),
@@ -158,6 +160,8 @@ class BM25Retriever:
             "section_id": s.get("section_id"),
             "section_title": s.get("section_title"),
             "is_forward_looking": s.get("is_forward_looking", False),
+            # Image caption — used as locator in source chip (same role as section_title for DOCX)
+            "caption": s.get("caption"),
         }
 
     # MODALITY FILTER SETTER

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -85,6 +86,7 @@ class MongoMemory:
         self.messages = None
         self.summaries = None
         self.sessions = None
+        self.feedback = None
 
         if not self._enabled:
             logger.info(event="mongo_disabled_no_uri_or_flag")
@@ -113,6 +115,7 @@ class MongoMemory:
             self.messages = self.db[settings.MONGO_MEMORY_COLLECTION]
             self.summaries = self.db[settings.MONGO_SUMMARY_COLLECTION]
             self.sessions = self.db[settings.MONGO_SESSIONS_COLLECTION]
+            self.feedback = self.db[settings.MONGO_FEEDBACK_COLLECTION]
 
             self._ensure_indexes()
             self._mongo_ok = True
@@ -266,6 +269,18 @@ class MongoMemory:
             self.sessions.create_index(
                 [("user_id", ASCENDING), ("updated_at", DESCENDING)],
                 name="idx_session_user_updated",
+                background=True,
+            )
+
+            # FEEDBACK INDEXES
+            self.feedback.create_index(
+                [("user_id", ASCENDING), ("created_at", DESCENDING)],
+                name="idx_feedback_user_created",
+                background=True,
+            )
+            self.feedback.create_index(
+                [("session_id", ASCENDING)],
+                name="idx_feedback_session",
                 background=True,
             )
 
@@ -645,6 +660,7 @@ class MongoMemory:
         user_id: Optional[str],
         query: str,
         answer: str,
+        sources: Optional[list] = None,
     ) -> None:
         if not session_id or not query.strip() or not answer.strip():
             return
@@ -655,6 +671,7 @@ class MongoMemory:
             now = self._utcnow()
             q = self._clean(query)[:settings.MAX_PROMPT_CHARS]
             a = self._clean(answer)[:settings.MAX_PROMPT_CHARS]
+            src = sources if isinstance(sources, list) else []
 
             def _do():
                 self.sessions.update_one(
@@ -671,8 +688,8 @@ class MongoMemory:
                         "$push": {
                             "messages": {
                                 "$each": [
-                                    {"role": "user", "content": q, "timestamp": now},
-                                    {"role": "assistant", "content": a, "timestamp": now},
+                                    {"role": "user",      "content": q, "timestamp": now, "msg_id": str(uuid.uuid4())},
+                                    {"role": "assistant", "content": a, "timestamp": now, "sources": src, "msg_id": str(uuid.uuid4()), "vote": None},
                                 ],
                                 "$slice": -_MAX_SESSION_MESSAGES,
                             }
@@ -743,6 +760,9 @@ class MongoMemory:
                         "role":      m.get("role"),
                         "content":   m.get("content", ""),
                         "timestamp": m.get("timestamp"),
+                        "sources":   m.get("sources") or [],
+                        "msg_id":    m.get("msg_id"),
+                        "vote":      m.get("vote"),
                     }
                     for m in doc.get("messages", [])
                 ],
@@ -751,6 +771,58 @@ class MongoMemory:
         except Exception as exc:
             logger.warning(event="chat_session_fetch_failed", session_id=session_id, error=str(exc))
             return None
+
+    def patch_last_assistant_message(
+        self,
+        session_id: str,
+        user_id: Optional[str],
+        content: str,
+        sources: Optional[list] = None,
+        msg_id: Optional[str] = None,
+    ) -> bool:
+        """Overwrite the last assistant message in the session transcript.
+        Called after streaming completes so reload shows the exact streamed answer.
+        If msg_id is provided it is stamped onto the message so the frontend ID
+        and DB msg_id stay in sync for vote persistence."""
+        if not session_id or not content or not self._is_available():
+            return False
+        try:
+            def _do():
+                doc = self.sessions.find_one(
+                    {"session_id": session_id, "user_id": user_id},
+                    {"messages": 1, "_id": 1},
+                )
+                if not doc:
+                    return False
+                messages = list(doc.get("messages") or [])
+                updated = False
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i].get("role") == "assistant":
+                        patch = {
+                            **messages[i],
+                            "content": str(content)[:settings.MAX_PROMPT_CHARS],
+                            "sources": sources if isinstance(sources, list) else [],
+                        }
+                        if msg_id:
+                            patch["msg_id"] = msg_id
+                        messages[i] = patch
+                        updated = True
+                        break
+                if updated:
+                    self.sessions.update_one(
+                        {"_id": doc["_id"]},
+                        {"$set": {"messages": messages}},
+                    )
+                return updated
+
+            return bool(self._retry(_do))
+        except Exception as exc:
+            logger.warning(
+                event="patch_last_msg_failed",
+                session_id=session_id,
+                error=str(exc),
+            )
+            return False
 
     def delete_chat_session(self, user_id: str, session_id: str) -> bool:
         """Delete a chat session and ALL associated data from every collection.
@@ -816,6 +888,22 @@ class MongoMemory:
         except Exception as exc:
             logger.warning(event="chat_session_delete_failed", session_id=session_id, error=str(exc))
 
+    def delete_all_chat_sessions(self, user_id: str) -> int:
+        """Delete every chat session (and associated messages/summaries) for a user.
+        Returns the number of sessions deleted."""
+        if not user_id or not self._is_available():
+            return 0
+        try:
+            s_r   = self.sessions.delete_many({"user_id": user_id})
+            self.messages.delete_many({"user_id": user_id})
+            self.summaries.delete_many({"user_id": user_id})
+            count = s_r.deleted_count if s_r else 0
+            logger.info(event="all_chat_sessions_deleted", user_id=user_id, count=count)
+            return count
+        except Exception as exc:
+            logger.warning(event="delete_all_sessions_failed", user_id=user_id, error=str(exc))
+            return 0
+
     _SESSION_UPDATABLE_FIELDS = {"title", "pinned", "archived"}
 
     def update_chat_session(self, user_id: str, session_id: str, fields: Dict[str, Any]) -> bool:
@@ -840,6 +928,59 @@ class MongoMemory:
 
         except Exception as exc:
             logger.warning(event="chat_session_update_failed", session_id=session_id, error=str(exc))
+            return False
+
+    def patch_message_vote(
+        self,
+        user_id: str,
+        session_id: str,
+        msg_id: str,
+        vote: Optional[str],
+    ) -> bool:
+        """Write the vote ('up'/'down'/None) onto the specific message in the session transcript."""
+        if not user_id or not session_id or not msg_id or not self._is_available():
+            return False
+        try:
+            def _do():
+                return self.sessions.update_one(
+                    {"user_id": user_id, "session_id": session_id, "messages.msg_id": msg_id},
+                    {"$set": {"messages.$.vote": vote}},
+                )
+            result = self._retry(_do)
+            return bool(result and result.matched_count)
+        except Exception as exc:
+            logger.warning(event="patch_message_vote_failed", msg_id=msg_id, error=str(exc))
+            return False
+
+    def save_feedback(
+        self,
+        user_id: str,
+        session_id: str,
+        vote: str,
+        message_id: Optional[str],
+        query: Optional[str],
+        response_snippet: Optional[str],
+    ) -> bool:
+        """Persist a thumbs-up / thumbs-down rating for a single assistant message."""
+        if not self._is_available() or self.feedback is None:
+            return False
+        if vote not in ("up", "down"):
+            return False
+        try:
+            doc = {
+                "user_id": user_id,
+                "session_id": session_id,
+                "vote": vote,
+                "message_id": message_id,
+                "query": (query or "")[:500],
+                "response_snippet": (response_snippet or "")[:500],
+                "created_at": datetime.now(timezone.utc),
+            }
+            self.feedback.insert_one(doc)
+            logger.info(event="feedback_saved", user_id=user_id, session_id=session_id, vote=vote)
+            return True
+        except Exception as exc:
+            logger.warning(event="feedback_save_failed", error=str(exc))
             return False
 
     # ASYNC WRAPPERS

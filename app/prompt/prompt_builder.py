@@ -366,26 +366,20 @@ def _output_format(
 
     if query_type == "comparative":
         return (
-            "FORMAT:\n"
-            "Entity A: <description>\n"
-            "Entity B: <description>\n"
-            "Comparison: <key differences and similarities>\n"
-            "Confidence: <0.0-1.0>"
+            "Write your answer below. Start with a complete sentence.\n"
+            "Entity A: [description]\n"
+            "Entity B: [description]\n"
+            "Comparison: [key differences and similarities]"
         )
 
     if query_type == "temporal":
         return (
-            "FORMAT:\n"
-            "Timeline: <chronological summary>\n"
-            "Answer: <direct answer>\n"
-            "Confidence: <0.0-1.0>"
+            "Write your answer below. Start with a complete sentence.\n"
+            "Timeline: [chronological summary]\n"
+            "Answer: [direct answer]"
         )
 
-    return (
-        "FORMAT:\n"
-        "Answer: <text>\n"
-        "Confidence: <0.0-1.0>"
-    )
+    return "Write your complete answer below. Begin with a full sentence:\n"
 
 
 class PromptBuilder:

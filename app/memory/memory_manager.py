@@ -564,6 +564,16 @@ class MemoryManager:
                 return self.redis_memory.get_memory_size(session_id)
             except Exception:
                 pass
+        # Use raw document count — get_history() applies sliding-window trimming
+        # which causes the count to never land on an exact multiple, breaking the
+        # modulo-based summarization trigger.
+        if self.mongo_memory and hasattr(self.mongo_memory, "message_count"):
+            try:
+                raw = self.mongo_memory.message_count(session_id)
+                if raw > 0:
+                    return raw
+            except Exception:
+                pass
         return len(self.get_history(session_id))
 
     # HEALTH CHECK — SECTION 4.7
