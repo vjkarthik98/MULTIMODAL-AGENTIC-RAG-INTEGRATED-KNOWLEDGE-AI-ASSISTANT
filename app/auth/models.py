@@ -76,6 +76,7 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str = Field(..., min_length=5, max_length=254)
     password: str = Field(..., min_length=1, max_length=128)
+    device_token: Optional[str] = Field(None, max_length=128)  # trusted-device bypass
 
     @field_validator("email")
     @classmethod
@@ -110,3 +111,33 @@ class TokenPayload(BaseModel):
     jti: str          # unique token id (for future revocation)
     exp: int
     iat: int
+
+
+# ── Email OTP ─────────────────────────────────────────────────────────────────
+
+class OTPVerifyRequest(BaseModel):
+    otp_token: str = Field(..., min_length=10)
+    code:      str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+# ── Forgot / reset password ───────────────────────────────────────────────────
+
+class ForgotPasswordRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=254)
+
+    @field_validator("email")
+    @classmethod
+    def normalise_email(cls, v: str) -> str:
+        return v.strip().lower()
+
+
+class ResetPasswordRequest(BaseModel):
+    token:        str = Field(..., min_length=10)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        return v

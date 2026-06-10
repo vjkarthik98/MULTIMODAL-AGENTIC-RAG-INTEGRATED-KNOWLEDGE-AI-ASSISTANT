@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import time
 import unicodedata
 import uuid
@@ -237,6 +238,50 @@ def _dedup_docs(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         seen.add(h)
         unique.append(d)
     return unique
+
+
+# AUTO FILE-SCOPE & SOURCE-COHERENCE HELPERS (duplicated from query_pipeline to
+# avoid a circular import — rag_pipeline must not import query_pipeline at module level)
+
+_AUTO_SCOPE_RE_STREAM = re.compile(
+    r'\b[\w\-]{2,60}\.(?:pdf|txt|docx|xlsx|xls|doc|mp3|mp4|wav|jpg|jpeg|png)\b',
+    re.IGNORECASE,
+)
+
+_COHERENCE_MAX_SOURCES_STREAM = 3
+_COHERENCE_GAP_ABS_STREAM     = 0.45
+_COHERENCE_ABS_FLOOR_STREAM   = 0.04
+
+
+def _detect_filename_scope_stream(query: str) -> Optional[List[str]]:
+    matches = _AUTO_SCOPE_RE_STREAM.findall(query)
+    return [m.lower() for m in matches] if matches else None
+
+
+def _source_coherence_filter_stream(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if len(docs) <= 1:
+        return docs
+    top_raw = (docs[0].get("metadata") or {}).get("_reranker_raw")
+    seen_sources: Dict[str, Any] = {}
+    kept: List[Dict[str, Any]] = []
+    for doc in docs:
+        meta = doc.get("metadata") or {}
+        src  = meta.get("source", "")
+        raw  = meta.get("_reranker_raw")
+        if not kept:
+            seen_sources[src] = raw
+            kept.append(doc)
+            continue
+        if raw is not None and raw < _COHERENCE_ABS_FLOOR_STREAM:
+            continue
+        if src not in seen_sources:
+            if len(seen_sources) >= _COHERENCE_MAX_SOURCES_STREAM:
+                continue
+            if top_raw is not None and raw is not None and raw < top_raw - _COHERENCE_GAP_ABS_STREAM:
+                continue
+            seen_sources[src] = raw
+        kept.append(doc)
+    return kept
 
 
 # BUILD CONTEXT STRING — SECTION 4.6
@@ -553,7 +598,21 @@ class RAGPipeline:
 
         # NORMALIZE + SANITIZE — SECTION 2.3 / 5
         query = _normalize(query)
+        _pre_sanitize = query
         query = _sanitize(query)
+
+        if not query and _pre_sanitize:
+            return {
+                "answer": (
+                    "⚠️ Your message was blocked by the security guardrail. "
+                    "It matched a restricted pattern (prompt injection or policy violation). "
+                    "Please rephrase your query."
+                ),
+                "decision": "blocked",
+                "source":   "input_guard",
+                "trace_id": trace_id,
+            }
+
         query = query[:settings.MAX_PROMPT_CHARS]
 
         try:
@@ -699,6 +758,20 @@ class RAGPipeline:
             except Exception as _og_err:
                 logger.warning(event="rag_pipeline_output_guard_failed", error=str(_og_err), session_id=session_id)
 
+            # CITATION TRACKING — filter sources to cited [n] indices, then strip them.
+            try:
+                from app.core.response import extract_cited_indices, strip_inline_citations
+                _cited_idx = extract_cited_indices(answer)
+                if _cited_idx:
+                    _filtered = [s for i, s in enumerate(sources, 1) if i in _cited_idx]
+                    if _filtered:
+                        sources = _filtered[:5]
+                else:
+                    sources = sources[:3]
+                answer = strip_inline_citations(answer)
+            except Exception as _cit_err:
+                logger.warning(event="rag_pipeline_citation_tracking_failed", error=str(_cit_err), session_id=session_id)
+
             total_latency = round(time.time() - start, 2)
 
             logger.info(
@@ -764,12 +837,18 @@ class RAGPipeline:
         def _generator() -> Iterator[str]:
             try:
                 retriever = self._get_retriever()
+                _auto_scope    = _detect_filename_scope_stream(query) if not sources else None
+                _stream_filters = (
+                    {"sources": sources}    if sources
+                    else {"sources": _auto_scope} if _auto_scope
+                    else None
+                )
                 raw_docs  = retriever.search(
                     query=query,
                     session_id=session_id,
                     top_k=settings.DEFAULT_TOP_K,
                     user_id=user_id,
-                    filters={"sources": sources} if sources else None,
+                    filters=_stream_filters,
                 )
 
                 docs    = _normalize_docs(raw_docs)
@@ -803,7 +882,7 @@ class RAGPipeline:
                     if _rer is not None:
                         _reranked = _rer.rerank(query, docs, top_k=settings.RAG_TOP_K, session_id=session_id)
                         if _reranked:
-                            docs = _reranked
+                            docs = _source_coherence_filter_stream(_reranked)
                         else:
                             docs = sorted(docs, key=lambda d: d.get("score", 0.0), reverse=True)[:settings.RAG_TOP_K]
                     else:
@@ -821,6 +900,17 @@ class RAGPipeline:
                     context=context,
                     session_id=session_id,
                 )
+
+                # PII PROMPT STRIP — same as non-streaming path (Phase 26 P1)
+                try:
+                    from app.guardrails.pii import strip_pii_from_prompt as _spfp
+                    prompt, _pii_stripped = _spfp(prompt)
+                    if _pii_stripped:
+                        logger.info(event="rag_stream_pii_stripped_from_prompt",
+                                    session_id=session_id)
+                except Exception as _pii_err:
+                    logger.warning(event="rag_stream_pii_prompt_strip_failed",
+                                   error=str(_pii_err))
 
                 llm = self._get_llm()
                 if not llm:
@@ -864,6 +954,19 @@ class RAGPipeline:
                     yield "\x00REFUSAL\x00"
                     return
 
+                # CITATION TRACKING — parse [n] indices, filter source chips, then strip.
+                try:
+                    from app.core.response import extract_cited_indices, strip_inline_citations
+                    _cited_idx = extract_cited_indices(answer)
+                    if _cited_idx:
+                        _cited_docs = [d for i, d in enumerate(docs, 1) if i in _cited_idx]
+                        _source_docs = _cited_docs[:5] if _cited_docs else docs[:3]
+                    else:
+                        _source_docs = docs[:3]
+                    answer = strip_inline_citations(answer)
+                except Exception:
+                    _source_docs = docs[:3]
+
                 yield answer
                 # Memory write is handled by query_pipeline._store_interaction()
                 # which is always called by the /query endpoint after streaming.
@@ -873,7 +976,7 @@ class RAGPipeline:
                 # without waiting for the separate /rag/query round-trip.
                 try:
                     import json as _json
-                    _p248 = _build_p248_sources(docs)
+                    _p248 = _build_p248_sources(_source_docs)
                     yield "\x00SOURCES\x00" + _json.dumps(_p248)
                 except Exception:
                     pass

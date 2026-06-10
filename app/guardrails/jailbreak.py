@@ -19,8 +19,9 @@ from pathlib import Path
 from typing import List, Optional
 
 import structlog
+from app.utils.logger import get_logger
 
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Result type
@@ -105,14 +106,11 @@ def _load_corpus_embeddings() -> None:
         if not texts:
             return
 
-        # Reuse the project's SentenceTransformer singleton
-        from app.embeddings.text_embedder import TextEmbedder
-        from app.core.config import settings as _cfg
-        embedder = TextEmbedder(
-            model_name=_cfg.EMBEDDING_MODEL,
-            batch_size=_cfg.EMBEDDING_BATCH_SIZE,
-            device=_cfg.EMBEDDER_DEVICE,
-        )
+        # Reuse the project's cached TextEmbedder singleton — constructing a
+        # fresh TextEmbedder() here reloads the 0.6B SentenceTransformer onto
+        # the GPU every call (4-9s), which is the dominant input-guard latency.
+        from app.core.model_loader import model_loader
+        embedder = model_loader.get_embedder()
         import numpy as np
         embeddings = embedder.embed_texts(texts)
         if embeddings is not None and len(embeddings) > 0:
@@ -164,14 +162,11 @@ def _semantic_check(query: str) -> Optional[float]:
 
     try:
         import numpy as np
-        from app.embeddings.text_embedder import TextEmbedder
-        from app.core.config import settings as _cfg
+        # Cached singleton — see _load_corpus_embeddings(): a fresh TextEmbedder()
+        # here would reload the embedding model to GPU on every query.
+        from app.core.model_loader import model_loader
 
-        embedder = TextEmbedder(
-            model_name=_cfg.EMBEDDING_MODEL,
-            batch_size=_cfg.EMBEDDING_BATCH_SIZE,
-            device=_cfg.EMBEDDER_DEVICE,
-        )
+        embedder = model_loader.get_embedder()
         q_emb = embedder.embed_texts([query])
         if q_emb is None or len(q_emb) == 0:
             return None

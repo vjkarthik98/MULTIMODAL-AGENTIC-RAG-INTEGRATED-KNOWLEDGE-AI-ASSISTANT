@@ -33,8 +33,9 @@ from app.guardrails.exceptions import GuardrailBlocked
 from app.guardrails.jailbreak import JailbreakResult, check as jailbreak_check
 from app.guardrails.metrics import record_allow, record_block
 from app.guardrails.ssrf import is_ssrf_risk
+from app.utils.logger import get_logger
 
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Policy cache (loaded once)
@@ -308,6 +309,12 @@ def check(
     )
 
 
+_INGEST_SURFACES = frozenset({
+    "txt_ingest", "excel_ingest", "excel_chart_ingest",
+    "document_ingest", "pdf_ingest", "audio_ingest",
+    "text_embedder", "embedder",
+})
+
 def sanitize(
     text: str,
     surface: str = "embedder",
@@ -323,8 +330,9 @@ def sanitize(
     _load_policy()
     text = _normalize_encoding(text)
 
-    # Truncate to max length
-    if len(text) > _max_query_chars:
+    # Truncate to max length — skip for ingestion surfaces so full documents
+    # are not truncated to the query limit (8000 chars) before chunking.
+    if surface not in _INGEST_SURFACES and len(text) > _max_query_chars:
         text = text[:_max_query_chars]
 
     # Strip injection payload — return safe prefix up to match

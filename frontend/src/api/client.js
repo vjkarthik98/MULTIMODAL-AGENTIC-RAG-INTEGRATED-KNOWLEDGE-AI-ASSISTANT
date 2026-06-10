@@ -5,16 +5,56 @@ function bearer(token) {
 }
 
 export async function login(email, password) {
+  const device_token = localStorage.getItem('magik_device_token') || undefined
   const res = await fetch(`${API}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, device_token }),
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
     throw new Error(err.detail || `Login failed (${res.status})`)
   }
-  return res.json()  // { access_token, token_type, refresh_token? }
+  return res.json()  // { access_token, refresh_token, device_token? } or { otp_required, otp_token }
+}
+
+export async function verifyOtp(otpToken, code) {
+  const res = await fetch(`${API}/auth/verify-otp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ otp_token: otpToken, code }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `Verification failed (${res.status})`)
+  }
+  return res.json()  // { access_token, refresh_token, ... }
+}
+
+export async function forgotPassword(email) {
+  const res = await fetch(`${API}/auth/forgot-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `Request failed (${res.status})`)
+  }
+  return res.json()
+}
+
+export async function resetPassword(token, newPassword) {
+  const res = await fetch(`${API}/auth/reset-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, new_password: newPassword }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `Reset failed (${res.status})`)
+  }
+  return res.json()
 }
 
 export async function register(email, password) {
@@ -27,7 +67,7 @@ export async function register(email, password) {
     const err = await res.json().catch(() => ({}))
     throw new Error(err.detail || `Registration failed (${res.status})`)
   }
-  return res.json()
+  return res.json()  // { otp_required: true, otp_token: "..." }
 }
 
 export async function getMe(token) {

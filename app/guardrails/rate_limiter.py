@@ -25,8 +25,9 @@ import structlog
 from app.guardrails.audit import audit_decision
 from app.guardrails.exceptions import GuardrailBlocked
 from app.guardrails.metrics import record_block
+from app.utils.logger import get_logger
 
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 
 # ── Policy ────────────────────────────────────────────────────────────────────
 _block_threshold: int   = 5

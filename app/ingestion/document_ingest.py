@@ -19,8 +19,9 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from app.core.config import settings
 from app.ingestion.image_ingest import ingest as image_ingest
 from app.ingestion.schema import IngestedDocument
+from app.utils.logger import get_logger
 
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
 # PROMETHEUS METRICS
@@ -72,6 +73,44 @@ def _file_hash(file_path: str) -> str:
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _sanitize(text: str, surface: str, **log_kw) -> str:
+    """Apply Phase-26 injection sanitization. Returns original on guardrail error."""
+    try:
+        from app.guardrails.input_guard import sanitize as _g
+        clean = _g(text, surface=surface)
+        if clean != text:
+            logger.warning("injection_sanitized", surface=surface,
+                           original_len=len(text), sanitized_len=len(clean), **log_kw)
+        return clean
+    except Exception as exc:
+        logger.warning("guardrail_skipped", surface=surface, error=str(exc))
+        return text
+
+
+def _pii_scrub(text: str, surface: str) -> str:
+    """Scrub PII using the Phase-26 guardrail (guardrails.pii.scrub_pii).
+
+    Falls back to the legacy _redact_pii if the guardrail import fails.
+    Ignores PII_DETECTION_ENABLED — guardrail PII scrubbing is always on.
+    """
+    try:
+        from app.guardrails.pii import scrub_pii as _gp_scrub
+        cleaned, changed = _gp_scrub(text)
+        if changed:
+            logger.warning("pii_scrubbed", surface=surface,
+                           original_len=len(text), scrubbed_len=len(cleaned))
+        return cleaned
+    except Exception as exc:
+        logger.warning("pii_scrub_guardrail_failed", surface=surface, error=str(exc))
+        # legacy fallback
+        cleaned, counts = _redact_pii(text)
+        for et, cnt in counts.items():
+            _pii_redacted.labels(entity_type=et).inc(cnt)
+        if counts:
+            logger.warning("pii_scrubbed_legacy", surface=surface, entities=counts)
+        return cleaned
 
 
 # TABLE ROWS TO MARKDOWN + TEXT
@@ -453,9 +492,7 @@ def _process_pdf(
         page_text = _correct_reading_order(page_text)
 
         if page_text:
-            page_text, pii_counts = _redact_pii(page_text)
-            for et, cnt in pii_counts.items():
-                _pii_redacted.labels(entity_type=et).inc(cnt)
+            page_text = _pii_scrub(page_text, surface="pdf_ingest")
 
             documents.append(
                 IngestedDocument(
@@ -541,7 +578,9 @@ def _process_pdf(
                     if not txt:
                         continue
 
-                    combined = f"{txt}\n\n{md}"
+                    combined = _sanitize(f"{txt}\n\n{md}", surface="pdf_table_ingest",
+                                         file=source_name, page=i)
+                    combined = _pii_scrub(combined, surface="pdf_table_ingest")
 
                     documents.append(
                         IngestedDocument(
@@ -577,7 +616,9 @@ def _process_pdf(
             with pdfplumber.open(active_path) as pdf_p:
                 outline = getattr(pdf_p, "outline", None)
                 if outline:
-                    outline_text = str(outline)[:2000]
+                    outline_text = _sanitize(str(outline)[:2000], surface="pdf_outline_ingest",
+                                             file=source_name)
+                    outline_text = _pii_scrub(outline_text, surface="pdf_outline_ingest")
                     documents.append(
                         IngestedDocument(
                             text=f"[OUTLINE]\n{outline_text}",
@@ -610,6 +651,8 @@ def _process_pdf(
             for link in links:
                 uri = link.get("uri", "")
                 if uri:
+                    uri = _sanitize(uri, surface="pdf_hyperlink_ingest", file=source_name, page=i)
+                    uri = _pii_scrub(uri, surface="pdf_hyperlink_ingest")
                     documents.append(
                         IngestedDocument(
                             text=f"[HYPERLINK page={i}] {uri}",
@@ -812,9 +855,20 @@ def _process_docx(
         if level:
             current_heading = text
 
-        text, pii_counts = _redact_pii(text)
-        for et, cnt in pii_counts.items():
-            _pii_redacted.labels(entity_type=et).inc(cnt)
+        try:
+            from app.guardrails.input_guard import sanitize as _guard_sanitize
+            _clean = _guard_sanitize(text, surface="docx_ingest")
+            if _clean != text:
+                logger.warning("docx_injection_sanitized", file=source_name,
+                               paragraph_index=i, original_len=len(text), sanitized_len=len(_clean))
+                text = _clean
+        except Exception as _ge:
+            logger.warning("docx_guardrail_failed", file=source_name, error=str(_ge))
+
+        if not text.strip():  # entire paragraph was injection — skip silently
+            continue
+
+        text = _pii_scrub(text, surface="docx_para_ingest")
 
         documents.append(
             IngestedDocument(
@@ -847,7 +901,9 @@ def _process_docx(
     # TABLES
     for t_idx, table in enumerate(doc.tables):
         rows     = [[cell.text.strip() for cell in row.cells] for row in table.rows]
-        combined = _format_docx_table_rows(rows)
+        combined = _sanitize(_format_docx_table_rows(rows), surface="docx_table_ingest",
+                             file=source_name, table_index=t_idx)
+        combined = _pii_scrub(combined, surface="docx_table_ingest")
 
         if not combined:
             continue
@@ -900,6 +956,8 @@ def _process_docx(
                 except Exception:
                     pass
                 if body_text:
+                    body_text = _sanitize(body_text, surface="docx_comment_ingest", file=source_name)
+                    body_text = _pii_scrub(body_text, surface="docx_comment_ingest")
                     documents.append(
                         IngestedDocument(
                             text=f"[COMMENT by {author} on {date_str}] {body_text}",
@@ -931,6 +989,8 @@ def _process_docx(
                 part = getattr(doc.part, fn_type, None)
                 if part:
                     xml_text = part._element.text_content() if hasattr(part._element, "text_content") else ""
+                    xml_text = _sanitize(xml_text, surface="docx_footnote_ingest", file=source_name)
+                    xml_text = _pii_scrub(xml_text, surface="docx_footnote_ingest")
                     if xml_text.strip():
                         documents.append(
                             IngestedDocument(
@@ -961,6 +1021,8 @@ def _process_docx(
         for section in doc.sections:
             for hf_type, hf_obj in [("header", section.header), ("footer", section.footer)]:
                 hf_text = " ".join(p.text.strip() for p in hf_obj.paragraphs if p.text.strip())
+                hf_text = _sanitize(hf_text, surface="docx_headerfooter_ingest", file=source_name)
+                hf_text = _pii_scrub(hf_text, surface="docx_headerfooter_ingest")
                 if hf_text:
                     documents.append(
                         IngestedDocument(
@@ -1040,7 +1102,7 @@ def _process_excel(
         warnings = []
 
     documents: List[IngestedDocument] = []
-    ROWS_PER_CHUNK = 500
+    ROWS_PER_CHUNK = 50
 
     try:
         wb = openpyxl.load_workbook(file_path, data_only=True)
@@ -1098,9 +1160,20 @@ def _process_excel(
                         continue
 
                     chunk_text = f"[Sheet: {sheet_name}, Rows {row_start}-{row_end}]\n{txt}"
-                    chunk_text, pii_counts = _redact_pii(chunk_text)
-                    for et, cnt in pii_counts.items():
-                        _pii_redacted.labels(entity_type=et).inc(cnt)
+                    try:
+                        from app.guardrails.input_guard import sanitize as _guard_sanitize
+                        _clean = _guard_sanitize(chunk_text, surface="excel_ingest")
+                        if _clean != chunk_text:
+                            logger.warning("excel_injection_sanitized", file=source_name,
+                                           sheet=sheet_name, original_len=len(chunk_text),
+                                           sanitized_len=len(_clean))
+                            chunk_text = _clean
+                    except Exception as _ge:
+                        logger.warning("excel_guardrail_failed", file=source_name, error=str(_ge))
+
+                    if not chunk_text.strip():  # entire chunk was injection — skip
+                        continue
+                    chunk_text = _pii_scrub(chunk_text, surface="excel_ingest")
 
                     documents.append(
                         IngestedDocument(
@@ -1260,9 +1333,7 @@ def _process_excel(
                             if len(chart_text) < 16:
                                 continue
 
-                            chart_text, pii_counts = _redact_pii(chart_text)
-                            for et, cnt in pii_counts.items():
-                                _pii_redacted.labels(entity_type=et).inc(cnt)
+                            chart_text = _pii_scrub(chart_text, surface="excel_chart_ingest")
 
                             documents.append(
                                 IngestedDocument(

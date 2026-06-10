@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import threading
 import time
 import unicodedata
@@ -123,6 +124,66 @@ _TEMPORAL_ANCHOR_WORDS = frozenset([
 ])
 
 _FORWARD_SECTION_THRESHOLD = 8  # section numbers >= this are treated as forward-looking
+
+
+# AUTO FILE-SCOPE — detect explicit filename mentions in the query so the
+# retriever automatically scopes to that file even without the UI @-picker.
+_AUTO_SCOPE_RE = re.compile(
+    r'\b[\w\-]{2,60}\.(?:pdf|txt|docx|xlsx|xls|doc|mp3|mp4|wav|jpg|jpeg|png)\b',
+    re.IGNORECASE,
+)
+
+
+def _detect_filename_scope(query: str) -> Optional[List[str]]:
+    """Return matched filenames if the query explicitly names a file with a known extension."""
+    matches = _AUTO_SCOPE_RE.findall(query)
+    return [m.lower() for m in matches] if matches else None
+
+
+# SOURCE-COHERENCE FILTER — after reranking, keep only the top-N distinct
+# source files. Drop files whose best chunk raw sigmoid score is more than
+# _COHERENCE_GAP_ABS below the leader. This prevents a query about one company
+# from silently pulling in chunks from an unrelated file that just happened to
+# share a keyword.
+_COHERENCE_MAX_SOURCES = 3
+_COHERENCE_GAP_ABS     = 0.45
+_COHERENCE_ABS_FLOOR   = 0.04
+
+
+def _source_coherence_filter(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Limit LLM context to the top-N source files; drop files far below the leader."""
+    if len(docs) <= 1:
+        return docs
+
+    top_raw = (docs[0].get("metadata") or {}).get("_reranker_raw")
+    seen_sources: Dict[str, Any] = {}
+    kept: List[Dict[str, Any]] = []
+
+    for doc in docs:
+        meta = doc.get("metadata") or {}
+        src  = meta.get("source", "")
+        raw  = meta.get("_reranker_raw")
+
+        if not kept:
+            seen_sources[src] = raw
+            kept.append(doc)
+            continue
+
+        # Skip chunks the reranker considers very off-topic
+        if raw is not None and raw < _COHERENCE_ABS_FLOOR:
+            continue
+
+        if src not in seen_sources:
+            if len(seen_sources) >= _COHERENCE_MAX_SOURCES:
+                continue
+            # Drop files whose best chunk is far below the leader's score
+            if top_raw is not None and raw is not None and raw < top_raw - _COHERENCE_GAP_ABS:
+                continue
+            seen_sources[src] = raw
+
+        kept.append(doc)
+
+    return kept
 
 
 def _is_temporal_query(query: str) -> bool:
@@ -463,10 +524,18 @@ async def stream_query(
     session_id: str = "default",
 ) -> AsyncIterator[str]:
     query = _normalize(query)
+    _pre_sanitize = query
     query = _sanitize_query(query)
 
     if not query:
-        yield "Query cannot be empty."
+        if _pre_sanitize:
+            yield (
+                "⚠️ Your message was blocked by the security guardrail. "
+                "It matched a restricted pattern (prompt injection or policy violation). "
+                "Please rephrase your query."
+            )
+        else:
+            yield "Query cannot be empty."
         return
 
     query = query[:settings.MAX_PROMPT_CHARS]
@@ -543,7 +612,28 @@ def query_pipeline(
 
     # NORMALIZE AND SANITIZE — SECTION 2.3 / SECTION 5
     query = _normalize(query)
+    _pre_sanitize = query
     query = _sanitize_query(query)
+
+    if not query:
+        return {
+            "answer": (
+                "⚠️ Your message was blocked by the security guardrail. "
+                "It matched a restricted pattern (prompt injection or policy violation). "
+                "Please rephrase your query."
+            ),
+            "confidence":            0.0,
+            "decision":              "blocked",
+            "source":                "input_guard",
+            "session_id":            session_id,
+            "request_id":            trace_id,
+            "latency":               round(time.time() - start, 3),
+            "sources":               [],
+            "is_fallback":           False,
+            "hallucination_warning": False,
+            "trace_id":              trace_id,
+        }
+
     query = query[:settings.MAX_PROMPT_CHARS]
 
     # CACHE HIT — SECTION 4.6 (skipped when no_cache=True, e.g. regenerate)
@@ -756,9 +846,13 @@ def query_pipeline(
         if sources:
             retrieval_filters = {"sources": sources}
         else:
-            detected_modality = _detect_modality_filter(query)
-            if detected_modality:
-                retrieval_filters = {"modality": detected_modality}
+            auto_scope = _detect_filename_scope(query)
+            if auto_scope:
+                retrieval_filters = {"sources": auto_scope}
+            else:
+                detected_modality = _detect_modality_filter(query)
+                if detected_modality:
+                    retrieval_filters = {"modality": detected_modality}
 
         # Hybrid decisions retrieve deeper so adjacent section chunks can surface.
         _retrieval_top_k = (
@@ -852,6 +946,9 @@ def query_pipeline(
         # TEMPORAL BOOST — demote forward-looking chunks when query is time-anchored
         reranked = _apply_temporal_boost(reranked, query)
         final_docs = reranked[:settings.RAG_TOP_K]
+
+        # SOURCE-COHERENCE FILTER — keep top-N files; drop cross-file noise
+        final_docs = _source_coherence_filter(final_docs)
 
         # H-05: Drop RAG chunks below relevance threshold in hybrid context.
         # Prevents off-topic document noise from diluting the LLM context window.
@@ -1027,8 +1124,9 @@ def query_pipeline(
         if not answer:
             answer = "No answer generated."
 
-        # PHASE 24.8 — build standardised sources[] from reranked docs
-        p248_sources = _build_sources_array(final_docs, max_items=min(3, len(final_docs)))
+        # PHASE 24.8 — build standardised sources[] from ALL reranked docs so
+        # citation-index filtering below can match any [n] the LLM produced.
+        p248_sources = _build_sources_array(final_docs, max_items=len(final_docs))
         if decision == "hybrid" and _hybrid_web_sources:
             p248_sources = p248_sources + _hybrid_web_sources[:3]
 
@@ -1085,6 +1183,24 @@ def query_pipeline(
                 )
         except Exception as _og_err:
             logger.warning(event="output_guard_failed", error=str(_og_err), session_id=session_id)
+
+        # CITATION TRACKING — keep only source chips the LLM actually cited.
+        # The system prompt asks the LLM to write [1], [2] etc.; we parse
+        # those indices here before stripping them from the answer text.
+        # Hybrid answers use [Document]/[Web] markers — no numeric indices —
+        # so we fall back to showing all retrieved sources in that case.
+        try:
+            from app.core.response import extract_cited_indices, strip_inline_citations
+            _cited_idx = extract_cited_indices(answer)
+            if _cited_idx and decision != "hybrid":
+                _filtered = [s for i, s in enumerate(p248_sources, 1) if i in _cited_idx]
+                if _filtered:
+                    p248_sources = _filtered[:5]
+            elif not (decision == "hybrid"):
+                p248_sources = p248_sources[:3]
+            answer = strip_inline_citations(answer)
+        except Exception as _cit_err:
+            logger.warning(event="citation_tracking_failed", error=str(_cit_err), session_id=session_id)
 
         # H-03: Stricter numeric grounding gate.
         # If the answer contains specific numbers/dollar amounts that are NOT

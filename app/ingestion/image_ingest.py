@@ -787,7 +787,12 @@ def ingest(
 
         # OCR DOCUMENT
         if ocr_text:
-            ocr_clean = sanitize_prompt_injection(redact_pii(normalize_text(ocr_text)))
+            _ocr_norm = redact_pii(normalize_text(ocr_text))
+            try:
+                from app.guardrails.input_guard import sanitize as _gs
+                ocr_clean = _gs(_ocr_norm, surface="image_ocr_ingest")
+            except Exception:
+                ocr_clean = sanitize_prompt_injection(_ocr_norm)
             documents.append(
                 IngestedDocument(
                     text=ocr_clean,
@@ -849,7 +854,12 @@ def ingest(
             try:
                 page_caption = _generate_caption(file_path, page_img, session_id)
                 page_ocr = _extract_ocr(page_img, session_id)
-                page_caption_clean = sanitize_prompt_injection(redact_pii(normalize_text(page_caption)))
+                _pc_norm = redact_pii(normalize_text(page_caption))
+                try:
+                    from app.guardrails.input_guard import sanitize as _gs
+                    page_caption_clean = _gs(_pc_norm, surface="image_page_caption_ingest")
+                except Exception:
+                    page_caption_clean = sanitize_prompt_injection(_pc_norm)
 
                 documents.append(
                     IngestedDocument(
@@ -874,7 +884,12 @@ def ingest(
                 )
 
                 if page_ocr:
-                    page_ocr_clean = sanitize_prompt_injection(redact_pii(normalize_text(page_ocr)))
+                    _po_norm = redact_pii(normalize_text(page_ocr))
+                    try:
+                        from app.guardrails.input_guard import sanitize as _gs
+                        page_ocr_clean = _gs(_po_norm, surface="image_page_ocr_ingest")
+                    except Exception:
+                        page_ocr_clean = sanitize_prompt_injection(_po_norm)
                     documents.append(
                         IngestedDocument(
                             text=page_ocr_clean,

@@ -8,12 +8,17 @@ import sys
 
 
 def is_cached(hf_home: str, model_id: str) -> bool:
-    cache_dir = os.path.join(
+    blobs_dir = os.path.join(
         hf_home, "hub",
         "models--" + model_id.replace("/", "--"),
         "blobs",
     )
-    return os.path.isdir(cache_dir) and bool(os.listdir(cache_dir))
+    if not os.path.isdir(blobs_dir):
+        return False
+    # Must have at least one complete blob (no .incomplete files only)
+    blobs = os.listdir(blobs_dir)
+    complete = [b for b in blobs if not b.endswith(".incomplete")]
+    return bool(complete)
 
 
 def download_snapshot(model_id: str, hf_home: str, token: str | None) -> None:
@@ -24,12 +29,7 @@ def download_snapshot(model_id: str, hf_home: str, token: str | None) -> None:
 
 def download_whisper(size: str, hf_home: str) -> None:
     model_id = f"Systran/faster-whisper-{size}"
-    cache_dir = os.path.join(
-        hf_home, "hub",
-        "models--" + model_id.replace("/", "--"),
-        "blobs",
-    )
-    if os.path.isdir(cache_dir) and os.listdir(cache_dir):
+    if is_cached(hf_home, model_id):
         print(f"[ensure_models] HF model present: {model_id}")
         return
     print(f"[ensure_models] HF model missing: {model_id} — downloading...")

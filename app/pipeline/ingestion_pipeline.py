@@ -370,33 +370,86 @@ def _dedup_chunks(docs: List[IngestedDocument]) -> List[IngestedDocument]:
 
 # BATCHED TEXT EMBEDDING WITH PROMETHEUS TIMING
 
-def _batched_text_embedding(
+def _stream_embed_and_store(
+    text_chunks: List[IngestedDocument],
+    vision_chunks: List[IngestedDocument],
     embedder: Any,
-    docs: List[IngestedDocument],
+    vector_store: Any,
     session_id: str,
-) -> List[IngestedDocument]:
-    batch_size = settings.INGESTION_BATCH_SIZE
-    results: List[IngestedDocument] = []
+    user_id: str,
+    micro_batch: int = 1,
+) -> Tuple[int, int]:
+    """Embed and store one micro-batch at a time, clearing GPU cache between batches.
 
-    for i in range(0, len(docs), batch_size):
-        batch = docs[i:i + batch_size]
+    Returns (total_embedded, total_stored).
+    """
+    import gc
+    try:
+        import torch
+        _cuda = torch.cuda.is_available()
+    except ImportError:
+        _cuda = False
+
+    def _clear_cache() -> None:
+        if _cuda:
+            torch.cuda.empty_cache()
+        gc.collect()
+
+    total_embedded = 0
+    total_stored   = 0
+
+    # TEXT CHUNKS — one micro-batch at a time
+    for i in range(0, len(text_chunks), micro_batch):
+        batch = text_chunks[i : i + micro_batch]
         t_start = time.time()
         try:
             embedded = embedder.embed_documents(batch, session_id=session_id)
-            elapsed  = round(time.time() - t_start, 3)
-            _record_embed_latency(settings.EMBEDDING_MODEL, elapsed)
+            _record_embed_latency(settings.EMBEDDING_MODEL, round(time.time() - t_start, 3))
             if embedded:
-                results.extend(embedded)
+                valid, _ = _valid_embeddings(embedded)
+                if valid:
+                    vector_store.insert_documents(valid, session_id=session_id, user_id=user_id)
+                    total_stored   += len(valid)
+                    total_embedded += len(valid)
         except Exception as e:
             logger.warning(
-                event="text_embedding_batch_failed",
+                event="stream_text_embed_failed",
                 batch_start=i,
                 error=str(e),
                 session_id=session_id,
             )
             _record_error("text", "embedding_failed")
+        finally:
+            _clear_cache()
 
-    return results
+    # VISION CHUNKS — one micro-batch at a time
+    if vision_chunks:
+        from app.core.model_loader import model_loader as _ml
+        for i in range(0, len(vision_chunks), micro_batch):
+            batch = vision_chunks[i : i + micro_batch]
+            t_vis = time.time()
+            try:
+                multimodal = _ml.get_multimodal_embedder()
+                txt_from_vis, vis_embedded = multimodal.embed_documents(batch, session_id=session_id)
+                _record_embed_latency(settings.SIGLIP_MODEL, round(time.time() - t_vis, 3))
+                combined = vis_embedded + txt_from_vis
+                valid, _ = _valid_embeddings(combined)
+                if valid:
+                    vector_store.insert_documents(valid, session_id=session_id, user_id=user_id)
+                    total_stored   += len(valid)
+                    total_embedded += len(valid)
+            except Exception as e:
+                logger.warning(
+                    event="stream_vision_embed_failed",
+                    batch_start=i,
+                    error=str(e),
+                    session_id=session_id,
+                )
+                _record_error("vision", "embedding_failed")
+            finally:
+                _clear_cache()
+
+    return total_embedded, total_stored
 
 
 # FALLBACK VECTOR STORE
@@ -638,44 +691,30 @@ class IngestionPipeline:
                 if user_id:
                     c.structure["user_id"] = user_id
 
-            # EMBED — SECTION 4.6
+            # EMBED + STORE (streaming micro-batches) — SECTION 4.6
+            # One micro-batch at a time: embed → validate → store → clear GPU cache.
+            # Prevents CUDA OOM on large chunks across all modalities.
             progress.emit("embed", "started")
             t_embed = time.time()
 
             from app.core.model_loader import model_loader
 
             text_chunks, vision_chunks = _split_by_modality(chunks)
-            text_embedded:   List[IngestedDocument] = []
-            vision_embedded: List[IngestedDocument] = []
+            embedder = model_loader.get_embedder() if text_chunks else None
 
-            if text_chunks:
-                embedder      = model_loader.get_embedder()
-                text_embedded = _batched_text_embedding(embedder, text_chunks, session_id)
+            micro = getattr(settings, "INGESTION_MICRO_BATCH", 1)
 
-            if vision_chunks:
-                try:
-                    multimodal      = model_loader.get_multimodal_embedder()
-                    t_vis           = time.time()
-                    txt_from_vis, vis_embedded = multimodal.embed_documents(
-                        vision_chunks, session_id=session_id
-                    )
-                    vision_embedded = vis_embedded
-                    text_embedded.extend(txt_from_vis)
-                    _record_embed_latency(settings.SIGLIP_MODEL, round(time.time() - t_vis, 3))
-                except Exception as e:
-                    logger.warning(
-                        event="vision_embedding_failed",
-                        error=str(e),
-                        session_id=session_id,
-                    )
-                    _record_error("vision", "embedding_failed")
+            total_embedded, total = _stream_embed_and_store(
+                text_chunks,
+                vision_chunks,
+                embedder,
+                self.vector_store,
+                session_id,
+                user_id,
+                micro_batch=micro,
+            )
 
-            all_embedded = text_embedded + vision_embedded
-            all_embedded, invalid_count = _valid_embeddings(all_embedded)
-
-            # CLEAN UP PERSISTENT FRAME STAGING DIR — frame images copied here by
-            # video_ingest so SigLIP embedding can read them after frame_temp_dir cleanup.
-            # Safe to delete now — all embeddings are in memory.
+            # CLEAN UP PERSISTENT FRAME STAGING DIR — done after all embeddings stored.
             if modality == "video":
                 import shutil as _shutil
                 for chunk in chunks:
@@ -686,36 +725,20 @@ class IngestionPipeline:
                             _shutil.rmtree(frame_stage, ignore_errors=True)
                             break
 
-            if not all_embedded:
+            if total_embedded == 0:
                 raise ValueError("NO_VALID_EMBEDDINGS")
 
             embed_latency = round(time.time() - t_embed, 2)
 
             progress.emit(
                 "embed", "completed",
-                embedded=len(all_embedded),
-                invalid=invalid_count,
+                embedded=total_embedded,
                 latency=embed_latency,
             )
 
-            # VECTOR STORE UPSERT — SECTION 4.4 / 4.6
+            # VECTOR STORE UPSERT already completed inside _stream_embed_and_store
             progress.emit("store", "started")
             t_store = time.time()
-            total   = 0
-
-            for i in range(0, len(all_embedded), self.batch_size):
-                batch = all_embedded[i:i + self.batch_size]
-                try:
-                    self.vector_store.insert_documents(batch, session_id=session_id, user_id=user_id)
-                    total += len(batch)
-                except Exception as e:
-                    logger.error(
-                        event="vector_insert_batch_failed",
-                        batch_start=i,
-                        error=str(e),
-                        session_id=session_id,
-                    )
-                    _record_error(modality, "vector_insert_failed")
 
             # BM25 INDEX UPDATE — after Qdrant upsert succeeds
             if total > 0:
@@ -745,7 +768,7 @@ class IngestionPipeline:
                 event="ingestion_pipeline_success",
                 file=file_name,
                 chunks=len(chunks),
-                embedded=len(all_embedded),
+                embedded=total_embedded,
                 stored=total,
                 modality=modality,
                 modality_breakdown=_modality_counts(chunks),
@@ -779,7 +802,7 @@ class IngestionPipeline:
                 "pages":             _pages,
                 "warnings":          _warnings,
                 "file_hash":         file_hash,
-                "embedded":          len(all_embedded),
+                "embedded":          total_embedded,
                 "user_id":           user_id,
                 "trace_id":          span_ctx["trace_id"],
             }

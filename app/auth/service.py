@@ -60,54 +60,71 @@ class AuthService:
 
     def register(self, req: RegisterRequest) -> UserPublic:
         """
-        Create or link an email/password account.
+        Create or link an email/password account as inactive (pending OTP verification).
 
-        - New email → create account with auth_providers=["email"]
-        - Email exists, Google-only → link: add password + add "email" provider
-        - Email exists, already has email provider → reject (account exists)
+        - New email → create inactive account, caller must send OTP and call activate_user()
+        - Email exists, unverified (is_active=False) → replace with fresh inactive account
+        - Email exists, Google-only → link password, keep active
+        - Email exists, already active email account → reject
         """
         col = _get_mongo_collection()
         existing = col.find_one({"email": req.email})
 
         if existing:
             providers = existing.get("auth_providers") or (
-                # Migrate legacy documents that used oauth_only flag
                 ["google"] if existing.get("oauth_only") else ["email"]
             )
 
-            if "email" in providers:
+            # Unverified account (created but OTP never completed) — let user retry
+            if "email" in providers and not existing.get("is_active", True):
+                _check_password_strength(req.password, req.email)
+                col.delete_one({"email": req.email})
+                # Fall through to create a fresh account below
+
+            elif "email" in providers:
                 raise ValueError("An account with this email already exists.")
 
-            # Google-only account — user is now adding a password to enable
-            # email/password login as well. Link the two methods.
-            _check_password_strength(req.password, req.email)
-            col.update_one(
-                {"email": req.email},
-                {
-                    "$set":      {"hashed_password": _hash_password(req.password)},
-                    "$addToSet": {"auth_providers": "email"},
-                    "$unset":    {"oauth_only": ""},   # remove legacy flag
-                },
-            )
-            logger.info(
-                event="auth_email_linked_to_google_account",
-                email=req.email,
-                user_id=existing["user_id"],
-            )
-            # Re-fetch to get the updated document
-            doc = col.find_one({"email": req.email})
-            return _doc_to_public(doc)
+            else:
+                # Google-only account — link email/password, activate immediately
+                _check_password_strength(req.password, req.email)
+                col.update_one(
+                    {"email": req.email},
+                    {
+                        "$set":      {"hashed_password": _hash_password(req.password)},
+                        "$addToSet": {"auth_providers": "email"},
+                        "$unset":    {"oauth_only": ""},
+                    },
+                )
+                logger.info(event="auth_email_linked_to_google_account", email=req.email)
+                doc = col.find_one({"email": req.email})
+                return _doc_to_public(doc)
 
-        # Brand-new account
+        # Brand-new account — inactive until OTP verified
         _check_password_strength(req.password, req.email)
         user = UserInDB(
             email=req.email,
             hashed_password=_hash_password(req.password),
             auth_providers=["email"],
+            is_active=False,  # activated in verify-otp after email confirmation
         )
         col.insert_one(user.model_dump())
-        logger.info(event="auth_user_registered", email=req.email, user_id=user.user_id)
+        logger.info(event="auth_user_registered_pending", email=req.email, user_id=user.user_id)
         return _doc_to_public(user.model_dump())
+
+    def activate_user(self, user_id: str) -> None:
+        """Mark account as active after OTP verification."""
+        col = _get_mongo_collection()
+        col.update_one(
+            {"user_id": user_id},
+            {"$set": {"is_active": True, "last_login": datetime.now(timezone.utc)}},
+        )
+        logger.info(event="auth_user_activated", user_id=user_id)
+
+    def delete_user(self, user_id: str) -> None:
+        """Remove an account — used to roll back on OTP send failure."""
+        col = _get_mongo_collection()
+        col.delete_one({"user_id": user_id})
+        logger.info(event="auth_user_deleted", user_id=user_id)
 
     def authenticate(self, email: str, password: str) -> UserPublic:
         """
@@ -135,16 +152,20 @@ class AuthService:
                     "to add a password to your account."
                 )
 
-        # Constant-time failure — always verify even on miss to prevent timing attacks
-        dummy = "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        stored = doc["hashed_password"] if doc else dummy
+        # No account found for this email
+        if doc is None:
+            # Still run dummy verify to prevent timing-based user enumeration
+            dummy = "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            _verify_password(password, dummy)
+            logger.warning(event="auth_login_failed_no_account", email=email)
+            raise ValueError("No account found with this email. Please create an account first.")
 
-        if not _verify_password(password, stored) or doc is None:
-            logger.warning(event="auth_login_failed", email=email)
-            raise ValueError("Incorrect email or password.")
+        if not _verify_password(password, doc["hashed_password"]):
+            logger.warning(event="auth_login_failed_wrong_password", email=email)
+            raise ValueError("Incorrect password. Please try again.")
 
         if not doc.get("is_active", True):
-            raise ValueError("Account is disabled.")
+            raise ValueError("Email not verified. Please complete registration to activate your account.")
 
         col.update_one(
             {"email": email},
@@ -205,6 +226,23 @@ class AuthService:
             },
         )
         logger.info(event="auth_password_changed", user_id=user_id)
+
+    def reset_password(self, user_id: str, new_password: str) -> None:
+        """Set a new password without requiring the current one (password-reset flow)."""
+        col = _get_mongo_collection()
+        doc = col.find_one({"user_id": user_id}, {"email": 1})
+        if not doc:
+            raise ValueError("User not found.")
+        email = doc.get("email", "")
+        _check_password_strength(new_password, email)
+        col.update_one(
+            {"user_id": user_id},
+            {
+                "$set":      {"hashed_password": _hash_password(new_password)},
+                "$addToSet": {"auth_providers": "email"},
+            },
+        )
+        logger.info(event="auth_password_reset", user_id=user_id)
 
     def deactivate(self, user_id: str) -> None:
         col = _get_mongo_collection()

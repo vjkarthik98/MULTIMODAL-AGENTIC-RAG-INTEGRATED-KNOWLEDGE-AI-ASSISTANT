@@ -25,8 +25,9 @@ import time
 from typing import Any, Dict, Optional
 
 import structlog
+from app.utils.logger import get_logger
 
-logger = structlog.get_logger("guardrails.audit")
+logger = get_logger("guardrails.audit")
 
 _HMAC_SECRET: Optional[bytes] = None
 

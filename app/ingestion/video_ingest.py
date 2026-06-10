@@ -29,6 +29,34 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _sanitize(text: str, surface: str, **log_kw) -> str:
+    """Apply Phase-26 injection sanitization. Returns original on guardrail error."""
+    try:
+        from app.guardrails.input_guard import sanitize as _g
+        clean = _g(text, surface=surface)
+        if clean != text:
+            logger.warning("injection_sanitized", surface=surface,
+                           original_len=len(text), sanitized_len=len(clean), **log_kw)
+        return clean
+    except Exception as exc:
+        logger.warning("guardrail_skipped", surface=surface, error=str(exc))
+        return text
+
+
+def _scrub_pii(text: str, surface: str) -> str:
+    """Apply Phase-26 PII scrubbing. Returns original on error."""
+    try:
+        from app.guardrails.pii import scrub_pii
+        clean, changed = scrub_pii(text)
+        if changed:
+            logger.warning("pii_scrubbed", surface=surface,
+                           original_len=len(text), scrubbed_len=len(clean))
+        return clean
+    except Exception as exc:
+        logger.warning("pii_scrub_skipped", surface=surface, error=str(exc))
+        return text
+
+
 # SUPPORTED FORMATS
 
 SUPPORTED_VIDEO_FORMATS = {
@@ -776,18 +804,21 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     if start_t is None or end_t is None or end_t <= start_t:
                         continue
 
+                    _speech_clean = _sanitize(doc.text, surface="video_speech_ingest",
+                                              file=source_name)
+                    _speech_clean = _scrub_pii(_speech_clean, surface="video_speech_ingest")
                     speech_segments.append({
                         "index":      i,
                         "start":      start_t,
                         "end":        end_t,
-                        "text":       doc.text,
+                        "text":       _speech_clean,
                         "confidence": s.get("confidence", 1.0),
                         "language":   s.get("language"),
                     })
 
                     documents.append(
                         IngestedDocument(
-                            text=doc.text,
+                            text=_speech_clean,
                             modality="video",
                             subtype="speech",
                             source_type="video",
@@ -849,6 +880,9 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 for sub in subtitles:
                     if not sub.get("text"):
                         continue
+                    sub["text"] = _sanitize(sub["text"], surface="video_subtitle_ingest",
+                                            file=source_name)
+                    sub["text"] = _scrub_pii(sub["text"], surface="video_subtitle_ingest")
                     documents.append(
                         IngestedDocument(
                             text=sub["text"],
@@ -976,6 +1010,9 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
                 # FRAME OCR
                 ocr_text = _extract_frame_ocr(persistent_frame_path)
+                if ocr_text:
+                    ocr_text = _sanitize(ocr_text, surface="video_ocr_ingest", file=source_name)
+                    ocr_text = _scrub_pii(ocr_text, surface="video_ocr_ingest")
 
                 blur    = _blur_score(persistent_frame_path)
                 linked  = _link_speech(ts, speech_segments)

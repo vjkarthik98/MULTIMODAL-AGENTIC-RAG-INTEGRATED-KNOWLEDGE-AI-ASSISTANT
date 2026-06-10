@@ -324,7 +324,8 @@ function PrivacySection({ auth, onLogout, addToast }) {
     setDeleting(true)
     try {
       await deleteAccount(auth.token)
-      addToast('Your account and data have been permanently deleted', 'success')
+      localStorage.removeItem('magik_device_token')
+      addToast('Your account and all data have been permanently deleted', 'success')
       setTimeout(onLogout, 1000)
     } catch (err) {
       addToast(err.message, 'error')

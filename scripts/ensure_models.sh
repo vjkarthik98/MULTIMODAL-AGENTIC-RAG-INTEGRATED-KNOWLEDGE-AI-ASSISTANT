@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Ensure ALL models are present on the ephemeral NVMe before starting the server.
-# /opt/dlami/nvme is wiped on every AWS instance stop — this script re-downloads
-# anything missing from HuggingFace using the project's HF_TOKEN.
+# Ensure ALL models are present in the project's permanent .hf_cache folder.
+# Models live on the EBS root volume and survive instance stop/start.
+# On a fresh clone (no .hf_cache yet) they are downloaded once from HuggingFace.
 #
 # Called automatically by start_server.sh on every boot.
 
@@ -18,9 +18,9 @@ _env_val() {
 
 HF_TOKEN="${HF_TOKEN:-$(_env_val HF_TOKEN)}"
 HF_CACHE="$(_env_val HF_HOME)"
-HF_CACHE="${HF_CACHE:-/opt/dlami/nvme/hf_cache}"
+HF_CACHE="${HF_CACHE:-${REPO_ROOT}/.hf_cache}"
 GGUF_DEST="$(_env_val LLM_MODEL_PATH)"
-GGUF_DEST="${GGUF_DEST:-${HF_CACHE}/mistral-7b-instruct-v0.2.Q4_K_M.gguf}"
+GGUF_DEST="${GGUF_DEST:-${REPO_ROOT}/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf}"
 
 EMBED_MODEL="$(_env_val EMBEDDING_MODEL)"; EMBED_MODEL="${EMBED_MODEL:-sentence-transformers/all-MiniLM-L6-v2}"
 SIGLIP_MODEL_ID="$(_env_val SIGLIP_MODEL)";  SIGLIP_MODEL_ID="${SIGLIP_MODEL_ID:-google/siglip-so400m-patch14-384}"
@@ -31,6 +31,7 @@ WHISPER_SIZE="$(_env_val WHISPER_MODEL)";  WHISPER_SIZE="${WHISPER_SIZE:-large-v
 log() { echo "[ensure_models] $*"; }
 
 mkdir -p "${HF_CACHE}"
+mkdir -p "$(dirname "${GGUF_DEST}")"
 
 # ── 1. GGUF ──────────────────────────────────────────────────────────────────
 GGUF_FILE="$(basename "${GGUF_DEST}")"
@@ -39,7 +40,6 @@ if [[ -f "${GGUF_DEST}" ]] && [[ $(stat -c%s "${GGUF_DEST}") -gt 1073741824 ]]; 
 else
     log "GGUF missing — downloading ${GGUF_FILE}..."
     [[ -z "${HF_TOKEN}" ]] && { log "ERROR: HF_TOKEN not set"; exit 1; }
-    mkdir -p "$(dirname "${GGUF_DEST}")"
     curl -L --retry 3 --retry-delay 10 --progress-bar \
         -H "Authorization: Bearer ${HF_TOKEN}" \
         -o "${GGUF_DEST}.tmp" \

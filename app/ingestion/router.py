@@ -23,8 +23,9 @@ from app.ingestion.image_ingest import ingest as image_ingest
 from app.ingestion.schema import IngestedDocument
 from app.ingestion.text_ingest import ingest as text_ingest
 from app.ingestion.video_ingest import ingest as video_ingest
+from app.utils.logger import get_logger
 
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
 # PROMETHEUS METRICS

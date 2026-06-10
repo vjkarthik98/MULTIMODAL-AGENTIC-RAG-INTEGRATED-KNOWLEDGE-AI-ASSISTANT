@@ -124,11 +124,13 @@ class Settings:
     LLM_RETRY_WAIT_MAX: int  = _int("LLM_RETRY_WAIT_MAX", 10)
 
     # EMBEDDINGS
-    EMBEDDING_MODEL: str                = _str("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-    EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 128)
-    EMBEDDING_MAX_BATCH_SIZE: int       = _int("EMBEDDING_MAX_BATCH_SIZE", 256)
+    EMBEDDING_MODEL: str                = _str("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B")
+    EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 4)
+    EMBEDDING_MAX_BATCH_SIZE: int       = _int("EMBEDDING_MAX_BATCH_SIZE", 8)
+    EMBEDDING_MAX_SEQ_LEN: int          = _int("EMBEDDING_MAX_SEQ_LEN", 512)
+    INGESTION_MICRO_BATCH: int          = _int("INGESTION_MICRO_BATCH", 1)
     EMBEDDING_CACHE_TTL: int            = _int("EMBEDDING_CACHE_TTL", 2_592_000)
-    TEXT_EMBEDDING_DIM: int             = _int("TEXT_EMBEDDING_DIM", 384)
+    TEXT_EMBEDDING_DIM: int             = _int("TEXT_EMBEDDING_DIM", 1024)
     MATRYOSHKA_SHORT_DIM: int           = _int("MATRYOSHKA_SHORT_DIM", 256)
     MATRYOSHKA_LONG_DIM: int            = _int("MATRYOSHKA_LONG_DIM", 1536)
 
@@ -147,7 +149,7 @@ class Settings:
     LLM_GPU_LAYERS_ALL: int          = _int("LLM_GPU_LAYERS_ALL", -1)
     EMBEDDER_HALF_PRECISION: bool    = _bool("EMBEDDER_HALF_PRECISION", True)
     VISION_HALF_PRECISION: bool      = _bool("VISION_HALF_PRECISION", True)
-    WHISPER_COMPUTE_TYPE: str        = _str("WHISPER_COMPUTE_TYPE", "float16")
+    WHISPER_COMPUTE_TYPE: str        = _str("WHISPER_COMPUTE_TYPE", "int8_float16")
     EMBEDDER_DEVICE: str             = _str("EMBEDDER_DEVICE", "cuda")
     RERANKER_DEVICE: str             = _str("RERANKER_DEVICE", "cuda")
     SIGLIP_DEVICE: str               = _str("SIGLIP_DEVICE", "cuda")
@@ -160,7 +162,7 @@ class Settings:
     VISION_EMBEDDING_DIM: int        = _int("VISION_EMBEDDING_DIM", 1152)
     BLIP_MODEL: str                  = _str("BLIP_MODEL", "Salesforce/blip-image-captioning-large")
     BLIP_MAX_TOKENS: int             = _int("BLIP_MAX_TOKENS", 100)
-    BLIP_NUM_BEAMS: int              = _int("BLIP_NUM_BEAMS", 5)
+    BLIP_NUM_BEAMS: int              = _int("BLIP_NUM_BEAMS", 2)
     MAX_IMAGE_DIM: int               = _int("MAX_IMAGE_DIM", 1024)
     MAX_IMAGE_SIZE_MP: int           = _int("MAX_IMAGE_SIZE_MP", 50)
     THUMBNAIL_WIDTH: int             = _int("THUMBNAIL_WIDTH", 256)
@@ -169,7 +171,7 @@ class Settings:
     SOLID_COLOR_THRESHOLD: float     = _float("SOLID_COLOR_THRESHOLD", 0.95)
 
     # ASR WHISPER
-    WHISPER_MODEL: str              = _str("WHISPER_MODEL", "large-v3")
+    WHISPER_MODEL: str              = _str("WHISPER_MODEL", "medium")
     AUDIO_SAMPLE_RATE: int          = _int("AUDIO_SAMPLE_RATE", 16000)
     MAX_AUDIO_DURATION_SEC: int     = _int("MAX_AUDIO_DURATION_SEC", 10800)
     MAX_AUDIO_SEGMENTS: int         = _int("MAX_AUDIO_SEGMENTS", 500)
@@ -186,7 +188,7 @@ class Settings:
     WHISPER_FILLER_WORDS: List[str] = _list("WHISPER_FILLER_WORDS", ["uh", "um", "er", "hmm"])
 
     # RERANKER
-    RERANKER_MODEL: str             = _str("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+    RERANKER_MODEL: str             = _str("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
     RERANK_TOP_K: int               = _int("RERANK_TOP_K", 8)
     RERANK_MAX_INPUT: int           = _int("RERANK_MAX_INPUT", 20)
     RERANK_CONTEXT_MAX_CHARS: int   = _int("RERANK_CONTEXT_MAX_CHARS", 512)
@@ -309,8 +311,8 @@ class Settings:
     }
 
     # HYBRID RETRIEVAL
-    HYBRID_WEIGHT_BM25: float          = _float("HYBRID_WEIGHT_BM25", 0.4)
-    HYBRID_WEIGHT_VECTOR: float        = _float("HYBRID_WEIGHT_VECTOR", 0.6)
+    HYBRID_WEIGHT_BM25: float          = _float("HYBRID_WEIGHT_BM25", 0.35)
+    HYBRID_WEIGHT_VECTOR: float        = _float("HYBRID_WEIGHT_VECTOR", 0.65)
     HYBRID_WEIGHT_VISION: float        = _float("HYBRID_WEIGHT_VISION", 0.2)
     HYBRID_CANDIDATES_MULTIPLIER: int  = _int("HYBRID_CANDIDATES_MULTIPLIER", 3)
     HYBRID_MIN_SCORE: float            = _float("HYBRID_MIN_SCORE", 0.20)
@@ -497,6 +499,22 @@ class Settings:
     PASSWORD_MIN_LENGTH: int             = _int("PASSWORD_MIN_LENGTH", 8)
     AUTH_ENABLED: bool                   = _bool("AUTH_ENABLED", True)
 
+    # EMAIL (Gmail SMTP) — OTP + password-reset
+    SMTP_HOST: str                       = _str("SMTP_HOST", "smtp.gmail.com")
+    SMTP_PORT: int                       = _int("SMTP_PORT", 587)
+    SMTP_USER: Optional[str]             = _opt("SMTP_USER")
+    SMTP_PASSWORD: Optional[str]         = _opt("SMTP_PASSWORD")
+    EMAIL_FROM: str                      = _str("EMAIL_FROM", "magikaiassistant@gmail.com")
+    EMAIL_FROM_NAME: str                 = _str("EMAIL_FROM_NAME", "MAGIK AI")
+    FRONTEND_URL: str                    = _str("FRONTEND_URL", "http://localhost:5173")
+
+    # OTP / password-reset tuning
+    OTP_TTL_SECONDS: int                 = _int("OTP_TTL_SECONDS", 600)        # 10 min
+    OTP_MAX_ATTEMPTS: int                = _int("OTP_MAX_ATTEMPTS", 3)
+    OTP_LOCKOUT_SECONDS: int             = _int("OTP_LOCKOUT_SECONDS", 900)    # 15 min
+    RESET_TOKEN_TTL_SECONDS: int         = _int("RESET_TOKEN_TTL_SECONDS", 3600)  # 1 hr
+    # Dev-only: log OTP/reset links to console instead of sending email
+    DEV_OTP_LOG: bool                    = _bool("DEV_OTP_LOG", False)
 
     # SECURITY
     SECRET_KEY: str                        = _str("SECRET_KEY", "CHANGE_ME_IN_PRODUCTION")
@@ -689,7 +707,7 @@ class TestSettings:
     def test_defaults_are_valid(self):
         s = Settings()
         assert s.APP_VERSION == "0.25.0"
-        assert s.TEXT_EMBEDDING_DIM == 384
+        assert s.TEXT_EMBEDDING_DIM == 1024
         assert s.VISION_EMBEDDING_DIM > 0
         assert s.CHUNK_OVERLAP < s.CHUNK_SIZE
         assert s.AGENT_MAX_STEPS > 0

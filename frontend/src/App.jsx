@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import LoginPage from './pages/LoginPage'
 import ChatPage from './pages/ChatPage'
+import ForgotPasswordPage from './pages/ForgotPasswordPage'
+import ResetPasswordPage from './pages/ResetPasswordPage'
 import { getMe, refreshAccessToken, logout as apiLogout } from './api/client'
 import { ToastProvider } from './context/ToastContext'
 import Toast from './components/Toast'
@@ -21,8 +23,23 @@ function setFavicon(href) {
 
 export default function App() {
   const [auth, setAuth]         = useState(null)
-  const [checking, setChecking] = useState(true)
+  const [checking, setChecking] = useState(
+    // Skip the auth-check spinner on reset/forgot-password pages — no session needed
+    () => !['/reset-password', '/forgot-password'].includes(window.location.pathname)
+  )
   const [pageKey, setPageKey]   = useState(0)   // incremented to re-trigger fade-in
+  // Read URL synchronously at init — before any effect or render runs
+  const [resetToken] = useState(() => {
+    if (window.location.pathname === '/reset-password')
+      return new URLSearchParams(window.location.search).get('token') || ''
+    return ''
+  })
+  const [page, setPage] = useState(() => {
+    const p = window.location.pathname
+    if (p === '/reset-password') { window.history.replaceState({}, '', '/reset-password'); return 'reset' }
+    if (p === '/forgot-password') { window.history.replaceState({}, '', '/'); return 'forgot' }
+    return 'main'
+  })
 
   const [dark, setDark] = useState(
     () => !document.documentElement.classList.contains('light')
@@ -55,6 +72,7 @@ export default function App() {
     localStorage.removeItem('magik_token')
     localStorage.removeItem('magik_refresh')
     localStorage.removeItem('magik_email')
+    // device token intentionally kept — it lets this browser skip OTP on next login
   }
 
   useEffect(() => {
@@ -176,20 +194,33 @@ export default function App() {
     <ErrorBoundary>
       <ToastProvider>
         <div key={pageKey} className="page-enter" style={{ height: '100%' }}>
-          {auth
-            ? <ChatPage
-                auth={auth}
-                onLogout={handleLogout}
-                dark={dark}
-                onToggleTheme={toggleTheme}
-                onStreamingChange={handleStreamingChange}
-              />
-            : <LoginPage
-                onLogin={handleLogin}
-                dark={dark}
-                onToggleTheme={toggleTheme}
-              />
-          }
+          {page === 'forgot' ? (
+            <ForgotPasswordPage onBack={() => { setPage('main'); setPageKey(k => k + 1) }} />
+          ) : page === 'reset' ? (
+            <ResetPasswordPage
+              token={resetToken}
+              onSuccess={() => {
+                setPage('main')
+                window.history.replaceState({}, '', '/')
+                setPageKey(k => k + 1)
+              }}
+            />
+          ) : auth ? (
+            <ChatPage
+              auth={auth}
+              onLogout={handleLogout}
+              dark={dark}
+              onToggleTheme={toggleTheme}
+              onStreamingChange={handleStreamingChange}
+            />
+          ) : (
+            <LoginPage
+              onLogin={handleLogin}
+              dark={dark}
+              onToggleTheme={toggleTheme}
+              onForgotPassword={() => { setPage('forgot'); setPageKey(k => k + 1) }}
+            />
+          )}
         </div>
         <Toast />
       </ToastProvider>

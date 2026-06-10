@@ -484,7 +484,7 @@ def _transcribe_file(
     segments_iter, info = whisper.transcribe(
         file_path,
         language=None,
-        beam_size=5,
+        beam_size=2,
         word_timestamps=False,
     )
     latency = round(time.time() - t_start, 2)
@@ -729,7 +729,12 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 text = _apply_domain_vocab(raw_text)
                 text = _strip_fillers(text)
                 text = _normalize_punctuation(text)
-                text = sanitize_prompt_injection(redact_pii(normalize_text(text)))
+                _text_norm = redact_pii(normalize_text(text))
+                try:
+                    from app.guardrails.input_guard import sanitize as _gs
+                    text = _gs(_text_norm, surface="audio_ingest")
+                except Exception:
+                    text = sanitize_prompt_injection(_text_norm)
 
             if not text or len(text.strip()) < 2:
                 continue

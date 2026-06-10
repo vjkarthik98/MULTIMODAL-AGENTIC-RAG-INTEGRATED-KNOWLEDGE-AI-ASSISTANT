@@ -182,11 +182,30 @@ class TextEmbedder:
 
         self.model = SentenceTransformer(model_name, device=device)
 
+        # Instruction-tuned embedders (Qwen3-Embedding, E5-Instruct, etc.) need a
+        # query-side prompt to activate their instruction-following capacity.
+        # Document embedding uses no prompt — the model card is explicit about this.
+        # We detect by checking the model's own registered prompt names; if "query"
+        # is present we use it, otherwise fall back to a raw string prefix.
+        self._query_prompt_name: Optional[str] = None
+        self._query_prompt_text: Optional[str] = None
+        _prompts = getattr(self.model, "prompts", {}) or {}
+        if "query" in _prompts:
+            self._query_prompt_name = "query"
+        elif any(k in model_name.lower() for k in ("qwen3", "e5-instruct", "gte-qwen")):
+            # Fallback: prepend the standard instruction string for Qwen3-class models
+            self._query_prompt_text = (
+                "Instruct: Given a web search query, retrieve relevant passages "
+                "that answer the query\nQuery: "
+            )
+
         logger.info(
             event="text_embedder_initialized",
             model=model_name,
             device=device,
             dim=self.expected_dim,
+            query_prompt_name=self._query_prompt_name,
+            query_prompt_text=bool(self._query_prompt_text),
         )
 
     # ENCODE WITH TENACITY RETRY
@@ -248,23 +267,35 @@ class TextEmbedder:
         if not clean:
             raise ValueError("EMPTY_TEXT")
 
+        # Query embeddings use a prompt; use a distinct cache key so a text
+        # that appears in both a query and a document doesn't collide.
+        _cache_model_key = (
+            self.model_name + ":q"
+            if (self._query_prompt_name or self._query_prompt_text)
+            else self.model_name
+        )
+
         # CACHE CHECK — SECTION 4.3
-        cached = _cache.get(clean, self.model_name, self.expected_dim)
+        cached = _cache.get(clean, _cache_model_key, self.expected_dim)
         if cached is not None:
             logger.debug(event="embed_cache_hit", session_id=session_id)
             return cached
 
         t_start = time.time()
-        emb = self.model.encode(
-            clean,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-        ).tolist()
+        _encode_kwargs: dict = dict(convert_to_numpy=True, normalize_embeddings=True)
+        if self._query_prompt_name:
+            _encode_kwargs["prompt_name"] = self._query_prompt_name
+            _text_to_encode = clean
+        elif self._query_prompt_text:
+            _text_to_encode = self._query_prompt_text + clean
+        else:
+            _text_to_encode = clean
+        emb = self.model.encode(_text_to_encode, **_encode_kwargs).tolist()
 
         if not _valid_embedding(emb, self.expected_dim):
             raise ValueError("INVALID_EMBEDDING_SINGLE")
 
-        _cache.set(clean, self.model_name, self.expected_dim, emb)
+        _cache.set(clean, _cache_model_key, self.expected_dim, emb)
 
         logger.debug(
             event="embed_single_success",

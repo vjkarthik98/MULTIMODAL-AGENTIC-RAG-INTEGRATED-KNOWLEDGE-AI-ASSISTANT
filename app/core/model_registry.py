@@ -100,10 +100,15 @@ class ModelRegistry:
         loaded: List[str] = []
 
         if settings.MODEL_PARALLEL_LOAD and len(to_load) > 1:
-            futures = {
-                name: self._executor.submit(self._load_one, name)
-                for name in to_load
-            }
+            futures = {}
+            for name in to_load:
+                try:
+                    futures[name] = self._executor.submit(self._load_one, name)
+                except RuntimeError as exc:
+                    if "interpreter shutdown" in str(exc) or "shutdown" in str(exc).lower():
+                        logger.debug(event="model_load_skipped_shutdown", model=name)
+                        return loaded
+                    raise
             for name, fut in futures.items():
                 try:
                     fut.result(timeout=settings.MODEL_TIMEOUT_SEC)
@@ -126,6 +131,16 @@ class ModelRegistry:
                     with self._lock:
                         self._loaded.add(name)
                     loaded.append(name)
+                except RuntimeError as exc:
+                    if "interpreter shutdown" in str(exc) or "shutdown" in str(exc).lower():
+                        logger.debug(event="model_load_skipped_shutdown", model=name)
+                        return loaded
+                    logger.warning(
+                        event="model_warmup_failed",
+                        model=name,
+                        scope=scope,
+                        error=str(exc),
+                    )
                 except Exception as exc:
                     logger.warning(
                         event="model_warmup_failed",

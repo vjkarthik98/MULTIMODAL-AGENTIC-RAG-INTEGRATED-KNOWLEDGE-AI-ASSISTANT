@@ -745,6 +745,28 @@ def build_retrieved_source(
     }
 
 
+def extract_cited_indices(text: str) -> set:
+    """Return the set of 1-based source indices the LLM cited in its answer.
+
+    Matches patterns like [1], [2], [1,2], [1, 3], [1,2,3].
+    Returns an empty set when no numeric citations are found (fallback: show all sources).
+    """
+    indices: set = set()
+    for m in re.finditer(r'\[(\d+(?:\s*,\s*\d+)*)\]', text or ""):
+        for part in m.group(1).split(","):
+            try:
+                indices.add(int(part.strip()))
+            except ValueError:
+                pass
+    return indices
+
+
+def strip_inline_citations(text: str) -> str:
+    """Remove [1], [2], [1,2] etc from the answer text without leaving double-spaces."""
+    cleaned = re.sub(r'\s*\[\d+(?:\s*,\s*\d+)*\]', '', text or "")
+    return re.sub(r'  +', ' ', cleaned).strip()
+
+
 def build_sources(
     docs:          List[Dict[str, Any]],
     snippet_chars: int = 240,

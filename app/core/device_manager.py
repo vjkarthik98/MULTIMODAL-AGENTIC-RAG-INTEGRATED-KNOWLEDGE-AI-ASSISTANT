@@ -4,13 +4,14 @@ Central device + dtype policy for the model layer.
 Tesla T4 deploy budget: 14.6 GB VRAM, CUDA 13.2.
 
 GPU models (all_gpu profile) — ALL models run on GPU:
-  - Mistral 7B Q4_K_M      ~4.1 GB  (llama-cpp n_gpu_layers=-1)
-  - SigLIP SO400M/14@384px ~1.74 GB (float16)
-  - BLIP large              ~1.5 GB  (float16)
-  - Whisper large-v3        ~1.5 GB  (float16)
-  - CrossEncoder MiniLM     ~0.1 GB  (float16)
-  - MiniLM text embed       ~0.09 GB (float16)
-  Total ≈ 8.9 GB  — fits comfortably in 14.6 GB
+  - Mistral 7B Q4_K_M          ~4.10 GB  (llama-cpp n_gpu_layers=-1)
+  - SigLIP SO400M/14@384px     ~1.76 GB  (float16, 878M params)
+  - BLIP large                 ~1.56 GB  (float16, 779M params)
+  - Whisper medium              ~0.38 GB  (int8_float16, weights halved)
+  - BGE-reranker-v2-m3         ~1.14 GB  (float16, 568M params)
+  - Qwen3-Embedding-0.6B       ~1.20 GB  (float16, 600M params)
+  Total static ≈ 10.5 GB  — fits in 15.6 GB with ~5 GB headroom
+  Peak (LLM KV cache 2048 ctx + BLIP 2-beam): ~13 GB
 
 CPU services (no VRAM needed — not models):
   - FastAPI / Uvicorn
@@ -233,7 +234,7 @@ class DeviceManager:
     # Mistral Q4_K_M has 32 transformer blocks; each costs ~128 MB of VRAM.
     # We reserve 512 MB headroom so other models (embedder, SigLIP, Whisper) don't OOM.
     _LAYERS_PER_GB = 7.5          # ~128 MB per layer → ~7.5 layers per GB
-    _VRAM_HEADROOM_GB = 0.3       # keep 300 MB free — tight but safe on T4
+    _VRAM_HEADROOM_GB = 2.0       # reserve 2 GB for non-LLM models (Qwen3+BGE+SigLIP+BLIP+Whisper)
 
     def llm_gpu_layers(self) -> int:
         llm_device = self.device_for("llm")
@@ -254,7 +255,7 @@ class DeviceManager:
             # Can't query VRAM — fall back to full offload and let llama_cpp try.
             return settings.LLM_GPU_LAYERS_ALL
 
-        usable_gb = max(0.0, free_gb - self._VRAM_HEADROOM_GB)
+        usable_gb = max(0.0, min(free_gb, settings.VRAM_BUDGET_GB) - self._VRAM_HEADROOM_GB)
         layers = int(usable_gb * self._LAYERS_PER_GB)
 
         if layers >= 32:

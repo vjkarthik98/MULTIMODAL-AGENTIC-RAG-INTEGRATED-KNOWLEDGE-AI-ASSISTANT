@@ -33,10 +33,20 @@ from opentelemetry.trace import Status, StatusCode
 from prometheus_client import Counter, Gauge, Histogram
 from tenacity import (
     retry,
+    retry_if_exception,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
+
+
+def _is_retryable_load_error(exc: BaseException) -> bool:
+    """Retry on timeout or transient RuntimeError, but not on interpreter shutdown."""
+    if isinstance(exc, FuturesTimeoutError):
+        return True
+    if isinstance(exc, RuntimeError):
+        return "interpreter shutdown" not in str(exc) and "shutdown" not in str(exc).lower()
+    return False
 
 from app.core.config import settings
 from app.core.device_manager import device_manager
@@ -147,7 +157,7 @@ class ModelLoader:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(min=2, max=10),
-        retry=retry_if_exception_type((FuturesTimeoutError, RuntimeError)),
+        retry=retry_if_exception(_is_retryable_load_error),
         reraise=True,
     )
     def _safe_load(self, load_fn, name: str, device: Optional[str] = None) -> Any:
@@ -290,6 +300,12 @@ class ModelLoader:
                     batch_size=settings.EMBEDDING_BATCH_SIZE,
                     device=decision.device,
                 )
+                # Truncate sequences to EMBEDDING_MAX_SEQ_LEN tokens — prevents
+                # OOM on oversized chunks without changing model weights.
+                try:
+                    emb.model.max_seq_length = settings.EMBEDDING_MAX_SEQ_LEN
+                except Exception:
+                    pass
                 # FP16 on CUDA shrinks the model and speeds inference.
                 if decision.device == "cuda" and decision.dtype == "float16":
                     try:
@@ -495,7 +511,7 @@ class ModelLoader:
     # HEALTH CHECK
 
     def health_check(self) -> Dict[str, Any]:
-        return {
+        health: Dict[str, Any] = {
             "llm":                  self._llm is not None,
             "embedder":             self._text_embedder is not None,
             "siglip":               self._siglip_model is not None,
@@ -511,6 +527,17 @@ class ModelLoader:
             "initialized":          self._initialized,
             "devices":              device_manager.snapshot(),
         }
+        if device_manager.cuda_available:
+            try:
+                torch = _torch()
+                reserved  = torch.cuda.memory_reserved(0)  / (1024 ** 3)
+                allocated = torch.cuda.memory_allocated(0) / (1024 ** 3)
+                health["vram_reserved_gb"]  = round(reserved,  2)
+                health["vram_allocated_gb"] = round(allocated, 2)
+                health["vram_free_gb"]      = round(device_manager.vram_total_gb - reserved, 2)
+            except Exception:
+                pass
+        return health
 
     # RESET ALL MODELS
 

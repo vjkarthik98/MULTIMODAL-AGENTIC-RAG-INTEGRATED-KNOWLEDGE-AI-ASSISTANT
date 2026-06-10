@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import chardet
-import structlog
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 from prometheus_client import Counter, Histogram
@@ -15,6 +14,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
 from app.ingestion.schema import IngestedDocument
+from app.utils.logger import get_logger
 from app.ingestion.text_repair import (
     detect_error_markers,
     extract_version,
@@ -26,7 +26,7 @@ from app.ingestion.text_repair import (
     strip_footnotes,
 )
 
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
 # PROMETHEUS METRICS
@@ -757,6 +757,40 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
                 if len(text) < 50:
                     raise ValueError("TEXT_TOO_SHORT")
+
+                # INJECTION SANITIZATION — strip prompt-injection payloads
+                # before chunking so they are never stored in Qdrant.
+                try:
+                    from app.guardrails.input_guard import sanitize as _guard_sanitize
+                    clean = _guard_sanitize(text, surface="txt_ingest")
+                    if clean != text:
+                        logger.warning(
+                            "txt_injection_sanitized",
+                            file=path.name,
+                            original_len=len(text),
+                            sanitized_len=len(clean),
+                        )
+                        text = clean
+                except Exception as _ge:
+                    logger.warning("txt_guardrail_failed", file=path.name, error=str(_ge))
+
+                if not text or text.isspace():
+                    raise ValueError("INJECTION_ONLY_CONTENT: file contained only injection payloads")
+
+                # PII SCRUBBING — redact SSNs, credit cards, phones, emails etc.
+                try:
+                    from app.guardrails.pii import scrub_pii
+                    _scrubbed, _changed = scrub_pii(text)
+                    if _changed:
+                        logger.warning(
+                            "txt_pii_scrubbed",
+                            file=path.name,
+                            original_len=len(text),
+                            scrubbed_len=len(_scrubbed),
+                        )
+                        text = _scrubbed
+                except Exception as _pe:
+                    logger.warning("txt_pii_scrub_failed", file=path.name, error=str(_pe))
 
                 # METADATA
                 file_hash   = _hash(text[:10000])

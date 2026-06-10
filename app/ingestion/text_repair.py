@@ -6,8 +6,9 @@ from typing import Dict, List, Optional, Tuple
 import structlog
 
 from app.core.config import settings
+from app.utils.logger import get_logger
 
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 
 
 # PASS 1 — MOJIBAKE REPAIR

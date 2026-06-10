@@ -12,8 +12,9 @@ import threading
 from typing import List, Optional
 
 import structlog
+from app.utils.logger import get_logger
 
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 
 # Lazy-loaded Presidio objects — initialized once via warm_up()
 _analyzer: Optional[object] = None

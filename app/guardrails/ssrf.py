@@ -13,8 +13,9 @@ from urllib.parse import urlparse
 import structlog
 
 from app.guardrails.exceptions import GuardrailBlocked
+from app.utils.logger import get_logger
 
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 
 # Populated from policies.yaml at module init via _load_policy()
 _BLOCKED_CIDRS: List[ipaddress.IPv4Network | ipaddress.IPv6Network] = []

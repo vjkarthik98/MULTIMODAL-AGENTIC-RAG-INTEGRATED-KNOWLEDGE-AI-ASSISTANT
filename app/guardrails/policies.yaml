@@ -279,6 +279,9 @@ pii:
     - name: "uk_nino"
       pattern: '\b[A-CEGHJ-PR-TW-Z]{2}\d{6}[A-D]\b'
       replacement: "<UK_NINO>"
+    - name: "us_ssn_all_formats"
+      pattern: '\b\d{3}-\d{2}-\d{4}\b'
+      replacement: "<US_SSN>"
 
 # ---------------------------------------------------------------------------
 # OUTPUT GUARDRAILS

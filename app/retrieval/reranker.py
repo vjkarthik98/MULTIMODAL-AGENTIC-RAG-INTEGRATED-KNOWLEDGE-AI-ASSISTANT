@@ -290,11 +290,12 @@ class Reranker:
         self,
         valid_docs: List[Dict],
         model_scores: np.ndarray,
+        raw_scores: Optional[np.ndarray] = None,
     ) -> List[Dict]:
         results: List[Dict] = []
 
-        for d, s in zip(valid_docs, model_scores):
-            meta = d.get("metadata", {}) or {}
+        for i, (d, s) in enumerate(zip(valid_docs, model_scores)):
+            meta = dict(d.get("metadata", {}) or {})
             structure = meta.get("structure", {}) or {}
 
             modality = meta.get("modality", "text")
@@ -315,6 +316,11 @@ class Reranker:
 
             if not self._valid_score(final_score):
                 continue
+
+            # Stamp raw sigmoid so downstream source-coherence filter has
+            # an absolute relevance signal (not just relative min-max rank).
+            if raw_scores is not None and i < len(raw_scores):
+                meta["_reranker_raw"] = round(float(raw_scores[i]), 5)
 
             results.append({
                 "text": d["text"][:settings.RAG_DOC_MAX_CHARS],
@@ -397,19 +403,33 @@ class Reranker:
                     session_id=session_id,
                 )
 
+            # Save pre-normalization sigmoid scores for absolute relevance filtering
+            raw_scores_orig = raw_scores.copy()
+
             # NORMALIZE MODEL SCORES
             norm_scores = self._normalize_scores(raw_scores)
 
             # ALIGN LENGTHS
             min_len = min(len(norm_scores), len(valid_docs))
-            norm_scores = norm_scores[:min_len]
-            valid_docs = valid_docs[:min_len]
+            norm_scores     = norm_scores[:min_len]
+            raw_scores_orig = raw_scores_orig[:min_len]
+            valid_docs      = valid_docs[:min_len]
 
-            # COMPUTE FINAL SCORES
-            results = self._compute_final_scores(valid_docs, norm_scores)
+            # COMPUTE FINAL SCORES (raw_scores_orig stamped as _reranker_raw)
+            results = self._compute_final_scores(valid_docs, norm_scores, raw_scores_orig)
 
             # SORT BY FINAL SCORE
             results.sort(key=lambda x: x["score"], reverse=True)
+
+            # ABSOLUTE RELEVANCE FLOOR — drop chunks the reranker is very confident
+            # are off-topic (sigmoid < 0.04), but always keep index 0 so the caller
+            # never receives an empty list when at least one doc was retrieved.
+            _FLOOR = 0.04
+            if len(results) > 1:
+                results = [results[0]] + [
+                    r for r in results[1:]
+                    if (r.get("metadata") or {}).get("_reranker_raw", 1.0) >= _FLOOR
+                ]
 
             # FLAG LOW CONFIDENCE
             results = self._flag_low_confidence(results)

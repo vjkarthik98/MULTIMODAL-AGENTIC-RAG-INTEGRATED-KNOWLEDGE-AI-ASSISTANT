@@ -11,8 +11,11 @@ from fastapi.security import OAuth2PasswordRequestForm
 
 from app.auth.dependencies import get_current_user
 from app.auth.jwt_handler import issue_tokens, refresh_access_token, verify_token
-from app.auth.models import LoginRequest, LogoutRequest, RefreshRequest, RegisterRequest, TokenPair, UserPublic
-from app.auth.mfa import MFAService
+from app.auth.models import (
+    LoginRequest, LogoutRequest, OTPVerifyRequest, ForgotPasswordRequest,
+    ResetPasswordRequest, RefreshRequest, RegisterRequest, TokenPair, UserPublic,
+)
+from app.auth.mfa import MFAService, _issue_mfa_token
 from app.auth.oauth import build_google_auth_url, exchange_google_code, get_or_create_oauth_user, google_oauth_enabled
 from app.auth.service import AuthService
 from app.auth.token_blacklist import revoke_all_user_tokens, revoke_token
@@ -27,14 +30,40 @@ _mfa  = MFAService()
 
 # ── Register ──────────────────────────────────────────────────────────────────
 
-@router.post("/register", response_model=UserPublic, status_code=status.HTTP_201_CREATED)
-async def register(req: RegisterRequest) -> UserPublic:
-    """Create a new account using email + password."""
+@router.post("/register", status_code=status.HTTP_201_CREATED)
+async def register(req: RegisterRequest):
+    """
+    Create an inactive account and send an OTP to verify email ownership.
+    Returns {"otp_required": true, "otp_token": "..."} — the client must
+    call /auth/verify-otp to activate the account and receive full tokens.
+    If OTP sending fails, the account is deleted so the user can retry cleanly.
+    """
+    from app.auth.otp_store import generate_otp, store_otp
+    from app.auth.email_service import send_otp_email
+
     try:
         user = await asyncio.to_thread(_svc.register, req)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    return user
+
+    otp = generate_otp()
+    try:
+        await asyncio.to_thread(store_otp, user.user_id, otp)
+        await asyncio.to_thread(send_otp_email, user.email, otp)
+    except Exception as exc:
+        logger.error(event="register_otp_send_failed", error=str(exc), user_id=user.user_id)
+        try:
+            await asyncio.to_thread(_svc.delete_user, user.user_id)
+        except Exception:
+            pass  # best-effort rollback
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not send verification email. Please try again.",
+        )
+
+    otp_token = await asyncio.to_thread(_issue_mfa_token, user.user_id)
+    logger.info(event="register_otp_sent", user_id=user.user_id)
+    return {"otp_required": True, "otp_token": otp_token}
 
 
 # ── Login (JSON body) ─────────────────────────────────────────────────────────
@@ -42,9 +71,9 @@ async def register(req: RegisterRequest) -> UserPublic:
 @router.post("/login")
 async def login(req: LoginRequest):
     """
-    Authenticate with email + password.
-    If MFA is enabled, returns {"mfa_required": true, "mfa_token": "..."}.
-    Otherwise returns a full TokenPair.
+    Step 1 of login: verify email + password.
+    Always returns {"otp_required": true, "otp_token": "..."} — the client
+    must present the 6-digit code sent to the user's email at /auth/verify-otp.
     """
     try:
         user = await asyncio.to_thread(_svc.authenticate, req.email, req.password)
@@ -55,14 +84,94 @@ async def login(req: LoginRequest):
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Check if MFA is enabled for this user
-    mfa_enabled = await asyncio.to_thread(_mfa.is_enabled, user.user_id)
-    if mfa_enabled:
-        mfa_token = await asyncio.to_thread(_mfa.begin_login, user.user_id)
-        return {"mfa_required": True, "mfa_token": mfa_token}
+    # Check for a trusted device token — skip OTP if valid
+    from app.auth.otp_store import generate_otp, store_otp, verify_device_token
+    from app.auth.email_service import send_otp_email
+
+    if req.device_token:
+        try:
+            trusted = await asyncio.to_thread(verify_device_token, req.device_token, user.user_id)
+            if trusted:
+                tokens = issue_tokens(user.user_id, user.email, user.role.value)
+                logger.info(event="login_trusted_device", user_id=user.user_id)
+                return {**TokenPair(**tokens).model_dump(), "device_token": req.device_token}
+        except Exception:
+            pass  # Redis unavailable — fall through to OTP
+
+    # Generate and email the OTP
+    otp = generate_otp()
+    try:
+        await asyncio.to_thread(store_otp, user.user_id, otp)
+        await asyncio.to_thread(send_otp_email, user.email, otp)
+    except Exception as exc:
+        logger.error(event="otp_send_failed", error=str(exc), user_id=user.user_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not send verification email. Please try again.",
+        )
+
+    otp_token = await asyncio.to_thread(_issue_mfa_token, user.user_id)
+    logger.info(event="otp_challenge_issued", user_id=user.user_id)
+    return {"otp_required": True, "otp_token": otp_token}
+
+
+# ── Verify email OTP ──────────────────────────────────────────────────────────
+
+@router.post("/verify-otp")
+async def verify_otp(req: OTPVerifyRequest):
+    """
+    Step 2 of login: submit the 6-digit OTP received by email.
+    Returns a full JWT access + refresh token pair on success.
+    """
+    from jose import JWTError, jwt as jose_jwt
+    from app.auth.otp_store import verify_otp as _verify_otp
+
+    # Decode the otp_token to get user_id (reuses the mfa_challenge token)
+    try:
+        payload = jose_jwt.decode(
+            req.otp_token, settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+        )
+        if payload.get("type") != "mfa_challenge":
+            raise ValueError("Invalid OTP token type")
+        user_id = payload["sub"]
+    except (JWTError, KeyError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="OTP session expired. Please sign in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        ok = await asyncio.to_thread(_verify_otp, user_id, req.code)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
+
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect code. Please try again.",
+        )
+
+    user = _svc.get_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    # Activate account if this was a registration OTP (account starts inactive)
+    if not user.is_active:
+        await asyncio.to_thread(_svc.activate_user, user_id)
+
+    # Issue a trusted-device token so this browser skips OTP on future logins
+    from app.auth.otp_store import generate_reset_token, store_device_token
+    device_token = generate_reset_token()  # reuse same 32-byte random generator
+    try:
+        await asyncio.to_thread(store_device_token, device_token, user_id)
+    except Exception:
+        device_token = None  # Redis unavailable — don't break login, just skip
 
     tokens = issue_tokens(user.user_id, user.email, user.role.value)
-    return TokenPair(**tokens)
+    logger.info(event="otp_verified_complete", user_id=user_id)
+    return {**TokenPair(**tokens).model_dump(), "device_token": device_token}
 
 
 # ── Login (OAuth2 form — enables /docs "Authorize" button) ───────────────────
@@ -181,6 +290,66 @@ async def google_callback(
         f"&magik_email={urllib.parse.quote(email, safe='')}"
     )
     return RedirectResponse(url=redirect_url, status_code=302)
+
+
+# ── Forgot password ───────────────────────────────────────────────────────────
+
+@router.post("/forgot-password", status_code=status.HTTP_200_OK)
+async def forgot_password(req: ForgotPasswordRequest) -> dict:
+    """
+    Send a password-reset link to the given email address.
+    Always returns 200 regardless of whether the email exists — prevents
+    user enumeration attacks.
+    """
+    from app.auth.otp_store import generate_reset_token, store_reset_token
+    from app.auth.email_service import send_password_reset_email
+
+    user = _svc.get_by_email(req.email)
+    if user:
+        token = generate_reset_token()
+        try:
+            await asyncio.to_thread(store_reset_token, token, user.user_id)
+            await asyncio.to_thread(send_password_reset_email, req.email, token)
+            logger.info(event="password_reset_requested", user_id=user.user_id)
+        except Exception as exc:
+            logger.error(event="password_reset_email_failed", error=str(exc))
+    else:
+        logger.info(event="password_reset_unknown_email", email=req.email)
+
+    # Always return the same response to prevent user enumeration
+    return {"status": "ok", "message": "If that email is registered, a reset link has been sent."}
+
+
+# ── Reset password (consume the emailed token) ────────────────────────────────
+
+@router.post("/reset-password", status_code=status.HTTP_200_OK)
+async def reset_password(req: ResetPasswordRequest) -> dict:
+    """
+    Validate the one-time reset token and set the new password.
+    The token is consumed immediately (single-use).
+    All existing tokens for the user are revoked, forcing a fresh login.
+    """
+    from app.auth.otp_store import consume_reset_token
+
+    try:
+        user_id = await asyncio.to_thread(consume_reset_token, req.token)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    try:
+        await asyncio.to_thread(_svc.reset_password, user_id, req.new_password)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    revoke_all_user_tokens(user_id)
+    # Revoke trusted devices so all remembered browsers must re-verify after a reset
+    try:
+        from app.auth.otp_store import revoke_device_tokens
+        await asyncio.to_thread(revoke_device_tokens, user_id)
+    except Exception:
+        pass
+    logger.info(event="password_reset_complete", user_id=user_id)
+    return {"status": "ok", "message": "Password updated. Please sign in with your new password."}
 
 
 # ── Logout (revoke current token) ────────────────────────────────────────────
@@ -367,38 +536,78 @@ async def delete_me(
     current_user: UserPublic = Depends(get_current_user),
 ) -> dict:
     """
-    GDPR right-to-erasure: purge all data for the authenticated user
-    from Qdrant, Redis, and MongoDB, then deactivate the account.
+    Full account deletion — wipes every trace of the user across all stores:
+    Qdrant (vectors), BM25 index, Redis (session cache, OTP keys, device tokens,
+    JWT revocation list), MongoDB (messages, summaries, sessions, user document),
+    and the user's directory on disk (uploaded files, processed documents, images).
     """
+    import shutil
+    from app.utils.paths import DATA_ROOT
+
     user_id = current_user.user_id
+    from app.core.infra_registry import infra
 
+    # 1. Qdrant — delete all vectors for this user across both collections
     try:
-        from app.memory.memory_manager import MemoryManager
-        manager = MemoryManager()
-        await asyncio.to_thread(manager.gdpr_purge, user_id)
+        vs = infra.get_vector_store()
+        if vs:
+            await asyncio.to_thread(vs.gdpr_purge, user_id)
     except Exception as exc:
-        logger.warning(event="gdpr_memory_purge_failed", user_id=user_id, error=str(exc))
+        logger.warning(event="gdpr_qdrant_purge_failed", user_id=user_id, error=str(exc))
 
+    # 2. MongoDB — messages, summaries, chat_sessions (direct, no MemoryManager wrapper)
     try:
-        from app.core.infra_registry import infra
+        mongo = infra.get_mongo()
+        if mongo:
+            await asyncio.to_thread(mongo.purge_user, user_id)
+    except Exception as exc:
+        logger.warning(event="gdpr_mongo_purge_failed", user_id=user_id, error=str(exc))
+
+    # 3. Redis — session cache, OTP keys, device tokens
+    try:
+        redis_mem = infra.get_memory()
+        if redis_mem and hasattr(redis_mem, "purge_user"):
+            await asyncio.to_thread(redis_mem.purge_user, user_id)
+    except Exception as exc:
+        logger.warning(event="gdpr_redis_session_purge_failed", user_id=user_id, error=str(exc))
+    try:
+        from app.auth.otp_store import delete_otp_keys, revoke_device_tokens
+        await asyncio.to_thread(delete_otp_keys, user_id)
+        await asyncio.to_thread(revoke_device_tokens, user_id)
+    except Exception as exc:
+        logger.warning(event="gdpr_redis_auth_purge_failed", user_id=user_id, error=str(exc))
+
+    # 4. BM25 index entries + disk (KB files, pickle, staging, images, etc.)
+    try:
         bm25 = infra.get_bm25()
-        if bm25 and hasattr(bm25, "purge_by_session"):
-            await asyncio.to_thread(bm25.purge_by_session, user_id)
+        if bm25 and hasattr(bm25, "delete_by_source"):
+            kb_dir = DATA_ROOT / user_id / "knowledge_base"
+            if kb_dir.exists():
+                for f in kb_dir.iterdir():
+                    if f.is_file():
+                        await asyncio.to_thread(bm25.delete_by_source, f.name, user_id)
     except Exception as exc:
         logger.warning(event="gdpr_bm25_purge_failed", user_id=user_id, error=str(exc))
-
     try:
-        await asyncio.to_thread(_svc.deactivate, user_id)
+        user_dir = DATA_ROOT / user_id
+        if user_dir.exists():
+            await asyncio.to_thread(shutil.rmtree, str(user_dir), True)
     except Exception as exc:
-        logger.warning(event="gdpr_deactivate_failed", user_id=user_id, error=str(exc))
+        logger.warning(event="gdpr_disk_purge_failed", user_id=user_id, error=str(exc))
 
-    # Revoke all tokens — account is gone
+    # 5. JWT tokens — blacklist all active tokens immediately
     revoke_all_user_tokens(user_id)
+
+    # 6. MongoDB user document — hard delete last so auth works for all steps above
+    try:
+        await asyncio.to_thread(_svc.delete_user, user_id)
+    except Exception as exc:
+        logger.warning(event="gdpr_user_doc_delete_failed", user_id=user_id, error=str(exc))
 
     logger.info(event="gdpr_self_purge_completed", user_id=user_id)
 
     return {
         "status": "ok",
-        "message": "All your data has been purged and your account deactivated",
+        "message": "Your account and all associated data have been permanently deleted.",
         "user_id": user_id,
     }

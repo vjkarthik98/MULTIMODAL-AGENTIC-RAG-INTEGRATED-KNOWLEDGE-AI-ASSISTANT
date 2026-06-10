@@ -34,6 +34,9 @@ fi
 echo "[start_server] Ensuring all models are present on nvme..."
 bash scripts/ensure_models.sh
 
+# Reduce CUDA memory fragmentation — must be set before PyTorch imports.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 echo "[start_server] Starting uvicorn..."
 exec uvicorn app.main:app \
     --host 0.0.0.0 \

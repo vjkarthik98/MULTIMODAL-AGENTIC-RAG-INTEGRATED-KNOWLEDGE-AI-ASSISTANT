@@ -225,7 +225,33 @@ class QdrantVectorStore:
         if name in self._collection_cache:
             return
 
-        if not self._collection_exists(name):
+        if self._collection_exists(name):
+            # Check that the stored vector dim matches the current embedder.
+            # A mismatch means the embedding model changed — drop and recreate
+            # so stale 384-d (MiniLM) vectors don't corrupt a 1024-d (Qwen3) index.
+            try:
+                info = self.client.get_collection(name)
+                vconf = info.config.params.vectors
+                existing_dim = getattr(vconf, "size", None)
+                if existing_dim is not None and existing_dim != dim:
+                    logger.info(
+                        "qdrant_recreate_collection_dim_mismatch",
+                        name=name,
+                        existing_dim=existing_dim,
+                        new_dim=dim,
+                    )
+                    self.client.delete_collection(name)
+                    self.client.create_collection(
+                        collection_name=name,
+                        vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "qdrant_dim_check_failed",
+                    name=name,
+                    error=str(exc),
+                )
+        else:
             logger.info("qdrant_create_collection", name=name, dim=dim)
             self.client.create_collection(
                 collection_name=name,
@@ -593,8 +619,6 @@ class QdrantVectorStore:
         purge_filter = Filter(must=conditions)
 
         for collection in (self.text_collection, self.vision_collection):
-            if collection not in self._collection_cache:
-                continue
             try:
                 self._retry(
                     self.client.delete,
@@ -608,8 +632,9 @@ class QdrantVectorStore:
                     user_id=user_id,
                 )
             except Exception as exc:
-                logger.error(
-                    "qdrant_gdpr_purge_failed",
+                # Collection may not exist yet — that's fine, nothing to delete
+                logger.warning(
+                    "qdrant_gdpr_purge_skipped",
                     collection=collection,
                     error=str(exc),
                 )
