@@ -365,38 +365,56 @@ class GGUFModel:
                     llm   = self._load()
                     start = time.time()
 
-                    # INFERENCE LOCK — llama.cpp is NOT thread-safe. The parallel
-                    # streaming + meta requests share one model context; without
-                    # this lock two concurrent llm() calls corrupt the KV cache
-                    # and SIGSEGV the process. Serializing them is the only safe
+                    # INFERENCE LOCK — llama.cpp is NOT thread-safe. Concurrent
+                    # llm() calls on the shared context corrupt the KV cache and
+                    # SIGSEGV the process. Serializing them is the only safe
                     # option on a single shared context.
+                    #
+                    # HARD LLM CALL TIMEOUT — SECTION 2.1. Enforced BETWEEN
+                    # tokens via an internal stream, so a runaway generation is
+                    # actually stopped at the deadline (freeing the lock for
+                    # queued requests) and the partial text is returned. The old
+                    # post-hoc check threw away a COMPLETED >60s answer and then
+                    # retried the whole generation up to 2 more times — turning
+                    # one slow call into a ~3× latency catastrophe.
+                    timed_out = False
+                    deadline  = start + settings.LLM_CALL_TIMEOUT_SEC
+                    parts: List[str] = []
                     with self._lock:
-                        res = llm(
+                        for chunk in llm(
                             prompt,
                             max_tokens=max_tokens_,
                             temperature=temperature_,
                             top_p=top_p_,
                             stop=_STOP_TOKENS,
+                            stream=True,
+                        ):
+                            tok = chunk["choices"][0]["text"]
+                            if tok:
+                                parts.append(tok)
+                            if time.time() > deadline:
+                                timed_out = True
+                                break
+
+                    elapsed  = time.time() - start
+                    raw_text = "".join(parts)
+
+                    if timed_out:
+                        logger.warning(
+                            event="gguf_generate_deadline_hit",
+                            elapsed=round(elapsed, 1),
+                            timeout_sec=settings.LLM_CALL_TIMEOUT_SEC,
+                            partial_tokens=len(parts),
+                            session_id=session_id,
                         )
-
-                    elapsed = time.time() - start
-
-                    # HARD LLM CALL TIMEOUT — SECTION 2.1
-                    if elapsed > settings.LLM_CALL_TIMEOUT_SEC:
-                        raise TimeoutError(
-                            f"LLM_TIMEOUT: {elapsed:.1f}s > {settings.LLM_CALL_TIMEOUT_SEC}s"
-                        )
-
-                    raw_text = res["choices"][0]["text"]
 
                     if not raw_text or len(raw_text.strip()) < 2:
                         raise ValueError("EMPTY_RESPONSE")
 
                     text = self._clean_output(raw_text)
 
-                    usage             = res.get("usage", {})
-                    prompt_tokens     = usage.get("prompt_tokens", 0)
-                    completion_tokens = usage.get("completion_tokens", 0)
+                    prompt_tokens     = 0  # not reported in stream mode
+                    completion_tokens = len(parts)
                     tps               = round(completion_tokens / max(elapsed, 1e-6), 1)
 
                     _record_latency(self._model_name, "generate", elapsed)
@@ -490,9 +508,9 @@ class GGUFModel:
             buffer      = ""
 
             # INFERENCE LOCK — held for the full token loop so no concurrent
-            # generate()/stream() touches the shared llama.cpp context. rag_pipeline
-            # consumes this generator to completion on its worker thread before
-            # yielding, so the lock is held for one bounded generation then freed.
+            # generate()/stream() touches the shared llama.cpp context. The loop
+            # is bounded by max_tokens and LLM_CALL_TIMEOUT_SEC, so the lock is
+            # held for one bounded generation then freed.
             with self._circuit, self._lock:
                 for chunk in llm(
                     prompt,
@@ -507,9 +525,11 @@ class GGUFModel:
                     if not token:
                         continue
 
-                    # HARD STREAMING TIMEOUT — SECTION 2.1
+                    # HARD STREAMING TIMEOUT — SECTION 2.1. Same bound as
+                    # generate(); FILE_PROCESSING_TIMEOUT_SEC (300s) let a
+                    # runaway stream hold the inference lock for 5 minutes.
                     elapsed = time.time() - start
-                    if elapsed > settings.FILE_PROCESSING_TIMEOUT_SEC:
+                    if elapsed > settings.LLM_CALL_TIMEOUT_SEC:
                         logger.warning(
                             event="gguf_stream_timeout",
                             elapsed=round(elapsed, 1),

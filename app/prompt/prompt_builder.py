@@ -43,6 +43,17 @@ _MEM_RATIO   = 0.20
 _CTX_RATIO   = 0.55
 _QUERY_MAX   = 0.15
 
+# Appended to every prompt's output-format block. Keeps inline [n] citations
+# (needed to map the answer to source chips) but forbids the trailing
+# "Sources:/Confidence:/Reasoning:/Answer:" labels and reasoning dumps the model
+# otherwise leaks — so the user-facing prose stays clean (Phase B/F goal).
+_ANSWER_ONLY_RULE = (
+    "\nIMPORTANT: Reply with ONLY the answer as plain prose, using inline [n] "
+    "citations like [1] or [2,3]. Do NOT add a 'Sources:', 'Confidence:', "
+    "'Reasoning:', or 'Answer:' section, label, or trailer, and do not restate "
+    "these instructions.\n"
+)
+
 # PROMPT INJECTION PATTERNS — consolidated into app/guardrails/policies.yaml (Phase 26)
 
 # STRUCTURED KEYWORDS
@@ -343,6 +354,11 @@ def _system_prompt(
         "7. Be concise and direct.\n"
         "8. Do NOT expand abbreviations or acronyms unless the context\n"
         "   explicitly defines them. Use the term exactly as it appears.\n"
+        "8b. MULTI-PERIOD FIGURES: Financial tables often list figures for\n"
+        "   several years or quarters side by side. When the question names a\n"
+        "   specific year or period, report ONLY the figure belonging to that\n"
+        "   exact year/period column — never a neighbouring year's value.\n"
+        "   Copy figures exactly as written; do not convert units.\n"
         "9. ACQUISITIONS: If the context uses words like 'acquired', 'acquisition',\n"
         "   'assumed liabilities', or any M&A language, that IS a corporate\n"
         "   acquisition. Report it as such. NEVER say 'no acquisition occurred'\n"
@@ -452,7 +468,7 @@ class PromptBuilder:
 
                 # SYSTEM PROMPT
                 system     = _system_prompt(query_type, structured, is_code, modality)
-                output_fmt = _output_format(structured, is_code, query_type)
+                output_fmt = _output_format(structured, is_code, query_type) + _ANSWER_ONLY_RULE
 
                 # BLOCK ASSEMBLY
                 mem_block   = f"MEMORY:\n{memory}\n\n"   if memory   else ""

@@ -397,8 +397,13 @@ def _stream_embed_and_store(
 
     total_embedded = 0
     total_stored   = 0
+    # empty_cache()+gc.collect() after EVERY micro-batch was costing more than
+    # the embeds themselves (and forced micro_batch=1 era behavior). Clearing
+    # periodically + on failure keeps the OOM protection without the tax.
+    clear_every = max(int(settings.INGESTION_CACHE_CLEAR_EVERY), 1)
+    batches_done = 0
 
-    # TEXT CHUNKS — one micro-batch at a time
+    # TEXT CHUNKS — micro-batched embed + batched Qdrant upsert
     for i in range(0, len(text_chunks), micro_batch):
         batch = text_chunks[i : i + micro_batch]
         t_start = time.time()
@@ -419,10 +424,12 @@ def _stream_embed_and_store(
                 session_id=session_id,
             )
             _record_error("text", "embedding_failed")
-        finally:
+            _clear_cache()
+        batches_done += 1
+        if batches_done % clear_every == 0:
             _clear_cache()
 
-    # VISION CHUNKS — one micro-batch at a time
+    # VISION CHUNKS — micro-batched embed + batched Qdrant upsert
     if vision_chunks:
         from app.core.model_loader import model_loader as _ml
         for i in range(0, len(vision_chunks), micro_batch):
@@ -446,9 +453,12 @@ def _stream_embed_and_store(
                     session_id=session_id,
                 )
                 _record_error("vision", "embedding_failed")
-            finally:
+                _clear_cache()
+            batches_done += 1
+            if batches_done % clear_every == 0:
                 _clear_cache()
 
+    _clear_cache()
     return total_embedded, total_stored
 
 

@@ -115,7 +115,12 @@ def _load_corpus_embeddings() -> None:
         embeddings = embedder.embed_texts(texts)
         if embeddings is not None and len(embeddings) > 0:
             _corpus_texts = texts
-            _corpus_embeddings = np.array(embeddings)
+            # Pre-normalize rows once at load — _semantic_check then only
+            # normalizes the query vector instead of the whole corpus per call.
+            corpus = np.array(embeddings)
+            _corpus_embeddings = corpus / (
+                np.linalg.norm(corpus, axis=1, keepdims=True) + 1e-8
+            )
             logger.info("jailbreak_corpus_loaded", n=len(texts))
     except Exception as e:
         logger.warning("jailbreak_corpus_load_failed", error=str(e))
@@ -176,8 +181,8 @@ def _semantic_check(query: str) -> Optional[float]:
 
         # Cosine similarity
         q_norm = q_vec / (np.linalg.norm(q_vec) + 1e-8)
-        c_norms = corpus / (np.linalg.norm(corpus, axis=1, keepdims=True) + 1e-8)
-        sims = c_norms @ q_norm
+        # corpus rows are pre-normalized at load time
+        sims = corpus @ q_norm
         return float(np.max(sims))
 
     except RuntimeError as e:

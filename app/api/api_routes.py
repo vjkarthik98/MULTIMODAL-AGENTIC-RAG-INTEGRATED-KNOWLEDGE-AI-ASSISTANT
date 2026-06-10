@@ -789,9 +789,33 @@ async def query_rag(
 
         pipeline_fn = _get_query_pipeline()
 
+        # IN-FLIGHT JOIN — if /rag/query/stream is mid-generation for this
+        # exact (session, query), await its completion instead of running a
+        # duplicate 7B generation that contends for the same GPU. The stream
+        # writes its guarded answer to the shared query cache before
+        # signalling, so the pipeline's cache-hit branch returns the identical
+        # text in ~15ms. On stream refusal/error nothing is cached and we
+        # compute normally — the fallback path is unchanged, just serialized.
+        _stream_joined = False
+        try:
+            from app.pipeline.query_pipeline import _cache_key as _qck
+            _join_ev = _INFLIGHT_STREAMS.get(_qck(session_id, query))
+            if _join_ev is not None:
+                await asyncio.wait_for(_join_ev.wait(), timeout=120.0)
+                _stream_joined = True
+                logger.info(event="meta_joined_inflight_stream",
+                            request_id=request_id, session_id=session_id)
+        except asyncio.TimeoutError:
+            logger.warning(event="meta_inflight_stream_timeout",
+                           request_id=request_id, session_id=session_id)
+        except Exception:
+            pass
+
         result = await asyncio.to_thread(
             pipeline_fn, query, session_id, request_body.sources, user_id,
-            request_body.no_cache,
+            # A just-joined stream result IS the fresh regeneration the user
+            # asked for — read it from cache even when no_cache was requested.
+            request_body.no_cache and not _stream_joined,
         )
 
         if not isinstance(result, dict) or "answer" not in result:
@@ -880,18 +904,34 @@ async def query_rag(
 
 # STREAM
 
-# The guarded answer arrives from rag.stream() as a single completed string
-# (output_guard must see the whole thing before anything reaches the client —
-# see the comment in RAGPipeline.stream). To still give the UI a live,
-# token-by-token feel, we re-chunk it here and pace the chunks with
-# asyncio.sleep (non-blocking, so other requests keep flowing on the loop).
-_STREAM_CHUNK_CHARS = 1
+# Live LLM tokens from rag.stream() are forwarded as-is (true streaming).
+# _stream_chunks is only used to pace CANNED messages — guardrail blocks,
+# gibberish rejections, cache hits — so they render with the same typing
+# feel as a real generation instead of appearing all at once.
+#
+# Pacing is ADAPTIVE: the replay always completes in <= _STREAM_MAX_TICKS
+# ticks. The old fixed 1-char/8ms replay added ~3s of artificial delay on a
+# 400-char answer AFTER generation had already finished (the guarded stream
+# yields the complete answer as one token). Short answers keep the smooth
+# 1-char feel; long ones grow the chunk instead of the wait.
 _STREAM_CHUNK_DELAY_SEC = 0.008
+_STREAM_MAX_TICKS = 160          # worst-case replay ≈ 160 × 8ms ≈ 1.3s
 
 
 def _stream_chunks(text: str):
-    for i in range(0, len(text), _STREAM_CHUNK_CHARS):
-        yield text[i:i + _STREAM_CHUNK_CHARS]
+    chunk = max(1, len(text) // _STREAM_MAX_TICKS)
+    for i in range(0, len(text), chunk):
+        yield text[i:i + chunk]
+
+
+# IN-FLIGHT STREAM REGISTRY — the frontend fires /rag/query/stream and
+# /rag/query in PARALLEL for every message. Without coordination both run a
+# full pipeline, i.e. two concurrent 7B generations contending for the same
+# GPU. The stream registers itself here; the meta endpoint awaits the event
+# and then serves the stream's cache-written answer (identical text, ~15ms)
+# instead of generating a duplicate. Single-worker uvicorn ⇒ in-process dict
+# is sufficient.
+_INFLIGHT_STREAMS: Dict[str, asyncio.Event] = {}
 
 
 _VOWELS = frozenset('aeiou')
@@ -1140,6 +1180,13 @@ async def stream_query(
         rag = _get_rag_pipeline()
         _stream_user_id = current_user.user_id
 
+        # Register as the in-flight generation for this (session, query) so the
+        # parallel /rag/query call joins this result instead of duplicating it.
+        from app.pipeline.query_pipeline import _cache_key as _qck
+        _inflight_key = _qck(session_id, query)
+        _inflight_ev = asyncio.Event()
+        _INFLIGHT_STREAMS[_inflight_key] = _inflight_ev
+
         generator = await asyncio.to_thread(
             rag.stream,
             query,
@@ -1150,20 +1197,99 @@ async def stream_query(
 
         async def event_stream():
             _answer_parts: list = []
+            _final_answer: Optional[str] = None
+            _sources_payload: Optional[str] = None
+            _refused = False
+            _loop = asyncio.get_running_loop()
+            _STOP = object()
+
+            def _next_token():
+                # generator.__next__ blocks on llama.cpp between tokens — it must
+                # never run on the event loop or it stalls every other request.
+                try:
+                    return next(generator)
+                except StopIteration:
+                    return _STOP
+
             try:
-                for token in generator:
+                while True:
+                    token = await _loop.run_in_executor(None, _next_token)
+                    if token is _STOP:
+                        break
                     if not token:
                         continue
                     if token.startswith("\x00REFUSAL\x00"):
+                        _refused = True
                         yield 'data: {"__type__":"refusal"}\n\n'
                         continue
+                    if token.startswith("\x00REPLACE\x00"):
+                        # Canonical guarded answer — supersedes the streamed tokens
+                        # for both the client bubble and persistence below.
+                        _final_answer = token[9:]
+                        import json as _json
+                        yield f'data: {{"__type__":"replace","data":{_json.dumps(_final_answer)}}}\n\n'
+                        continue
                     if token.startswith("\x00SOURCES\x00"):
+                        _sources_payload = token[9:]
                         yield f'data: {{"__type__":"sources","data":{token[9:]}}}\n\n'
                         continue
                     _answer_parts.append(token)
-                    for piece in _stream_chunks(token):
-                        yield _sse(piece)
-                        await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
+                    yield _sse(token)
+
+                # PERSIST BEFORE [DONE] — the client patches/reads the stored turn
+                # the moment it sees [DONE]; writing after it would race that read.
+                _full_answer = (_final_answer or "".join(_answer_parts)).strip()
+                _src: list = []
+                if _sources_payload:
+                    import json as _json
+                    try:
+                        _src = _json.loads(_sources_payload)
+                    except Exception:
+                        _src = []
+                if _full_answer and not _refused:
+                    # Single canonical persistence: Redis short-term memory +
+                    # Mongo chat transcript + auto-summarize trigger. This used
+                    # to be the parallel /rag/query (meta) call's job — that
+                    # call is now only made by the client on refusal fallback.
+                    try:
+                        from app.pipeline.query_pipeline import _store_interaction
+                        await asyncio.to_thread(
+                            _store_interaction,
+                            session_id,
+                            query,
+                            _full_answer,
+                            None,
+                            user_id=_stream_user_id,
+                            sources=_src,
+                        )
+                    except Exception as _se:
+                        logger.warning(event="stream_save_turn_failed",
+                                       session_id=session_id, error=str(_se))
+                    try:
+                        # ALWAYS write the fresh result — including no_cache
+                        # (regenerate): no_cache means "don't READ stale", not
+                        # "don't share fresh". The joined /rag/query waiter and
+                        # the next page-reload both need this entry; on
+                        # regenerate we intentionally OVERWRITE the old answer.
+                        from app.pipeline.query_pipeline import _cache_get, _cache_set
+                        if request_body.no_cache or not await asyncio.to_thread(_cache_get, session_id, query):
+                            await asyncio.to_thread(_cache_set, session_id, query, {
+                                    "answer":                _full_answer,
+                                    "sources":               _src,
+                                    "sources_used":          len(_src),
+                                    "confidence":            0.9,
+                                    "decision":              "rag",
+                                    "source":                "stream",
+                                    "session_id":            session_id,
+                                    "request_id":            request_id,
+                                    "is_fallback":           False,
+                                    "hallucination_warning": False,
+                                    "metadata":              {"from_stream": True},
+                                })
+                    except Exception as _ce:
+                        logger.debug(event="stream_cache_write_failed",
+                                     session_id=session_id, error=str(_ce))
+
                 yield "data: [DONE]\n\n"
             except Exception as exc:
                 logger.error(
@@ -1174,22 +1300,12 @@ async def stream_query(
                 )
                 yield "data: [Stream interrupted]\n\n"
             finally:
-                # Persist the completed turn so it appears in Recents
-                try:
-                    _mongo = infra.get_mongo()
-                    if _mongo and _answer_parts:
-                        _full_answer = "".join(_answer_parts).strip()
-                        if _full_answer:
-                            await asyncio.to_thread(
-                                _mongo.save_chat_turn,
-                                session_id,
-                                _stream_user_id,
-                                query,
-                                _full_answer,
-                            )
-                except Exception as _se:
-                    logger.warning(event="stream_save_turn_failed",
-                                   session_id=session_id, error=str(_se))
+                # Wake the parallel /rag/query waiter AFTER the cache write so
+                # it reads the freshly stored answer. Always signal — on
+                # refusal, error, or client disconnect the waiter just computes
+                # its own answer instead of waiting out the timeout.
+                _INFLIGHT_STREAMS.pop(_inflight_key, None)
+                _inflight_ev.set()
 
         return StreamingResponse(
             event_stream(),
@@ -1205,6 +1321,13 @@ async def stream_query(
         raise
 
     except Exception as exc:
+        # If we registered as in-flight but failed before streaming began,
+        # release any parallel /rag/query waiter immediately.
+        try:
+            _INFLIGHT_STREAMS.pop(_inflight_key, None)  # type: ignore[has-type]
+            _inflight_ev.set()                           # type: ignore[has-type]
+        except NameError:
+            pass
         logger.error(
             event="api_stream_error",
             request_id=request_id,

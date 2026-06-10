@@ -110,7 +110,7 @@ class Settings:
     # LLM
     LLM_MOCK_MODE: bool      = _bool("LLM_MOCK_MODE", False)
     LLM_MODEL_PATH: str      = _str("LLM_MODEL_PATH", "./models/mistral-7b-instruct-v0.2.Q4_K_M.gguf")
-    LLM_MAX_TOKENS: int      = _int("LLM_MAX_TOKENS", 768)
+    LLM_MAX_TOKENS: int      = _int("LLM_MAX_TOKENS", 512)
     CONTEXT_MAX_TOKENS: int  = _int("CONTEXT_MAX_TOKENS", 4096)
     LLM_TEMPERATURE: float   = _float("LLM_TEMPERATURE", 0.2)
     LLM_TOP_P: float         = _float("LLM_TOP_P", 0.9)
@@ -125,10 +125,13 @@ class Settings:
 
     # EMBEDDINGS
     EMBEDDING_MODEL: str                = _str("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B")
-    EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 4)
-    EMBEDDING_MAX_BATCH_SIZE: int       = _int("EMBEDDING_MAX_BATCH_SIZE", 8)
+    EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 32)
+    EMBEDDING_MAX_BATCH_SIZE: int       = _int("EMBEDDING_MAX_BATCH_SIZE", 64)
     EMBEDDING_MAX_SEQ_LEN: int          = _int("EMBEDDING_MAX_SEQ_LEN", 512)
-    INGESTION_MICRO_BATCH: int          = _int("INGESTION_MICRO_BATCH", 1)
+    INGESTION_MICRO_BATCH: int          = _int("INGESTION_MICRO_BATCH", 16)
+    # Clear CUDA cache every N micro-batches during ingestion (OOM guard
+    # without the per-chunk empty_cache+gc tax that dominated embed latency).
+    INGESTION_CACHE_CLEAR_EVERY: int    = _int("INGESTION_CACHE_CLEAR_EVERY", 8)
     EMBEDDING_CACHE_TTL: int            = _int("EMBEDDING_CACHE_TTL", 2_592_000)
     TEXT_EMBEDDING_DIM: int             = _int("TEXT_EMBEDDING_DIM", 1024)
     MATRYOSHKA_SHORT_DIM: int           = _int("MATRYOSHKA_SHORT_DIM", 256)
@@ -344,10 +347,19 @@ class Settings:
     RAG_TOP_K: int          = _int("RAG_TOP_K", 8)
     RAG_DOC_MAX_CHARS: int  = _int("RAG_DOC_MAX_CHARS", 1200)
 
+    # STREAMING — token flush holdback (see RAGPipeline.stream)
+    STREAM_PREFIX_GATE_CHARS: int = _int("STREAM_PREFIX_GATE_CHARS", 160)
+    STREAM_HOLDBACK_CHARS: int    = _int("STREAM_HOLDBACK_CHARS", 48)
+
     # QUERY DECOMPOSITION
     MAX_SUBQUERIES: int                        = _int("MAX_SUBQUERIES", 3)
     SUBQUERY_MAX_TOKENS: int                   = _int("SUBQUERY_MAX_TOKENS", 64)
     DECOMPOSITION_MIN_WORDS: int               = _int("DECOMPOSITION_MIN_WORDS", 6)
+    # Heuristic gate: only call the LLM decomposer for structurally multi-part
+    # queries (≥2 question marks or an explicit compare/multi-part marker).
+    # Measured logs show decompose yields 1 subquery ~100% of the time on
+    # simple questions — a pure LLM-latency tax on every query otherwise.
+    DECOMPOSITION_HEURISTIC_GATE: bool         = _bool("DECOMPOSITION_HEURISTIC_GATE", True)
     DECOMPOSITION_MAX_SUBQUERIES: int          = _int("DECOMPOSITION_MAX_SUBQUERIES", 3)
     DECOMPOSITION_CONFIDENCE_THRESHOLD: float  = _float("DECOMPOSITION_CONFIDENCE_THRESHOLD", 0.5)
     DECOMPOSITION_KEYWORDS: List[str]          = _list("DECOMPOSITION_KEYWORDS", [

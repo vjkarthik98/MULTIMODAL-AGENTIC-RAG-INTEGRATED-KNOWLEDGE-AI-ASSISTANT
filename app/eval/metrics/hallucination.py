@@ -13,27 +13,128 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.eval.metrics.base import MetricResult
 
 
-# Finance-specific number pattern: integers ≥ 4 digits or decimals
-_NUMBER_RE = re.compile(r"\b\d{4,}(?:\.\d+)?\b|\b\d+(?:\.\d+)?\s*(?:billion|million|%|bn|m)\b", re.IGNORECASE)
+# Scale words → multiplier. Covers the common financial-report conventions.
+_SCALE = {
+    "thousand": 1e3, "thousands": 1e3, "k": 1e3,
+    "million": 1e6, "millions": 1e6, "mn": 1e6, "m": 1e6,
+    "billion": 1e9, "billions": 1e9, "bn": 1e9, "b": 1e9,
+    "trillion": 1e12, "trillions": 1e12, "tn": 1e12, "t": 1e12,
+}
+
+# A money/quantity token: optional $, a number with optional thousands commas and
+# decimals, optionally followed by a scale word or % . We capture the number and
+# the (optional) trailing unit so "$314,623 million", "314.6 billion", "2.5%" and
+# bare "15,535" all parse.
+_NUM_UNIT_RE = re.compile(
+    r"\$?\s*(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?\s*"
+    r"(thousand|thousands|million|millions|billion|billions|trillion|trillions|"
+    r"bn|mn|tn|[kmbt])?\b\s*(%)?",
+    re.IGNORECASE,
+)
+
+# Powers of 1000 to try when one side states an explicit scale (e.g. "314.6
+# billion") and the other is a bare table figure printed "in millions".
+_IMPLICIT_SCALES = (1.0, 1e3, 1e6, 1e9, 1e12)
+_REL_TOL = 0.015  # 1.5% — absorbs rounding ("328.084M" reported as "328.1 billion").
+
+
+class _Num:
+    __slots__ = ("raw", "value", "digits", "has_unit", "is_year", "is_id", "is_pct")
+
+    def __init__(self, raw, value, digits, has_unit, is_year, is_id, is_pct):
+        self.raw, self.value, self.digits = raw, value, digits
+        self.has_unit = has_unit
+        self.is_year, self.is_id, self.is_pct = is_year, is_id, is_pct
+
+
+def _parse_numbers(text: str) -> List[_Num]:
+    """Parse quantity tokens into normalized magnitudes with metadata."""
+    out: List[_Num] = []
+    for m in _NUM_UNIT_RE.finditer(text or ""):
+        int_part, frac_part, unit, pct = m.group(1), m.group(2), m.group(3), m.group(4)
+        digits = (int_part + (frac_part or "")).replace(",", "")
+        if not digits:
+            continue
+        try:
+            base = float(int_part.replace(",", "") + ("." + frac_part if frac_part else ""))
+        except ValueError:
+            continue
+        unit = (unit or "").lower()
+        has_unit = bool(unit)
+        value = base * _SCALE.get(unit, 1.0)
+        int_digits = int_part.replace(",", "")
+        # A bare 4-digit integer in [1900, 2099] with no unit/decimal/% is a year.
+        is_year = (
+            not has_unit and not frac_part and not pct
+            and len(int_digits) == 4 and 1900 <= int(int_digits) <= 2099
+        )
+        # A bare integer with NO thousands separators, scale word, decimal or %
+        # and >= 7 digits is an identifier (SEC accession/CIK, account/filing
+        # no.), not a quantitative claim. Real monetary figures in prose carry
+        # commas ("$1,219,355"), a scale word ("1.2 million") or a decimal — so
+        # this never suppresses a genuine figure, and a bare id present in
+        # context is still digit-matched anyway.
+        is_id = (
+            not has_unit and not frac_part and not pct
+            and "," not in int_part and len(int_digits) >= 7
+        )
+        out.append(_Num(m.group(0).strip(), value, digits, has_unit, is_year, is_id, bool(pct)))
+    return out
+
+
+def _digit_match(a: str, b: str) -> bool:
+    """Significant-digit containment, ignoring scale/format (handles rounding
+    like 314.6 ↔ 314,623 where '3146' is a prefix of '314623')."""
+    if len(a) < 2 or len(b) < 2:
+        return a == b
+    return a in b or b in a
+
+
+def _value_match(a: float, b: float) -> bool:
+    """Magnitude match within tolerance, trying implicit 1000^n scale factors so
+    '314.6 billion' matches a bare '314,623' figure printed in millions."""
+    if a <= 0 or b <= 0:
+        return abs(a - b) < 1e-9
+    for scale in _IMPLICIT_SCALES:
+        for x, y in ((a, b * scale), (a * scale, b)):
+            hi = max(x, y)
+            if hi > 0 and abs(x - y) / hi <= _REL_TOL:
+                return True
+    return False
 
 
 def _extract_numbers(text: str) -> List[str]:
-    """Extract number-like tokens from text for grounding check."""
-    return _NUMBER_RE.findall(text.lower())
+    """Backwards-compatible helper: raw quantity tokens (used by reference check)."""
+    return [n.raw.lower() for n in _parse_numbers(text)]
 
 
 def _numbers_grounded(answer: str, context_texts: List[str]) -> Tuple[bool, List[str]]:
     """Return (all_grounded, ungrounded_numbers).
 
-    A number in the answer is considered grounded if it appears in at least one
-    retrieved context chunk (exact or near-exact match).
+    A number in the answer is grounded when a context number matches it either
+    by significant digits (scale/format independent) or by normalized magnitude
+    within tolerance. Bare years and long identifier numbers are never flagged —
+    they are not quantitative claims and previously drove false positives
+    (e.g. '2023' and SEC accession '000121935523000039').
     """
-    ans_numbers = _extract_numbers(answer)
+    ans_numbers = _parse_numbers(answer)
     if not ans_numbers:
         return True, []
 
-    ctx_combined = " ".join(context_texts).lower()
-    ungrounded = [n for n in ans_numbers if n.replace(",", "").strip() not in ctx_combined]
+    ctx_numbers = _parse_numbers(" ".join(context_texts))
+    ctx_digits = [c.digits for c in ctx_numbers]
+    ctx_values = [c.value for c in ctx_numbers]
+
+    ungrounded: List[str] = []
+    for n in ans_numbers:
+        if n.is_year or n.is_id:
+            continue
+        grounded = any(_digit_match(n.digits, cd) for cd in ctx_digits) or any(
+            _value_match(n.value, cv) for cv in ctx_values
+        )
+        if not grounded:
+            ungrounded.append(n.raw)
+
     return len(ungrounded) == 0, ungrounded
 
 

@@ -377,6 +377,14 @@ def _is_llm_refusal(text: str) -> bool:
     t = text.lower()
     return any(p in t for p in _LLM_REFUSAL_PHRASES)
 
+
+# Streaming holdback tuning — see RAGPipeline.stream(). The prefix gate must be
+# long enough to contain every _LLM_REFUSAL_PHRASES opener; the holdback tail
+# must exceed the longest PII entity (emails/SSNs/phones contain no spaces, so
+# an in-progress entity always sits inside the unflushed tail).
+_STREAM_PREFIX_GATE = settings.STREAM_PREFIX_GATE_CHARS
+_STREAM_HOLDBACK    = settings.STREAM_HOLDBACK_CHARS
+
 def _prepend_key_facts(docs: List[Dict[str, Any]], query: str, context: str) -> str:
     """If the query is about an M&A event, extract the most relevant sentences
     from the top chunks and prepend them so they land first in the flat prompt."""
@@ -917,7 +925,30 @@ class RAGPipeline:
                     yield "LLM unavailable."
                     return
 
+                # TRUE TOKEN STREAMING with a holdback buffer.
+                # - The first _STREAM_PREFIX_GATE chars are held back so a refusal
+                #   ("I could not find…") is detected BEFORE anything reaches the
+                #   client — preserving the refusal-sentinel UX below.
+                # - After the gate, segments are flushed at whitespace boundaries
+                #   keeping a _STREAM_HOLDBACK-char tail, so a PII entity that
+                #   spans tokens is never split across a flush (it sits in the
+                #   tail until complete, then gets scrubbed).
+                # - The FULL output guard still runs on the complete answer; its
+                #   canonical text is sent as a \x00REPLACE\x00 sentinel so the
+                #   client and persistence always end on the guarded version.
+                from app.guardrails.pii import scrub_pii as _scrub_pii_seg
+
                 collected_tokens: List[str] = []
+                hold = ""
+                refusal_mode = False
+                prefix_checked = False
+
+                def _flush(seg: str) -> str:
+                    try:
+                        scrubbed, _ = _scrub_pii_seg(seg)
+                        return scrubbed
+                    except Exception:
+                        return seg
 
                 for token in llm.stream(
                     prompt,
@@ -927,10 +958,31 @@ class RAGPipeline:
                     session_id=session_id,
                 ):
                     collected_tokens.append(token)
+                    if refusal_mode:
+                        continue
+                    hold += token
+                    if not prefix_checked:
+                        if len(hold) < _STREAM_PREFIX_GATE:
+                            continue
+                        if _is_llm_refusal(hold):
+                            refusal_mode = True
+                            continue
+                        prefix_checked = True
+                    cut = len(hold) - _STREAM_HOLDBACK
+                    if cut <= 0:
+                        continue
+                    ws = hold.rfind(" ", 0, cut)
+                    if ws <= 0:
+                        continue
+                    out = _flush(hold[:ws])
+                    hold = hold[ws:]
+                    if out:
+                        yield out
 
-                # OUTPUT GUARD — Phase 26 P1b: scrub full answer before yielding.
-                # Cannot scrub mid-stream token-by-token (PII/citations span tokens),
-                # so we collect all tokens, guard the complete answer, then yield.
+                # OUTPUT GUARD — Phase 26 P1b: guard the COMPLETE answer.
+                # Whole-answer checks (groundedness, template artifacts, toxicity,
+                # cross-segment PII) cannot run mid-stream; their canonical result
+                # is delivered via the REPLACE sentinel after the token stream.
                 answer = "".join(collected_tokens).strip()
                 try:
                     from app.guardrails.output_guard import check as _og_check
@@ -945,10 +997,10 @@ class RAGPipeline:
                 # gate above), so a refusal here means the model declined despite
                 # relevant context. Do NOT stream the refusal text: it would flash
                 # letter-by-letter and then be replaced, which is the exact UX bug
-                # we are fixing. Instead emit a sentinel so the client streams the
-                # accurate meta-path answer (CrossEncoder + CoT) it already has in
-                # flight. The genuine "no documents" case never reaches here — it
-                # is handled by the deterministic retrieval gate above.
+                # we are fixing. Instead emit a sentinel so the client fetches the
+                # accurate meta-path answer (its lazy /rag/query fallback). The
+                # genuine "no documents" case never reaches here — it is handled
+                # by the deterministic retrieval gate above.
                 if not answer or _is_llm_refusal(answer):
                     logger.info(event="rag_stream_llm_refused_using_meta", session_id=session_id)
                     yield "\x00REFUSAL\x00"
@@ -967,13 +1019,13 @@ class RAGPipeline:
                 except Exception:
                     _source_docs = docs[:3]
 
-                yield answer
-                # Memory write is handled by query_pipeline._store_interaction()
-                # which is always called by the /query endpoint after streaming.
-                # Writing here too causes every exchange to appear twice in MongoDB.
+                # REPLACE sentinel — canonical guarded answer. The client swaps
+                # its streamed buffer for this text; the API stream layer is the
+                # single persistence point (memory + Mongo + cache) — writing
+                # here too would duplicate every exchange in MongoDB.
+                yield "\x00REPLACE\x00" + answer
 
-                # Emit sources so the client can display them immediately
-                # without waiting for the separate /rag/query round-trip.
+                # Emit sources so the client can display them immediately.
                 try:
                     import json as _json
                     _p248 = _build_p248_sources(_source_docs)

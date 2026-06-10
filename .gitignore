@@ -150,6 +150,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+.env.bak-perf 
 
 # Spyder project settings
 .spyderproject
@@ -222,4 +223,5 @@ __marimo__/
 CLAUDE.md
 rag_env 
 .hf_cache
-.torch_cache
+.torch_cache.env.bak-perf
+.env*

@@ -1189,7 +1189,10 @@ def _process_excel(
                                 row_end=row_end,
                                 page_number=None,
                                 total_pages=None,
-                                section_title=None,
+                                # Store the sheet name as the locator so the source
+                                # chip is robust to chunk-text changes (Phase E) and
+                                # does not depend on parsing the "[Sheet: X]" prefix.
+                                section_title=sheet_name,
                                 ingestion_timestamp=time.time(),
                                 language="en",
                                 file_size_bytes=file_size,

@@ -347,6 +347,28 @@ def _get_reasoning_components(llm: Any):
 
 # MEMORY CONTEXT BUILDER — SECTION 4.7
 
+# Structural markers of a genuinely multi-part question. Kept deliberately
+# narrow: a false negative costs nothing (single-query retrieval already
+# works), a false positive costs one full LLM generation.
+_MULTI_PART_MARKERS = (
+    " and also ", " as well as ", " compare ", " versus ", " vs ",
+    " difference between ", " both ", "; ",
+)
+
+
+def _should_decompose(query: str) -> bool:
+    # Two explicit questions is the strongest multi-part signal — it overrides
+    # the word-count floor (a 12-word double question IS multi-part).
+    if query.count("?") >= 2:
+        return True
+    if len(query.split()) <= settings.DECOMPOSITION_MIN_WORDS:
+        return False
+    if not settings.DECOMPOSITION_HEURISTIC_GATE:
+        return True
+    ql = f" {query.lower()} "
+    return any(m in ql for m in _MULTI_PART_MARKERS)
+
+
 def _build_memory_context(
     query: str,
     session_id: str,
@@ -821,8 +843,11 @@ def query_pipeline(
         memory_context = _build_memory_context(query, session_id, embedder, memory)
 
         # QUERY DECOMPOSITION — SECTION 4.8
+        # Gated heuristically: the decomposer is an extra serialized LLM call,
+        # and measured logs show it returns a single subquery on virtually all
+        # simple questions. Only structurally multi-part queries pay for it.
         queries = [query]
-        if len(query.split()) > settings.DECOMPOSITION_MIN_WORDS:
+        if _should_decompose(query):
             try:
                 sub = decomposer.decompose(query, session_id=session_id)
                 if sub:

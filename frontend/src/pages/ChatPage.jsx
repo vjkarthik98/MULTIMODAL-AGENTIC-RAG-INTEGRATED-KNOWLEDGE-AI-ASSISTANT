@@ -322,9 +322,11 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
     // scoped "explain" never returns a cached answer from an unscoped "explain".
     const effectiveNoCache = noCache || !!fileSources
 
-    // Fire queryMeta in parallel with streaming so sources + fallback answer
-    // are ready the moment streaming finishes — no sequential wait.
-    const metaPromise = queryMeta(auth.token, text, sessionId, effectiveNoCache, fileSources)
+    // The stream is the single answer path: it emits tokens live, then a
+    // "replace" event with the canonical guarded answer and a "sources" event.
+    // queryMeta (the full non-streaming pipeline — a second LLM generation) is
+    // only called lazily on the refusal-fallback path below, so the GPU does
+    // one generation per message instead of two.
 
     // Animate a completed string into the bubble letter-by-letter (8ms/char,
     // matching the backend's re-chunk pacing). Used for the meta answer when
@@ -377,6 +379,18 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
               refused = true
               continue
             }
+            // Canonical guarded answer — swap the streamed buffer for it. The
+            // visible text rarely changes (client-side cleaning already strips
+            // citation tags); this guarantees guard repairs always land.
+            if (parsed && typeof parsed === 'object' && parsed.__type__ === 'replace') {
+              fullText = parsed.data || fullText
+              if (!refused) {
+                setMessages(prev => prev.map(m =>
+                  m.id === botId ? { ...m, content: cleanStreamText(fullText), pending: false } : m
+                ))
+              }
+              continue
+            }
             // Sources event emitted by the stream after text is complete.
             // For explicit web queries keep only web chips — file sources
             // must never show when the answer came from the internet.
@@ -422,9 +436,9 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
         setMessages(prev => prev.map(m =>
           m.id === botId ? { ...m, content: '', pending: true } : m
         ))
-        // Stream the accurate meta-path answer letter-by-letter. Sources are set
-        // first so they render the moment `streaming` flips off in `finally`.
-        const meta = await metaPromise
+        // Lazily run the full meta pipeline (CrossEncoder + CoT) — only on this
+        // fallback path, so the common case never pays a second LLM generation.
+        const meta = await queryMeta(auth.token, text, sessionId, effectiveNoCache, fileSources).catch(() => null)
         const metaAnswer = cleanStreamText(meta?.answer || '')
         const finalText = metaAnswer ||
           'I could not find relevant information in your knowledge base to answer this question.'
@@ -446,36 +460,12 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
           } : m
         ))
 
-        // After meta completes (which means save_chat_turn already ran and
-        // the meta answer is in MongoDB), overwrite the stored answer with the
-        // cleaned streamed answer so reload shows exactly what the user saw.
-        // Also backfill sources when the stream carried none (e.g. web queries).
-        metaPromise.then(meta => {
-          let finalSources = (meta?.sources?.length > 0)
-            ? meta.sources
-            : (streamedSources || [])
-
-          // For pure web-search queries strip file sources — the answer came from
-          // the internet and file citations would be misleading.
-          if (meta?.decision === 'search') {
-            const webOnly = finalSources.filter(s => typeof s === 'object' && s.modality === 'web')
-            if (webOnly.length > 0) finalSources = webOnly
-          }
-
-          // Always update sources from meta — meta has the authoritative combined
-          // set (hybrid: stream only has RAG sources, meta adds web sources on top).
-          if (meta?.sources?.length > 0) {
-            setMessages(prev => prev.map(m =>
-              m.id === botId ? { ...m, sources: finalSources } : m
-            ))
-          }
-
-          // Overwrite MongoDB with the streamed answer so reload = live view.
-          // Only when stream produced a real answer (not a refusal fallback).
-          if (streamedAnswer && !isRefusal(streamedAnswer)) {
-            patchLastMessage(auth.token, sessionId, streamedAnswer, finalSources, botId)
-          }
-        }).catch(() => {})
+        // The backend persisted the canonical turn (Mongo + memory) before
+        // sending [DONE]. Patch it with the client-cleaned text and stamp
+        // botId so votes persist and reload shows exactly what the user saw.
+        if (streamedAnswer && !isRefusal(streamedAnswer)) {
+          patchLastMessage(auth.token, sessionId, streamedAnswer, streamedSources || [], botId)
+        }
       }
     } catch (err) {
       if (err.name === 'AbortError') {

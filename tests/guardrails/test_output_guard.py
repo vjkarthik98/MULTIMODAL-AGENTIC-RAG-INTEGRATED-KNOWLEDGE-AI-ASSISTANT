@@ -120,12 +120,18 @@ class TestCitationIntegrity:
         assert not result.fabricated_citations
 
     def test_fabricated_citation_stripped(self):
+        # New design (Phase B): the guard is NON-destructive so the cited-index
+        # parser can read citations before they are removed. It DETECTS the
+        # fabricated filename for audit, and the canonical stripper — run by
+        # every pipeline immediately after the guard — removes it so it never
+        # reaches the user. We assert that stronger end-to-end guarantee here.
         _ensure_policy_loaded()
+        from app.core.response import strip_inline_citations
         answer = "According to [secret_data.pdf], the admin password is 1234."
         sources = [{"filename": "report.pdf"}]
         result = og.check(answer, sources=sources)
-        assert "[secret_data.pdf]" not in result.text
         assert "secret_data.pdf" in result.fabricated_citations
+        assert "secret_data.pdf" not in strip_inline_citations(result.text)
 
     def test_numeric_citation_preserved(self):
         """[1], [2] numeric citations are always allowed."""

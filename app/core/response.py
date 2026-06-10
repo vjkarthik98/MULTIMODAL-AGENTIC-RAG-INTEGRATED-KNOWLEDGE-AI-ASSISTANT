@@ -761,10 +761,47 @@ def extract_cited_indices(text: str) -> set:
     return indices
 
 
+# Structured locator/marker tokens that may leak from ingestion, the reranker
+# context builder, or a model that echoes a chunk header verbatim. These must
+# NOT appear in the user-facing answer — locators are surfaced on source chips.
+_STRUCT_MARKER_RE = re.compile(
+    r'\s*\[\s*(?:'
+    r'sheet|page|pg|pages?|hyperlink|src|spk|t|para|paragraph|rows?|'
+    r'section|sec|figure|fig|table|caption|slide|frame|timestamp|ts|'
+    r'error_markers'
+    r')\b[^\]]*\]',
+    re.IGNORECASE,
+)
+# Bare filename citation, e.g. [report.pdf], [gdp.jpg] — strip so no provenance
+# string leaks into prose. Requires a dot + 2-4 char extension to avoid eating
+# ordinary bracketed words.
+_FILENAME_CITATION_RE = re.compile(r'\s*\[[^\]\n]*?\.[A-Za-z0-9]{2,4}\s*\]')
+# Filename/doc-id stem citation with no clean extension, e.g. [aapl_def14a_2023]
+# or the PII-mangled [aapl_def14a_<URL>cx] (the scrubber ate the ".docx"). Any
+# bracketed token that has no spaces and contains an underscore or a <PLACEHOLDER>
+# is an identifier, never prose — strip it.
+_STEM_CITATION_RE = re.compile(r'\s*\[[^\]\s]*(?:_[^\]\s]*|<[A-Za-z_]{2,20}>[^\]\s]*)\]')
+
+
 def strip_inline_citations(text: str) -> str:
-    """Remove [1], [2], [1,2] etc from the answer text without leaving double-spaces."""
-    cleaned = re.sub(r'\s*\[\d+(?:\s*,\s*\d+)*\]', '', text or "")
-    return re.sub(r'  +', ' ', cleaned).strip()
+    """Remove every inline citation/marker so the answer prose carries no
+    references or filename leakage. Handles numeric [1]/[2,3], structured
+    markers ([Sheet: ...], [PG:3], [HYPERLINK ...], [T:12.0s], ...) and bare
+    filename citations ([report.pdf]) — without leaving double spaces or a
+    stray space before punctuation (the "net sales of  net sales" bug).
+    """
+    if not text:
+        return ""
+    cleaned = re.sub(r'\s*\[\d+(?:\s*,\s*\d+)*\]', '', text)
+    cleaned = _STRUCT_MARKER_RE.sub('', cleaned)
+    cleaned = _FILENAME_CITATION_RE.sub('', cleaned)
+    cleaned = _STEM_CITATION_RE.sub('', cleaned)
+    # Collapse whitespace and repair punctuation spacing left by removals.
+    cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)
+    cleaned = re.sub(r'\s+([,.;:!?])', r'\1', cleaned)
+    cleaned = re.sub(r'\(\s*\)', '', cleaned)            # empty parens
+    cleaned = re.sub(r'[ \t]+\n', '\n', cleaned)
+    return cleaned.strip()
 
 
 def build_sources(

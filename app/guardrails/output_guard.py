@@ -104,46 +104,51 @@ def _strip_template_artifacts(text: str) -> tuple[str, bool]:
     return text, text != original
 
 
-def _validate_citations(answer: str, sources: List[Dict]) -> tuple[str, List[str]]:
-    """Validate [filename] citation tokens against retrieved sources.
+# Numeric / multi-index citation token, e.g. [1], [2,3], [2, 3].
+_NUMERIC_CITATION_RE = re.compile(r'\[\s*\d+(?:\s*,\s*\d+)*\s*\]')
 
-    Any citation referencing a file not in sources[] is removed.
-    Returns (cleaned_answer, fabricated_citations_removed).
+
+def _detect_suspect_citations(answer: str, sources: List[Dict]) -> List[str]:
+    """Detect (but do NOT mutate) citation tokens for audit/metrics only.
+
+    The answer body is cleaned downstream by
+    ``app.core.response.strip_inline_citations`` (the single, canonical
+    stripper), which removes every inline citation — numeric and structured —
+    so the user-facing prose carries no references or filename leakage. This
+    function therefore never edits the text; it only reports bracketed
+    non-numeric tokens that reference a filename NOT in sources[], so the
+    pipeline can log genuine provenance fabrication without the old
+    destructive ``re.sub`` that left whitespace gaps ("net sales of  net
+    sales") and wiped [2,3] before the source-chip filter could read it.
     """
-    citation_pattern = re.compile(r'\[([^\]]+)\]')
     source_filenames = set()
     for src in (sources or []):
         fn = src.get("filename") or src.get("source") or src.get("file") or ""
         if fn:
             source_filenames.add(fn.lower())
-        # Also accept chunk IDs that embed the filename
         chunk_id = src.get("chunk_id") or src.get("id") or ""
-        if "_" in chunk_id:
-            source_filenames.add(chunk_id.split("_", 1)[-1].lower())
+        if "_" in str(chunk_id):
+            source_filenames.add(str(chunk_id).split("_", 1)[-1].lower())
 
-    fabricated = []
-    def _check_citation(match: re.Match) -> str:
-        token = match.group(1)
-        # Allow numeric citations like [1], [2]
-        if token.isdigit():
-            return match.group(0)
-        # Check if the token matches any known source file
+    suspect: List[str] = []
+    for match in re.finditer(r'\[([^\]]+)\]', answer):
+        token = match.group(1).strip()
+        # Numeric / multi-index citations are always legitimate.
+        if _NUMERIC_CITATION_RE.fullmatch(match.group(0)):
+            continue
+        # Structured locator markers emitted by ingestion/reranker are not
+        # fabrications (they are stripped downstream, not leaked).
+        if re.match(r'(?i)^(sheet|page|pg|pages?|hyperlink|src|spk|t|para|paragraph|row|rows|section|figure|fig|table|caption|slide|frame|timestamp|error_markers)\b', token):
+            continue
         token_lower = token.lower()
-        if any(
-            token_lower in fn or fn in token_lower or token_lower == fn
-            for fn in source_filenames
+        if source_filenames and any(
+            token_lower in fn or fn in token_lower for fn in source_filenames
         ):
-            return match.group(0)
-        # No match found — fabricated citation
-        fabricated.append(token)
-        return ""
+            continue
+        # Unknown bracketed token referencing no known source — report only.
+        suspect.append(token)
 
-    if source_filenames:
-        cleaned = citation_pattern.sub(_check_citation, answer)
-    else:
-        cleaned = answer
-
-    return cleaned, fabricated
+    return suspect
 
 
 def _check_groundedness(
@@ -162,20 +167,42 @@ def _check_groundedness(
         return False, None
 
 
+# Detoxify availability + model are resolved once. A failed import is NOT
+# cached by Python (sys.modules only caches successes), so the old per-call
+# `from detoxify import Detoxify` re-scanned the path on every answer; and
+# when installed, `Detoxify("original")` would reload the full model per call.
+_detoxify_model: Optional[object] = None
+_detoxify_checked = False
+
+
+def _get_detoxify():
+    global _detoxify_model, _detoxify_checked
+    if _detoxify_checked:
+        return _detoxify_model
+    _detoxify_checked = True
+    try:
+        from detoxify import Detoxify
+        _detoxify_model = Detoxify("original")
+    except ImportError:
+        _detoxify_model = None
+    except Exception as e:
+        logger.warning("output_guard_detoxify_init_failed", error=str(e))
+        _detoxify_model = None
+    return _detoxify_model
+
+
 def _check_toxicity(answer: str) -> float:
     """Simple heuristic toxicity check. Returns score 0–1.
 
     Uses Detoxify if available; falls back to a keyword heuristic.
     """
-    # Try Detoxify (GPU-accelerated)
-    try:
-        from detoxify import Detoxify
-        results = Detoxify("original").predict(answer)
-        return float(results.get("toxicity", 0.0))
-    except ImportError:
-        pass
-    except Exception as e:
-        logger.warning("output_guard_detoxify_failed", error=str(e))
+    model = _get_detoxify()
+    if model is not None:
+        try:
+            results = model.predict(answer)
+            return float(results.get("toxicity", 0.0))
+        except Exception as e:
+            logger.warning("output_guard_detoxify_failed", error=str(e))
 
     # Heuristic fallback — check for obvious harmful content patterns
     _TOXIC_PATTERNS = [
@@ -278,14 +305,18 @@ def check(
         answer = answer[:_max_answer_chars]
         logger.info("output_guard_length_truncated", limit=_max_answer_chars)
 
-    # 4. Citation integrity validation
+    # 4. Citation integrity — DETECT-ONLY (never mutate the answer here).
+    #    The canonical cleaner strip_inline_citations() removes ALL inline
+    #    citations (numeric + structured) so the prose has no references or
+    #    filename leakage. Callers that need the cited-source indices MUST run
+    #    extract_cited_indices() on the RAW answer (before this guard) — which
+    #    is why this guard must not delete citation tokens.
     fabricated_citations: List[str] = []
     if _citation_validation:
-        answer, fabricated_citations = _validate_citations(answer, sources)
+        fabricated_citations = _detect_suspect_citations(answer, sources)
         if fabricated_citations:
-            record_scrub("citation", surface)
-            logger.warning(
-                "output_guard_fabricated_citations_removed",
+            logger.info(
+                "output_guard_suspect_citations_detected",
                 citations=fabricated_citations[:5],
                 correlation_id=correlation_id,
                 session_id=session_id,
