@@ -154,6 +154,7 @@ export default function Sidebar({
   onOpenSettings,
   onSetUploadHandler,
   historyClearedAt,
+  staleSessionId,
 }) {
   const [dragOver, setDragOver]           = useState(false)
   const [sessions, setSessions]           = useState([])
@@ -350,6 +351,11 @@ export default function Sidebar({
 
   // When all history is cleared, empty the list instantly without a round-trip.
   useEffect(() => { if (historyClearedAt) setSessions([]) }, [historyClearedAt])
+
+  // When a session is no longer in MongoDB, remove it from Recents instantly.
+  useEffect(() => {
+    if (staleSessionId) setSessions(prev => prev.filter(s => s.session_id !== staleSessionId))
+  }, [staleSessionId])
 
   const handleDeleteSession = async (e, id) => {
     e.stopPropagation()
@@ -761,7 +767,32 @@ export default function Sidebar({
         </span>
       </div>
 
-      {/* File list + drop zone */}
+      {/* KB drop zone — compact strip pinned below heading */}
+      <div className="px-4 mb-2">
+        <div
+          onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={handleDrop}
+          onClick={() => !isUploading && fileInputRef.current?.click()}
+          className={`border border-dashed rounded-lg py-2.5 flex items-center justify-center gap-2 transition-colors ${isUploading ? 'cursor-default' : 'cursor-pointer'}`}
+          style={{
+            borderColor: dragOver ? 'var(--t-accent)' : 'var(--t-bd2)',
+            background: dragOver ? 'var(--t-accent-soft)' : 'transparent',
+          }}
+          onMouseEnter={e => { if (!isUploading && !dragOver) e.currentTarget.style.borderColor = 'var(--t-bd4)' }}
+          onMouseLeave={e => { if (!dragOver) e.currentTarget.style.borderColor = 'var(--t-bd2)' }}
+          aria-label="Upload files to knowledge base"
+          role="button"
+        >
+          <Upload size={13} style={{ color: isUploading ? 'var(--t-accent)' : 'var(--t-tx5)', flexShrink: 0 }} />
+          <span className="text-xs" style={{ color: isUploading ? 'var(--t-accent)' : 'var(--t-ph)' }}>
+            {isUploading ? 'Drop more files' : 'Drop files or click to add'}
+          </span>
+          <input ref={fileInputRef} type="file" multiple className="hidden" aria-label="File input" onChange={e => handleUpload(Array.from(e.target.files))} />
+        </div>
+      </div>
+
+      {/* File list */}
       <div className="flex-1 overflow-y-auto px-4 pb-2 space-y-0.5">
 
         {/* Skeleton while loading */}
@@ -772,8 +803,8 @@ export default function Sidebar({
         )}
 
         {!loadingKB && kbFiles.length === 0 && uploadingFiles.size === 0 && (
-          <p className="text-sm text-center py-4 leading-relaxed px-2" style={{ color: 'var(--t-tx6)' }}>
-            No files yet.<br/>Drop files below to get started.
+          <p className="text-xs text-center py-3" style={{ color: 'var(--t-tx6)' }}>
+            No files yet
           </p>
         )}
 
@@ -823,6 +854,43 @@ export default function Sidebar({
           )
         })}
 
+        {/* Per-file upload cards */}
+        {Object.entries(uploadProgress).map(([name, pct]) => {
+          const b = badge(name)
+          return (
+            <div key={name} className="mt-2 rounded-xl"
+              style={{ background: 'var(--t-card)', border: '1px solid var(--t-bd2)' }}>
+              <div className="flex items-center gap-3 px-3 py-2.5">
+                <div className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0"
+                  style={{ background: uploadCardColor(name) }}>
+                  <UploadCardIcon filename={name} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium truncate" style={{ color: 'var(--t-tx2)' }}>{name}</p>
+                  <p className="text-[11px] mt-0.5 flex items-center gap-1.5" style={{ color: 'var(--t-tx5)' }}>
+                    <CircularProgress pct={pct} />
+                    {pct < 100 ? `Uploading ${pct}%` : 'Processing…'}
+                  </p>
+                </div>
+                <span className={`${b.bg} text-white text-[10px] font-bold px-1.5 py-0.5 rounded flex-shrink-0`}>
+                  {b.label}
+                </span>
+                <button
+                  onClick={() => handleCancelUpload(name)}
+                  title="Cancel upload"
+                  aria-label="Cancel upload"
+                  className="flex-shrink-0 rounded p-1 transition-colors"
+                  style={{ color: 'var(--t-tx5)' }}
+                  onMouseEnter={e => { e.currentTarget.style.color = 'var(--t-danger)'; e.currentTarget.style.background = 'var(--t-hov)' }}
+                  onMouseLeave={e => { e.currentTarget.style.color = 'var(--t-tx5)'; e.currentTarget.style.background = 'transparent' }}
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            </div>
+          )
+        })}
+
         {/* Duplicate-file warning */}
         {dupPrompt && (
           <div className="mt-2 rounded-xl p-3"
@@ -856,70 +924,6 @@ export default function Sidebar({
             </div>
           </div>
         )}
-
-        {/* Per-file upload cards */}
-        {Object.entries(uploadProgress).map(([name, pct]) => {
-          const b = badge(name)
-          return (
-            <div key={name} className="mt-2 rounded-xl overflow-hidden"
-              style={{ background: 'var(--t-card)', border: '1px solid var(--t-bd2)' }}>
-              <div className="flex items-center gap-3 px-3 py-2.5">
-                <div className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0"
-                  style={{ background: uploadCardColor(name) }}>
-                  <UploadCardIcon filename={name} />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium truncate" style={{ color: 'var(--t-tx2)' }}>{name}</p>
-                  <p className="text-[11px] mt-0.5 flex items-center gap-1.5" style={{ color: 'var(--t-tx5)' }}>
-                    <CircularProgress pct={pct} />
-                    {pct < 100 ? `Uploading ${pct}%` : 'Processing…'}
-                  </p>
-                </div>
-                <span className={`${b.bg} text-white text-[10px] font-bold px-1.5 py-0.5 rounded flex-shrink-0`}>
-                  {b.label}
-                </span>
-                <button
-                  onClick={() => handleCancelUpload(name)}
-                  title="Cancel upload"
-                  aria-label="Cancel upload"
-                  className="flex-shrink-0 rounded p-1 transition-colors"
-                  style={{ color: 'var(--t-tx5)' }}
-                  onMouseEnter={e => { e.currentTarget.style.color = 'var(--t-danger)'; e.currentTarget.style.background = 'var(--t-hov)' }}
-                  onMouseLeave={e => { e.currentTarget.style.color = 'var(--t-tx5)'; e.currentTarget.style.background = 'transparent' }}
-                >
-                  <X size={13} />
-                </button>
-              </div>
-              <div className="h-[3px]" style={{ background: 'var(--t-bd2)' }}>
-                <div className="h-full transition-all duration-300"
-                  style={{ width: `${pct}%`, background: 'linear-gradient(90deg, #8b5cf6, #3b82f6)' }} />
-              </div>
-            </div>
-          )
-        })}
-
-        {/* Drop zone */}
-        <div
-          onDragOver={e => { e.preventDefault(); setDragOver(true) }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={handleDrop}
-          onClick={() => !isUploading && fileInputRef.current?.click()}
-          className={`mt-3 border border-dashed rounded-xl py-6 flex flex-col items-center gap-2 transition-colors ${isUploading ? 'cursor-default' : 'cursor-pointer'}`}
-          style={{
-            borderColor: dragOver ? 'var(--t-accent)' : 'var(--t-bd2)',
-            background: dragOver ? 'var(--t-accent-soft)' : 'transparent',
-          }}
-          onMouseEnter={e => { if (!isUploading && !dragOver) e.currentTarget.style.borderColor = 'var(--t-bd4)' }}
-          onMouseLeave={e => { if (!dragOver) e.currentTarget.style.borderColor = 'var(--t-bd2)' }}
-          aria-label="Upload files to knowledge base"
-          role="button"
-        >
-          <Upload size={18} style={{ color: isUploading ? 'var(--t-accent)' : 'var(--t-tx5)' }} />
-          <span className="text-sm text-center leading-snug px-3" style={{ color: 'var(--t-ph)' }}>
-            {isUploading ? 'Drop more files' : 'Drop files or click to add'}
-          </span>
-          <input ref={fileInputRef} type="file" multiple className="hidden" aria-label="File input" onChange={e => handleUpload(Array.from(e.target.files))} />
-        </div>
 
         {uploadError && (
           <div className="mt-2 flex items-start gap-1.5 text-sm px-1" style={{ color: 'var(--t-danger)' }}>

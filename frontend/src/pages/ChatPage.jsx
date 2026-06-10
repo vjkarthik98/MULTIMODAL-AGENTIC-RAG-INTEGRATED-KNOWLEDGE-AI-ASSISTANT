@@ -42,9 +42,6 @@ const isExplicitWebQuery = (q) => {
 
 const PLACEHOLDERS = [
   'Ask anything about your files…',
-  'Summarise a document…',
-  'Find key insights…',
-  'Compare sections across files…',
 ]
 
 function fileModalityIcon(filename) {
@@ -106,6 +103,7 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
   const [chatMenuOpen, setChatMenuOpen]   = useState(false)
   const chatMenuRef                       = useRef(null)
   const [historyClearedAt, setHistoryClearedAt] = useState(0)
+  const [staleSessionId, setStaleSessionId]     = useState(null)
 
   useEffect(() => { localStorage.setItem('magik_show_sources', String(showSources)) }, [showSources])
 
@@ -320,10 +318,13 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
 
     // File-scope filter: if user selected a specific file, restrict retrieval to it.
     const fileSources = selectedFile ? [selectedFile.filename] : null
+    // Cache key is query-only — bypass it whenever a file scope is active so a
+    // scoped "explain" never returns a cached answer from an unscoped "explain".
+    const effectiveNoCache = noCache || !!fileSources
 
     // Fire queryMeta in parallel with streaming so sources + fallback answer
     // are ready the moment streaming finishes — no sequential wait.
-    const metaPromise = queryMeta(auth.token, text, sessionId, noCache, fileSources)
+    const metaPromise = queryMeta(auth.token, text, sessionId, effectiveNoCache, fileSources)
 
     // Animate a completed string into the bubble letter-by-letter (8ms/char,
     // matching the backend's re-chunk pacing). Used for the meta answer when
@@ -432,6 +433,8 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
           m.id === botId ? { ...m, sources: metaSources } : m
         ))
         await streamTextIntoBubble(finalText)
+        // Stamp botId onto the DB message so votes on refusal-path answers persist.
+        patchLastMessage(auth.token, sessionId, finalText, metaSources, botId)
       } else {
         // Lock in the streamed answer immediately.
         setMessages(prev => prev.map(m =>
@@ -532,6 +535,7 @@ const handleNewChat = () => {
     setTimeout(() => inputRef.current?.focus(), 50)
   }
 
+
   // Open a chat from Recents — fetches its saved transcript and switches to it
   const handleLoadSession = useCallback(async (targetId) => {
     if (streaming || loadingSession || !targetId || targetId === sessionId) return
@@ -540,6 +544,7 @@ const handleNewChat = () => {
       const session = await getChatSession(auth.token, targetId)
       if (!session) {
         addToast('That chat is no longer available', 'error')
+        setStaleSessionId(targetId)
         return
       }
       const loaded = (session.messages || []).map((m, i) => ({
@@ -601,6 +606,7 @@ const handleNewChat = () => {
           onOpenSettings={() => { setSettingsOpen(true); if (isMobile) setMobileSidebarOpen(false) }}
           onSetUploadHandler={chatUploadRef}
           historyClearedAt={historyClearedAt}
+          staleSessionId={staleSessionId}
         />
       </div>
 
@@ -742,7 +748,7 @@ const handleNewChat = () => {
             </h2>
             <p className="text-[15px] sm:text-[17px] mb-7 max-w-md leading-relaxed" style={{ color: 'var(--t-tx5)' }}>
               {kbFiles.length > 0
-                ? 'Your knowledge base is ready. Try one of these to get started:'
+                ? 'Your knowledge base is ready.'
                 : 'Drop files into the sidebar to build your knowledge base, then ask questions.'}
             </p>
 
@@ -780,9 +786,32 @@ const handleNewChat = () => {
                       <rect x="15" y="15" width="7" height="7" rx="1" fill="rgba(255,255,255,0.25)"/>
                     </svg>
                   )},
-                  { label: 'Image', color: '#34d399', icon: '🖼️' },
-                  { label: 'Audio', color: '#a78bfa', icon: '🎵' },
-                  { label: 'Video', color: '#60a5fa', icon: '🎬' },
+                  { label: 'Image', color: '#34d399', icon: (
+                    <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+                      <rect width="28" height="28" rx="5" fill="#0f766e"/>
+                      <rect x="5" y="8" width="18" height="13" rx="1.5" fill="rgba(255,255,255,0.2)"/>
+                      <circle cx="10.5" cy="13" r="2" fill="rgba(255,255,255,0.55)"/>
+                      <path d="M5 19l6-6 3.5 3.5 2.5-2.5 6 5.5H5z" fill="rgba(255,255,255,0.55)"/>
+                    </svg>
+                  )},
+                  { label: 'Audio', color: '#a78bfa', icon: (
+                    <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+                      <rect width="28" height="28" rx="5" fill="#5b21b6"/>
+                      <rect x="4.5"  y="12.5" width="2.5" height="3.5" rx="1.25" fill="rgba(255,255,255,0.6)"/>
+                      <rect x="8.5"  y="10"   width="2.5" height="8.5" rx="1.25" fill="rgba(255,255,255,0.6)"/>
+                      <rect x="12.5" y="7.5"  width="2.5" height="13" rx="1.25" fill="rgba(255,255,255,0.6)"/>
+                      <rect x="16.5" y="10"   width="2.5" height="8.5" rx="1.25" fill="rgba(255,255,255,0.6)"/>
+                      <rect x="20.5" y="12.5" width="2.5" height="3.5" rx="1.25" fill="rgba(255,255,255,0.6)"/>
+                    </svg>
+                  )},
+                  { label: 'Video', color: '#60a5fa', icon: (
+                    <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+                      <rect width="28" height="28" rx="5" fill="#1d4ed8"/>
+                      <rect x="4" y="9" width="14" height="10" rx="1.5" fill="rgba(255,255,255,0.2)"/>
+                      <path d="M18 11.5l6-2.5v10l-6-2.5v-5z" fill="rgba(255,255,255,0.3)"/>
+                      <path d="M10 12v5l4.5-2.5L10 12z" fill="rgba(255,255,255,0.75)"/>
+                    </svg>
+                  )},
                 ].map(({ label, color, icon }) => (
                   <div
                     key={label}
@@ -847,7 +876,7 @@ const handleNewChat = () => {
           <div className="max-w-3xl mx-auto relative" ref={filePickerRef}>
 
             {/* @ file picker dropdown — opens upward */}
-            {showFilePicker && kbFiles.length > 0 && (
+            {showFilePicker && (
               <div
                 className="absolute bottom-full mb-2 left-0 right-0 z-50 rounded-xl shadow-xl overflow-hidden"
                 style={{ background: 'var(--t-card)', border: '1px solid var(--t-bd3)' }}
@@ -856,36 +885,42 @@ const handleNewChat = () => {
                   style={{ color: 'var(--t-tx5)', borderBottom: '1px solid var(--t-bd2)' }}>
                   Scope to a file
                 </div>
-                <div className="overflow-y-auto" style={{ maxHeight: 220 }}>
-                  {[...kbFiles]
-                    .sort((a, b) => a.filename.localeCompare(b.filename))
-                    .map(f => {
-                      const ext    = f.filename.split('.').pop()?.toUpperCase() || 'FILE'
-                      const active = selectedFile?.filename === f.filename
-                      return (
-                        <button
-                          key={f.filename}
-                          onClick={() => { setSelectedFile(active ? null : f); setShowFilePicker(false) }}
-                          className="w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors"
-                          style={{ background: active ? 'rgba(139,92,246,0.12)' : 'transparent' }}
-                          onMouseEnter={e => { if (!active) e.currentTarget.style.background = 'var(--t-hov)' }}
-                          onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent' }}
-                        >
-                          <span className="flex-shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded"
-                            style={{ background: 'var(--t-hov3)', color: 'var(--t-tx4)', letterSpacing: '0.05em' }}>
-                            {ext}
-                          </span>
-                          <span className="text-[13px] truncate" style={{ color: active ? 'var(--t-accent)' : 'var(--t-tx2)' }}>
-                            {f.filename}
-                          </span>
-                          {active && (
-                            <span className="ml-auto text-[11px] flex-shrink-0" style={{ color: 'var(--t-accent)' }}>✓</span>
-                          )}
-                        </button>
-                      )
-                    })
-                  }
-                </div>
+                {kbFiles.length === 0 ? (
+                  <div className="px-4 py-4 text-center text-[13px]" style={{ color: 'var(--t-tx5)' }}>
+                    No files uploaded yet — use the <strong style={{ color: 'var(--t-tx3)' }}>+</strong> button to add files
+                  </div>
+                ) : (
+                  <div className="overflow-y-auto" style={{ maxHeight: 220 }}>
+                    {[...kbFiles]
+                      .sort((a, b) => a.filename.localeCompare(b.filename))
+                      .map(f => {
+                        const ext    = f.filename.split('.').pop()?.toUpperCase() || 'FILE'
+                        const active = selectedFile?.filename === f.filename
+                        return (
+                          <button
+                            key={f.filename}
+                            onClick={() => { setSelectedFile(active ? null : f); setShowFilePicker(false) }}
+                            className="w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors"
+                            style={{ background: active ? 'rgba(139,92,246,0.12)' : 'transparent' }}
+                            onMouseEnter={e => { if (!active) e.currentTarget.style.background = 'var(--t-hov)' }}
+                            onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent' }}
+                          >
+                            <span className="flex-shrink-0 text-[9px] font-bold px-1.5 py-0.5 rounded"
+                              style={{ background: 'var(--t-hov3)', color: 'var(--t-tx4)', letterSpacing: '0.05em' }}>
+                              {ext}
+                            </span>
+                            <span className="text-[13px] truncate" style={{ color: active ? 'var(--t-accent)' : 'var(--t-tx2)' }}>
+                              {f.filename}
+                            </span>
+                            {active && (
+                              <span className="ml-auto text-[11px] flex-shrink-0" style={{ color: 'var(--t-accent)' }}>✓</span>
+                            )}
+                          </button>
+                        )
+                      })
+                    }
+                  </div>
+                )}
               </div>
             )}
 
@@ -898,7 +933,7 @@ const handleNewChat = () => {
               }}
             >
               {/* TOP — text input */}
-              <div className="px-4 pt-3 pb-2">
+              <div className="px-4 pt-3 pb-1">
                 <textarea
                   ref={inputRef}
                   rows={1}
@@ -921,28 +956,25 @@ const handleNewChat = () => {
                 />
               </div>
 
-              {/* DIVIDER */}
-              <div style={{ borderTop: '1px solid var(--t-bd2)' }} />
-
               {/* BOTTOM — controls row */}
-              <div className="flex items-center gap-2 px-3 py-2">
+              <div className="flex items-center gap-2 px-3 pb-2.5 pt-0">
 
-                {/* @ file scope button */}
-                {kbFiles.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setShowFilePicker(p => !p)}
-                    title="Scope to a file"
-                    aria-label="Scope query to a specific file"
-                    className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-lg text-[13px] font-semibold transition-all"
-                    style={selectedFile || showFilePicker
-                      ? { background: 'rgba(139,92,246,0.18)', color: 'var(--t-accent)' }
-                      : { background: 'transparent', color: 'var(--t-tx5)' }
-                    }
-                  >
-                    @
-                  </button>
-                )}
+                {/* @ file scope button — always visible and clickable */}
+                <button
+                  type="button"
+                  onClick={() => setShowFilePicker(p => !p)}
+                  title="Scope to a file"
+                  aria-label="Scope query to a specific file"
+                  className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-lg text-[13px] font-semibold transition-all"
+                  style={selectedFile || showFilePicker
+                    ? { background: 'rgba(139,92,246,0.18)', color: 'var(--t-accent)' }
+                    : { background: 'transparent', color: 'var(--t-tx4)' }
+                  }
+                  onMouseEnter={e => { if (!selectedFile && !showFilePicker) { e.currentTarget.style.background = 'var(--t-hov)'; e.currentTarget.style.color = 'var(--t-tx2)' } }}
+                  onMouseLeave={e => { if (!selectedFile && !showFilePicker) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--t-tx4)' } }}
+                >
+                  @
+                </button>
 
                 {/* Selected-file chip */}
                 {selectedFile && (
@@ -966,21 +998,6 @@ const handleNewChat = () => {
                 {/* Spacer */}
                 <div className="flex-1" />
 
-                {/* Export */}
-                {messages.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={exportChat}
-                    aria-label="Export chat as Markdown"
-                    title="Export chat"
-                    className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-lg transition-all"
-                    style={{ color: 'var(--t-tx5)', background: 'transparent' }}
-                    onMouseEnter={e => { e.currentTarget.style.color = 'var(--t-tx2)'; e.currentTarget.style.background = 'var(--t-hov)' }}
-                    onMouseLeave={e => { e.currentTarget.style.color = 'var(--t-tx5)'; e.currentTarget.style.background = 'transparent' }}
-                  >
-                    <Download size={14} />
-                  </button>
-                )}
 
                 {/* Send / Stop */}
                 <button

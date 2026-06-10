@@ -247,11 +247,11 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
   function handleVote(newVote) {
     const next = vote === newVote ? null : newVote
     setVote(next)
-    if (next && authToken && sessionId) {
+    if (authToken && sessionId) {
       submitFeedback(
         authToken,
         sessionId,
-        next,
+        next ?? 'none',
         message.id || null,
         precedingQuery || null,
         typeof message.content === 'string' ? message.content.slice(0, 500) : null,

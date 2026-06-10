@@ -156,7 +156,7 @@ class QueryRequest(BaseModel):
 
 class FeedbackRequest(BaseModel):
     session_id: str = Field(..., min_length=1, max_length=128)
-    vote: str = Field(..., pattern="^(up|down)$")
+    vote: str = Field(..., pattern="^(up|down|none)$")
     message_id: Optional[str] = Field(default=None, max_length=128)
     query: Optional[str] = Field(default=None, max_length=500)
     response_snippet: Optional[str] = Field(default=None, max_length=500)
@@ -282,6 +282,39 @@ def _check_prompt_injection(query: str, correlation_id: str = "", session_id: st
     return _guard_sanitize(query, surface="api", session_id=session_id, correlation_id=correlation_id)
 
 
+# PII SCRUB ON RAW QUERY — strip PII before the query enters the pipeline.
+# Applied on the short query string (better Presidio accuracy than on the full prompt).
+
+def _scrub_query_pii(query: str, session_id: str = "") -> str:
+    try:
+        from app.guardrails.pii import scrub_pii as _sp
+        cleaned, changed = _sp(query)
+        if changed:
+            logger.warning(event="query_pii_scrubbed", session_id=session_id,
+                           original_len=len(query), scrubbed_len=len(cleaned))
+        return cleaned
+    except Exception as _e:
+        logger.warning(event="query_pii_scrub_failed", error=str(_e))
+        return query
+
+
+# SSRF URL DETECTION IN QUERY TEXT
+# Extracts URLs from a query and blocks if any resolve to a private/SSRF-risk address.
+
+_URL_RE = re.compile(r'https?://[^\s\'"<>]+', re.IGNORECASE)
+
+def _check_query_ssrf(query: str) -> bool:
+    """Return True if the query contains a URL that is an SSRF risk."""
+    try:
+        from app.guardrails.ssrf import is_ssrf_risk
+        for url in _URL_RE.findall(query):
+            if is_ssrf_risk(url):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 # CLEANUP TEMP FILE
 
 def _cleanup_file(file_path: Optional[Path]) -> None:
@@ -334,6 +367,11 @@ _INGEST_422_PREFIXES = (
     "MAGIC_BYTE_MIME_MISMATCH",
     "UNSUPPORTED_IMAGE_FORMAT",
     "RAW_DECODE_FAILED",
+    # Pipeline processing failures — file was received but produced no usable content
+    "NO_VALID_EMBEDDINGS",
+    "NO_VALID_AUDIO_SEGMENTS",
+    "NO_VALID_CHUNKS",
+    "INGESTION_EMPTY",
 )
 
 
@@ -410,6 +448,13 @@ async def ingest_document(
         file_hash = await asyncio.to_thread(_compute_file_hash, file_path)
         if file_hash in _INGEST_DEDUP:
             latency = round(time.time() - start, 3)
+            # Still copy to kb_dir so the file shows in the sidebar list even
+            # though the vectors are already in Qdrant from a prior upload.
+            import shutil as _shutil
+            kb_dir = user_knowledge_base_dir(user_id)
+            kb_path = kb_dir / filename
+            if not kb_path.exists():
+                _shutil.copy2(str(file_path), str(kb_path))
             return JSONResponse(
                 status_code=200,
                 content={
@@ -466,6 +511,11 @@ async def ingest_document(
         # PIPELINE-LEVEL DUPLICATE (detected by pipeline's own hash check)
         if result.get("status") == "duplicate":
             latency = round(time.time() - start, 3)
+            import shutil as _shutil
+            kb_dir = user_knowledge_base_dir(user_id)
+            kb_path = kb_dir / filename
+            if not kb_path.exists():
+                _shutil.copy2(str(file_path), str(kb_path))
             return JSONResponse(
                 status_code=200,
                 content={
@@ -490,6 +540,16 @@ async def ingest_document(
                     "request_id": request_id,
                     "error_code": "NO_CONTENT_EXTRACTED",
                     "detail":     "No usable content extracted from file",
+                },
+            )
+
+        if stored == 0:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "request_id": request_id,
+                    "error_code": "NOTHING_STORED",
+                    "detail":     f"Content extracted ({chunks} chunks) but 0 vectors were stored — embedding or Qdrant error",
                 },
             )
 
@@ -673,7 +733,50 @@ async def query_rag(
             }
 
         # PROMPT INJECTION CHECK
+        _pre_sanitize = query
         query = _check_prompt_injection(query)
+
+        if not query and _pre_sanitize:
+            _blocked_msg = (
+                "⚠️ Your message was blocked by the security guardrail. "
+                "It matched a restricted pattern (prompt injection or policy violation). "
+                "Please rephrase your query."
+            )
+            logger.warning(event="query_blocked_by_guardrail",
+                           request_id=request_id, session_id=session_id)
+            return {
+                "request_id": request_id,
+                "answer":     _blocked_msg,
+                "confidence": 0.0,
+                "sources":    [],
+                "cache_hit":  False,
+                "decision":   "blocked",
+                "source":     "input_guard",
+                "latency":    round(time.time() - start, 3),
+            }
+
+        if _check_query_ssrf(query):
+            _ssrf_msg = (
+                "⚠️ Your message was blocked by the SSRF guardrail. "
+                "It contains a URL pointing to a private or restricted network address. "
+                "Please remove the URL and try again."
+            )
+            logger.warning(event="query_blocked_ssrf",
+                           request_id=request_id, session_id=session_id)
+            return {
+                "request_id": request_id,
+                "answer":     _ssrf_msg,
+                "confidence": 0.0,
+                "sources":    [],
+                "cache_hit":  False,
+                "decision":   "blocked",
+                "source":     "ssrf_guard",
+                "latency":    round(time.time() - start, 3),
+            }
+
+        # PII SCRUB — strip PII from the raw query before it enters the pipeline
+        query = _scrub_query_pii(query, session_id=session_id)
+
         query = query[:settings.MAX_PROMPT_CHARS]
 
         _audit_log(
@@ -857,7 +960,52 @@ async def stream_query(
         if not query:
             raise HTTPException(status_code=400, detail="Empty query")
 
+        _pre_sanitize_stream = query
         query = _check_prompt_injection(query)
+
+        if not query and _pre_sanitize_stream:
+            _blocked_msg = (
+                "⚠️ Your message was blocked by the security guardrail. "
+                "It matched a restricted pattern (prompt injection or policy violation). "
+                "Please rephrase your query."
+            )
+            logger.warning(event="stream_query_blocked_by_guardrail", session_id=session_id)
+
+            async def blocked_stream():
+                for piece in _stream_chunks(_blocked_msg):
+                    yield _sse(piece)
+                    await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                blocked_stream(),
+                media_type="text/event-stream",
+                headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+            )
+
+        if _check_query_ssrf(query):
+            _ssrf_msg = (
+                "⚠️ Your message was blocked by the SSRF guardrail. "
+                "It contains a URL pointing to a private or restricted network address. "
+                "Please remove the URL and try again."
+            )
+            logger.warning(event="stream_query_blocked_ssrf", session_id=session_id)
+
+            async def ssrf_blocked_stream():
+                for piece in _stream_chunks(_ssrf_msg):
+                    yield _sse(piece)
+                    await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                ssrf_blocked_stream(),
+                media_type="text/event-stream",
+                headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+            )
+
+        # PII SCRUB — strip PII from the raw query before it enters the pipeline
+        query = _scrub_query_pii(query, session_id=session_id)
+
         query = query[:settings.MAX_PROMPT_CHARS]
 
         # GIBBERISH GUARD — reject random-character inputs before any pipeline work
@@ -1001,22 +1149,18 @@ async def stream_query(
         )
 
         async def event_stream():
+            _answer_parts: list = []
             try:
                 for token in generator:
                     if not token:
                         continue
                     if token.startswith("\x00REFUSAL\x00"):
-                        # The model refused despite relevant docs. Do NOT stream
-                        # the refusal text (that is the flash bug). Signal the
-                        # client to stream the accurate meta-path answer instead.
                         yield 'data: {"__type__":"refusal"}\n\n'
                         continue
                     if token.startswith("\x00SOURCES\x00"):
-                        # Emit sources as a typed JSON event so the client can
-                        # display them immediately without a second round-trip.
-                        # Sentinel is 9 bytes (\x00SOURCES\x00) — slice at [9:]
                         yield f'data: {{"__type__":"sources","data":{token[9:]}}}\n\n'
                         continue
+                    _answer_parts.append(token)
                     for piece in _stream_chunks(token):
                         yield _sse(piece)
                         await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
@@ -1029,6 +1173,23 @@ async def stream_query(
                     session_id=session_id,
                 )
                 yield "data: [Stream interrupted]\n\n"
+            finally:
+                # Persist the completed turn so it appears in Recents
+                try:
+                    _mongo = infra.get_mongo()
+                    if _mongo and _answer_parts:
+                        _full_answer = "".join(_answer_parts).strip()
+                        if _full_answer:
+                            await asyncio.to_thread(
+                                _mongo.save_chat_turn,
+                                session_id,
+                                _stream_user_id,
+                                query,
+                                _full_answer,
+                            )
+                except Exception as _se:
+                    logger.warning(event="stream_save_turn_failed",
+                                   session_id=session_id, error=str(_se))
 
         return StreamingResponse(
             event_stream(),
@@ -1783,15 +1944,16 @@ async def submit_feedback(
     try:
         mongo = infra.get_mongo()
         if mongo:
+            _vote_val = None if body.vote == "none" else body.vote
             saved, _ = await asyncio.gather(
                 asyncio.to_thread(
                     mongo.save_feedback,
                     user_id, body.session_id, body.vote,
                     body.message_id, body.query, body.response_snippet,
-                ),
+                ) if body.vote != "none" else asyncio.sleep(0),
                 asyncio.to_thread(
                     mongo.patch_message_vote,
-                    user_id, body.session_id, body.message_id or "", body.vote,
+                    user_id, body.session_id, body.message_id or "", _vote_val,
                 ) if body.message_id else asyncio.sleep(0),
             )
         else:
