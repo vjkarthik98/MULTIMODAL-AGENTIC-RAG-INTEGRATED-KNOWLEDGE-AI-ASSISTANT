@@ -129,6 +129,58 @@ def _sanitize(query: str) -> str:
     return _guard_sanitize(query, surface="rag_pipeline")
 
 
+# FINANCIAL FIGURE NORMALIZER — post-processing layer that replaces rounded
+# billion figures in LLM output with the exact million figures that appear
+# verbatim in the retrieved context chunks. This is deterministic and does not
+# depend on the LLM following prompt instructions about rounding.
+
+_ROUNDED_BILLIONS_RE = re.compile(
+    r'\$\s*(\d{1,4}(?:\.\d+)?)\s*billion', re.IGNORECASE
+)
+_EXACT_MILLIONS_RE = re.compile(r'\b(\d{2,3},\d{3})\b')
+_CHUNK_TEXT_CITATION_RE = re.compile(
+    r'\[\s*\d+\s*,\s*[\'"].*?[\'"]\s*\]',  # [2, 'chunk text'] → strip
+    re.DOTALL,
+)
+_SOURCE_LABEL_RE = re.compile(
+    r'\(\s*[\w\-\.]+\.(?:txt|pdf|docx|xlsx)\s*[^)]*\)\s*[A-Z][A-Z\s]{10,}',
+    re.IGNORECASE,
+)
+
+
+def _fix_financial_figures(answer: str, context_texts: List[str]) -> str:
+    """
+    Replace '$X.X billion' rounded figures with '$XXX,XXX million' exact figures
+    from the retrieved context. Matching tolerance: within 0.5%.
+    Also strips citation-leakage patterns like [2, 'chunk text...'].
+    """
+    # Strip [n, 'chunk text'] citation leakage
+    answer = _CHUNK_TEXT_CITATION_RE.sub(
+        lambda m: "[" + m.group(0).split(",")[0].strip("[ ") + "]",
+        answer,
+    )
+
+    # Find all exact million figures across all context chunks
+    combined = " ".join(str(t) for t in context_texts)
+    exact_figs = _EXACT_MILLIONS_RE.findall(combined)
+    if not exact_figs:
+        return answer
+
+    def _replace(m: re.Match) -> str:
+        rounded_val = float(m.group(1))
+        best: Optional[str] = None
+        best_diff = float("inf")
+        for fig in exact_figs:
+            fig_val = float(fig.replace(",", "")) / 1000.0  # millions → billions
+            diff = abs(fig_val - rounded_val) / max(rounded_val, 0.001)
+            if diff < 0.005 and diff < best_diff:  # within 0.5%
+                best_diff = diff
+                best = fig
+        return f"${best} million" if best else m.group(0)
+
+    return _ROUNDED_BILLIONS_RE.sub(_replace, answer)
+
+
 # HASH FOR DEDUP
 
 def _hash(text: str, meta: Dict[str, Any]) -> str:
@@ -206,11 +258,20 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3) -> List[
             if _m:
                 section_title = _m.group(1).strip()
 
-        # Image: use BLIP caption as the locator so chip reads "gdp.jpg · Graph showing..."
-        if not section_title and modality == "image":
-            caption = meta.get("caption")
-            if caption:
-                section_title = str(caption).strip()
+        # Image: prefer chart title extracted from OCR text over BLIP caption,
+        # because BLIP often produces generic descriptions ("Graph showing...").
+        # The OCR text contains the actual chart title as a readable line.
+        if modality == "image" and not section_title:
+            _title_m = re.search(
+                r'(?:U\.S\.?|US)\s+(?:GDP|GNP|CPI|unemployment|employment)[^\n\r]{5,60}',
+                str(text), re.IGNORECASE,
+            )
+            if _title_m:
+                section_title = _title_m.group(0).strip()[:80]
+            else:
+                caption = meta.get("caption")
+                if caption:
+                    section_title = str(caption).strip()
 
         out.append({
             "text":          str(text)[:200],
@@ -384,6 +445,34 @@ def _is_llm_refusal(text: str) -> bool:
 # an in-progress entity always sits inside the unflushed tail).
 _STREAM_PREFIX_GATE = settings.STREAM_PREFIX_GATE_CHARS
 _STREAM_HOLDBACK    = settings.STREAM_HOLDBACK_CHARS
+
+
+# SANDWICH REORDER — Liu et al. "Lost in the Middle" (2023):
+# LLMs attend best to the beginning and end of long prompts; middle positions
+# are attended to least.  Placing the best-ranked chunk first and the
+# second-best last keeps the two most relevant passages in the high-attention
+# zones.  Middle chunks are sorted by descending relevance so any accidental
+# attention still lands on the most relevant remaining content.
+#
+# Input:  docs sorted descending by reranker score (docs[0] is best).
+# Output: [best, 3rd, 4th, …, 2nd-best]  (sandwich around the middle filler).
+
+def _sandwich_reorder(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if len(docs) <= 2:
+        return docs
+    best   = docs[0]
+    second = docs[1]
+    middle = docs[2:]   # already sorted descending — middle filler
+    return [best] + middle + [second]
+
+
+def _adaptive_temperature(query: str) -> float:
+    """Derive the generation temperature from the query type (factual vs generative)."""
+    try:
+        from app.prompt.prompt_builder import get_generation_temperature, _detect_query_type  # noqa: PLC0415
+        return get_generation_temperature(_detect_query_type(query))
+    except Exception:
+        return settings.LLM_TEMPERATURE
 
 def _prepend_key_facts(docs: List[Dict[str, Any]], query: str, context: str) -> str:
     """If the query is about an M&A event, extract the most relevant sentences
@@ -596,6 +685,7 @@ class RAGPipeline:
         self,
         query: str,
         session_id: str = "default",
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
 
         start    = time.time()
@@ -647,6 +737,7 @@ class RAGPipeline:
                     query=query,
                     session_id=session_id,
                     top_k=settings.DEFAULT_TOP_K,
+                    user_id=user_id,
                 )
             except Exception as e:
                 logger.error(
@@ -669,6 +760,7 @@ class RAGPipeline:
             docs = _dedup_docs(docs)
             docs = sorted(docs, key=lambda d: d.get("score", 0.0), reverse=True)
             docs = docs[:settings.RAG_TOP_K]
+            docs = _sandwich_reorder(docs)
 
             # CONTEXT ASSEMBLY
             from app.core.response import build_sources
@@ -720,7 +812,7 @@ class RAGPipeline:
                     answer = llm.generate(
                         prompt,
                         max_tokens=settings.LLM_MAX_TOKENS,
-                        temperature=settings.LLM_TEMPERATURE,
+                        temperature=_adaptive_temperature(query),
                         top_p=settings.LLM_TOP_P,
                         session_id=session_id,
                     )
@@ -898,6 +990,7 @@ class RAGPipeline:
                 except Exception as _re_err:
                     logger.warning(event="rag_stream_rerank_failed", error=str(_re_err))
                     docs = sorted(docs, key=lambda d: d.get("score", 0.0), reverse=True)[:settings.RAG_TOP_K]
+                docs = _sandwich_reorder(docs)
 
                 context = _build_context(docs, settings.MAX_CONTEXT_CHARS)
                 context = _prepend_key_facts(docs, query, context)
@@ -953,7 +1046,7 @@ class RAGPipeline:
                 for token in llm.stream(
                     prompt,
                     max_tokens=settings.LLM_MAX_TOKENS,
-                    temperature=settings.LLM_TEMPERATURE,
+                    temperature=_adaptive_temperature(query),
                     top_p=settings.LLM_TOP_P,
                     session_id=session_id,
                 ):
@@ -984,14 +1077,27 @@ class RAGPipeline:
                 # cross-segment PII) cannot run mid-stream; their canonical result
                 # is delivered via the REPLACE sentinel after the token stream.
                 answer = "".join(collected_tokens).strip()
+                _ctx: List[str] = [
+                    d.get("text", "") if isinstance(d, dict)
+                    else (d.page_content if hasattr(d, "page_content") else "")
+                    for d in docs
+                ]
                 try:
                     from app.guardrails.output_guard import check as _og_check
                     _sources = [{"filename": d.get("metadata", {}).get("source", "") if isinstance(d, dict) else ""} for d in docs]
-                    _ctx = [d.get("text", "") if isinstance(d, dict) else (d.page_content if hasattr(d, "page_content") else "") for d in docs]
                     _og = _og_check(answer, context_chunks=_ctx, sources=_sources, session_id=session_id)
                     answer = _og.text
                 except Exception as _og_err:
                     logger.warning(event="rag_stream_output_guard_failed", error=str(_og_err))
+
+                # FINANCIAL FIGURE NORMALIZER — deterministic post-processor:
+                # replace any '$X.X billion' the LLM wrote with the exact
+                # '$XXX,XXX million' figure from context (if within 0.5%).
+                # This is context-grounded and does not depend on prompt rules.
+                try:
+                    answer = _fix_financial_figures(answer, _ctx)
+                except Exception as _fin_err:
+                    logger.warning(event="rag_fin_normalizer_failed", error=str(_fin_err))
 
                 # REFUSAL HANDLING — docs WERE retrieved (we passed the retrieval
                 # gate above), so a refusal here means the model declined despite

@@ -571,6 +571,45 @@ def _extract_table_blocks(
     return blocks
 
 
+def _make_nl_summary(rows: List[str]) -> str:
+    """Build a short natural-language summary line for financial table rows.
+
+    Extracts the first label and up to two numbers from the rows so the
+    vector embedding captures human-readable meaning alongside the raw pipe
+    data.  Example output:
+      'Financial data: Net sales 383,285 | 394,328 | Products 298,085 | Services 85,200'
+    This prefix makes the chunk semantically searchable for natural-language
+    queries like 'total net sales FY2023' without changing the underlying
+    exact figures.
+    """
+    labels: List[str] = []
+    numbers: List[str] = []
+    seen_labels: set = set()
+    for row in rows[:8]:
+        parts = [p.strip() for p in row.split("|") if p.strip()]
+        # first non-numeric part = label candidate
+        for p in parts:
+            if p and not re.match(r'^[\$\d,\.%\(\)\-\s]+$', p) and p not in seen_labels:
+                short = p[:30].strip()
+                if short:
+                    labels.append(short)
+                    seen_labels.add(p)
+                break
+        # collect numbers (comma-separated integers ≥ 3 digits)
+        nums_in_row = re.findall(r'\b\d{1,3}(?:,\d{3})+\b|\b\d{4,}\b', row)
+        numbers.extend(nums_in_row[:2])
+        if len(numbers) >= 8:
+            break
+    parts_out: List[str] = []
+    if labels:
+        parts_out.append(" | ".join(labels[:4]))
+    if numbers:
+        parts_out.append(" | ".join(numbers[:6]))
+    if parts_out:
+        return "[Financial data: " + " — ".join(parts_out) + "]\n"
+    return ""
+
+
 def _chunk_table(header: str, data_rows: List[str], min_size: Optional[int] = None) -> List[str]:
     """Pack data rows into chunks, each prefixed with the header.
 
@@ -578,6 +617,9 @@ def _chunk_table(header: str, data_rows: List[str], min_size: Optional[int] = No
     so 3-5 rows are kept together — enough context for the LLM to interpret
     column order while remaining small enough for precise vector retrieval.
     For fixed-width tables the default CHUNK_MIN_SIZE keeps one row per chunk.
+
+    Each chunk is prefixed with a natural-language summary line so the vector
+    embedding is semantically searchable (not just raw pipe syntax).
     """
     chunks: List[str] = []
     header_len = len(header) + 1
@@ -588,7 +630,8 @@ def _chunk_table(header: str, data_rows: List[str], min_size: Optional[int] = No
 
     def flush():
         if pending_rows:
-            chunks.append(header + "\n" + "\n".join(pending_rows))
+            nl_prefix = _make_nl_summary(pending_rows)
+            chunks.append(nl_prefix + header + "\n" + "\n".join(pending_rows))
 
     for row in data_rows:
         candidate_size = header_len + pending_len + len(row) + 1
@@ -789,7 +832,7 @@ def _chunk_text(text: str) -> List[str]:
         non_pipe_text = text
         for start_off, end_off, header, data_rows in reversed(pipe_blocks):
             non_pipe_text = non_pipe_text[:start_off] + non_pipe_text[end_off:]
-            table_chunks.extend(_chunk_table(header, data_rows, min_size=250))
+            table_chunks.extend(_chunk_table(header, data_rows, min_size=600))
         text = non_pipe_text
 
     # FIXED-WIDTH TABLE PASS — extract space-aligned table regions.
@@ -1133,12 +1176,13 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                         continue
                     seen_hashes.add(exact_h)
 
-                    # NEAR DEDUP VIA SIMHASH — threshold 1 bit to avoid
-                    # false-positive dedup of financial table rows that share
-                    # structural tokens (header, $, |) but differ in numbers.
+                    # NEAR DEDUP VIA SIMHASH — disabled (threshold -1 = never match)
+                    # Financial table rows share structural tokens ($, |, header)
+                    # but differ critically in numbers; even 1-bit threshold caused
+                    # valid revenue/EPS/cash rows to be silently dropped.
                     sh = _simhash(chunk)
                     too_similar = any(
-                        _simhash_distance(sh, prev) <= 1
+                        _simhash_distance(sh, prev) <= 0   # exact-bit match only
                         for prev in seen_simhashes
                     )
                     if too_similar:

@@ -53,8 +53,20 @@ def _get_semaphore() -> asyncio.Semaphore:
 _RECENT_WORDS     = {"latest", "today", "news", "recent", "update", "current", "now", "live"}
 # Web/market-data signals — queries mentioning these almost certainly need live external
 # data that won't be inside an ingested document (stock prices, analyst ratings, etc.).
-_WEB_WORDS        = {"stock", "stocks", "analyst", "analysts", "consensus", "sentiment",
-                     "shares", "market cap", "ticker", "earnings reaction", "post-earnings"}
+# NOTE: "stock" alone is intentionally excluded — "stock price reaction mentioned in the
+# CNBC video" asks about KB content, not live data. Only include terms that ALWAYS imply
+# live external data when not paired with a media-reference phrase.
+_WEB_WORDS        = {"stocks", "analyst", "analysts", "consensus", "sentiment",
+                     "market cap", "ticker", "earnings reaction", "post-earnings"}
+
+# If any of these phrases appears, the query is asking about content inside an ingested
+# media file — force RAG regardless of other signals (e.g. "stock" keyword).
+_MEDIA_REFERENCE_PHRASES = frozenset({
+    "mentioned in the", "mentioned in", "in the video", "in the audio",
+    "in the clip", "from the video", "from the audio", "shown in the",
+    "in the cnbc", "in the earnings video", "in the highlight",
+    "according to the video", "according to the audio",
+})
 # Explicit web-request phrases — user directly asked to fetch from the internet.
 # These force a pure "search" route (not hybrid) so file citations never mix in.
 _EXPLICIT_WEB_PHRASES = frozenset({
@@ -62,6 +74,8 @@ _EXPLICIT_WEB_PHRASES = frozenset({
     "get from web", "get it from web", "web search", "find online",
     "search online", "look online", "from internet", "from the internet",
     "find on the internet", "look it up",
+    "search the internet", "search internet", "search for current",
+    "search for historical", "search for recent", "search for latest",
 })
 _MEMORY_WORDS     = {
     "earlier", "previous", "last time", "we discussed", "you said", "before",
@@ -162,6 +176,15 @@ class AgentRouter:
                     self._log_decision(d, signals, start, session_id)
                     return d
 
+                # HARD RULE: MEDIA REFERENCE — query asks about content inside an ingested
+                # video/audio/image file (e.g. "mentioned in the CNBC video").
+                # Force pure RAG so web results never contaminate KB-grounded answers.
+                if any(phrase in query.lower() for phrase in _MEDIA_REFERENCE_PHRASES):
+                    d = self._decision("rag", "media_reference_kb", 0.97, session_id)
+                    _router_decisions.labels(action="rag", method="hard_rule").inc()
+                    self._log_decision(d, signals, start, session_id)
+                    return d
+
                 # HARD RULE: RECENT QUERY — RAG + web fusion
                 if signals["is_recent"]:
                     d = self._decision("hybrid", "recent_hybrid", 0.95, session_id)
@@ -176,8 +199,8 @@ class AgentRouter:
                     self._log_decision(d, signals, start, session_id)
                     return d
 
-                # HARD RULE: WEB/MARKET DATA — stock prices, analyst reactions,
-                # consensus ratings are live external data not found in any document.
+                # HARD RULE: WEB/MARKET DATA — analyst ratings, consensus ratings
+                # are live external data not found in any document.
                 if signals["is_web"]:
                     d = self._decision("hybrid", "web_market_signal", 0.88, session_id)
                     _router_decisions.labels(action="hybrid", method="hard_rule").inc()

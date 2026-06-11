@@ -1288,6 +1288,126 @@ def _process_excel(
                         ).finalize()
                     )
 
+                # COMPUTED STATISTICS SUMMARY — for numeric time-series sheets
+                # (e.g. S&P 500 daily data) the individual row-batch chunks
+                # cannot answer aggregate queries like "average for 2023" or
+                # "highest value ever". Compute key stats here and store as a
+                # dedicated high-importance summary chunk so the retriever can
+                # surface them directly.
+                try:
+                    def _try_float(v):
+                        try:
+                            f = float(str(v).replace(',', ''))
+                            return f if str(f) != 'nan' else None
+                        except (ValueError, TypeError):
+                            return None
+                    _num_cols = [
+                        ci for ci, hdr in enumerate(non_empty[0])
+                        if any(_try_float(r[ci]) is not None
+                               for r in non_empty[1:min(10, len(non_empty))])
+                    ] if len(non_empty) > 1 else []
+                    _date_col = next(
+                        (ci for ci, hdr in enumerate(non_empty[0])
+                         if any(str(r[ci]).startswith('20') or str(r[ci]).startswith('19')
+                                for r in non_empty[1:min(5, len(non_empty))]
+                                if r[ci])),
+                        None,
+                    )
+                    if _num_cols and _date_col is not None and len(non_empty) > 10:
+                        _hdr = non_empty[0]
+                        _data_rows = [r for r in non_empty[1:] if r[_date_col] and
+                                      any(_try_float(r[c]) is not None for c in _num_cols)]
+                        if len(_data_rows) > 10:
+                            _nc = _num_cols[0]  # primary numeric column
+                            _vals = [(r[_date_col], _try_float(r[_nc])) for r in _data_rows
+                                     if _try_float(r[_nc]) is not None]
+                            if _vals:
+                                _max_v = max(_vals, key=lambda x: x[1])
+                                _min_v = min(_vals, key=lambda x: x[1])
+                                _first  = _vals[0]
+                                _last   = _vals[-1]
+                                # Year-level aggregates
+                                _year_stats: dict = {}
+                                for _d, _v in _vals:
+                                    _yr = str(_d)[:4]
+                                    if _yr not in _year_stats:
+                                        _year_stats[_yr] = {"first": (_d, _v), "last": (_d, _v),
+                                                            "sum": 0.0, "cnt": 0,
+                                                            "min": (_d, _v), "max": (_d, _v)}
+                                    s = _year_stats[_yr]
+                                    s["last"] = (_d, _v)
+                                    s["sum"] += float(_v)
+                                    s["cnt"] += 1
+                                    if float(_v) < float(s["min"][1]): s["min"] = (_d, _v)
+                                    if float(_v) > float(s["max"][1]): s["max"] = (_d, _v)
+                                _num_col_name = _hdr[_nc] if _hdr[_nc] else f"Column {_nc+1}"
+                                _lines = [
+                                    f"[COMPUTED SUMMARY — Sheet: {sheet_name}]",
+                                    f"Column: {_num_col_name}",
+                                    f"Dataset: {_first[0]} to {_last[0]} ({len(_vals)} trading days)",
+                                    f"Overall maximum: {_max_v[1]:.2f} on {_max_v[0]}",
+                                    f"Overall minimum: {_min_v[1]:.2f} on {_min_v[0]}",
+                                    f"First value: {_first[1]:.2f} on {_first[0]}",
+                                    f"Last value: {_last[1]:.2f} on {_last[0]}",
+                                ]
+                                for _yr, s in sorted(_year_stats.items()):
+                                    _avg = s["sum"] / s["cnt"] if s["cnt"] else 0
+                                    _pct = ((float(s["last"][1]) - float(s["first"][1])) / float(s["first"][1]) * 100
+                                            if float(s["first"][1]) else 0)
+                                    _lines.append(
+                                        f"Year {_yr}: open={float(s['first'][1]):.2f} ({s['first'][0]}), "
+                                        f"close={float(s['last'][1]):.2f} ({s['last'][0]}), "
+                                        f"avg={_avg:.2f}, high={float(s['max'][1]):.2f} ({s['max'][0]}), "
+                                        f"low={float(s['min'][1]):.2f} ({s['min'][0]}), "
+                                        f"change={_pct:+.2f}%, trading_days={s['cnt']}"
+                                    )
+                                # Cross-period analysis: e.g. "from start of 2021 to end of 2022"
+                                _sorted_yrs = sorted(_year_stats.keys())
+                                if len(_sorted_yrs) >= 2:
+                                    for i in range(len(_sorted_yrs) - 1):
+                                        _ya, _yb = _sorted_yrs[i], _sorted_yrs[i + 1]
+                                        _va_open = float(_year_stats[_ya]["first"][1])
+                                        _vb_close = float(_year_stats[_yb]["last"][1])
+                                        if _va_open:
+                                            _cross_pct = (_vb_close - _va_open) / _va_open * 100
+                                            _lines.append(
+                                                f"Cross-period: start of {_ya} ({_year_stats[_ya]['first'][0]}, {_va_open:.2f}) "
+                                                f"to end of {_yb} ({_year_stats[_yb]['last'][0]}, {_vb_close:.2f}) "
+                                                f"= {_cross_pct:+.2f}%"
+                                            )
+                                _sum_text = "\n".join(_lines)
+                                documents.append(
+                                    IngestedDocument(
+                                        text=_sum_text,
+                                        modality="table",
+                                        subtype="summary",
+                                        source_type="excel",
+                                        source=source_name,
+                                        structure=_base_structure(
+                                            doc_id, session_id, source_path,
+                                            sheet=sheet_name,
+                                            row_start=1,
+                                            row_end=len(_data_rows),
+                                            page_number=None,
+                                            total_pages=None,
+                                            section_title=sheet_name,
+                                            ingestion_timestamp=time.time(),
+                                            language="en",
+                                            file_size_bytes=file_size,
+                                            content_type="excel_summary",
+                                            ingestion_time=time.time(),
+                                        ),
+                                        extra_metadata={
+                                            "data_quality_score": 1.0,
+                                            "importance_score":   1.0,
+                                            "modality_weight":    1.5,
+                                        },
+                                    ).finalize()
+                                )
+                except Exception as _stat_err:
+                    logger.warning("excel_stats_summary_failed", sheet=sheet_name,
+                                   error=str(_stat_err))
+
                 # EMBEDDED IMAGES PER SHEET — route through image_ingest.
                 try:
                     sheet_images = list(getattr(ws, "_images", []) or [])

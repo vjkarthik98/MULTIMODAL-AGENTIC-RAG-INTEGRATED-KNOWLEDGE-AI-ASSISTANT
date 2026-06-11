@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import queue as _queue
 import threading
 import time
 import unicodedata
@@ -508,47 +509,84 @@ class GGUFModel:
 
             start       = time.time()
             token_count = 0
-            buffer      = ""
 
-            # INFERENCE LOCK — held for the full token loop so no concurrent
-            # generate()/stream() touches the shared llama.cpp context. The loop
-            # is bounded by max_tokens and LLM_CALL_TIMEOUT_SEC, so the lock is
-            # held for one bounded generation then freed.
-            with self._circuit, self._lock:
-                for chunk in llm(
-                    prompt,
-                    max_tokens=max_tokens   if max_tokens   is not None else settings.LLM_MAX_TOKENS,
-                    temperature=temperature if temperature  is not None else settings.LLM_TEMPERATURE,
-                    top_p=top_p             if top_p        is not None else settings.LLM_TOP_P,
-                    top_k=settings.LLM_TOP_K_SAMPLING,
-                    min_p=settings.LLM_MIN_P,
-                    repeat_penalty=settings.LLM_REPEAT_PENALTY,
-                    stop=_STOP_TOKENS,
-                    stream=True,
-                ):
-                    token = chunk["choices"][0]["text"]
+            # THREAD+QUEUE STREAMING TIMEOUT
+            # The timeout check inside a plain `for chunk in llm(..., stream=True):`
+            # loop only fires AFTER the first token is yielded.  Prefill (processing
+            # the full input prompt) runs BEFORE the first token, so a long prefill
+            # phase could block the caller indefinitely.
+            #
+            # Fix: run the llama-cpp iterator on a daemon thread and drain its
+            # output via a bounded queue.  The main thread (this generator) calls
+            # q.get(timeout=...) which covers both prefill and per-token stalls.
+            _SENTINEL = object()
+            tok_q: _queue.Queue = _queue.Queue(maxsize=512)
 
-                    if not token:
-                        continue
+            _max_tok  = max_tokens   if max_tokens   is not None else settings.LLM_MAX_TOKENS
+            _temp     = temperature  if temperature  is not None else settings.LLM_TEMPERATURE
+            _top_p_v  = top_p        if top_p        is not None else settings.LLM_TOP_P
 
-                    # HARD STREAMING TIMEOUT — SECTION 2.1. Same bound as
-                    # generate(); FILE_PROCESSING_TIMEOUT_SEC (300s) let a
-                    # runaway stream hold the inference lock for 5 minutes.
-                    elapsed = time.time() - start
-                    if elapsed > settings.LLM_CALL_TIMEOUT_SEC:
-                        logger.warning(
-                            event="gguf_stream_timeout",
-                            elapsed=round(elapsed, 1),
-                            session_id=session_id,
-                        )
-                        break
+            def _generate() -> None:
+                try:
+                    with self._circuit, self._lock:
+                        for chunk in llm(
+                            prompt,
+                            max_tokens=_max_tok,
+                            temperature=_temp,
+                            top_p=_top_p_v,
+                            top_k=settings.LLM_TOP_K_SAMPLING,
+                            min_p=settings.LLM_MIN_P,
+                            repeat_penalty=settings.LLM_REPEAT_PENALTY,
+                            stop=_STOP_TOKENS,
+                            stream=True,
+                        ):
+                            tok_q.put(chunk)
+                except RuntimeError as _re:
+                    tok_q.put(_re)
+                except Exception as _ex:
+                    tok_q.put(_ex)
+                finally:
+                    tok_q.put(_SENTINEL)
 
-                    # STRIP NULL BYTES FROM TOKENS
-                    token = token.replace("\x00", "")
+            gen_thread = threading.Thread(target=_generate, daemon=True)
+            gen_thread.start()
 
-                    buffer += token
-                    token_count += 1
-                    yield token
+            # Separate timeouts: longer for first token (covers prefill),
+            # shorter per-token guard (catches mid-generation stalls).
+            _first_tok_timeout = float(settings.LLM_CALL_TIMEOUT_SEC)
+            _per_tok_timeout   = min(30.0, _first_tok_timeout)
+            _is_first_token    = True
+
+            while True:
+                _timeout = _first_tok_timeout if _is_first_token else _per_tok_timeout
+                try:
+                    item = tok_q.get(timeout=_timeout)
+                except _queue.Empty:
+                    elapsed = round(time.time() - start, 1)
+                    phase   = "prefill" if _is_first_token else "generation"
+                    logger.warning(
+                        event="gguf_stream_timeout",
+                        phase=phase,
+                        elapsed=elapsed,
+                        session_id=session_id,
+                    )
+                    break
+
+                if item is _SENTINEL:
+                    break
+
+                if isinstance(item, (RuntimeError, Exception)):
+                    raise item
+
+                _is_first_token = False
+                token = item["choices"][0]["text"]
+
+                if not token:
+                    continue
+
+                token = token.replace("\x00", "")
+                token_count += 1
+                yield token
 
             latency = round(time.time() - start, 2)
             tps     = round(token_count / max(latency, 1e-6), 1)
