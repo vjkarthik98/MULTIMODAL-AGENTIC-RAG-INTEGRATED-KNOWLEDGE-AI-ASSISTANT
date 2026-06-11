@@ -302,6 +302,10 @@ output:
     - '\[/?INST\]'               # Mistral instruction tokens
     - '<</?SYS>>'                # Mistral system tokens
     - '</?s>'                    # Llama BOS/EOS tokens <s> and </s>
+    - '^\s*Answer:\s*'           # Mistral label prefix "Answer: ..."
+    - '^\s*Reasoning:\s*'        # Mistral label prefix "Reasoning: ..."
+    - '^\s*Confidence:\s*[0-9][^\n]*\n?'  # "Confidence: 0.9" trailer
+    - '\n\s*(?:Sources?|References?):\s*\n(?:[^\n]+\n?)+'  # trailing Sources/References block
 
   citation_validation: true      # validate [filename] tokens against sources[]
   citation_replacement: ""       # replace fabricated citations with empty string

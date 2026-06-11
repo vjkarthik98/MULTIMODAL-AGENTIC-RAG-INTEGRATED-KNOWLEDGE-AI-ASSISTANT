@@ -94,9 +94,9 @@ html, body, #root {
 }
 
 /* ── Scrollbar ────────────────────────────────────── */
-::-webkit-scrollbar       { width: 4px; height: 4px; }
+::-webkit-scrollbar       { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--t-bd3); border-radius: 2px; }
+::-webkit-scrollbar-thumb { background: var(--t-bd3); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--t-bd4); }
 
 /* ── Markdown in chat bubbles ─────────────────────── */

@@ -298,6 +298,7 @@ class Settings:
     CHUNK_MINHASH_PERMUTATIONS: int  = _int("CHUNK_MINHASH_PERMUTATIONS", 128)
     CHUNK_ADAPTIVE_ENABLED: bool     = _bool("CHUNK_ADAPTIVE_ENABLED", True)
     LATE_CHUNKING_ENABLED: bool      = _bool("LATE_CHUNKING_ENABLED", False)
+    EXCEL_ROWS_PER_CHUNK: int        = _int("EXCEL_ROWS_PER_CHUNK", 25)
 
     # BM25
     BM25_MAX_DOCS: int        = _int("BM25_MAX_DOCS", 10_000)

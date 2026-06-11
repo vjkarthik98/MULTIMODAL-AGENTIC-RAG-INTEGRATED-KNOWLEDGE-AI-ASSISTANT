@@ -494,37 +494,60 @@ def _process_pdf(
         if page_text:
             page_text = _pii_scrub(page_text, surface="pdf_ingest")
 
-            documents.append(
-                IngestedDocument(
-                    text=page_text,
-                    modality="text",
-                    subtype="page",
-                    source_type="pdf",
-                    source=source_name,
-                    page=i,
-                    structure=_base_structure(
-                        doc_id, session_id, source_path,
+            # SUB-PAGE CHUNKING — split long pages into overlapping semantic
+            # chunks so that distinct topics on the same page each get their
+            # own embedding and are individually retrievable.
+            page_sub_chunks: List[str] = []
+            if len(page_text) > settings.CHUNK_SIZE:
+                try:
+                    from langchain_text_splitters import RecursiveCharacterTextSplitter
+                    _page_splitter = RecursiveCharacterTextSplitter(
+                        chunk_size=settings.CHUNK_SIZE,
+                        chunk_overlap=settings.CHUNK_OVERLAP,
+                        separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""],
+                    )
+                    page_sub_chunks = [
+                        c.strip() for c in _page_splitter.split_text(page_text) if c.strip()
+                    ]
+                except Exception:
+                    pass
+            if not page_sub_chunks:
+                page_sub_chunks = [page_text]
+
+            for sub_idx, sub_chunk in enumerate(page_sub_chunks):
+                documents.append(
+                    IngestedDocument(
+                        text=sub_chunk,
+                        modality="text",
+                        subtype="page",
+                        source_type="pdf",
+                        source=source_name,
                         page=i,
-                        page_number=i,
-                        total_pages=total_pages,
-                        ocr_confidence=ocr_conf,
-                        is_pdfa=is_pdfa,
-                        has_xfa=has_xfa,
-                        has_javascript=has_js,
-                        section_title=None,
-                        ingestion_timestamp=time.time(),
-                        language="en",
-                        file_size_bytes=file_size,
-                        content_type="pdf_page",
-                        ingestion_time=time.time(),
-                    ),
-                    extra_metadata={
-                        "data_quality_score": _quality(page_text),
-                        "importance_score":   _quality(page_text),
-                        "modality_weight":    1.0,
-                    },
-                ).finalize()
-            )
+                        structure=_base_structure(
+                            doc_id, session_id, source_path,
+                            page=i,
+                            page_number=i,
+                            total_pages=total_pages,
+                            sub_chunk_index=sub_idx,
+                            total_sub_chunks=len(page_sub_chunks),
+                            ocr_confidence=ocr_conf,
+                            is_pdfa=is_pdfa,
+                            has_xfa=has_xfa,
+                            has_javascript=has_js,
+                            section_title=None,
+                            ingestion_timestamp=time.time(),
+                            language="en",
+                            file_size_bytes=file_size,
+                            content_type="pdf_page",
+                            ingestion_time=time.time(),
+                        ),
+                        extra_metadata={
+                            "data_quality_score": _quality(sub_chunk),
+                            "importance_score":   _quality(sub_chunk),
+                            "modality_weight":    1.0,
+                        },
+                    ).finalize()
+                )
 
         # EMBEDDED IMAGES
         for img_idx, img_ref in enumerate(page.get_images(full=True)):
@@ -844,6 +867,51 @@ def _process_docx(
             pass
         return None
 
+    # PARAGRAPH MERGING — buffer consecutive non-heading paragraphs under the
+    # same section heading and flush when the accumulated text reaches
+    # CHUNK_SIZE (≈800 chars). This prevents tiny per-sentence chunks that
+    # destroy semantic context while staying within embedding token limits.
+    _para_buffer: List[str] = []
+    _para_buffer_start_idx: int = 0
+    _chunk_target = min(settings.CHUNK_SIZE, 800)
+
+    def _flush_para_buffer(up_to_idx: int) -> None:
+        if not _para_buffer:
+            return
+        merged = " ".join(_para_buffer).strip()
+        merged = _pii_scrub(merged, surface="docx_para_ingest")
+        if not merged:
+            _para_buffer.clear()
+            return
+        documents.append(
+            IngestedDocument(
+                text=merged,
+                modality="text",
+                subtype="paragraph",
+                source_type="word",
+                source=source_name,
+                structure=_base_structure(
+                    doc_id, session_id, source_path,
+                    paragraph_index=_para_buffer_start_idx,
+                    heading_level=None,
+                    page_number=None,
+                    total_pages=None,
+                    section_title=current_heading,
+                    ingestion_timestamp=time.time(),
+                    language="en",
+                    file_size_bytes=file_size,
+                    content_type="docx_paragraph",
+                    ingestion_time=time.time(),
+                ),
+                extra_metadata={
+                    "data_quality_score": _quality(merged),
+                    "importance_score":   _quality(merged),
+                    "modality_weight":    1.0,
+                },
+            ).finalize()
+        )
+        _para_buffer.clear()
+
     # PARAGRAPHS
     for i, p in enumerate(doc.paragraphs):
         text = (p.text or "").strip()
@@ -852,8 +920,6 @@ def _process_docx(
 
         level   = _heading_level(p)
         subtype = "heading" if level else "paragraph"
-        if level:
-            current_heading = text
 
         try:
             from app.guardrails.input_guard import sanitize as _guard_sanitize
@@ -865,38 +931,53 @@ def _process_docx(
         except Exception as _ge:
             logger.warning("docx_guardrail_failed", file=source_name, error=str(_ge))
 
-        if not text.strip():  # entire paragraph was injection — skip silently
+        if not text.strip():
             continue
 
-        text = _pii_scrub(text, surface="docx_para_ingest")
+        if level:
+            # Flush any buffered paragraphs from the previous section first.
+            _flush_para_buffer(i)
+            current_heading = text
+            heading_text = _pii_scrub(text, surface="docx_para_ingest")
+            if heading_text:
+                documents.append(
+                    IngestedDocument(
+                        text=heading_text,
+                        modality="text",
+                        subtype="heading",
+                        source_type="word",
+                        source=source_name,
+                        structure=_base_structure(
+                            doc_id, session_id, source_path,
+                            paragraph_index=i,
+                            heading_level=level,
+                            page_number=None,
+                            total_pages=None,
+                            section_title=heading_text,
+                            ingestion_timestamp=time.time(),
+                            language="en",
+                            file_size_bytes=file_size,
+                            content_type="docx_paragraph",
+                            ingestion_time=time.time(),
+                        ),
+                        extra_metadata={
+                            "data_quality_score": _quality(heading_text),
+                            "importance_score":   1.2,
+                            "modality_weight":    1.0,
+                        },
+                    ).finalize()
+                )
+        else:
+            # Accumulate paragraph into buffer; flush when size target reached.
+            if not _para_buffer:
+                _para_buffer_start_idx = i
+            _para_buffer.append(text)
+            buffered_len = sum(len(s) + 1 for s in _para_buffer)
+            if buffered_len >= _chunk_target:
+                _flush_para_buffer(i)
 
-        documents.append(
-            IngestedDocument(
-                text=text,
-                modality="text",
-                subtype=subtype,
-                source_type="word",
-                source=source_name,
-                structure=_base_structure(
-                    doc_id, session_id, source_path,
-                    paragraph_index=i,
-                    heading_level=level,
-                    page_number=None,
-                    total_pages=None,
-                    section_title=text if subtype == "heading" else current_heading,
-                    ingestion_timestamp=time.time(),
-                    language="en",
-                    file_size_bytes=file_size,
-                    content_type="docx_paragraph",
-                    ingestion_time=time.time(),
-                ),
-                extra_metadata={
-                    "data_quality_score": _quality(text),
-                    "importance_score":   1.2 if subtype == "heading" else _quality(text),
-                    "modality_weight":    1.0,
-                },
-            ).finalize()
-        )
+    # Flush remaining buffered paragraphs.
+    _flush_para_buffer(len(list(doc.paragraphs)))
 
     # TABLES
     for t_idx, table in enumerate(doc.tables):
@@ -1102,7 +1183,7 @@ def _process_excel(
         warnings = []
 
     documents: List[IngestedDocument] = []
-    ROWS_PER_CHUNK = 50
+    ROWS_PER_CHUNK = settings.EXCEL_ROWS_PER_CHUNK
 
     try:
         wb = openpyxl.load_workbook(file_path, data_only=True)

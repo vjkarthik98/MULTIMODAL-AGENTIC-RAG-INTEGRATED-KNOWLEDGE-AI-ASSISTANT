@@ -468,9 +468,14 @@ class HybridRetriever:
         top_k = top_k or settings.DEFAULT_TOP_K
         candidate_k = min(top_k * self.candidate_multiplier, 50)
 
-        is_vision = self._is_vision_query(query)
-        is_audio = self._is_audio_query(query)
-        is_video = self._is_video_query(query)
+        # When the caller has already scoped to explicit source files, keyword-
+        # based modality detection must not override that intent.  A query like
+        # "what revenue was earned" against @aapl_10k_2023.txt must not boost
+        # video/audio chunks just because a heuristic fires on a word like "earn".
+        _explicit_sources = bool(filters and filters.get("sources"))
+        is_vision = (not _explicit_sources) and self._is_vision_query(query)
+        is_audio  = (not _explicit_sources) and self._is_audio_query(query)
+        is_video  = (not _explicit_sources) and self._is_video_query(query)
 
         try:
             # TEXT EMBEDDING

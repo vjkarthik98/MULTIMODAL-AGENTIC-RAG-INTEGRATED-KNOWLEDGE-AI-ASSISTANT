@@ -131,13 +131,19 @@ def _prefix(doc: Any) -> str:
     if m == "image":
         return "OCR: " if st == "ocr" else "Image: "
     if m == "audio":
-        ts = s.get("timestamp_start", "")
-        return f"Audio {ts}s: " if ts else "Audio: "
+        ts = s.get("timestamp_start")
+        return f"Audio {ts:.1f}s: " if ts is not None else "Audio: "
     if m == "video":
+        ts = s.get("timestamp_start")
+        fi = s.get("frame_index")
         if st == "speech":
-            return "Video speech: "
+            return f"Video speech {ts:.1f}s: " if ts is not None else "Video speech: "
         if st == "frame":
-            return "Video frame: "
+            if fi is not None and ts is not None:
+                return f"Video frame {fi} @{ts:.1f}s: "
+            if fi is not None:
+                return f"Video frame {fi}: "
+            return f"Video frame @{ts:.1f}s: " if ts is not None else "Video frame: "
         if st == "ocr":
             return "Video OCR: "
     if m == "text" and st == "heading":
@@ -157,6 +163,41 @@ def _enrich(doc: Any, text: str) -> str:
         context.append(f"[Page {doc.page}]")
     if getattr(doc, "source", None):
         context.append(f"[{doc.source}]")
+
+    # Include section title when available — two chunks from different sections
+    # of the same document would otherwise produce identical prefixes, causing
+    # their embeddings to collapse together in vector space.
+    _structure = getattr(doc, "structure", {}) or {}
+    _section_title = _structure.get("section_title") or ""
+    if _section_title and len(_section_title) <= 120:
+        context.append(f"[Section: {_section_title}]")
+
+    # PDF sub-chunk position — disambiguates adjacent chunks on the same page
+    _sub_idx   = _structure.get("sub_chunk_index")
+    _sub_total = _structure.get("total_sub_chunks")
+    if _sub_idx is not None and _sub_total and int(_sub_total) > 1:
+        context.append(f"[Part {int(_sub_idx) + 1}/{int(_sub_total)}]")
+
+    # EXCEL row range — grounds the chunk in a precise cell window
+    _row_start = _structure.get("row_start")
+    _row_end   = _structure.get("row_end")
+    if _row_start is not None and _row_end is not None:
+        context.append(f"[Rows {_row_start}-{_row_end}]")
+
+    # Audio/video temporal window — anchors chunk to the media timeline
+    _modality  = getattr(doc, "modality", "") or ""
+    _ts_start  = _structure.get("timestamp_start")
+    _ts_end    = _structure.get("timestamp_end")
+    if _modality in ("audio", "video") and _ts_start is not None:
+        if _ts_end is not None:
+            context.append(f"[{float(_ts_start):.1f}s-{float(_ts_end):.1f}s]")
+        else:
+            context.append(f"[{float(_ts_start):.1f}s]")
+
+    # Video frame index — unique frame identifier within the video
+    _frame_idx = _structure.get("frame_index")
+    if _modality == "video" and _frame_idx is not None:
+        context.append(f"[Frame {_frame_idx}]")
 
     enriched = " ".join(context) + " " + _prefix(doc) + text
     return enriched.strip()[:settings.MAX_PROMPT_CHARS]
@@ -193,10 +234,11 @@ class TextEmbedder:
         if "query" in _prompts:
             self._query_prompt_name = "query"
         elif any(k in model_name.lower() for k in ("qwen3", "e5-instruct", "gte-qwen")):
-            # Fallback: prepend the standard instruction string for Qwen3-class models
+            # Financial-domain instruction for Qwen3-class instruction-tuned embedders.
+            # Tested against the Qwen3-Embedding-0.6B model card guidance.
             self._query_prompt_text = (
-                "Instruct: Given a web search query, retrieve relevant passages "
-                "that answer the query\nQuery: "
+                "Instruct: Given a financial document query, retrieve the most "
+                "relevant passage that answers the question\nQuery: "
             )
 
         logger.info(

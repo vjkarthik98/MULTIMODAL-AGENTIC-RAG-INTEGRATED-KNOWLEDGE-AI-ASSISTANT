@@ -67,6 +67,54 @@ _STOPWORDS: Set[str] = {
     "could", "should", "may", "might", "can", "any", "some", "no",
 }
 
+# FINANCIAL ABBREVIATION EXPANSION — applied at both index-time and query-time
+# so "EPS" and "earnings per share" match each other even when neither phrase
+# appears verbatim in the other's text.
+_FIN_ABBR: Dict[str, List[str]] = {
+    "eps":              ["earnings", "per", "share"],
+    "ebitda":           ["earnings", "before", "interest", "taxes", "depreciation", "amortization"],
+    "revenue":          ["net", "sales"],
+    "net sales":        ["revenue"],
+    "yoy":              ["year", "over", "year"],
+    "fy":               ["fiscal", "year"],
+    "q1":               ["first", "quarter"],
+    "q2":               ["second", "quarter"],
+    "q3":               ["third", "quarter"],
+    "q4":               ["fourth", "quarter"],
+    "ceo":              ["chief", "executive", "officer"],
+    "cfo":              ["chief", "financial", "officer"],
+    "capex":            ["capital", "expenditure", "expenditures"],
+    "r&d":              ["research", "development"],
+    "gm":               ["gross", "margin"],
+    "op":               ["operating"],
+    "ttm":              ["trailing", "twelve", "months"],
+    "pe":               ["price", "earnings"],
+    "pb":               ["price", "book"],
+    "roe":              ["return", "equity"],
+    "roa":              ["return", "assets"],
+    "fcf":              ["free", "cash", "flow"],
+    "gaap":             ["generally", "accepted", "accounting", "principles"],
+    "non-gaap":         ["non", "gaap", "adjusted"],
+    "diluted":          ["diluted", "per", "share"],
+    "buyback":          ["share", "repurchase"],
+    "repurchase":       ["buyback", "share", "repurchase"],
+}
+
+# HIGH-VALUE FINANCIAL BIGRAMS — kept as single tokens in BM25 corpus
+# so phrases like "net income" score higher than individual words.
+_FIN_BIGRAMS: Set[str] = {
+    "net income", "net sales", "gross margin", "operating income",
+    "earnings per share", "diluted eps", "basic eps", "per share",
+    "cash flow", "free cash", "total revenue", "total assets",
+    "total liabilities", "shareholders equity", "return on equity",
+    "return on assets", "research development", "capital expenditure",
+    "year over year", "fiscal year", "first quarter", "second quarter",
+    "third quarter", "fourth quarter", "annual report", "form 10k",
+    "income statement", "balance sheet", "cash flow statement",
+    "interest expense", "tax rate", "effective tax", "share repurchase",
+    "stock buyback", "dividend per share", "book value",
+}
+
 
 class BM25Document:
     """Picklable document wrapper for BM25 index storage."""
@@ -129,9 +177,35 @@ class BM25Retriever:
 
     def _tokenize(self, text: str) -> List[str]:
         text = str(text or "").lower()
-        tokens = re.findall(r"\b[a-z0-9]+\b", text)
+
+        # ── Bigram extraction ─────────────────────────────────────────────
+        # Before splitting into unigrams, scan for high-value financial
+        # bigrams and add them as single tokens. This makes "net income"
+        # score higher than the product of "net" × "income" individually.
+        bigram_tokens: List[str] = []
+        for bigram in _FIN_BIGRAMS:
+            if bigram in text:
+                bigram_tokens.append(bigram.replace(" ", "_"))
+
+        # ── Unigram extraction ────────────────────────────────────────────
+        # Capture decimal/dollar figures as single tokens BEFORE splitting on
+        # word boundaries so "$6.13" and "6.13" index as one token, not
+        # ["6", "13"].
+        tokens = re.findall(r'\d+\.\d+|\b[a-z0-9]+\b', text)
         tokens = [t for t in tokens if t not in _STOPWORDS and len(t) > 1]
-        return tokens[:settings.BM25_MAX_TOKENS]
+
+        # ── Abbreviation expansion ────────────────────────────────────────
+        # For every known abbreviation found in the token stream, add its
+        # expanded form too. Both forms are indexed so abbreviated queries
+        # match full-form text and vice-versa.
+        expanded: List[str] = []
+        for tok in tokens:
+            expanded.append(tok)
+            if tok in _FIN_ABBR:
+                expanded.extend(_FIN_ABBR[tok])
+
+        all_tokens = bigram_tokens + expanded
+        return all_tokens[:settings.BM25_MAX_TOKENS]
 
     # METADATA EXTRACTION
 

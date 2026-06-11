@@ -315,6 +315,29 @@ class QdrantVectorStore:
             "deleted_at":       None,
         }
 
+        _source_type = getattr(d, "source_type", "") or ""
+
+        # PDF LOCATOR FIELDS — sub-page chunk position for precise citation
+        # PDF chunks use modality="text" + source_type="pdf", not modality="pdf"
+        if _source_type == "pdf":
+            if s.get("sub_chunk_index") is not None:
+                payload["sub_chunk_index"] = int(s["sub_chunk_index"])
+            if s.get("total_sub_chunks") is not None:
+                payload["total_sub_chunks"] = int(s["total_sub_chunks"])
+
+        # DOCX HEADING LEVEL — hierarchy depth for section-aware retrieval
+        if _source_type == "word" and s.get("heading_level") is not None:
+            payload["heading_level"] = int(s["heading_level"])
+
+        # EXCEL LOCATOR FIELDS — sheet name and row range for cell-level citation
+        if _source_type == "excel":
+            if s.get("sheet"):
+                payload["sheet_name"] = str(s["sheet"])
+            if s.get("row_start") is not None:
+                payload["row_start"] = int(s["row_start"])
+            if s.get("row_end") is not None:
+                payload["row_end"] = int(s["row_end"])
+
         # AUDIO TEMPORAL FIELDS — top-level so reranker can read them directly
         if modality == "audio":
             if s.get("timestamp_start") is not None:

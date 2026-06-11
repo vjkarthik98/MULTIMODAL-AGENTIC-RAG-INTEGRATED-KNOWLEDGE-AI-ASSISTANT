@@ -571,24 +571,20 @@ def _extract_table_blocks(
     return blocks
 
 
-def _chunk_table(header: str, data_rows: List[str]) -> List[str]:
-    """Emit one chunk per data row, each prefixed with the header.
+def _chunk_table(header: str, data_rows: List[str], min_size: Optional[int] = None) -> List[str]:
+    """Pack data rows into chunks, each prefixed with the header.
 
-    Per-row chunks maximise retrieval discriminability: the row's unique
-    tokens (IDs, names, numbers) dominate the embedding signal instead of
-    being averaged out with neighbouring rows. The header is still attached
-    so the LLM can interpret which value belongs to which column.
-
-    Falls back to packing multiple short rows together only when a single
-    header+row pair is below CHUNK_MIN_SIZE — otherwise the chunk would be
-    dropped by the downstream min-size filter.
+    For pipe-tables (financial statements) pass a larger min_size (e.g. 250)
+    so 3-5 rows are kept together — enough context for the LLM to interpret
+    column order while remaining small enough for precise vector retrieval.
+    For fixed-width tables the default CHUNK_MIN_SIZE keeps one row per chunk.
     """
     chunks: List[str] = []
     header_len = len(header) + 1
 
     pending_rows: List[str] = []
     pending_len  = 0
-    min_size     = settings.CHUNK_MIN_SIZE
+    effective_min = min_size if min_size is not None else settings.CHUNK_MIN_SIZE
 
     def flush():
         if pending_rows:
@@ -596,9 +592,7 @@ def _chunk_table(header: str, data_rows: List[str]) -> List[str]:
 
     for row in data_rows:
         candidate_size = header_len + pending_len + len(row) + 1
-        if pending_rows and candidate_size >= min_size:
-            # The accumulated chunk is already above the min-size floor —
-            # emit it now and start fresh so each row gets its own chunk.
+        if pending_rows and candidate_size >= effective_min:
             flush()
             pending_rows = [row]
             pending_len  = len(row) + 1
@@ -610,20 +604,199 @@ def _chunk_table(header: str, data_rows: List[str]) -> List[str]:
     return chunks
 
 
+# PIPE-TABLE DETECTION (markdown | separated tables)
+#
+# Financial TXT files extracted from PDFs use a pipe format:
+#   | Net income | $ | 96,995 | | | $ | 99,803 |
+#   | Diluted    | $ |  6.13  | | | $  |  6.11 |
+#
+# These are invisible to the fixed-width table detector (which requires 2+
+# spaces between columns). We detect them separately, normalize the rows,
+# look back for year/column context, and emit multi-row chunks so the LLM
+# can interpret column order.
+
+_PIPE_ROW_RE       = re.compile(r"^\s*\|")
+_PIPE_SEP_CELL_RE  = re.compile(r"^:?-{2,}:?$")
+_YEAR_IN_LINE_RE   = re.compile(r"\b(20\d{2})\b")
+
+# Financial section headings used in 10-Ks and earnings filings.
+_FINANCIAL_HEADING_RE = re.compile(
+    r"^(?:PART\s+[IVX]+|ITEM\s+\d+[A-Z]?\.|"
+    r"CONSOLIDATED\s+STATEMENTS?\s+OF|"
+    r"NOTES?\s+TO\s+(?:CONSOLIDATED\s+)?FINANCIAL|"
+    r"MANAGEMENT[''S]*\s+DISCUSSION|"
+    r"SELECTED\s+FINANCIAL|"
+    r"RESULTS?\s+OF\s+OPERATIONS?|"
+    r"LIQUIDITY\s+AND\s+CAPITAL|"
+    r"CRITICAL\s+ACCOUNTING)",
+    re.IGNORECASE,
+)
+
+
+def _is_pipe_row(line: str) -> bool:
+    return bool(_PIPE_ROW_RE.match(line)) and line.count("|") >= 2
+
+
+def _is_pipe_separator_row(line: str) -> bool:
+    stripped = line.strip().strip("|")
+    cells = [c.strip() for c in stripped.split("|")]
+    return bool(cells) and all(
+        bool(_PIPE_SEP_CELL_RE.match(c)) for c in cells if c
+    )
+
+
+def _normalize_pipe_row(line: str) -> str:
+    """Strip outer pipes, collapse empty/whitespace-only cells, join with ' | '."""
+    parts = line.strip().strip("|").split("|")
+    non_trivial = [p.strip() for p in parts if p.strip()]
+    return " | ".join(non_trivial)
+
+
+def _extract_pipe_table_blocks(
+    text: str,
+) -> List[Tuple[int, int, str, List[str]]]:
+    """Find markdown pipe-table regions in `text`.
+
+    For each block returns (start_offset, end_offset, header_str, data_rows).
+    The header_str may be prefixed with "Years: 20XX, 20YY\\n" when year
+    context is found in the lines immediately preceding the block — this
+    lets the LLM correctly attribute column values to fiscal years.
+    """
+    lines = text.split("\n")
+    offsets: List[int] = []
+    pos = 0
+    for line in lines:
+        offsets.append(pos)
+        pos += len(line) + 1
+
+    blocks: List[Tuple[int, int, str, List[str]]] = []
+    MIN_PIPE_ROWS = 3  # header + at least 2 data rows
+
+    i = 0
+    while i < len(lines):
+        if not _is_pipe_row(lines[i]):
+            i += 1
+            continue
+
+        # Collect consecutive pipe rows (allow no blank gaps).
+        run_start = i
+        run_indices: List[int] = []
+        j = i
+        while j < len(lines):
+            ln = lines[j]
+            if not ln.strip():
+                break
+            if _is_pipe_row(ln):
+                run_indices.append(j)
+                j += 1
+            else:
+                break
+
+        # Strip pure markdown separator rows.
+        content_rows = [k for k in run_indices if not _is_pipe_separator_row(lines[k])]
+
+        if len(content_rows) >= MIN_PIPE_ROWS:
+            # Look back up to 12 lines for year/column context (not crossing
+            # blank lines) so we can stamp FY columns onto the header.
+            look_back_text_parts: List[str] = []
+            for step in range(1, 13):
+                lb = run_start - step
+                if lb < 0:
+                    break
+                lb_line = lines[lb].strip()
+                if not lb_line:
+                    break
+                look_back_text_parts.insert(0, lb_line)
+
+            year_matches = list(dict.fromkeys(
+                _YEAR_IN_LINE_RE.findall("\n".join(look_back_text_parts))
+            ))
+
+            # Detect financial section heading above the table (up to 8 lines back).
+            preceding_heading: Optional[str] = None
+            for step in range(1, 9):
+                lb = run_start - step
+                if lb < 0:
+                    break
+                lb_line = lines[lb].strip()
+                if not lb_line:
+                    break
+                if _FINANCIAL_HEADING_RE.match(lb_line) or (
+                    lb_line.isupper() and 3 <= len(lb_line.split()) <= 10
+                ):
+                    preceding_heading = lb_line
+                    break
+
+            header_norm = _normalize_pipe_row(lines[content_rows[0]])
+
+            # Build enriched header: section heading + year context + row header.
+            header_parts: List[str] = []
+            if preceding_heading:
+                header_parts.append(preceding_heading)
+            if year_matches:
+                header_parts.append("Years: " + ", ".join(year_matches))
+            header_parts.append(header_norm)
+            enriched_header = "\n".join(header_parts)
+
+            data_rows = [
+                _normalize_pipe_row(lines[k]) for k in content_rows[1:]
+            ]
+            data_rows = [d for d in data_rows if d]
+
+            if data_rows:
+                start_off = offsets[run_start]
+                end_off   = offsets[run_indices[-1]] + len(lines[run_indices[-1]]) + 1
+                blocks.append((start_off, end_off, enriched_header, data_rows))
+
+        i = j if j > i else i + 1
+
+    return blocks
+
+
+# FINANCIAL HEADING PROPAGATION
+#
+# For plain TXT/MD files that do NOT use [DOC-NNN] markers, we scan the full
+# text for PART I / ITEM N. / ALL-CAPS section titles and stamp each
+# subsequent chunk with the nearest heading so BM25+vector retrieval can
+# filter by section.
+
+def _extract_section_headings(text: str) -> List[Tuple[int, str]]:
+    """Return (char_offset, heading_text) pairs for detected section headings."""
+    headings: List[Tuple[int, str]] = []
+    for m in re.finditer(
+        r"(?:^|\n)(?P<heading>"
+        r"PART\s+[IVX]+[^\n]{0,60}|"
+        r"ITEM\s+\d+[A-Z]?\.[^\n]{0,80}|"
+        r"(?:[A-Z][A-Z\s\-\&]{10,60})(?=\n))",
+        text,
+        re.MULTILINE,
+    ):
+        h = m.group("heading").strip()
+        if h and len(h.split()) <= 12:
+            headings.append((m.start("heading"), h))
+    return headings
+
+
 # CHUNKING — SEMANTIC BOUNDARY AWARE
 
 def _chunk_text(text: str) -> List[str]:
-    # TABLE-AWARE PASS — extract fixed-width table regions first and chunk
-    # them with the header attached to every data chunk. This prevents
-    # mid-row splits and ensures row-level queries land on chunks that
-    # carry the column meanings.
+    # PIPE TABLE PASS — extract markdown pipe tables first (financial filings
+    # use | separated rows). These get their own header-prefixed chunks with
+    # 3-5 rows each (min_size=250) so the LLM sees column order.
     table_chunks: List[str] = []
-    table_blocks = _extract_table_blocks(text)
-    if table_blocks:
-        # Splice the table regions out of the text so the standard chunker
-        # doesn't see them. Walk back-to-front so offsets stay valid.
+    pipe_blocks = _extract_pipe_table_blocks(text)
+    if pipe_blocks:
+        non_pipe_text = text
+        for start_off, end_off, header, data_rows in reversed(pipe_blocks):
+            non_pipe_text = non_pipe_text[:start_off] + non_pipe_text[end_off:]
+            table_chunks.extend(_chunk_table(header, data_rows, min_size=250))
+        text = non_pipe_text
+
+    # FIXED-WIDTH TABLE PASS — extract space-aligned table regions.
+    fixed_blocks = _extract_table_blocks(text)
+    if fixed_blocks:
         non_table_text = text
-        for start_off, end_off, header, data_rows in reversed(table_blocks):
+        for start_off, end_off, header, data_rows in reversed(fixed_blocks):
             non_table_text = non_table_text[:start_off] + non_table_text[end_off:]
             table_chunks.extend(_chunk_table(header, data_rows))
         text = non_table_text
@@ -635,7 +808,11 @@ def _chunk_text(text: str) -> List[str]:
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=settings.CHUNK_SIZE,
             chunk_overlap=settings.CHUNK_OVERLAP,
-            separators=["\n[DOC-", "\nSECTION ", "\n====", "\n----", "\n####", "\n###", "\n##", "\n#", "\n\n", "\n", ". ", "! ", "? ", " ", ""],
+            separators=[
+                "\n[DOC-", "\nPART ", "\nITEM ", "\nSECTION ",
+                "\n====", "\n----", "\n####", "\n###", "\n##", "\n#",
+                "\n\n", "\n", ". ", "! ", "? ", " ", "",
+            ],
         )
         chunks = splitter.split_text(text)
         chunks = [c.strip() for c in chunks if c.strip()]
@@ -652,7 +829,36 @@ def _chunk_text(text: str) -> List[str]:
             if ch:
                 chunks.append(ch)
 
-    # Table chunks first — they're the highest-precision retrieval units.
+    # HEADING PROPAGATION — stamp each prose chunk with the nearest preceding
+    # financial section heading so the source-chip can show it and retrieval
+    # can filter by section (PART I / ITEM 7 / etc.).
+    if chunks:
+        # Build (offset_approx, heading) list from the remaining non-table text.
+        headings = _extract_section_headings(text)
+        if headings:
+            # Reconstruct approximate char offsets for chunks by scanning.
+            search_start = 0
+            enriched: List[str] = []
+            active_heading: Optional[str] = None
+            # Advance heading pointer as we scan through text.
+            h_idx = 0
+            running_offset = 0
+            for chunk in chunks:
+                # Advance active heading past any headings that precede this chunk.
+                chunk_pos = text.find(chunk[:40], running_offset)
+                if chunk_pos < 0:
+                    chunk_pos = running_offset
+                while h_idx < len(headings) and headings[h_idx][0] <= chunk_pos:
+                    active_heading = headings[h_idx][1]
+                    h_idx += 1
+                if active_heading and not chunk.startswith(active_heading):
+                    enriched.append(f"{active_heading}\n{chunk}")
+                else:
+                    enriched.append(chunk)
+                running_offset = chunk_pos + len(chunk)
+            chunks = enriched
+
+    # Table chunks first — highest-precision retrieval units.
     return table_chunks + chunks
 
 
@@ -927,10 +1133,12 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                         continue
                     seen_hashes.add(exact_h)
 
-                    # NEAR DEDUP VIA SIMHASH
+                    # NEAR DEDUP VIA SIMHASH — threshold 1 bit to avoid
+                    # false-positive dedup of financial table rows that share
+                    # structural tokens (header, $, |) but differ in numbers.
                     sh = _simhash(chunk)
                     too_similar = any(
-                        _simhash_distance(sh, prev) <= 3
+                        _simhash_distance(sh, prev) <= 1
                         for prev in seen_simhashes
                     )
                     if too_similar:
