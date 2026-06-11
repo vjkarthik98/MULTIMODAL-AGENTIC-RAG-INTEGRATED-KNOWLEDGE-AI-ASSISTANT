@@ -20,7 +20,7 @@ HF_TOKEN="${HF_TOKEN:-$(_env_val HF_TOKEN)}"
 HF_CACHE="$(_env_val HF_HOME)"
 HF_CACHE="${HF_CACHE:-${REPO_ROOT}/.hf_cache}"
 GGUF_DEST="$(_env_val LLM_MODEL_PATH)"
-GGUF_DEST="${GGUF_DEST:-${REPO_ROOT}/models/mistral-7b-instruct-v0.2.Q4_K_M.gguf}"
+GGUF_DEST="${GGUF_DEST:-${HF_CACHE}/gguf/mistral-7b-instruct-v0.2.Q4_K_M.gguf}"
 
 EMBED_MODEL="$(_env_val EMBEDDING_MODEL)"; EMBED_MODEL="${EMBED_MODEL:-sentence-transformers/all-MiniLM-L6-v2}"
 SIGLIP_MODEL_ID="$(_env_val SIGLIP_MODEL)";  SIGLIP_MODEL_ID="${SIGLIP_MODEL_ID:-google/siglip-so400m-patch14-384}"

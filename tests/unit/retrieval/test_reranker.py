@@ -181,9 +181,16 @@ class TestRerankerValidScore:
         r = _make_reranker()
         assert r._valid_score(0.5) is True
 
-    def test_zero_score_invalid(self):
+    def test_zero_score_valid(self):
+        # 0.0 is valid: the sigmoid floor filter (not _valid_score) handles removal
+        # of off-topic documents. Silently dropping 0.0 would discard the
+        # min-normalized chunk even when its sigmoid score passes the floor.
         r = _make_reranker()
-        assert r._valid_score(0.0) is False
+        assert r._valid_score(0.0) is True
+
+    def test_negative_score_invalid(self):
+        r = _make_reranker()
+        assert r._valid_score(-0.1) is False
 
     def test_nan_score_invalid(self):
         r = _make_reranker()

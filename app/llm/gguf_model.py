@@ -386,6 +386,9 @@ class GGUFModel:
                             max_tokens=max_tokens_,
                             temperature=temperature_,
                             top_p=top_p_,
+                            top_k=settings.LLM_TOP_K_SAMPLING,
+                            min_p=settings.LLM_MIN_P,
+                            repeat_penalty=settings.LLM_REPEAT_PENALTY,
                             stop=_STOP_TOKENS,
                             stream=True,
                         ):
@@ -517,6 +520,9 @@ class GGUFModel:
                     max_tokens=max_tokens   if max_tokens   is not None else settings.LLM_MAX_TOKENS,
                     temperature=temperature if temperature  is not None else settings.LLM_TEMPERATURE,
                     top_p=top_p             if top_p        is not None else settings.LLM_TOP_P,
+                    top_k=settings.LLM_TOP_K_SAMPLING,
+                    min_p=settings.LLM_MIN_P,
+                    repeat_penalty=settings.LLM_REPEAT_PENALTY,
                     stop=_STOP_TOKENS,
                     stream=True,
                 ):

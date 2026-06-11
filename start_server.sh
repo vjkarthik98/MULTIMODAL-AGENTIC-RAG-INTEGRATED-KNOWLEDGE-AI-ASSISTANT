@@ -31,6 +31,14 @@ if ! command -v tesseract &>/dev/null; then
     sudo apt-get install -y tesseract-ocr tesseract-ocr-eng 2>&1 | grep -E "Setting up|already installed|error" || true
 fi
 
+# ffmpeg + ffprobe are required by video/audio ingestion (video_ingest.py
+# resolves them via PATH). Guard them the same way as tesseract so a fresh
+# AMI launch can never start the server without working media tooling.
+if ! command -v ffmpeg &>/dev/null || ! command -v ffprobe &>/dev/null; then
+    echo "[start_server] Installing ffmpeg..."
+    sudo apt-get install -y ffmpeg 2>&1 | grep -E "Setting up|already installed|error" || true
+fi
+
 echo "[start_server] Ensuring all models are present on nvme..."
 bash scripts/ensure_models.sh
 

@@ -38,15 +38,15 @@ _injection_detections = Counter(
 # SEMAPHORE
 _semaphore = asyncio.Semaphore(5)
 
-# BUDGET RATIOS
-_MEM_RATIO   = 0.20
-_CTX_RATIO   = 0.55
-_QUERY_MAX   = 0.15
+# BUDGET RATIOS — applied to the REMAINING capacity after fixed components
+# (system prompt + query block + format block) are reserved.
+_MEM_RATIO   = 0.25  # memory share of the variable budget
+_CTX_RATIO   = 0.75  # context share of the variable budget
 
 # Appended to every prompt's output-format block. Keeps inline [n] citations
 # (needed to map the answer to source chips) but forbids the trailing
 # "Sources:/Confidence:/Reasoning:/Answer:" labels and reasoning dumps the model
-# otherwise leaks — so the user-facing prose stays clean (Phase B/F goal).
+# otherwise leaks — so the user-facing prose stays clean.
 _ANSWER_ONLY_RULE = (
     "\nIMPORTANT: Reply with ONLY the answer as plain prose, using inline [n] "
     "citations like [1] or [2,3]. Do NOT add a 'Sources:', 'Confidence:', "
@@ -62,6 +62,24 @@ _STRUCTURED_KEYWORDS = [
     "which page", "toc", "section", "cell",
     "extract", "list all", "enumerate",
 ]
+
+# FINANCIAL KEYWORDS — for detecting numeric-comparison / accounting queries.
+# Two or more of these in the query triggers the financial-specific system prompt
+# that includes arithmetic direction rules and a CoT worked example.
+_FINANCIAL_EXACT_PHRASES = frozenset({
+    "net sales", "net revenue", "gross revenue", "total revenue",
+    "cash flow", "year over year", "year-over-year", "yoy", "fiscal year",
+    "operating income", "cost of goods", "gross margin", "operating margin",
+    "balance sheet", "earnings per share", "annual report", "compared to",
+})
+_FINANCIAL_TOKENS = frozenset({
+    "revenue", "profit", "loss", "income", "earnings", "margin", "eps",
+    "ebitda", "ebit", "dividend", "shares", "fiscal", "quarter", "fy",
+    "compare", "versus", "vs", "increased", "decreased", "change", "growth",
+    "decline", "assets", "liabilities", "equity", "capex", "depreciation",
+    "amortization", "goodwill", "impairment", "acquisition", "segment",
+    "guidance", "outlook", "forecast",
+})
 
 # MULTIMODAL KEYWORDS
 _IMAGE_KEYWORDS = {"image", "photo", "diagram", "figure", "chart", "screenshot", "picture", "visual"}
@@ -135,6 +153,20 @@ def _is_temporal(query: str) -> bool:
     return bool(tokens & _TEMPORAL_KEYWORDS)
 
 
+def _is_financial(query: str) -> bool:
+    """True when the query is about financial metrics or numeric comparisons.
+
+    Activates on any exact phrase match OR on 2+ financial token matches.
+    The higher token bar prevents single-word false positives like "change" or
+    "income" from triggering the financial prompt on unrelated queries.
+    """
+    q_lower = query.lower()
+    if any(phrase in q_lower for phrase in _FINANCIAL_EXACT_PHRASES):
+        return True
+    tokens = set(q_lower.split())
+    return len(tokens & _FINANCIAL_TOKENS) >= 2
+
+
 def _detect_modality(query: str, context: str) -> Optional[str]:
     combined = (query + " " + context).lower()
     tokens   = set(combined.split())
@@ -148,10 +180,15 @@ def _detect_modality(query: str, context: str) -> Optional[str]:
 
 
 # DETECT QUERY TYPE FOR PROMPT ROUTING
+# Financial is checked before comparative/temporal because many financial
+# queries ("compare FY2023 to FY2022") would otherwise fall into "comparative"
+# and miss the arithmetic direction rules.
 
 def _detect_query_type(query: str) -> str:
     if _is_code(query):
         return "code"
+    if _is_financial(query):
+        return "financial"
     if _is_comparative(query):
         return "comparative"
     if _is_temporal(query):
@@ -162,6 +199,23 @@ def _detect_query_type(query: str) -> str:
     if modality:
         return modality
     return "general"
+
+
+# QUERY-ADAPTIVE GENERATION TEMPERATURE
+# Factual / extraction tasks need low temperature (deterministic, accurate).
+# Generative / analytical tasks benefit from slightly higher temperature.
+
+_FACTUAL_QUERY_TYPES    = frozenset({"financial", "structured", "code", "temporal"})
+_GENERATIVE_QUERY_TYPES = frozenset({"comparative", "image", "audio", "video"})
+
+
+def get_generation_temperature(query_type: str) -> float:
+    """Return the optimal sampling temperature for the given query type."""
+    if query_type in _FACTUAL_QUERY_TYPES:
+        return settings.LLM_TEMPERATURE_FACTUAL
+    if query_type in _GENERATIVE_QUERY_TYPES:
+        return settings.LLM_TEMPERATURE_GENERATIVE
+    return settings.LLM_TEMPERATURE
 
 
 # DEDUP OVERLAP — REMOVE MEMORY CONTENT ALREADY IN CONTEXT
@@ -242,6 +296,32 @@ def _system_prompt(
             " claim as suspect\n"
             "- No hallucination. If the answer is not in the context,"
             " reply exactly: \"I could not find this in the provided sources.\"\n\n"
+        )
+
+    if query_type == "financial":
+        return (
+            "You are a precise financial analyst.\n"
+            "Answer ONLY using the provided CONTEXT chunks. Each chunk is\n"
+            "labelled [1], [2], [3]... — cite every fact with its number.\n"
+            "\n"
+            "ARITHMETIC RULE FOR COMPARISONS (mandatory):\n"
+            "  Step 1 — State both values: 'Period A: $X, Period B: $Y'\n"
+            "  Step 2 — Compute: delta = Period A value − Period B value\n"
+            "  Step 3 — Direction: delta > 0 → INCREASED; delta < 0 → DECREASED\n"
+            "  Step 4 — State: '...increased/decreased by $|delta|'\n"
+            "  NEVER reverse the sign. NEVER state 'increased' for a negative delta.\n"
+            "\n"
+            "WORKED EXAMPLE (do not include in answer):\n"
+            "  FY2023 net sales $383,285M, FY2022 $394,328M.\n"
+            "  delta = 383,285 − 394,328 = −11,043  →  DECREASED by $11,043M.\n"
+            "\n"
+            "ADDITIONAL RULES:\n"
+            "1. Report figures EXACTLY as written in the source. Do not convert units.\n"
+            "2. Multi-period tables: report ONLY the figure for the specific period asked.\n"
+            "3. Do NOT expand abbreviations unless the context defines them.\n"
+            "4. If sources disagree, surface the disagreement: 'Sources differ:'\n"
+            "5. If the answer is not in the context, reply exactly:\n"
+            "   \"I could not find this in the provided sources.\"\n\n"
         )
 
     if query_type == "comparative":
@@ -380,6 +460,12 @@ def _output_format(
     if is_code:
         return "OUTPUT:\n```\n<code here>\n```"
 
+    if query_type == "financial":
+        return (
+            "Write your answer below. Begin with a direct sentence stating "
+            "the figures. Show your period comparison and direction explicitly.\n"
+        )
+
     if query_type == "comparative":
         return (
             "Write your answer below. Start with a complete sentence.\n"
@@ -457,27 +543,34 @@ class PromptBuilder:
                 # DEDUP OVERLAP BETWEEN MEMORY AND CONTEXT
                 memory, context = _deduplicate_context(memory, context)
 
-                # BUDGET ALLOCATION
-                mem_budget   = int(self.max_chars * _MEM_RATIO)
-                ctx_budget   = int(self.max_chars * _CTX_RATIO)
-                query_budget = int(self.max_chars * _QUERY_MAX)
-
-                memory  = _truncate(memory,  mem_budget)
-                context = _truncate(context, ctx_budget)
-                query   = _truncate(query,   query_budget)
-
-                # SYSTEM PROMPT
+                # SYSTEM PROMPT + FORMAT BLOCK (fixed overhead — computed first)
                 system     = _system_prompt(query_type, structured, is_code, modality)
                 output_fmt = _output_format(structured, is_code, query_type) + _ANSWER_ONLY_RULE
 
-                # BLOCK ASSEMBLY
-                mem_block   = f"MEMORY:\n{memory}\n\n"   if memory   else ""
-                ctx_block   = f"CONTEXT:\n{context}\n\n" if context  else ""
-                query_block = (
-                    f"TASK:\n{query}\n\n"
+                # QUERY BLOCK — hard cap at 15% of total budget
+                query_budget = int(self.max_chars * 0.15)
+                query_text   = _truncate(query, query_budget)
+                query_block  = (
+                    f"TASK:\n{query_text}\n\n"
                     if structured
-                    else f"QUERY:\n{query}\n\n"
+                    else f"QUERY:\n{query_text}\n\n"
                 )
+
+                # RESIDUAL BUDGET — everything left after fixed components.
+                # This prevents the system prompt (which varies 400–900 chars)
+                # from silently compressing the context window.
+                fixed_len = len(system) + len(output_fmt) + len(query_block) + 100
+                remaining = max(0, self.max_chars - fixed_len)
+
+                mem_budget = int(remaining * _MEM_RATIO)
+                ctx_budget = remaining - mem_budget
+
+                memory  = _truncate(memory,  mem_budget)
+                context = _truncate(context, ctx_budget)
+
+                # BLOCK ASSEMBLY
+                mem_block = f"MEMORY:\n{memory}\n\n" if memory else ""
+                ctx_block = f"CONTEXT:\n{context}\n\n" if context else ""
 
                 prompt = (
                     system
@@ -589,5 +682,3 @@ class PromptBuilder:
                 None,
                 lambda: self.build_prompt(query, context, memory, session_id, scrub_pii),
             )
-
-

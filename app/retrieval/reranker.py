@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from tenacity import (
@@ -47,6 +48,21 @@ _DEFAULT_MODALITY_WEIGHTS: Dict[str, float] = {
     "video": 0.75,
 }
 
+# Common English stopwords excluded from exact-match boost calculation.
+_STOPWORDS: Set[str] = frozenset({  # type: ignore[assignment]
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "dare", "ought",
+    "in", "on", "at", "for", "of", "to", "and", "or", "not", "but",
+    "with", "from", "by", "this", "that", "these", "those", "its", "it",
+    "we", "they", "you", "he", "she", "their", "our", "your", "my",
+    "what", "which", "who", "how", "when", "where", "why",
+})
+
+# Absolute relevance floor on sigmoid-calibrated CE score.
+# sigmoid(logit) < 0.04 ≈ logit < −3.18 → document is almost certainly off-topic.
+_FLOOR_SIGMOID: float = 0.04
+
 
 class Reranker:
 
@@ -61,6 +77,8 @@ class Reranker:
         self.w_fusion = settings.RERANK_FUSION_WEIGHT
         self.position_weight = settings.RERANK_POSITION_WEIGHT
         self.score_threshold = settings.RERANK_SCORE_THRESHOLD
+        self.batch_size = getattr(settings, "RERANK_BATCH_SIZE", 8)
+        self.source_max_chunks = getattr(settings, "RERANK_SOURCE_MAX_CHUNKS", 3)
         self.mmr_enabled = settings.MMR_ENABLED
         self.mmr_lambda = settings.MMR_LAMBDA
 
@@ -74,6 +92,8 @@ class Reranker:
             max_inputs=self.max_inputs,
             w_model=self.w_model,
             w_fusion=self.w_fusion,
+            batch_size=self.batch_size,
+            source_max_chunks=self.source_max_chunks,
             mmr_enabled=self.mmr_enabled,
         )
 
@@ -101,37 +121,56 @@ class Reranker:
         return " ".join(str(text or "").split())
 
     # CONTEXT BUILDER FOR CROSS-ENCODER
-    # The cross-encoder needs a CLEAN (query, text) pair. Prepending verbose
-    # metadata headers like "[SRC:b62c7383...] [TEXT] [TEXT_CHUNK]" pollutes
-    # the input — every chunk gets the same 30+ noise tokens, which dilutes
-    # the query-document similarity signal and makes the ranker indecisive.
-    # We only add headers when they carry SEMANTIC information that helps
-    # disambiguate retrieval (modality for non-text, page for paginated docs,
-    # speaker for audio, timestamp for video). We never add the source/UUID
-    # or generic content_type — those are identical across the corpus.
+    # The cross-encoder receives (query, context) pairs. Adding semantic
+    # locator headers — page number, section heading, sheet name, timestamp,
+    # speaker — lets the cross-encoder score chunks from the right section or
+    # time window higher than identical-text chunks from an irrelevant one.
+    # We omit: source UUID, generic content_type (uniform across the corpus,
+    # add noise without signal), and "[TEXT]" for text modality (the default).
 
     def _context(self, doc: Dict) -> str:
-        meta = doc.get("metadata", {}) or {}
-
-        modality = meta.get("modality", "text")
-        page = meta.get("page")
-        # timestamp_start and speaker are stored as top-level Qdrant payload fields
-        speaker  = meta.get("speaker")
-        ts_start = meta.get("timestamp_start")
+        meta        = doc.get("metadata", {}) or {}
+        modality    = meta.get("modality", "text")
+        source_type = meta.get("source_type", "")
+        page        = meta.get("page")
+        speaker     = meta.get("speaker")
+        ts_start    = meta.get("timestamp_start")
+        section     = meta.get("section_title") or ""
+        sheet       = meta.get("sheet_name") or ""
+        sub_idx     = meta.get("sub_chunk_index")
+        sub_total   = meta.get("total_sub_chunks")
+        row_start   = meta.get("row_start")
+        row_end     = meta.get("row_end")
 
         header_parts: List[str] = []
 
-        # Only signal modality when it's NOT plain text — text is the default,
-        # adding "[TEXT]" to every chunk is pure noise.
+        # Modality prefix — only for non-text (text is the default)
         if modality and modality != "text":
             header_parts.append(f"[{modality.upper()}]")
 
+        # PDF page + sub-chunk position
         if page:
-            header_parts.append(f"[PG:{page}]")
+            if sub_idx is not None and sub_total and int(sub_total) > 1:
+                header_parts.append(f"[PG:{page} {int(sub_idx)+1}/{int(sub_total)}]")
+            else:
+                header_parts.append(f"[PG:{page}]")
 
+        # DOCX section heading — critical for heading-based queries
+        if source_type == "word" and section:
+            header_parts.append(f"[{section[:50]}]")
+
+        # XLSX sheet + row range — grounds the chunk in the spreadsheet
+        if source_type == "excel":
+            if sheet and row_start is not None and row_end is not None:
+                header_parts.append(f"[{sheet[:30]} R{row_start}-{row_end}]")
+            elif sheet:
+                header_parts.append(f"[{sheet[:30]}]")
+
+        # Audio/video speaker
         if speaker:
             header_parts.append(f"[SPK:{speaker}]")
 
+        # Audio/video timestamp
         if ts_start is not None:
             header_parts.append(f"[T:{round(float(ts_start), 1)}s]")
 
@@ -173,7 +212,7 @@ class Reranker:
             isinstance(score, (int, float))
             and not math.isnan(score)
             and not math.isinf(score)
-            and score > 0.0
+            and score >= 0.0
         )
 
     # DEDUP
@@ -194,7 +233,73 @@ class Reranker:
 
         return final
 
+    # COSINE SIMILARITY BETWEEN EMBEDDING VECTORS
+
+    def _cosine_sim(self, emb_a: Any, emb_b: Any) -> float:
+        try:
+            a = np.asarray(emb_a, dtype=float)
+            b = np.asarray(emb_b, dtype=float)
+            denom = np.linalg.norm(a) * np.linalg.norm(b)
+            if denom < 1e-9:
+                return 0.0
+            return float(np.clip(np.dot(a, b) / denom, 0.0, 1.0))
+        except Exception:
+            return 0.0
+
+    # INTER-DOCUMENT SIMILARITY
+    # Uses embedding cosine when both docs carry stored embeddings (standard for
+    # Qdrant results); falls back to Jaccard bag-of-words when they do not.
+
+    def _similarity(self, doc_a: Dict, doc_b: Dict) -> float:
+        emb_a = doc_a.get("embedding")
+        emb_b = doc_b.get("embedding")
+        if emb_a is not None and emb_b is not None:
+            return self._cosine_sim(emb_a, emb_b)
+        return self._text_overlap(doc_a.get("text", ""), doc_b.get("text", ""))
+
+    # TEXT OVERLAP FOR MMR (JACCARD FALLBACK)
+
+    def _text_overlap(self, left: str, right: str) -> float:
+        a = set(left.lower().split())
+        b = set(right.lower().split())
+        if not a or not b:
+            return 0.0
+        return len(a & b) / len(a | b)
+
+    # EXACT-MATCH BOOST
+    # Rewards chunks where non-trivial query terms appear verbatim. Compensates
+    # for CE misses on exact financial figures, model numbers, or proper names.
+    # Max bonus is 5% of the final score.
+
+    def _exact_match_boost(self, query: str, text: str) -> float:
+        q_lower = query.lower()
+        t_lower = text.lower()
+        terms = [
+            t for t in re.findall(r"\b\w{4,}\b", q_lower)
+            if t not in _STOPWORDS
+        ]
+        if not terms:
+            return 0.0
+        hits = sum(1 for t in terms if re.search(r"\b" + re.escape(t) + r"\b", t_lower))
+        return 0.05 * (hits / len(terms))
+
+    # SOURCE DIVERSITY CAP
+    # Hard-limit chunks per doc_id so one document cannot dominate top_k.
+
+    def _apply_source_cap(self, results: List[Dict]) -> List[Dict]:
+        count: Dict[str, int] = {}
+        output: List[Dict] = []
+        for r in results:
+            doc_id = (r.get("metadata") or {}).get("doc_id", "")
+            n = count.get(doc_id, 0)
+            if n >= self.source_max_chunks:
+                continue
+            count[doc_id] = n + 1
+            output.append(r)
+        return output
+
     # MMR DIVERSITY
+    # Uses embedding cosine similarity (not Jaccard) when embeddings are present.
 
     def _mmr(self, results: List[Dict], top_k: int) -> List[Dict]:
         if not self.mmr_enabled or not results:
@@ -210,13 +315,7 @@ class Reranker:
             for i, candidate in enumerate(candidates):
                 relevance = candidate.get("score", 0.0)
                 max_sim = max(
-                    (
-                        self._text_overlap(
-                            candidate.get("text", ""),
-                            s.get("text", ""),
-                        )
-                        for s in selected
-                    ),
+                    (self._similarity(candidate, s) for s in selected),
                     default=0.0,
                 )
                 mmr_score = (
@@ -231,16 +330,7 @@ class Reranker:
 
         return selected
 
-    # TEXT OVERLAP FOR MMR
-
-    def _text_overlap(self, left: str, right: str) -> float:
-        a = set(left.lower().split())
-        b = set(right.lower().split())
-        if not a or not b:
-            return 0.0
-        return len(a & b) / len(a | b)
-
-    # CROSS-ENCODER INFERENCE WITH RETRY + CIRCUIT BREAKER
+    # SINGLE-BATCH CROSS-ENCODER INFERENCE WITH RETRY + CIRCUIT BREAKER
 
     @retry(
         stop=stop_after_attempt(settings.RETRY_MAX_ATTEMPTS),
@@ -251,9 +341,9 @@ class Reranker:
         retry=retry_if_exception_type((RuntimeError, TimeoutError)),
         reraise=True,
     )
-    def _cross_encoder_predict(self, pairs: List[Tuple[str, str]]) -> np.ndarray:
+    def _predict_batch(self, batch: List[Tuple[str, str]]) -> np.ndarray:
         def _do():
-            return self.model.predict(pairs)
+            return self.model.predict(batch)
 
         if _PYBREAKER_AVAILABLE:
             raw = _reranker_breaker(_do)()
@@ -261,6 +351,19 @@ class Reranker:
             raw = _do()
 
         return np.asarray(raw).reshape(-1)
+
+    # BATCHED CROSS-ENCODER INFERENCE
+    # Splits pairs into self.batch_size chunks to prevent OOM on large inputs.
+    # Each sub-batch retries independently via _predict_batch.
+
+    def _cross_encoder_predict(self, pairs: List[Tuple[str, str]]) -> np.ndarray:
+        if not pairs:
+            return np.array([], dtype=float)
+
+        batch_size = max(1, self.batch_size)
+        batches = [pairs[i:i + batch_size] for i in range(0, len(pairs), batch_size)]
+        parts = [self._predict_batch(b) for b in batches]
+        return np.concatenate(parts) if parts else np.array([], dtype=float)
 
     # BUILD PAIRS
 
@@ -290,37 +393,43 @@ class Reranker:
         self,
         valid_docs: List[Dict],
         model_scores: np.ndarray,
-        raw_scores: Optional[np.ndarray] = None,
+        raw_sigmoid: np.ndarray,
+        query: str = "",
     ) -> List[Dict]:
         results: List[Dict] = []
 
         for i, (d, s) in enumerate(zip(valid_docs, model_scores)):
             meta = dict(d.get("metadata", {}) or {})
-            structure = meta.get("structure", {}) or {}
 
             modality = meta.get("modality", "text")
-            chunk_idx = structure.get("chunk_index", 0)
+            # sub_chunk_index is a top-level Qdrant/BM25 payload field (not
+            # nested in a "structure" sub-dict). chunk_id is a fallback.
+            chunk_idx    = meta.get("sub_chunk_index") or meta.get("chunk_id") or 0
             fusion_score = min(float(d.get("score", 0.0)), 1.0)
 
-            # POSITION BOOST: EARLIER CHUNKS GET SLIGHT BOOST
+            # POSITION BOOST: earlier sub-chunks get slight boost
             position_boost = 1.0 + (
                 self.position_weight / (int(chunk_idx) + 2)
             )
 
             modality_boost = self.modality_weights.get(modality, 1.0)
 
+            # EXACT MATCH BOOST: reward verbatim key-term hits (up to +5%)
+            em_boost = 1.0 + self._exact_match_boost(query, d.get("text", ""))
+
             final_score = (
                 self.w_model * float(s) +
                 self.w_fusion * fusion_score
-            ) * position_boost * modality_boost
+            ) * position_boost * modality_boost * em_boost
 
             if not self._valid_score(final_score):
                 continue
 
-            # Stamp raw sigmoid so downstream source-coherence filter has
-            # an absolute relevance signal (not just relative min-max rank).
-            if raw_scores is not None and i < len(raw_scores):
-                meta["_reranker_raw"] = round(float(raw_scores[i]), 5)
+            # Stamp sigmoid-calibrated CE score for absolute relevance filtering.
+            # This is sigmoid(raw_logit) ∈ [0, 1] — a true relevance probability,
+            # not a relative rank. Used by the floor filter and confidence flag.
+            if i < len(raw_sigmoid):
+                meta["_reranker_raw"] = round(float(raw_sigmoid[i]), 5)
 
             results.append({
                 "text": d["text"][:settings.RAG_DOC_MAX_CHARS],
@@ -331,11 +440,14 @@ class Reranker:
 
         return results
 
-    # HALLUCINATION GUARD — FLAG DOCS WITH LOW MODEL SCORE
+    # HALLUCINATION GUARD — FLAG DOCS WHERE CE SIGMOID SCORE IS LOW
 
     def _flag_low_confidence(self, results: List[Dict]) -> List[Dict]:
         for r in results:
-            if r.get("score", 1.0) < self.score_threshold * 2:
+            # Use the calibrated sigmoid score, not the composite final score,
+            # so the flag is an absolute relevance signal independent of boosts.
+            raw = (r.get("metadata") or {}).get("_reranker_raw", 1.0)
+            if raw < self.score_threshold:
                 r.setdefault("metadata", {})["low_confidence"] = True
         return results
 
@@ -358,7 +470,7 @@ class Reranker:
         input_count = len(documents)
 
         try:
-            # PRE-FILTER
+            # PRE-FILTER: remove empty/too-short docs
             docs = self._filter(documents)[:self.max_inputs]
             filtered_count = len(docs)
 
@@ -370,6 +482,11 @@ class Reranker:
                 )
                 return self._fallback(documents, top_k)
 
+            # DEDUP BEFORE INFERENCE: remove exact duplicates so cross-encoder
+            # slots are not wasted on identical chunks retrieved by both BM25
+            # and the dense vector retriever.
+            docs = self._dedup(docs, self.max_inputs)
+
             # BUILD PAIRS
             pairs, valid_docs = self._build_pairs(query, docs)
 
@@ -380,7 +497,7 @@ class Reranker:
                 )
                 return self._fallback(documents, top_k)
 
-            # CROSS-ENCODER INFERENCE
+            # CROSS-ENCODER INFERENCE (batched, with retry + circuit breaker)
             t_model = time.time()
 
             try:
@@ -403,42 +520,49 @@ class Reranker:
                     session_id=session_id,
                 )
 
-            # Save pre-normalization sigmoid scores for absolute relevance filtering
-            raw_scores_orig = raw_scores.copy()
+            # SIGMOID CALIBRATION
+            # bge-reranker-v2-m3 (and most sentence-transformers CrossEncoders)
+            # return raw logits in ≈[−10, 10]. Apply sigmoid to get calibrated
+            # relevance probabilities in [0, 1] for absolute threshold comparisons.
+            clipped = np.clip(raw_scores, -20.0, 20.0)
+            raw_sigmoid = 1.0 / (1.0 + np.exp(-clipped))
 
-            # NORMALIZE MODEL SCORES
+            # NORMALIZE LOGITS → [0, 1] for the model-score term in the formula
             norm_scores = self._normalize_scores(raw_scores)
 
             # ALIGN LENGTHS
-            min_len = min(len(norm_scores), len(valid_docs))
-            norm_scores     = norm_scores[:min_len]
-            raw_scores_orig = raw_scores_orig[:min_len]
-            valid_docs      = valid_docs[:min_len]
+            min_len = min(len(norm_scores), len(valid_docs), len(raw_sigmoid))
+            norm_scores  = norm_scores[:min_len]
+            raw_sigmoid  = raw_sigmoid[:min_len]
+            valid_docs   = valid_docs[:min_len]
 
-            # COMPUTE FINAL SCORES (raw_scores_orig stamped as _reranker_raw)
-            results = self._compute_final_scores(valid_docs, norm_scores, raw_scores_orig)
+            # COMPUTE FINAL SCORES (raw_sigmoid stamped as _reranker_raw)
+            results = self._compute_final_scores(
+                valid_docs, norm_scores, raw_sigmoid, query
+            )
 
             # SORT BY FINAL SCORE
             results.sort(key=lambda x: x["score"], reverse=True)
 
-            # ABSOLUTE RELEVANCE FLOOR — drop chunks the reranker is very confident
-            # are off-topic (sigmoid < 0.04), but always keep index 0 so the caller
-            # never receives an empty list when at least one doc was retrieved.
-            _FLOOR = 0.04
+            # ABSOLUTE RELEVANCE FLOOR
+            # Drop chunks where sigmoid < 0.04 (≈ logit < −3.18), meaning the
+            # CE is highly confident they are off-topic. Always keep index 0 so
+            # the caller never receives an empty list.
             if len(results) > 1:
                 results = [results[0]] + [
                     r for r in results[1:]
-                    if (r.get("metadata") or {}).get("_reranker_raw", 1.0) >= _FLOOR
+                    if (r.get("metadata") or {}).get("_reranker_raw", 1.0)
+                    >= _FLOOR_SIGMOID
                 ]
 
-            # FLAG LOW CONFIDENCE
+            # FLAG LOW CONFIDENCE (uses calibrated sigmoid score)
             results = self._flag_low_confidence(results)
 
-            # MMR DIVERSITY
-            results = self._mmr(results, top_k * 2)
+            # SOURCE DIVERSITY CAP: limit chunks per doc_id before MMR
+            results = self._apply_source_cap(results)
 
-            # DEDUP
-            final = self._dedup(results, top_k)
+            # MMR DIVERSITY (embedding cosine similarity when available)
+            results = self._mmr(results, top_k)
 
             total_latency = round(time.time() - start, 3)
 
@@ -447,13 +571,13 @@ class Reranker:
                 input_count=input_count,
                 filtered_count=filtered_count,
                 pairs_built=len(pairs),
-                output=len(final),
+                output=len(results),
                 model_latency=model_latency,
                 total_latency=total_latency,
                 session_id=session_id,
             )
 
-            return final
+            return results
 
         except Exception as exc:
             logger.error(
@@ -492,10 +616,11 @@ class Reranker:
             "model_loaded": self.model is not None,
             "top_k": self.top_k,
             "max_inputs": self.max_inputs,
+            "batch_size": self.batch_size,
+            "source_max_chunks": self.source_max_chunks,
             "circuit_breaker": _PYBREAKER_AVAILABLE,
             "mmr_enabled": self.mmr_enabled,
             "w_model": self.w_model,
             "w_fusion": self.w_fusion,
             "score_threshold": self.score_threshold,
         }
-

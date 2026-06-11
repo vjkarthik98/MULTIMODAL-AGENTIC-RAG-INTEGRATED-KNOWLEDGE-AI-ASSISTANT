@@ -61,17 +61,23 @@ def _valid_score(score: float) -> bool:
     return not (math.isnan(score) or math.isinf(score))
 
 
-# SCORE NORMALIZATION
+# SCORE NORMALIZATION — min-max to [0,1]
+# Pure /max collapses the score range when all scores have a high floor
+# (e.g. BM25Plus always gives non-zero scores). Min-max preserves the spread.
 
 def _normalize_scores(results: List[Dict]) -> List[Dict]:
     if not results:
         return results
-    scores    = [r.get("score", 0.0) for r in results]
-    max_score = max(scores) if scores else 0.0
-    if max_score <= 0.0:
-        return results
-    for r in results:
-        r["score"] = r.get("score", 0.0) / max_score
+    scores = [r.get("score", 0.0) for r in results]
+    min_s  = min(scores)
+    max_s  = max(scores)
+    spread = max_s - min_s
+    if spread > 1e-8:
+        for r in results:
+            r["score"] = (r.get("score", 0.0) - min_s) / spread
+    elif max_s > 1e-8:
+        for r in results:
+            r["score"] = 1.0
     return results
 
 

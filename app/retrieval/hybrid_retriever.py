@@ -6,7 +6,7 @@ import math
 import re
 import time
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -95,19 +95,44 @@ _VISION_KEYWORDS = {
     "image", "photo", "diagram", "visual", "figure",
     "chart", "graph", "screenshot", "picture", "illustration",
     "drawing", "render", "thumbnail", "frame", "scene",
+    "show", "display", "depict",
 }
 
 # AUDIO QUERY KEYWORDS
 _AUDIO_KEYWORDS = {
     "audio", "sound", "speech", "transcript", "recording",
-    "voice", "podcast", "spoken", "listen", "hear",
+    "voice", "podcast", "spoken", "listen", "hear", "said",
+    "speaker", "interview", "call", "conversation",
 }
 
 # VIDEO QUERY KEYWORDS
 _VIDEO_KEYWORDS = {
     "video", "clip", "footage", "movie", "film",
     "watch", "stream", "playback", "scene", "frame",
+    "timestamp", "segment",
 }
+
+# KEYWORD QUERY SIGNALS — patterns that strongly suggest the BM25 lane
+# should be weighted higher (exact entity names, tickers, financial codes).
+_ENTITY_RE = re.compile(
+    r'\b[A-Z]{2,6}\b'                  # tickers / acronyms: AAPL, EPS, EBITDA
+    r'|\b\d{4}\b'                       # year: 2023
+    r'|\b[Qq][1-4]\b'                   # quarter: Q3
+    r'|\$[\d,.]+[BMKTbmkt]?'           # dollar amount: $6.13B
+    r'|\b\d[\d,.]*\s*[BMKTbmkt]\b'    # scale amount: 45B, 3.2M
+    r'|\b\d+\.\d+\b'                   # decimal: 6.13
+)
+
+# SEMANTIC QUERY SIGNALS — conversational, explanation-seeking
+_SEMANTIC_STARTERS = {
+    "explain", "describe", "summarize", "summarise", "elaborate",
+    "why", "how", "what is", "what are", "what was", "tell me",
+    "give me", "provide", "overview", "discuss",
+}
+
+# Multi-source boost — applied when the SAME document appears in both BM25
+# and dense-vector results, indicating cross-paradigm agreement on relevance.
+_MULTI_SOURCE_BOOST: float = 1.15
 
 # RRF CONSTANT
 _RRF_K: int = settings.HYBRID_RRF_K
@@ -214,17 +239,58 @@ class HybridRetriever:
 
         return vec
 
-    # SCORE NORMALIZATION
+    # QUERY TYPE DETECTION — drives adaptive weight selection
+    # Returns one of: "keyword", "semantic", "mixed"
+
+    def _query_type(self, q: str) -> str:
+        tokens   = q.split()
+        n_tokens = len(tokens)
+        lower    = q.lower()
+
+        # Entity-heavy: tickers, dollar amounts, years, quarter codes
+        has_entity = bool(_ENTITY_RE.search(q))
+
+        # Very short query or dominated by entities → prefer BM25 (exact match)
+        if n_tokens <= 3 or (has_entity and n_tokens <= 6):
+            return "keyword"
+
+        # Conversational / explanation-seeking → prefer dense (semantic)
+        for starter in _SEMANTIC_STARTERS:
+            if lower.startswith(starter + " ") or lower == starter:
+                return "semantic"
+        if n_tokens >= 10:
+            return "semantic"
+
+        return "mixed"
+
+    # ADAPTIVE WEIGHTS — BM25/dense ratio shifted by query type
+    # Keyword queries reward exact match (BM25↑); semantic queries reward
+    # paraphrase / context understanding (dense↑).
+
+    def _adaptive_weights(self, query_type: str) -> Tuple[float, float, float]:
+        if query_type == "keyword":
+            return (0.50, 0.50, self.w_vision)
+        if query_type == "semantic":
+            return (0.25, 0.75, self.w_vision)
+        # mixed: use configured defaults
+        return (self.w_bm25, self.w_vector, self.w_vision)
+
+    # SCORE NORMALIZATION — min-max to [0,1]; avoids the floor-collapse
+    # that happens with pure /max when all BM25Plus scores are non-zero.
 
     def _normalize_scores(self, results: List[Dict]) -> List[Dict]:
         if not results:
             return results
         scores = [r.get("score", 0.0) for r in results]
-        max_s = max(scores) if scores else 0.0
-        if max_s <= 1e-8:
-            return results
-        for r in results:
-            r["score"] = r.get("score", 0.0) / max_s
+        min_s  = min(scores)
+        max_s  = max(scores)
+        spread = max_s - min_s
+        if spread > 1e-8:
+            for r in results:
+                r["score"] = (r.get("score", 0.0) - min_s) / spread
+        elif max_s > 1e-8:
+            for r in results:
+                r["score"] = 1.0
         return results
 
     # RRF FUSION — score = sum(1 / (K + rank_i)) per spec
@@ -540,14 +606,27 @@ class HybridRetriever:
             elif is_video:
                 modality_filter = "video"
 
+            # ADAPTIVE WEIGHTS — BM25/dense ratio adjusted for query type
+            q_type = self._query_type(query)
+            w_bm25, w_vector, w_vision = self._adaptive_weights(q_type)
+
             # RRF FUSION — vision always contributes; boosted when query is vision-cued.
             combined: Dict[str, Dict] = {}
-            self._fuse(combined, bm25_res, self.w_bm25, "bm25")
-            self._fuse(combined, vec_res, self.w_vector, "dense")
+            self._fuse(combined, bm25_res, w_bm25, "bm25")
+            self._fuse(combined, vec_res, w_vector, "dense")
 
             if vis_res:
-                vis_weight = self.w_vision * (1.5 if is_vision else 1.0)
+                vis_weight = w_vision * (1.5 if is_vision else 1.0)
                 self._fuse(combined, vis_res, vis_weight, "vision")
+
+            # CROSS-RETRIEVER AGREEMENT BOOST — documents that appear in both
+            # BM25 and dense search are corroborated by two independent retrieval
+            # paradigms, indicating higher confidence. Boost their fused score
+            # by _MULTI_SOURCE_BOOST (15%) to surface them above single-path hits.
+            for item in combined.values():
+                sources: Set[str] = item.get("sources", set())
+                if "bm25" in sources and "dense" in sources:
+                    item["score"] = item["score"] * _MULTI_SOURCE_BOOST
 
             if not combined:
                 return []
@@ -644,6 +723,8 @@ class HybridRetriever:
                 is_vision=is_vision,
                 is_audio=is_audio,
                 is_video=is_video,
+                query_type=q_type,
+                weights={"bm25": round(w_bm25, 2), "dense": round(w_vector, 2)},
                 mmr_enabled=self.mmr_enabled,
                 latency=latency,
                 session_id=session_id,

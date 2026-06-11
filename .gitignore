@@ -150,7 +150,6 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-.env.bak-perf 
 
 # Spyder project settings
 .spyderproject
@@ -165,6 +164,9 @@ venv.bak/
 # Models
 models/
 *.gguf
+
+# Bundled binaries (use system ffmpeg etc., never commit executables)
+*.exe
 
 # mypy
 .mypy_cache/
@@ -221,7 +223,32 @@ __marimo__/
 
 .claude/
 CLAUDE.md
-rag_env 
+rag_env
 .hf_cache
-.torch_cache.env.bak-perf
+.torch_cache
 .env*
+!.env.example
+.vscode
+
+# Logs (runtime artifacts — backend logs/ dir and JS tooling debug logs)
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Frontend (merged from frontend/.gitignore; *.log, dist/ and .vscode
+# were already covered above)
+node_modules/
+dist-ssr/
+*.local
+
+# Editor directories and files
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
