@@ -474,35 +474,33 @@ def _build_cot_prompt(
     cite_keys: Optional[List[str]] = None,
 ) -> str:
 
+    # NOTE: these instructions must NOT ask the model to show its reasoning or
+    # emit "Step 1/Step 2..." text. The small GGUF model echoes such scaffolding
+    # verbatim into the answer (visible as reasoning-leak preambles). Reason
+    # silently; output only the final answer.
     type_instructions = {
         "factual": (
-            "Answer factually using ONLY the provided knowledge.\n"
-            "State your reasoning step by step before giving the final answer."
+            "Answer factually using ONLY the provided knowledge. "
+            "Give only the final answer — do not show your reasoning."
         ),
         "comparative": (
-            "Compare the entities mentioned using ONLY the provided knowledge.\n"
-            "Step 1: Describe entity A.\n"
-            "Step 2: Describe entity B.\n"
-            "Step 3: State key differences and similarities.\n"
-            "Step 4: Give a final comparative answer."
+            "Compare the entities using ONLY the provided knowledge. "
+            "Describe each, then state the key differences in a single final "
+            "answer. Do not show your reasoning or number your steps."
         ),
         "temporal": (
-            "Answer with temporal context using ONLY the provided knowledge.\n"
-            "Step 1: Identify relevant time periods.\n"
-            "Step 2: Order events chronologically.\n"
-            "Step 3: Give a final temporal answer."
+            "Answer with temporal context using ONLY the provided knowledge. "
+            "Keep events in chronological order in one final answer. "
+            "Do not show your reasoning or number your steps."
         ),
         "aggregation": (
-            "Aggregate information using ONLY the provided knowledge.\n"
-            "Step 1: List all relevant items found.\n"
-            "Step 2: Count or summarize as needed.\n"
-            "Step 3: Give a final aggregated answer."
+            "Aggregate information using ONLY the provided knowledge. "
+            "Include every relevant item in one final answer. "
+            "Do not show your reasoning or number your steps."
         ),
         "multihop": (
-            "Reason across multiple hops using ONLY the provided knowledge.\n"
-            "Step 1: Answer sub-question 1.\n"
-            "Step 2: Use that answer for sub-question 2.\n"
-            "Step 3: Synthesize into a final answer."
+            "Reason silently across the provided knowledge and give one "
+            "synthesized final answer. Do not show your reasoning or steps."
         ),
     }
 

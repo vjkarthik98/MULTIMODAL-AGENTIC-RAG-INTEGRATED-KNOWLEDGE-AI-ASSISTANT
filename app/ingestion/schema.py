@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import time
-import re 
+import re
 import unicodedata
+from dataclasses import dataclass, field as dc_field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID, uuid4
 from copy import deepcopy
 
@@ -15,6 +16,31 @@ from app.core.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# RAW EXTRACT — lightweight intermediary between ingestor and chunker (Phase 1)
+# Each ingestor returns List[RawExtract]; chunkers consume them and produce List[IngestedDocument].
+
+@dataclass
+class RawExtract:
+    text: str                                # raw extracted text (prose, row, transcript, caption)
+    extract_type: str                        # "prose"|"table_row"|"heading"|"footnote"|"header_footer"
+                                             # "image_raw"|"image_region"|"scanned_page"
+                                             # "audio_raw"|"video_raw"|"segment"|"frame"
+                                             # "named_range"|"unit_header"|"chart_image"
+                                             # "comment"|"speaker_turn"
+    page: Optional[int] = None              # PDF page number (1-indexed)
+    sheet: Optional[str] = None             # Excel sheet name
+    bbox: Optional[Tuple[float, float, float, float]] = None   # (x0, y0, x1, y1)
+    timestamp_start: Optional[float] = None # audio/video seconds
+    timestamp_end: Optional[float] = None
+    font_size: Optional[float] = None       # PDF font size in points
+    is_bold: bool = False                   # PDF/DOCX bold flag
+    speaker_label: Optional[str] = None     # audio/video speaker ID
+    raw_source_ref: str = ""                # e.g. "page_12", "sheet_Income_Statement", "0:28:30"
+    raw_bytes: Optional[bytes] = None       # image/audio/video binary content
+    style_name: Optional[str] = None        # DOCX paragraph style name
+    extra: Dict[str, Any] = dc_field(default_factory=dict)  # modality-specific overflow
 
 
 # MODALITY ENUM
@@ -49,14 +75,17 @@ class EmbeddingSpace(str, Enum):
 
 # ALLOWED MODALITIES AND SUBTYPES
 
-ALLOWED_MODALITIES = {"text", "table", "image", "audio", "video"}
+ALLOWED_MODALITIES = {"text", "table", "image", "audio", "video", "pdf", "word", "excel"}
 
 ALLOWED_SUBTYPES: Dict[str, set] = {
-    "text":  {"paragraph", "heading", "page", "chunk", "unknown"},
+    "text":  {"paragraph", "heading", "page", "chunk", "speaker_turn", "section", "list", "unknown"},
     "table": {"structured", "unknown"},
     "image": {"caption", "ocr", "image_frame", "unknown"},
     "audio": {"speech", "unknown"},
     "video": {"speech", "frame", "ocr", "unknown"},
+    "pdf":   {"paragraph", "table", "footnote", "figure_caption", "list", "heading", "ocr", "unknown"},
+    "word":  {"paragraph", "table", "list", "heading", "annotation", "definition", "unknown"},
+    "excel": {"table_row_group", "assumptions", "named_ranges", "chart_caption", "unknown"},
 }
 
 ALLOWED_EMBEDDING_SPACES = {"text", "vision"}
@@ -67,6 +96,9 @@ MODALITY_QUALITY_FLOORS: Dict[str, float] = {
     "image": 0.0,
     "audio": 0.0,
     "video": 0.0,
+    "pdf":   0.1,
+    "word":  0.1,
+    "excel": 0.1,
 }
 
 

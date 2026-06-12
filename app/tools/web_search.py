@@ -64,6 +64,66 @@ def _normalize(query: str) -> str:
     return " ".join(query.strip().split())[:settings.MAX_PROMPT_CHARS]
 
 
+# WEB ANSWER CLEANER — the small GGUF model sometimes narrates raw search
+# results ("and here's what we found. | 1:30 AM PST | Dec 28, 2025 | by Sarah
+# Perez | TechCrunch In this article, it is stated that ..."). This deterministic
+# pass removes narration intros, pipe-separated article metadata, and self-
+# referential "the article mentions" phrasing, leaving a clean factual answer.
+import re as _re
+
+_WEB_NARRATION_RE = _re.compile(
+    r"^\s*(?:and\s+)?here'?s what (?:we|i) (?:found|have)\b[.:]?\s*"
+    r"|^\s*the question\s*:?\s*[^?]*\?\s*"                # echoed "The question: ...?"
+    r"|\bin this article,?\s*it is stated that\s*"
+    r"|\bthe article (?:also )?(?:mentions|states|notes) that\s*"
+    r"|\bit (?:also )?mentions that\s*"
+    r"|\baccording to the (?:article|results?),?\s*"
+    r"|\b(?:however,?\s*)?it'?s important to note that\s*"  # hedge filler
+    r"|\bbased on the (?:available data|web search results?),?\s*",
+    _re.IGNORECASE,
+)
+# "The answer, according to X, is" → "according to X, it is"  (keeps attribution).
+_WEB_ANSWER_REPHRASE_RE = _re.compile(
+    r'\bthe answer,?\s*according to\s+([^,]+?),?\s*is\b', _re.IGNORECASE,
+)
+_WEB_ANSWER_PLAIN_RE = _re.compile(r'\bthe answer\s+is\b', _re.IGNORECASE)
+# Runs of short pipe-separated metadata cells: "| 1:30 AM PST | Dec 28, 2025 |
+# by Sarah Perez |". Requires a trailing pipe so the run stops at the last
+# delimiter and never consumes the prose sentence that follows it.
+_WEB_PIPE_META_RE = _re.compile(r'(?:\s*\|\s*[^|\n]{1,32}){2,}\s*\|')
+# A lone publication/byline token left dangling right before the real sentence
+# (e.g. "TechCrunch In this article ...") once the pipe run is removed.
+_WEB_ORPHAN_LEAD_RE = _re.compile(
+    r'^\s*(?:by\s+)?[A-Z][A-Za-z0-9.\']{1,20}(?:\s+[A-Z][A-Za-z0-9.\']{1,20}){0,2}\s+'
+    r'(?=(?:in this article|it is stated|tim |the |a |an |according))',
+    _re.IGNORECASE,
+)
+
+
+def _clean_web_answer(text: str) -> str:
+    if not text:
+        return text
+    out = text.strip()
+    out = _WEB_PIPE_META_RE.sub(" ", out)             # strip article metadata runs
+    out = _WEB_ANSWER_REPHRASE_RE.sub(r'according to \1, it is', out)
+    out = _WEB_ANSWER_PLAIN_RE.sub('it is', out)
+    # Remove narration intros / self-references anywhere they appear (may chain).
+    for _ in range(5):
+        new = _WEB_NARRATION_RE.sub("", out)
+        new = _WEB_ORPHAN_LEAD_RE.sub("", new)
+        if new == out:
+            break
+        out = new
+    out = _re.sub(r'^\s*answers?\s*:\s*', '', out, flags=_re.IGNORECASE)  # "Answer:" prefix
+    out = _re.sub(r'^\s*[:\-—|]\s*', '', out)          # leading stray punctuation
+    out = _re.sub(r'\s{2,}', ' ', out).strip()
+    # Re-capitalise the first letter of each sentence (clause removals can leave
+    # a lowercase word exposed after a period).
+    out = _re.sub(r'(^|[.!?]\s+)([a-z])',
+                  lambda m: m.group(1) + m.group(2).upper(), out)
+    return out
+
+
 # SHA-256 HASH FOR DEDUP
 
 def _hash(text: str) -> str:
@@ -355,12 +415,18 @@ class WebSearchTool:
         context = "\n\n".join(docs)[:self.max_context_chars]
 
         instruction = (
-            "Answer ONLY using the provided web search results.\n"
+            "You are a web research assistant. Using ONLY the web search results "
+            "below, write a direct, factual answer to the QUERY in 1-3 clean "
+            "sentences.\n"
             "Rules:\n"
-            "- Use ONLY the provided results\n"
-            "- If insufficient → say 'I don't know based on available data'\n"
-            "- Be concise and factual\n"
-            "- No hallucination\n\n"
+            "- State the facts directly. Do NOT narrate (no 'here's what we "
+            "found', 'in this article it is stated', 'the article also "
+            "mentions').\n"
+            "- Do NOT include article timestamps, dates, author bylines, or "
+            "publication names as inline or pipe-separated metadata.\n"
+            "- Do NOT restate these rules or add labels.\n"
+            "- If the results do not answer the query, say 'I don't know based "
+            "on available data'.\n\n"
         )
 
         body    = f"WEB RESULTS:\n{context}\n\nQUERY:\n{query}\n\nAnswer:"
@@ -388,7 +454,7 @@ class WebSearchTool:
                 )
                 return "Summary took too long to generate."
 
-            return (response or "").strip() or "No answer generated."
+            return _clean_web_answer(response or "") or "No answer generated."
 
         except Exception as exc:
             logger.warning(

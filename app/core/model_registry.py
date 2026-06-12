@@ -28,10 +28,15 @@ logger = get_logger(__name__)
 # ingest path. Query path is separate.
 MODALITY_MODELS: Dict[str, Tuple[str, ...]] = {
     "text":     ("text_embedder",),
+    "txt":      ("text_embedder",),
     "document": ("text_embedder",),
-    "image":    ("text_embedder", "blip", "siglip", "image_embedder", "siglip_text_embedder"),
-    "audio":    ("text_embedder", "whisper"),
-    "video":    ("text_embedder", "blip", "siglip", "image_embedder", "siglip_text_embedder", "whisper"),
+    "pdf":      ("text_embedder", "trocr"),
+    "word":     ("text_embedder",),
+    "excel":    ("text_embedder",),
+    "image":    ("text_embedder", "blip2", "trocr", "siglip", "image_embedder", "siglip_text_embedder"),
+    "audio":    ("text_embedder", "whisper", "diarizer", "ner"),
+    "video":    ("text_embedder", "llava", "trocr", "siglip", "image_embedder",
+                 "siglip_text_embedder", "whisper", "diarizer", "ner"),
 }
 
 # Models the query path needs (no upload).
@@ -159,11 +164,12 @@ class ModelRegistry:
         return loaded
 
     def _is_enabled(self, name: str) -> bool:
-        # SigLIP/BLIP/image_embedder gated by ENABLE_VISION.
-        # Whisper gated by ENABLE_AUDIO.
-        if name in ("siglip", "blip", "image_embedder", "siglip_text_embedder"):
+        # Vision models gated by ENABLE_VISION.
+        # Audio/diarizer/ner gated by ENABLE_AUDIO.
+        if name in ("siglip", "blip", "blip2", "llava", "trocr",
+                    "image_embedder", "siglip_text_embedder"):
             return bool(settings.ENABLE_VISION)
-        if name == "whisper":
+        if name in ("whisper", "diarizer", "ner"):
             return bool(settings.ENABLE_AUDIO)
         return True
 
@@ -176,6 +182,11 @@ class ModelRegistry:
             "text_embedder":        model_loader.get_embedder,
             "siglip":               model_loader.get_siglip,
             "blip":                 model_loader.get_blip,
+            "blip2":                model_loader.get_blip2,
+            "llava":                model_loader.get_llava,
+            "trocr":                model_loader.get_trocr,
+            "diarizer":             model_loader.get_diarizer,
+            "ner":                  model_loader.get_ner,
             "image_embedder":       model_loader.get_image_embedder,
             "siglip_text_embedder": model_loader.get_siglip_text_embedder,
             "whisper":              model_loader.get_whisper,
@@ -188,7 +199,8 @@ class ModelRegistry:
 
     def snapshot(self) -> Dict[str, bool]:
         all_known = (
-            "llm", "text_embedder", "siglip", "blip",
+            "llm", "text_embedder", "siglip", "blip", "blip2", "llava",
+            "trocr", "diarizer", "ner",
             "image_embedder", "siglip_text_embedder", "whisper", "reranker",
         )
         return {n: n in self._loaded for n in all_known}

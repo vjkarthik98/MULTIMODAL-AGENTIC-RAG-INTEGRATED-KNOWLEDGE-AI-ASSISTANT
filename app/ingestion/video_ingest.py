@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -27,6 +28,30 @@ from app.ingestion.schema import (
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
+try:
+    import imagehash
+    from PIL import Image as _PILImage
+    _IMAGEHASH_AVAILABLE = True
+except ImportError:
+    _IMAGEHASH_AVAILABLE = False
+
+try:
+    from scenedetect import SceneManager, open_video
+    from scenedetect.detectors import AdaptiveDetector
+    _SCENEDETECT_AVAILABLE = True
+except ImportError:
+    _SCENEDETECT_AVAILABLE = False
+
+try:
+    import numpy as _np
+except ImportError:
+    _np = None
 
 
 def _sanitize(text: str, surface: str, **log_kw) -> str:
@@ -85,6 +110,45 @@ def _get_easyocr_reader() -> Any:
         import easyocr
         _easyocr_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
     return _easyocr_reader
+
+
+# SLIDE NUMBER PATTERN — matches "Slide 4", "4 / 12", "4 of 12"
+_SLIDE_NUM_RE = re.compile(
+    r'\bslide\s+(\d+)\b|\b(\d+)\s*/\s*\d+\b|\b(\d+)\s+of\s+\d+\b',
+    re.IGNORECASE,
+)
+
+# FINANCE-NUMERIC CAPTION KEYWORDS
+_FIN_NUMERIC_KW = {"$", "%", "billion", "million", "revenue", "earnings", "ebitda", "eps"}
+
+
+def _extract_slide_number(caption: str) -> Optional[int]:
+    m = _SLIDE_NUM_RE.search(caption)
+    if m:
+        for g in m.groups():
+            if g is not None:
+                return int(g)
+    return None
+
+
+def _is_numeric_frame(caption: str) -> bool:
+    lower = caption.lower()
+    return any(kw in lower for kw in _FIN_NUMERIC_KW)
+
+
+def _build_combined_text(speech_text: str, nearby_frames: List[Dict[str, Any]]) -> str:
+    parts = [speech_text]
+    for frame in nearby_frames:
+        ts  = frame.get("timestamp", 0.0)
+        cap = frame.get("caption", "")
+        ocr = frame.get("ocr_text", "")
+        if cap:
+            parts.append(f"\n\n[VISUAL AT {ts:.1f}s]: {cap}")
+            if _is_numeric_frame(cap):
+                parts.append(f"\n[VISUAL AT {ts:.1f}s]: {cap}")
+        if ocr:
+            parts.append(f"\n[ON-SCREEN TEXT]: {ocr}")
+    return "".join(parts)
 
 
 # SHA-256 FILE HASH
@@ -919,7 +983,6 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         frames: List[Dict] = []
         if has_video:
             try:
-                from app.ingestion.video_frames import extract_frames
                 frames = extract_frames(
                     file_path,
                     settings.VIDEO_FRAME_INTERVAL_SEC,
@@ -955,6 +1018,8 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         is_hdr = probe.get("is_hdr", False)
         seen_frame_hashes: set = set()
         total_frames_count = len(frames)
+        # Collect frame captions + OCR for combined_text linking to speech segments
+        frame_manifest: List[Dict[str, Any]] = []
 
         if total_frames_count > settings.MAX_VIDEO_FRAMES:
             logger.warning(
@@ -1000,13 +1065,8 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 )
                 shutil.copy2(processing_path, persistent_frame_path)
 
-                # FRAME CAPTION
-                try:
-                    from app.ingestion.frame_captioner import generate_caption
-                    caption = generate_caption(persistent_frame_path, session_id) or f"Scene at {ts:.1f}s"
-                except Exception as e:
-                    caption = f"Scene at {ts:.1f}s"
-                    logger.debug(event="frame_caption_failed", error=str(e))
+                # FRAME CAPTION — ML inference is the chunker's job; store path for VideoChunker
+                caption = f"Scene at {ts:.1f}s"
 
                 # FRAME OCR
                 ocr_text = _extract_frame_ocr(persistent_frame_path)
@@ -1014,10 +1074,21 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     ocr_text = _sanitize(ocr_text, surface="video_ocr_ingest", file=source_name)
                     ocr_text = _scrub_pii(ocr_text, surface="video_ocr_ingest")
 
-                blur    = _blur_score(persistent_frame_path)
-                linked  = _link_speech(ts, speech_segments)
-                align   = _alignment_score(caption, linked)
-                conflict_flag = bool(linked and ocr_text and align < 0.1)
+                blur         = _blur_score(persistent_frame_path)
+                linked       = _link_speech(ts, speech_segments)
+                align        = _alignment_score(caption, linked)
+                # Raised threshold to 0.2 — finance audio/slides often phrase the same
+                # number differently (e.g. "four billion" vs "$4B"), so 0.1 caused too many
+                # false conflict flags on financial presentation videos.
+                conflict_flag = bool(linked and ocr_text and align < 0.2)
+                slide_number  = _extract_slide_number(caption)
+
+                # Collect for combined_text linking in the post-frame pass
+                frame_manifest.append({
+                    "timestamp": ts,
+                    "caption":   caption,
+                    "ocr_text":  ocr_text or "",
+                })
 
                 documents.append(
                     IngestedDocument(
@@ -1036,6 +1107,7 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                             frame_index=frame["frame_index"],
                             total_frames=total_frames_count,
                             caption=caption,
+                            slide_number=slide_number,
                             asset_path=persistent_frame_path,
                             linked_speech=linked,
                             conflict_flag=conflict_flag,
@@ -1088,6 +1160,21 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     session_id=session_id,
                 )
                 universal_meta.add_error(f"FRAME_PROCESS_ERROR at ts={frame.get('timestamp_start')}: {e}")
+
+        # POST-FRAME PASS — attach combined_text to speech docs
+        if frame_manifest:
+            _WINDOW = 5.0
+            for doc in documents:
+                if not doc.structure or doc.structure.get("chunk_type") != "audio_segment":
+                    continue
+                st = doc.structure.get("start_time", 0.0)
+                et = doc.structure.get("end_time", st)
+                nearby = [
+                    f for f in frame_manifest
+                    if f["timestamp"] >= st - _WINDOW and f["timestamp"] <= et + _WINDOW
+                ]
+                if nearby:
+                    doc.structure["combined_text"] = _build_combined_text(doc.text, nearby)
 
         # GUARD — ATTEMPT RECOVERY ON EMPTY RESULT — SECTION 4.1
         if not documents:
@@ -1158,5 +1245,634 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 os.remove(recovered_path)
             except Exception:
                 pass
+
+
+# ─── Phase 1: VideoIngestor ────────────────────────────────────────────────────
+
+from app.ingestion.base_ingest import BaseIngestor
+from app.ingestion.schema import RawExtract
+
+
+class VideoIngestor(BaseIngestor):
+    """Validates video files → List[RawExtract].
+
+    Phase 1 responsibility: container validation, DRM check, duration/resolution metadata.
+    Does NOT extract frames, caption, or transcribe — the chunker (Phase 2) drives ffmpeg.
+    """
+
+    async def extract(
+        self,
+        path: Path,
+        metadata: UniversalMetadata,
+    ) -> List[RawExtract]:
+        suffix = path.suffix.lower()
+
+        if suffix not in SUPPORTED_VIDEO_FORMATS:
+            raise UnsupportedMimeError(f"UNSUPPORTED_VIDEO_FORMAT: {suffix}")
+
+        file_size = path.stat().st_size
+        if file_size == 0:
+            raise EmptyFileError(str(path))
+        if file_size > settings.MAX_FILE_SIZE_VIDEO:
+            raise FileTooLargeError(f"VIDEO_TOO_LARGE: {file_size}")
+
+        # Probe duration + resolution via ffprobe
+        duration_s: Optional[float] = None
+        width: Optional[int] = None
+        height: Optional[int] = None
+        has_audio = False
+        has_video = False
+
+        try:
+            probe_result = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-print_format", "json",
+                    "-show_streams", "-show_format",
+                    str(path),
+                ],
+                capture_output=True, text=True, timeout=30,
+            )
+            import json as _json
+            probe_data = _json.loads(probe_result.stdout or "{}")
+            fmt = probe_data.get("format", {})
+            duration_s = float(fmt.get("duration", 0) or 0) or None
+            for stream in probe_data.get("streams", []):
+                codec_type = stream.get("codec_type", "")
+                if codec_type == "video" and not has_video:
+                    has_video = True
+                    width = stream.get("width")
+                    height = stream.get("height")
+                elif codec_type == "audio":
+                    has_audio = True
+        except Exception as exc:
+            logger.warning("video_probe_failed", file=path.name, error=str(exc))
+
+        if duration_s is not None and duration_s > settings.MAX_VIDEO_DURATION_SEC:
+            raise ValueError(f"VIDEO_TOO_LONG: {duration_s:.0f}s")
+
+        # DRM / container sanity via magic bytes
+        try:
+            with open(path, "rb") as f:
+                header = f.read(16)
+            # Simple check: known bad magic → raise
+            if header.startswith(b"\x00\x00\x00\x00"):
+                raise ValueError(f"VIDEO_CONTAINER_INVALID: zero-byte header in {path.name}")
+        except (ValueError, FileTooLargeError, EmptyFileError):
+            raise
+        except Exception:
+            pass
+
+        return [
+            RawExtract(
+                text="",
+                extract_type="video_raw",
+                timestamp_start=0.0,
+                timestamp_end=duration_s,
+                raw_source_ref=f"video:{path.name}",
+                raw_bytes=None,  # file path stored in metadata; chunker reads directly
+                extra={
+                    "file_path": str(path.resolve()),
+                    "file_size": file_size,
+                    "duration_seconds": duration_s,
+                    "width": width,
+                    "height": height,
+                    "has_audio": has_audio,
+                    "has_video": has_video,
+                    "format": suffix.lstrip("."),
+                },
+            )
+        ]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FRAME EXTRACTION  (moved from video_chunker.py — ingestion concern)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _vf_make_metrics():
+    if not settings.PROMETHEUS_ENABLED:
+        class _Noop:
+            def observe(self, *a, **kw): pass
+            def inc(self, *a, **kw): pass
+            def set(self, *a, **kw): pass
+            def labels(self, **kw): return self
+        noop = _Noop()
+        return noop, noop, noop, noop
+    try:
+        from prometheus_client import Counter, Gauge, Histogram
+        frames_extracted = Counter("video_frames_extracted_total", "Total frames extracted", ["session_id"])
+        frames_skipped   = Counter("video_frames_skipped_total",   "Total frames skipped",  ["reason"])
+        extract_duration = Histogram("video_frame_extraction_duration_seconds", "Frame extraction time")
+        active           = Gauge("video_frame_active_extractions", "In-progress extractions")
+        return frames_extracted, frames_skipped, extract_duration, active
+    except Exception:
+        class _Noop:
+            def observe(self, *a, **kw): pass
+            def inc(self, *a, **kw): pass
+            def set(self, *a, **kw): pass
+            def labels(self, **kw): return self
+        noop = _Noop()
+        return noop, noop, noop, noop
+
+
+_VF_FRAMES_EXTRACTED, _VF_FRAMES_SKIPPED, _VF_EXTRACT_DURATION, _VF_ACTIVE = _vf_make_metrics()
+
+_VF_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+
+def _vf_get_semaphore() -> asyncio.Semaphore:
+    global _VF_SEMAPHORE
+    if _VF_SEMAPHORE is None:
+        _VF_SEMAPHORE = asyncio.Semaphore(settings.ASYNC_SEMAPHORE_WORKERS)
+    return _VF_SEMAPHORE
+
+
+class FrameMetadata:
+    """Structured metadata for a single extracted video frame."""
+
+    def __init__(
+        self,
+        frame_index: int,
+        timestamp_start: float,
+        timestamp_end: float,
+        path: str,
+        frame_width: int,
+        frame_height: int,
+        fps: float,
+        video_duration: float,
+        video_id: str,
+        blur_score: float,
+        brightness_mean: float,
+        phash: Optional[str],
+        is_scene_boundary: bool,
+        scene_index: int,
+        shot_type: str,
+        hdr_detected: bool,
+        interlaced: bool,
+        aspect_ratio: float,
+        extraction_method: str,
+        session_id: str,
+    ) -> None:
+        self.frame_index       = frame_index
+        self.timestamp_start   = timestamp_start
+        self.timestamp_end     = timestamp_end
+        self.path              = path
+        self.frame_width       = frame_width
+        self.frame_height      = frame_height
+        self.fps               = fps
+        self.video_duration    = video_duration
+        self.video_id          = video_id
+        self.blur_score        = blur_score
+        self.brightness_mean   = brightness_mean
+        self.phash             = phash
+        self.is_scene_boundary = is_scene_boundary
+        self.scene_index       = scene_index
+        self.shot_type         = shot_type
+        self.hdr_detected      = hdr_detected
+        self.interlaced        = interlaced
+        self.aspect_ratio      = aspect_ratio
+        self.extraction_method = extraction_method
+        self.session_id        = session_id
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {k: getattr(self, k) for k in (
+            "frame_index", "timestamp_start", "timestamp_end", "path",
+            "frame_width", "frame_height", "fps", "video_duration", "video_id",
+            "blur_score", "brightness_mean", "phash", "is_scene_boundary",
+            "scene_index", "shot_type", "hdr_detected", "interlaced",
+            "aspect_ratio", "extraction_method", "session_id",
+        )}
+
+
+class VideoFrameError(Exception):
+    """Base exception for video frame extraction errors."""
+
+class VideoOpenError(VideoFrameError):
+    """Raised when the video file cannot be opened."""
+
+class VideoTooShortError(VideoFrameError):
+    """Raised when the video is too short for scene detection."""
+
+class NoFramesExtractedError(VideoFrameError):
+    """Raised when zero frames survive all filters."""
+
+class DiskSpaceError(VideoFrameError):
+    """Raised when insufficient disk space is available."""
+
+
+def _probe_video(video_path: str) -> Dict[str, Any]:
+    import json
+    ffprobe = shutil.which("ffprobe") or "ffprobe"
+    cmd = [
+        ffprobe, "-v", "error", "-select_streams", "v:0",
+        "-show_entries",
+        "stream=width,height,r_frame_rate,avg_frame_rate,codec_name,color_transfer,color_space,field_order",
+        "-show_entries", "format=duration,size",
+        "-of", "json", video_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        data   = json.loads(result.stdout or "{}")
+        stream = (data.get("streams") or [{}])[0]
+        fmt    = data.get("format", {})
+        fps    = 0.0
+        try:
+            num, den = stream.get("r_frame_rate", "0/1").split("/")
+            fps = float(num) / max(float(den), 1e-6)
+        except Exception:
+            pass
+        hdr         = stream.get("color_transfer", "") in ("smpte2084", "arib-std-b67", "smpte428")
+        field_order = stream.get("field_order", "progressive")
+        interlaced  = field_order not in ("progressive", "unknown", "")
+        duration    = 0.0
+        try:
+            duration = float(fmt.get("duration", 0))
+        except Exception:
+            pass
+        return {
+            "width": int(stream.get("width", 0)), "height": int(stream.get("height", 0)),
+            "fps": fps, "codec": stream.get("codec_name", "unknown"),
+            "hdr": hdr, "interlaced": interlaced, "duration": duration,
+        }
+    except Exception as exc:
+        logger.warning(event="ffprobe_failed", error=str(exc))
+        return {"width": 0, "height": 0, "fps": 0.0, "codec": "unknown",
+                "hdr": False, "interlaced": False, "duration": 0.0}
+
+
+def _detect_scenes_pyscenedetect(video_path: str, threshold: float) -> List[float]:
+    if not _SCENEDETECT_AVAILABLE:
+        return []
+    try:
+        video = open_video(video_path)
+        sm = SceneManager()
+        sm.add_detector(AdaptiveDetector(adaptive_threshold=threshold))
+        sm.detect_scenes(video)
+        return [round(sc[0].get_seconds(), 3) for sc in sm.get_scene_list()]
+    except Exception as exc:
+        logger.warning(event="pyscenedetect_failed", error=str(exc))
+        return []
+
+
+def _cv_blur_score(frame: Any) -> float:
+    """Compute blur score from a cv2 numpy frame."""
+    try:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return float(min(cv2.Laplacian(gray, cv2.CV_64F).var() / 100.0, 1.0))
+    except Exception:
+        return 1.0
+
+
+def _cv_brightness_mean(frame: Any) -> float:
+    try:
+        import numpy as np
+        return float(np.mean(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)))
+    except Exception:
+        return 128.0
+
+
+def _cv_is_too_dark(brightness: float) -> bool:
+    return brightness < settings.FRAME_DARKNESS_THRESHOLD
+
+
+def _cv_compute_phash(image_path: str) -> Optional[str]:
+    if not _IMAGEHASH_AVAILABLE:
+        return None
+    try:
+        with _PILImage.open(image_path) as img:
+            return str(imagehash.phash(img))
+    except Exception:
+        return None
+
+
+def _cv_phash_distance(h1: str, h2: str) -> int:
+    try:
+        return imagehash.hex_to_hash(h1) - imagehash.hex_to_hash(h2)
+    except Exception:
+        return 999
+
+
+def _cv_tonemap_frame(frame: Any) -> Any:
+    try:
+        tonemap = cv2.createTonemapReinhard(gamma=2.2)
+        f32     = frame.astype(_np.float32) / frame.max()
+        return (tonemap.process(f32) * 255).clip(0, 255).astype(_np.uint8)
+    except Exception:
+        return frame
+
+
+def _cv_deinterlace_frame(frame: Any) -> Any:
+    try:
+        return cv2.resize(frame, None, fx=1.0, fy=1.0, interpolation=cv2.INTER_LINEAR)
+    except Exception:
+        return frame
+
+
+def _cv_classify_shot(frame: Any) -> str:
+    try:
+        density = float(_np.mean(cv2.Canny(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), 50, 150) > 0))
+        if density < 0.03: return "wide"
+        if density < 0.10: return "medium"
+        return "close"
+    except Exception:
+        return "unknown"
+
+
+def _cv_resize_if_needed(frame: Any, max_dim: int) -> Any:
+    h, w = frame.shape[:2]
+    if max(h, w) <= max_dim:
+        return frame
+    scale = max_dim / max(h, w)
+    return cv2.resize(frame, (max(int(w * scale), 1), max(int(h * scale), 1)), interpolation=cv2.INTER_AREA)
+
+
+def _cv_save_frame(frame: Any, path: str, quality: int = 95) -> bool:
+    try:
+        return bool(cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, quality]))
+    except Exception:
+        return False
+
+
+def _extract_frames_opencv(
+    video_path: str, interval_sec: int, max_frames: int,
+    max_dim: int, max_duration: float, scene_thresh: float,
+    session_id: str, temp_dir: Path, probe: Dict[str, Any],
+) -> List[FrameMetadata]:
+    fps = max(probe.get("fps") or 25.0, 0.01)
+    duration     = probe.get("duration") or 0.0
+    hdr_detected = probe.get("hdr", False)
+    interlaced   = probe.get("interlaced", False)
+    video_id     = os.path.basename(video_path)
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise VideoOpenError(f"VIDEO_OPEN_FAILED: {video_path}")
+
+    import numpy as np
+    interval_frames = max(int(fps * interval_sec), 1)
+    frames: List[FrameMetadata] = []
+    seen_phashes: List[str] = []
+    prev_frame = None
+    frame_idx = 0
+    saved = 0
+    scene_idx = 0
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            timestamp = frame_idx / fps
+            if timestamp > max_duration:
+                break
+
+            take_frame = (frame_idx % interval_frames == 0)
+            diff = 0.0
+            if prev_frame is not None:
+                _p = cv2.resize(prev_frame, (frame.shape[1], frame.shape[0])) if prev_frame.shape != frame.shape else prev_frame
+                diff = float(np.mean(cv2.absdiff(_p, frame)))
+                if diff > scene_thresh:
+                    take_frame = True
+                    scene_idx += 1
+
+            if take_frame and saved < max_frames:
+                h, w = frame.shape[:2]
+                if h < 32 or w < 32:
+                    _VF_FRAMES_SKIPPED.labels(reason="too_small").inc()
+                else:
+                    brightness = _cv_brightness_mean(frame)
+                    if _cv_is_too_dark(brightness):
+                        _VF_FRAMES_SKIPPED.labels(reason="too_dark").inc()
+                    else:
+                        if hdr_detected and settings.VIDEO_HDR_TONEMAPPING:
+                            frame = _cv_tonemap_frame(frame)
+                        if interlaced and settings.VIDEO_DEINTERLACE:
+                            frame = _cv_deinterlace_frame(frame)
+                        frame = _cv_resize_if_needed(frame, max_dim)
+                        h_r, w_r = frame.shape[:2]
+                        frame_path = str(temp_dir / f"frame_{saved:06d}.jpg")
+                        if _cv_save_frame(frame, frame_path):
+                            ph = _cv_compute_phash(frame_path)
+                            if ph and seen_phashes and min(_cv_phash_distance(ph, e) for e in seen_phashes) < 8:
+                                Path(frame_path).unlink(missing_ok=True)
+                                _VF_FRAMES_SKIPPED.labels(reason="duplicate_phash").inc()
+                            else:
+                                if ph:
+                                    seen_phashes.append(ph)
+                                ts_end = min(round((frame_idx + interval_frames) / fps, 3), duration)
+                                frames.append(FrameMetadata(
+                                    frame_index=saved, timestamp_start=round(timestamp, 3),
+                                    timestamp_end=ts_end, path=frame_path,
+                                    frame_width=w_r, frame_height=h_r, fps=fps,
+                                    video_duration=round(duration, 3), video_id=video_id,
+                                    blur_score=round(_cv_blur_score(frame), 4),
+                                    brightness_mean=round(brightness, 2), phash=ph,
+                                    is_scene_boundary=(prev_frame is not None and diff > scene_thresh),
+                                    scene_index=scene_idx, shot_type=_cv_classify_shot(frame),
+                                    hdr_detected=hdr_detected, interlaced=interlaced,
+                                    aspect_ratio=round(w_r / max(h_r, 1), 3),
+                                    extraction_method="opencv_fallback", session_id=session_id,
+                                ))
+                                saved += 1
+            prev_frame = frame
+            frame_idx += 1
+    finally:
+        cap.release()
+    return frames
+
+
+def _extract_frames_pyscenedetect(
+    video_path: str, max_frames: int, max_dim: int,
+    max_duration: float, threshold: float, session_id: str,
+    temp_dir: Path, probe: Dict[str, Any],
+) -> List[FrameMetadata]:
+    if not _SCENEDETECT_AVAILABLE or cv2 is None:
+        raise VideoFrameError("PYSCENEDETECT_OR_CV2_UNAVAILABLE")
+
+    fps          = max(probe.get("fps") or 25.0, 0.01)
+    duration     = probe.get("duration") or 0.0
+    hdr_detected = probe.get("hdr", False)
+    interlaced   = probe.get("interlaced", False)
+    video_id     = os.path.basename(video_path)
+
+    scene_timestamps = _detect_scenes_pyscenedetect(video_path, threshold)
+    all_timestamps   = sorted(set([0.0] + [ts for ts in scene_timestamps if ts > 0.1]))
+    if len(all_timestamps) > max_frames:
+        step = max(len(all_timestamps) // max_frames, 1)
+        all_timestamps = all_timestamps[::step][:max_frames]
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise VideoOpenError(f"VIDEO_OPEN_FAILED: {video_path}")
+
+    frames: List[FrameMetadata] = []
+    seen_phashes: List[str] = []
+    saved = 0
+
+    try:
+        for scene_idx, ts in enumerate(all_timestamps):
+            if saved >= max_frames or ts > max_duration:
+                break
+            cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000.0)
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            h, w = frame.shape[:2]
+            if h < 32 or w < 32:
+                _VF_FRAMES_SKIPPED.labels(reason="too_small").inc()
+                continue
+            brightness = _cv_brightness_mean(frame)
+            if _cv_is_too_dark(brightness):
+                _VF_FRAMES_SKIPPED.labels(reason="too_dark").inc()
+                continue
+            if hdr_detected and settings.VIDEO_HDR_TONEMAPPING:
+                frame = _cv_tonemap_frame(frame)
+            if interlaced and settings.VIDEO_DEINTERLACE:
+                frame = _cv_deinterlace_frame(frame)
+            frame = _cv_resize_if_needed(frame, max_dim)
+            h_r, w_r = frame.shape[:2]
+            next_ts   = all_timestamps[scene_idx + 1] if scene_idx + 1 < len(all_timestamps) else duration
+            frame_path = str(temp_dir / f"frame_{saved:06d}.jpg")
+            if not _cv_save_frame(frame, frame_path):
+                continue
+            ph = _cv_compute_phash(frame_path)
+            if ph and seen_phashes and min(_cv_phash_distance(ph, e) for e in seen_phashes) < 8:
+                Path(frame_path).unlink(missing_ok=True)
+                _VF_FRAMES_SKIPPED.labels(reason="duplicate_phash").inc()
+                continue
+            if ph:
+                seen_phashes.append(ph)
+            frames.append(FrameMetadata(
+                frame_index=saved, timestamp_start=round(ts, 3),
+                timestamp_end=round(min(next_ts, duration), 3), path=frame_path,
+                frame_width=w_r, frame_height=h_r, fps=fps,
+                video_duration=round(duration, 3), video_id=video_id,
+                blur_score=round(_cv_blur_score(frame), 4),
+                brightness_mean=round(brightness, 2), phash=ph,
+                is_scene_boundary=(scene_idx > 0), scene_index=scene_idx,
+                shot_type=_cv_classify_shot(frame), hdr_detected=hdr_detected,
+                interlaced=interlaced, aspect_ratio=round(w_r / max(h_r, 1), 3),
+                extraction_method="pyscenedetect", session_id=session_id,
+            ))
+            saved += 1
+    finally:
+        cap.release()
+    return frames
+
+
+def extract_frames(
+    video_path: str,
+    interval_sec: int,
+    session_id: str,
+    skip_scene_detection: bool = False,
+) -> List[Dict[str, Any]]:
+    """Extract keyframes from a video file.
+
+    Primary path: PySceneDetect (semantic scene boundaries).
+    Fallback path: OpenCV interval + scene-diff.
+
+    Returns List[FrameMetadata.to_dict()].
+    """
+    import math as _math
+    if cv2 is None:
+        raise ImportError("OPENCV_REQUIRED_FOR_FRAME_EXTRACTION")
+    if not session_id:
+        raise ValueError("SESSION_ID_REQUIRED")
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"VIDEO_NOT_FOUND: {video_path}")
+    if Path(video_path).stat().st_size == 0:
+        raise ValueError("EMPTY_VIDEO_FILE")
+
+    interval_sec = max(1, min(int(interval_sec), 300))
+    max_frames   = settings.MAX_VIDEO_FRAMES
+    max_dim      = settings.MAX_IMAGE_DIM
+    max_duration = float(settings.MAX_VIDEO_DURATION_SEC)
+    scene_thresh = settings.SCENE_CHANGE_THRESHOLD
+
+    start = time.time()
+    _VF_ACTIVE.set(1)
+
+    try:
+        from app.utils.paths import resolved_temp_frames_dir
+        temp_root = resolved_temp_frames_dir()
+    except Exception:
+        import tempfile as _tf
+        temp_root = Path(_tf.gettempdir())
+
+    _check_disk_space(str(temp_root))
+    import tempfile as _tf
+    temp_dir = Path(_tf.mkdtemp(prefix="frames_", dir=str(temp_root)))
+
+    try:
+        probe    = _probe_video(video_path)
+        fps      = probe.get("fps") or 25.0
+        if fps <= 0 or _math.isnan(fps):
+            fps = 25.0
+        duration = probe.get("duration") or 0.0
+        is_short = (0 < duration < 2.0)
+
+        frames: List[FrameMetadata]
+        if _SCENEDETECT_AVAILABLE and not is_short and duration >= 2.0 and not skip_scene_detection:
+            try:
+                frames = _extract_frames_pyscenedetect(
+                    video_path=video_path, max_frames=max_frames, max_dim=max_dim,
+                    max_duration=max_duration, threshold=scene_thresh,
+                    session_id=session_id, temp_dir=temp_dir, probe=probe,
+                )
+                if not frames:
+                    raise NoFramesExtractedError("PYSCENEDETECT_PRODUCED_NO_FRAMES")
+            except (VideoFrameError, Exception) as exc:
+                logger.warning(event="pyscenedetect_fallback_to_opencv", error=str(exc))
+                frames = _extract_frames_opencv(
+                    video_path=video_path, interval_sec=interval_sec, max_frames=max_frames,
+                    max_dim=max_dim, max_duration=max_duration, scene_thresh=scene_thresh,
+                    session_id=session_id, temp_dir=temp_dir, probe=probe,
+                )
+        else:
+            frames = _extract_frames_opencv(
+                video_path=video_path, interval_sec=interval_sec, max_frames=max_frames,
+                max_dim=max_dim, max_duration=max_duration, scene_thresh=scene_thresh,
+                session_id=session_id, temp_dir=temp_dir, probe=probe,
+            )
+
+        if not frames:
+            raise NoFramesExtractedError(f"NO_FRAMES_EXTRACTED from {os.path.basename(video_path)}")
+
+        _VF_FRAMES_EXTRACTED.labels(session_id=session_id).inc(len(frames))
+        logger.info(
+            event="frame_extraction_success",
+            video=os.path.basename(video_path),
+            frames=len(frames),
+            latency=round(time.time() - start, 2),
+        )
+        return [f.to_dict() for f in frames]
+
+    except (NoFramesExtractedError, VideoOpenError, DiskSpaceError):
+        raise
+    except Exception as exc:
+        logger.error(event="frame_extraction_failed", error=str(exc))
+        raise
+    finally:
+        _VF_ACTIVE.set(0)
+
+
+async def extract_frames_async(
+    video_path: str,
+    session_id: str,
+    interval_sec: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    async with _vf_get_semaphore():
+        import contextvars
+        loop = asyncio.get_event_loop()
+        ctx  = contextvars.copy_context()
+        return await loop.run_in_executor(
+            None,
+            ctx.run,
+            lambda: extract_frames(
+                video_path=video_path,
+                interval_sec=interval_sec or settings.VIDEO_FRAME_INTERVAL_SEC,
+                session_id=session_id,
+            ),
+        )
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import re
 import time
 import unicodedata
 from functools import lru_cache
@@ -12,6 +13,87 @@ from app.core.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# ── Finance number normalization ───────────────────────────────────────────────
+# Appends all equivalent phrasings of finance numbers after the original text.
+# "$4.3B" → also appends "4.3 billion 4300 million 4.3 billion dollars".
+# Applied to both document text (index time) and queries (query time) so
+# scale-variant phrases match regardless of how the number was written.
+
+_SCALE_EXPAND: Dict[str, Tuple[float, str, str]] = {
+    # suffix_lower → (multiplier_to_base, full_word, cross_word)
+    "b":       (1e9,  "billion",  "million"),
+    "bn":      (1e9,  "billion",  "million"),
+    "t":       (1e12, "trillion", "billion"),
+    "tn":      (1e12, "trillion", "billion"),
+    "m":       (1e6,  "million",  "billion"),
+    "mn":      (1e6,  "million",  "billion"),
+    "k":       (1e3,  "thousand", "million"),
+}
+
+_FIN_NUM_RE = re.compile(
+    r'([$€£¥₹]?)'              # optional currency symbol
+    r'([\d,]+\.?\d*)'          # number with optional commas/decimal
+    r'\s*([BMKTbmkt]n?)\b'     # scale suffix
+)
+_PCT_RE   = re.compile(r'([\d.]+)\s*%')
+_BPS_RE   = re.compile(r'([\d.]+)\s*bps\b', re.IGNORECASE)
+_QTR_RE   = re.compile(r'\bQ([1-4])\s*(?:FY)?\s*(\d{2,4})\b', re.IGNORECASE)
+_HY_RE    = re.compile(r'\bH([12])\s+(\d{4})\b', re.IGNORECASE)
+
+
+def _normalize_finance_numbers(text: str) -> str:
+    """Append expanded forms of finance numbers to *text* without replacing the
+    original tokens.  Returns the original text with variant phrases appended
+    after a separator so both forms are present in the embedding input."""
+    extras: List[str] = []
+
+    # Dollar/currency scale amounts: "$4.3B" → "4.3 billion 4300 million"
+    for m in _FIN_NUM_RE.finditer(text):
+        raw_num = m.group(2).replace(",", "")
+        suffix  = m.group(3).lower().rstrip("n")  # "bn" → "b", "mn" → "m"
+        if suffix not in _SCALE_EXPAND:
+            continue
+        try:
+            num_val = float(raw_num)
+        except ValueError:
+            continue
+        mult, full_word, cross_word = _SCALE_EXPAND[suffix]
+        cross_val = num_val * mult / (1e9 if cross_word == "billion"
+                                      else 1e6 if cross_word == "million"
+                                      else 1e3)
+        extras.append(f"{num_val} {full_word}")
+        extras.append(f"{num_val} {full_word} dollars")
+        cross_str = f"{cross_val:.1f}".rstrip("0").rstrip(".")
+        extras.append(f"{cross_str} {cross_word}")
+
+    # Percentages: "23.5%" → "23.5 percent"
+    for m in _PCT_RE.finditer(text):
+        extras.append(f"{m.group(1)} percent")
+
+    # Basis points: "350 bps" → "350 basis points"
+    for m in _BPS_RE.finditer(text):
+        extras.append(f"{m.group(1)} basis points")
+
+    # Quarter references: "Q3FY24" → "Q3 fiscal year 2024 third quarter 2024"
+    _QTR_WORDS = {"1": "first", "2": "second", "3": "third", "4": "fourth"}
+    for m in _QTR_RE.finditer(text):
+        q, yr = m.group(1), m.group(2)
+        if len(yr) == 2:
+            yr = "20" + yr
+        extras.append(f"Q{q} fiscal year {yr}")
+        extras.append(f"{_QTR_WORDS.get(q, 'Q'+q)} quarter {yr}")
+
+    # Half-year: "H1 2025" → "first half 2025"
+    _HY_WORDS = {"1": "first", "2": "second"}
+    for m in _HY_RE.finditer(text):
+        h, yr = m.group(1), m.group(2)
+        extras.append(f"{_HY_WORDS.get(h, 'H'+h)} half {yr}")
+
+    if not extras:
+        return text
+    return text + " " + " ".join(extras)
 
 
 # REDIS EMBEDDING CACHE — SECTION 4.3 (SHA-256 key, TTL 30 days)
@@ -164,10 +246,14 @@ def _enrich(doc: Any, text: str) -> str:
     if getattr(doc, "source", None):
         context.append(f"[{doc.source}]")
 
+    _structure = getattr(doc, "structure", {}) or {}
+    _modality  = (getattr(doc, "modality", "") or "").lower()
+    _source_type = (getattr(doc, "source_type", "") or "").lower()
+    _content_type = (_structure.get("content_type") or "").lower()
+
     # Include section title when available — two chunks from different sections
     # of the same document would otherwise produce identical prefixes, causing
     # their embeddings to collapse together in vector space.
-    _structure = getattr(doc, "structure", {}) or {}
     _section_title = _structure.get("section_title") or ""
     if _section_title and len(_section_title) <= 120:
         context.append(f"[Section: {_section_title}]")
@@ -185,7 +271,6 @@ def _enrich(doc: Any, text: str) -> str:
         context.append(f"[Rows {_row_start}-{_row_end}]")
 
     # Audio/video temporal window — anchors chunk to the media timeline
-    _modality  = getattr(doc, "modality", "") or ""
     _ts_start  = _structure.get("timestamp_start")
     _ts_end    = _structure.get("timestamp_end")
     if _modality in ("audio", "video") and _ts_start is not None:
@@ -199,7 +284,74 @@ def _enrich(doc: Any, text: str) -> str:
     if _modality == "video" and _frame_idx is not None:
         context.append(f"[Frame {_frame_idx}]")
 
-    enriched = " ".join(context) + " " + _prefix(doc) + text
+    context_prefix = " ".join(context) + " " + _prefix(doc)
+
+    # ── Phase 2.2: DOCX — section hierarchy prefix ────────────────────────────
+    # Bakes the full heading path into the vector so "financial projections"
+    # queries retrieve the right subsection even when its text doesn't repeat
+    # the section name.
+    if _source_type == "word" or _content_type.startswith("docx_"):
+        hierarchy = _structure.get("section_hierarchy") or []
+        if hierarchy:
+            hier_str = " > ".join(str(h) for h in hierarchy)
+            text = f"Section: {hier_str} | {text}"
+
+    # ── Phase 2.3: XLSX — sheet name + unit scale prefix ─────────────────────
+    # "Sheet: Income Statement" baked into vector so "income statement revenue"
+    # queries hit the right sheet even across documents.
+    if _source_type == "excel" or _content_type.startswith("excel_"):
+        sheet = (_structure.get("sheet") or _structure.get("sheet_name") or "").strip()
+        unit_scale = (_structure.get("unit_scale") or "").strip()
+        prefix_parts = []
+        if sheet:
+            prefix_parts.append(f"Sheet: {sheet}")
+        if unit_scale:
+            prefix_parts.append(f"({unit_scale})")
+        if prefix_parts:
+            text = " | ".join(prefix_parts) + " | " + text
+
+    # ── Phase 2.4: Audio / Video — speaker prefix + finance entity tokens ─────
+    # "[SPEAKER: Luca Maestri - CFO] [1842s-1924s] transcript [ENTITIES: ...]"
+    if _modality in ("audio", "video") and (_structure.get("content_type") or "").endswith(
+        ("speech", "audio_speech_segment", "video_speech")
+    ):
+        speaker_name = (_structure.get("speaker") or _structure.get("speaker_role") or "").strip()
+        ts_s = _ts_start
+        ts_e = _ts_end
+        speaker_header = ""
+        if speaker_name:
+            speaker_header = f"[SPEAKER: {speaker_name}]"
+        if ts_s is not None and ts_e is not None:
+            speaker_header += f" [{float(ts_s):.0f}s-{float(ts_e):.0f}s]"
+        finance_entities = _structure.get("finance_entities") or {}
+        entity_tokens: List[str] = []
+        if isinstance(finance_entities, dict):
+            for v in finance_entities.values():
+                if isinstance(v, list):
+                    entity_tokens.extend(str(x) for x in v[:3])
+        entity_suffix = (f" [ENTITIES: {', '.join(entity_tokens)}]"
+                         if entity_tokens else "")
+        if speaker_header:
+            text = f"{speaker_header} {text}{entity_suffix}"
+        elif entity_tokens:
+            text = f"{text}{entity_suffix}"
+
+    # ── Phase 2.5: Video — use combined_text (transcript + frame captions) ────
+    # combined_text includes "[VISUAL AT Xs]: <caption>" so the video chunk
+    # embeds both spoken content AND what was visually shown.
+    if _modality == "video":
+        combined = (_structure.get("combined_text") or "").strip()
+        if combined and len(combined) > len(text):
+            text = combined
+
+    # ── Phase 2.6: Image — image type prefix ─────────────────────────────────
+    # "Bar chart: Revenue by Segment..." retrieves better than plain caption.
+    if _modality == "image" or _source_type == "image":
+        image_type = (_structure.get("image_type") or "").strip()
+        if image_type:
+            text = f"{image_type.replace('_', ' ')}: {text}"
+
+    enriched = context_prefix + text
     return enriched.strip()[:settings.MAX_PROMPT_CHARS]
 
 
@@ -308,6 +460,10 @@ class TextEmbedder:
         clean = _sanitize(text)
         if not clean:
             raise ValueError("EMPTY_TEXT")
+
+        # Phase 2.1 — expand finance number forms in queries too, so a query
+        # for "4.3 billion" also matches chunks that stored "4300 million".
+        clean = _normalize_finance_numbers(clean)
 
         # Query embeddings use a prompt; use a distinct cache key so a text
         # that appears in both a query and a document doesn't collide.
@@ -432,6 +588,10 @@ class TextEmbedder:
                 clean = _sanitize(raw)
                 if not clean:
                     continue
+
+                # Phase 2.1 — append expanded number forms before enrichment
+                # so "$4.3B" also encodes "4.3 billion 4300 million" in the vector.
+                clean = _normalize_finance_numbers(clean)
 
                 enriched = _enrich(doc, clean)
                 h = hashlib.sha256(enriched.encode("utf-8")).hexdigest()

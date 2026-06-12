@@ -181,6 +181,185 @@ def _fix_financial_figures(answer: str, context_texts: List[str]) -> str:
     return _ROUNDED_BILLIONS_RE.sub(_replace, answer)
 
 
+# LEAKED-INSTRUCTION STRIPPER — deterministic post-processor that removes prompt
+# rules / reasoning preambles the small GGUF model sometimes echoes verbatim
+# (e.g. "The context contains a table...", "Do NOT confuse...", "[Product] = Mac",
+# placeholder rows like "[Metric] | [A] | [B]", "No need to calculate"). This is
+# grounded only in the answer text and does not depend on the LLM obeying rules.
+
+# A sentence is DROPPED if it matches one of these echoed-rule / reasoning-
+# narration patterns. The small GGUF model paraphrases the system prompt rather
+# than copying it verbatim, so the patterns match meaning, not exact strings.
+# "the context <up to 3 words> provides/contains/..." catches "the context only
+# provides information", etc.
+_LEAK_SENTENCE_RE = re.compile(
+    r'(?:'
+    r'the context(?:\s+\w+){0,3}\s+(?:contains?|provide|provides|mentions?|'
+    r'states?|shows?|has|have|includes?|gives?|does not|only)'
+    r'|use the table to answer'
+    r'|\bdo not confuse\b'
+    r'|based on (?:this (?:information|data)|the (?:context|document|knowledge|provided))'
+    r'|statement is the authoritative answer'
+    r'|no need to (?:calculate|estimate)'
+    r'|\b(?:do not|don.?t|never)\s+(?:calculate|compute|estimate|infer)\b'
+    r'|recall(?:ing)? a number from memory'
+    r'|report only the year'
+    r'|these are different figures'
+    r'|answer the query from these'
+    r'|\bthe question asks\b'
+    r"|\bi(?:'ll| will| am going to| can| need to| should| would)?\s+assume"
+    r'|\bi will (?:answer|use|now|compute|calculate|provide|interpret)'
+    r'|\blet me\b'
+    r'|as (?:stated|shown|provided|mentioned) in (?:the )?context'
+    r'|\bclosely related\b'
+    r'|i interpret (?:this|the question)'
+    r'|\bdo not use the (?:term|phrase|word)\b'
+    r'|\bdo not include the (?:term|phrase|word)\b'
+    r'|\bdo not assume\b'
+    r'|\bdo not interpret\b'
+    r'|\binstead,?\s+(?:refer to|describe)\b'
+    r'|^\s*step\s*\d\b'
+    r'|\bwe can infer\b'
+    r'|not (?:explicitly |actually |directly )?'
+    r'(?:mentioned|stated|provided|given|available|included|found)'
+    r'\s+in\s+(?:the\s+)?(?:context|sources?|provided(?:\s+sources?)?)'
+    r')',
+    re.IGNORECASE,
+)
+
+# A sentence is also DROPPED if it carries leaked placeholder tokens (the model
+# filled in a rule template) or is a raw pipe-table row dumped from context.
+_PLACEHOLDER_RE = re.compile(
+    r'\[(?:Product|Metric|Decline[^\]]*|BS_[AB]|[A-Z])\]'
+    r'|→\s*FY\s*20\d{2}'
+    r'|^\s*Row\s*:',
+    re.IGNORECASE,
+)
+
+# Verbose bracket-citations the model invents (e.g. "[Source: aapl_10k_2023.txt,
+# Consolidated Balance Sheets, ...]" or "[Based on the document, ...]"). Numeric
+# inline cites like [1] or [2,3] are preserved.
+_VERBOSE_BRACKET_RE = re.compile(
+    r'\[\s*(?:Source|Based on|Note|Reference|Ref|From|I\s+could)\b[^\]]*\]',
+    re.IGNORECASE,
+)
+
+# Whole-line meta fields to delete (label AND value — we don't want them).
+_FRAGMENT_SCRUB_RE = re.compile(
+    r'\bKEY FACTS\b[^:]*:\s*'
+    r'|^\s*(?:Answer Tags|Confidence|Sources Used|Reasoning)\s*:.*$',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Template section labels to remove ANYWHERE (keep the description after them).
+# These come from the comparative / temporal / structured output-format templates
+# that a small model sometimes echoes inline (e.g. "Entity B: the iPhone...").
+_TEMPLATE_LABEL_RE = re.compile(
+    r'\b(?:Entity\s+[A-Z]|Comparison|Timeline|OUTPUT)\s*:\s*',
+    re.IGNORECASE,
+)
+
+# "Answer:"/"Answers:" marker the model emits after its reasoning preamble.
+# Everything before the LAST such marker is reasoning scaffolding and discarded.
+_ANSWER_MARKER_RE = re.compile(
+    r'(?:^|[\s.;])answers?\s*:\s*'
+    r'|the answer would be\s*:\s*'
+    r'|the answer is\s*:\s*',
+    re.IGNORECASE,
+)
+
+# Trailing "no relevant information was found" hedge. When it appears AFTER real
+# answer content it is dropped: (a) it self-contradicts the answer, and (b) the
+# frontend hides ALL source chips for any answer containing this phrase. A
+# stand-alone no-info answer (nothing else kept) is preserved.
+_NOINFO_HEDGE_RE = re.compile(
+    r'no relevant information (?:was )?found'
+    r'|no (?:relevant )?information (?:was )?found in your knowledge'
+    r'|could not find (?:any )?relevant'
+    r'|no relevant documents found'
+    r'|nothing relevant was found',
+    re.IGNORECASE,
+)
+
+
+def _strip_leaked_instructions(answer: str) -> str:
+    """Remove echoed prompt rules / reasoning preambles, leaving the clean answer.
+
+    Strategy, in order:
+      1. Drop verbose invented bracket-citations ([Source: ...]).
+      2. If the model wrote an "Answer:" marker, keep only what follows the LAST
+         one — that is the post-reasoning final answer.
+      3. Sentence-level removal of any remaining echoed rules / narration.
+    Genuine prose answer sentences are always preserved; if nothing identifiable
+    remains we fall back to the de-prefixed original rather than an empty string.
+    """
+    if not answer:
+        return answer
+
+    text = answer.strip()
+    text = _VERBOSE_BRACKET_RE.sub('', text)           # invented [Source: ...]
+    text = _FRAGMENT_SCRUB_RE.sub('', text)            # KEY FACTS:/meta-label lines
+    text = _TEMPLATE_LABEL_RE.sub('', text)            # Entity A:/Comparison:/...
+
+    # Keep only what follows the final "Answer:" / "the answer would be:" marker.
+    markers = list(_ANSWER_MARKER_RE.finditer(text))
+    if markers:
+        text = text[markers[-1].end():].strip()
+
+    # If model wrapped its answer in double-quotes after a reasoning preamble
+    # (e.g. 'the answer would be: "The earnings call..."'), unwrap the quotes.
+    if text.startswith('"'):
+        end_q = text.find('"', 1)
+        if end_q != -1:
+            inner = text[1:end_q].strip()
+            tail  = text[end_q + 1:].strip()
+            text  = (inner + " " + tail).strip() if tail else inner
+
+    text = re.sub(r'^\s*[:\-—]\s*', '', text)          # leading bare colon/dash
+
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    kept: List[str] = []
+    for s in sentences:
+        st = s.strip()
+        if not st:
+            continue
+        if _LEAK_SENTENCE_RE.search(st):
+            continue
+        if _PLACEHOLDER_RE.search(st):
+            continue
+        if st.count('|') >= 3:                          # raw pipe-table row dump
+            continue
+        kept.append(st)
+
+    # Drop a trailing no-info hedge when real content remains (keeps source chips
+    # visible). A pure no-info answer — nothing else kept — is preserved as-is.
+    _substantive = [s for s in kept if not _NOINFO_HEDGE_RE.search(s)]
+    if _substantive:
+        kept = _substantive
+
+    result = " ".join(kept).strip()
+    result = re.sub(r'^\s*[:\-—]\s*', '', result)
+    # Drop a dangling leading connector left behind when a reasoning sentence
+    # before it was removed (e.g. "Therefore, Mac had..." → "Mac had...").
+    result = re.sub(r'^(?:therefore|thus|so|hence|then|in conclusion|'
+                    r'as a result)\s*,?\s*', '', result, flags=re.IGNORECASE)
+    result = (result[:1].upper() + result[1:]) if result else result
+    result = re.sub(r'\s{2,}', ' ', result).strip()
+
+    # Empty after stripping. If the ORIGINAL was itself a leaked instruction
+    # (e.g. "Do not assume that ESG goals are mentioned in the context."), do NOT
+    # echo it back — return the standard not-found message so the caller's
+    # refusal/fallback path takes over and the user never sees the leak.
+    if not result:
+        if _LEAK_SENTENCE_RE.search(answer) or _PLACEHOLDER_RE.search(answer):
+            return "I could not find this in the provided sources."
+        # Otherwise the stripping over-matched a genuine answer — return the
+        # de-prefixed original rather than an empty string.
+        fallback = re.sub(r'^\s*[:\-—]\s*', '', text.strip())
+        return fallback or re.sub(r'^\s*[:\-—]\s*', '', answer.strip())
+    return result
+
+
 # HASH FOR DEDUP
 
 def _hash(text: str, meta: Dict[str, Any]) -> str:
@@ -222,6 +401,17 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3) -> List[
         source_name = _os.path.basename(str(src_raw)) if src_raw != "unknown" else "unknown"
         modality = str(meta.get("modality") or "text")
 
+        # The chip suppresses the section-header suffix when modality == "text"
+        # (it treats that as a plain .txt file, where the filename alone suffices).
+        # DOCX/PDF/RTF paragraphs are stored with content-modality "text" but ARE
+        # document files WITH useful section headers, so map them to a file-type
+        # modality so the header shows. (.txt stays "text" → filename-only.)
+        _ext = source_name.rsplit(".", 1)[-1].lower() if "." in source_name else ""
+        _FILE_MODALITY = {"docx": "word", "doc": "word", "rtf": "word",
+                          "odt": "word", "pdf": "pdf"}
+        if modality == "text" and _ext in _FILE_MODALITY:
+            modality = _FILE_MODALITY[_ext]
+
         page_number: Optional[int] = None
         raw_page = meta.get("page_number") if meta.get("page_number") is not None else meta.get("page")
         if isinstance(raw_page, int):
@@ -251,6 +441,12 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3) -> List[
         # so existing indexed data works without re-upload.
         raw_section = meta.get("section_title")
         section_title = str(raw_section).strip() if raw_section else None
+        # Fix OCR year-range substitutions stored at ingest time (e.g. "ta"/"t0" → "to")
+        if section_title:
+            section_title = re.sub(
+                r'(\d{4})\s+(?:ta|t0)\s+(\d{4})', r'\1 to \2',
+                section_title, flags=re.IGNORECASE,
+            )
 
         if not section_title and modality in ("table", "excel"):
             import re as _re
@@ -433,10 +629,18 @@ _LLM_REFUSAL_PHRASES = (
 )
 
 def _is_llm_refusal(text: str) -> bool:
-    if not text:
+    if not text or not text.strip():
         return True
-    t = text.lower()
-    return any(p in t for p in _LLM_REFUSAL_PHRASES)
+    t = text.strip().lower()
+    # Pure refusal: a short answer dominated by a refusal phrase.
+    if len(t) <= 200:
+        return any(p in t for p in _LLM_REFUSAL_PHRASES)
+    # Long answers: only a refusal if they OPEN with a refusal phrase (model
+    # declined up front). A substantive answer that merely mentions "no relevant
+    # information" for one sub-part — after giving real content — is NOT a
+    # refusal, and must keep its source citations (was dropping them before).
+    head = t[:120]
+    return any(p in head for p in _LLM_REFUSAL_PHRASES)
 
 
 # Streaming holdback tuning — see RAGPipeline.stream(). The prefix gate must be
@@ -858,6 +1062,13 @@ class RAGPipeline:
             except Exception as _og_err:
                 logger.warning(event="rag_pipeline_output_guard_failed", error=str(_og_err), session_id=session_id)
 
+            # LEAKED-INSTRUCTION STRIPPER — remove echoed prompt rules / reasoning
+            # preambles the small GGUF model sometimes emits before the answer.
+            try:
+                answer = _strip_leaked_instructions(answer)
+            except Exception as _leak_err:
+                logger.warning(event="rag_pipeline_leak_strip_failed", error=str(_leak_err), session_id=session_id)
+
             # CITATION TRACKING — filter sources to cited [n] indices, then strip them.
             try:
                 from app.core.response import extract_cited_indices, strip_inline_citations
@@ -1043,6 +1254,14 @@ class RAGPipeline:
                     except Exception:
                         return seg
 
+                # BUFFER-THEN-CLEAN STREAMING. We deliberately do NOT forward raw
+                # tokens to the client: the small GGUF model often emits a
+                # reasoning/rule preamble first (e.g. "Do not calculate...
+                # Answer:") which would flash on screen and then be replaced — the
+                # exact flicker the user reported. Instead we accumulate the full
+                # generation, strip the leak, and stream the CLEAN answer below.
+                # Early refusal detection still runs on the growing prefix so the
+                # refusal-sentinel UX is preserved.
                 for token in llm.stream(
                     prompt,
                     max_tokens=settings.LLM_MAX_TOKENS,
@@ -1051,26 +1270,15 @@ class RAGPipeline:
                     session_id=session_id,
                 ):
                     collected_tokens.append(token)
-                    if refusal_mode:
+                    if refusal_mode or prefix_checked:
                         continue
                     hold += token
-                    if not prefix_checked:
-                        if len(hold) < _STREAM_PREFIX_GATE:
-                            continue
-                        if _is_llm_refusal(hold):
-                            refusal_mode = True
-                            continue
+                    if len(hold) < _STREAM_PREFIX_GATE:
+                        continue
+                    if _is_llm_refusal(hold):
+                        refusal_mode = True
+                    else:
                         prefix_checked = True
-                    cut = len(hold) - _STREAM_HOLDBACK
-                    if cut <= 0:
-                        continue
-                    ws = hold.rfind(" ", 0, cut)
-                    if ws <= 0:
-                        continue
-                    out = _flush(hold[:ws])
-                    hold = hold[ws:]
-                    if out:
-                        yield out
 
                 # OUTPUT GUARD — Phase 26 P1b: guard the COMPLETE answer.
                 # Whole-answer checks (groundedness, template artifacts, toxicity,
@@ -1099,6 +1307,13 @@ class RAGPipeline:
                 except Exception as _fin_err:
                     logger.warning(event="rag_fin_normalizer_failed", error=str(_fin_err))
 
+                # LEAKED-INSTRUCTION STRIPPER — remove any echoed prompt rules /
+                # reasoning preambles before the canonical answer is delivered.
+                try:
+                    answer = _strip_leaked_instructions(answer)
+                except Exception as _leak_err:
+                    logger.warning(event="rag_stream_leak_strip_failed", error=str(_leak_err))
+
                 # REFUSAL HANDLING — docs WERE retrieved (we passed the retrieval
                 # gate above), so a refusal here means the model declined despite
                 # relevant context. Do NOT stream the refusal text: it would flash
@@ -1124,6 +1339,23 @@ class RAGPipeline:
                     answer = strip_inline_citations(answer)
                 except Exception:
                     _source_docs = docs[:3]
+
+                # STREAM THE CLEAN ANSWER progressively — gives the client a
+                # typing effect without ever exposing the raw leaked preamble.
+                # PII is scrubbed once on the whole answer (so entities are never
+                # split across a chunk boundary), then emitted in small word
+                # groups. The REPLACE sentinel below carries the identical text,
+                # so the swap is invisible (no flicker).
+                _stream_answer = _flush(answer)
+                _words = _stream_answer.split(" ")
+                _chunk = ""
+                for _i, _w in enumerate(_words):
+                    _chunk = _w if not _chunk else _chunk + " " + _w
+                    if (_i + 1) % 4 == 0:
+                        yield _chunk + " "
+                        _chunk = ""
+                if _chunk:
+                    yield _chunk
 
                 # REPLACE sentinel — canonical guarded answer. The client swaps
                 # its streamed buffer for this text; the API stream layer is the

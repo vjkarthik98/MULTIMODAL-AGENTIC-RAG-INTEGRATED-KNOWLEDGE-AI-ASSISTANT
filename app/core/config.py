@@ -49,9 +49,13 @@ class Settings:
     # PROJECT ROOT
     PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 
+    # MODEL CACHE — permanent .hf_cache (survives instance stop/start; mount as EBS volume on EC2)
+    HF_HOME: str = _str("HF_HOME", str(Path(__file__).resolve().parents[2] / ".hf_cache"))
+    MODEL_CACHE_REQUIRE_MANIFEST: bool = _bool("MODEL_CACHE_REQUIRE_MANIFEST", False)
+
     # CORE APPLICATION
     APP_NAME: str        = _str("APP_NAME", "Multimodal Agentic RAG Integrated Knowledge AI Assistant")
-    APP_VERSION: str     = _str("APP_VERSION", "0.22.0")
+    APP_VERSION: str     = _str("APP_VERSION", "1.0.0")
     APP_DESCRIPTION: str = _str("APP_DESCRIPTION", "Production Multimodal Agentic RAG Integrated AI System")
     ENV: str             = _str("ENV", "development")
     DEBUG: bool          = _bool("DEBUG", False)
@@ -111,7 +115,7 @@ class Settings:
     LLM_MOCK_MODE: bool      = _bool("LLM_MOCK_MODE", False)
     LLM_MODEL_PATH: str      = _str("LLM_MODEL_PATH", "./.hf_cache/gguf/mistral-7b-instruct-v0.2.Q4_K_M.gguf")
     LLM_MAX_TOKENS: int      = _int("LLM_MAX_TOKENS", 768)
-    CONTEXT_MAX_TOKENS: int  = _int("CONTEXT_MAX_TOKENS", 4096)
+    CONTEXT_MAX_TOKENS: int  = _int("CONTEXT_MAX_TOKENS", 8192)
     LLM_TEMPERATURE: float          = _float("LLM_TEMPERATURE", 0.2)
     LLM_TEMPERATURE_FACTUAL: float  = _float("LLM_TEMPERATURE_FACTUAL", 0.1)
     LLM_TEMPERATURE_GENERATIVE: float = _float("LLM_TEMPERATURE_GENERATIVE", 0.35)
@@ -129,7 +133,7 @@ class Settings:
     LLM_RETRY_WAIT_MAX: int  = _int("LLM_RETRY_WAIT_MAX", 10)
 
     # EMBEDDINGS
-    EMBEDDING_MODEL: str                = _str("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B")
+    EMBEDDING_MODEL: str                = _str("EMBEDDING_MODEL", "BAAI/bge-large-en-v1.5")
     EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 32)
     EMBEDDING_MAX_BATCH_SIZE: int       = _int("EMBEDDING_MAX_BATCH_SIZE", 64)
     EMBEDDING_MAX_SEQ_LEN: int          = _int("EMBEDDING_MAX_SEQ_LEN", 512)
@@ -138,15 +142,22 @@ class Settings:
     # without the per-chunk empty_cache+gc tax that dominated embed latency).
     INGESTION_CACHE_CLEAR_EVERY: int    = _int("INGESTION_CACHE_CLEAR_EVERY", 8)
     EMBEDDING_CACHE_TTL: int            = _int("EMBEDDING_CACHE_TTL", 2_592_000)
-    TEXT_EMBEDDING_DIM: int             = _int("TEXT_EMBEDDING_DIM", 1024)
-    MATRYOSHKA_SHORT_DIM: int           = _int("MATRYOSHKA_SHORT_DIM", 256)
-    MATRYOSHKA_LONG_DIM: int            = _int("MATRYOSHKA_LONG_DIM", 1536)
+    TEXT_EMBEDDING_DIM: int             = _int("TEXT_EMBEDDING_DIM", 1536)
+    # BGE-large requires instruction prefix on queries only (not documents)
+    BGE_QUERY_INSTRUCTION: str          = _str("BGE_QUERY_INSTRUCTION",
+                                               "Represent this sentence for searching relevant passages: ")
 
     # MODALITY FEATURE FLAGS — set to false to skip model load and all related processing
     ENABLE_VISION: bool              = _bool("ENABLE_VISION", True)
     ENABLE_AUDIO: bool               = _bool("ENABLE_AUDIO", True)
 
-    # MODEL DEVICE / WARMUP — Tesla T4 all_gpu profile
+    # FINANCE-GRADE PROCESSING FEATURE FLAGS
+    PDF_USE_PDFPLUMBER: bool         = _bool("PDF_USE_PDFPLUMBER", True)
+    VIDEO_SCENE_DETECTION: bool      = _bool("VIDEO_SCENE_DETECTION", True)
+    EXCEL_SEMANTIC_GROUP: bool       = _bool("EXCEL_SEMANTIC_GROUP", True)
+    AUDIO_SPEAKER_SUBINDEX_ENABLED: bool = _bool("AUDIO_SPEAKER_SUBINDEX_ENABLED", False)
+
+    # MODEL DEVICE / WARMUP — Tesla T4 / A10G all_gpu profile
     # Profiles: "auto" (CUDA → all_gpu, else cpu), "hybrid", "all_gpu", "all_cpu"
     MODELS_DEVICE_PROFILE: str       = _str("MODELS_DEVICE_PROFILE", "all_gpu")
     VRAM_BUDGET_GB: float            = _float("VRAM_BUDGET_GB", 13.0)
@@ -155,6 +166,7 @@ class Settings:
     MODEL_PARALLEL_LOAD: bool        = _bool("MODEL_PARALLEL_LOAD", True)
     LLM_GPU_LAYERS_AUTO: bool        = _bool("LLM_GPU_LAYERS_AUTO", True)
     LLM_GPU_LAYERS_ALL: int          = _int("LLM_GPU_LAYERS_ALL", -1)
+    LLM_N_CTX: int                   = _int("LLM_N_CTX", 8192)
     EMBEDDER_HALF_PRECISION: bool    = _bool("EMBEDDER_HALF_PRECISION", True)
     VISION_HALF_PRECISION: bool      = _bool("VISION_HALF_PRECISION", True)
     WHISPER_COMPUTE_TYPE: str        = _str("WHISPER_COMPUTE_TYPE", "int8_float16")
@@ -162,15 +174,31 @@ class Settings:
     RERANKER_DEVICE: str             = _str("RERANKER_DEVICE", "cuda")
     SIGLIP_DEVICE: str               = _str("SIGLIP_DEVICE", "cuda")
     BLIP_DEVICE: str                 = _str("BLIP_DEVICE", "cuda")
+    BLIP2_DEVICE: str                = _str("BLIP2_DEVICE", "cuda")
+    LLAVA_DEVICE: str                = _str("LLAVA_DEVICE", "cuda")
+    TROCR_DEVICE: str                = _str("TROCR_DEVICE", "cuda")
+    DIARIZER_DEVICE: str             = _str("DIARIZER_DEVICE", "cuda")
+    NER_DEVICE: str                  = _str("NER_DEVICE", "cuda")
     WHISPER_DEVICE: str              = _str("WHISPER_DEVICE", "cuda")
     LLM_DEVICE_HINT: str             = _str("LLM_DEVICE_HINT", "cuda")
 
     # VISION MODELS
     SIGLIP_MODEL: str                = _str("SIGLIP_MODEL", "google/siglip-so400m-patch14-384")
     VISION_EMBEDDING_DIM: int        = _int("VISION_EMBEDDING_DIM", 1152)
+    # BLIP-1 kept for backward-compat during transition; new ingestion uses BLIP2
     BLIP_MODEL: str                  = _str("BLIP_MODEL", "Salesforce/blip-image-captioning-large")
     BLIP_MAX_TOKENS: int             = _int("BLIP_MAX_TOKENS", 100)
     BLIP_NUM_BEAMS: int              = _int("BLIP_NUM_BEAMS", 2)
+    # BLIP2 — replaces BLIP-1 for image captioning (Phase 2+)
+    BLIP2_MODEL: str                 = _str("BLIP2_MODEL", "Salesforce/blip2-opt-2.7b")
+    BLIP2_LOAD_IN_8BIT: bool         = _bool("BLIP2_LOAD_IN_8BIT", True)
+    BLIP2_MAX_TOKENS: int            = _int("BLIP2_MAX_TOKENS", 200)
+    # LLaVA — video frame captioning
+    LLAVA_MODEL: str                 = _str("LLAVA_MODEL", "llava-hf/llava-1.5-7b-hf")
+    LLAVA_LOAD_IN_8BIT: bool         = _bool("LLAVA_LOAD_IN_8BIT", True)
+    LLAVA_MAX_TOKENS: int            = _int("LLAVA_MAX_TOKENS", 300)
+    # TrOCR — printed OCR for financial documents
+    TROCR_MODEL: str                 = _str("TROCR_MODEL", "microsoft/trocr-large-printed")
     MAX_IMAGE_DIM: int               = _int("MAX_IMAGE_DIM", 1024)
     MAX_IMAGE_SIZE_MP: int           = _int("MAX_IMAGE_SIZE_MP", 50)
     THUMBNAIL_WIDTH: int             = _int("THUMBNAIL_WIDTH", 256)
@@ -179,7 +207,7 @@ class Settings:
     SOLID_COLOR_THRESHOLD: float     = _float("SOLID_COLOR_THRESHOLD", 0.95)
 
     # ASR WHISPER
-    WHISPER_MODEL: str              = _str("WHISPER_MODEL", "medium")
+    WHISPER_MODEL: str              = _str("WHISPER_MODEL", "large-v3")
     AUDIO_SAMPLE_RATE: int          = _int("AUDIO_SAMPLE_RATE", 16000)
     MAX_AUDIO_DURATION_SEC: int     = _int("MAX_AUDIO_DURATION_SEC", 10800)
     MAX_AUDIO_SEGMENTS: int         = _int("MAX_AUDIO_SEGMENTS", 500)
@@ -187,6 +215,11 @@ class Settings:
     AUDIO_SILENCE_GAP_MS: int       = _int("AUDIO_SILENCE_GAP_MS", 200)
     AUDIO_CHUNK_DURATION_SEC: int   = _int("AUDIO_CHUNK_DURATION_SEC", 1800)
     DIARIZATION_ENABLED: bool       = _bool("DIARIZATION_ENABLED", False)
+    AUDIO_DIARIZATION_ENABLED: bool = _bool("AUDIO_DIARIZATION_ENABLED", False)
+    # Pyannote speaker diarization (requires HF_TOKEN + model access approval)
+    DIARIZATION_MODEL: str          = _str("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
+    # Finance NER
+    NER_MODEL: str                  = _str("NER_MODEL", "dslim/bert-base-NER")
     HF_TOKEN: Optional[str]         = _opt("HF_TOKEN")
     WHISPER_DOMAIN_VOCAB: List[str] = _list("WHISPER_DOMAIN_VOCAB", [
         "RAG", "FAISS", "Qdrant", "LlamaIndex", "LangChain", "RAGAS",
@@ -196,10 +229,10 @@ class Settings:
     WHISPER_FILLER_WORDS: List[str] = _list("WHISPER_FILLER_WORDS", ["uh", "um", "er", "hmm"])
 
     # RERANKER
-    RERANKER_MODEL: str             = _str("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+    RERANKER_MODEL: str             = _str("RERANKER_MODEL", "BAAI/bge-reranker-large")
     RERANK_TOP_K: int               = _int("RERANK_TOP_K", 8)
     RERANK_MAX_INPUT: int           = _int("RERANK_MAX_INPUT", 20)
-    RERANK_CONTEXT_MAX_CHARS: int   = _int("RERANK_CONTEXT_MAX_CHARS", 512)
+    RERANK_CONTEXT_MAX_CHARS: int   = _int("RERANK_CONTEXT_MAX_CHARS", 1024)
     RERANK_MODEL_WEIGHT: float      = _float("RERANK_MODEL_WEIGHT", 0.7)
     RERANK_FUSION_WEIGHT: float     = _float("RERANK_FUSION_WEIGHT", 0.3)
     RERANK_POSITION_WEIGHT: float   = _float("RERANK_POSITION_WEIGHT", 0.1)
@@ -212,7 +245,7 @@ class Settings:
 
     RERANK_MODALITY_WEIGHTS: Dict[str, float] = {
         "text":  1.0,
-        "table": 1.1,
+        "table": 1.15,
         "image": 0.75,
         "audio": 0.85,
         "video": 0.75,
@@ -296,6 +329,10 @@ class Settings:
     # CHUNKING
     CHUNK_SIZE: int                  = _int("CHUNK_SIZE", 1024)
     CHUNK_OVERLAP: int               = _int("CHUNK_OVERLAP", 128)
+    CHUNK_HASH_ID: bool              = _bool("CHUNK_HASH_ID", True)
+    FINANCE_NUMBER_PROTECT: bool     = _bool("FINANCE_NUMBER_PROTECT", True)
+    CHUNK_TARGET_TOKENS: int         = _int("CHUNK_TARGET_TOKENS", 400)
+    CHUNK_OVERLAP_SENTENCES: int     = _int("CHUNK_OVERLAP_SENTENCES", 1)
     CHUNK_OVERLAP_RATIO: float       = _float("CHUNK_OVERLAP_RATIO", 0.15)
     CHUNK_MIN_SIZE: int              = _int("CHUNK_MIN_SIZE", 50)
     MAX_CHUNKS: int                  = _int("MAX_CHUNKS", 200)
@@ -726,8 +763,8 @@ class TestSettings:
 
     def test_defaults_are_valid(self):
         s = Settings()
-        assert s.APP_VERSION == "0.25.0"
-        assert s.TEXT_EMBEDDING_DIM == 1024
+        assert s.APP_VERSION == "1.0.0"
+        assert s.TEXT_EMBEDDING_DIM == 1536
         assert s.VISION_EMBEDDING_DIM > 0
         assert s.CHUNK_OVERLAP < s.CHUNK_SIZE
         assert s.AGENT_MAX_STEPS > 0

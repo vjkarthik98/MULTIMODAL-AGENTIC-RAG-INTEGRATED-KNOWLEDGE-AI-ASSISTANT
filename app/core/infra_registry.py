@@ -194,11 +194,20 @@ class InfraRegistry:
 
         logger.info("infra_warmup_started")
 
+        from app.core.model_loader import model_loader as _loader
+
         tasks = [
+            # Infra services
             asyncio.to_thread(self.get_vector_store),
             asyncio.to_thread(self.get_bm25),
             asyncio.to_thread(self.get_memory),
             asyncio.to_thread(self.get_mongo),
+            # Small always-on models — warm fast (embedder, reranker, ner, trocr)
+            asyncio.to_thread(_loader.get_embedder),
+            asyncio.to_thread(_loader.get_reranker),
+            asyncio.to_thread(_loader.get_trocr),
+            asyncio.to_thread(_loader.get_ner),
+            # Large models warm lazily on first use (blip2, llava, whisper, diarizer)
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)

@@ -347,6 +347,13 @@ class QdrantVectorStore:
             if s.get("speaker"):
                 payload["speaker"] = str(s["speaker"])
 
+        # XLSX DUAL EMBEDDING — store alt vector in payload so Phase 5 retrieval
+        # can reconstruct it for structural table search without a named-vector
+        # collection migration.
+        emb_alt = getattr(d, "embedding_alt", None)
+        if emb_alt and isinstance(emb_alt, list) and len(emb_alt) > 0:
+            payload["embedding_alt"] = emb_alt
+
         # VISION QUALITY FIELDS — stored for image and video frame chunks so
         # retrieval can filter/rank on content quality rather than blind similarity.
         if modality in ("image", "video"):
@@ -470,6 +477,13 @@ class QdrantVectorStore:
                     )
                 else:
                     if not self._valid_vector(emb, self.text_dim):
+                        if isinstance(emb, list) and len(emb) > 0 and len(emb) != self.text_dim:
+                            raise ValueError(
+                                f"EMBEDDING_DIM_MISMATCH: got {len(emb)}, expected "
+                                f"{self.text_dim}. Re-ingest after running "
+                                f"app/bin/migrate_qdrant_dim.py if you changed "
+                                f"TEXT_EMBEDDING_DIM."
+                            )
                         skipped += 1
                         continue
                     text_points.append(

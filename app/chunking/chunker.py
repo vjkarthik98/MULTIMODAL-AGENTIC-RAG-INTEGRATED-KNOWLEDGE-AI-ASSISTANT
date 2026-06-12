@@ -9,6 +9,44 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# PER-MODALITY CHUNKER DISPATCH (Phase 2)
+# Called by ingestion_pipeline when the new ingest→chunk→embed chain is used.
+# The legacy chunk_documents() below remains for backward compatibility.
+
+_CHUNKER_MAP = None
+
+
+def _get_chunker_map():
+    global _CHUNKER_MAP
+    if _CHUNKER_MAP is None:
+        from app.chunking.txt_chunker import TxtChunker
+        from app.chunking.pdf_chunker import PdfChunker
+        from app.chunking.docx_chunker import DocxChunker
+        from app.chunking.xlsx_chunker import XlsxChunker
+        from app.chunking.image_chunker import ImageChunker
+        from app.chunking.audio_chunker import AudioChunker
+        from app.chunking.video_chunker import VideoChunker
+        _CHUNKER_MAP = {
+            "text":  TxtChunker,
+            "pdf":   PdfChunker,
+            "word":  DocxChunker,
+            "excel": XlsxChunker,
+            "image": ImageChunker,
+            "audio": AudioChunker,
+            "video": VideoChunker,
+        }
+    return _CHUNKER_MAP
+
+
+def chunk_raw_extracts(extracts, meta, modality: str) -> List[Any]:
+    """Route List[RawExtract] through the appropriate per-modality chunker."""
+    chunker_cls = _get_chunker_map().get(modality)
+    if chunker_cls is None:
+        logger.warning(event="chunker_unknown_modality", modality=modality)
+        return []
+    chunker = chunker_cls()
+    return chunker.chunk(extracts, meta)
+
 
 # DOCUMENT CHUNKER — CALLED BY INGESTION PIPELINE
 #

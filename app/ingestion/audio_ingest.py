@@ -404,6 +404,98 @@ def _classify_noise(file_path: str) -> Optional[str]:
         return None
 
 
+# FINANCE TOPIC TRANSITION PHRASES
+_TOPIC_TRANSITIONS: List[str] = [
+    "moving to", "turning to", "let me now", "on the balance sheet",
+    "cash flow", "guidance", "next question", "question and answer", "q&a",
+    "opening remarks", "prepared remarks", "i'll turn it over",
+    "income statement", "operating expenses", "earnings per share",
+    "capital expenditure", "free cash flow", "outlook", "fiscal year",
+]
+
+# EARNINGS CALL SECTION MARKERS
+_PREPARED_REMARKS_KW = [
+    "good morning", "good afternoon", "good evening",
+    "thank you for joining", "welcome to",
+    "let me walk you through", "our results", "quarterly results",
+]
+_QA_KW = [
+    "question and answer", "q&a session", "open up for questions",
+    "first question", "next question", "your question please", "please go ahead",
+]
+_OPERATOR_KW = ["operator:", "operator,", "this is the operator"]
+
+# SPEAKER ROLE KEYWORD MAP
+_SPEAKER_ROLE_MAP: Dict[str, str] = {
+    "ceo": "CEO", "chief executive": "CEO",
+    "cfo": "CFO", "chief financial": "CFO",
+    "cto": "CTO", "chief technology": "CTO",
+    "coo": "COO", "chief operating": "COO",
+    "analyst": "analyst", "research": "analyst",
+    "operator": "operator", "moderator": "moderator",
+}
+
+# FINANCE ENTITY REGEXES
+_FIN_AMOUNT_RE = re.compile(
+    r'\$[\d,]+\.?\d*\s?[BMKTbmkt]?|\b\d[\d,.]*\s?(?:billion|million|thousand)\b',
+    re.IGNORECASE,
+)
+_FIN_PCT_RE   = re.compile(r'[\d.]+\s?(?:percent|%)')
+_FIN_TICKER_RE = re.compile(r'\b[A-Z]{2,5}\b')
+_FIN_QUARTER_RE = re.compile(r'Q[1-4]\s?(?:FY)?\s?\d{2,4}|H[12]\s?\d{4}', re.IGNORECASE)
+
+
+def _infer_speaker_role(speaker_name: Optional[str]) -> str:
+    if not speaker_name:
+        return "unknown"
+    lower = speaker_name.lower()
+    for keyword, role in _SPEAKER_ROLE_MAP.items():
+        if keyword in lower:
+            return role
+    return "executive"
+
+
+def _extract_finance_entities(text: str) -> Dict[str, List[str]]:
+    return {
+        "amounts":     _FIN_AMOUNT_RE.findall(text)[:20],
+        "percentages": _FIN_PCT_RE.findall(text)[:20],
+        "tickers":     list({t for t in _FIN_TICKER_RE.findall(text) if len(t) >= 2})[:20],
+        "dates":       _FIN_QUARTER_RE.findall(text)[:10],
+    }
+
+
+def _detect_call_section(text: str, prior_section: str) -> str:
+    lower = text.lower()
+    if any(kw in lower for kw in _OPERATOR_KW):
+        return "operator"
+    if any(kw in lower for kw in _QA_KW):
+        return "qa_session"
+    if any(kw in lower for kw in _PREPARED_REMARKS_KW):
+        return "prepared_remarks"
+    return prior_section
+
+
+def _detect_topic_section(text: str) -> Optional[str]:
+    lower = text.lower()
+    for phrase in _TOPIC_TRANSITIONS:
+        if phrase in lower:
+            return phrase.replace(" ", "_")
+    return None
+
+
+def _audio_is_earnings_call(segments: List[Dict[str, Any]]) -> bool:
+    sample_text = " ".join(s["text"] for s in segments[:30]).lower()
+    operator_turns = sum(
+        1 for s in segments if "operator" in (s.get("text") or "").lower()
+    )
+    return (
+        operator_turns >= 5
+        or "earnings call" in sample_text
+        or "quarterly results" in sample_text
+        or "conference call" in sample_text
+    )
+
+
 # DIARIZATION VIA PYANNOTE
 
 def _diarize(file_path: str, session_id: str) -> Dict[Tuple[float, float], str]:
@@ -705,6 +797,10 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         # DETECT FINAL LANGUAGE FROM FIRST SEGMENT
         final_language = all_segments[0].get("language") if all_segments else None
 
+        # EARNINGS CALL METADATA — document-level, computed once
+        is_earnings_call = _audio_is_earnings_call(all_segments)
+        current_call_section: str = "prepared_remarks"
+
         # BUILD INGESTED DOCUMENTS
         documents: List[IngestedDocument] = []
         global_idx = 0
@@ -740,6 +836,10 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 continue
 
             speaker = _get_speaker(seg_start, seg_end, speaker_map)
+            speaker_role   = _infer_speaker_role(speaker)
+            finance_ents   = _extract_finance_entities(text) if not inaudible else {}
+            current_call_section = _detect_call_section(text, current_call_section)
+            topic_section  = _detect_topic_section(text)
 
             doc = IngestedDocument(
                 text=text,
@@ -776,7 +876,12 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     "channels": channels,
                     "frame_rate": frame_rate,
                     "speaker": speaker,
+                    "speaker_role": speaker_role,
                     "noise_class": noise_class,
+                    "is_earnings_call": is_earnings_call,
+                    "call_section": current_call_section,
+                    "topic_section": topic_section,
+                    "finance_entities": finance_ents,
                     "content_type": "audio_speech_segment",
                     "embedding_space": "text",
                     "ingestion_time": time.time(),
@@ -858,5 +963,91 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
 async def async_ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
     return await asyncio.to_thread(ingest, file_path, session_id)
+
+
+# ─── Phase 1: AudioIngestor ────────────────────────────────────────────────────
+
+from app.ingestion.base_ingest import BaseIngestor
+from app.ingestion.schema import RawExtract, UniversalMetadata
+
+
+class AudioIngestor(BaseIngestor):
+    """Validates and loads audio files → List[RawExtract].
+
+    Phase 1 responsibility: DRM check, pydub load, ffmpeg repair, duration check.
+    Does NOT transcribe or diarize. The chunker (Phase 2) runs Whisper + pyannote.
+    """
+
+    async def extract(
+        self,
+        path: Path,
+        metadata: UniversalMetadata,
+    ) -> List[RawExtract]:
+        suffix = path.suffix.lower()
+
+        if suffix not in SUPPORTED_AUDIO_FORMATS:
+            raise UnsupportedMimeError(f"UNSUPPORTED_AUDIO_FORMAT: {suffix}")
+
+        file_size = path.stat().st_size
+        if file_size == 0:
+            raise EmptyFileError(str(path))
+        if file_size > settings.MAX_FILE_SIZE_AUDIO:
+            raise FileTooLargeError(f"FILE_TOO_LARGE: {file_size}")
+
+        _check_disk_space(path)
+
+        # DRM / encryption check (can't process DRM audio)
+        try:
+            from pydub import AudioSegment
+            audio = AudioSegment.from_file(str(path))
+            duration_s = len(audio) / 1000.0
+        except Exception as exc:
+            if "DRM" in str(exc).upper() or "encrypted" in str(exc).lower():
+                raise ValueError(f"DRM_PROTECTED_AUDIO: {path.name}")
+            # Try ffmpeg repair path
+            try:
+                import subprocess
+                import tempfile
+                tmp = tempfile.mktemp(suffix=".wav")
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", str(path), "-ar", "16000", "-ac", "1", tmp],
+                    capture_output=True, timeout=120,
+                )
+                if not Path(tmp).exists() or Path(tmp).stat().st_size == 0:
+                    raise ValueError(f"AUDIO_REPAIR_FAILED: {path.name}")
+                from pydub import AudioSegment
+                audio = AudioSegment.from_wav(tmp)
+                duration_s = len(audio) / 1000.0
+            except Exception as repair_exc:
+                raise ValueError(f"AUDIO_LOAD_FAILED: {repair_exc}")
+
+        if duration_s < 0.5:
+            raise ValueError(f"AUDIO_TOO_SHORT: {duration_s:.2f}s")
+        if duration_s > settings.MAX_AUDIO_DURATION_SECONDS:
+            raise ValueError(f"AUDIO_TOO_LONG: {duration_s:.0f}s")
+
+        # Export as 16kHz mono WAV bytes for chunker
+        import io as _io
+        wav_buf = _io.BytesIO()
+        audio.set_frame_rate(16000).set_channels(1).export(wav_buf, format="wav")
+        audio_bytes = wav_buf.getvalue()
+
+        return [
+            RawExtract(
+                text="",
+                extract_type="audio_raw",
+                timestamp_start=0.0,
+                timestamp_end=duration_s,
+                raw_source_ref=f"audio:{path.name}",
+                raw_bytes=audio_bytes,
+                extra={
+                    "duration_seconds": duration_s,
+                    "file_size": file_size,
+                    "format": suffix.lstrip("."),
+                    "sample_rate": 16000,
+                    "channels": 1,
+                },
+            )
+        ]
 
 

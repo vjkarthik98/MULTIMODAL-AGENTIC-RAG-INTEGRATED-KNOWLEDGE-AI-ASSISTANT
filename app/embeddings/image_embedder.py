@@ -615,3 +615,49 @@ class ImageEmbedder:
         }
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# IMAGE DOCUMENT EMBEDDER (Phase 3)
+# Extends BaseEmbedder to embed IngestedDocument objects produced by ImageChunker.
+# Each doc's text = "{image_type}: {caption}\n{ocr_text}" — embed with BGE so
+# image chunks are retrievable by finance text queries.
+# The existing ImageEmbedder above handles raw image file paths via SigLIP and
+# remains the vision-collection path.
+# ══════════════════════════════════════════════════════════════════════════════
+
+from app.embeddings.base_embedder import BaseEmbedder as _BaseEmbedder  # noqa: E402
+
+
+class ImageDocEmbedder(_BaseEmbedder):
+    """BGE text embedder for image IngestedDocument objects.
+
+    Enrichment:
+      [{image_type}] {caption}. {ocr_text} {extracted_numbers}
+
+    Keeps image chunks in the text collection so they surface for text queries.
+    SigLIP vision-space embedding (vision collection) is handled separately by
+    ImageEmbedder.embed_batch() called from ingestion_pipeline.
+    """
+
+    def _build_embed_text(self, doc: Any, cleaned_text: str) -> str:
+        from app.core.config import settings as _s
+        s          = getattr(doc, "structure", {}) or {}
+        image_type = (s.get("image_type") or "").replace("_", " ").strip()
+        caption    = (s.get("caption")    or "").strip()
+        ocr_text   = (s.get("ocr_text")   or "").strip()
+
+        nums: list = s.get("extracted_numbers") or []
+        num_str    = " ".join(str(n) for n in nums[:10])
+
+        # Build from structure fields (richer than cleaned_text which is the
+        # combined caption+ocr string already, so use it as fallback)
+        if image_type and caption:
+            base = f"[{image_type}] {caption}"
+            if ocr_text:
+                base += f". {ocr_text}"
+        else:
+            base = cleaned_text
+
+        if num_str:
+            base += f" {num_str}"
+
+        return base[:_s.MAX_PROMPT_CHARS]

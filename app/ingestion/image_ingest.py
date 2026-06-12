@@ -5,8 +5,10 @@ import hashlib
 import io
 import math
 import os
+import re
 import shutil
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -15,6 +17,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.core.config import settings
 from app.ingestion.schema import (
+    EmptyContentError,
     EmptyFileError,
     FileTooLargeError,
     IngestedDocument,
@@ -495,36 +498,61 @@ def _generate_thumbnail(img: Image.Image, path: Path, session_id: str) -> Option
 
 # CAPTION CLEANING
 
+_YEAR_RANGE_OCR_RE = re.compile(r'(\d{4})\s+(?:ta|t0)\s+(\d{4})', re.IGNORECASE)
+
+
+_CAPTION_MAX_WORDS = 50
+_CAPTION_MIN_WORDS = 5
+_CAPTION_MIN_CHARS = 10
+
+
 def _clean_caption(text: str) -> Optional[str]:
     if not text:
         return None
     text = text.strip()
+    # Fix common vision-model OCR confusions in year ranges ("2003 ta 2023" → "2003 to 2023")
+    text = _YEAR_RANGE_OCR_RE.sub(r'\1 to \2', text)
+    text = unicodedata.normalize("NFC", text)
     lower = text.lower()
     for prefix in _WEAK_PREFIXES:
         if lower.startswith(prefix):
             text = text[len(prefix):].strip()
             lower = text.lower()
             break
-    words = text.split()
-    if len(words) < 5:
-        return None
-    text = " ".join(words[:30])
-    return text[0].upper() + text[1:] if text else None
-
-
-# CAPTION GENERATION — VISION PROVIDER
-
-def _generate_caption(file_path: str, img: Image.Image, session_id: str) -> str:
+    if "\x00" in text:
+        text = text.replace("\x00", "")
     try:
-        from app.ingestion.frame_captioner import generate_caption
-        raw = generate_caption(file_path, session_id=session_id)
-        caption = _clean_caption(raw) if raw else None
+        from app.guardrails.input_guard import sanitize as _guard_sanitize
+        text = _guard_sanitize(text, surface="frame_captioner")
+    except Exception:
+        pass
+    words = text.split()
+    if len(words) < _CAPTION_MIN_WORDS:
+        return None
+    text = " ".join(words[:_CAPTION_MAX_WORDS])
+    text = text[0].upper() + text[1:] if text else text
+    if len(text) < _CAPTION_MIN_CHARS:
+        return None
+    return text
+
+
+# CAPTION + CLASSIFICATION — VISION PROVIDER
+
+def _classify_and_caption(
+    file_path: str, ocr_text: str, session_id: str
+) -> Tuple[str, str, List[str]]:
+    try:
+        from app.chunking.image_chunker import classify_and_caption
+        raw_caption, image_type, extracted_numbers = classify_and_caption(
+            file_path, session_id=session_id, ocr_text=ocr_text, use_cache=True
+        )
+        caption = _clean_caption(raw_caption) if raw_caption else None
         if caption and len(caption.split()) >= 5:
-            return caption.strip()
+            return caption.strip(), image_type, extracted_numbers
     except Exception as exc:
         logger.warning(event="caption_failed", error=str(exc), session_id=session_id)
 
-    return "[Image: no caption generated]"
+    return "[Image: no caption generated]", "infographic", []
 
 
 # QUALITY SCORE
@@ -661,7 +689,7 @@ def ingest(
 
         # ANALYSIS
         ocr_text = _extract_ocr(img, session_id)
-        caption = _generate_caption(file_path, img, session_id)
+        caption, image_type, extracted_numbers = _classify_and_caption(file_path, ocr_text, session_id)
         blur = _blur_score(img)
         ph = _phash(img)
         solid = _is_solid_color(img)
@@ -770,6 +798,8 @@ def ingest(
                     "embedding_space":   "text",
                     "caption":           caption_clean,
                     "caption_confidence": cap_conf,
+                    "image_type":        image_type,
+                    "extracted_numbers": extracted_numbers,
                     "width":             width,
                     "height":            height,
                     "is_solid_color":    solid,
@@ -801,7 +831,13 @@ def ingest(
                     source_type="image",
                     source=source_name,
                     metadata=metadata,
-                    structure={**base_structure, "content_type": "image_ocr", "embedding_space": "text"},
+                    structure={
+                        **base_structure,
+                        "content_type":      "image_ocr",
+                        "embedding_space":   "text",
+                        "image_type":        image_type,
+                        "extracted_numbers": extracted_numbers,
+                    },
                     extra_metadata={
                         "modality_weight": 0.9,
                         "importance_score": min(quality + 0.1, 1.0),
@@ -831,6 +867,8 @@ def ingest(
                     "frame_path":        source_path,
                     "caption":           caption_clean,
                     "caption_confidence": cap_conf,
+                    "image_type":        image_type,
+                    "extracted_numbers": extracted_numbers,
                     "blur_score":        blur,
                     "quality_score":     quality,
                     "solid_color":       solid,
@@ -852,8 +890,10 @@ def ingest(
         # MULTI-PAGE TIFF — ADDITIONAL PAGES
         for page_idx, page_img in enumerate(tiff_pages[1:], start=1):
             try:
-                page_caption = _generate_caption(file_path, page_img, session_id)
                 page_ocr = _extract_ocr(page_img, session_id)
+                page_caption, page_image_type, page_extracted_numbers = _classify_and_caption(
+                    file_path, page_ocr, session_id
+                )
                 _pc_norm = redact_pii(normalize_text(page_caption))
                 try:
                     from app.guardrails.input_guard import sanitize as _gs
@@ -871,9 +911,11 @@ def ingest(
                         metadata=metadata,
                         structure={
                             **base_structure,
-                            "content_type": "tiff_page_caption",
-                            "tiff_page": page_idx,
-                            "embedding_space": "text",
+                            "content_type":      "tiff_page_caption",
+                            "tiff_page":         page_idx,
+                            "embedding_space":   "text",
+                            "image_type":        page_image_type,
+                            "extracted_numbers": page_extracted_numbers,
                         },
                         extra_metadata={
                             "modality_weight": 1.0,
@@ -900,9 +942,11 @@ def ingest(
                             metadata=metadata,
                             structure={
                                 **base_structure,
-                                "content_type": "tiff_page_ocr",
-                                "tiff_page": page_idx,
-                                "embedding_space": "text",
+                                "content_type":      "tiff_page_ocr",
+                                "tiff_page":         page_idx,
+                                "embedding_space":   "text",
+                                "image_type":        page_image_type,
+                                "extracted_numbers": page_extracted_numbers,
                             },
                             extra_metadata={
                                 "modality_weight": 0.9,
@@ -969,4 +1013,73 @@ def ingest(
 
 async def async_ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
     return await asyncio.to_thread(ingest, file_path, session_id)
+
+
+# ─── Phase 1: ImageIngestor ────────────────────────────────────────────────────
+
+from app.ingestion.base_ingest import BaseIngestor
+from app.ingestion.schema import RawExtract, UniversalMetadata
+
+
+class ImageIngestor(BaseIngestor):
+    """Extracts raw image bytes from image files → List[RawExtract].
+
+    Phase 1 responsibility: file validation + PIL load + raw bytes packaging.
+    Does NOT caption or OCR. The chunker (Phase 2) calls BLIP2/TrOCR.
+    """
+
+    async def extract(
+        self,
+        path: Path,
+        metadata: UniversalMetadata,
+    ) -> List[RawExtract]:
+        _validate_image_file(path)
+        _check_disk_space(path)
+
+        # Load image to validate it opens + apply EXIF rotation + ICC profile
+        img = await asyncio.get_event_loop().run_in_executor(
+            None, _load_image, path, str(getattr(metadata, "session_id", ""))
+        )
+
+        # Capture raw bytes as PNG for chunker
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        raw_bytes = buf.getvalue()
+
+        width, height = img.size
+
+        # Basic EXIF metadata
+        exif_data: dict = {}
+        try:
+            from PIL.ExifTags import TAGS
+            raw_exif = img._getexif() or {}
+            exif_data = {TAGS.get(k, k): str(v) for k, v in raw_exif.items() if v is not None}
+        except Exception:
+            pass
+
+        # Perceptual hash (for dedup signal in chunker)
+        phash_str: str = ""
+        try:
+            import imagehash
+            phash_str = str(imagehash.phash(img))
+        except Exception:
+            pass
+
+        return [
+            RawExtract(
+                text="",
+                extract_type="image_raw",
+                bbox=None,
+                raw_source_ref=f"image:{path.name}",
+                raw_bytes=raw_bytes,
+                extra={
+                    "width": width,
+                    "height": height,
+                    "format": path.suffix.lower().lstrip("."),
+                    "phash": phash_str,
+                    "exif": exif_data,
+                    "file_size": path.stat().st_size,
+                },
+            )
+        ]
 

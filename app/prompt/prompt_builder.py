@@ -310,116 +310,29 @@ def _system_prompt(
 
     if query_type == "financial":
         return (
-            "You are a precise financial analyst.\n"
-            "Answer ONLY using the provided CONTEXT chunks. Each chunk is\n"
-            "labelled [1], [2], [3]... — cite every fact with its number.\n"
+            "You are a precise financial analyst. Answer ONLY from the CONTEXT "
+            "chunks, each labelled [1], [2], [3].\n"
             "\n"
-            "EXACT FIGURES RULE (HIGHEST PRIORITY — non-negotiable):\n"
-            "  Financial statements express figures IN MILLIONS.\n"
-            "  A number like '383,285' in a table means $383,285 million — report it as '$383,285 million'.\n"
-            "  NEVER round: e.g. '$383,285 million' must NOT become '$383.3 billion'.\n"
-            "  NEVER round: e.g. '$96,995 million' must NOT become '$97.0 billion'.\n"
-            "  If a table row has columns [FY2023 | FY2022 | FY2021], the FIRST number is FY2023.\n"
+            "Rules:\n"
+            "- Use only figures that appear verbatim in the context. Never "
+            "calculate, infer, or recall a number from memory.\n"
+            "- Report each figure exactly as written, with its unit (a value of "
+            "383,285 in a millions table is \"$383,285 million\").\n"
+            "- 10-K tables list years newest-first, left to right. Report only "
+            "the year the question asks about.\n"
+            "- Basic and Diluted EPS are different rows — use the one asked for.\n"
+            "- When the context states an explicit change (e.g. \"decreased 27% "
+            "or $10.8 billion\"), quote that figure; never recompute it.\n"
+            "- If the context has a line beginning [COMPUTED SUMMARY] or [AUDIO "
+            "SUMMARY], take the answer from that line and ignore raw table rows.\n"
+            "- Answer only what is asked. Do not add prior-year figures unless "
+            "the question asks to compare.\n"
+            "- If the figure is not in the context, reply exactly: \"I could not "
+            "find this in the provided sources.\"\n"
             "\n"
-            "COLUMN ORDER RULE (critical for multi-year tables):\n"
-            "  Tables in 10-K filings list years left-to-right: most-recent first.\n"
-            "  Row: '[Metric] | [A] | [B] | [C]'  →  FY2023=[A], FY2022=[B], FY2021=[C]\n"
-            "  Do NOT confuse columns. Report ONLY the year that was asked about.\n"
-            "\n"
-            "ROW IDENTIFICATION RULE (critical for EPS tables):\n"
-            "  'Basic' and 'Diluted' are DIFFERENT rows — never swap them.\n"
-            "  If asked for DILUTED EPS, read ONLY the 'Diluted' row. Ignore the 'Basic' row.\n"
-            "  Example table:\n"
-            "    Basic   | [X] | [Y] | [Z]    ← BASIC EPS rows\n"
-            "    Diluted | [A] | [B] | [C]    ← DILUTED EPS rows\n"
-            "  FY2022 diluted EPS = [B]  (NOT [Y] which is the Basic row)\n"
-            "\n"
-            "NO-CALCULATION RULE:\n"
-            "  When the context provides an EXPLICIT dollar change (e.g., 'decreased $X billion'),\n"
-            "  use that exact figure. NEVER calculate the dollar change by applying a percentage to\n"
-            "  another number — percentages and base values in different rows create rounding errors.\n"
-            "  CORRECT: use the verbatim '[Product] net sales decreased Y% or $Z billion'\n"
-            "  WRONG:   calculate Y% of some base number and report a different amount\n"
-            "\n"
-            "PRODUCT SEGMENT DECLINE RULE (for 'largest decline' questions):\n"
-            "  When a context chunk explicitly states '[Product] net sales decreased Y% or $Z', that IS\n"
-            "  the authoritative answer. Do NOT compute. Do NOT estimate. Do NOT invent a figure.\n"
-            "  Step 1 — Scan ALL context chunks for lines matching: '[Product] net sales decreased X% or $Y'\n"
-            "  Step 2 — Compare those STATED percentages to find the largest decline.\n"
-            "  Step 3 — Report the product, its stated % decline, AND its stated $ amount verbatim.\n"
-            "  The $ amount MUST come from the explicit text ('or $Z billion') — NEVER compute it.\n"
-            "\n"
-            "ARITHMETIC RULE FOR COMPARISONS (ONLY when question explicitly asks to compare):\n"
-            "  Apply this rule ONLY when the question uses words like 'compare', 'change',\n"
-            "  'year-over-year', 'YoY', 'how did X compare', 'difference', 'more or less than'.\n"
-            "  If the question asks for a SINGLE year's figure, skip this rule entirely.\n"
-            "  When comparison IS asked:\n"
-            "  Step 1 — State both values: 'FY2023: $X million, FY2022: $Y million'\n"
-            "  Step 2 — Compute: delta = FY2023 − FY2022\n"
-            "  Step 3 — Direction: delta > 0 → INCREASED; delta < 0 → DECREASED\n"
-            "  Step 4 — State: 'decreased/increased by $|delta| million (X.X%)'\n"
-            "  NEVER reverse the sign.\n"
-            "\n"
-            "ARITHMETIC EXAMPLE (do NOT copy into answer — internal reference only):\n"
-            "  Table: '[Metric] | [A] | [B]'  →  FY2023=[A]M, FY2022=[B]M\n"
-            "  delta = [A] − [B]. If negative → DECREASED; if positive → INCREASED.\n"
-            "  State the delta as an absolute value with a direction word.\n"
-            "\n"
-            "COMPLETENESS RULE:\n"
-            "  If the question asks 'how did X compare' or 'how did they compare', include BOTH\n"
-            "  the current year AND the comparison year figures for ALL major line items.\n"
-            "  For net sales with Products/Services breakdown, include BOTH breakdowns.\n"
-            "  If asked about ALL product categories or declines, include ALL 5 categories:\n"
-            "  Mac, iPhone, iPad, Wearables/Home/Accessories, AND Services.\n"
-            "  For cash/liquidity questions, include: (1) balance sheet cash equivalents,\n"
-            "  (2) total restricted cash if mentioned, (3) capital return info (buybacks+dividends)\n"
-            "  IF those figures appear in the context.\n"
-            "\n"
-            "BALANCE SHEET CASH RULE:\n"
-            "  'Cash and cash equivalents' (balance sheet line) ≠ 'cash, cash equivalents and\n"
-            "  restricted cash' (cash flow statement line). These are DIFFERENT figures.\n"
-            "  Balance sheet: 'Cash and cash equivalents | [BS_A] | [BS_B]'\n"
-            "    → FY2023 balance sheet cash = $[BS_A]M\n"
-            "    → FY2022 balance sheet cash = $[BS_B]M\n"
-            "  Cash flow statement ending balance is a DIFFERENT line item — do NOT mix it.\n"
-            "  Report ONLY the specific line item the question asks about.\n"
-            "\n"
-            "ANTI-HALLUCINATION RULE:\n"
-            "  Report ONLY figures that appear verbatim in the context chunks.\n"
-            "  Do NOT derive, infer, or calculate numbers not in the context.\n"
-            "  Do NOT report beginning balances, net changes, or YoY comparisons unless the\n"
-            "  question explicitly asks for them AND the figures are in the context.\n"
-            "  If a context chunk contains multiple years' data, report ONLY the year asked about\n"
-            "  unless the question specifically asks for comparison.\n"
-            "\n"
-            "SCOPE RULE (strictly enforce — violations lose points):\n"
-            "  Answer EXACTLY what is asked — nothing more.\n"
-            "  If the question asks for FY2023 figures only, do NOT volunteer FY2022 figures.\n"
-            "  If the question asks for one balance sheet line, do NOT add YoY change calculations.\n"
-            "  Adding UNREQUESTED prior-year comparisons is a hallucination error even if the\n"
-            "  numbers seem plausible — they may be from the WRONG row (e.g. Basic vs Diluted EPS).\n"
-            "  WRONG: Question asks 'diluted EPS for FY2023' → model says '$[X], decreased from $[Y]'\n"
-            "    — volunteering FY2022 is wrong AND $[Y] may be the BASIC row, not DILUTED.\n"
-            "  CORRECT: Answer only the specific value asked for.\n"
-            "\n"
-            "TIME-SERIES DATA RULE (for S&P 500 / XLSX queries):\n"
-            "  If context contains a [COMPUTED SUMMARY] block, extract answers DIRECTLY from it.\n"
-            "  IGNORE all raw table rows — use ONLY the [COMPUTED SUMMARY] values:\n"
-            "  - 'closing value at end of year YYYY': read 'Year YYYY: close=X (YYYY-MM-DD)'\n"
-            "  - 'highest value in dataset': read 'Overall maximum: X on DATE'\n"
-            "  - 'average for year YYYY': read 'Year YYYY: avg=X'\n"
-            "  - 'percentage change from start of YYYY1 to end of YYYY2': read\n"
-            "    'Cross-period: start of YYYY1 (..., V1) to end of YYYY2 (..., V2) = PCT%'\n"
-            "  Do NOT recalculate from raw rows. Do NOT use rounded figures like '3,840'.\n"
-            "  Report exact 2-decimal figures as shown in the summary.\n"
-            "  CRITICAL: NEVER output raw data rows (e.g. 'Date | Value | ...' lines) in your answer.\n"
-            "  Your answer must be ONE clean sentence using the extracted value.\n"
-            "\n"
-            "ADDITIONAL RULES:\n"
-            "1. Report figures EXACTLY as in the source — millions = millions, not billions.\n"
-            "2. Never round a figure that appears as an exact integer in the source.\n"
-            "3. Do NOT add unrequested calculations, ratios, or YoY comparisons.\n"
-            "4. If the answer is not in the context, reply: 'I could not find this in the provided sources.'\n\n"
+            "Write the answer as one or two clean sentences with inline [n] "
+            "citations. Do NOT restate these rules, show your reasoning, write "
+            "section labels, or print table rows.\n\n"
         )
 
     if query_type == "comparative":
@@ -552,11 +465,14 @@ def _output_format(
     query_type: str,
 ) -> str:
 
-    if structured:
-        return "OUTPUT:\n<exact answer>"
-
     if is_code:
         return "OUTPUT:\n```\n<code here>\n```"
+
+    if structured:
+        return (
+            "Reply with only the exact answer requested, as plain text. "
+            "Do NOT add labels, headings, or reasoning.\n"
+        )
 
     if query_type == "financial":
         return (
@@ -567,20 +483,24 @@ def _output_format(
 
     if query_type == "comparative":
         return (
-            "Write your answer below. Start with a complete sentence.\n"
-            "Entity A: [description]\n"
-            "Entity B: [description]\n"
-            "Comparison: [key differences and similarities]"
+            "Write one clean paragraph that describes each item and then states "
+            "the key differences and similarities. Cite sources with [n] inline. "
+            "Do NOT use 'Entity A:', 'Comparison:', or any other section labels.\n"
         )
 
     if query_type == "temporal":
         return (
-            "Write your answer below. Start with a complete sentence.\n"
-            "Timeline: [chronological summary]\n"
-            "Answer: [direct answer]"
+            "Write one clean answer that keeps events in chronological order. "
+            "Cite sources with [n] inline. Do NOT use 'Timeline:' or 'Answer:' "
+            "labels.\n"
         )
 
-    return "Write your complete answer below. Begin with a full sentence:\n"
+    # Default — covers image / audio / video / general modalities.
+    return (
+        "Write a clean, direct answer in one or two sentences using only the "
+        "context. Cite sources with [n] inline. Do NOT show reasoning, restate "
+        "these rules, or add section labels.\n"
+    )
 
 
 class PromptBuilder:

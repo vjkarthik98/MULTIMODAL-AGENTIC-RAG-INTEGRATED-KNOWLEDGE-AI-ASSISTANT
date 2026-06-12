@@ -1260,6 +1260,19 @@ def query_pipeline(
         except Exception as _og_err:
             logger.warning(event="output_guard_failed", error=str(_og_err), session_id=session_id)
 
+        # LEAKED-INSTRUCTION + HEDGE STRIPPER — apply the SAME cleaning as the
+        # streaming path so the meta/non-stream answer (used as the stream's
+        # refusal fallback, and on direct /rag/query calls) is equally clean: no
+        # echoed prompt rules, and no trailing "no relevant information" hedge
+        # appended after real content (which would make the UI hide the source
+        # chips). rag_pipeline never imports query_pipeline, so this is safe.
+        try:
+            from app.pipeline.rag_pipeline import _strip_leaked_instructions
+            answer = _strip_leaked_instructions(answer)
+        except Exception as _leak_err:
+            logger.warning(event="query_pipeline_leak_strip_failed",
+                           error=str(_leak_err), session_id=session_id)
+
         # CITATION TRACKING — keep only source chips the LLM actually cited.
         # The system prompt asks the LLM to write [1], [2] etc.; we parse
         # those indices here before stripping them from the answer text.

@@ -49,6 +49,11 @@ MODEL_NAMES = (
     "text_embedder",
     "siglip",
     "blip",
+    "blip2",
+    "llava",
+    "trocr",
+    "diarizer",
+    "ner",
     "whisper",
     "reranker",
 )
@@ -58,6 +63,11 @@ _HYBRID_MAP: Dict[str, str] = {
     "llm":            "cuda",
     "siglip":         "cuda",
     "blip":           "cuda",
+    "blip2":          "cuda",
+    "llava":          "cuda",
+    "trocr":          "cuda",
+    "diarizer":       "cuda",
+    "ner":            "cuda",
     "whisper":        "cuda",
     "text_embedder":  "cpu",
     "reranker":       "cpu",
@@ -164,6 +174,11 @@ class DeviceManager:
             "reranker":      settings.RERANKER_DEVICE,
             "siglip":        settings.SIGLIP_DEVICE,
             "blip":          settings.BLIP_DEVICE,
+            "blip2":         settings.BLIP2_DEVICE,
+            "llava":         settings.LLAVA_DEVICE,
+            "trocr":         settings.TROCR_DEVICE,
+            "diarizer":      settings.DIARIZER_DEVICE,
+            "ner":           settings.NER_DEVICE,
             "whisper":       settings.WHISPER_DEVICE,
         }
         return (overrides.get(name) or "").strip().lower()
@@ -208,12 +223,16 @@ class DeviceManager:
             if name == "whisper":
                 ct = (settings.WHISPER_COMPUTE_TYPE or "").strip().lower()
                 return ct or "float16"
-            if name in ("siglip", "blip") and settings.VISION_HALF_PRECISION:
+            if name in ("siglip", "blip", "trocr", "ner") and settings.VISION_HALF_PRECISION:
                 return "float16"
+            if name in ("blip2", "llava"):
+                # 8-bit load handled by get_blip2/get_llava — dtype not used directly
+                return "float16"
+            if name == "diarizer":
+                return "float32"  # pyannote does its own dtype management
             if name == "text_embedder" and settings.EMBEDDER_HALF_PRECISION:
                 return "float16"
             if name == "reranker":
-                # CrossEncoder benefits from float16 on GPU
                 return "float16"
             # LLM dtype is irrelevant — llama.cpp uses GGUF quant internally
             return "float32"

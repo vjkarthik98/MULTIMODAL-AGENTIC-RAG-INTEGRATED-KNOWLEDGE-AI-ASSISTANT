@@ -134,6 +134,18 @@ class ModelLoader:
         self._blip_model                         = None
         self._blip_processor                     = None
         self._blip_device:          Optional[str] = None
+        # New Phase MAGIK models
+        self._blip2_model                        = None
+        self._blip2_processor                    = None
+        self._blip2_device:         Optional[str] = None
+        self._llava_model                        = None
+        self._llava_processor                    = None
+        self._llava_device:         Optional[str] = None
+        self._trocr_model                        = None
+        self._trocr_processor                    = None
+        self._trocr_device:         Optional[str] = None
+        self._diarizer:             Optional[Any] = None
+        self._ner:                  Optional[Any] = None
 
         self._initialized = False
 
@@ -508,6 +520,160 @@ class ModelLoader:
 
         return self._reranker
 
+    # BLIP2 — IMAGE CAPTIONING (replaces BLIP-1 in Phase 2+)
+
+    def get_blip2(self) -> Tuple:
+        if self._blip2_model:
+            return self._blip2_processor, self._blip2_model, self._blip2_device
+
+        with self._lock:
+            if self._blip2_model:
+                return self._blip2_processor, self._blip2_model, self._blip2_device
+
+            decision = device_manager.decision_for("blip2")
+
+            def _load():
+                from transformers import Blip2Processor, Blip2ForConditionalGeneration  # local
+                processor = Blip2Processor.from_pretrained(settings.BLIP2_MODEL)
+                load_kwargs: dict = {}
+                if settings.BLIP2_LOAD_IN_8BIT and decision.device == "cuda":
+                    load_kwargs["load_in_8bit"] = True
+                elif decision.device == "cuda" and decision.dtype == "float16":
+                    load_kwargs["torch_dtype"] = _torch_dtype("float16")
+                model = Blip2ForConditionalGeneration.from_pretrained(
+                    settings.BLIP2_MODEL, **load_kwargs
+                )
+                if not settings.BLIP2_LOAD_IN_8BIT:
+                    model.to(decision.device)
+                model.eval()
+                return processor, model
+
+            self._blip2_processor, self._blip2_model = self._safe_load(_load, "blip2")
+            self._blip2_device = decision.device
+
+        return self._blip2_processor, self._blip2_model, self._blip2_device
+
+    # LLAVA — VIDEO FRAME CAPTIONING (T4: evict LLM first via _VIDEO_SLOT_LOCK)
+
+    _VIDEO_SLOT_LOCK = threading.Lock()
+
+    def get_llava(self) -> Tuple:
+        if self._llava_model:
+            return self._llava_processor, self._llava_model, self._llava_device
+
+        with self._lock:
+            if self._llava_model:
+                return self._llava_processor, self._llava_model, self._llava_device
+
+            decision = device_manager.decision_for("llava")
+
+            def _load():
+                from transformers import LlavaForConditionalGeneration, AutoProcessor  # local
+                processor = AutoProcessor.from_pretrained(settings.LLAVA_MODEL)
+                load_kwargs: dict = {}
+                if settings.LLAVA_LOAD_IN_8BIT and decision.device == "cuda":
+                    load_kwargs["load_in_8bit"] = True
+                elif decision.device == "cuda":
+                    load_kwargs["torch_dtype"] = _torch_dtype("float16")
+                model = LlavaForConditionalGeneration.from_pretrained(
+                    settings.LLAVA_MODEL, **load_kwargs
+                )
+                if not settings.LLAVA_LOAD_IN_8BIT:
+                    model.to(decision.device)
+                model.eval()
+                return processor, model
+
+            self._llava_processor, self._llava_model = self._safe_load(_load, "llava")
+            self._llava_device = decision.device
+
+        return self._llava_processor, self._llava_model, self._llava_device
+
+    # TROCR — PRINTED OCR FOR FINANCIAL DOCUMENTS
+
+    def get_trocr(self) -> Tuple:
+        if self._trocr_model:
+            return self._trocr_processor, self._trocr_model, self._trocr_device
+
+        with self._lock:
+            if self._trocr_model:
+                return self._trocr_processor, self._trocr_model, self._trocr_device
+
+            decision = device_manager.decision_for("trocr")
+
+            def _load():
+                from transformers import TrOCRProcessor, VisionEncoderDecoderModel  # local
+                processor = TrOCRProcessor.from_pretrained(settings.TROCR_MODEL)
+                kwargs = {}
+                if decision.device == "cuda" and decision.dtype == "float16":
+                    kwargs["torch_dtype"] = _torch_dtype("float16")
+                model = VisionEncoderDecoderModel.from_pretrained(settings.TROCR_MODEL, **kwargs)
+                model.to(decision.device)
+                model.eval()
+                return processor, model
+
+            self._trocr_processor, self._trocr_model = self._safe_load(_load, "trocr")
+            self._trocr_device = decision.device
+
+        return self._trocr_processor, self._trocr_model, self._trocr_device
+
+    # PYANNOTE DIARIZER — SPEAKER DIARIZATION (requires HF_TOKEN + license)
+
+    def get_diarizer(self):
+        if self._diarizer:
+            return self._diarizer
+
+        with self._lock:
+            if self._diarizer:
+                return self._diarizer
+
+            if not settings.HF_TOKEN:
+                raise RuntimeError(
+                    "Diarizer requires HF_TOKEN with pyannote model access. "
+                    "Set HF_TOKEN in .env and accept the model license at hf.co."
+                )
+
+            decision = device_manager.decision_for("diarizer")
+
+            def _load():
+                from pyannote.audio import Pipeline  # local
+                import torch
+                pipeline = Pipeline.from_pretrained(
+                    settings.DIARIZATION_MODEL,
+                    use_auth_token=settings.HF_TOKEN,
+                )
+                if decision.device == "cuda":
+                    pipeline = pipeline.to(torch.device("cuda"))
+                return pipeline
+
+            self._diarizer = self._safe_load(_load, "diarizer")
+
+        return self._diarizer
+
+    # BERT-NER — FINANCE ENTITY EXTRACTION
+
+    def get_ner(self):
+        if self._ner:
+            return self._ner
+
+        with self._lock:
+            if self._ner:
+                return self._ner
+
+            decision = device_manager.decision_for("ner")
+
+            def _load():
+                from transformers import pipeline as hf_pipeline  # local
+                return hf_pipeline(
+                    "ner",
+                    model=settings.NER_MODEL,
+                    aggregation_strategy="simple",
+                    device=0 if decision.device == "cuda" else -1,
+                )
+
+            self._ner = self._safe_load(_load, "ner")
+
+        return self._ner
+
     # HEALTH CHECK
 
     def health_check(self) -> Dict[str, Any]:
@@ -520,6 +686,11 @@ class ModelLoader:
             "multimodal":           self._multimodal is not None,
             "whisper":              self._whisper is not None,
             "blip":                 self._blip_model is not None,
+            "blip2":                self._blip2_model is not None,
+            "llava":                self._llava_model is not None,
+            "trocr":                self._trocr_model is not None,
+            "diarizer":             self._diarizer is not None,
+            "ner":                  self._ner is not None,
             "reranker":             self._reranker is not None,
             "device":               device_manager.device_for("llm"),
             "profile":              device_manager.profile,
@@ -556,12 +727,23 @@ class ModelLoader:
             self._blip_model           = None
             self._blip_processor       = None
             self._blip_device          = None
+            self._blip2_model          = None
+            self._blip2_processor      = None
+            self._blip2_device         = None
+            self._llava_model          = None
+            self._llava_processor      = None
+            self._llava_device         = None
+            self._trocr_model          = None
+            self._trocr_processor      = None
+            self._trocr_device         = None
+            self._diarizer             = None
+            self._ner                  = None
             self._initialized          = False
 
             for name in (
                 "LLM", "TextEmbedder", "SigLIP", "SigLIPText",
                 "ImageEmbedder", "MultimodalEmbedder", "Whisper",
-                "BLIP", "Reranker",
+                "BLIP", "blip2", "llava", "trocr", "diarizer", "ner", "Reranker",
             ):
                 _model_loaded.labels(model=name).set(0)
 

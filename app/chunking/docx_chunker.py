@@ -1,0 +1,305 @@
+from __future__ import annotations
+
+import io
+import re
+from pathlib import Path
+from typing import Dict, List, Optional
+
+from app.chunking.base_chunker import BaseChunker
+from app.chunking.finance_numbers import (
+    deterministic_chunk_id,
+    extract_finance_entities,
+)
+from app.ingestion.schema import IngestedDocument, RawExtract, UniversalMetadata
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+_DEFINED_TERM_RE = re.compile(
+    r'"?([A-Z][a-zA-Z\s]{2,40})"?\s+(?:means?|shall mean|is defined as)\s+',
+    re.IGNORECASE,
+)
+_BOLD_TERM_RE = re.compile(r"\*\*(.+?)\*\*")
+_ITALIC_TERM_RE = re.compile(r"\*(.+?)\*|_(.+?)_")
+
+_TABLE_GROUP_SIZE = 5
+_TABLE_OVERLAP_ROWS = 2
+
+
+def _caption_bytes(raw_bytes: bytes) -> str:
+    try:
+        from PIL import Image
+        from app.chunking.image_chunker import blip2_caption
+        img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+        return blip2_caption(img)
+    except Exception as exc:
+        logger.warning(event="docx_blip2_failed", error=str(exc))
+        return ""
+
+
+def _heading_level_from_style(style_name: Optional[str]) -> int:
+    """Extract numeric heading level from DOCX style name (e.g. 'Heading 2' → 2)."""
+    if not style_name:
+        return 0
+    m = re.search(r"heading\s*(\d)", style_name, re.IGNORECASE)
+    return int(m.group(1)) if m else 0
+
+
+class DocxChunker(BaseChunker):
+    """Finance-grade chunker for Word documents (investment memos, term sheets, agreements)."""
+
+    def chunk(
+        self,
+        extracts: List[RawExtract],
+        meta: UniversalMetadata,
+    ) -> List[IngestedDocument]:
+        source = Path(meta.source_path).name or "unknown.docx"
+        surface = "docx_chunker"
+
+        docs: List[IngestedDocument] = []
+        chunk_idx = [0]
+
+        # Section hierarchy stack: index = level-1, value = heading text
+        hierarchy: List[str] = []
+        prose_buf: str = ""
+        pending_table_rows: List[RawExtract] = []
+        table_headers: List[str] = []
+        defined_terms: Dict[str, str] = {}
+        seen_hashes: set = set()
+
+        def current_heading() -> Optional[str]:
+            return hierarchy[-1] if hierarchy else None
+
+        def flush_prose() -> None:
+            nonlocal prose_buf
+            if not prose_buf.strip():
+                return
+            for piece in self._split_text(prose_buf):
+                if not piece.strip():
+                    continue
+                h = hash(piece)
+                if h in seen_hashes:
+                    continue
+                seen_hashes.add(h)
+
+                bold_terms = _BOLD_TERM_RE.findall(piece)
+                italic_terms = [g1 or g2 for g1, g2 in _ITALIC_TERM_RE.findall(piece)]
+                # Capture defined terms from this prose chunk
+                for m in _DEFINED_TERM_RE.finditer(piece):
+                    term = m.group(1).strip()
+                    defined_terms[term] = piece[m.end(): m.end() + 80].strip()
+
+                fin_entities = extract_finance_entities(piece)
+                chunk_hash = deterministic_chunk_id(source, f"para_{chunk_idx[0]}", chunk_idx[0])
+                structure = {
+                    "chunk_hash_id":    chunk_hash,
+                    "source_file":      source,
+                    "chunk_index":      chunk_idx[0],
+                    "heading":          current_heading(),
+                    "heading_hierarchy": hierarchy[:],
+                    "heading_level":    len(hierarchy),
+                    "chunk_type":       "paragraph",
+                    "has_bold_terms":   bold_terms,
+                    "has_italic_terms": italic_terms,
+                    "defined_terms":    {},
+                    "finance_entities": fin_entities,
+                }
+                doc = self._make_doc(
+                    text=piece,
+                    modality="word",
+                    subtype="paragraph",
+                    source=source,
+                    page=None,
+                    chunk_idx=chunk_idx[0],
+                    structure=structure,
+                    meta=meta,
+                    surface=surface,
+                )
+                if doc:
+                    docs.append(doc)
+                    chunk_idx[0] += 1
+            prose_buf = ""
+
+        def flush_table() -> None:
+            nonlocal pending_table_rows, table_headers
+            if not pending_table_rows:
+                return
+            step = _TABLE_GROUP_SIZE
+            overlap = _TABLE_OVERLAP_ROWS
+            i = 0
+            while i < len(pending_table_rows):
+                group = pending_table_rows[i: i + step]
+                row_texts = [r.text for r in group]
+                header_line = " | ".join(table_headers) if table_headers else ""
+                nl_text = (f"{header_line}\n" if header_line else "") + "\n".join(row_texts)
+                fin_entities = extract_finance_entities(nl_text)
+                row_range = [i + 1, min(i + step, len(pending_table_rows))]
+                chunk_hash = deterministic_chunk_id(source, f"table_r{row_range[0]}_{chunk_idx[0]}", chunk_idx[0])
+                structure = {
+                    "chunk_hash_id":    chunk_hash,
+                    "source_file":      source,
+                    "chunk_index":      chunk_idx[0],
+                    "heading":          current_heading(),
+                    "heading_hierarchy": hierarchy[:],
+                    "heading_level":    len(hierarchy),
+                    "chunk_type":       "table",
+                    "column_headers":   table_headers[:],
+                    "row_range":        row_range,
+                    "defined_terms":    {},
+                    "finance_entities": fin_entities,
+                }
+                doc = self._make_doc(
+                    text=nl_text,
+                    modality="word",
+                    subtype="table",
+                    source=source,
+                    page=None,
+                    chunk_idx=chunk_idx[0],
+                    structure=structure,
+                    meta=meta,
+                    surface=surface,
+                )
+                if doc:
+                    docs.append(doc)
+                    chunk_idx[0] += 1
+                i += step - overlap
+            pending_table_rows = []
+            table_headers = []
+
+        for ext in extracts:
+            etype = ext.extract_type
+
+            if etype == "header_footer":
+                continue
+
+            if etype == "heading":
+                flush_prose()
+                flush_table()
+                heading_text = (ext.text or "").strip()
+                level = _heading_level_from_style(ext.style_name) or 1
+                # Trim hierarchy to the level above and append new heading.
+                hierarchy = hierarchy[: level - 1]
+                if heading_text:
+                    hierarchy.append(heading_text)
+                continue
+
+            if etype == "table_row":
+                flush_prose()
+                row_text = (ext.text or "").strip()
+                if not row_text:
+                    continue
+                if not pending_table_rows:
+                    # First row — check if it's a header (no digits usually).
+                    if not re.search(r"\d", row_text):
+                        table_headers = [c.strip() for c in row_text.split("|") if c.strip()]
+                        continue
+                pending_table_rows.append(ext)
+                continue
+
+            if pending_table_rows and etype != "table_row":
+                flush_table()
+
+            if etype == "prose":
+                text = (ext.text or "").strip()
+                if not text:
+                    continue
+                prose_buf = (prose_buf + "\n\n" + text).strip() if prose_buf else text
+                continue
+
+            if etype == "comment":
+                flush_prose()
+                flush_table()
+                comment_text = (ext.text or "").strip()
+                if not comment_text:
+                    continue
+                chunk_hash = deterministic_chunk_id(source, f"comment_{chunk_idx[0]}", chunk_idx[0])
+                structure = {
+                    "chunk_hash_id":    chunk_hash,
+                    "source_file":      source,
+                    "chunk_index":      chunk_idx[0],
+                    "heading":          current_heading(),
+                    "heading_hierarchy": hierarchy[:],
+                    "chunk_type":       "annotation",
+                    "finance_entities": extract_finance_entities(comment_text),
+                }
+                doc = self._make_doc(
+                    text=comment_text,
+                    modality="word",
+                    subtype="annotation",
+                    source=source,
+                    page=None,
+                    chunk_idx=chunk_idx[0],
+                    structure=structure,
+                    meta=meta,
+                    surface=surface,
+                )
+                if doc:
+                    docs.append(doc)
+                    chunk_idx[0] += 1
+                continue
+
+            if etype == "image_region":
+                flush_prose()
+                flush_table()
+                raw = ext.raw_bytes or b""
+                cap = _caption_bytes(raw) if raw else ""
+                if not cap:
+                    continue
+                chunk_hash = deterministic_chunk_id(source, f"img_{chunk_idx[0]}", chunk_idx[0])
+                structure = {
+                    "chunk_hash_id":   chunk_hash,
+                    "source_file":     source,
+                    "chunk_index":     chunk_idx[0],
+                    "heading":         current_heading(),
+                    "heading_hierarchy": hierarchy[:],
+                    "chunk_type":      "figure_caption",
+                    "caption":         cap,
+                    "finance_entities": extract_finance_entities(cap),
+                }
+                doc = self._make_doc(
+                    text=cap,
+                    modality="word",
+                    subtype="paragraph",
+                    source=source,
+                    page=None,
+                    chunk_idx=chunk_idx[0],
+                    structure=structure,
+                    meta=meta,
+                    surface=surface,
+                )
+                if doc:
+                    docs.append(doc)
+                    chunk_idx[0] += 1
+                continue
+
+        flush_prose()
+        flush_table()
+
+        # Emit a definitions chunk if we collected any defined terms.
+        if defined_terms:
+            def_text = "\n".join(f"{k}: {v}" for k, v in defined_terms.items())
+            chunk_hash = deterministic_chunk_id(source, "definitions", chunk_idx[0])
+            structure = {
+                "chunk_hash_id":   chunk_hash,
+                "source_file":     source,
+                "chunk_index":     chunk_idx[0],
+                "chunk_type":      "definitions",
+                "defined_terms":   defined_terms,
+                "finance_entities": [],
+            }
+            doc = self._make_doc(
+                text=def_text,
+                modality="word",
+                subtype="definition",
+                source=source,
+                page=None,
+                chunk_idx=chunk_idx[0],
+                structure=structure,
+                meta=meta,
+                surface=surface,
+            )
+            if doc:
+                docs.append(doc)
+
+        logger.info(event="docx_chunking_done", source=source, chunks=len(docs))
+        return docs

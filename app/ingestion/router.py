@@ -18,11 +18,13 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from app.core.config import settings
 from app.core.response import ErrorCode, Modality, Severity, UniversalErrorResponse
 from app.ingestion.audio_ingest import ingest as audio_ingest
-from app.ingestion.document_ingest import ingest as document_ingest
+from app.ingestion.docx_ingest import ingest as word_ingest
 from app.ingestion.image_ingest import ingest as image_ingest
+from app.ingestion.pdf_ingest import ingest as pdf_ingest
 from app.ingestion.schema import IngestedDocument
-from app.ingestion.text_ingest import ingest as text_ingest
+from app.ingestion.txt_ingest import ingest as text_ingest
 from app.ingestion.video_ingest import ingest as video_ingest
+from app.ingestion.xlsx_ingest import ingest as excel_ingest
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -46,18 +48,25 @@ _ingestion_docs = Histogram(
 )
 
 # EXTENSION MAPS
-TEXT_EXTENSIONS: Set[str]     = {".txt", ".md", ".rst", ".csv", ".log", ".json", ".yaml", ".yml"}
-DOCUMENT_EXTENSIONS: Set[str] = {".pdf", ".docx", ".doc", ".xlsx", ".xls"}
-IMAGE_EXTENSIONS: Set[str]    = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif", ".heic", ".heif", ".gif", ".svg"}
-AUDIO_EXTENSIONS: Set[str]    = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma", ".aiff", ".opus"}
-VIDEO_EXTENSIONS: Set[str]    = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".ts"}
+TEXT_EXTENSIONS: Set[str]  = {".txt", ".md", ".rst", ".csv", ".log", ".json", ".yaml", ".yml"}
+PDF_EXTENSIONS: Set[str]   = {".pdf"}
+WORD_EXTENSIONS: Set[str]  = {".docx", ".doc"}
+EXCEL_EXTENSIONS: Set[str] = {".xlsx", ".xls"}
+IMAGE_EXTENSIONS: Set[str] = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif", ".heic", ".heif", ".gif", ".svg"}
+AUDIO_EXTENSIONS: Set[str] = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma", ".aiff", ".opus"}
+VIDEO_EXTENSIONS: Set[str] = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".ts"}
+
+# "document" kept as alias so any callers using old string still work
+DOCUMENT_EXTENSIONS: Set[str] = PDF_EXTENSIONS | WORD_EXTENSIONS | EXCEL_EXTENSIONS
 
 EXT_TO_MODALITY: Dict[str, str] = {
-    **{ext: "text"     for ext in TEXT_EXTENSIONS},
-    **{ext: "document" for ext in DOCUMENT_EXTENSIONS},
-    **{ext: "image"    for ext in IMAGE_EXTENSIONS},
-    **{ext: "audio"    for ext in AUDIO_EXTENSIONS},
-    **{ext: "video"    for ext in VIDEO_EXTENSIONS},
+    **{ext: "text"  for ext in TEXT_EXTENSIONS},
+    **{ext: "pdf"   for ext in PDF_EXTENSIONS},
+    **{ext: "word"  for ext in WORD_EXTENSIONS},
+    **{ext: "excel" for ext in EXCEL_EXTENSIONS},
+    **{ext: "image" for ext in IMAGE_EXTENSIONS},
+    **{ext: "audio" for ext in AUDIO_EXTENSIONS},
+    **{ext: "video" for ext in VIDEO_EXTENSIONS},
 }
 
 # MAGIC-BYTE MIME TO MODALITY MAP
@@ -68,11 +77,11 @@ MIME_TO_MODALITY: Dict[str, str] = {
     "text/x-rst":                  "text",
     "application/json":            "text",
     "application/x-yaml":          "text",
-    "application/pdf":             "document",
-    "application/msword":          "document",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "document",
-    "application/vnd.ms-excel":    "document",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":       "document",
+    "application/pdf":             "pdf",
+    "application/msword":          "word",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "word",
+    "application/vnd.ms-excel":    "excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":       "excel",
     "image/jpeg":                  "image",
     "image/png":                   "image",
     "image/gif":                   "image",
@@ -102,27 +111,33 @@ MIME_TO_MODALITY: Dict[str, str] = {
 }
 
 MODALITY_LABEL: Dict[str, str] = {
-    "text":     Modality.TEXT,
-    "document": Modality.PDF,
-    "image":    Modality.IMAGE,
-    "audio":    Modality.AUDIO,
-    "video":    Modality.VIDEO,
+    "text":  Modality.TEXT,
+    "pdf":   Modality.PDF,
+    "word":  Modality.PDF,
+    "excel": Modality.PDF,
+    "image": Modality.IMAGE,
+    "audio": Modality.AUDIO,
+    "video": Modality.VIDEO,
 }
 
 MODALITY_SIZE_LIMITS: Dict[str, int] = {
-    "text":     settings.MAX_FILE_SIZE_TEXT,
-    "document": settings.MAX_FILE_SIZE_PDF,
-    "image":    settings.MAX_FILE_SIZE_IMAGE,
-    "audio":    settings.MAX_FILE_SIZE_AUDIO,
-    "video":    settings.MAX_FILE_SIZE_VIDEO,
+    "text":  settings.MAX_FILE_SIZE_TEXT,
+    "pdf":   settings.MAX_FILE_SIZE_PDF,
+    "word":  settings.MAX_FILE_SIZE_DOCX,
+    "excel": settings.MAX_FILE_SIZE_XLSX,
+    "image": settings.MAX_FILE_SIZE_IMAGE,
+    "audio": settings.MAX_FILE_SIZE_AUDIO,
+    "video": settings.MAX_FILE_SIZE_VIDEO,
 }
 
 INGESTION_HANDLERS: Dict[str, Callable] = {
-    "text":     text_ingest,
-    "document": document_ingest,
-    "image":    image_ingest,
-    "audio":    audio_ingest,
-    "video":    video_ingest,
+    "text":  text_ingest,
+    "pdf":   pdf_ingest,
+    "word":  word_ingest,
+    "excel": excel_ingest,
+    "image": image_ingest,
+    "audio": audio_ingest,
+    "video": video_ingest,
 }
 
 MAX_INGESTED_DOCS: int = 5000

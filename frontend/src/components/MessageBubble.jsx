@@ -98,20 +98,9 @@ function isNoInfoResponse(content) {
   return NO_INFO_PATTERNS.some(p => lc.includes(p))
 }
 
-/* ── Modality colour + icon — single source of truth for both icon and chip text ── */
-function getModalityColor(source, isWeb) {
-  if (isWeb) return '#22d3ee'
-  const modality = typeof source === 'object' ? (source.modality || '') : ''
-  const raw = typeof source === 'string' ? source : (source.source || source.filename || source.file || '')
-  const ext = (raw.split('.').pop() || '').toUpperCase()
-  if (modality === 'audio' || ['MP3','WAV','M4A','OGG','FLAC','OPUS','AIFF','WMA'].includes(ext)) return '#a78bfa'
-  if (modality === 'video' || ['MP4','MOV','AVI','MKV','WEBM'].includes(ext))                    return '#60a5fa'
-  if (modality === 'image' || ['PNG','JPG','JPEG','GIF','WEBP'].includes(ext))                    return '#34d399'
-  if (['table','excel'].includes(modality) || ['XLS','XLSX','CSV'].includes(ext))                 return '#4ade80'
-  if (ext === 'PDF')                                                                               return '#f87171'
-  if (['DOC','DOCX'].includes(ext))                                                               return '#93c5fd'
-  if (ext === 'TXT')                                                                              return '#94a3b8'
-  return '#94a3b8'
+/* ── Modality colour + icon — unified teal for all source types ── */
+function getModalityColor(_source, _isWeb) {
+  return '#22d3ee'
 }
 
 function SourceIcon({ source, isWeb }) {

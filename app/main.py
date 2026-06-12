@@ -1,6 +1,16 @@
-# APP/MAIN.PY — PHASE 24 UPGRADE
+# APP/MAIN.PY — MAGIK FINANCE RAG v1.0
 # FASTAPI APPLICATION ENTRY POINT — WIRES EVERYTHING TOGETHER
 # SECTION 4.6 — LIFESPAN, MIDDLEWARE, OTEL, PROMETHEUS, CORS, RATE LIMIT
+
+# ── HF CACHE MUST BE SET BEFORE ANY TRANSFORMERS/TORCH IMPORT ──────────────
+import os as _os
+from pathlib import Path as _Path
+_hf_home = _os.getenv("HF_HOME", str(_Path(__file__).parents[1] / ".hf_cache"))
+_os.environ["HF_HOME"]              = _hf_home
+_os.environ["TRANSFORMERS_CACHE"]   = _hf_home + "/hub"
+_os.environ["HF_DATASETS_CACHE"]    = _hf_home + "/datasets"
+_os.environ["HF_HUB_CACHE"]        = _hf_home + "/hub"
+# ────────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
 
@@ -92,7 +102,7 @@ async def _init_qdrant_async() -> None:
 
 
 def _init_qdrant_sync() -> None:
-    from scripts.init_qdrant import initialize_qdrant
+    from app.bin.ops.init_qdrant import initialize_qdrant
     initialize_qdrant()
 
 
@@ -215,6 +225,14 @@ async def lifespan(app: FastAPI):
     _setup_audit_log()
     _setup_otel()
     _setup_prometheus()
+
+    # Model manifest check — fail fast if required models are not cached
+    try:
+        from app.core.startup_validator import validate_model_manifest
+        validate_model_manifest()
+    except RuntimeError as exc:
+        logger.critical(event="model_manifest_invalid", error=str(exc))
+        raise
 
     # BACKGROUND TASKS — network I/O and GPU model loads run concurrently
     # after Uvicorn is already accepting requests. Circuit breakers and lazy

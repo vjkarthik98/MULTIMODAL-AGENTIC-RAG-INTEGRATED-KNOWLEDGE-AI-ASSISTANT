@@ -39,8 +39,8 @@ if ! command -v ffmpeg &>/dev/null || ! command -v ffprobe &>/dev/null; then
     sudo apt-get install -y ffmpeg 2>&1 | grep -E "Setting up|already installed|error" || true
 fi
 
-echo "[start_server] Ensuring all models are present on nvme..."
-bash scripts/ensure_models.sh
+echo "[start_server] Ensuring all models are present..."
+bash app/bin/server/ensure_models.sh
 
 # Reduce CUDA memory fragmentation — must be set before PyTorch imports.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -52,5 +52,8 @@ exec uvicorn app.main:app \
     --workers 1 \
     --loop uvloop \
     --http httptools \
+    --timeout-keep-alive 30 \
+    --limit-concurrency 64 \
+    --backlog 256 \
     --log-level warning \
     "$@"
