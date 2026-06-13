@@ -616,6 +616,429 @@ class ImageEmbedder:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SIGLIP TEXT EMBEDDER
+# Text-side of the cross-modal retrieval pair. Moved from clip_text_embedder.py
+# (now deleted). Helper functions renamed to avoid conflicts with ImageEmbedder
+# helpers above (_cache_key → _siglip_text_cache_key, etc.)
+# ══════════════════════════════════════════════════════════════════════════════
+
+import unicodedata as _unicodedata
+import uuid as _uuid
+
+# SigLIP 64-token hard limit.
+_SIGLIP_MAX_TOKEN_LENGTH: int = 64
+
+
+def _make_siglip_text_metrics():
+    if not settings.PROMETHEUS_ENABLED:
+        class _Noop:
+            def observe(self, *a, **kw): pass
+            def inc(self, *a, **kw): pass
+            def labels(self, **kw): return self
+        n = _Noop()
+        return n, n, n, n
+    try:
+        from prometheus_client import Counter, Histogram
+        _sl = Histogram(
+            "siglip_text_embedding_latency_seconds",
+            "SigLIP text embedding batch latency",
+            ["batch_size"],
+        )
+        _se = Counter(
+            "siglip_text_embedding_errors_total",
+            "SigLIP text embedding failures",
+            ["reason"],
+        )
+        _st = Counter(
+            "siglip_text_embeddings_produced_total",
+            "Total SigLIP text embeddings produced",
+        )
+        _sc = Counter(
+            "siglip_text_embedding_cache_hits_total",
+            "Redis SigLIP text embedding cache hits",
+        )
+        return _sl, _se, _st, _sc
+    except Exception:
+        class _Noop:
+            def observe(self, *a, **kw): pass
+            def inc(self, *a, **kw): pass
+            def labels(self, **kw): return self
+        n = _Noop()
+        return n, n, n, n
+
+
+_ST_EMBED_LATENCY, _ST_EMBED_ERRORS, _ST_EMBED_TOTAL, _ST_CACHE_HITS = _make_siglip_text_metrics()
+
+_SIGLIP_TEXT_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+
+def _get_siglip_text_semaphore() -> asyncio.Semaphore:
+    global _SIGLIP_TEXT_SEMAPHORE
+    if _SIGLIP_TEXT_SEMAPHORE is None:
+        _SIGLIP_TEXT_SEMAPHORE = asyncio.Semaphore(settings.ASYNC_SEMAPHORE_WORKERS)
+    return _SIGLIP_TEXT_SEMAPHORE
+
+
+class SiglipTextEmbedderError(Exception):
+    pass
+
+ClipTextEmbedderError = SiglipTextEmbedderError
+
+
+class SiglipDimensionMismatchError(SiglipTextEmbedderError):
+    pass
+
+
+class NoValidTextsError(SiglipTextEmbedderError):
+    pass
+
+
+class TorchNotAvailableError(SiglipTextEmbedderError):
+    pass
+
+
+class SiglipTextEmbeddingResult:
+    def __init__(
+        self,
+        text_preview: str,
+        embedding: List[float],
+        embedding_dim: int,
+        model_name: str,
+        checksum_sha256: str,
+        token_count_estimate: int,
+        was_truncated: bool,
+        embedding_id: str,
+        latency_ms: float,
+        cache_hit: bool,
+        session_id: str,
+        language: Optional[str] = None,
+    ) -> None:
+        self.text_preview          = text_preview
+        self.embedding             = embedding
+        self.embedding_dim         = embedding_dim
+        self.model_name            = model_name
+        self.checksum_sha256       = checksum_sha256
+        self.token_count_estimate  = token_count_estimate
+        self.was_truncated         = was_truncated
+        self.embedding_id          = embedding_id
+        self.latency_ms            = latency_ms
+        self.cache_hit             = cache_hit
+        self.session_id            = session_id
+        self.language              = language
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "text_preview":         self.text_preview,
+            "embedding":            self.embedding,
+            "embedding_dim":        self.embedding_dim,
+            "model_name":           self.model_name,
+            "checksum_sha256":      self.checksum_sha256,
+            "token_count_estimate": self.token_count_estimate,
+            "was_truncated":        self.was_truncated,
+            "embedding_id":         self.embedding_id,
+            "latency_ms":           self.latency_ms,
+            "cache_hit":            self.cache_hit,
+            "session_id":           self.session_id,
+            "language":             self.language,
+        }
+
+
+ClipTextEmbeddingResult = SiglipTextEmbeddingResult
+
+
+def _normalize_siglip_text(text: str) -> str:
+    text = _unicodedata.normalize("NFC", str(text or ""))
+    return " ".join(text.strip().split())
+
+
+def _sanitize_siglip_text(text: str) -> str:
+    return text.replace("\x00", "").lstrip("﻿")
+
+
+def _sanitize_siglip_injection(text: str) -> str:
+    from app.guardrails.input_guard import sanitize as _guard_sanitize
+    cleaned = _guard_sanitize(text, surface="clip_text_embedder")
+    if cleaned != text:
+        logger.warning(
+            event="siglip_text_injection_pattern_stripped",
+            original_len=len(text),
+            cleaned_len=len(cleaned),
+        )
+    return cleaned
+
+
+def _estimate_siglip_tokens(text: str) -> int:
+    return max(1, len(text.split()))
+
+
+def _truncate_to_siglip_limit(text: str, max_chars: int) -> tuple:
+    if len(text) <= max_chars:
+        return text, False
+    words     = text.split()
+    truncated = ""
+    for word in words:
+        candidate = (truncated + " " + word).strip()
+        if len(candidate) > max_chars:
+            break
+        truncated = candidate
+    if not truncated:
+        truncated = text[:max_chars]
+    return truncated, True
+
+
+def _siglip_text_cache_key(checksum: str) -> str:
+    return f"siglip_txt_emb:{checksum}"
+
+
+def _siglip_text_cache_get(checksum: str) -> Optional[List[float]]:
+    try:
+        from app.core.infra_registry import infra
+        mem = infra.get_memory()
+        if mem is None:
+            return None
+        raw = mem.cache_get(_siglip_text_cache_key(checksum))
+        if raw and isinstance(raw, list):
+            return raw
+    except Exception:
+        pass
+    return None
+
+
+def _siglip_text_cache_set(checksum: str, embedding: List[float]) -> None:
+    try:
+        from app.core.infra_registry import infra
+        mem = infra.get_memory()
+        if mem is None:
+            return
+        mem.cache_set(
+            _siglip_text_cache_key(checksum),
+            embedding,
+            ttl=settings.REDIS_EMBEDDING_CACHE_TTL,
+        )
+    except Exception:
+        pass
+
+
+class SiglipTextEmbedder:
+    """SigLIP text-side embedder for cross-modal retrieval.
+
+    Produces embeddings in the same vision space as ImageEmbedder so text
+    queries can retrieve image chunks by semantic similarity.
+    Moved from clip_text_embedder.py.
+    """
+
+    def __init__(self, processor, model, device: str) -> None:
+        if not TORCH_AVAILABLE:
+            raise TorchNotAvailableError("TORCH_REQUIRED_FOR_SIGLIP_TEXT_EMBEDDER")
+        self.processor    = processor
+        self.model        = model
+        self.device       = device
+        self.model_name   = settings.SIGLIP_MODEL
+        self.expected_dim = settings.VISION_EMBEDDING_DIM
+        self.batch_size   = settings.EMBEDDING_BATCH_SIZE
+        tokenizer  = getattr(processor, "tokenizer", None)
+        model_max  = getattr(tokenizer, "model_max_length", _SIGLIP_MAX_TOKEN_LENGTH)
+        if model_max > 10_000:
+            model_max = _SIGLIP_MAX_TOKEN_LENGTH
+        self.max_length = model_max
+        self._max_chars = self.max_length * 4
+        logger.info(
+            event="siglip_text_embedder_initialized",
+            device=device,
+            model=self.model_name,
+            expected_dim=self.expected_dim,
+            max_length=self.max_length,
+            batch_size=self.batch_size,
+        )
+
+    def _prepare_texts(self, texts) -> List[Dict[str, Any]]:
+        if isinstance(texts, str):
+            texts = [texts]
+        prepared: List[Dict[str, Any]] = []
+        seen: Dict[str, bool] = {}
+        for raw in texts:
+            text = _normalize_siglip_text(_sanitize_siglip_text(str(raw or "")))
+            text = _sanitize_siglip_injection(text)
+            if not text or len(text) < 2:
+                _ST_EMBED_ERRORS.labels(reason="empty_text").inc()
+                continue
+            if len(text) > settings.MAX_PROMPT_CHARS:
+                text = text[:settings.MAX_PROMPT_CHARS]
+            text, was_truncated = _truncate_to_siglip_limit(text, self._max_chars)
+            if not text:
+                _ST_EMBED_ERRORS.labels(reason="empty_after_truncation").inc()
+                continue
+            checksum = _sha256_text(text)
+            if checksum in seen:
+                continue
+            seen[checksum] = True
+            prepared.append({
+                "text":           text,
+                "checksum":       checksum,
+                "token_estimate": _estimate_siglip_tokens(text),
+                "was_truncated":  was_truncated,
+                "text_preview":   text[:80],
+                "language":       None,
+            })
+        return prepared
+
+    def embed_single(self, text: str, session_id: str = "default") -> List[float]:
+        results = self.embed(text, session_id=session_id)
+        if not results:
+            raise NoValidTextsError(f"NO_EMBEDDING_PRODUCED for text: {text[:80]}")
+        return results[0].embedding
+
+    def embed(self, texts, session_id: str = "default") -> List[SiglipTextEmbeddingResult]:
+        if not session_id:
+            raise ValueError("SESSION_ID_REQUIRED")
+        prepared = self._prepare_texts(texts)
+        if not prepared:
+            raise NoValidTextsError("NO_VALID_TEXTS_AFTER_PREPARATION")
+        start_total    = time.time()
+        cached_results: List[SiglipTextEmbeddingResult] = []
+        miss_items:     List[Dict[str, Any]]             = []
+        for item in prepared:
+            cached_emb = _siglip_text_cache_get(item["checksum"])
+            if cached_emb and _valid_embedding(cached_emb, self.expected_dim):
+                _ST_CACHE_HITS.inc()
+                cached_results.append(SiglipTextEmbeddingResult(
+                    text_preview=item["text_preview"],
+                    embedding=cached_emb,
+                    embedding_dim=self.expected_dim,
+                    model_name=self.model_name,
+                    checksum_sha256=item["checksum"],
+                    token_count_estimate=item["token_estimate"],
+                    was_truncated=item["was_truncated"],
+                    embedding_id=str(_uuid.uuid4()),
+                    latency_ms=0.0,
+                    cache_hit=True,
+                    session_id=session_id,
+                    language=item["language"],
+                ))
+            else:
+                miss_items.append(item)
+        fresh_results: List[SiglipTextEmbeddingResult] = []
+        for i in range(0, len(miss_items), self.batch_size):
+            batch       = miss_items[i:i + self.batch_size]
+            batch_texts = [item["text"] for item in batch]
+            t_batch     = time.time()
+            try:
+                inputs = self.processor(
+                    text=batch_texts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=self.max_length,
+                ).to(self.device)
+                with torch.no_grad():
+                    features = self.model.get_text_features(**inputs)
+                    if hasattr(features, "pooler_output"):
+                        features = features.pooler_output
+                    features = F.normalize(features.float(), p=2, dim=-1)
+                embeddings    = features.detach().cpu().numpy().tolist()
+                batch_latency = round((time.time() - t_batch) * 1000, 1)
+                if batch_latency > settings.LATENCY_TARGET_IMAGE_MS:
+                    logger.warning(
+                        event="siglip_text_batch_latency_exceeded",
+                        latency_ms=batch_latency,
+                        target_ms=settings.LATENCY_TARGET_IMAGE_MS,
+                        batch_size=len(batch_texts),
+                        session_id=session_id,
+                    )
+                _ST_EMBED_LATENCY.labels(batch_size=str(len(batch_texts))).observe(batch_latency / 1000.0)
+                for emb, item in zip(embeddings, batch):
+                    emb_list = emb if isinstance(emb, list) else list(emb)
+                    if len(emb_list) != self.expected_dim:
+                        logger.error(
+                            event="siglip_text_dim_mismatch",
+                            got=len(emb_list),
+                            expected=self.expected_dim,
+                            text_preview=item["text_preview"],
+                            session_id=session_id,
+                        )
+                        _ST_EMBED_ERRORS.labels(reason="dim_mismatch").inc()
+                        raise SiglipDimensionMismatchError(
+                            f"DIMENSION_MISMATCH: got {len(emb_list)}, expected {self.expected_dim}"
+                        )
+                    if not _valid_embedding(emb_list, self.expected_dim):
+                        logger.warning(
+                            event="siglip_text_invalid_values",
+                            text_preview=item["text_preview"],
+                            session_id=session_id,
+                        )
+                        _ST_EMBED_ERRORS.labels(reason="invalid_values").inc()
+                        continue
+                    _siglip_text_cache_set(item["checksum"], emb_list)
+                    _ST_EMBED_TOTAL.inc()
+                    fresh_results.append(SiglipTextEmbeddingResult(
+                        text_preview=item["text_preview"],
+                        embedding=emb_list,
+                        embedding_dim=self.expected_dim,
+                        model_name=self.model_name,
+                        checksum_sha256=item["checksum"],
+                        token_count_estimate=item["token_estimate"],
+                        was_truncated=item["was_truncated"],
+                        embedding_id=str(_uuid.uuid4()),
+                        latency_ms=batch_latency,
+                        cache_hit=False,
+                        session_id=session_id,
+                        language=item["language"],
+                    ))
+            except SiglipDimensionMismatchError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    event="siglip_text_batch_failed",
+                    batch_start=i,
+                    error=str(exc),
+                    session_id=session_id,
+                )
+                _ST_EMBED_ERRORS.labels(reason="batch_exception").inc()
+        all_results = cached_results + fresh_results
+        if not all_results:
+            raise NoValidTextsError("NO_SIGLIP_TEXT_EMBEDDINGS_PRODUCED")
+        total_latency = round(time.time() - start_total, 3)
+        logger.info(
+            event="siglip_text_embed_success",
+            total=len(all_results),
+            cached=len(cached_results),
+            fresh=len(fresh_results),
+            throughput_per_sec=round(len(all_results) / max(total_latency, 1e-6), 1),
+            total_latency_sec=total_latency,
+            session_id=session_id,
+        )
+        return all_results
+
+    def embed_query(self, query: str, session_id: str = "default") -> List[float]:
+        return self.embed_single(query, session_id=session_id)
+
+    async def embed_async(self, texts, session_id: str = "default") -> List[SiglipTextEmbeddingResult]:
+        async with _get_siglip_text_semaphore():
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, lambda: self.embed(texts, session_id))
+
+    async def embed_query_async(self, query: str, session_id: str = "default") -> List[float]:
+        async with _get_siglip_text_semaphore():
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, lambda: self.embed_query(query, session_id))
+
+    def health_check(self) -> Dict[str, Any]:
+        return {
+            "model_loaded":     self.model is not None,
+            "processor_loaded": self.processor is not None,
+            "device":           self.device,
+            "model_name":       self.model_name,
+            "expected_dim":     self.expected_dim,
+            "max_length":       self.max_length,
+            "batch_size":       self.batch_size,
+            "torch_available":  TORCH_AVAILABLE,
+        }
+
+
+ClipTextEmbedder = SiglipTextEmbedder
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # IMAGE DOCUMENT EMBEDDER (Phase 3)
 # Extends BaseEmbedder to embed IngestedDocument objects produced by ImageChunker.
 # Each doc's text = "{image_type}: {caption}\n{ocr_text}" — embed with BGE so

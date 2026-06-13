@@ -344,3 +344,611 @@ class BaseEmbedder(ABC):
             if instruction:
                 query = instruction + query
         return embedder.embed_text(query, session_id)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODALITY-SPECIFIC CONTEXT ENRICHMENT
+# Used by TextEmbedder.embed_documents() (legacy pipeline path) to produce a
+# context-rich string before encoding. Per-modality embedders use
+# _build_embed_text() instead.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _modality_prefix(doc: Any) -> str:
+    m  = (getattr(doc, "modality", "") or "").lower()
+    st = (getattr(doc, "subtype",  "") or "").lower()
+    s  = getattr(doc, "structure", {}) or {}
+    if m == "table":
+        return "Table: "
+    if m == "image":
+        return "OCR: " if st == "ocr" else "Image: "
+    if m == "audio":
+        ts = s.get("timestamp_start")
+        return f"Audio {ts:.1f}s: " if ts is not None else "Audio: "
+    if m == "video":
+        ts = s.get("timestamp_start")
+        fi = s.get("frame_index")
+        if st == "speech":
+            return f"Video speech {ts:.1f}s: " if ts is not None else "Video speech: "
+        if st == "frame":
+            if fi is not None and ts is not None:
+                return f"Video frame {fi} @{ts:.1f}s: "
+            if fi is not None:
+                return f"Video frame {fi}: "
+            return f"Video frame @{ts:.1f}s: " if ts is not None else "Video frame: "
+        if st == "ocr":
+            return "Video OCR: "
+    if m == "text" and st == "heading":
+        return "Heading: "
+    return ""
+
+
+def _enrich_doc(doc: Any, text: str) -> str:
+    """Build context-enriched embedding input for a document (legacy shared path)."""
+    context: List[str] = []
+    src_type = (getattr(doc, "source_type", "") or "").lower()
+    modality = (getattr(doc, "modality", "") or "").lower()
+    s = getattr(doc, "structure", {}) or {}
+
+    if getattr(doc, "source_type", None):
+        context.append(f"[{getattr(doc, 'source_type').upper()}]")
+    if modality:
+        context.append(f"[{modality.upper()}]")
+    if getattr(doc, "page", None):
+        context.append(f"[Page {doc.page}]")
+    if getattr(doc, "source", None):
+        context.append(f"[{doc.source}]")
+
+    section_title = s.get("section_title") or ""
+    if section_title and len(section_title) <= 120:
+        context.append(f"[Section: {section_title}]")
+
+    sub_idx   = s.get("sub_chunk_index")
+    sub_total = s.get("total_sub_chunks")
+    if sub_idx is not None and sub_total and int(sub_total) > 1:
+        context.append(f"[Part {int(sub_idx)+1}/{int(sub_total)}]")
+
+    row_start, row_end = s.get("row_start"), s.get("row_end")
+    if row_start is not None and row_end is not None:
+        context.append(f"[Rows {row_start}-{row_end}]")
+
+    ts_start, ts_end = s.get("timestamp_start"), s.get("timestamp_end")
+    if modality in ("audio", "video") and ts_start is not None:
+        if ts_end is not None:
+            context.append(f"[{float(ts_start):.1f}s-{float(ts_end):.1f}s]")
+        else:
+            context.append(f"[{float(ts_start):.1f}s]")
+
+    if modality == "video" and s.get("frame_index") is not None:
+        context.append(f"[Frame {s['frame_index']}]")
+
+    context_prefix = " ".join(context) + " " + _modality_prefix(doc)
+
+    if src_type == "word" or (s.get("content_type") or "").lower().startswith("docx_"):
+        hierarchy = s.get("section_hierarchy") or []
+        if hierarchy:
+            text = f"Section: {' > '.join(str(h) for h in hierarchy)} | {text}"
+
+    if src_type == "excel" or (s.get("content_type") or "").lower().startswith("excel_"):
+        sheet = (s.get("sheet") or s.get("sheet_name") or "").strip()
+        unit_scale = (s.get("unit_scale") or "").strip()
+        parts = []
+        if sheet:
+            parts.append(f"Sheet: {sheet}")
+        if unit_scale:
+            parts.append(f"({unit_scale})")
+        if parts:
+            text = " | ".join(parts) + " | " + text
+
+    if modality in ("audio", "video") and (s.get("content_type") or "").endswith(
+        ("speech", "audio_speech_segment", "video_speech")
+    ):
+        speaker = (s.get("speaker") or s.get("speaker_role") or "").strip()
+        ts_s, ts_e = s.get("timestamp_start"), s.get("timestamp_end")
+        header = f"[SPEAKER: {speaker}]" if speaker else ""
+        if ts_s is not None and ts_e is not None:
+            header += f" [{float(ts_s):.0f}s-{float(ts_e):.0f}s]"
+        entities = s.get("finance_entities") or {}
+        entity_tokens: List[str] = []
+        if isinstance(entities, dict):
+            for v in entities.values():
+                if isinstance(v, list):
+                    entity_tokens.extend(str(x) for x in v[:3])
+        suffix = f" [ENTITIES: {', '.join(entity_tokens)}]" if entity_tokens else ""
+        if header:
+            text = f"{header} {text}{suffix}"
+        elif entity_tokens:
+            text = f"{text}{suffix}"
+
+    if modality == "video":
+        combined = (s.get("combined_text") or "").strip()
+        if combined and len(combined) > len(text):
+            text = combined
+
+    if modality == "image" or src_type == "image":
+        image_type = (s.get("image_type") or "").strip()
+        if image_type:
+            text = f"{image_type.replace('_', ' ')}: {text}"
+
+    return (context_prefix + text).strip()[:settings.MAX_PROMPT_CHARS]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TEXT EMBEDDER — BGE SentenceTransformer model wrapper
+# Used by BaseEmbedder._get_model() and MultimodalEmbedder.
+# Moved from text_embedder.py (now deleted).
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TextEmbedder:
+    """BGE-large-en-v1.5 (or configured model) SentenceTransformer wrapper.
+
+    Provides: embed_text, embed_texts, embed_documents, embed_query,
+    embed_matryoshka, embed_sparse.  Used as the shared encoding kernel by
+    all per-modality embedders via model_loader.get_embedder().
+    """
+
+    def __init__(self, model_name: str, batch_size: int, device: str) -> None:
+        from sentence_transformers import SentenceTransformer
+        self.model_name   = model_name
+        self.batch_size   = batch_size
+        self.device       = device
+        self.expected_dim = settings.TEXT_EMBEDDING_DIM
+        self.max_text_len = settings.MAX_PROMPT_CHARS
+        self.model = SentenceTransformer(model_name, device=device)
+
+        self._query_prompt_name: Optional[str] = None
+        self._query_prompt_text: Optional[str] = None
+        _prompts = getattr(self.model, "prompts", {}) or {}
+        if "query" in _prompts:
+            self._query_prompt_name = "query"
+        elif any(k in model_name.lower() for k in ("qwen3", "e5-instruct", "gte-qwen")):
+            self._query_prompt_text = (
+                "Instruct: Given a financial document query, retrieve the most "
+                "relevant passage that answers the question\nQuery: "
+            )
+
+        logger.info(
+            event="text_embedder_initialized",
+            model=model_name,
+            device=device,
+            dim=self.expected_dim,
+            query_prompt_name=self._query_prompt_name,
+            query_prompt_text=bool(self._query_prompt_text),
+        )
+
+    def _encode_with_retry(self, model, texts: List[str], max_retries: int = 3) -> List[List[float]]:
+        import time as _time
+        wait = 1.0
+        for attempt in range(max_retries):
+            try:
+                t_start = _time.time()
+                embs = model.encode(
+                    texts,
+                    batch_size=len(texts),
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                )
+                elapsed_ms = round((_time.time() - t_start) * 1000, 1)
+                if elapsed_ms > settings.LATENCY_TARGET_EMBED_BATCH_MS:
+                    logger.warning(
+                        event="embed_batch_latency_exceeded",
+                        latency_ms=elapsed_ms,
+                        target_ms=settings.LATENCY_TARGET_EMBED_BATCH_MS,
+                        batch_size=len(texts),
+                    )
+                return [e.tolist() for e in embs]
+            except Exception as e:
+                logger.warning(event="embed_encode_retry", attempt=attempt, error=str(e))
+                if attempt >= max_retries - 1:
+                    raise
+                _time.sleep(wait)
+                wait = min(wait * 2, 10.0)
+        return []
+
+    def embed_text(self, text: str, session_id: str = "default") -> List[float]:
+        if not session_id:
+            raise ValueError("SESSION_ID_REQUIRED")
+        clean = sanitize_text(text)
+        if not clean:
+            raise ValueError("EMPTY_TEXT")
+        clean = normalize_finance_numbers(clean)
+        _cache_model_key = (
+            self.model_name + ":q"
+            if (self._query_prompt_name or self._query_prompt_text)
+            else self.model_name
+        )
+        cached = _shared_cache.get(clean, _cache_model_key, self.expected_dim)
+        if cached is not None:
+            logger.debug(event="embed_cache_hit", session_id=session_id)
+            return cached
+        import time as _time
+        t_start = _time.time()
+        _kwargs: dict = dict(convert_to_numpy=True, normalize_embeddings=True)
+        if self._query_prompt_name:
+            _kwargs["prompt_name"] = self._query_prompt_name
+            _text_to_encode = clean
+        elif self._query_prompt_text:
+            _text_to_encode = self._query_prompt_text + clean
+        else:
+            _text_to_encode = clean
+        emb = self.model.encode(_text_to_encode, **_kwargs).tolist()
+        if not valid_embedding(emb, self.expected_dim):
+            raise ValueError("INVALID_EMBEDDING_SINGLE")
+        _shared_cache.set(clean, _cache_model_key, self.expected_dim, emb)
+        logger.debug(
+            event="embed_single_success",
+            latency_ms=round((_time.time() - t_start) * 1000, 1),
+            session_id=session_id,
+        )
+        return emb
+
+    def embed_texts(self, texts: List[str], session_id: str = "default") -> List[List[float]]:
+        if not texts:
+            return []
+        results: List[List[float]] = []
+        for i in range(0, len(texts), self.batch_size):
+            raw_batch = texts[i:i + self.batch_size]
+            clean_batch: List[str] = []
+            cached_results: List[Optional[List[float]]] = []
+            for t in raw_batch:
+                c = sanitize_text(t)
+                if not c:
+                    cached_results.append(None)
+                    clean_batch.append("")
+                    continue
+                hit = _shared_cache.get(c, self.model_name, self.expected_dim)
+                if hit is not None:
+                    cached_results.append(hit)
+                    clean_batch.append("")
+                else:
+                    cached_results.append(None)
+                    clean_batch.append(c)
+            to_encode = [(idx, t) for idx, t in enumerate(clean_batch) if t]
+            encoded: Dict[str, List[float]] = {}
+            if to_encode:
+                indices, batch_texts = zip(*to_encode)
+                try:
+                    embs = self._encode_with_retry(self.model, list(batch_texts))
+                    for idx, emb in zip(indices, embs):
+                        if valid_embedding(emb, self.expected_dim):
+                            encoded[idx] = emb
+                            _shared_cache.set(clean_batch[idx], self.model_name, self.expected_dim, emb)
+                except Exception as e:
+                    logger.error(event="embed_texts_batch_failed", error=str(e), session_id=session_id)
+            for idx, cached_emb in enumerate(cached_results):
+                if cached_emb is not None:
+                    results.append(cached_emb)
+                elif idx in encoded:
+                    results.append(encoded[idx])
+        return results
+
+    def embed_documents(self, documents: List[Any], session_id: str = "default") -> List[Any]:
+        import time as _time
+        if not session_id:
+            raise ValueError("SESSION_ID_REQUIRED")
+        if not documents:
+            return []
+        start  = _time.time()
+        texts: List[str] = []
+        valid_docs: List[Any] = []
+        seen: Dict[str, bool] = {}
+        for doc in documents:
+            try:
+                raw   = getattr(doc, "text", "") or ""
+                clean = sanitize_text(raw)
+                if not clean:
+                    continue
+                clean    = normalize_finance_numbers(clean)
+                enriched = _enrich_doc(doc, clean)
+                h = hashlib.sha256(enriched.encode("utf-8")).hexdigest()
+                if h in seen:
+                    continue
+                seen[h] = True
+                texts.append(enriched)
+                valid_docs.append(doc)
+            except Exception as e:
+                logger.warning(event="embed_doc_skip", error=str(e), session_id=session_id)
+        if not valid_docs:
+            return []
+        cap = settings.INGESTION_BATCH_SIZE * 10
+        texts, valid_docs = texts[:cap], valid_docs[:cap]
+        results: List[Any] = []
+        for i in range(0, len(texts), self.batch_size):
+            batch_texts = texts[i:i + self.batch_size]
+            batch_docs  = valid_docs[i:i + self.batch_size]
+            try:
+                embs = self._encode_with_retry(self.model, batch_texts)
+                for doc, emb in zip(batch_docs, embs):
+                    if not valid_embedding(emb, self.expected_dim):
+                        continue
+                    doc.embedding = emb
+                    struct = dict(doc.structure or {})
+                    struct["embedding_space"] = "text"
+                    struct["embedding_model"] = self.model_name
+                    doc.structure = struct
+                    text_for_cache = sanitize_text(getattr(doc, "text", "") or "")
+                    if text_for_cache:
+                        _shared_cache.set(text_for_cache, self.model_name, self.expected_dim, emb)
+                    results.append(doc)
+            except Exception as e:
+                logger.error(event="embed_batch_failed", batch_start=i, error=str(e), session_id=session_id)
+        total_latency = round(_time.time() - start, 3)
+        logger.info(
+            event="embed_documents_success",
+            embedded=len(results),
+            total=len(valid_docs),
+            throughput_per_sec=round(len(results) / max(total_latency, 1e-6), 1),
+            latency=total_latency,
+            session_id=session_id,
+        )
+        return results
+
+    def embed_query(self, query: str, session_id: str = "default") -> List[float]:
+        return self.embed_text(query, session_id)
+
+    def embed_matryoshka(self, text: str, session_id: str = "default") -> Tuple[List[float], List[float]]:
+        full  = self.embed_text(text, session_id)
+        short = full[:settings.MATRYOSHKA_SHORT_DIM]
+        norm  = math.sqrt(sum(v * v for v in short)) + 1e-10
+        return [v / norm for v in short], full
+
+    def embed_sparse(self, text: str, vocab_size: int = 30000) -> Dict[str, float]:
+        import re as _re
+        clean = sanitize_text(text)
+        if not clean:
+            return {}
+        tokens = _re.findall(r"\b[a-z0-9]+\b", clean.lower())
+        tf: Dict[int, float] = {}
+        for tok in tokens:
+            idx = hash(tok) % vocab_size
+            tf[idx] = tf.get(idx, 0.0) + 1.0
+        total = sum(tf.values()) + 1e-10
+        return {k: round(v / total, 6) for k, v in tf.items()}
+
+    def health_check(self) -> Dict[str, Any]:
+        return {
+            "model":       self.model_name,
+            "device":      self.device,
+            "dim":         self.expected_dim,
+            "batch_size":  self.batch_size,
+            "cache_local": len(_shared_cache._local),
+        }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MULTIMODAL EMBEDDER — text + vision orchestration
+# Moved from multimodal_embedder.py (now deleted).
+# ══════════════════════════════════════════════════════════════════════════════
+
+import asyncio as _asyncio
+from pathlib import Path as _Path
+
+
+class MultimodalEmbedderError(Exception):
+    pass
+
+class NoValidDocumentsError(MultimodalEmbedderError):
+    pass
+
+class EmbeddingDimensionError(MultimodalEmbedderError):
+    pass
+
+class SessionIdRequiredError(MultimodalEmbedderError):
+    pass
+
+
+def _mm_valid_embedding(emb: Any, expected_dim: int) -> bool:
+    if not isinstance(emb, list) or len(emb) != expected_dim:
+        return False
+    return not any(math.isnan(v) or math.isinf(v) for v in emb)
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _modality_counts(docs: List[Any]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for d in docs:
+        m = getattr(d, "modality", "unknown")
+        counts[m] = counts.get(m, 0) + 1
+    return counts
+
+
+def _resolve_asset_path(doc: Any) -> Optional[str]:
+    structure = getattr(doc, "structure", {}) or {}
+    for key in ("asset_path", "frame_path", "source_path"):
+        path = structure.get(key)
+        if not path:
+            continue
+        p = _Path(str(path))
+        if p.exists():
+            return str(p)
+        logger.warning(event="multimodal_asset_path_not_found", key=key, path=str(path))
+    return None
+
+
+def _route_documents(docs: List[Any]) -> Tuple[List[Any], List[Any]]:
+    text_docs:   List[Any] = []
+    vision_docs: List[Any] = []
+    for doc in docs:
+        try:
+            modality = getattr(doc, "modality", "")
+            subtype  = getattr(doc, "subtype",  "") or ""
+            if modality in ("text", "table"):
+                text_docs.append(doc)
+            elif modality == "audio":
+                text_docs.append(doc)
+            elif modality == "image":
+                text_docs.append(doc)
+                if subtype in ("caption", "image_frame") and _resolve_asset_path(doc):
+                    vision_docs.append(doc)
+            elif modality == "video":
+                if subtype in ("speech", "ocr"):
+                    text_docs.append(doc)
+                elif subtype == "frame":
+                    vision_docs.append(doc)
+                    text_docs.append(doc)
+        except Exception as exc:
+            logger.warning(event="multimodal_route_failed", error=str(exc))
+    return text_docs, vision_docs
+
+
+class MultimodalEmbedder:
+    """Routes IngestedDocuments to TextEmbedder (BGE) or ImageEmbedder (SigLIP).
+
+    Used by ingestion_pipeline.py for the vision embedding path.
+    Moved from multimodal_embedder.py.
+    """
+
+    def __init__(self, text_embedder, image_embedder) -> None:
+        self.text_embedder  = text_embedder
+        self.image_embedder = image_embedder
+        self.batch_size     = settings.EMBEDDING_BATCH_SIZE
+        self.max_docs       = settings.INGESTION_BATCH_SIZE * 10
+        self._text_model_name   = settings.EMBEDDING_MODEL
+        self._vision_model_name = settings.SIGLIP_MODEL
+        logger.info(
+            event="multimodal_embedder_initialized",
+            text_model=self._text_model_name,
+            vision_model=self._vision_model_name,
+            batch_size=self.batch_size,
+        )
+
+    def embed_documents(self, documents: List[Any], session_id: str) -> Tuple[List[Any], List[Any]]:
+        import time as _time
+        if not session_id:
+            raise SessionIdRequiredError("SESSION_ID_REQUIRED")
+        if not documents:
+            return [], []
+        start = _time.time()
+        docs = documents[:self.max_docs]
+        seen_hashes: Dict[str, bool] = {}
+        unique_docs: List[Any] = []
+        deduped_skipped = 0
+        for doc in docs:
+            h = _sha256_text(getattr(doc, "text", "") or "")
+            if h in seen_hashes:
+                deduped_skipped += 1
+                continue
+            seen_hashes[h] = True
+            unique_docs.append(doc)
+        if not unique_docs:
+            raise NoValidDocumentsError(f"ALL_DOCUMENTS_DEDUPED: {deduped_skipped} duplicates")
+        text_docs, vision_docs = _route_documents(unique_docs)
+        embedded_text:   List[Any] = []
+        embedded_vision: List[Any] = []
+        if text_docs:
+            try:
+                embedded_text = self._embed_text_batched(text_docs, session_id)
+            except Exception as exc:
+                logger.error(event="multimodal_text_embed_failed", count=len(text_docs), error=str(exc))
+        if vision_docs:
+            try:
+                embedded_vision = self._embed_vision_batched(vision_docs, session_id)
+            except Exception as exc:
+                logger.error(event="multimodal_vision_embed_failed", count=len(vision_docs), error=str(exc))
+        logger.info(
+            event="multimodal_embed_success",
+            text_embedded=len(embedded_text),
+            vision_embedded=len(embedded_vision),
+            deduped_skipped=deduped_skipped,
+            latency=round(_time.time() - start, 3),
+            session_id=session_id,
+        )
+        return embedded_text, embedded_vision
+
+    def _embed_text_batched(self, docs: List[Any], session_id: str) -> List[Any]:
+        import time as _time
+        results: List[Any] = []
+        for i in range(0, len(docs), self.batch_size):
+            batch = docs[i:i + self.batch_size]
+            try:
+                embedded = self.text_embedder.embed_documents(batch, session_id=session_id)
+                for doc in embedded:
+                    emb = getattr(doc, "embedding", None)
+                    if not _mm_valid_embedding(emb, settings.TEXT_EMBEDDING_DIM):
+                        continue
+                    struct = dict(getattr(doc, "structure", {}) or {})
+                    struct["embedding_space"] = "text"
+                    struct["embedding_model"] = self._text_model_name
+                    struct["embedding_dim"]   = settings.TEXT_EMBEDDING_DIM
+                    struct["embedded_at"]     = _time.time()
+                    doc.structure = struct
+                    results.append(doc)
+            except Exception as exc:
+                logger.error(event="multimodal_text_batch_failed", batch_start=i, error=str(exc))
+        return results
+
+    def _embed_vision_batched(self, docs: List[Any], session_id: str) -> List[Any]:
+        import time as _time
+        results: List[Any] = []
+        seen_paths: Dict[str, bool] = {}
+        for i in range(0, len(docs), self.batch_size):
+            batch      = docs[i:i + self.batch_size]
+            paths:     List[str] = []
+            valid_docs: List[Any] = []
+            for doc in batch:
+                asset_path = _resolve_asset_path(doc)
+                if not asset_path:
+                    continue
+                ph = _sha256_text(asset_path)
+                if ph in seen_paths:
+                    continue
+                seen_paths[ph] = True
+                paths.append(asset_path)
+                valid_docs.append(doc)
+            if not paths:
+                continue
+            try:
+                emb_results = self.image_embedder.embed_batch(paths, session_id=session_id)
+                for doc, emb_result in zip(valid_docs, emb_results):
+                    emb_list = emb_result.embedding if hasattr(emb_result, "embedding") else emb_result
+                    if not _mm_valid_embedding(emb_list, settings.VISION_EMBEDDING_DIM):
+                        continue
+                    doc.embedding = emb_list
+                    struct = dict(getattr(doc, "structure", {}) or {})
+                    struct["embedding_space"] = "vision"
+                    struct["embedding_model"] = self._vision_model_name
+                    struct["embedding_dim"]   = settings.VISION_EMBEDDING_DIM
+                    struct["embedded_at"]     = _time.time()
+                    if hasattr(emb_result, "checksum_sha256"):
+                        struct["asset_checksum_sha256"] = emb_result.checksum_sha256
+                    doc.structure = struct
+                    results.append(doc)
+            except Exception as exc:
+                logger.error(event="multimodal_vision_batch_failed", batch_start=i, error=str(exc))
+        return results
+
+    async def embed_documents_async(
+        self, documents: List[Any], session_id: str
+    ) -> Tuple[List[Any], List[Any]]:
+        loop = _asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: self.embed_documents(documents, session_id))
+
+    def cross_modal_similarity(
+        self, query_text: str, image_embedding: List[float], session_id: str = "default"
+    ) -> float:
+        if not query_text or not image_embedding:
+            return 0.0
+        try:
+            import numpy as np
+            from app.core.model_loader import model_loader
+            clip_emb = model_loader.get_siglip_text_embedder().embed_query(query_text, session_id=session_id)
+            if not clip_emb or len(clip_emb) != len(image_embedding):
+                return 0.0
+            a = np.array(clip_emb, dtype=float)
+            b = np.array(image_embedding, dtype=float)
+            val = float(np.dot(a, b) / ((np.linalg.norm(a) * np.linalg.norm(b)) + 1e-10))
+            return 0.0 if (math.isnan(val) or math.isinf(val)) else round(val, 6)
+        except Exception:
+            return 0.0
+
+    def health_check(self) -> Dict[str, Any]:
+        return {
+            "text_embedder_ok":   self.text_embedder is not None,
+            "vision_embedder_ok": self.image_embedder is not None,
+            "text_model":         self._text_model_name,
+            "vision_model":       self._vision_model_name,
+            "batch_size":         self.batch_size,
+        }

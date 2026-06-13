@@ -309,6 +309,7 @@ class PdfIngestor(BaseIngestor):
         metadata: UniversalMetadata,
     ) -> List[RawExtract]:
         file_path = str(path)
+        logger.info(event="extraction_start", modality="pdf", file=str(path), size=path.stat().st_size)
 
         if _is_pdf_encrypted(file_path):
             raise ValueError(f"PASSWORD_PROTECTED_PDF: {path.name}")
@@ -537,6 +538,7 @@ class PdfIngestor(BaseIngestor):
         if not extracts:
             raise ValueError("NO_EXTRACTS_PRODUCED")
 
+        logger.info(event="extraction_complete", modality="pdf", file=str(path), extracts=len(extracts))
         return extracts
 
 

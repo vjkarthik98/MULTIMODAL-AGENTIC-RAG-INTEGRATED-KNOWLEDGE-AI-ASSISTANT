@@ -69,6 +69,10 @@ class TxtChunker(BaseChunker):
     ) -> List[IngestedDocument]:
         source = Path(meta.source_path).name or "unknown.txt"
         surface = "txt_chunker"
+        logger.info(event="chunking_start", modality="txt", source=source, extracts=len(extracts))
+        if not extracts:
+            logger.warning(event="no_extracts_received", modality="txt", source=source)
+            return []
         is_transcript_file = _is_transcript(extracts)
 
         docs: List[IngestedDocument] = []

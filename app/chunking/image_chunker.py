@@ -715,6 +715,10 @@ class ImageChunker(BaseChunker):
     ) -> List[IngestedDocument]:
         source  = Path(meta.source_path).name or "unknown.jpg"
         surface = "image_chunker"
+        logger.info(event="chunking_start", modality="image", source=source, extracts=len(extracts))
+        if not extracts:
+            logger.warning(event="no_extracts_received", modality="image", source=source)
+            return []
         docs: List[IngestedDocument] = []
 
         for chunk_idx, ext in enumerate(extracts):

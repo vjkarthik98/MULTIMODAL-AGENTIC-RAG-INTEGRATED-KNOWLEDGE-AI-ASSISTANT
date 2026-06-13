@@ -5,6 +5,9 @@ from typing import Any
 
 from app.embeddings.base_embedder import BaseEmbedder
 from app.core.config import settings
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 _FLS_SUFFIX = " guidance outlook forecast projection guidance outlook"
 
@@ -49,4 +52,6 @@ class TxtEmbedder(BaseEmbedder):
         if s.get("chunk_type") == "section" and section:
             text += f" {section} {section}"
 
-        return text[:settings.MAX_PROMPT_CHARS]
+        result = text[:settings.MAX_PROMPT_CHARS]
+        logger.debug(event="embed_text_built", modality="txt", chars=len(result))
+        return result

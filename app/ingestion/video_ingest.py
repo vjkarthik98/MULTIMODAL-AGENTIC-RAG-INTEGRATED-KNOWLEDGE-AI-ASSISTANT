@@ -1266,6 +1266,7 @@ class VideoIngestor(BaseIngestor):
         metadata: UniversalMetadata,
     ) -> List[RawExtract]:
         suffix = path.suffix.lower()
+        logger.info(event="extraction_start", modality="video", file=str(path), size=path.stat().st_size)
 
         if suffix not in SUPPORTED_VIDEO_FORMATS:
             raise UnsupportedMimeError(f"UNSUPPORTED_VIDEO_FORMAT: {suffix}")
@@ -1323,6 +1324,7 @@ class VideoIngestor(BaseIngestor):
         except Exception:
             pass
 
+        logger.info(event="extraction_complete", modality="video", file=str(path), extracts=1)
         return [
             RawExtract(
                 text="",

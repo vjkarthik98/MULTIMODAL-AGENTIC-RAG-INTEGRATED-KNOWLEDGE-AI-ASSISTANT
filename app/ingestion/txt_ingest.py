@@ -944,6 +944,7 @@ class TxtIngestor(BaseIngestor):
         metadata: UniversalMetadata,
     ) -> List[RawExtract]:
         file_size = path.stat().st_size
+        logger.info(event="extraction_start", modality="txt", file=str(path), size=file_size)
 
         # Binary check
         is_bin = await asyncio.get_event_loop().run_in_executor(None, _is_binary, path)
@@ -1045,6 +1046,7 @@ class TxtIngestor(BaseIngestor):
         if not extracts:
             raise ValueError("NO_EXTRACTS_PRODUCED")
 
+        logger.info(event="extraction_complete", modality="txt", file=str(path), extracts=len(extracts))
         return extracts
 
 

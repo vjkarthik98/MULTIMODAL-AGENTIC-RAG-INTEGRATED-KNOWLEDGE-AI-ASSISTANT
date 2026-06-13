@@ -763,7 +763,7 @@ class IngestionPipeline:
             progress.emit("chunk", "started")
             t_chunk = time.time()
 
-            from app.chunking.chunker import chunk_documents
+            from app.chunking.base_chunker import chunk_documents
             chunks = chunk_documents(docs)
             chunks = _valid_chunks(chunks)
 

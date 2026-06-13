@@ -5,6 +5,9 @@ from typing import Any
 
 from app.embeddings.base_embedder import BaseEmbedder
 from app.core.config import settings
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class PdfEmbedder(BaseEmbedder):
@@ -52,4 +55,6 @@ class PdfEmbedder(BaseEmbedder):
             if table_title:
                 return f"Table: {table_title} | {prefix}{cleaned_text}"[:settings.MAX_PROMPT_CHARS]
 
-        return (prefix + cleaned_text)[:settings.MAX_PROMPT_CHARS]
+        result = (prefix + cleaned_text)[:settings.MAX_PROMPT_CHARS]
+        logger.debug(event="embed_text_built", modality="pdf", chars=len(result))
+        return result

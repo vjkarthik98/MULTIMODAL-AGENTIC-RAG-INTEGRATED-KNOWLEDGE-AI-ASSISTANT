@@ -230,6 +230,10 @@ class AudioChunker(BaseChunker):
     ) -> List[IngestedDocument]:
         source = Path(meta.source_path).name or "unknown.mp3"
         surface = "audio_chunker"
+        logger.info(event="chunking_start", modality="audio", source=source, extracts=len(extracts))
+        if not extracts:
+            logger.warning(event="no_extracts_received", modality="audio", source=source)
+            return []
         docs: List[IngestedDocument] = []
 
         for ext in extracts:

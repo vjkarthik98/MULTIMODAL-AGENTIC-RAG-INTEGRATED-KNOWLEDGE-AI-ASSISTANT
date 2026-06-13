@@ -202,6 +202,7 @@ class DocxIngestor(BaseIngestor):
     ) -> List[RawExtract]:
         file_path = str(path)
         ext = path.suffix.lower()
+        logger.info(event="extraction_start", modality="docx", file=str(path), size=path.stat().st_size)
 
         if _is_docx_encrypted(file_path):
             raise ValueError(f"PASSWORD_PROTECTED_DOCX: {path.name}")
@@ -416,6 +417,7 @@ class DocxIngestor(BaseIngestor):
         if not extracts:
             raise ValueError("NO_EXTRACTS_PRODUCED")
 
+        logger.info(event="extraction_complete", modality="docx", file=str(path), extracts=len(extracts))
         return extracts
 
 

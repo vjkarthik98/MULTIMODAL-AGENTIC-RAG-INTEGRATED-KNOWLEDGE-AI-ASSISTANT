@@ -55,6 +55,10 @@ class DocxChunker(BaseChunker):
     ) -> List[IngestedDocument]:
         source = Path(meta.source_path).name or "unknown.docx"
         surface = "docx_chunker"
+        logger.info(event="chunking_start", modality="docx", source=source, extracts=len(extracts))
+        if not extracts:
+            logger.warning(event="no_extracts_received", modality="docx", source=source)
+            return []
 
         docs: List[IngestedDocument] = []
         chunk_idx = [0]

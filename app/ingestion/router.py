@@ -18,13 +18,20 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from app.core.config import settings
 from app.core.response import ErrorCode, Modality, Severity, UniversalErrorResponse
 from app.ingestion.audio_ingest import ingest as audio_ingest
+from app.ingestion.audio_ingest import AudioIngestor
 from app.ingestion.docx_ingest import ingest as word_ingest
+from app.ingestion.docx_ingest import DocxIngestor
 from app.ingestion.image_ingest import ingest as image_ingest
+from app.ingestion.image_ingest import ImageIngestor
 from app.ingestion.pdf_ingest import ingest as pdf_ingest
+from app.ingestion.pdf_ingest import PdfIngestor
 from app.ingestion.schema import IngestedDocument
 from app.ingestion.txt_ingest import ingest as text_ingest
+from app.ingestion.txt_ingest import TxtIngestor
 from app.ingestion.video_ingest import ingest as video_ingest
+from app.ingestion.video_ingest import VideoIngestor
 from app.ingestion.xlsx_ingest import ingest as excel_ingest
+from app.ingestion.xlsx_ingest import XlsxIngestor
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -138,6 +145,23 @@ INGESTION_HANDLERS: Dict[str, Callable] = {
     "image": image_ingest,
     "audio": audio_ingest,
     "video": video_ingest,
+}
+
+# Per-modality ingestor classes exposing .extract(path, meta) -> List[RawExtract].
+# Used by the new per-modality pipeline chain (ingestion_pipeline.py Step 4).
+INGESTOR_MAP: Dict[str, type] = {
+    "text":  TxtIngestor,
+    "txt":   TxtIngestor,
+    "pdf":   PdfIngestor,
+    "word":  DocxIngestor,
+    "docx":  DocxIngestor,
+    "excel": XlsxIngestor,
+    "xlsx":  XlsxIngestor,
+    "image": ImageIngestor,
+    "audio": AudioIngestor,
+    "mp3":   AudioIngestor,
+    "video": VideoIngestor,
+    "mp4":   VideoIngestor,
 }
 
 MAX_INGESTED_DOCS: int = 5000

@@ -120,6 +120,10 @@ class PdfChunker(BaseChunker):
     ) -> List[IngestedDocument]:
         source = Path(meta.source_path).name or "unknown.pdf"
         surface = "pdf_chunker"
+        logger.info(event="chunking_start", modality="pdf", source=source, extracts=len(extracts))
+        if not extracts:
+            logger.warning(event="no_extracts_received", modality="pdf", source=source)
+            return []
 
         docs: List[IngestedDocument] = []
         chunk_idx = [0]

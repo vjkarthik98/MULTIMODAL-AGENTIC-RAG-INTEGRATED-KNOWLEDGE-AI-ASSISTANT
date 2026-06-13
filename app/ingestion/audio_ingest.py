@@ -984,6 +984,7 @@ class AudioIngestor(BaseIngestor):
         metadata: UniversalMetadata,
     ) -> List[RawExtract]:
         suffix = path.suffix.lower()
+        logger.info(event="extraction_start", modality="audio", file=str(path), size=path.stat().st_size)
 
         if suffix not in SUPPORTED_AUDIO_FORMATS:
             raise UnsupportedMimeError(f"UNSUPPORTED_AUDIO_FORMAT: {suffix}")
@@ -1032,6 +1033,7 @@ class AudioIngestor(BaseIngestor):
         audio.set_frame_rate(16000).set_channels(1).export(wav_buf, format="wav")
         audio_bytes = wav_buf.getvalue()
 
+        logger.info(event="extraction_complete", modality="audio", file=str(path), extracts=1)
         return [
             RawExtract(
                 text="",

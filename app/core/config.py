@@ -112,7 +112,6 @@ class Settings:
     INGESTION_WORKER_COUNT: int     = _int("INGESTION_WORKER_COUNT", 6)
 
     # LLM
-    LLM_MOCK_MODE: bool      = _bool("LLM_MOCK_MODE", False)
     LLM_MODEL_PATH: str      = _str("LLM_MODEL_PATH", "./.hf_cache/gguf/mistral-7b-instruct-v0.2.Q4_K_M.gguf")
     LLM_MAX_TOKENS: int      = _int("LLM_MAX_TOKENS", 768)
     CONTEXT_MAX_TOKENS: int  = _int("CONTEXT_MAX_TOKENS", 8192)
@@ -638,7 +637,7 @@ class Settings:
     def validate(self) -> bool:
         errors: List[str] = []
 
-        if not self.LLM_MOCK_MODE and not self.LLM_MODEL_PATH:
+        if not self.LLM_MODEL_PATH:
             errors.append("LLM_MODEL_PATH is required")
 
         if self.LLM_MAX_TOKENS > self.CONTEXT_MAX_TOKENS:

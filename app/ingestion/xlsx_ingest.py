@@ -334,6 +334,7 @@ class XlsxIngestor(BaseIngestor):
         metadata: UniversalMetadata,
     ) -> List[RawExtract]:
         file_path = str(path)
+        logger.info(event="extraction_start", modality="xlsx", file=str(path), size=path.stat().st_size)
 
         try:
             import openpyxl
@@ -480,6 +481,7 @@ class XlsxIngestor(BaseIngestor):
         if not extracts:
             raise ValueError("NO_EXTRACTS_PRODUCED")
 
+        logger.info(event="extraction_complete", modality="xlsx", file=str(path), extracts=len(extracts))
         return extracts
 
 

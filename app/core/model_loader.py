@@ -274,7 +274,7 @@ class ModelLoader:
                 self._executor, self.warmup
             )
 
-    # LLM — GGUF MODEL (or MockLLM when LLM_MOCK_MODE=true)
+    # LLM — GGUF MODEL
 
     def get_llm(self) -> Any:
         if self._llm:
@@ -282,15 +282,6 @@ class ModelLoader:
 
         with self._lock:
             if self._llm:
-                return self._llm
-
-            if settings.LLM_MOCK_MODE:
-                from app.llm.mock_llm import MockLLM
-                self._llm = MockLLM()
-                logger.warning(
-                    "llm_mock_mode_active",
-                    hint="Set LLM_MOCK_MODE=false to use the real GGUF model",
-                )
                 return self._llm
 
             if not settings.LLM_MODEL_PATH:
@@ -322,7 +313,7 @@ class ModelLoader:
             decision = device_manager.decision_for("text_embedder")
 
             def _load():
-                from app.embeddings.text_embedder import TextEmbedder  # local
+                from app.embeddings.base_embedder import TextEmbedder  # local
                 emb = TextEmbedder(
                     model_name=settings.EMBEDDING_MODEL,
                     batch_size=settings.EMBEDDING_BATCH_SIZE,
@@ -418,7 +409,7 @@ class ModelLoader:
             processor, model, device = self.get_siglip()
 
             def _load():
-                from app.embeddings.clip_text_embedder import ClipTextEmbedder  # local
+                from app.embeddings.image_embedder import ClipTextEmbedder  # local
                 return ClipTextEmbedder(processor, model, device)
 
             self._siglip_text_embedder = self._safe_load(_load, "siglip_text_embedder", device=device)
@@ -439,7 +430,7 @@ class ModelLoader:
             if self._multimodal:
                 return self._multimodal
 
-            from app.embeddings.multimodal_embedder import MultimodalEmbedder  # local
+            from app.embeddings.base_embedder import MultimodalEmbedder  # local
             self._multimodal = MultimodalEmbedder(
                 self.get_embedder(),
                 self.get_image_embedder(),

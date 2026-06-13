@@ -1033,6 +1033,7 @@ class ImageIngestor(BaseIngestor):
         path: Path,
         metadata: UniversalMetadata,
     ) -> List[RawExtract]:
+        logger.info(event="extraction_start", modality="image", file=str(path), size=path.stat().st_size)
         _validate_image_file(path)
         _check_disk_space(path)
 
@@ -1065,6 +1066,7 @@ class ImageIngestor(BaseIngestor):
         except Exception:
             pass
 
+        logger.info(event="extraction_complete", modality="image", file=str(path), extracts=1)
         return [
             RawExtract(
                 text="",
