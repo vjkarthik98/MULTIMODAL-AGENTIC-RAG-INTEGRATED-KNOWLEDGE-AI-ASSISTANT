@@ -627,11 +627,19 @@ class ImageEmbedder:
 from app.embeddings.base_embedder import BaseEmbedder as _BaseEmbedder  # noqa: E402
 
 
+import re as _re
+_NUMBERS_ONLY_RE = _re.compile(r'[$€£¥₹]?[\d,]+\.?\d*\s*(?:[BMKTbmkt]n?|%|bps|x)?\b')
+
+
 class ImageDocEmbedder(_BaseEmbedder):
     """BGE text embedder for image IngestedDocument objects.
 
     Enrichment:
       [{image_type}] {caption}. {ocr_text} {extracted_numbers}
+
+    Phase 2.5 dual embedding:
+      doc.embedding     = full caption (semantic retrieval)
+      doc.embedding_alt = numbers-only text (exact numeric retrieval)
 
     Keeps image chunks in the text collection so they surface for text queries.
     SigLIP vision-space embedding (vision collection) is handled separately by
@@ -661,3 +669,57 @@ class ImageDocEmbedder(_BaseEmbedder):
             base += f" {num_str}"
 
         return base[:_s.MAX_PROMPT_CHARS]
+
+    def _build_numbers_only_text(self, doc: Any) -> str:
+        """Build numbers-only embed text for embedding_alt (Phase 2.5)."""
+        from app.core.config import settings as _s
+        s        = getattr(doc, "structure", {}) or {}
+        ocr_text = (s.get("ocr_text") or "").strip()
+        caption  = (s.get("caption")  or "").strip()
+        combined = f"{ocr_text} {caption}".strip()
+
+        # Extract all numeric tokens (dollar amounts, percentages, bps, etc.)
+        nums = _NUMBERS_ONLY_RE.findall(combined)
+        if not nums:
+            # Fall back to extracted_numbers list from structure
+            nums = [str(n) for n in (s.get("extracted_numbers") or [])]
+
+        return " ".join(nums)[:_s.MAX_PROMPT_CHARS] if nums else ""
+
+    def embed_documents(self, docs: List[Any], session_id: str = "default") -> List[Any]:
+        """Embed image docs with dual vectors: primary (full caption) + alt (numbers-only).
+
+        Calls the parent embed_documents for the primary vector, then computes
+        embedding_alt via a second BGE pass over numbers-only text.
+        """
+        results = super().embed_documents(docs, session_id=session_id)
+        if not results:
+            return results
+
+        # Phase 2.5: compute numbers-only secondary embedding for each result
+        embedder   = self._get_model()
+        alt_texts  = []
+        alt_docs   = []
+        for doc in results:
+            alt_text = self._build_numbers_only_text(doc)
+            if alt_text:
+                alt_texts.append(alt_text)
+                alt_docs.append(doc)
+
+        if alt_texts:
+            from app.embeddings.base_embedder import valid_embedding
+            for i in range(0, len(alt_texts), embedder.batch_size):
+                batch_texts = alt_texts[i:i + embedder.batch_size]
+                batch_docs  = alt_docs[i:i + embedder.batch_size]
+                try:
+                    embs = embedder._encode_with_retry(embedder.model, batch_texts)
+                    for doc, emb in zip(batch_docs, embs):
+                        if valid_embedding(emb, embedder.expected_dim):
+                            doc.embedding_alt = emb
+                            struct = dict(getattr(doc, "structure", {}) or {})
+                            struct["has_numeric_alt_embedding"] = True
+                            doc.structure = struct
+                except Exception as exc:
+                    logger.debug(event="image_alt_embed_skip", error=str(exc))
+
+        return results

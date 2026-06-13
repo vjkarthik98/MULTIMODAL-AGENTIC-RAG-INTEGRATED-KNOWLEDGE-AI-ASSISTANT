@@ -79,11 +79,35 @@ class XlsxChunker(BaseChunker):
 
         # State per sheet
         current_sheet: Optional[str] = None
+        sheet_index = [0]        # sequential sheet number (MD Phase 1.4)
         unit_scale: str = ""
         currency: str = "USD"
         column_headers: List[str] = []
         pending_rows: List[RawExtract] = []
         seen_hashes: set = set()
+
+        _SHEET_TYPE_MAP = {
+            "income": "income_statement",
+            "p&l": "income_statement",
+            "profit": "income_statement",
+            "balance": "balance_sheet",
+            "cash": "cash_flow",
+            "capex": "capex",
+            "assump": "assumptions",
+            "input": "assumptions",
+            "summary": "summary",
+            "model": "model",
+            "data": "data",
+        }
+
+        def _infer_sheet_type(name: Optional[str]) -> str:
+            if not name:
+                return "unknown"
+            nl = name.lower()
+            for key, stype in _SHEET_TYPE_MAP.items():
+                if key in nl:
+                    return stype
+            return "data"
 
         def flush_rows(force: bool = False) -> None:
             if not pending_rows:
@@ -111,11 +135,18 @@ class XlsxChunker(BaseChunker):
             chunk_hash = deterministic_chunk_id(
                 source, f"sheet_{current_sheet}_r{row_nums[0]}_{chunk_idx[0]}", chunk_idx[0]
             )
+            first_row_ref = rows[0].extra.get("cell_ref", "")
+            last_row_ref  = rows[-1].extra.get("cell_ref", "")
+            table_region  = f"{first_row_ref}:{last_row_ref}" if first_row_ref and last_row_ref else ""
             structure = {
                 "chunk_hash_id":         chunk_hash,
                 "source_file":           source,
                 "chunk_index":           chunk_idx[0],
                 "sheet_name":            current_sheet,
+                "sheet_index":           sheet_index[0],
+                "sheet_type":            _infer_sheet_type(current_sheet),
+                "table_region":          table_region,
+                "named_ranges_in_chunk": [],
                 "chunk_type":            "table_row_group",
                 "row_range":             row_nums,
                 "column_headers":        headers,
@@ -128,7 +159,7 @@ class XlsxChunker(BaseChunker):
             }
             doc = self._make_doc(
                 text=nl_text,
-                modality="excel",
+                modality="xlsx",
                 subtype="table_row_group",
                 source=source,
                 page=None,
@@ -148,6 +179,7 @@ class XlsxChunker(BaseChunker):
             if ext.sheet and ext.sheet != current_sheet:
                 flush_rows(force=True)
                 current_sheet = ext.sheet
+                sheet_index[0] += 1
                 unit_scale = ""
                 currency = "USD"
                 column_headers = []
@@ -171,17 +203,21 @@ class XlsxChunker(BaseChunker):
                 fin_entities = extract_finance_entities(nr_text)
                 chunk_hash = deterministic_chunk_id(source, f"named_range_{chunk_idx[0]}", chunk_idx[0])
                 structure = {
-                    "chunk_hash_id":   chunk_hash,
-                    "source_file":     source,
-                    "chunk_index":     chunk_idx[0],
-                    "sheet_name":      current_sheet,
-                    "chunk_type":      "named_ranges",
-                    "unit_scale":      unit_scale,
-                    "finance_entities": fin_entities,
+                    "chunk_hash_id":         chunk_hash,
+                    "source_file":           source,
+                    "chunk_index":           chunk_idx[0],
+                    "sheet_name":            current_sheet,
+                    "sheet_index":           sheet_index[0],
+                    "sheet_type":            _infer_sheet_type(current_sheet),
+                    "table_region":          "",
+                    "named_ranges_in_chunk": [nr_text.split("=")[0].strip()] if "=" in nr_text else [],
+                    "chunk_type":            "named_ranges",
+                    "unit_scale":            unit_scale,
+                    "finance_entities":      fin_entities,
                 }
                 doc = self._make_doc(
                     text=nr_text,
-                    modality="excel",
+                    modality="xlsx",
                     subtype="assumptions",
                     source=source,
                     page=None,
@@ -225,17 +261,21 @@ class XlsxChunker(BaseChunker):
                 fin_entities = extract_finance_entities(cap)
                 chunk_hash = deterministic_chunk_id(source, f"chart_{chunk_idx[0]}", chunk_idx[0])
                 structure = {
-                    "chunk_hash_id":   chunk_hash,
-                    "source_file":     source,
-                    "chunk_index":     chunk_idx[0],
-                    "sheet_name":      current_sheet,
-                    "chunk_type":      "chart_caption",
-                    "caption":         cap,
-                    "finance_entities": fin_entities,
+                    "chunk_hash_id":         chunk_hash,
+                    "source_file":           source,
+                    "chunk_index":           chunk_idx[0],
+                    "sheet_name":            current_sheet,
+                    "sheet_index":           sheet_index[0],
+                    "sheet_type":            _infer_sheet_type(current_sheet),
+                    "table_region":          "",
+                    "named_ranges_in_chunk": [],
+                    "chunk_type":            "chart_caption",
+                    "caption":               cap,
+                    "finance_entities":      fin_entities,
                 }
                 doc = self._make_doc(
                     text=cap,
-                    modality="excel",
+                    modality="xlsx",
                     subtype="chart_caption",
                     source=source,
                     page=None,

@@ -6,6 +6,7 @@ import { FileText, Globe, Copy, ThumbsUp, ThumbsDown, Check, RotateCcw, Pencil,
 import { useToast } from '../context/ToastContext'
 import useIsMobile from '../hooks/useIsMobile'
 import { submitFeedback } from '../api/client'
+import FinanceTable from './FinanceTable'
 
 // Extract inline citations from LLM output. Handles both the bare form
 // [filename.pdf] and the page-tagged forms the CoT path emits:
@@ -130,10 +131,20 @@ function SourceIcon({ source, isWeb }) {
   return <File size={10} className={cls} style={s} />
 }
 
+/* ── Seconds → M:SS string ── */
+function fmtTimestamp(sec) {
+  const t = parseFloat(sec)
+  if (isNaN(t)) return null
+  const m = Math.floor(t / 60)
+  const s = Math.floor(t % 60).toString().padStart(2, '0')
+  return `${m}:${s}`
+}
+
 /* ── Source chip ──
-   Source object shape (from backend):
-   KB docs:  { source: "filename.pdf", page_number: 4,    start_time: 83.5, modality: "text"|"audio"|"video" }
-   Web:      { source: "https://...",  page_number: null, start_time: null, modality: "web" }
+   Full Phase 6.3 citation shape:
+   { source/filename, modality, page, section_title, sheet_name, heading,
+     timestamp_start, timestamp_end, speaker_role, speaker_name,
+     call_section, row_range, chunk_type, image_title, slide_numbers, snippet }
 */
 function SourceChip({ source }) {
   const isWeb  = typeof source === 'object' && source.modality === 'web'
@@ -143,24 +154,39 @@ function SourceChip({ source }) {
   let suffix = ''
 
   if (isWeb) {
-    // Show hostname without www. prefix
     try { label = new URL(raw).hostname.replace(/^www\./, '') } catch { /* keep raw */ }
   } else if (typeof source === 'object') {
-    const srcExt = (raw.split('.').pop() || '').toUpperCase()
-    const isTxt  = srcExt === 'TXT' || source.modality === 'text'
-    if (source.page_number != null) {
-      suffix = ` · p.${source.page_number}`
-    } else if (source.start_time != null) {
-      const t = parseFloat(source.start_time)
-      if (!isNaN(t)) {
-        const m = Math.floor(t / 60)
-        const s = Math.floor(t % 60).toString().padStart(2, '0')
-        suffix = ` · ${m}:${s}`
+    const mod    = source.modality || ''
+    const isTxt  = mod === 'text' || mod === 'txt'
+    const isAudio = ['audio', 'mp3'].includes(mod)
+    const isVideo = ['video', 'mp4'].includes(mod)
+    const isXlsx  = ['excel', 'xlsx'].includes(mod)
+
+    // Priority order: page → timestamp → sheet+row → heading → section_title → image_title
+    if (source.page != null || source.page_number != null) {
+      const pg = source.page ?? source.page_number
+      suffix = ` · p.${pg}`
+      if (source.section_title) suffix += ` · ${String(source.section_title).slice(0, 30)}`
+    } else if (isAudio || isVideo) {
+      const ts = fmtTimestamp(source.timestamp_start)
+      if (ts) {
+        const speaker = source.speaker_name || source.speaker_role || ''
+        suffix = speaker ? ` · ${speaker} ${ts}` : ` · ${ts}`
       }
+    } else if (isXlsx && source.sheet_name) {
+      suffix = ` · ${source.sheet_name}`
+      if (source.row_range) suffix += ` row ${source.row_range}`
+    } else if (source.heading) {
+      suffix = ` · ${String(source.heading).slice(0, 40)}`
     } else if (source.section_title && !isTxt) {
-      // TXT files: filename alone is sufficient citation
       const st = String(source.section_title).trim()
       if (st) suffix = ` · ${st}`
+    } else if (source.image_title) {
+      suffix = ` · ${String(source.image_title).slice(0, 30)}`
+    } else if (source.start_time != null) {
+      // legacy field
+      const ts = fmtTimestamp(source.start_time)
+      if (ts) suffix = ` · ${ts}`
     }
   }
 
@@ -384,6 +410,43 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
                   {cleanContent}
                 </ReactMarkdown>
               </div>
+
+              {/* Numeric verification badges — rendered after stream completes */}
+              {!isStreaming && message.verification_results && message.verification_results.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {message.verification_results.map((v, i) => {
+                    const badge = v.grounded ? '✅' : v.approximate ? '⚠' : '🚩'
+                    const title = v.grounded ? 'Grounded in source' : v.approximate ? 'Approximate match' : 'Unverified — not found in sources'
+                    return (
+                      <span
+                        key={i}
+                        title={title}
+                        className="inline-flex items-center gap-1 text-[11px] leading-4 rounded-xl px-2 py-0.5 font-mono select-none"
+                        style={{ background: 'var(--t-chp)', border: '1px solid var(--t-chpb)', color: 'var(--t-tx4)', cursor: 'help' }}
+                      >
+                        {badge} {v.number}
+                      </span>
+                    )
+                  })}
+                </div>
+              )}
+
+              {/* Inline FinanceTable for XLSX sources with markdown_repr */}
+              {!isStreaming && allSources.some(s => typeof s === 'object' && ['excel','xlsx'].includes(s.modality) && s.markdown_repr) && (
+                <div className="mt-3 space-y-2">
+                  {allSources
+                    .filter(s => typeof s === 'object' && ['excel','xlsx'].includes(s.modality) && s.markdown_repr)
+                    .map((s, i) => (
+                      <FinanceTable
+                        key={i}
+                        markdown={s.markdown_repr}
+                        title={s.sheet_name || s.source || ''}
+                        rowRange={s.row_range}
+                      />
+                    ))
+                  }
+                </div>
+              )}
 
               {/* Sources inside the bubble — hidden when answer says no info was found */}
               {showSources && allSources.length > 0 && !isStreaming && !isNoInfoResponse(cleanContent) && (

@@ -94,6 +94,25 @@ _MATH_WORDS       = {"calculate", "compute", "solve", "equation", "formula", "in
 _ARITHMETIC_RE    = re.compile(r"^\s*\d[\d\s]*[+\-*/^%]\s*\d[\d\s]*[=?]?\s*$")
 _SECURITY_WORDS   = {"password", "credential", "secret", "token", "api key", "hack", "exploit"}
 
+# Finance domain routing keyword sets (Phase 7)
+_MARKET_DATA: frozenset = frozenset({
+    "stock price", "market cap", "p/e", "pe ratio", "analyst target",
+    "price target", "consensus", "52-week", "trading at", "share price",
+})
+_EARNINGS_CALL: frozenset = frozenset({
+    "earnings call", "conference call", "transcript", "said about",
+    "cfo said", "ceo said", "management said", "what did the cfo",
+    "what did the ceo", "prepared remarks",
+})
+_REGULATORY: frozenset = frozenset({
+    "10-k", "10-q", "8-k", "sec filing", "annual report", "proxy",
+    "form 10", "10k", "10q", "regulatory filing", "disclosure",
+})
+_FINANCIAL_MODEL: frozenset = frozenset({
+    "dcf", "lbo", "valuation", "projection", "sensitivity",
+    "wacc", "financial model", "assumptions", "model output",
+})
+
 
 # NORMALIZE QUERY
 
@@ -207,6 +226,42 @@ class AgentRouter:
                     self._log_decision(d, signals, start, session_id)
                     return d
 
+                # FINANCE DOMAIN HARD RULES (Phase 7)
+                if signals.get("is_market_data_query"):
+                    d = self._finance_decision(
+                        "search", "market_data_live", 0.93, session_id, signals,
+                    )
+                    _router_decisions.labels(action="search", method="finance_hard_rule").inc()
+                    self._log_decision(d, signals, start, session_id)
+                    return d
+
+                if signals.get("is_earnings_call_query"):
+                    d = self._finance_decision(
+                        "rag", "earnings_call_kb", 0.92, session_id, signals,
+                        modality_hint="mp3",
+                    )
+                    _router_decisions.labels(action="rag", method="finance_hard_rule").inc()
+                    self._log_decision(d, signals, start, session_id)
+                    return d
+
+                if signals.get("is_regulatory_query"):
+                    d = self._finance_decision(
+                        "rag", "regulatory_filing_kb", 0.91, session_id, signals,
+                        source_type_filter=["pdf", "docx"],
+                    )
+                    _router_decisions.labels(action="rag", method="finance_hard_rule").inc()
+                    self._log_decision(d, signals, start, session_id)
+                    return d
+
+                if signals.get("is_financial_model_query"):
+                    d = self._finance_decision(
+                        "rag", "financial_model_kb", 0.90, session_id, signals,
+                        subtype_filter=["table", "assumptions"],
+                    )
+                    _router_decisions.labels(action="rag", method="finance_hard_rule").inc()
+                    self._log_decision(d, signals, start, session_id)
+                    return d
+
                 # LLM ROUTING FOR AMBIGUOUS QUERIES
                 try:
                     decision = self._llm_route(query, signals, session_id)
@@ -281,27 +336,37 @@ class AgentRouter:
         q      = query.lower()
         tokens = set(q.split())
 
+        is_market_data      = any(phrase in q for phrase in _MARKET_DATA)
+        is_earnings_call    = any(phrase in q for phrase in _EARNINGS_CALL)
+        is_regulatory       = any(phrase in q for phrase in _REGULATORY)
+        is_financial_model  = any(phrase in q for phrase in _FINANCIAL_MODEL)
+
         return {
-            "is_recent":           bool(tokens & _RECENT_WORDS),
-            "is_web":              bool(tokens & _WEB_WORDS),
-            "is_memory":           any(
+            "is_recent":              bool(tokens & _RECENT_WORDS),
+            "is_web":                 bool(tokens & _WEB_WORDS),
+            "is_memory":              any(
                 re.search(r"\b" + re.escape(w) + r"\b", q, re.IGNORECASE)
                 for w in _MEMORY_WORDS
             ),
-            "is_complex":          (
+            "is_complex":             (
                 len(tokens) > settings.DECOMPOSITION_MIN_WORDS or
                 bool(tokens & _COMPLEX_KEYWORDS)
             ),
-            "is_reasoning":        bool(tokens & _REASONING_WORDS),
-            "has_multimodal_hint": bool(tokens & _MULTIMODAL_WORDS),
-            "is_code":             bool(tokens & _CODE_WORDS),
-            "is_greeting":         (bool(tokens & _GREETING_WORDS) and len(tokens) <= 6)
-                                   or bool(re.search(r"\bhow are you\b", q)),
-            "is_math":             bool(tokens & _MATH_WORDS) or bool(_ARITHMETIC_RE.match(q)),
-            "is_security":         bool(tokens & _SECURITY_WORDS),
-            "token_count":         len(tokens),
-            "has_question_mark":   "?" in query,
-            "multi_question":      query.count("?") > 1,
+            "is_reasoning":           bool(tokens & _REASONING_WORDS),
+            "has_multimodal_hint":    bool(tokens & _MULTIMODAL_WORDS),
+            "is_code":                bool(tokens & _CODE_WORDS),
+            "is_greeting":            (bool(tokens & _GREETING_WORDS) and len(tokens) <= 6)
+                                      or bool(re.search(r"\bhow are you\b", q)),
+            "is_math":                bool(tokens & _MATH_WORDS) or bool(_ARITHMETIC_RE.match(q)),
+            "is_security":            bool(tokens & _SECURITY_WORDS),
+            "token_count":            len(tokens),
+            "has_question_mark":      "?" in query,
+            "multi_question":         query.count("?") > 1,
+            # Finance domain signals
+            "is_market_data_query":      is_market_data,
+            "is_earnings_call_query":    is_earnings_call,
+            "is_regulatory_query":       is_regulatory,
+            "is_financial_model_query":  is_financial_model,
         }
 
     # PROMPT BUILDER
@@ -509,6 +574,33 @@ class AgentRouter:
             confidence=confidence,
             signals={},
             session_id=session_id,
+        )
+
+    # FINANCE DECISION FACTORY — carries retrieval filter hints
+
+    def _finance_decision(
+        self,
+        action: str,
+        reason: str,
+        confidence: float,
+        session_id: str,
+        signals: dict,
+        modality_hint: Optional[str] = None,
+        source_type_filter: Optional[list] = None,
+        subtype_filter: Optional[list] = None,
+        call_section_filter: Optional[str] = None,
+    ) -> AgentDecision:
+        from app.agents.agent_schema import AgentSignals
+        return AgentDecision(
+            action=action,
+            reason=reason,
+            confidence=confidence,
+            signals=signals,
+            session_id=session_id,
+            modality_hint=modality_hint,
+            source_type_filter=source_type_filter or [],
+            subtype_filter=subtype_filter or [],
+            call_section_filter=call_section_filter,
         )
 
     # ASYNC ROUTE WRAPPER

@@ -240,41 +240,59 @@ class HybridRetriever:
 
         return vec
 
-    # QUERY TYPE DETECTION — drives adaptive weight selection
-    # Returns one of: "keyword", "semantic", "mixed"
+    # FINANCE QUERY TYPE CLASSIFIER (plan Phase 5.2)
+    # Returns one of: "exact_numeric" | "earnings_call" | "tabular" | "semantic"
+    # Each type drives a different BM25/dense/vision weight split.
+
+    _NUMERIC_RE = re.compile(
+        r'[$€£]\d|Q[1-4]|FY\d{2}|\d+(?:\.\d+)?%|\beps\b|\bearnings per share\b'
+        r'|\d+(?:\.\d+)?\s*(?:billion|million|bps|basis points)',
+        re.IGNORECASE,
+    )
+    _EARNINGS_CALL_WORDS = frozenset({
+        "said", "stated", "noted", "commented", "mentioned", "guided",
+        "cfo", "ceo", "management", "executive", "speaker", "transcript",
+        "call", "conference",
+    })
+    _TABULAR_WORDS = frozenset({
+        "table", "balance sheet", "income statement", "cash flow",
+        "row", "sheet", "column", "spreadsheet", "excel", "model",
+    })
 
     def _query_type(self, q: str) -> str:
-        tokens   = q.split()
-        n_tokens = len(tokens)
         lower    = q.lower()
+        words    = set(lower.split())
 
-        # Entity-heavy: tickers, dollar amounts, years, quarter codes
-        has_entity = bool(_ENTITY_RE.search(q))
+        # Exact numeric: dollar amounts, quarter codes, percentages, EPS
+        if self._NUMERIC_RE.search(q):
+            return "exact_numeric"
 
-        # Very short query or dominated by entities → prefer BM25 (exact match)
-        if n_tokens <= 3 or (has_entity and n_tokens <= 6):
-            return "keyword"
+        # Earnings call: speaker attribution or transcript reference
+        if words & self._EARNINGS_CALL_WORDS:
+            return "earnings_call"
 
-        # Conversational / explanation-seeking → prefer dense (semantic)
-        for starter in _SEMANTIC_STARTERS:
-            if lower.startswith(starter + " ") or lower == starter:
-                return "semantic"
-        if n_tokens >= 10:
-            return "semantic"
+        # Tabular: balance sheet, income statement, spreadsheet references
+        for phrase in self._TABULAR_WORDS:
+            if phrase in lower:
+                return "tabular"
 
-        return "mixed"
+        return "semantic"
 
-    # ADAPTIVE WEIGHTS — BM25/dense ratio shifted by query type
-    # Keyword queries reward exact match (BM25↑); semantic queries reward
-    # paraphrase / context understanding (dense↑).
+    # ADAPTIVE WEIGHTS — finance-tuned per query type (plan Phase 5.2)
+    # exact_numeric: BM25 dominates (exact token match beats paraphrase)
+    # earnings_call: balanced dense (audio embedding space is rich)
+    # tabular:       BM25 + dense balanced (structured + semantic)
+    # semantic:      dense dominates (concept / paraphrase retrieval)
 
     def _adaptive_weights(self, query_type: str) -> Tuple[float, float, float]:
-        if query_type == "keyword":
-            return (0.50, 0.50, self.w_vision)
-        if query_type == "semantic":
-            return (0.25, 0.75, self.w_vision)
-        # mixed: use configured defaults
-        return (self.w_bm25, self.w_vector, self.w_vision)
+        if query_type == "exact_numeric":
+            return (0.55, 0.35, 0.10)
+        if query_type == "earnings_call":
+            return (0.40, 0.45, 0.15)
+        if query_type == "tabular":
+            return (0.50, 0.40, 0.10)
+        # semantic (default)
+        return (0.25, 0.60, 0.15)
 
     # SCORE NORMALIZATION — min-max to [0,1]; avoids the floor-collapse
     # that happens with pure /max when all BM25Plus scores are non-zero.
@@ -456,6 +474,36 @@ class HybridRetriever:
                 error=str(exc),
                 session_id=session_id,
             )
+            return []
+
+    # VECTOR SEARCH — ALT VECTOR (embedding_alt for tables/images) — Phase 5.3
+
+    def _vector_search_alt(
+        self,
+        q_vec: List[float],
+        candidate_k: int,
+        session_id: str,
+        user_id: Optional[str] = None,
+    ) -> List[Dict]:
+        """Query the vector_alt named vector (markdown table / numbers-only embeddings).
+
+        Falls back silently — not all collections have this named vector.
+        """
+        def _do():
+            return self.vector_store.search_text(
+                q_vec, candidate_k, session_id,
+                user_id=user_id,
+                vector_name="vector_alt",
+            )
+
+        try:
+            if _PYBREAKER_AVAILABLE:
+                results = _text_breaker(_do)()
+            else:
+                results = _do()
+            return self._normalize_scores(results or [])
+        except Exception:
+            # vector_alt may not exist for all modalities — silent fallback
             return []
 
     # VECTOR SEARCH — VISION SPACE
@@ -700,11 +748,11 @@ class HybridRetriever:
             # AUDIO/VIDEO MODALITY FILTER BOOST
             modality_filter: Optional[str] = None
             if is_audio:
-                modality_filter = "audio"
+                modality_filter = "mp3"
             elif is_video:
-                modality_filter = "video"
+                modality_filter = "mp4"
 
-            # ADAPTIVE WEIGHTS — BM25/dense ratio adjusted for query type
+            # ADAPTIVE WEIGHTS — finance query classifier drives BM25/dense split
             q_type = self._query_type(query)
             w_bm25, w_vector, w_vision = self._adaptive_weights(q_type)
 
@@ -716,6 +764,25 @@ class HybridRetriever:
             if vis_res:
                 vis_weight = w_vision * (1.5 if is_vision else 1.0)
                 self._fuse(combined, vis_res, vis_weight, "vision")
+
+            # DUAL-VECTOR ALT SEARCH — Phase 5.3
+            # For tabular and exact_numeric queries, also query the vector_alt space
+            # (markdown table embedding / numbers-only embedding). Take max of primary
+            # and alt scores so table chunks surface even if the query phrasing doesn't
+            # match the NL summary.
+            if q_type in ("tabular", "exact_numeric") and q_vec:
+                alt_res = self._vector_search_alt(q_vec, candidate_k, session_id, user_id)
+                if alt_res:
+                    # Merge: for docs already in combined take max score; new docs add.
+                    for r in alt_res:
+                        meta  = r.get("metadata", {})
+                        key   = self._hash(r.get("text", ""), meta)
+                        score = r.get("score", 0.0) * w_vector
+                        if key in combined:
+                            combined[key]["score"] = max(combined[key]["score"], score)
+                            combined[key]["sources"].add("dense_alt")
+                        else:
+                            combined[key] = {**r, "score": score, "sources": {"dense_alt"}}
 
             # CROSS-RETRIEVER AGREEMENT BOOST — documents that appear in both
             # BM25 and dense search are corroborated by two independent retrieval
@@ -744,7 +811,7 @@ class HybridRetriever:
             # Apply a strong boost so they surface into reranker view, then
             # let the cross-encoder make the final relevance call.
             if modality_filter:
-                boost = 2.5 if modality_filter == "audio" else 1.5
+                boost = 2.5 if modality_filter == "mp3" else 1.5
                 boosted_any = False
                 for r in fused:
                     if r.get("metadata", {}).get("modality") == modality_filter:
@@ -752,12 +819,12 @@ class HybridRetriever:
                         boosted_any = True
                 # If no audio/video chunks reached fused at all, do a direct
                 # modality-filtered Qdrant search and inject the results.
-                if not boosted_any and modality_filter == "audio":
+                if not boosted_any and modality_filter == "mp3":
                     try:
                         from app.auth.tenancy import qdrant_user_filter
                         from qdrant_client.models import Filter, FieldCondition, MatchValue
                         audio_filter = Filter(must=[
-                            FieldCondition(key="modality", match=MatchValue(value="audio")),
+                            FieldCondition(key="modality", match=MatchValue(value="mp3")),
                         ])
                         if user_id:
                             audio_filter.must.append(

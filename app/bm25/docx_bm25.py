@@ -17,7 +17,7 @@ class DocxBM25(BaseBM25):
     - Heading level token for heading-weight boosting
     """
 
-    modality = "word"
+    modality = "docx"
 
     def _build_indexed_text(self, doc: Any) -> str:
         s = getattr(doc, "structure", {}) or {}

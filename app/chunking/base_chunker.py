@@ -11,12 +11,15 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Priority-ordered separators for finance text.
+# Priority-ordered separators for finance text (MAGIK spec Phase 1.1).
+# Single-newline speaker patterns come after paragraph break so they
+# catch transcript formats that use \nCEO: without a blank line.
 _FINANCE_SEPARATORS = [
     "\n\n\n",
-    "\n\nOPERATOR:", "\n\nCEO:", "\n\nCFO:", "\n\nANALYST:",
     "\n\n",
+    "\nOPERATOR:", "\nCEO:", "\nCFO:", "\nANALYST:",
     ". ", "? ", "! ", "; ",
+    ", ",    # last resort — protected finance numbers are safe from splitting
 ]
 
 _HEADING_RE = re.compile(r"^(?:[A-Z][A-Z\s&,]{4,}|(?:\d+\.)+\s+.{3,}|#{1,3}\s+.{3,})$")

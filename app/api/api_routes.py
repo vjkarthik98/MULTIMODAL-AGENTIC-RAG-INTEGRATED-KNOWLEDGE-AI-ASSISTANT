@@ -2096,3 +2096,189 @@ async def submit_feedback(
     except Exception as exc:
         logger.error(event="api_feedback_failed", request_id=request_id, error=str(exc))
         raise HTTPException(status_code=500, detail="Failed to save feedback")
+
+
+# ─────────────────────────────────────────────────────────────────
+# PHASE 8 NEW ENDPOINTS
+# ─────────────────────────────────────────────────────────────────
+
+# GET /api/ingestion/status/{job_id} — poll IngestJob progress
+
+@router.get("/api/ingestion/status/{job_id}")
+async def get_ingestion_status(
+    job_id: str,
+    request: Request,
+    current_user: UserPublic = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Poll ingestion job progress (for audio/video uploads)."""
+    from app.pipeline.ingestion_pipeline import get_ingest_job
+    job = get_ingest_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+# GET /api/sources/{chunk_id} — return full chunk metadata for TranscriptViewer
+
+@router.get("/api/sources/{chunk_id}")
+async def get_source_chunk(
+    chunk_id: str,
+    request: Request,
+    current_user: UserPublic = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Return full metadata for a single chunk (used by TranscriptViewer)."""
+    user_id = current_user.user_id
+    try:
+        vs = infra.get_vector_store()
+        if vs is None:
+            raise HTTPException(status_code=503, detail="Vector store unavailable")
+        results = vs.search_by_payload(
+            field="chunk_id",
+            value=chunk_id,
+            session_id=None,
+            limit=1,
+        )
+        if not results:
+            raise HTTPException(status_code=404, detail="Chunk not found")
+        chunk = results[0]
+        meta  = chunk.get("metadata", {}) or {}
+        if meta.get("user_id") and meta["user_id"] != user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        return {
+            "chunk_id":   chunk_id,
+            "text":       chunk.get("text", ""),
+            "metadata":   meta,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(event="api_source_chunk_failed", chunk_id=chunk_id, error=str(exc))
+        raise HTTPException(status_code=500, detail="Failed to fetch chunk")
+
+
+# GET /api/kb/files — list all files in user's KB
+
+@router.get("/api/kb/files")
+async def list_kb_files(
+    request: Request,
+    current_user: UserPublic = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """List all ingested files in the user's knowledge base."""
+    user_id = current_user.user_id
+    try:
+        vs = infra.get_vector_store()
+        if vs is None:
+            return {"files": [], "count": 0}
+        results = vs.search_by_payload(
+            field="user_id",
+            value=user_id,
+            session_id=None,
+            limit=1000,
+        )
+        # Group by source filename
+        seen:  Dict[str, Dict] = {}
+        for r in results:
+            meta   = r.get("metadata", {}) or {}
+            src    = meta.get("source") or meta.get("source_file") or ""
+            fhash  = meta.get("checksum_sha256", "") or meta.get("file_hash", "")
+            if src not in seen:
+                seen[src] = {
+                    "filename":    src,
+                    "modality":    meta.get("modality", "unknown"),
+                    "file_hash":   fhash,
+                    "chunk_count": 0,
+                    "ingested_at": meta.get("ingestion_time", ""),
+                }
+            seen[src]["chunk_count"] += 1
+        files = sorted(seen.values(), key=lambda x: x["ingested_at"], reverse=True)
+        return {"files": files, "count": len(files)}
+    except Exception as exc:
+        logger.error(event="api_kb_files_failed", user_id=user_id, error=str(exc))
+        raise HTTPException(status_code=500, detail="Failed to list KB files")
+
+
+# DELETE /api/kb/files/{file_hash} — delete a specific file from KB
+
+@router.delete("/api/kb/files/{file_hash}")
+async def delete_kb_file(
+    file_hash: str,
+    request: Request,
+    current_user: UserPublic = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Delete all chunks for a file from the user's knowledge base."""
+    user_id = current_user.user_id
+    try:
+        vs = infra.get_vector_store()
+        if vs is None:
+            raise HTTPException(status_code=503, detail="Vector store unavailable")
+        results = vs.search_by_payload(
+            field="checksum_sha256",
+            value=file_hash,
+            session_id=None,
+            limit=1000,
+        )
+        if not results:
+            raise HTTPException(status_code=404, detail="File not found in KB")
+        ids_to_delete = []
+        for r in results:
+            meta = r.get("metadata", {}) or {}
+            if meta.get("user_id") == user_id:
+                point_id = r.get("id")
+                if point_id:
+                    ids_to_delete.append(point_id)
+        if not ids_to_delete:
+            raise HTTPException(status_code=403, detail="No matching chunks for this user")
+        vs.delete_by_ids(ids_to_delete)
+        return {"deleted_chunks": len(ids_to_delete), "file_hash": file_hash, "status": "ok"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(event="api_kb_delete_failed", file_hash=file_hash, error=str(exc))
+        raise HTTPException(status_code=500, detail="Failed to delete file")
+
+
+# GET /api/transcript/{file_hash} — full ordered transcript for audio/video
+
+@router.get("/api/transcript/{file_hash}")
+async def get_transcript(
+    file_hash: str,
+    request: Request,
+    current_user: UserPublic = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Return full ordered transcript chunks for an audio/video file."""
+    user_id = current_user.user_id
+    try:
+        vs = infra.get_vector_store()
+        if vs is None:
+            raise HTTPException(status_code=503, detail="Vector store unavailable")
+        results = vs.search_by_payload(
+            field="checksum_sha256",
+            value=file_hash,
+            session_id=None,
+            limit=2000,
+        )
+        chunks = []
+        for r in results:
+            meta = r.get("metadata", {}) or {}
+            if meta.get("user_id") != user_id:
+                continue
+            modality = meta.get("modality", "")
+            if modality not in ("mp3", "mp4", "audio", "video"):
+                continue
+            chunks.append({
+                "chunk_id":       r.get("id", ""),
+                "text":           r.get("text", ""),
+                "start":          meta.get("start_timestamp") or meta.get("timestamp_start"),
+                "end":            meta.get("end_timestamp") or meta.get("timestamp_end"),
+                "speaker_name":   meta.get("speaker_name"),
+                "speaker_role":   meta.get("speaker_role"),
+                "call_section":   meta.get("call_section"),
+                "chunk_index":    meta.get("chunk_index", 0),
+            })
+        chunks.sort(key=lambda x: (x.get("chunk_index") or 0, x.get("start") or 0))
+        return {"transcript": chunks, "count": len(chunks)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(event="api_transcript_failed", file_hash=file_hash, error=str(exc))
+        raise HTTPException(status_code=500, detail="Failed to fetch transcript")

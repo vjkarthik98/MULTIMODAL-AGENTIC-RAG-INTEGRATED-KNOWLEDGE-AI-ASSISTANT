@@ -75,11 +75,16 @@ class TxtChunker(BaseChunker):
         chunk_idx = 0
         current_section: Optional[str] = None
         seen_hashes: set = set()
+        char_offset = 0  # running character offset across all extract text
+        paragraph_number = 0  # counter reset per section (MD Phase 1.1)
+        last_section_for_para_counter: Optional[str] = None
 
         for extract in extracts:
             text = (extract.text or "").strip()
             if not text:
                 continue
+
+            extract_char_start = char_offset
 
             if extract.extract_type == "speaker_turn":
                 pieces = [text]
@@ -92,13 +97,26 @@ class TxtChunker(BaseChunker):
                 chunk_type = _detect_chunk_type(text)
                 pieces = self._split_text(text) if chunk_type != "speaker_turn" else [text]
 
+            piece_offset = extract_char_start
             for piece in pieces:
                 if not piece.strip():
+                    piece_offset += len(piece) + 1
                     continue
                 h = hash(piece)
                 if h in seen_hashes:
+                    piece_offset += len(piece) + 1
                     continue
                 seen_hashes.add(h)
+
+                char_start = piece_offset
+                char_end = piece_offset + len(piece)
+
+                # Reset paragraph counter when section changes
+                if current_section != last_section_for_para_counter:
+                    paragraph_number = 0
+                    last_section_for_para_counter = current_section
+                if chunk_type == "paragraph":
+                    paragraph_number += 1
 
                 speaker = extract.speaker_label or _extract_speaker(piece)
                 fin_entities = extract_finance_entities(piece)
@@ -108,6 +126,9 @@ class TxtChunker(BaseChunker):
                     "chunk_hash_id":    chunk_hash,
                     "source_file":      source,
                     "chunk_index":      chunk_idx,
+                    "paragraph_number": paragraph_number,
+                    "char_start":       char_start,
+                    "char_end":         char_end,
                     "section_title":    current_section,
                     "speaker":          speaker,
                     "is_transcript":    is_transcript_file,
@@ -115,13 +136,15 @@ class TxtChunker(BaseChunker):
                     "finance_entities": fin_entities,
                 }
 
+                piece_offset = char_end + 1
+
                 subtype = "speaker_turn" if chunk_type == "speaker_turn" else (
                     "heading" if chunk_type == "section" else "paragraph"
                 )
 
                 doc = self._make_doc(
                     text=piece,
-                    modality="text",
+                    modality="txt",
                     subtype=subtype,
                     source=source,
                     page=None,
@@ -133,6 +156,8 @@ class TxtChunker(BaseChunker):
                 if doc:
                     docs.append(doc)
                     chunk_idx += 1
+
+            char_offset += len(text) + 1  # +1 for separator between extracts
 
         logger.info(event="txt_chunking_done", source=source, chunks=len(docs))
         return docs

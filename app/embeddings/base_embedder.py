@@ -276,6 +276,13 @@ class BaseEmbedder(ABC):
                     error=str(exc), session_id=session_id,
                 )
 
+        # ── FinBERT finance tone annotation ──────────────────────────────────
+        # Augment chunk metadata with finance sentiment/tone from FinBERT
+        # (yiyanghkust/finbert-tone) per Phase 2 Global Rules requirement.
+        # This adds a 'finance_tone' field to structure without changing vectors.
+        if getattr(settings, "FINBERT_ENABLED", False) and results:
+            self._annotate_finbert_tone(results)
+
         latency    = round(time.time() - start, 3)
         throughput = round(len(results) / max(latency, 1e-6), 1)
         logger.info(
@@ -289,6 +296,51 @@ class BaseEmbedder(ABC):
         )
         return results
 
+    def _annotate_finbert_tone(self, docs: List[Any]) -> None:
+        """Run FinBERT tone classification on embedded docs and store result in structure.
+
+        Labels: 'positive' | 'negative' | 'neutral'
+        Score stored in structure['finance_tone'] and structure['finance_tone_score'].
+        Runs in batches; silently skips on any error so it never blocks embedding.
+        """
+        try:
+            from app.core.model_loader import model_loader
+            finbert = model_loader.get_finbert()
+            if finbert is None:
+                return
+        except Exception:
+            return
+
+        batch_size = getattr(settings, "FINBERT_BATCH_SIZE", 32)
+        for i in range(0, len(docs), batch_size):
+            batch = docs[i:i + batch_size]
+            texts = []
+            for doc in batch:
+                t = getattr(doc, "text", "") or ""
+                texts.append(t[:512])  # FinBERT max 512 tokens
+            try:
+                preds = finbert(texts, truncation=True, max_length=512)
+                for doc, pred in zip(batch, preds):
+                    struct = dict(getattr(doc, "structure", {}) or {})
+                    struct["finance_tone"]       = pred["label"].lower()
+                    struct["finance_tone_score"] = round(float(pred["score"]), 4)
+                    doc.structure = struct
+            except Exception as exc:
+                logger.debug(event="finbert_batch_skip", error=str(exc))
+
     def embed_query(self, query: str, session_id: str = "default") -> List[float]:
-        """Embed a query string (uses BGE query instruction prefix)."""
-        return self._get_model().embed_text(query, session_id)
+        """Embed a query string.
+
+        Applies BGE_QUERY_INSTRUCTION from config as explicit prefix when the
+        underlying model has no registered query prompt (ensures finance-domain
+        instruction is always active regardless of SentenceTransformers version).
+        """
+        embedder = self._get_model()
+        # Only prepend if the model hasn't already registered a query prompt;
+        # prevents double-prefixing for instruction-tuned models (Qwen3/E5).
+        if not (getattr(embedder, "_query_prompt_name", None) or
+                getattr(embedder, "_query_prompt_text", None)):
+            instruction = getattr(settings, "BGE_QUERY_INSTRUCTION", "")
+            if instruction:
+                query = instruction + query
+        return embedder.embed_text(query, session_id)

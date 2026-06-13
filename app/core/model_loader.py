@@ -146,6 +146,7 @@ class ModelLoader:
         self._trocr_device:         Optional[str] = None
         self._diarizer:             Optional[Any] = None
         self._ner:                  Optional[Any] = None
+        self._finbert:              Optional[Any] = None
 
         self._initialized = False
 
@@ -163,6 +164,21 @@ class ModelLoader:
         """Compat shim: callers historically read this to choose a device."""
         # The "default" device is the LLM's device — the heaviest workload.
         return device_manager.device_for("llm")
+
+    # OOM GUARD — flush CUDA cache + Python GC between model loads (MD spec)
+
+    @staticmethod
+    def _oom_guard() -> None:
+        """Release CUDA memory and run GC before loading the next model."""
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+        except Exception:
+            pass
 
     # SAFE LOAD WITH TIMEOUT AND RETRY
 
@@ -530,6 +546,7 @@ class ModelLoader:
             if self._blip2_model:
                 return self._blip2_processor, self._blip2_model, self._blip2_device
 
+            self._oom_guard()
             decision = device_manager.decision_for("blip2")
 
             def _load():
@@ -565,6 +582,7 @@ class ModelLoader:
             if self._llava_model:
                 return self._llava_processor, self._llava_model, self._llava_device
 
+            self._oom_guard()
             decision = device_manager.decision_for("llava")
 
             def _load():
@@ -598,6 +616,7 @@ class ModelLoader:
             if self._trocr_model:
                 return self._trocr_processor, self._trocr_model, self._trocr_device
 
+            self._oom_guard()
             decision = device_manager.decision_for("trocr")
 
             def _load():
@@ -626,6 +645,7 @@ class ModelLoader:
             if self._diarizer:
                 return self._diarizer
 
+            self._oom_guard()
             if not settings.HF_TOKEN:
                 raise RuntimeError(
                     "Diarizer requires HF_TOKEN with pyannote model access. "
@@ -659,6 +679,7 @@ class ModelLoader:
             if self._ner:
                 return self._ner
 
+            self._oom_guard()
             decision = device_manager.decision_for("ner")
 
             def _load():
@@ -673,6 +694,33 @@ class ModelLoader:
             self._ner = self._safe_load(_load, "ner")
 
         return self._ner
+
+    # FINBERT — finance tone/sentiment classifier
+
+    def get_finbert(self):
+        if self._finbert:
+            return self._finbert
+
+        with self._lock:
+            if self._finbert:
+                return self._finbert
+
+            self._oom_guard()
+            decision = device_manager.decision_for("ner")  # small model, same slot as NER
+
+            def _load():
+                from transformers import pipeline as hf_pipeline
+                return hf_pipeline(
+                    "text-classification",
+                    model=settings.FINBERT_MODEL,
+                    device=0 if decision.device == "cuda" else -1,
+                    truncation=True,
+                    max_length=512,
+                )
+
+            self._finbert = self._safe_load(_load, "finbert")
+
+        return self._finbert
 
     # HEALTH CHECK
 
@@ -691,6 +739,7 @@ class ModelLoader:
             "trocr":                self._trocr_model is not None,
             "diarizer":             self._diarizer is not None,
             "ner":                  self._ner is not None,
+            "finbert":              self._finbert is not None,
             "reranker":             self._reranker is not None,
             "device":               device_manager.device_for("llm"),
             "profile":              device_manager.profile,

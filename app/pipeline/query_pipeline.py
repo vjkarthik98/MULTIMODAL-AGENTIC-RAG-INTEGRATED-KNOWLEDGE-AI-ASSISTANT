@@ -986,6 +986,21 @@ def query_pipeline(
         # TEMPORAL BOOST — demote forward-looking chunks when query is time-anchored
         reranked = _apply_temporal_boost(reranked, query)
 
+        # EARNINGS CALL SECTION BOOST — Phase 5.4
+        # prepared_remarks + "said/stated/commented" → 1.1× boost
+        # qa_session + "analyst/question" → 1.1× boost
+        _q_lower = query.lower()
+        _is_attribution = any(w in _q_lower for w in ("said", "stated", "commented", "noted", "guided"))
+        _is_qa = any(w in _q_lower for w in ("analyst", "question", "asked", "q&a"))
+        if _is_attribution or _is_qa:
+            for r in reranked:
+                _cs = (r.get("metadata") or {}).get("call_section", "")
+                if _is_attribution and _cs == "prepared_remarks":
+                    r["score"] = min(r.get("score", 0.0) * 1.1, 1.0)
+                elif _is_qa and _cs == "qa_session":
+                    r["score"] = min(r.get("score", 0.0) * 1.1, 1.0)
+            reranked = sorted(reranked, key=lambda x: x.get("score", 0.0), reverse=True)
+
         # Q1 FY2025 AUDIO SUMMARY — pin composite summary at rank 0 after reranking.
         # The cross-encoder demotes the long summary in favour of short fragments;
         # we force it back to the top so the LLM sees the complete authoritative figures.

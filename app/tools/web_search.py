@@ -54,6 +54,39 @@ _BLOCKED_DOMAINS: Set[str] = {
     "linkedin.com",
 }
 
+# FINANCE DOMAIN SCORE BOOST (Phase 7)
+_FINANCE_BOOST_DOMAINS: Dict[str, float] = {
+    "sec.gov":       1.30,
+    "ft.com":        1.20,
+    "reuters.com":   1.20,
+    "bloomberg.com": 1.20,
+    "wsj.com":       1.15,
+    "cnbc.com":      1.10,
+    "marketwatch.com": 1.10,
+}
+# Finance query detection for topic= param and freshness filter
+_FINANCE_QUERY_RE = _re.compile(
+    r'\b(?:revenue|earnings|eps|stock|dividend|margin|quarterly|annual report'
+    r'|10-k|10-q|8-k|sec|investor|analyst|fiscal|guidance|EBITDA|P/E|valuation)\b',
+    _re.IGNORECASE,
+)
+_YEAR_RE = _re.compile(r'\b20\d{2}\b')
+_FRESHNESS_CUTOFF_DAYS = 90
+
+
+def _is_finance_query(query: str) -> bool:
+    return bool(_FINANCE_QUERY_RE.search(query))
+
+
+def _parse_date(date_str: str) -> Optional[datetime.date]:
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.datetime.strptime(date_str[:19], fmt).date()
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
 # SSRF PREVENTION — delegated to consolidated ssrf.py guard (Phase 26)
 
 
@@ -69,6 +102,7 @@ def _normalize(query: str) -> str:
 # Perez | TechCrunch In this article, it is stated that ..."). This deterministic
 # pass removes narration intros, pipe-separated article metadata, and self-
 # referential "the article mentions" phrasing, leaving a clean factual answer.
+import datetime
 import re as _re
 
 _WEB_NARRATION_RE = _re.compile(
@@ -157,10 +191,11 @@ def _sanitize_query(query: str) -> str:
 
 # RESULT QUALITY SCORING
 
-def _quality_score(result: Dict) -> float:
+def _quality_score(result: Dict, finance_query: bool = False) -> float:
     score   = float(result.get("score", 0.5))
     content = str(result.get("content", "") or "")
     title   = str(result.get("title", "") or "")
+    url     = str(result.get("url", "") or "")
 
     # LENGTH BONUS
     if len(content) > 500:
@@ -170,8 +205,14 @@ def _quality_score(result: Dict) -> float:
     if title and len(title) > 5:
         score = min(score + 0.05, 1.0)
 
+    # FINANCE DOMAIN CREDIBILITY BOOST
+    if finance_query:
+        for domain, mult in _FINANCE_BOOST_DOMAINS.items():
+            if domain in url:
+                score = min(score * mult, 1.0)
+                break
+
     # BLOCKED DOMAIN PENALTY
-    url = result.get("url", "")
     if _is_blocked(url):
         score = 0.0
 
@@ -219,9 +260,13 @@ class WebSearchTool:
                 if not query.strip():
                     return self._empty()
 
+                # DETECT FINANCE QUERY FOR TOPIC PARAMETER + FRESHNESS FILTER
+                is_finance      = _is_finance_query(query)
+                has_year        = bool(_YEAR_RE.search(query))
+
                 # TAVILY API CALL
                 t_api      = time.time()
-                raw        = self._search(query, session_id)
+                raw        = self._search(query, session_id, is_finance=is_finance)
                 api_latency = round(time.time() - t_api, 3)
 
                 _api_duration.observe(api_latency)
@@ -234,7 +279,7 @@ class WebSearchTool:
                         session_id=session_id,
                     )
 
-                processed = self._process(raw)
+                processed = self._process(raw, is_finance=is_finance, has_year=has_year)
 
                 if not processed["documents"]:
                     logger.warning("web_search_no_documents", session_id=session_id)
@@ -311,13 +356,16 @@ class WebSearchTool:
         wait=wait_exponential(multiplier=1, min=1, max=4),
         reraise=True,
     )
-    def _search(self, query: str, session_id: str = "") -> Dict:
+    def _search(self, query: str, session_id: str = "", is_finance: bool = False) -> Dict:
         try:
-            return self.client.search(
+            kwargs: Dict[str, Any] = dict(
                 query=query,
                 search_depth=settings.WEB_SEARCH_DEPTH,
                 max_results=self.max_results,
             )
+            if is_finance:
+                kwargs["topic"] = "finance"
+            return self.client.search(**kwargs)
         except Exception as exc:
             logger.error(
                 "tavily_api_failed",
@@ -328,24 +376,31 @@ class WebSearchTool:
 
     # PROCESS AND FILTER RESULTS
 
-    def _process(self, response: Dict) -> Dict[str, List]:
+    def _process(
+        self,
+        response: Dict,
+        is_finance: bool = False,
+        has_year: bool = False,
+    ) -> Dict[str, List]:
         documents: List[str]  = []
         sources:   List[str]  = []
         seen:      set        = set()
 
         results = response.get("results", [])
+        cutoff  = (datetime.date.today() - datetime.timedelta(days=_FRESHNESS_CUTOFF_DAYS))
 
-        # SORT BY QUALITY SCORE
+        # SORT BY QUALITY SCORE (with finance domain boost when applicable)
         results = sorted(
             results,
-            key=lambda r: _quality_score(r),
+            key=lambda r: _quality_score(r, finance_query=is_finance),
             reverse=True,
         )
 
         for r in results:
-            url     = r.get("url", "")
-            content = str(r.get("content", "") or "").strip()
-            title   = str(r.get("title", "") or "").strip()
+            url        = r.get("url", "")
+            content    = str(r.get("content", "") or "").strip()
+            title      = str(r.get("title", "") or "").strip()
+            pub_date   = r.get("published_date") or r.get("published_at") or ""
 
             # SSRF + BLOCKED DOMAIN GUARD
             if _is_blocked(url):
@@ -353,6 +408,13 @@ class WebSearchTool:
 
             if len(content) < 40:
                 continue
+
+            # FRESHNESS FILTER — drop stale market/finance results unless query pins a year
+            if is_finance and not has_year and pub_date:
+                parsed = _parse_date(pub_date)
+                if parsed and parsed < cutoff:
+                    logger.debug("web_search_stale_result_dropped", url=url[:80], pub_date=pub_date)
+                    continue
 
             # PREPEND TITLE FOR BETTER CONTEXT
             full_text = f"{title}: {content}" if title else content
@@ -424,6 +486,8 @@ class WebSearchTool:
             "mentions').\n"
             "- Do NOT include article timestamps, dates, author bylines, or "
             "publication names as inline or pipe-separated metadata.\n"
+            "- Preserve ALL dollar amounts, percentages, and dates verbatim. "
+            "Do NOT paraphrase or round any numbers.\n"
             "- Do NOT restate these rules or add labels.\n"
             "- If the results do not answer the query, say 'I don't know based "
             "on available data'.\n\n"

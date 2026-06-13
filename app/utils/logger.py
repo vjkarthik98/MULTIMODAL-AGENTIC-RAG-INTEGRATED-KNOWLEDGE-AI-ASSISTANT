@@ -25,6 +25,12 @@ trace_id_ctx:   ContextVar[str] = ContextVar("trace_id",   default="-")
 span_id_ctx:    ContextVar[str] = ContextVar("span_id",    default="-")
 user_id_ctx:    ContextVar[str] = ContextVar("user_id",    default="-")
 
+# FINANCE / CHUNKER CONTEXT VARS (Phase 8)
+chunk_id_var:             ContextVar[Optional[str]] = ContextVar("chunk_id",             default=None)
+modality_var:             ContextVar[Optional[str]] = ContextVar("modality",             default=None)
+page_number_var:          ContextVar[Optional[int]] = ContextVar("page_number",          default=None)
+finance_entity_count_var: ContextVar[Optional[int]] = ContextVar("finance_entity_count", default=None)
+
 
 # INTERNAL STATE
 
@@ -179,6 +185,11 @@ class CleanFormatter(logging.Formatter):
 class JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
+        _chunk_id   = chunk_id_var.get(None)
+        _modality   = modality_var.get(None)
+        _page_num   = page_number_var.get(None)
+        _entity_cnt = finance_entity_count_var.get(None)
+
         payload: Dict[str, Any] = {
             "timestamp":  datetime.now(tz=timezone.utc).isoformat(),
             "level":      record.levelname,
@@ -193,6 +204,14 @@ class JsonFormatter(logging.Formatter):
             "version":    settings.APP_VERSION,
             "env":        settings.ENV,
         }
+        if _chunk_id is not None:
+            payload["chunk_id"] = _chunk_id
+        if _modality is not None:
+            payload["modality"] = _modality
+        if _page_num is not None:
+            payload["page_number"] = _page_num
+        if _entity_cnt is not None:
+            payload["finance_entity_count"] = _entity_cnt
 
         # EXTRA FIELDS
         for key, value in record.__dict__.items():

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import shutil
 import time
 import uuid
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -491,6 +493,55 @@ class _ProgressEmitter:
         )
 
 
+# INGEST JOB — PROGRESS TRACKING (Phase 8)
+
+@dataclass
+class IngestJob:
+    job_id:       str
+    filename:     str
+    modality:     str
+    status:       str          # "queued"|"extracting"|"chunking"|"embedding"|"done"|"error"
+    progress:     float = 0.0  # 0.0–1.0
+    chunks_done:  int   = 0
+    chunks_total: int   = 0
+    error:        Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+_JOB_TTL_SECONDS = 3600   # 1 hour
+
+
+def _job_key(job_id: str) -> str:
+    return f"ingest_job:{job_id}"
+
+
+def _store_job(job: IngestJob) -> None:
+    """Persist IngestJob to Redis with a 1-hour TTL. Silently skips if Redis unavailable."""
+    try:
+        from app.core.infra_registry import infra
+        redis = infra.get_memory()
+        if redis and hasattr(redis, "client"):
+            redis.client.setex(_job_key(job.job_id), _JOB_TTL_SECONDS, json.dumps(job.to_dict()))
+    except Exception:
+        pass
+
+
+def get_ingest_job(job_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch IngestJob dict from Redis. Returns None if not found."""
+    try:
+        from app.core.infra_registry import infra
+        redis = infra.get_memory()
+        if redis and hasattr(redis, "client"):
+            raw = redis.client.get(_job_key(job_id))
+            if raw:
+                return json.loads(raw)
+    except Exception:
+        pass
+    return None
+
+
 # INGESTION PIPELINE CLASS
 
 class IngestionPipeline:
@@ -550,6 +601,53 @@ class IngestionPipeline:
         await self._queue.put((file_path, session_id, future, user_id))
         _set_queue_depth(self._queue.qsize())
         return future
+
+    # BACKGROUND JOB — return job_id immediately; poll /api/ingestion/status/{job_id}
+    # Used for audio/video ingestion which can take minutes. (Phase 8)
+
+    _BACKGROUND_MODALITIES = {"mp3", "mp4", "audio", "video"}
+
+    async def process_file_background(
+        self,
+        file_path: str,
+        session_id: str = "default",
+        user_id: Optional[str] = None,
+    ) -> str:
+        """Start ingestion in background. Returns job_id immediately."""
+        job_id   = str(uuid.uuid4())
+        filename = Path(file_path).name
+        ext      = Path(file_path).suffix.lstrip(".").lower()
+        modality = {
+            "mp3": "mp3", "wav": "mp3", "m4a": "mp3",
+            "mp4": "mp4", "mov": "mp4", "avi": "mp4",
+        }.get(ext, ext)
+
+        job = IngestJob(
+            job_id=job_id,
+            filename=filename,
+            modality=modality,
+            status="queued",
+        )
+        _store_job(job)
+
+        async def _run() -> None:
+            try:
+                job.status = "extracting"
+                _store_job(job)
+                result = await self.process_file_async(file_path, session_id, user_id)
+                job.status       = "done"
+                job.progress     = 1.0
+                job.chunks_done  = result.get("chunks", 0) if isinstance(result, dict) else 0
+                job.chunks_total = job.chunks_done
+            except Exception as exc:
+                job.status = "error"
+                job.error  = str(exc)
+                logger.warning(event="background_ingest_failed", job_id=job_id, error=str(exc))
+            finally:
+                _store_job(job)
+
+        asyncio.create_task(_run())
+        return job_id
 
     # MAIN SYNC PROCESS FILE
 
@@ -725,7 +823,7 @@ class IngestionPipeline:
             )
 
             # CLEAN UP PERSISTENT FRAME STAGING DIR — done after all embeddings stored.
-            if modality == "video":
+            if modality in ("video", "mp4"):
                 import shutil as _shutil
                 for chunk in chunks:
                     asset = (getattr(chunk, "structure", {}) or {}).get("asset_path", "")

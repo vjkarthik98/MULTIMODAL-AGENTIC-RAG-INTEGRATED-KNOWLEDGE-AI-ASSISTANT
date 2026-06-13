@@ -219,11 +219,21 @@ class GGUFModel:
 
     # PROMPT INJECTION SANITIZATION — delegates to unified guardrail (Phase 26)
 
+    # Finance safety suffix — appended after injection sanitization, before LLM call.
+    # Additive: does not affect guardrails, only nudges the model away from
+    # unsolicited investment recommendations. (Plan Phase 6 requirement.)
+    _FINANCE_SAFETY_SUFFIX = (
+        "\n[SAFETY: Do not recommend specific securities or trades. "
+        "State all figures as reported.]"
+    )
+
     def _sanitize_prompt(self, prompt: str) -> str:
         from app.guardrails.input_guard import sanitize as _guard_sanitize
         cleaned = _guard_sanitize(prompt, surface="gguf_model")
         if cleaned != prompt:
             logger.warning(event="gguf_prompt_injection_stripped")
+        # Append finance safety guard (plan Phase 6.6)
+        cleaned = cleaned + self._FINANCE_SAFETY_SUFFIX
         return cleaned
 
     # CLEAN OUTPUT

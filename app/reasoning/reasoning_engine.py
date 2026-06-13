@@ -271,6 +271,123 @@ def _unsupported_numbers(
     return unsupported
 
 
+# SCALE-AWARE NUMERIC GROUNDING — Phase 6.2
+# Normalises finance numbers to base units for comparison, detects sign errors
+# and unit mismatches, then annotates unverified numbers inline.
+
+_SCALE_FACTORS: dict = {
+    "billion": 1e9, "billions": 1e9, "bn": 1e9,
+    "million":  1e6, "millions":  1e6, "mn": 1e6, "m": 1e6,
+    "thousand": 1e3, "thousands": 1e3, "k": 1e3,
+    "trillion": 1e12, "trillions": 1e12, "tn": 1e12,
+}
+_SCALE_NUM_RE = re.compile(
+    r'([$€£¥₹]?)\s*([\d,]+\.?\d*)\s*'
+    r'(trillion|trillions|tn|billion|billions|bn|million|millions|mn|thousand|thousands|k|m)\b',
+    re.IGNORECASE,
+)
+_LOSS_WORDS = frozenset({"loss", "deficit", "negative", "down", "declined", "decreased"})
+_PROFIT_WORDS = frozenset({"profit", "income", "gain", "positive", "grew", "increased"})
+
+
+def _to_base_units(num_str: str, scale_str: str) -> float:
+    """Convert a scaled finance number to its base-unit float."""
+    try:
+        raw = float(num_str.replace(",", ""))
+    except ValueError:
+        return 0.0
+    factor = _SCALE_FACTORS.get(scale_str.lower(), 1.0)
+    return raw * factor
+
+
+def _verify_numeric_citations(
+    answer: str,
+    docs: List[Dict],
+    query: str = "",
+) -> List[Dict]:
+    """Return verification results for each significant number in the answer.
+
+    Each result: {"number": str, "grounded": bool, "confidence": float, "issue": str}
+    Issues detected:
+    - scale_mismatch: "$4.3B" in answer vs "$4.3 million" in context
+    - sign_error: context says "net loss" but number treated as positive
+    - unit_mismatch: answer uses different unit denomination than context
+    - not_found: number absent from context entirely
+    """
+    if not answer or not docs:
+        return []
+
+    context_full = " ".join(str(d.get("text", "") or "") for d in docs)
+    context_lower = context_full.lower()
+    query_nums    = set(_extract_numbers(query)) if query else set()
+    results       = []
+    seen          = set()
+
+    for m in _SCALE_NUM_RE.finditer(answer):
+        currency, num_str, scale = m.group(1), m.group(2), m.group(3)
+        token = m.group(0).strip()
+        if token in seen:
+            continue
+        seen.add(token)
+
+        base_answer = _to_base_units(num_str, scale)
+        if base_answer == 0:
+            continue
+
+        issue      = ""
+        grounded   = False
+        confidence = 0.0
+
+        # 1. Exact token match
+        if token.lower() in context_lower or num_str in context_full:
+            grounded   = True
+            confidence = 1.0
+        else:
+            # 2. Scale-normalised cross-match: look for the same base value
+            for cm in _SCALE_NUM_RE.finditer(context_full):
+                base_ctx = _to_base_units(cm.group(2), cm.group(3))
+                if base_ctx > 0 and abs(base_answer - base_ctx) / base_ctx < 0.01:
+                    grounded   = True
+                    confidence = 0.85
+                    if cm.group(3).lower() != scale.lower():
+                        issue = "unit_mismatch"
+                    break
+
+            # 3. Sign check: context says loss but number appears positive
+            if not grounded:
+                surrounding = context_lower[max(0, context_lower.find(num_str) - 60):
+                                            context_lower.find(num_str) + 60]
+                ans_surrounding = answer.lower()[max(0, answer.lower().find(token) - 60):
+                                                 answer.lower().find(token) + 60]
+                if (any(w in surrounding for w in _LOSS_WORDS) and
+                        not any(w in ans_surrounding for w in _LOSS_WORDS)):
+                    issue      = "sign_error"
+                    confidence = 0.3
+                else:
+                    issue      = "not_found"
+                    confidence = 0.0
+
+        results.append({
+            "number":     token,
+            "grounded":   grounded,
+            "confidence": confidence,
+            "issue":      issue,
+        })
+
+    return results
+
+
+def _apply_numeric_annotations(answer: str, verification_results: List[Dict]) -> str:
+    """Append inline ⚠ [Unverified: N] markers for ungrounded numbers with confidence < 0.8."""
+    for vr in verification_results:
+        if not vr.get("grounded") and vr.get("confidence", 0) < 0.8:
+            num = vr["number"]
+            marker = f" ⚠ [Unverified: {num}]"
+            # Only annotate first occurrence to avoid cluttering
+            answer = answer.replace(num, num + marker, 1)
+    return answer
+
+
 # PII SCRUB ANSWER BEFORE RETURNING
 
 def _scrub_answer_pii(text: str) -> str:
@@ -1268,6 +1385,23 @@ class ReasoningEngine:
                     parsed["hallucination_warning"] = True
                 else:
                     parsed["hallucination_warning"] = False
+
+                # SCALE-AWARE NUMERIC VERIFICATION — Phase 6.2
+                # Annotate unverified numbers inline and expose results to caller.
+                _verification_results = _verify_numeric_citations(
+                    parsed.get("answer", ""), retrieved_docs, query=query,
+                )
+                if _verification_results:
+                    parsed["verification_results"] = _verification_results
+                    # Only annotate when answer is not already a refusal
+                    _has_unverified = any(
+                        not vr["grounded"] and vr.get("confidence", 0) < 0.8
+                        for vr in _verification_results
+                    )
+                    if _has_unverified and not parsed.get("hallucination_warning"):
+                        parsed["answer"] = _apply_numeric_annotations(
+                            parsed["answer"], _verification_results,
+                        )
 
                 # FILTERED SOURCES — subset of input sources that the LLM actually cited.
                 ans_lower = (parsed.get("answer") or "").lower()

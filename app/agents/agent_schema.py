@@ -129,18 +129,23 @@ class AgentSignals(BaseModel):
 
     model_config = {"validate_assignment": True}
 
-    is_recent:           bool  = False
-    is_memory:           bool  = False
-    is_complex:          bool  = False
-    is_reasoning:        bool  = False
-    has_multimodal_hint: bool  = False
-    is_code:             bool  = False
-    is_greeting:         bool  = False
-    is_math:             bool  = False
-    is_security:         bool  = False
-    multi_question:      bool  = False
-    has_question_mark:   bool  = False
-    token_count:         int   = 0
+    is_recent:              bool  = False
+    is_memory:              bool  = False
+    is_complex:             bool  = False
+    is_reasoning:           bool  = False
+    has_multimodal_hint:    bool  = False
+    is_code:                bool  = False
+    is_greeting:            bool  = False
+    is_math:                bool  = False
+    is_security:            bool  = False
+    multi_question:         bool  = False
+    has_question_mark:      bool  = False
+    token_count:            int   = 0
+    # Finance domain signals (Phase 7)
+    is_earnings_call_query:    bool  = False
+    is_regulatory_query:       bool  = False
+    is_financial_model_query:  bool  = False
+    is_market_data_query:      bool  = False
 
     def to_dict(self) -> Dict[str, Any]:
         return self.model_dump()
@@ -173,6 +178,12 @@ class AgentDecision(BaseModel):
     trace:           Dict[str, Any]   = Field(default_factory=dict)
     tool_calls:      List[ToolCall]   = Field(default_factory=list)
     query_type:      Optional[str]    = Field(default=None)
+    # Finance retrieval filters (Phase 7)
+    modality_hint:       Optional[str]   = Field(default=None)
+    source_type_filter:  List[str]       = Field(default_factory=list)
+    subtype_filter:      List[str]       = Field(default_factory=list)
+    call_section_filter: Optional[str]   = Field(default=None)
+
     # TIMING
     created_at: float          = Field(default_factory=time.time)
     latency_ms: Optional[float] = Field(default=None)
@@ -303,18 +314,22 @@ class AgentDecision(BaseModel):
             }
 
         return {
-            "action":          self.action,
-            "reason":          self.reason,
-            "confidence":      self.confidence,
-            "session_id":      self.session_id,
-            "signals":         self.signals,
-            "suggested_tools": self.suggested_tools,
-            "action_history":  self.action_history,
-            "trace":           self.trace,
-            "tool_calls":      [tc.to_dict() for tc in self.tool_calls],
-            "query_type":      self.query_type,
-            "created_at":      self.created_at,
-            "latency_ms":      self.latency_ms,
+            "action":              self.action,
+            "reason":              self.reason,
+            "confidence":          self.confidence,
+            "session_id":          self.session_id,
+            "signals":             self.signals,
+            "suggested_tools":     self.suggested_tools,
+            "action_history":      self.action_history,
+            "trace":               self.trace,
+            "tool_calls":          [tc.to_dict() for tc in self.tool_calls],
+            "query_type":          self.query_type,
+            "modality_hint":       self.modality_hint,
+            "source_type_filter":  self.source_type_filter,
+            "subtype_filter":      self.subtype_filter,
+            "call_section_filter": self.call_section_filter,
+            "created_at":          self.created_at,
+            "latency_ms":          self.latency_ms,
         }
 
     def to_log_dict(self) -> Dict[str, Any]:

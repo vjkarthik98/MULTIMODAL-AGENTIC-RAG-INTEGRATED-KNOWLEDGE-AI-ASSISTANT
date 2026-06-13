@@ -469,16 +469,51 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3) -> List[
                 if caption:
                     section_title = str(caption).strip()
 
+        # Phase 6.3 rich citation fields — flow directly from chunk structure
+        sheet_name   = meta.get("sheet_name")
+        heading      = meta.get("heading") or meta.get("heading_hierarchy")
+        speaker_role = meta.get("speaker_role")
+        speaker_name = meta.get("speaker_name") or meta.get("speaker_label")
+        row_range    = meta.get("row_range")
+        chunk_type   = meta.get("chunk_type") or meta.get("content_type")
+        call_section = meta.get("call_section") or meta.get("topic_section")
+        image_title  = meta.get("image_title")
+        slide_numbers = meta.get("slide_numbers_covered")
+
+        # Clean heading_hierarchy list → readable string
+        if isinstance(heading, list):
+            heading = " > ".join(str(h) for h in heading if h)
+        if heading:
+            heading = str(heading).strip()[:120] or None
+
+        # Snippet: first 200 chars of text, truncated at word boundary
+        snippet_raw = str(text)[:220]
+        snippet = snippet_raw[:snippet_raw.rfind(" ", 0, 200)] if len(snippet_raw) > 200 else snippet_raw
+
         out.append({
-            "text":          str(text)[:200],
-            "score":         round(score, 6),
-            "source":        source_name,
-            "page_number":   page_number,
-            "section_title": section_title,
-            "start_time":    start_time,
-            "end_time":      end_time,
-            "modality":      modality,
-            "doc_id":        str(meta.get("doc_id") or meta.get("chunk_id") or ""),
+            "filename":       source_name,
+            "source":         source_name,
+            "modality":       modality,
+            "page":           page_number,
+            "page_number":    page_number,
+            "section_title":  section_title,
+            "sheet_name":     sheet_name,
+            "heading":        heading,
+            "timestamp_start": start_time,
+            "timestamp_end":  end_time,
+            "start_time":     start_time,
+            "end_time":       end_time,
+            "speaker_role":   speaker_role,
+            "speaker_name":   speaker_name,
+            "call_section":   call_section,
+            "row_range":      row_range,
+            "chunk_type":     chunk_type,
+            "image_title":    image_title,
+            "slide_numbers":  slide_numbers,
+            "snippet":        snippet,
+            "text":           snippet,
+            "score":          round(score, 6),
+            "doc_id":         str(meta.get("doc_id") or meta.get("chunk_id") or ""),
         })
     return out
 

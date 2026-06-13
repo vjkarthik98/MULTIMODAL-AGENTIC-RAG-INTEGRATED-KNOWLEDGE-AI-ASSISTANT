@@ -236,31 +236,40 @@ class VideoChunker(BaseChunker):
                     has_finance  = bool(_FINANCIAL_TRIGGER_RE.search(transcript))
                     chunk_hash   = deterministic_chunk_id(source, f"v_{t_start:.1f}", chunk_idx)
 
+                    # Extract slide numbers from slide_bullets like ["Slide 3", "Slide 4"] (MD 1.7)
+                    slide_numbers_covered: List[int] = []
+                    for sb in slide_bullets:
+                        m = re.search(r"\bslide\s*(\d+)\b", sb, re.IGNORECASE)
+                        if m:
+                            slide_numbers_covered.append(int(m.group(1)))
+
                     structure = {
-                        "chunk_hash_id":   chunk_hash,
-                        "source_file":     source,
-                        "chunk_index":     chunk_idx,
-                        "start_timestamp": round(t_start, 3),
-                        "end_timestamp":   round(t_end, 3),
-                        "duration_seconds": round(t_end - t_start, 3),
-                        "speaker_label":   ch.get("speaker_label"),
-                        "speaker_name":    ch.get("speaker_name"),
-                        "speaker_role":    ch.get("speaker_role"),
-                        "topic_section":   ch.get("topic_section"),
-                        "call_section":    ch.get("call_section"),
-                        "transcript":      transcript,
-                        "frame_captions":  chunk_frames,
-                        "combined_text":   combined_text,
-                        "slide_bullets":   slide_bullets,
-                        "finance_entities": fin_entities,
-                        "has_finance_signal": has_finance,
-                        "is_question":     ch.get("is_question", False),
-                        "is_answer":       ch.get("is_answer", False),
+                        "chunk_hash_id":        chunk_hash,
+                        "source_file":          source,
+                        "chunk_index":          chunk_idx,
+                        "start_timestamp":      round(t_start, 3),
+                        "end_timestamp":        round(t_end, 3),
+                        "duration_seconds":     round(t_end - t_start, 3),
+                        "speaker_label":        ch.get("speaker_label"),
+                        "speaker_name":         ch.get("speaker_name"),
+                        "speaker_role":         ch.get("speaker_role"),
+                        "topic_section":        ch.get("topic_section"),
+                        "call_section":         ch.get("call_section"),
+                        "transcript":           transcript,
+                        "frame_captions":       chunk_frames,
+                        "combined_text":        combined_text,
+                        "slide_bullets":        slide_bullets,
+                        "has_slide_content":    bool(slide_bullets),
+                        "slide_numbers_covered": slide_numbers_covered,
+                        "finance_entities":     fin_entities,
+                        "has_finance_signal":   has_finance,
+                        "is_question":          ch.get("is_question", False),
+                        "is_answer":            ch.get("is_answer", False),
                     }
 
                     doc = self._make_doc(
                         text=combined_text,
-                        modality="video",
+                        modality="mp4",
                         subtype="transcript_frame",
                         source=source,
                         page=None,

@@ -89,16 +89,31 @@ class Planner:
                     plan = self._direct(signals)
 
                 elif action == "search":
-                    plan = self._search(signals)
+                    # Finance market data → specialist plan
+                    if signals.get("is_market_data_query"):
+                        plan = self._finance_market_data(signals)
+                    else:
+                        plan = self._search(signals)
 
                 elif action == "memory":
                     plan = self._memory(signals)
 
                 elif action == "rag":
-                    plan = self._rag(signals)
+                    # Finance domain archetypes (Phase 7)
+                    if signals.get("is_earnings_call_query"):
+                        plan = self._finance_earnings_analysis(signals)
+                    elif signals.get("is_regulatory_query"):
+                        plan = self._finance_regulatory(signals)
+                    elif signals.get("is_financial_model_query"):
+                        plan = self._finance_model(signals)
+                    else:
+                        plan = self._rag(signals)
 
                 elif action == "hybrid":
-                    plan = self._hybrid(signals)
+                    if signals.get("is_earnings_call_query"):
+                        plan = self._finance_earnings_analysis(signals)
+                    else:
+                        plan = self._hybrid(signals)
 
                 else:
                     plan = self._fallback("unknown_action", session_id)
@@ -460,6 +475,52 @@ class Planner:
             return steps[:max_steps]
 
         return steps
+
+    # FINANCE PLAN ARCHETYPES (Phase 7)
+
+    def _finance_earnings_analysis(self, signals: Dict) -> ExecutionPlan:
+        """Archetype: earnings_analysis — audio transcript + PDF + reason."""
+        return ExecutionPlan(
+            steps=self._optimize([
+                ExecutionStep(tool="rag",    description="Retrieve audio/transcript chunks (earnings call)", cost=COST_MEDIUM),
+                ExecutionStep(tool="rag",    description="Retrieve PDF supplemental (earnings release/10-Q)", cost=COST_MEDIUM),
+                ExecutionStep(tool="fusion", description="Merge audio and document results", optional=True, cost=COST_MEDIUM),
+                ExecutionStep(tool="reason", description="Speaker-attributed earnings analysis", cost=COST_HIGH),
+            ]),
+            trace={"type": "finance_earnings_analysis"},
+        )
+
+    def _finance_regulatory(self, signals: Dict) -> ExecutionPlan:
+        """Archetype: regulatory_filing — PDF/DOCX KB + optional EDGAR + reason."""
+        return ExecutionPlan(
+            steps=self._optimize([
+                ExecutionStep(tool="rag",          description="Retrieve regulatory filing from KB (PDF/DOCX)", cost=COST_MEDIUM),
+                ExecutionStep(tool="sec_edgar_search", description="EDGAR supplemental lookup", optional=True, cost=COST_HIGH),
+                ExecutionStep(tool="reason",       description="Regulatory filing analysis", cost=COST_HIGH),
+            ]),
+            trace={"type": "finance_regulatory"},
+        )
+
+    def _finance_model(self, signals: Dict) -> ExecutionPlan:
+        """Archetype: financial_model — table/assumptions chunks + calculate + reason."""
+        return ExecutionPlan(
+            steps=self._optimize([
+                ExecutionStep(tool="rag",                  description="Retrieve table and assumption chunks", cost=COST_MEDIUM),
+                ExecutionStep(tool="financial_calculator", description="Verify arithmetic (YoY/margin/EPS)", optional=True, cost=COST_LOW),
+                ExecutionStep(tool="reason",               description="Financial model analysis", cost=COST_HIGH),
+            ]),
+            trace={"type": "finance_financial_model"},
+        )
+
+    def _finance_market_data(self, signals: Dict) -> ExecutionPlan:
+        """Archetype: market_data — live web search + reason."""
+        return ExecutionPlan(
+            steps=self._optimize([
+                ExecutionStep(tool="search", description="Retrieve live market data (finance topic)", cost=COST_HIGH),
+                ExecutionStep(tool="reason", description="Market data synthesis", cost=COST_HIGH),
+            ]),
+            trace={"type": "finance_market_data"},
+        )
 
     # FALLBACK — MINIMAL DIRECT REASONING PLAN
 

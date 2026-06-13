@@ -19,7 +19,7 @@ class XlsxBM25(BaseBM25):
     - All extracted numbers passed through _expand_scale_variants for cross-scale matching
     """
 
-    modality = "excel"
+    modality = "xlsx"
 
     def _build_indexed_text(self, doc: Any) -> str:
         s = getattr(doc, "structure", {}) or {}

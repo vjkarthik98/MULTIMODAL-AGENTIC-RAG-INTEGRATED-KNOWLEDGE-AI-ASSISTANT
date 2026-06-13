@@ -716,6 +716,7 @@ class QdrantVectorStore:
         exclude_deleted: bool = True,
         user_id: Optional[str] = None,
         extra_filter: Optional["Filter"] = None,
+        vector_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
 
         if collection not in self._collection_cache:
@@ -744,14 +745,16 @@ class QdrantVectorStore:
                     query_filter = extra_filter
                 else:
                     query_filter = base_filter
-                res    = self._retry(
-                    self.client.query_points,
+                _qp_kwargs: dict = dict(
                     collection_name=collection,
                     query=vector,
                     limit=limit,
                     query_filter=query_filter,
                     score_threshold=score_threshold if score_threshold > 0 else None,
                 )
+                if vector_name:
+                    _qp_kwargs["using"] = vector_name
+                res    = self._retry(self.client.query_points, **_qp_kwargs)
                 points = getattr(res, "points", [])
 
                 results = [
@@ -806,6 +809,7 @@ class QdrantVectorStore:
         score_threshold: float = 0.0,
         user_id: Optional[str] = None,
         extra_filter=None,
+        vector_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         return self._search(
             self.text_collection,
@@ -815,6 +819,7 @@ class QdrantVectorStore:
             score_threshold,
             user_id=user_id,
             extra_filter=extra_filter,
+            vector_name=vector_name,
         )
 
     # PUBLIC SEARCH — VISION COLLECTION

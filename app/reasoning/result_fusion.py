@@ -84,33 +84,72 @@ def _modality_counts(results: List[Dict]) -> Dict[str, int]:
     return counts
 
 
+# FINANCE ANTONYM PAIRS — keyword-level hard rule (Phase 6.8)
+_FINANCE_ANTONYMS: frozenset = frozenset({
+    ("grew", "fell"), ("fell", "grew"),
+    ("profit", "loss"), ("loss", "profit"),
+    ("increased", "decreased"), ("decreased", "increased"),
+    ("beat", "missed"), ("missed", "beat"),
+    ("gain", "decline"), ("decline", "gain"),
+    ("positive", "negative"), ("negative", "positive"),
+    ("surplus", "deficit"), ("deficit", "surplus"),
+})
+
+# SOURCE CREDIBILITY WEIGHTS — applied to web results (Phase 6.8)
+_SOURCE_CREDIBILITY: Dict[str, float] = {
+    "sec.gov":       1.30,
+    "ft.com":        1.20,
+    "reuters.com":   1.20,
+    "bloomberg.com": 1.20,
+    "wsj.com":       1.15,
+    "cnbc.com":      1.10,
+    "reddit.com":    0.60,
+    "twitter.com":   0.50,
+    "x.com":         0.50,
+}
+
+_WEB_FRESHNESS_WINDOW_SECONDS: float = 4 * 3600.0   # 4-hour cliff for market data
+
+
 # CONTRADICTION DETECTION
-# COMPARES ANSWER PAIRS FOR SEMANTIC OPPOSITION
+# COMPARES ANSWER PAIRS FOR SEMANTIC OPPOSITION + FINANCE ANTONYM CHECK
+
+def _finance_antonym_contradiction(text_a: str, text_b: str) -> bool:
+    """True when two texts contain opposing finance sentiment words for the same entity."""
+    words_a = set(text_a.lower().split())
+    words_b = set(text_b.lower().split())
+    for w_a, w_b in _FINANCE_ANTONYMS:
+        if w_a in words_a and w_b in words_b:
+            return True
+    return False
+
 
 def _detect_contradictions(results: List[Dict]) -> List[Tuple[int, int, float]]:
     """
-    RETURNS LIST OF (IDX_A, IDX_B, SIMILARITY) FOR PAIRS
-    WHERE SIMILARITY IS LOW DESPITE HIGH SCORES — POTENTIAL CONTRADICTION.
-    ONLY RUNS ON RESULTS WITH EMBEDDINGS.
+    RETURNS LIST OF (IDX_A, IDX_B, SIMILARITY) FOR PAIRS WHERE SIMILARITY IS LOW
+    DESPITE HIGH SCORES, OR FINANCE ANTONYMS ARE FOUND — POTENTIAL CONTRADICTION.
     """
     contradictions: List[Tuple[int, int, float]] = []
 
     for i in range(len(results)):
         for j in range(i + 1, len(results)):
-            emb_i = results[i].get("embedding")
-            emb_j = results[j].get("embedding")
+            text_i = results[i].get("text", "") or ""
+            text_j = results[j].get("text", "") or ""
+            emb_i  = results[i].get("embedding")
+            emb_j  = results[j].get("embedding")
 
-            if not _valid_embedding(emb_i) or not _valid_embedding(emb_j):
-                continue
+            # EMBEDDING-BASED CHECK
+            if _valid_embedding(emb_i) and _valid_embedding(emb_j):
+                sim = _cosine(emb_i, emb_j)
+                score_i = results[i].get("score", 0.0)
+                score_j = results[j].get("score", 0.0)
+                if score_i > 0.7 and score_j > 0.7 and sim < 0.2:
+                    contradictions.append((i, j, round(sim, 3)))
+                    continue
 
-            sim = _cosine(emb_i, emb_j)
-
-            # HIGH-SCORING RESULTS WITH LOW SIMILARITY — LIKELY CONTRADICTING
-            score_i = results[i].get("score", 0.0)
-            score_j = results[j].get("score", 0.0)
-
-            if score_i > 0.7 and score_j > 0.7 and sim < 0.2:
-                contradictions.append((i, j, round(sim, 3)))
+            # FINANCE KEYWORD ANTONYM HARD RULE — no embedding needed
+            if text_i and text_j and _finance_antonym_contradiction(text_i, text_j):
+                contradictions.append((i, j, -1.0))   # -1.0 = antonym-flagged
 
     return contradictions
 
@@ -187,13 +226,26 @@ def _score_fusion(results: List[Dict]) -> List[Dict]:
             else min(len(text) / settings.FUSION_MAX_TEXT_CHARS, 1.0)
         )
 
-        # RECENCY BOOST
+        # SOURCE CREDIBILITY WEIGHT (web results only)
+        source_url        = str(meta.get("source_url", "") or "")
+        credibility_mult  = 1.0
+        for domain, weight in _SOURCE_CREDIBILITY.items():
+            if domain in source_url:
+                credibility_mult = weight
+                break
+
+        # RECENCY — linear decay for research docs; sharp 4-hour cliff for web
         recency = 0.0
-        ts      = meta.get("timestamp_start") or meta.get("ingestion_time")
+        ts      = meta.get("timestamp_start") or meta.get("ingestion_time") or meta.get("fetched_at")
         if ts:
             try:
-                age     = max(time.time() - float(ts), 0.0)
-                recency = 1.0 / (1.0 + age / settings.MEMORY_RECENCY_SCALE)
+                age = max(time.time() - float(ts), 0.0)
+                if modality == "web":
+                    recency = 1.0 / (1.0 + age / settings.MEMORY_RECENCY_SCALE)
+                    if age > _WEB_FRESHNESS_WINDOW_SECONDS:
+                        recency *= 0.7   # sharp cliff: stale market data
+                else:
+                    recency = 1.0 / (1.0 + age / settings.MEMORY_RECENCY_SCALE)
             except Exception:
                 recency = 0.0
 
@@ -210,7 +262,7 @@ def _score_fusion(results: List[Dict]) -> List[Dict]:
             settings.FUSION_QUALITY_WEIGHT  * quality +
             settings.FUSION_MODALITY_WEIGHT * modality_boost +
             0.05 * recency
-        ) * hierarchy_boost
+        ) * hierarchy_boost * credibility_mult
 
         if not _valid_score(final_score):
             final_score = 0.0

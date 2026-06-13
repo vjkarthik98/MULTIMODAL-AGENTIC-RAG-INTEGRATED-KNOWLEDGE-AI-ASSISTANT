@@ -40,12 +40,16 @@ except ImportError:
 # MODALITY WEIGHTS FOR FINAL SCORE BOOSTING
 # Image/video OCR is noisy; penalise relative to clean text so fact-retrieval
 # queries don't get dominated by ticker-display captions or cover-scan fragments.
+# Table weight raised to 1.15 (plan Phase 5.1) — finance queries are table-heavy.
 _DEFAULT_MODALITY_WEIGHTS: Dict[str, float] = {
     "text":  1.0,
-    "table": 1.1,
+    "table": 1.15,
     "image": 0.75,
+    "jpg":   0.75,
     "audio": 0.85,
+    "mp3":   0.85,
     "video": 0.75,
+    "mp4":   0.75,
 }
 
 # Common English stopwords excluded from exact-match boost calculation.

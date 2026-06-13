@@ -301,3 +301,47 @@ export async function patchLastMessage(token, sessionId, content, sources, msgId
     })
   } catch (_) {}  // fire-and-forget — failure is non-critical
 }
+
+// ── Phase 8/9 — New endpoints ──────────────────────────────────────────────
+
+export async function getIngestionStatus(token, jobId) {
+  const res = await fetch(`${API}/api/ingestion/status/${encodeURIComponent(jobId)}`, {
+    headers: bearer(token),
+  })
+  if (!res.ok) throw new Error(`Status check failed (${res.status})`)
+  return res.json()  // IngestJob: { job_id, filename, modality, status, progress, chunks_done, chunks_total }
+}
+
+export async function listKBFiles(token) {
+  const res = await fetch(`${API}/api/kb/files`, { headers: bearer(token) })
+  if (!res.ok) throw new Error(`KB list failed (${res.status})`)
+  return res.json()  // { files: [{ file_hash, filename, modality, chunk_count, ingested_at }] }
+}
+
+export async function deleteKBFileByHash(token, fileHash) {
+  const res = await fetch(`${API}/api/kb/files/${encodeURIComponent(fileHash)}`, {
+    method: 'DELETE',
+    headers: bearer(token),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `Delete failed (${res.status})`)
+  }
+  return res.json()
+}
+
+export async function getTranscript(token, fileHash) {
+  const res = await fetch(`${API}/api/transcript/${encodeURIComponent(fileHash)}`, {
+    headers: bearer(token),
+  })
+  if (!res.ok) throw new Error(`Transcript fetch failed (${res.status})`)
+  return res.json()  // { chunks: [{ start_timestamp, end_timestamp, speaker_name, speaker_role, call_section, transcript }] }
+}
+
+export async function getChunkMeta(token, chunkId) {
+  const res = await fetch(`${API}/api/sources/${encodeURIComponent(chunkId)}`, {
+    headers: bearer(token),
+  })
+  if (!res.ok) throw new Error(`Chunk metadata fetch failed (${res.status})`)
+  return res.json()
+}

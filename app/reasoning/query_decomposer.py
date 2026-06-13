@@ -289,6 +289,61 @@ def _rule_based_fallback(query: str, max_subqueries: int) -> List[str]:
     return [query if query.endswith("?") else query + "?"]
 
 
+# FINANCE-SPECIFIC DECOMPOSITION PATTERNS (Phase 7)
+
+_QQ_PATTERN = re.compile(
+    r'Q([1-4])\s+(?:vs\.?\s*)?(?:and\s+)?Q([1-4])',
+    re.IGNORECASE,
+)
+_CEO_AND_FINANCIALS = re.compile(
+    r'(.+?)\s+(?:said|stated|commented|noted|mentioned)\s+(.+)\s+and\s+(.+)',
+    re.IGNORECASE,
+)
+
+
+def _finance_decompose(query: str, max_subqueries: int) -> Optional[List[str]]:
+    """
+    Detect finance-specific patterns and produce targeted sub-queries.
+    Returns a list when a pattern matched, or None to fall through to LLM.
+    """
+    q = query.strip()
+
+    # "Compare Q3 vs Q4 revenue" → ["Q3 revenue?", "Q4 revenue?", "Q3 vs Q4 revenue change?"]
+    m = _QQ_PATTERN.search(q)
+    if m:
+        q1, q2  = m.group(1), m.group(2)
+        topic   = q[m.end():].strip(" ?.,") or "results"
+        subs = [
+            f"Q{q1} {topic}?",
+            f"Q{q2} {topic}?",
+            f"Q{q1} versus Q{q2} {topic} change?",
+        ]
+        return subs[:max_subqueries]
+
+    # "CEO said X AND financials show Y" → ["CEO statement about X?", "Y financials?"]
+    m2 = _CEO_AND_FINANCIALS.match(q)
+    if m2:
+        speaker_part   = m2.group(1).strip()
+        statement_part = m2.group(2).strip()
+        financial_part = m2.group(3).strip()
+        subs = [
+            f"What did {speaker_part} say about {statement_part}?",
+            f"{financial_part} financial data?",
+        ]
+        return subs[:max_subqueries]
+
+    # "X YoY" or "year-over-year X" → needs current + prior year data
+    if re.search(r'\byoy\b|year[- ]over[- ]year', q, re.IGNORECASE):
+        base = re.sub(r'\byoy\b|year[- ]over[- ]year', '', q, flags=re.IGNORECASE).strip(" ?.,")
+        year_m = re.search(r'\b(20\d{2})\b', q)
+        if year_m:
+            yr   = int(year_m.group(1))
+            subs = [f"{base} {yr}?", f"{base} {yr - 1}?", f"{base} YoY change {yr}?"]
+            return subs[:max_subqueries]
+
+    return None
+
+
 # DEDUPLICATE AGAINST ORIGINAL QUERY
 
 def _dedup_against_original(
@@ -369,6 +424,18 @@ class QueryDecomposer:
                     span.set_attribute("decompose.skipped", True)
                     span.set_status(Status(StatusCode.OK))
                     return [query]
+
+                # FINANCE PATTERN FAST-PATH — no LLM needed for well-known patterns
+                finance_subs = _finance_decompose(query, self.max_subqueries)
+                if finance_subs:
+                    logger.info(
+                        "decompose_finance_pattern",
+                        count=len(finance_subs),
+                        session_id=session_id,
+                    )
+                    span.set_attribute("decompose.method", "finance_pattern")
+                    span.set_status(Status(StatusCode.OK))
+                    return finance_subs
 
                 query_type = detect_query_type(query)
                 span.set_attribute("query.type", query_type)

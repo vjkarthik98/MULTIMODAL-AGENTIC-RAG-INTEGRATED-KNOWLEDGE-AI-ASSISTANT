@@ -19,7 +19,7 @@ class ImageBM25(BaseBM25):
     - time_period token for date-scoped chart queries
     """
 
-    modality = "image"
+    modality = "jpg"
 
     _NUMBER_RE = re.compile(r'(\d[\d,.]*(?:\.\d+)?)\s*([bBmMkK])\b')
 

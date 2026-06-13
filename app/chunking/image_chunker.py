@@ -730,6 +730,8 @@ class ImageChunker(BaseChunker):
                 logger.warning(event="image_chunker_open_failed", error=str(exc), source=source)
                 continue
 
+            img_width, img_height = img.size
+
             # Step 1: OCR (ground-truth numbers).
             ocr_text = ""
             try:
@@ -768,11 +770,16 @@ class ImageChunker(BaseChunker):
             extracted_numbers = list(_NUMBER_RE.findall(ocr_text or caption_text))
             chunk_hash        = deterministic_chunk_id(source, "image_raw_0", chunk_idx)
 
+            # Extract image_title: first sentence/line of caption (MD Phase 1.5)
+            raw_title = (caption_text or "").split(".")[0].split("\n")[0].strip()
+            image_title = raw_title[:120] if raw_title else source
+
             structure = {
                 "chunk_hash_id":        chunk_hash,
                 "source_file":          source,
                 "chunk_index":          chunk_idx,
                 "image_type":           image_type,
+                "image_title":          image_title,
                 "caption":              caption_text,
                 "ocr_text":             ocr_text,
                 "extracted_numbers":    extracted_numbers,
@@ -782,11 +789,13 @@ class ImageChunker(BaseChunker):
                 "parent_document":      ext.extra.get("parent_document"),
                 "parent_page":          ext.extra.get("parent_page"),
                 "finance_entities":     fin_entities,
+                "image_width":          img_width,
+                "image_height":         img_height,
             }
 
             doc = self._make_doc(
                 text=combined,
-                modality="image",
+                modality="jpg",
                 subtype="caption",
                 source=source,
                 page=None,

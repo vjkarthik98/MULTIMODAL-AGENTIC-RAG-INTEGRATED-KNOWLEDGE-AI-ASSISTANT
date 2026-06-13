@@ -83,10 +83,33 @@ def user_temp_frames_dir(user_id: Optional[str] = None) -> Path:
     return p
 
 
-def user_bm25_path(user_id: Optional[str] = None) -> Path:
-    p = user_dir(user_id) / "bm25_index"
+def user_bm25_path(user_id: Optional[str] = None, modality: str = "") -> Path:
+    """Per-user (optionally per-modality) BM25 index file."""
+    p = user_dir(user_id) / "bm25" if modality else user_dir(user_id) / "bm25_index"
     p.mkdir(exist_ok=True)
-    return p / "bm25.pkl"
+    filename = f"{modality}_index.pkl" if modality else "bm25.pkl"
+    return p / filename
+
+
+# ─── .HF_CACHE PATH HELPERS (Phase 8) ─────────────────────────────────────────
+
+def _hf_home() -> Path:
+    """Resolve HF_HOME from environment or project-relative default."""
+    from app.core.config import settings as _s
+    return Path(getattr(_s, "HF_HOME", ".hf_cache"))
+
+
+def hf_model_path(model_id: str) -> Path:
+    """Returns .hf_cache/hub/models--{org}--{name}/ for a HuggingFace model."""
+    safe_id = model_id.replace("/", "--")
+    return _hf_home() / "hub" / f"models--{safe_id}"
+
+
+def gguf_path(filename: Optional[str] = None) -> Path:
+    """Returns path to a GGUF model file inside .hf_cache/gguf/."""
+    from app.core.config import settings as _s
+    fname = filename or Path(getattr(_s, "LLM_MODEL_PATH", "model.gguf")).name
+    return _hf_home() / "gguf" / fname
 
 
 # ─── RESOLVED PATHS (contextvar-aware, with global-fallback) ──────────────────

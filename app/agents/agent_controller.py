@@ -146,6 +146,20 @@ class AgentExecutor:
             logger.warning("executor_router_failed", error=str(exc), session_id=session_id)
             action, reason, confidence = "rag", "router_exception", 0.5
 
+        # Collect finance filter hints from decision (Phase 7)
+        finance_filters: Dict[str, Any] = {}
+        try:
+            if hasattr(decision, "modality_hint") and decision.modality_hint:
+                finance_filters["modality_hint"] = decision.modality_hint
+            if hasattr(decision, "source_type_filter") and decision.source_type_filter:
+                finance_filters["source_type_filter"] = decision.source_type_filter
+            if hasattr(decision, "subtype_filter") and decision.subtype_filter:
+                finance_filters["subtype_filter"] = decision.subtype_filter
+            if hasattr(decision, "call_section_filter") and decision.call_section_filter:
+                finance_filters["call_section_filter"] = decision.call_section_filter
+        except Exception:
+            pass
+
         # RAG/hybrid → return a signal; the pipeline performs retrieval.
         if action in {"rag", "hybrid"}:
             return {
@@ -153,7 +167,7 @@ class AgentExecutor:
                 "source":   "rag",
                 "decision": action,
                 "reason":   reason or "knowledge_query",
-                "metadata": {"confidence": max(confidence, 0.6)},
+                "metadata": {"confidence": max(confidence, 0.6), **finance_filters},
             }
 
         # search/memory → also requires the pipeline to fulfil; pass through.
@@ -163,7 +177,7 @@ class AgentExecutor:
                 "source":   action,
                 "decision": action,
                 "reason":   reason or f"{action}_route",
-                "metadata": {"confidence": confidence},
+                "metadata": {"confidence": confidence, **finance_filters},
             }
 
         # direct → only safe when router is confident this is NOT a doc question.

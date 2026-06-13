@@ -411,6 +411,54 @@ class ToolRegistry:
             },
         ))
 
+        # FINANCIAL CALCULATOR TOOL (Phase 7)
+        def financial_calculator_tool(query: str, context: Dict, session_id: str):
+            from app.tools.financial_calculator import calculate
+            expression = context.get("metric", query.strip().lower())
+            return calculate(expression, context).formatted
+
+        self.register(Tool(
+            name="financial_calculator",
+            description="Verified arithmetic: YoY%, margin%, EPS, CAGR, P/E, EV/EBITDA",
+            handler=financial_calculator_tool,
+            tool_type="reasoning",
+            cost="low",
+            schema={
+                "input":  {"metric": "str", "context": "dict[current,prior|numerator,revenue|...]"},
+                "output": "str (formatted result)",
+            },
+        ))
+
+        # SEC EDGAR SEARCH TOOL (Phase 7)
+        def sec_edgar_tool(query: str, context: Dict, session_id: str):
+            from app.tools.sec_edgar import search_edgar_sync
+            form_type  = context.get("form_type", "10-K")
+            ticker     = context.get("ticker")
+            date_range = context.get("date_range")
+            results    = search_edgar_sync(query, form_type=form_type, ticker=ticker, date_range=date_range)
+            return [
+                {
+                    "company":    r.company_name,
+                    "form_type":  r.form_type,
+                    "filed":      r.filing_date,
+                    "url":        r.document_url,
+                    "snippet":    r.snippet,
+                }
+                for r in results
+            ]
+
+        self.register(Tool(
+            name="sec_edgar_search",
+            description="Free SEC EDGAR full-text search for 10-K/10-Q/8-K filings",
+            handler=sec_edgar_tool,
+            tool_type="external",
+            cost="high",
+            schema={
+                "input":  {"query": "str", "form_type": "str", "ticker": "str|None"},
+                "output": "list[dict[company,form_type,filed,url,snippet]]",
+            },
+        ))
+
         logger.info(
             "tools_registered",
             count=len(self.tools),

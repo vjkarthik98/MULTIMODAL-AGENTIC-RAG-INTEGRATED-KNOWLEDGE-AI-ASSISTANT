@@ -220,6 +220,10 @@ class Settings:
     DIARIZATION_MODEL: str          = _str("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
     # Finance NER
     NER_MODEL: str                  = _str("NER_MODEL", "dslim/bert-base-NER")
+    # FinBERT — finance-domain tone/sentiment classifier (yiyanghkust/finbert-tone)
+    FINBERT_MODEL: str              = _str("FINBERT_MODEL", "yiyanghkust/finbert-tone")
+    FINBERT_ENABLED: bool           = _bool("FINBERT_ENABLED", True)
+    FINBERT_BATCH_SIZE: int         = _int("FINBERT_BATCH_SIZE", 32)
     HF_TOKEN: Optional[str]         = _opt("HF_TOKEN")
     WHISPER_DOMAIN_VOCAB: List[str] = _list("WHISPER_DOMAIN_VOCAB", [
         "RAG", "FAISS", "Qdrant", "LlamaIndex", "LangChain", "RAGAS",
@@ -359,8 +363,8 @@ class Settings:
     }
 
     # HYBRID RETRIEVAL
-    HYBRID_WEIGHT_BM25: float          = _float("HYBRID_WEIGHT_BM25", 0.35)
-    HYBRID_WEIGHT_VECTOR: float        = _float("HYBRID_WEIGHT_VECTOR", 0.65)
+    HYBRID_WEIGHT_BM25: float          = _float("HYBRID_WEIGHT_BM25", 0.40)
+    HYBRID_WEIGHT_VECTOR: float        = _float("HYBRID_WEIGHT_VECTOR", 0.60)
     HYBRID_WEIGHT_VISION: float        = _float("HYBRID_WEIGHT_VISION", 0.2)
     HYBRID_CANDIDATES_MULTIPLIER: int  = _int("HYBRID_CANDIDATES_MULTIPLIER", 3)
     HYBRID_MIN_SCORE: float            = _float("HYBRID_MIN_SCORE", 0.20)

@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import re
 import time
 import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
@@ -197,6 +198,30 @@ def _validate(summary: str) -> str:
 
 # BUILD SUMMARIZATION PROMPT
 
+# Finance number preservation instruction — injected into both prompt builders
+# (Plan Phase 6: finance number preservation in summaries).
+_FINANCE_NUMBER_RULE = (
+    "- Preserve ALL exact financial figures verbatim: dollar amounts, percentages, "
+    "basis points, EPS values, dates, ticker symbols, and company names. "
+    "Do NOT paraphrase or round any numbers.\n"
+)
+
+
+_FINANCE_NUM_RE = re.compile(
+    r'(?:[$€£]\s*\d[\d,]*(?:\.\d+)?(?:\s*(?:billion|million|thousand|B|M|K))?'
+    r'|\d[\d,]*(?:\.\d+)?%'
+    r'|\b\d[\d,]*(?:\.\d+)?\s*(?:billion|million|bps|basis points)'
+    r'|\bQ[1-4]\s*(?:FY)?\d{2,4}'
+    r'|\bFY\d{2,4}'
+    r'|\b(?:EPS|eps)\s*(?:of\s*)?\$?\d[\d.]*)',
+    re.IGNORECASE,
+)
+
+
+def _extract_finance_numbers(text: str) -> list[str]:
+    return list(dict.fromkeys(_FINANCE_NUM_RE.findall(text)))
+
+
 def _build_prompt(conv: str) -> str:
     instruction = (
         "Compress this conversation into structured memory.\n"
@@ -204,7 +229,9 @@ def _build_prompt(conv: str) -> str:
         "- Keep only factual, actionable information\n"
         "- No hallucination or inference beyond what is stated\n"
         "- No filler words\n"
-        "- Be maximally concise\n\n"
+        "- Be maximally concise\n"
+        + _FINANCE_NUMBER_RULE
+        + "\n"
     )
 
     format_block = (
@@ -234,7 +261,9 @@ def _build_incremental_prompt(
         "- Preserve existing facts unless contradicted\n"
         "- Add new facts from new turns\n"
         "- Remove outdated entries if new turns contradict them\n"
-        "- Be maximally concise\n\n"
+        "- Be maximally concise\n"
+        + _FINANCE_NUMBER_RULE
+        + "\n"
     )
 
     format_block = (
@@ -357,6 +386,19 @@ def summarize_conversation(
                 )
                 span.set_status(Status(StatusCode.OK))
                 return ""
+
+            # FINANCE NUMBER PRESERVATION PASS
+            # Extract numbers from original turns; append any dropped by LLM.
+            original_numbers = _extract_finance_numbers(conv)
+            if original_numbers:
+                missing = [n for n in original_numbers if n not in summary]
+                if missing:
+                    summary = summary.rstrip() + "\n[KEY FIGURES: " + ", ".join(missing[:20]) + "]"
+                    logger.debug(
+                        "finance_figures_appended",
+                        count=len(missing),
+                        session_id=session_id,
+                    )
 
             # KEYWORD EXTRACTION FOR TAGGING
             keywords = _extract_keywords(summary)

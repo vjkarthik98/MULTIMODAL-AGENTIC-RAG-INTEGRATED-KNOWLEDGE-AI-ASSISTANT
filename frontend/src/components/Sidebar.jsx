@@ -7,7 +7,7 @@ import {
   BrainCircuit, MessageSquare, MoreHorizontal, Pin, PinOff, Pencil,
   Archive, ArchiveRestore, Trash2,
 } from 'lucide-react'
-import { listKB, deleteKBFile, ingestFile, listChatSessions, deleteChatSession, updateChatSession } from '../api/client'
+import { listKB, deleteKBFile, ingestFile, listChatSessions, deleteChatSession, updateChatSession, getIngestionStatus } from '../api/client'
 import { useToast } from '../context/ToastContext'
 
 const EXT_BADGE = {
@@ -455,6 +455,29 @@ export default function Sidebar({
     _doUpload([...fresh, ...dups])
   }
 
+  // Stage labels for real ingestion status polling (audio/video)
+  const _STAGE_PROGRESS = { queued: 2, extracting: 20, chunking: 50, embedding: 80, done: 100, error: 0 }
+  const _AUDIO_VIDEO_EXTS = new Set(['mp3','mp4','wav','m4a','ogg','flac','mov','avi','mkv','webm','opus','aiff','wma'])
+  const _isLongRunning = (filename) => {
+    const ext = (filename.split('.').pop() || '').toLowerCase()
+    return _AUDIO_VIDEO_EXTS.has(ext)
+  }
+
+  const _pollJobStatus = async (token, jobId, filename) => {
+    const INTERVAL = 3000, MAX_POLLS = 300  // up to 15 min
+    for (let i = 0; i < MAX_POLLS; i++) {
+      await new Promise(r => setTimeout(r, INTERVAL))
+      try {
+        const job = await getIngestionStatus(token, jobId)
+        const pct = _STAGE_PROGRESS[job.status] ?? Math.round((job.progress || 0) * 100)
+        setUploadProgress(prev => filename in prev ? { ...prev, [filename]: pct } : prev)
+        if (job.status === 'done') return { ok: true, chunks: job.chunks_done }
+        if (job.status === 'error') return { ok: false, error: job.error || 'Processing failed' }
+      } catch (_) { /* network blip — keep polling */ }
+    }
+    return { ok: false, error: 'Timed out waiting for processing' }
+  }
+
   const _doUpload = async (files) => {
     setUploadError('')
     const errors = []
@@ -465,31 +488,46 @@ export default function Sidebar({
       setUploadingFiles(prev => new Set([...prev, file.name]))
       setUploadProgress(prev => ({ ...prev, [file.name]: 0 }))
 
-      // Exponential-ease simulation (0→90%) drives the ring while the backend
-      // processes. XHR byte-transfer is instant on localhost so we don't use
-      // onprogress — it fires at 100% before the server is done.
-      let tick = 0
-      const sim = setInterval(() => {
-        tick++
-        const fake = Math.min(Math.round(90 * (1 - Math.exp(-tick / 25))), 90)
-        setUploadProgress(prev =>
-          file.name in prev
-            ? { ...prev, [file.name]: Math.max(prev[file.name], fake) }
-            : prev
-        )
-      }, 200)
+      const longRunning = _isLongRunning(file.name)
+
+      // For short files: exponential-ease simulation (0→90%)
+      // For audio/video: real stage polling via job_id
+      let sim = null
+      if (!longRunning) {
+        let tick = 0
+        sim = setInterval(() => {
+          tick++
+          const fake = Math.min(Math.round(90 * (1 - Math.exp(-tick / 25))), 90)
+          setUploadProgress(prev =>
+            file.name in prev
+              ? { ...prev, [file.name]: Math.max(prev[file.name], fake) }
+              : prev
+          )
+        }, 200)
+      }
 
       try {
-        await ingestFile(auth.token, file, 'default', ctrl)
-        clearInterval(sim)
-        setUploadProgress(prev => ({ ...prev, [file.name]: 100 }))
-        addToast(`Uploaded: ${file.name}`, 'success')
+        const result = await ingestFile(auth.token, file, 'default', ctrl)
+        if (sim) clearInterval(sim)
+
+        if (longRunning && result?.job_id) {
+          // Real status polling for audio/video
+          const { ok, error: pollErr, chunks } = await _pollJobStatus(auth.token, result.job_id, file.name)
+          if (ok) {
+            setUploadProgress(prev => ({ ...prev, [file.name]: 100 }))
+            addToast(`Uploaded: ${file.name}${chunks ? ` (${chunks} chunks)` : ''}`, 'success')
+          } else {
+            errors.push(`${file.name}: ${pollErr}`)
+            addToast(`Failed: ${file.name}`, 'error')
+          }
+        } else {
+          setUploadProgress(prev => ({ ...prev, [file.name]: 100 }))
+          addToast(`Uploaded: ${file.name}`, 'success')
+        }
       } catch (err) {
-        clearInterval(sim)
+        if (sim) clearInterval(sim)
         if (err.name === 'AbortError') {
           addToast(`Cancelled: ${file.name}`, 'info')
-          // Best-effort: delete any partial chunks the server may have stored
-          // before the connection was aborted (fire-and-forget, non-blocking).
           deleteKBFile(auth.token, file.name).catch(() => {})
         } else {
           errors.push(`${file.name}: ${err.message}`)

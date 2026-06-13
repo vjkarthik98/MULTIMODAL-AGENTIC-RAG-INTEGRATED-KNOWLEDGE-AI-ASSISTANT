@@ -85,7 +85,12 @@ def _split_table_rows(
             "row_range":          list(row_nums),
             "is_ocr":             False,
             "footnotes":          [],
+            "footnote_markers":   [],
+            "has_figure":         False,
+            "figure_path":        None,
             "finance_entities":   fin_entities,
+            "char_start":         0,
+            "char_end":           len(nl_text),
         }
         doc = chunker._make_doc(
             text=nl_text,
@@ -157,7 +162,12 @@ class PdfChunker(BaseChunker):
                     "row_range":         None,
                     "is_ocr":            False,
                     "footnotes":         prose_footnotes[:],
+                    "footnote_markers":  [],
+                    "has_figure":        False,
+                    "figure_path":       None,
                     "finance_entities":  fin_entities,
+                    "char_start":        0,
+                    "char_end":          len(piece),
                 }
                 doc = self._make_doc(
                     text=piece,
@@ -271,7 +281,12 @@ class PdfChunker(BaseChunker):
                         "section_hierarchy": section_hierarchy[:],
                         "is_ocr":            True,
                         "footnotes":         [],
+                        "footnote_markers":  [],
+                        "has_figure":        False,
+                        "figure_path":       None,
                         "finance_entities":  fin_entities,
+                        "char_start":        0,
+                        "char_end":          len(piece),
                     }
                     doc = self._make_doc(
                         text=piece,
@@ -301,16 +316,22 @@ class PdfChunker(BaseChunker):
                 fin_entities = extract_finance_entities(combined)
                 chunk_hash = deterministic_chunk_id(source, f"p{ext.page or 0}_img_{chunk_idx[0]}", chunk_idx[0])
                 structure = {
-                    "chunk_hash_id":   chunk_hash,
-                    "source_file":     source,
-                    "chunk_index":     chunk_idx[0],
-                    "page_number":     ext.page,
-                    "page_range":      [ext.page, ext.page] if ext.page else None,
-                    "chunk_type":      "figure_caption",
-                    "section_title":   section_title,
-                    "caption":         caption_text,
-                    "ocr_text":        ocr_text,
+                    "chunk_hash_id":    chunk_hash,
+                    "source_file":      source,
+                    "chunk_index":      chunk_idx[0],
+                    "page_number":      ext.page,
+                    "page_range":       [ext.page, ext.page] if ext.page else None,
+                    "chunk_type":       "figure_caption",
+                    "section_title":    section_title,
+                    "caption":          caption_text,
+                    "ocr_text":         ocr_text,
+                    "footnotes":        [],
+                    "footnote_markers": [],
+                    "has_figure":       True,
+                    "figure_path":      None,
                     "finance_entities": fin_entities,
+                    "char_start":       0,
+                    "char_end":         len(combined),
                 }
                 doc = self._make_doc(
                     text=combined,

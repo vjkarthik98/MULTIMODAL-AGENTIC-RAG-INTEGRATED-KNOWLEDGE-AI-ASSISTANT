@@ -471,7 +471,7 @@ class BaseBM25(ABC):
             self.documents        = payload.get("documents", [])
             self.tokenized_corpus = payload.get("tokenized_corpus", [])
             if self.tokenized_corpus:
-                self.bm25 = BM25Plus(self.tokenized_corpus)
+                self.bm25 = BM25Plus(self.tokenized_corpus, k1=1.5, b=0.75)
             self._index_loaded   = True
             self._loaded_user_id = eff_uid
             logger.info(
@@ -518,7 +518,7 @@ class BaseBM25(ABC):
 
         if not self.tokenized_corpus:
             return
-        self.bm25 = BM25Plus(self.tokenized_corpus)
+        self.bm25 = BM25Plus(self.tokenized_corpus, k1=1.5, b=0.75)
         self._save(user_id)
         logger.info(
             event="bm25_index_built",
@@ -566,7 +566,7 @@ class BaseBM25(ABC):
 
         if not added:
             return
-        self.bm25 = BM25Plus(self.tokenized_corpus)
+        self.bm25 = BM25Plus(self.tokenized_corpus, k1=1.5, b=0.75)
         self._save(user_id)
         logger.info(
             event="bm25_docs_added",
@@ -691,7 +691,7 @@ class BaseBM25(ABC):
         self.tokenized_corpus = keep_t
         removed = before - len(self.documents)
         if removed:
-            self.bm25 = BM25Plus(self.tokenized_corpus) if self.tokenized_corpus else None
+            self.bm25 = BM25Plus(self.tokenized_corpus, k1=1.5, b=0.75) if self.tokenized_corpus else None
             self._save(user_id)
         return removed
 
@@ -707,7 +707,7 @@ class BaseBM25(ABC):
         self.tokenized_corpus = keep_t
         removed = before - len(self.documents)
         if removed:
-            self.bm25 = BM25Plus(self.tokenized_corpus) if self.tokenized_corpus else None
+            self.bm25 = BM25Plus(self.tokenized_corpus, k1=1.5, b=0.75) if self.tokenized_corpus else None
             self._save()
         return removed
 

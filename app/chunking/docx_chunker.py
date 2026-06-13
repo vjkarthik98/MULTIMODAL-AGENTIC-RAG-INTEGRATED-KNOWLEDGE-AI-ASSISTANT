@@ -58,6 +58,7 @@ class DocxChunker(BaseChunker):
 
         docs: List[IngestedDocument] = []
         chunk_idx = [0]
+        char_offset = [0]  # cumulative character offset through document
 
         # Section hierarchy stack: index = level-1, value = heading text
         hierarchy: List[str] = []
@@ -66,6 +67,8 @@ class DocxChunker(BaseChunker):
         table_headers: List[str] = []
         defined_terms: Dict[str, str] = {}
         seen_hashes: set = set()
+        paragraph_index = [0]   # paragraph counter within current section (MD Phase 1.3)
+        table_index = [0]       # table counter in document (MD Phase 1.3)
 
         def current_heading() -> Optional[str]:
             return hierarchy[-1] if hierarchy else None
@@ -90,11 +93,13 @@ class DocxChunker(BaseChunker):
                     defined_terms[term] = piece[m.end(): m.end() + 80].strip()
 
                 fin_entities = extract_finance_entities(piece)
+                paragraph_index[0] += 1
                 chunk_hash = deterministic_chunk_id(source, f"para_{chunk_idx[0]}", chunk_idx[0])
                 structure = {
                     "chunk_hash_id":    chunk_hash,
                     "source_file":      source,
                     "chunk_index":      chunk_idx[0],
+                    "paragraph_index":  paragraph_index[0],
                     "heading":          current_heading(),
                     "heading_hierarchy": hierarchy[:],
                     "heading_level":    len(hierarchy),
@@ -103,10 +108,13 @@ class DocxChunker(BaseChunker):
                     "has_italic_terms": italic_terms,
                     "defined_terms":    {},
                     "finance_entities": fin_entities,
+                    "char_start":       char_offset[0],
+                    "char_end":         char_offset[0] + len(piece),
                 }
+                char_offset[0] += len(piece) + 1
                 doc = self._make_doc(
                     text=piece,
-                    modality="word",
+                    modality="docx",
                     subtype="paragraph",
                     source=source,
                     page=None,
@@ -135,10 +143,14 @@ class DocxChunker(BaseChunker):
                 fin_entities = extract_finance_entities(nl_text)
                 row_range = [i + 1, min(i + step, len(pending_table_rows))]
                 chunk_hash = deterministic_chunk_id(source, f"table_r{row_range[0]}_{chunk_idx[0]}", chunk_idx[0])
+                if i == 0:
+                    table_index[0] += 1
                 structure = {
                     "chunk_hash_id":    chunk_hash,
                     "source_file":      source,
                     "chunk_index":      chunk_idx[0],
+                    "paragraph_index":  paragraph_index[0],
+                    "table_index":      table_index[0],
                     "heading":          current_heading(),
                     "heading_hierarchy": hierarchy[:],
                     "heading_level":    len(hierarchy),
@@ -147,10 +159,13 @@ class DocxChunker(BaseChunker):
                     "row_range":        row_range,
                     "defined_terms":    {},
                     "finance_entities": fin_entities,
+                    "char_start":       char_offset[0],
+                    "char_end":         char_offset[0] + len(nl_text),
                 }
+                char_offset[0] += len(nl_text) + 1
                 doc = self._make_doc(
                     text=nl_text,
-                    modality="word",
+                    modality="docx",
                     subtype="table",
                     source=source,
                     page=None,
@@ -181,6 +196,7 @@ class DocxChunker(BaseChunker):
                 hierarchy = hierarchy[: level - 1]
                 if heading_text:
                     hierarchy.append(heading_text)
+                paragraph_index[0] = 0  # reset per-section paragraph counter
                 continue
 
             if etype == "table_row":
@@ -221,10 +237,13 @@ class DocxChunker(BaseChunker):
                     "heading_hierarchy": hierarchy[:],
                     "chunk_type":       "annotation",
                     "finance_entities": extract_finance_entities(comment_text),
+                    "char_start":       char_offset[0],
+                    "char_end":         char_offset[0] + len(comment_text),
                 }
+                char_offset[0] += len(comment_text) + 1
                 doc = self._make_doc(
                     text=comment_text,
-                    modality="word",
+                    modality="docx",
                     subtype="annotation",
                     source=source,
                     page=None,
@@ -255,10 +274,13 @@ class DocxChunker(BaseChunker):
                     "chunk_type":      "figure_caption",
                     "caption":         cap,
                     "finance_entities": extract_finance_entities(cap),
+                    "char_start":      char_offset[0],
+                    "char_end":        char_offset[0] + len(cap),
                 }
+                char_offset[0] += len(cap) + 1
                 doc = self._make_doc(
                     text=cap,
-                    modality="word",
+                    modality="docx",
                     subtype="paragraph",
                     source=source,
                     page=None,
@@ -289,7 +311,7 @@ class DocxChunker(BaseChunker):
             }
             doc = self._make_doc(
                 text=def_text,
-                modality="word",
+                modality="docx",
                 subtype="definition",
                 source=source,
                 page=None,

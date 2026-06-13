@@ -430,7 +430,7 @@ class BM25Retriever:
 
         # ── Phase 3.3: Audio / Video — speaker role, call section, timestamp ──
         # Enables "what did the CFO say about margins at 30min" queries.
-        if modality in ("audio", "video"):
+        if modality in ("audio", "video", "mp3", "mp4"):
             speaker_role = (s.get("speaker_role") or "").strip()
             call_section = (s.get("call_section") or "").strip()
             ts_start = s.get("timestamp_start")
@@ -457,7 +457,7 @@ class BM25Retriever:
 
         # ── Phase 3.6: Image — image type prefix + extracted numbers ──────────
         # Enables "revenue bar chart" and exact number queries on image content.
-        if modality == "image" or source_type == "image":
+        if modality in ("image", "jpg") or source_type == "image":
             image_type = (s.get("image_type") or "").strip()
             if image_type:
                 parts.insert(0, image_type.replace("_", " "))

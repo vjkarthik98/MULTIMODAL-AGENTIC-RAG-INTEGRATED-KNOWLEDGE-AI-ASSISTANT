@@ -73,7 +73,8 @@ _MERGE_SHORT_S = 30.0    # merge speaker segments shorter than this
 
 _TOPIC_TRANSITIONS = re.compile(
     r"\b(moving to|turning to|let me now|switching to|on the balance sheet|"
-    r"cash flow|guidance|outlook|next question|question and answer|q&a)\b",
+    r"cash flow|guidance|outlook|next question|question and answer|q&a|"
+    r"basis points|year over year|quarter over quarter)\b",
     re.IGNORECASE,
 )
 
@@ -303,7 +304,7 @@ class AudioChunker(BaseChunker):
 
                     doc = self._make_doc(
                         text=transcript,
-                        modality="audio",
+                        modality="mp3",
                         subtype="speech",
                         source=source,
                         page=None,
