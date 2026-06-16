@@ -3,7 +3,21 @@ from __future__ import annotations
 
 from typing import Any, List
 
+from prometheus_client import Counter
+
 from app.bm25.base_bm25 import BaseBM25
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+_BM25_INDEXED = Counter(
+    "magik_xlsx_bm25_indexed_total",
+    "Documents indexed in xlsx BM25",
+)
+_BM25_INDEX_ERRORS = Counter(
+    "magik_xlsx_bm25_index_errors_total",
+    "Errors in xlsx BM25 _build_indexed_text",
+)
 
 
 class XlsxBM25(BaseBM25):
@@ -22,48 +36,63 @@ class XlsxBM25(BaseBM25):
     modality = "xlsx"
 
     def _build_indexed_text(self, doc: Any) -> str:
-        s = getattr(doc, "structure", {}) or {}
-        parts: List[str] = list(self._base_text(doc))
+        try:
+            s = getattr(doc, "structure", {}) or {}
+            parts: List[str] = list(self._base_text(doc))
 
-        # Sheet name prefix
-        sheet = (
-            getattr(doc, "sheet_name", None)
-            or s.get("sheet_name")
-            or s.get("sheet")
-            or s.get("section_title")
-            or ""
-        ).strip()
-        if sheet:
-            parts.append(f"sheet {sheet}")
-            parts.append(sheet)  # bare name too
+            # Sheet name prefix
+            sheet = (
+                getattr(doc, "sheet_name", None)
+                or s.get("sheet_name")
+                or s.get("sheet")
+                or s.get("section_title")
+                or ""
+            ).strip()
+            if sheet:
+                parts.append(f"sheet {sheet}")
+                parts.append(sheet)  # bare name too
 
-        # Unit scale token — crucial for "$4.3B" vs "$4.3M" disambiguation
-        unit_scale = (s.get("unit_scale") or s.get("currency") or "").strip().lower()
-        if unit_scale:
-            parts.append(f"unit {unit_scale}")
-            parts.append(unit_scale)
+            # Unit scale token — crucial for "$4.3B" vs "$4.3M" disambiguation
+            unit_scale = (s.get("unit_scale") or s.get("currency") or "").strip().lower()
+            if unit_scale:
+                parts.append(f"unit {unit_scale}")
+                parts.append(unit_scale)
 
-        # Column headers amplified
-        col_headers: List[str] = s.get("column_headers") or []
-        if col_headers:
-            header_text = " ".join(str(h) for h in col_headers[:8])
-            parts.append(header_text)
-            parts.append(header_text)  # ×2
+            # Column headers amplified
+            col_headers: List[str] = s.get("column_headers") or []
+            if col_headers:
+                header_text = " ".join(str(h) for h in col_headers[:8])
+                parts.append(header_text)
+                parts.append(header_text)  # ×2
 
-        # Named ranges (assumption variables)
-        named_ranges: dict = s.get("named_ranges") or {}
-        for name in list(named_ranges.keys())[:10]:
-            parts.append(str(name).replace("_", " "))
+            # Named ranges (assumption variables)
+            named_ranges: dict = s.get("named_ranges") or {}
+            for name in list(named_ranges.keys())[:10]:
+                parts.append(str(name).replace("_", " "))
 
-        # Row range token
-        row_start = getattr(doc, "row_start", None) or s.get("row_start")
-        row_end   = getattr(doc, "row_end",   None) or s.get("row_end")
-        if row_start is not None and row_end is not None:
-            parts.append(f"row {row_start} to {row_end}")
+            # Row range token
+            row_start = getattr(doc, "row_start", None) or s.get("row_start")
+            row_end   = getattr(doc, "row_end",   None) or s.get("row_end")
+            if row_start is not None and row_end is not None:
+                parts.append(f"row {row_start} to {row_end}")
 
-        # Semantic group label (e.g. "revenue breakdown", "cost structure")
-        group = (s.get("semantic_group") or "").strip()
-        if group:
-            parts.append(group)
+            # Semantic group label (e.g. "revenue breakdown", "cost structure")
+            group = (s.get("semantic_group") or "").strip()
+            if group:
+                parts.append(group)
 
-        return " ".join(parts)
+            _BM25_INDEXED.inc()
+            return " ".join(parts)
+        except Exception as _exc:
+            _BM25_INDEX_ERRORS.inc()
+            logger.warning(
+                event="bm25_index_text_failed",
+                modality=self.modality,
+                error=str(_exc),
+            )
+            return getattr(doc, "text", "") or ""
+
+    def health_check(self, user_id=None) -> dict:
+        base = super().health_check(user_id)
+        base["class"] = self.__class__.__name__
+        return base

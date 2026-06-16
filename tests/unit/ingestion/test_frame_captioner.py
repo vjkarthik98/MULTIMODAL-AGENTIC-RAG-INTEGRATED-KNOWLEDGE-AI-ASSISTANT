@@ -4,7 +4,7 @@ Functions that require BLIP model or live Redis are not tested here.
 """
 import pytest
 
-from app.ingestion.frame_captioner import (
+from app.chunking.image_chunker import (
     _cache_key,
     _caption_confidence,
     _clean_caption,

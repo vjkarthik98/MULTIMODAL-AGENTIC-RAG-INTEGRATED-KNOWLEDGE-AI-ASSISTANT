@@ -691,6 +691,16 @@ class QdrantVectorStore:
             conditions.append(
                 FieldCondition(key="user_id", match=MatchValue(value=user_id))
             )
+        else:
+            logger.warning(
+                "qdrant_build_filter_no_user_id",
+                warning="_build_filter called without user_id — unscoped filter will match all tenants",
+            )
+
+        if session_id:
+            conditions.append(
+                FieldCondition(key="session_id", match=MatchValue(value=session_id))
+            )
 
         if self.modality_filter:
             conditions.append(
@@ -887,9 +897,12 @@ class QdrantVectorStore:
         self,
         field: str,
         value: str,
+        user_id: str = "",
         session_id: str = "",
         limit: int = 1,
     ) -> List[Any]:
+        if not user_id:
+            raise ValueError("search_by_payload requires a non-empty user_id for tenant isolation")
         results: List[Any] = []
         for collection in (self.text_collection, self.vision_collection):
             if collection not in self._collection_cache:
@@ -898,7 +911,10 @@ class QdrantVectorStore:
                 points, _ = self.client.scroll(
                     collection_name=collection,
                     scroll_filter=Filter(
-                        must=[FieldCondition(key=field, match=MatchValue(value=value))]
+                        must=[
+                            FieldCondition(key=field, match=MatchValue(value=value)),
+                            FieldCondition(key="user_id", match=MatchValue(value=user_id)),
+                        ]
                     ),
                     limit=limit,
                     with_payload=False,
@@ -953,5 +969,14 @@ class QdrantVectorStore:
             "collections":     list(self._collection_cache),
             "stats":           self.collection_stats(),
         }
+
+
+def initialize_qdrant() -> None:
+    """Explicit startup init — ensures both collections exist with correct dims."""
+    from app.core.infra_registry import infra
+    store = infra.get_vector_store()
+    store._ensure_collection(settings.TEXT_COLLECTION_NAME, settings.TEXT_EMBEDDING_DIM)
+    store._ensure_collection(settings.VISION_COLLECTION_NAME, settings.VISION_EMBEDDING_DIM)
+    logger.info("qdrant_init_complete")
 
 

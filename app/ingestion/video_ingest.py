@@ -1251,6 +1251,10 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
 from app.ingestion.base_ingest import BaseIngestor
 from app.ingestion.schema import RawExtract
+from prometheus_client import Counter as _Counter
+
+_EXTRACTS_TOTAL = _Counter("magik_video_extracts_total", "Total extracts produced by video ingestor")
+_EXTRACT_ERRORS = _Counter("magik_video_extract_errors_total", "Errors in video ingestor")
 
 
 class VideoIngestor(BaseIngestor):
@@ -1260,91 +1264,104 @@ class VideoIngestor(BaseIngestor):
     Does NOT extract frames, caption, or transcribe — the chunker (Phase 2) drives ffmpeg.
     """
 
+    def health_check(self) -> dict:
+        return {
+            "modality": "video",
+            "status": "ok",
+            "class": self.__class__.__name__,
+        }
+
     async def extract(
         self,
         path: Path,
         metadata: UniversalMetadata,
     ) -> List[RawExtract]:
+        source = path.name
         suffix = path.suffix.lower()
         logger.info(event="extraction_start", modality="video", file=str(path), size=path.stat().st_size)
-
-        if suffix not in SUPPORTED_VIDEO_FORMATS:
-            raise UnsupportedMimeError(f"UNSUPPORTED_VIDEO_FORMAT: {suffix}")
-
-        file_size = path.stat().st_size
-        if file_size == 0:
-            raise EmptyFileError(str(path))
-        if file_size > settings.MAX_FILE_SIZE_VIDEO:
-            raise FileTooLargeError(f"VIDEO_TOO_LARGE: {file_size}")
-
-        # Probe duration + resolution via ffprobe
-        duration_s: Optional[float] = None
-        width: Optional[int] = None
-        height: Optional[int] = None
-        has_audio = False
-        has_video = False
-
         try:
-            probe_result = subprocess.run(
-                [
-                    "ffprobe", "-v", "error",
-                    "-print_format", "json",
-                    "-show_streams", "-show_format",
-                    str(path),
-                ],
-                capture_output=True, text=True, timeout=30,
-            )
-            import json as _json
-            probe_data = _json.loads(probe_result.stdout or "{}")
-            fmt = probe_data.get("format", {})
-            duration_s = float(fmt.get("duration", 0) or 0) or None
-            for stream in probe_data.get("streams", []):
-                codec_type = stream.get("codec_type", "")
-                if codec_type == "video" and not has_video:
-                    has_video = True
-                    width = stream.get("width")
-                    height = stream.get("height")
-                elif codec_type == "audio":
-                    has_audio = True
-        except Exception as exc:
-            logger.warning("video_probe_failed", file=path.name, error=str(exc))
+            if suffix not in SUPPORTED_VIDEO_FORMATS:
+                raise UnsupportedMimeError(f"UNSUPPORTED_VIDEO_FORMAT: {suffix}")
 
-        if duration_s is not None and duration_s > settings.MAX_VIDEO_DURATION_SEC:
-            raise ValueError(f"VIDEO_TOO_LONG: {duration_s:.0f}s")
+            file_size = path.stat().st_size
+            if file_size == 0:
+                raise EmptyFileError(str(path))
+            if file_size > settings.MAX_FILE_SIZE_VIDEO:
+                raise FileTooLargeError(f"VIDEO_TOO_LARGE: {file_size}")
 
-        # DRM / container sanity via magic bytes
-        try:
-            with open(path, "rb") as f:
-                header = f.read(16)
-            # Simple check: known bad magic → raise
-            if header.startswith(b"\x00\x00\x00\x00"):
-                raise ValueError(f"VIDEO_CONTAINER_INVALID: zero-byte header in {path.name}")
-        except (ValueError, FileTooLargeError, EmptyFileError):
+            # Probe duration + resolution via ffprobe
+            duration_s: Optional[float] = None
+            width: Optional[int] = None
+            height: Optional[int] = None
+            has_audio = False
+            has_video = False
+
+            try:
+                probe_result = subprocess.run(
+                    [
+                        "ffprobe", "-v", "error",
+                        "-print_format", "json",
+                        "-show_streams", "-show_format",
+                        str(path),
+                    ],
+                    capture_output=True, text=True, timeout=30,
+                )
+                import json as _json
+                probe_data = _json.loads(probe_result.stdout or "{}")
+                fmt = probe_data.get("format", {})
+                duration_s = float(fmt.get("duration", 0) or 0) or None
+                for stream in probe_data.get("streams", []):
+                    codec_type = stream.get("codec_type", "")
+                    if codec_type == "video" and not has_video:
+                        has_video = True
+                        width = stream.get("width")
+                        height = stream.get("height")
+                    elif codec_type == "audio":
+                        has_audio = True
+            except Exception as exc:
+                logger.warning("video_probe_failed", file=path.name, error=str(exc))
+
+            if duration_s is not None and duration_s > settings.MAX_VIDEO_DURATION_SEC:
+                raise ValueError(f"VIDEO_TOO_LONG: {duration_s:.0f}s")
+
+            # DRM / container sanity via magic bytes
+            try:
+                with open(path, "rb") as f:
+                    header = f.read(16)
+                # Simple check: known bad magic → raise
+                if header.startswith(b"\x00\x00\x00\x00"):
+                    raise ValueError(f"VIDEO_CONTAINER_INVALID: zero-byte header in {path.name}")
+            except (ValueError, FileTooLargeError, EmptyFileError):
+                raise
+            except Exception:
+                pass
+
+            _EXTRACTS_TOTAL.inc(1)
+            logger.info(event="extraction_complete", modality="video", file=str(path), extracts=1)
+            return [
+                RawExtract(
+                    text="",
+                    extract_type="video_raw",
+                    timestamp_start=0.0,
+                    timestamp_end=duration_s,
+                    raw_source_ref=f"video:{path.name}",
+                    raw_bytes=None,  # file path stored in metadata; chunker reads directly
+                    extra={
+                        "file_path": str(path.resolve()),
+                        "file_size": file_size,
+                        "duration_seconds": duration_s,
+                        "width": width,
+                        "height": height,
+                        "has_audio": has_audio,
+                        "has_video": has_video,
+                        "format": suffix.lstrip("."),
+                    },
+                )
+            ]
+        except Exception as _exc:
+            _EXTRACT_ERRORS.inc()
+            logger.error(event="extraction_failed", modality="video", source=source, error=str(_exc))
             raise
-        except Exception:
-            pass
-
-        logger.info(event="extraction_complete", modality="video", file=str(path), extracts=1)
-        return [
-            RawExtract(
-                text="",
-                extract_type="video_raw",
-                timestamp_start=0.0,
-                timestamp_end=duration_s,
-                raw_source_ref=f"video:{path.name}",
-                raw_bytes=None,  # file path stored in metadata; chunker reads directly
-                extra={
-                    "file_path": str(path.resolve()),
-                    "file_size": file_size,
-                    "duration_seconds": duration_s,
-                    "width": width,
-                    "height": height,
-                    "has_audio": has_audio,
-                    "has_video": has_video,
-                    "format": suffix.lstrip("."),
-                },
-            )
-        ]
 
 
 # ══════════════════════════════════════════════════════════════════════════════

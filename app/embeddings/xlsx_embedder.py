@@ -19,8 +19,18 @@ from app.embeddings.base_embedder import (
 )
 from app.core.config import settings
 from app.utils.logger import get_logger
+from prometheus_client import Counter
 
 logger = get_logger(__name__)
+
+_EMBED_BUILT = Counter(
+    "magik_xlsx_embed_text_built_total",
+    "Embed texts successfully built for xlsx",
+)
+_EMBED_ERRORS = Counter(
+    "magik_xlsx_embed_text_errors_total",
+    "Errors building embed text for xlsx",
+)
 
 
 class XlsxEmbedder(BaseEmbedder):
@@ -34,26 +44,33 @@ class XlsxEmbedder(BaseEmbedder):
     """
 
     def _build_embed_text(self, doc: Any, cleaned_text: str) -> str:
-        s = getattr(doc, "structure", {}) or {}
+        try:
+            s = getattr(doc, "structure", {}) or {}
 
-        sheet      = (s.get("sheet_name") or s.get("sheet") or "").strip()
-        unit_scale = (s.get("unit_scale") or "").strip()
+            sheet      = (s.get("sheet_name") or s.get("sheet") or "").strip()
+            unit_scale = (s.get("unit_scale") or "").strip()
 
-        parts = []
-        if sheet:
-            parts.append(f"Sheet: {sheet}")
-        if unit_scale:
-            parts.append(f"({unit_scale})")
+            parts = []
+            if sheet:
+                parts.append(f"Sheet: {sheet}")
+            if unit_scale:
+                parts.append(f"({unit_scale})")
 
-        prefix = (" | ".join(parts) + " | ") if parts else ""
+            prefix = (" | ".join(parts) + " | ") if parts else ""
 
-        # Named-range chunks include assumption names as tokens
-        if (s.get("chunk_type") or getattr(doc, "subtype", "")) in ("named_range", "assumptions"):
-            named = (s.get("named_range") or s.get("semantic_group") or "").strip()
-            if named:
-                prefix = f"Assumptions: {named} | " + prefix
+            # Named-range chunks include assumption names as tokens
+            if (s.get("chunk_type") or getattr(doc, "subtype", "")) in ("named_range", "assumptions"):
+                named = (s.get("named_range") or s.get("semantic_group") or "").strip()
+                if named:
+                    prefix = f"Assumptions: {named} | " + prefix
 
-        return (prefix + cleaned_text)[:settings.MAX_PROMPT_CHARS]
+            result = (prefix + cleaned_text)[:settings.MAX_PROMPT_CHARS]
+            _EMBED_BUILT.inc()
+            return result
+        except Exception as _exc:
+            _EMBED_ERRORS.inc()
+            logger.error(event="embed_text_build_failed", modality="xlsx", error=str(_exc))
+            return cleaned_text  # safe fallback to unenriched text
 
     def _build_alt_embed_text(self, doc: Any) -> str:
         """Build markdown table text for embedding_alt (structural path)."""
@@ -119,3 +136,10 @@ class XlsxEmbedder(BaseEmbedder):
                 )
 
         return embedded
+
+    def health_check(self) -> dict:
+        return {
+            "modality": "xlsx",
+            "status": "ok",
+            "class": self.__class__.__name__,
+        }

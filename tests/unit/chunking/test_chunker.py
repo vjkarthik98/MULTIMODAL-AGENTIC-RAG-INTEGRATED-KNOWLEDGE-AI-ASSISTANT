@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.chunking.chunker import chunk_documents
+from app.chunking.base_chunker import chunk_documents
 
 
 # ── Minimal doc-like object ───────────────────────────────────────────────────

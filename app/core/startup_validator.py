@@ -31,6 +31,15 @@ REQUIRED_MODELS: Set[str] = {
 }
 
 
+def validate_auth_config() -> None:
+    """Fail fast if AUTH_ENABLED=False is attempted in a production environment."""
+    if not settings.AUTH_ENABLED and settings.ENV not in ("development", "test", "dev"):
+        raise RuntimeError(
+            "AUTH_ENABLED=False is not allowed in production environment "
+            f"(ENV={settings.ENV!r}). Set AUTH_ENABLED=true or change ENV to development/test."
+        )
+
+
 def validate_model_manifest() -> None:
     """Fail fast if any required model is absent from the download manifest."""
     if not settings.MODEL_CACHE_REQUIRE_MANIFEST:

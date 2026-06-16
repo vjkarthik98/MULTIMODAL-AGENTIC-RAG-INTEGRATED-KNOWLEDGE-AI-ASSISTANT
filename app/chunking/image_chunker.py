@@ -26,7 +26,8 @@ from app.chunking.base_chunker import BaseChunker
 from app.chunking.finance_numbers import deterministic_chunk_id, extract_finance_entities
 from app.core.config import settings
 from app.ingestion.schema import EmptyContentError, IngestedDocument, RawExtract, UniversalMetadata
-from app.utils.logger import get_logger
+from app.utils.logger import get_logger, modality_var
+from prometheus_client import Counter, Histogram
 
 try:
     import torch
@@ -34,6 +35,15 @@ except ImportError:
     torch = None
 
 logger = get_logger(__name__)
+
+_CHUNKS_TOTAL = Counter(
+    "magik_image_chunks_total",
+    "Total chunks produced by image chunker",
+)
+_CHUNK_ERRORS = Counter(
+    "magik_image_chunk_errors_total",
+    "Total errors in image chunker",
+)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # OCR-CAPTION MISMATCH
@@ -715,101 +725,116 @@ class ImageChunker(BaseChunker):
     ) -> List[IngestedDocument]:
         source  = Path(meta.source_path).name or "unknown.jpg"
         surface = "image_chunker"
+        modality_var.set("image")
+        _t0 = time.time()
         logger.info(event="chunking_start", modality="image", source=source, extracts=len(extracts))
         if not extracts:
             logger.warning(event="no_extracts_received", modality="image", source=source)
             return []
-        docs: List[IngestedDocument] = []
+        try:
+            docs: List[IngestedDocument] = []
 
-        for chunk_idx, ext in enumerate(extracts):
-            if ext.extract_type != "image_raw":
-                continue
-            raw = ext.raw_bytes or b""
-            if not raw:
-                continue
+            for chunk_idx, ext in enumerate(extracts):
+                if ext.extract_type != "image_raw":
+                    continue
+                raw = ext.raw_bytes or b""
+                if not raw:
+                    continue
 
-            try:
-                img = Image.open(io.BytesIO(raw)).convert("RGB")
-            except Exception as exc:
-                logger.warning(event="image_chunker_open_failed", error=str(exc), source=source)
-                continue
+                try:
+                    img = Image.open(io.BytesIO(raw)).convert("RGB")
+                except Exception as exc:
+                    logger.warning(event="image_chunker_open_failed", error=str(exc), source=source)
+                    continue
 
-            img_width, img_height = img.size
+                img_width, img_height = img.size
 
-            # Step 1: OCR (ground-truth numbers).
-            ocr_text = ""
-            try:
-                ocr_text = ocr(img)
-            except Exception as exc:
-                logger.warning(event="image_trocr_failed", error=str(exc))
+                # Step 1: OCR (ground-truth numbers).
+                ocr_text = ""
+                try:
+                    ocr_text = ocr(img)
+                except Exception as exc:
+                    logger.warning(event="image_trocr_failed", error=str(exc))
 
-            # Step 2: BLIP2 caption.
-            caption_text = ""
-            try:
-                caption_text = blip2_caption(img)
-            except Exception as exc:
-                logger.warning(event="image_blip2_failed", error=str(exc))
+                # Step 2: BLIP2 caption.
+                caption_text = ""
+                try:
+                    caption_text = blip2_caption(img)
+                except Exception as exc:
+                    logger.warning(event="image_blip2_failed", error=str(exc))
 
-            # Step 3: SigLIP image type classification (falls back to heuristic).
-            image_type = "infographic"
-            try:
-                image_type = blip2_classify_image_type(img, ocr_text)
-            except Exception:
-                pass
+                # Step 3: SigLIP image type classification (falls back to heuristic).
+                image_type = "infographic"
+                try:
+                    image_type = blip2_classify_image_type(img, ocr_text)
+                except Exception:
+                    pass
 
-            # Step 4: OCR-caption consistency check.
-            mismatch = _check_mismatch(ocr_text, caption_text)
-            if mismatch:
-                logger.warning(event="ocr_caption_mismatch", source=source)
+                # Step 4: OCR-caption consistency check.
+                mismatch = _check_mismatch(ocr_text, caption_text)
+                if mismatch:
+                    logger.warning(event="ocr_caption_mismatch", source=source)
 
-            # Step 5: Combine (prefer OCR numbers as ground truth).
-            combined = f"{image_type}: {caption_text}"
-            if ocr_text:
-                combined += f"\n{ocr_text}"
-            combined = combined.strip()
-            if not combined:
-                continue
+                # Step 5: Combine (prefer OCR numbers as ground truth).
+                combined = f"{image_type}: {caption_text}"
+                if ocr_text:
+                    combined += f"\n{ocr_text}"
+                combined = combined.strip()
+                if not combined:
+                    continue
 
-            fin_entities      = extract_finance_entities(combined)
-            extracted_numbers = list(_NUMBER_RE.findall(ocr_text or caption_text))
-            chunk_hash        = deterministic_chunk_id(source, "image_raw_0", chunk_idx)
+                fin_entities      = extract_finance_entities(combined)
+                extracted_numbers = list(_NUMBER_RE.findall(ocr_text or caption_text))
+                chunk_hash        = deterministic_chunk_id(source, "image_raw_0", chunk_idx)
 
-            # Extract image_title: first sentence/line of caption (MD Phase 1.5)
-            raw_title = (caption_text or "").split(".")[0].split("\n")[0].strip()
-            image_title = raw_title[:120] if raw_title else source
+                # Extract image_title: first sentence/line of caption (MD Phase 1.5)
+                raw_title = (caption_text or "").split(".")[0].split("\n")[0].strip()
+                image_title = raw_title[:120] if raw_title else source
 
-            structure = {
-                "chunk_hash_id":        chunk_hash,
-                "source_file":          source,
-                "chunk_index":          chunk_idx,
-                "image_type":           image_type,
-                "image_title":          image_title,
-                "caption":              caption_text,
-                "ocr_text":             ocr_text,
-                "extracted_numbers":    extracted_numbers,
-                "time_period":          ext.extra.get("time_period"),
-                "data_series":          ext.extra.get("data_series", []),
-                "ocr_caption_mismatch": mismatch,
-                "parent_document":      ext.extra.get("parent_document"),
-                "parent_page":          ext.extra.get("parent_page"),
-                "finance_entities":     fin_entities,
-                "image_width":          img_width,
-                "image_height":         img_height,
-            }
+                structure = {
+                    "chunk_hash_id":        chunk_hash,
+                    "source_file":          source,
+                    "chunk_index":          chunk_idx,
+                    "image_type":           image_type,
+                    "image_title":          image_title,
+                    "caption":              caption_text,
+                    "ocr_text":             ocr_text,
+                    "extracted_numbers":    extracted_numbers,
+                    "time_period":          ext.extra.get("time_period"),
+                    "data_series":          ext.extra.get("data_series", []),
+                    "ocr_caption_mismatch": mismatch,
+                    "parent_document":      ext.extra.get("parent_document"),
+                    "parent_page":          ext.extra.get("parent_page"),
+                    "finance_entities":     fin_entities,
+                    "image_width":          img_width,
+                    "image_height":         img_height,
+                }
 
-            doc = self._make_doc(
-                text=combined,
-                modality="jpg",
-                subtype="caption",
-                source=source,
-                page=None,
-                chunk_idx=chunk_idx,
-                structure=structure,
-                meta=meta,
-                surface=surface,
-            )
-            if doc:
-                docs.append(doc)
+                doc = self._make_doc(
+                    text=combined,
+                    modality="jpg",
+                    subtype="caption",
+                    source=source,
+                    page=None,
+                    chunk_idx=chunk_idx,
+                    structure=structure,
+                    meta=meta,
+                    surface=surface,
+                )
+                if doc:
+                    docs.append(doc)
 
-        logger.info(event="image_chunking_done", source=source, chunks=len(docs))
-        return docs
+            logger.info(event="image_chunking_done", source=source, chunks=len(docs))
+            _CHUNKS_TOTAL.inc(len(docs))
+            return docs
+        except Exception as _exc:
+            _CHUNK_ERRORS.inc()
+            logger.error(event="chunking_failed", modality="image", source=source, error=str(_exc))
+            raise
+
+    def health_check(self) -> dict:
+        return {
+            "modality": "image",
+            "status": "ok",
+            "class": self.__class__.__name__,
+        }

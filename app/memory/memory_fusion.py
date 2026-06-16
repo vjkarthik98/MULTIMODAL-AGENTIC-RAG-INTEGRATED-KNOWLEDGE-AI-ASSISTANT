@@ -13,6 +13,12 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 try:
+    from app.guardrails.input_guard import sanitize as _guard_sanitize
+    _GUARD_AVAILABLE = True
+except Exception:
+    _GUARD_AVAILABLE = False
+
+try:
     import pybreaker
     _fusion_breaker = pybreaker.CircuitBreaker(
         fail_max=settings.CIRCUIT_BREAKER_MAX_FAILURES,
@@ -183,6 +189,12 @@ def _format_message(msg: Dict[str, Any], char_limit: int) -> str:
         content = _normalize(msg.get("content", ""))
         if len(content) < 2:
             return ""
+
+        if _GUARD_AVAILABLE:
+            try:
+                content = _guard_sanitize(content, surface="memory_context")
+            except Exception:
+                pass  # pass through on failure
 
         modality = str(msg.get("modality", "text")).lower()
         ts = msg.get("timestamp")

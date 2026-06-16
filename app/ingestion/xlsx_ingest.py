@@ -39,6 +39,8 @@ _ingest_errors = Counter(
     "XLSX ingestion errors by type",
     ["error_type"],
 )
+_EXTRACTS_TOTAL = Counter("magik_xlsx_extracts_total", "Total extracts produced by xlsx ingestor")
+_EXTRACT_ERRORS = Counter("magik_xlsx_extract_errors_total", "Errors in xlsx ingestor")
 
 _semaphore = asyncio.Semaphore(5)
 
@@ -328,161 +330,174 @@ class XlsxIngestor(BaseIngestor):
     Does NOT chunk. The chunker (Phase 2) handles splitting.
     """
 
+    def health_check(self) -> dict:
+        return {
+            "modality": "xlsx",
+            "status": "ok",
+            "class": self.__class__.__name__,
+        }
+
     async def extract(
         self,
         path: Path,
         metadata: UniversalMetadata,
     ) -> List[RawExtract]:
+        source = path.name
         file_path = str(path)
         logger.info(event="extraction_start", modality="xlsx", file=str(path), size=path.stat().st_size)
-
         try:
-            import openpyxl
-            wb = openpyxl.load_workbook(file_path, data_only=True)
-        except Exception as exc:
-            raise ValueError(f"CORRUPTED_FILE: {exc}")
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(file_path, data_only=True)
+            except Exception as exc:
+                raise ValueError(f"CORRUPTED_FILE: {exc}")
 
-        extracts: List[RawExtract] = []
+            extracts: List[RawExtract] = []
 
-        try:
-            for sheet_name in wb.sheetnames:
-                try:
-                    ws = wb[sheet_name]
-                    non_empty, unit_scale = _load_worksheet_rows(ws)
+            try:
+                for sheet_name in wb.sheetnames:
+                    try:
+                        ws = wb[sheet_name]
+                        non_empty, unit_scale = _load_worksheet_rows(ws)
 
-                    if not non_empty:
-                        logger.info("excel_empty_sheet_skipped", sheet=sheet_name, file=path.name)
-                        continue
+                        if not non_empty:
+                            logger.info("excel_empty_sheet_skipped", sheet=sheet_name, file=path.name)
+                            continue
 
-                    # Detect unit header (first row with scale keyword)
-                    if non_empty and unit_scale != "units":
-                        unit_header_text = " ".join(non_empty[0]) if non_empty else ""
-                        if unit_header_text:
-                            unit_header_text = self._sanitize(unit_header_text, surface="excel_ingest")
+                        # Detect unit header (first row with scale keyword)
+                        if non_empty and unit_scale != "units":
+                            unit_header_text = " ".join(non_empty[0]) if non_empty else ""
                             if unit_header_text:
-                                extracts.append(RawExtract(
-                                    text=unit_header_text,
-                                    extract_type="unit_header",
-                                    sheet=sheet_name,
-                                    raw_source_ref=f"xlsx:{path.name}|sheet:{sheet_name}|unit_header",
-                                    extra={"unit_scale": unit_scale},
-                                ))
+                                unit_header_text = self._sanitize(unit_header_text, surface="excel_ingest")
+                                if unit_header_text:
+                                    extracts.append(RawExtract(
+                                        text=unit_header_text,
+                                        extract_type="unit_header",
+                                        sheet=sheet_name,
+                                        raw_source_ref=f"xlsx:{path.name}|sheet:{sheet_name}|unit_header",
+                                        extra={"unit_scale": unit_scale},
+                                    ))
 
-                    # Row extracts
-                    ROWS_PER_CHUNK = settings.EXCEL_ROWS_PER_CHUNK
-                    header_row = non_empty[0] if non_empty else None
+                        # Row extracts
+                        ROWS_PER_CHUNK = settings.EXCEL_ROWS_PER_CHUNK
+                        header_row = non_empty[0] if non_empty else None
 
-                    for batch_start in range(0, len(non_empty), ROWS_PER_CHUNK):
-                        batch = non_empty[batch_start:batch_start + ROWS_PER_CHUNK]
-                        row_start = batch_start + 1
-                        row_end = batch_start + len(batch)
+                        for batch_start in range(0, len(non_empty), ROWS_PER_CHUNK):
+                            batch = non_empty[batch_start:batch_start + ROWS_PER_CHUNK]
+                            row_start = batch_start + 1
+                            row_end = batch_start + len(batch)
 
-                        if batch_start > 0 and header_row and batch[0] != header_row:
-                            batch = [header_row] + batch
+                            if batch_start > 0 and header_row and batch[0] != header_row:
+                                batch = [header_row] + batch
 
-                        txt = _table_to_text(batch)
-                        if not txt.strip():
-                            continue
+                            txt = _table_to_text(batch)
+                            if not txt.strip():
+                                continue
 
-                        chunk_text = f"[Sheet: {sheet_name}, Rows {row_start}-{row_end}]\n{txt}"
-                        chunk_text = self._sanitize(chunk_text, surface="excel_ingest")
-                        if not chunk_text.strip():
-                            continue
-                        chunk_text = self._scrub_pii(chunk_text, surface="excel_ingest")
+                            chunk_text = f"[Sheet: {sheet_name}, Rows {row_start}-{row_end}]\n{txt}"
+                            chunk_text = self._sanitize(chunk_text, surface="excel_ingest")
+                            if not chunk_text.strip():
+                                continue
+                            chunk_text = self._scrub_pii(chunk_text, surface="excel_ingest")
 
-                        extracts.append(RawExtract(
-                            text=chunk_text,
-                            extract_type="table_row",
-                            sheet=sheet_name,
-                            raw_source_ref=f"xlsx:{path.name}|sheet:{sheet_name}|rows:{row_start}-{row_end}",
-                            extra={
-                                "unit_scale": unit_scale,
-                                "row_start": row_start,
-                                "row_end": row_end,
-                            },
-                        ))
-
-                    # Statistics summary
-                    summary = _build_stats_summary(sheet_name, non_empty)
-                    if summary:
-                        extracts.append(RawExtract(
-                            text=summary,
-                            extract_type="named_range",
-                            sheet=sheet_name,
-                            raw_source_ref=f"xlsx:{path.name}|sheet:{sheet_name}|stats_summary",
-                            extra={"is_stats_summary": True, "unit_scale": unit_scale},
-                        ))
-
-                    # Charts
-                    for chart_text in _extract_chart_text(ws, sheet_name):
-                        chart_text = self._scrub_pii(chart_text, surface="excel_chart_ingest")
-                        if chart_text:
                             extracts.append(RawExtract(
-                                text=chart_text,
-                                extract_type="chart_image",
+                                text=chunk_text,
+                                extract_type="table_row",
                                 sheet=sheet_name,
-                                raw_source_ref=f"xlsx:{path.name}|sheet:{sheet_name}|chart",
+                                raw_source_ref=f"xlsx:{path.name}|sheet:{sheet_name}|rows:{row_start}-{row_end}",
+                                extra={
+                                    "unit_scale": unit_scale,
+                                    "row_start": row_start,
+                                    "row_end": row_end,
+                                },
                             ))
 
-                    # Embedded images
-                    try:
-                        for img_idx, img_obj in enumerate(getattr(ws, "_images", []) or []):
-                            try:
-                                blob: Optional[bytes] = None
-                                ext_hint = ".png"
-                                data_attr = getattr(img_obj, "_data", None)
-                                if callable(data_attr):
-                                    try:
-                                        blob = data_attr()
-                                    except Exception:
-                                        blob = None
-                                if not blob:
-                                    ref = getattr(img_obj, "ref", None) or getattr(img_obj, "path", None)
-                                    if ref and hasattr(ref, "read"):
+                        # Statistics summary
+                        summary = _build_stats_summary(sheet_name, non_empty)
+                        if summary:
+                            extracts.append(RawExtract(
+                                text=summary,
+                                extract_type="named_range",
+                                sheet=sheet_name,
+                                raw_source_ref=f"xlsx:{path.name}|sheet:{sheet_name}|stats_summary",
+                                extra={"is_stats_summary": True, "unit_scale": unit_scale},
+                            ))
+
+                        # Charts
+                        for chart_text in _extract_chart_text(ws, sheet_name):
+                            chart_text = self._scrub_pii(chart_text, surface="excel_chart_ingest")
+                            if chart_text:
+                                extracts.append(RawExtract(
+                                    text=chart_text,
+                                    extract_type="chart_image",
+                                    sheet=sheet_name,
+                                    raw_source_ref=f"xlsx:{path.name}|sheet:{sheet_name}|chart",
+                                ))
+
+                        # Embedded images
+                        try:
+                            for img_idx, img_obj in enumerate(getattr(ws, "_images", []) or []):
+                                try:
+                                    blob: Optional[bytes] = None
+                                    ext_hint = ".png"
+                                    data_attr = getattr(img_obj, "_data", None)
+                                    if callable(data_attr):
                                         try:
-                                            ref.seek(0)
-                                        except Exception:
-                                            pass
-                                        blob = ref.read()
-                                    elif isinstance(ref, (str, os.PathLike)):
-                                        try:
-                                            with open(ref, "rb") as fh:
-                                                blob = fh.read()
-                                            ext_hint = os.path.splitext(str(ref))[1] or ext_hint
+                                            blob = data_attr()
                                         except Exception:
                                             blob = None
-                                fmt = getattr(img_obj, "format", None)
-                                if fmt:
-                                    ext_hint = "." + str(fmt).lower()
-                                if blob and len(blob) >= 256:
-                                    extracts.append(RawExtract(
-                                        text="",
-                                        extract_type="image_region",
-                                        sheet=sheet_name,
-                                        raw_source_ref=f"xlsx:{path.name}|sheet:{sheet_name}|img:{img_idx}",
-                                        raw_bytes=blob,
-                                        extra={"img_ext": ext_hint},
-                                    ))
-                            except Exception as exc:
-                                logger.warning("excel_embedded_image_failed", sheet=sheet_name, error=str(exc))
+                                    if not blob:
+                                        ref = getattr(img_obj, "ref", None) or getattr(img_obj, "path", None)
+                                        if ref and hasattr(ref, "read"):
+                                            try:
+                                                ref.seek(0)
+                                            except Exception:
+                                                pass
+                                            blob = ref.read()
+                                        elif isinstance(ref, (str, os.PathLike)):
+                                            try:
+                                                with open(ref, "rb") as fh:
+                                                    blob = fh.read()
+                                                ext_hint = os.path.splitext(str(ref))[1] or ext_hint
+                                            except Exception:
+                                                blob = None
+                                    fmt = getattr(img_obj, "format", None)
+                                    if fmt:
+                                        ext_hint = "." + str(fmt).lower()
+                                    if blob and len(blob) >= 256:
+                                        extracts.append(RawExtract(
+                                            text="",
+                                            extract_type="image_region",
+                                            sheet=sheet_name,
+                                            raw_source_ref=f"xlsx:{path.name}|sheet:{sheet_name}|img:{img_idx}",
+                                            raw_bytes=blob,
+                                            extra={"img_ext": ext_hint},
+                                        ))
+                                except Exception as exc:
+                                    logger.warning("excel_embedded_image_failed", sheet=sheet_name, error=str(exc))
+                        except Exception as exc:
+                            logger.warning("excel_image_scan_failed", sheet=sheet_name, error=str(exc))
+
+                    except ValueError:
+                        raise
                     except Exception as exc:
-                        logger.warning("excel_image_scan_failed", sheet=sheet_name, error=str(exc))
+                        logger.warning("excel_sheet_failed", sheet=sheet_name, error=str(exc))
+            finally:
+                try:
+                    wb.close()
+                except Exception:
+                    pass
 
-                except ValueError:
-                    raise
-                except Exception as exc:
-                    logger.warning("excel_sheet_failed", sheet=sheet_name, error=str(exc))
-        finally:
-            try:
-                wb.close()
-            except Exception:
-                pass
+            if not extracts:
+                raise ValueError("NO_EXTRACTS_PRODUCED")
 
-        if not extracts:
-            raise ValueError("NO_EXTRACTS_PRODUCED")
-
-        logger.info(event="extraction_complete", modality="xlsx", file=str(path), extracts=len(extracts))
-        return extracts
+            _EXTRACTS_TOTAL.inc(len(extracts))
+            logger.info(event="extraction_complete", modality="xlsx", file=str(path), extracts=len(extracts))
+            return extracts
+        except Exception as _exc:
+            _EXTRACT_ERRORS.inc()
+            logger.error(event="extraction_failed", modality="xlsx", source=source, error=str(_exc))
+            raise
 
 
 # ─── Backward-compat ingest() — full pipeline ─────────────────────────────────

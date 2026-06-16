@@ -23,7 +23,7 @@ def test_register_success(svc):
 
     assert user.email == "user@example.com"
     assert user.user_id
-    assert user.is_active is True
+    assert user.is_active is False  # inactive until OTP email verification
     assert user.role.value == "user"
 
 
@@ -35,7 +35,8 @@ def test_register_email_normalised_to_lowercase(svc):
 
 def test_register_duplicate_email_raises(svc):
     req = RegisterRequest(email="dup@example.com", password="StrongPass99!")
-    svc.register(req)
+    user = svc.register(req)
+    svc.activate_user(user.user_id)  # activate first so duplicate triggers the error
     with pytest.raises(ValueError, match="already exists"):
         svc.register(req)
 
@@ -82,7 +83,7 @@ def test_login_wrong_password_raises(svc, registered_user_a, user_a_data):
 
 
 def test_login_unknown_email_raises(svc):
-    with pytest.raises(ValueError, match="Incorrect"):
+    with pytest.raises(ValueError, match="No account"):
         svc.authenticate("nobody@example.com", "somepassword")
 
 
@@ -94,5 +95,5 @@ def test_login_updates_last_login(svc, registered_user_a, user_a_data, mock_mong
 
 def test_login_inactive_account_raises(svc, registered_user_a, user_a_data, mock_mongo_col):
     svc.deactivate(registered_user_a.user_id)
-    with pytest.raises(ValueError, match="disabled"):
+    with pytest.raises(ValueError, match="not verified|disabled"):
         svc.authenticate(user_a_data["email"], user_a_data["password"])

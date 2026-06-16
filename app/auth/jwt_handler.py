@@ -104,8 +104,21 @@ def verify_token(token: str, expected_type: str = "access") -> Dict[str, Any]:
 
 
 def refresh_access_token(refresh_token: str) -> Dict[str, Any]:
-    """Exchange a valid refresh token for a new access token."""
+    """Exchange a valid refresh token for a new access token.
+
+    Implements refresh token rotation: the consumed refresh token's JTI is
+    revoked immediately after verification so each refresh token can only be
+    used once.
+    """
     payload = verify_token(refresh_token, expected_type="refresh")
+
+    # Revoke the consumed refresh token (rotation — one-use enforcement)
+    from app.auth.token_blacklist import revoke_token
+    jti = payload.get("jti", "")
+    exp = payload.get("exp", 0)
+    if jti and exp:
+        revoke_token(jti, exp)
+
     return issue_tokens(
         user_id=payload["sub"],
         email=payload["email"],

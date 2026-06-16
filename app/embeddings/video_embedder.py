@@ -8,8 +8,18 @@ from app.embeddings.base_embedder import (
 )
 from app.core.config import settings
 from app.utils.logger import get_logger
+from prometheus_client import Counter
 
 logger = get_logger(__name__)
+
+_EMBED_BUILT = Counter(
+    "magik_video_embed_text_built_total",
+    "Embed texts successfully built for video",
+)
+_EMBED_ERRORS = Counter(
+    "magik_video_embed_text_errors_total",
+    "Errors building embed text for video",
+)
 
 
 class VideoEmbedder(BaseEmbedder):
@@ -26,7 +36,15 @@ class VideoEmbedder(BaseEmbedder):
 
     def _build_embed_text(self, doc: Any, cleaned_text: str) -> str:
         """Primary (combined) embedding text."""
-        return self._combined_text(doc, cleaned_text)
+        try:
+            result = self._combined_text(doc, cleaned_text)
+            logger.debug(event="embed_text_built", modality="video", chars=len(result))
+            _EMBED_BUILT.inc()
+            return result
+        except Exception as _exc:
+            _EMBED_ERRORS.inc()
+            logger.error(event="embed_text_build_failed", modality="video", error=str(_exc))
+            return cleaned_text  # safe fallback to unenriched text
 
     def _combined_text(self, doc: Any, cleaned_text: str) -> str:
         s = getattr(doc, "structure", {}) or {}
@@ -159,3 +177,10 @@ class VideoEmbedder(BaseEmbedder):
                     )
 
         return results
+
+    def health_check(self) -> dict:
+        return {
+            "modality": "video",
+            "status": "ok",
+            "class": self.__class__.__name__,
+        }

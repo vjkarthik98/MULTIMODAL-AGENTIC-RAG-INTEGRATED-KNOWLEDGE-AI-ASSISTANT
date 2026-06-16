@@ -26,9 +26,21 @@ from app.chunking.base_chunker import BaseChunker
 from app.chunking.finance_numbers import deterministic_chunk_id, extract_finance_entities
 from app.core.config import settings
 from app.ingestion.schema import IngestedDocument, RawExtract, UniversalMetadata
-from app.utils.logger import get_logger
+from app.utils.logger import get_logger, modality_var
+
+import time
+from prometheus_client import Counter, Histogram
 
 logger = get_logger(__name__)
+
+_CHUNKS_TOTAL = Counter(
+    "magik_video_chunks_total",
+    "Total chunks produced by video chunker",
+)
+_CHUNK_ERRORS = Counter(
+    "magik_video_chunk_errors_total",
+    "Total errors in video chunker",
+)
 
 _FRAME_WINDOW_S = 5.0          # attach frames within ±5s of audio chunk
 _FINANCIAL_TRIGGER_RE = re.compile(r"[$%]|\bbillion\b|\brevenue\b|\bearnings\b", re.I)
@@ -152,138 +164,153 @@ class VideoChunker(BaseChunker):
     ) -> List[IngestedDocument]:
         source  = Path(meta.source_path).name or "unknown.mp4"
         surface = "video_chunker"
+        modality_var.set("video")
+        _t0 = time.time()
         logger.info(event="chunking_start", modality="video", source=source, extracts=len(extracts))
         if not extracts:
             logger.warning(event="no_extracts_received", modality="video", source=source)
             return []
-        docs: List[IngestedDocument] = []
+        try:
+            docs: List[IngestedDocument] = []
 
-        for ext in extracts:
-            if ext.extract_type != "video_raw":
-                continue
-
-            video_path = ext.extra.get("file_path", "") or meta.source_path
-            if not video_path or not Path(video_path).exists():
-                logger.warning(event="video_chunker_missing_file", source=source)
-                continue
-
-            with tempfile.TemporaryDirectory() as tmpdir:
-                wav_path = os.path.join(tmpdir, "audio.wav")
-
-                # 1. Extract audio track.
-                if not _extract_audio(video_path, wav_path):
-                    logger.warning(event="video_no_audio", source=source)
+            for ext in extracts:
+                if ext.extract_type != "video_raw":
                     continue
 
-                # 2. Whisper transcription.
-                words = _run_whisper(wav_path)
+                video_path = ext.extra.get("file_path", "") or meta.source_path
+                if not video_path or not Path(video_path).exists():
+                    logger.warning(event="video_chunker_missing_file", source=source)
+                    continue
 
-                # 3. Diarization.
-                diarization: List[Tuple[float, float, str]] = []
-                try:
-                    from app.chunking.audio_chunker import diarize as _diarize
-                    diarization = _diarize(wav_path)
-                except Exception:
-                    pass
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    wav_path = os.path.join(tmpdir, "audio.wav")
 
-                full_transcript = " ".join(w["word"] for w in words)
-                role_map        = _map_speaker_roles(diarization, full_transcript)
-                audio_chunks    = _assemble_chunks(words, diarization, role_map)
-
-                # 4. Frame extraction (import from video_ingest where it lives).
-                try:
-                    from app.ingestion.video_ingest import extract_frames
-                    frame_dicts = extract_frames(
-                        video_path=video_path,
-                        interval_sec=settings.VIDEO_FRAME_INTERVAL_SEC,
-                        session_id=meta.custom_fields.get("session_id", "internal"),
-                    )
-                except Exception as exc:
-                    logger.warning(event="frame_extraction_error", error=str(exc))
-                    frame_dicts = []
-
-                # 5. Caption + OCR each frame.
-                captioned_frames: Dict[float, Dict] = {
-                    fd["timestamp_start"]: _caption_and_ocr_frame(fd)
-                    for fd in frame_dicts
-                }
-
-                # 6. Build IngestedDocuments (one per audio chunk).
-                for chunk_idx, ch in enumerate(audio_chunks):
-                    transcript = ch.get("transcript", "")
-                    if not transcript.strip():
+                    # 1. Extract audio track.
+                    if not _extract_audio(video_path, wav_path):
+                        logger.warning(event="video_no_audio", source=source)
                         continue
 
-                    t_start = ch["start"]
-                    t_end   = ch["end"]
+                    # 2. Whisper transcription.
+                    words = _run_whisper(wav_path)
 
-                    chunk_frames = [
-                        cf for ts, cf in captioned_frames.items()
-                        if t_start - _FRAME_WINDOW_S <= ts <= t_end + _FRAME_WINDOW_S
-                    ]
+                    # 3. Diarization.
+                    diarization: List[Tuple[float, float, str]] = []
+                    try:
+                        from app.chunking.audio_chunker import diarize as _diarize
+                        diarization = _diarize(wav_path)
+                    except Exception:
+                        pass
 
-                    visual_ctx = ""
-                    slide_bullets: List[str] = []
-                    for cf in chunk_frames:
-                        if cf.get("frame_caption"):
-                            visual_ctx += f"\n[VISUAL AT {cf['frame_timestamp']:.1f}s]: {cf['frame_caption']}"
-                        if cf.get("ocr_text"):
-                            visual_ctx += f"\n[ON-SCREEN]: {cf['ocr_text']}"
-                        if cf.get("slide_number") is not None:
-                            slide_bullets.append(f"Slide {cf['slide_number']}")
+                    full_transcript = " ".join(w["word"] for w in words)
+                    role_map        = _map_speaker_roles(diarization, full_transcript)
+                    audio_chunks    = _assemble_chunks(words, diarization, role_map)
 
-                    combined_text = transcript
-                    if visual_ctx:
-                        combined_text += visual_ctx
+                    # 4. Frame extraction (import from video_ingest where it lives).
+                    try:
+                        from app.ingestion.video_ingest import extract_frames
+                        frame_dicts = extract_frames(
+                            video_path=video_path,
+                            interval_sec=settings.VIDEO_FRAME_INTERVAL_SEC,
+                            session_id=meta.custom_fields.get("session_id", "internal"),
+                        )
+                    except Exception as exc:
+                        logger.warning(event="frame_extraction_error", error=str(exc))
+                        frame_dicts = []
 
-                    fin_entities = extract_finance_entities(combined_text)
-                    has_finance  = bool(_FINANCIAL_TRIGGER_RE.search(transcript))
-                    chunk_hash   = deterministic_chunk_id(source, f"v_{t_start:.1f}", chunk_idx)
-
-                    # Extract slide numbers from slide_bullets like ["Slide 3", "Slide 4"] (MD 1.7)
-                    slide_numbers_covered: List[int] = []
-                    for sb in slide_bullets:
-                        m = re.search(r"\bslide\s*(\d+)\b", sb, re.IGNORECASE)
-                        if m:
-                            slide_numbers_covered.append(int(m.group(1)))
-
-                    structure = {
-                        "chunk_hash_id":        chunk_hash,
-                        "source_file":          source,
-                        "chunk_index":          chunk_idx,
-                        "start_timestamp":      round(t_start, 3),
-                        "end_timestamp":        round(t_end, 3),
-                        "duration_seconds":     round(t_end - t_start, 3),
-                        "speaker_label":        ch.get("speaker_label"),
-                        "speaker_name":         ch.get("speaker_name"),
-                        "speaker_role":         ch.get("speaker_role"),
-                        "topic_section":        ch.get("topic_section"),
-                        "call_section":         ch.get("call_section"),
-                        "transcript":           transcript,
-                        "frame_captions":       chunk_frames,
-                        "combined_text":        combined_text,
-                        "slide_bullets":        slide_bullets,
-                        "has_slide_content":    bool(slide_bullets),
-                        "slide_numbers_covered": slide_numbers_covered,
-                        "finance_entities":     fin_entities,
-                        "has_finance_signal":   has_finance,
-                        "is_question":          ch.get("is_question", False),
-                        "is_answer":            ch.get("is_answer", False),
+                    # 5. Caption + OCR each frame.
+                    captioned_frames: Dict[float, Dict] = {
+                        fd["timestamp_start"]: _caption_and_ocr_frame(fd)
+                        for fd in frame_dicts
                     }
 
-                    doc = self._make_doc(
-                        text=combined_text,
-                        modality="mp4",
-                        subtype="transcript_frame",
-                        source=source,
-                        page=None,
-                        chunk_idx=chunk_idx,
-                        structure=structure,
-                        meta=meta,
-                        surface=surface,
-                    )
-                    if doc:
-                        docs.append(doc)
+                    # 6. Build IngestedDocuments (one per audio chunk).
+                    for chunk_idx, ch in enumerate(audio_chunks):
+                        transcript = ch.get("transcript", "")
+                        if not transcript.strip():
+                            continue
 
-        logger.info(event="video_chunking_done", source=source, chunks=len(docs))
-        return docs
+                        t_start = ch["start"]
+                        t_end   = ch["end"]
+
+                        chunk_frames = [
+                            cf for ts, cf in captioned_frames.items()
+                            if t_start - _FRAME_WINDOW_S <= ts <= t_end + _FRAME_WINDOW_S
+                        ]
+
+                        visual_ctx = ""
+                        slide_bullets: List[str] = []
+                        for cf in chunk_frames:
+                            if cf.get("frame_caption"):
+                                visual_ctx += f"\n[VISUAL AT {cf['frame_timestamp']:.1f}s]: {cf['frame_caption']}"
+                            if cf.get("ocr_text"):
+                                visual_ctx += f"\n[ON-SCREEN]: {cf['ocr_text']}"
+                            if cf.get("slide_number") is not None:
+                                slide_bullets.append(f"Slide {cf['slide_number']}")
+
+                        combined_text = transcript
+                        if visual_ctx:
+                            combined_text += visual_ctx
+
+                        fin_entities = extract_finance_entities(combined_text)
+                        has_finance  = bool(_FINANCIAL_TRIGGER_RE.search(transcript))
+                        chunk_hash   = deterministic_chunk_id(source, f"v_{t_start:.1f}", chunk_idx)
+
+                        # Extract slide numbers from slide_bullets like ["Slide 3", "Slide 4"] (MD 1.7)
+                        slide_numbers_covered: List[int] = []
+                        for sb in slide_bullets:
+                            m = re.search(r"\bslide\s*(\d+)\b", sb, re.IGNORECASE)
+                            if m:
+                                slide_numbers_covered.append(int(m.group(1)))
+
+                        structure = {
+                            "chunk_hash_id":        chunk_hash,
+                            "source_file":          source,
+                            "chunk_index":          chunk_idx,
+                            "start_timestamp":      round(t_start, 3),
+                            "end_timestamp":        round(t_end, 3),
+                            "duration_seconds":     round(t_end - t_start, 3),
+                            "speaker_label":        ch.get("speaker_label"),
+                            "speaker_name":         ch.get("speaker_name"),
+                            "speaker_role":         ch.get("speaker_role"),
+                            "topic_section":        ch.get("topic_section"),
+                            "call_section":         ch.get("call_section"),
+                            "transcript":           transcript,
+                            "frame_captions":       chunk_frames,
+                            "combined_text":        combined_text,
+                            "slide_bullets":        slide_bullets,
+                            "has_slide_content":    bool(slide_bullets),
+                            "slide_numbers_covered": slide_numbers_covered,
+                            "finance_entities":     fin_entities,
+                            "has_finance_signal":   has_finance,
+                            "is_question":          ch.get("is_question", False),
+                            "is_answer":            ch.get("is_answer", False),
+                        }
+
+                        doc = self._make_doc(
+                            text=combined_text,
+                            modality="mp4",
+                            subtype="transcript_frame",
+                            source=source,
+                            page=None,
+                            chunk_idx=chunk_idx,
+                            structure=structure,
+                            meta=meta,
+                            surface=surface,
+                        )
+                        if doc:
+                            docs.append(doc)
+
+            logger.info(event="video_chunking_done", source=source, chunks=len(docs))
+            _CHUNKS_TOTAL.inc(len(docs))
+            return docs
+        except Exception as _exc:
+            _CHUNK_ERRORS.inc()
+            logger.error(event="chunking_failed", modality="video", source=source, error=str(_exc))
+            raise
+
+    def health_check(self) -> dict:
+        return {
+            "modality": "video",
+            "status": "ok",
+            "class": self.__class__.__name__,
+        }

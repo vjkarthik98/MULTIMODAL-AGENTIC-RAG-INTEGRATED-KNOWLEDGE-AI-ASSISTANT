@@ -104,14 +104,28 @@ def test_register_is_public(client):
 
 
 def test_login_is_public(client, registered_user_a, user_a_data):
-    r = client.post("/auth/login", json={
-        "email": user_a_data["email"],
-        "password": user_a_data["password"],
-    })
+    # Login is a two-step MFA flow: step 1 returns an OTP challenge (not tokens).
+    # This test verifies the endpoint is publicly accessible (no 401) and
+    # returns the OTP challenge that step 2 (/auth/verify-otp) must complete.
+    from unittest.mock import patch as _patch
+    captured_otp = []
+
+    def _fake_store(uid, otp):
+        captured_otp.append(otp)
+
+    def _fake_send(email, otp):
+        pass  # don't actually send email in tests
+
+    with _patch("app.auth.otp_store.store_otp", side_effect=_fake_store), \
+         _patch("app.auth.email_service.send_otp_email", side_effect=_fake_send):
+        r = client.post("/auth/login", json={
+            "email": user_a_data["email"],
+            "password": user_a_data["password"],
+        })
     assert r.status_code == 200
     data = r.json()
-    assert "access_token" in data
-    assert "refresh_token" in data
+    assert data.get("otp_required") is True
+    assert "otp_token" in data
 
 
 # ── /auth/refresh ─────────────────────────────────────────────────────────────

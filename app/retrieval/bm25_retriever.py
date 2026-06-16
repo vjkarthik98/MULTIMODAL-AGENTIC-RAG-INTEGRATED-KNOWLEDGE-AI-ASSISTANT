@@ -1311,3 +1311,35 @@ class BM25AggregatorRetriever:
     def set_modality_filter(self, modality: Optional[str]) -> None:
         """No-op on aggregator — pass modality via search(filters={'modality': ...}) instead."""
         logger.debug(event="bm25_agg_set_modality_filter_ignored", modality=modality)
+
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parents[2]))
+
+    from app.core.config import settings
+    from app.vectorstore.qdrant_store import QdrantVectorStore
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    parser = argparse.ArgumentParser(description="Rebuild BM25 index from Qdrant data")
+    parser.add_argument("--user_id", default="eval_default")
+    _args = parser.parse_args()
+    _user_id = _args.user_id
+
+    _qs = QdrantVectorStore()
+    _bm25 = BM25Retriever(user_id=_user_id)
+    _filter = Filter(
+        must=[FieldCondition(key="user_id", match=MatchValue(value=_user_id))]
+    ) if _user_id else None
+    _points, _ = _qs.client.scroll(
+        collection_name=settings.TEXT_COLLECTION_NAME,
+        with_payload=True,
+        limit=5000,
+        scroll_filter=_filter,
+    )
+    _docs = [BM25Document.from_payload(pt.payload or {}) for pt in _points]
+    _docs = [d for d in _docs if d.text]
+    _bm25.build_index(_docs, user_id=_user_id)
+    print(f"Rebuilt BM25 index for user '{_user_id}': {len(_bm25.documents)} docs indexed.")

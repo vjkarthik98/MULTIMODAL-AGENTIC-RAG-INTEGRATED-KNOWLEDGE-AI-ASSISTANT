@@ -32,10 +32,8 @@ _NUM_UNIT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Powers of 1000 to try when one side states an explicit scale (e.g. "314.6
-# billion") and the other is a bare table figure printed "in millions".
-_IMPLICIT_SCALES = (1.0, 1e3, 1e6, 1e9, 1e12)
-_REL_TOL = 0.015  # 1.5% — absorbs rounding ("328.084M" reported as "328.1 billion").
+_REL_TOL = 0.015  # 1.5% — absorbs rounding for hallucination grounding checks.
+_FIDELITY_TOL = 0.005  # 0.5% — strict tolerance for finance_fidelity (no scale bridging).
 
 
 class _Num:
@@ -95,17 +93,62 @@ def _value_match(a: float, b: float) -> bool:
     '314.6 billion' matches a bare '314,623' figure printed in millions."""
     if a <= 0 or b <= 0:
         return abs(a - b) < 1e-9
-    for scale in _IMPLICIT_SCALES:
-        for x, y in ((a, b * scale), (a * scale, b)):
-            hi = max(x, y)
-            if hi > 0 and abs(x - y) / hi <= _REL_TOL:
-                return True
-    return False
+    hi = max(a, b)
+    return abs(a - b) / hi <= _REL_TOL
+
+
+def _value_match_strict(a: float, b: float, tol: float = _FIDELITY_TOL) -> bool:
+    """Exact match within 0.5% tolerance — no scale bridging.
+
+    Numbers at different scales (millions vs billions) must NOT match.
+    Used by compute_finance_fidelity to catch scale hallucinations.
+    """
+    if b == 0:
+        return a == 0
+    return abs(a - b) / abs(b) <= tol
 
 
 def _extract_numbers(text: str) -> List[str]:
     """Backwards-compatible helper: raw quantity tokens (used by reference check)."""
     return [n.raw.lower() for n in _parse_numbers(text)]
+
+
+def _extract_finance_numbers(text: str) -> List[float]:
+    """Extract normalized finance number magnitudes from text.
+
+    Skips bare years and long identifiers — only returns genuine quantitative
+    claims (dollar amounts, percentages, counts with scale words).
+    """
+    return [
+        n.value for n in _parse_numbers(text)
+        if not n.is_year and not n.is_id
+    ]
+
+
+def compute_finance_fidelity(answer: str, contexts: List[str]) -> float:
+    """Fraction of finance numbers in the answer that appear verbatim in context.
+
+    Uses strict magnitude matching (0.5% tolerance, no scale bridging) so that
+    $4.3B in the answer does NOT match $4.3M in context.
+
+    Returns 1.0 when the answer contains no finance numbers (nothing to verify).
+
+    Args:
+        answer:   LLM-generated answer string.
+        contexts: List of retrieved context chunk strings.
+
+    Returns:
+        Float in [0.0, 1.0].
+    """
+    answer_nums = _extract_finance_numbers(answer)
+    if not answer_nums:
+        return 1.0
+    context_text = " ".join(contexts)
+    context_nums = _extract_finance_numbers(context_text)
+    matched = sum(
+        1 for n in answer_nums if any(_value_match_strict(n, c) for c in context_nums)
+    )
+    return matched / len(answer_nums)
 
 
 def _numbers_grounded(answer: str, context_texts: List[str]) -> Tuple[bool, List[str]]:

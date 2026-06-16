@@ -1,6 +1,6 @@
 """
 Retrieval eval for XLSX, image, audio, video modalities.
-Runs Retriever.retrieval() and scores metrics, merges into rag_report.json.
+Runs HybridRetriever.search() and scores metrics, merges into rag_report.json.
 """
 from __future__ import annotations
 
@@ -22,8 +22,14 @@ REPORT_FILE = ROOT / "app/eval/reports/rag_report.json"
 
 
 def run_retrieval_for_modality(modality: str, cfg: EvalConfig):
-    from app.retrieval.retriever import Retriever
-    retriever = Retriever()
+    from app.core.infra_registry import infra
+    from app.core.model_loader import model_loader
+    from app.retrieval.hybrid_retriever import HybridRetriever
+    retriever = HybridRetriever(
+        bm25=infra.get_bm25(),
+        vector_store=infra.get_vector_store(),
+        embedder=model_loader.get_embedder(),
+    )
 
     gold_rows = load_gold(modality, gold_dir=cfg.gold_dir)
     gold_rows = [r for r in gold_rows if r.get("relevant_chunk_ids") and "SEARCH_REQUIRED" not in r.get("reference_answer", "")]
@@ -44,13 +50,11 @@ def run_retrieval_for_modality(modality: str, cfg: EvalConfig):
         session_id = f"eval_retrieval_{modality}_{row['id']}"
         t0 = time.time()
         try:
-            retrieved = retriever.retrieval(
+            retrieved = retriever.search(
                 query=query,
                 session_id=session_id,
                 top_k=10,
                 user_id=cfg.user_id,
-                use_mmr=True,
-                use_rrf=True,
             )
         except Exception as e:
             print(f"  [{row['id']}] error: {e}")

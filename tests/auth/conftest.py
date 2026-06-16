@@ -156,7 +156,14 @@ def registered_user_a(mock_mongo_col, user_a_data):
     from app.auth.service import AuthService
     svc = AuthService()
     user = svc.register(RegisterRequest(**user_a_data))
-    return user
+    svc.activate_user(user.user_id)  # simulate OTP email verification
+    return UserPublic(
+        user_id=user.user_id,
+        email=user.email,
+        role=user.role,
+        is_active=True,
+        created_at=user.created_at,
+    )
 
 
 @pytest.fixture
@@ -164,7 +171,14 @@ def registered_user_b(mock_mongo_col, user_b_data):
     from app.auth.service import AuthService
     svc = AuthService()
     user = svc.register(RegisterRequest(**user_b_data))
-    return user
+    svc.activate_user(user.user_id)  # simulate OTP email verification
+    return UserPublic(
+        user_id=user.user_id,
+        email=user.email,
+        role=user.role,
+        is_active=True,
+        created_at=user.created_at,
+    )
 
 
 @pytest.fixture

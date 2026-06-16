@@ -67,8 +67,8 @@ class TestInjectionExact:
 
     @pytest.mark.parametrize(
         "case",
-        [c for c in INJECTION_BLOCK_CASES if "inj-exact" in c.get("tags", [])],
-        ids=[c["id"] for c in INJECTION_BLOCK_CASES if "inj-exact" in c.get("tags", [])],
+        [c for c in INJECTION_BLOCK_CASES if "exact" in c.get("tags", [])],
+        ids=[c["id"] for c in INJECTION_BLOCK_CASES if "exact" in c.get("tags", [])],
     )
     def test_exact_injection_blocked(self, case):
         _ensure_policy_loaded()
@@ -111,8 +111,8 @@ class TestInjectionModifier:
 
     @pytest.mark.parametrize(
         "case",
-        [c for c in INJECTION_BLOCK_CASES if "inj-modifier" in c.get("tags", [])],
-        ids=[c["id"] for c in INJECTION_BLOCK_CASES if "inj-modifier" in c.get("tags", [])],
+        [c for c in INJECTION_BLOCK_CASES if "modifier_bypass" in c.get("tags", [])],
+        ids=[c["id"] for c in INJECTION_BLOCK_CASES if "modifier_bypass" in c.get("tags", [])],
     )
     def test_corpus_modifier_blocked(self, case):
         _ensure_policy_loaded()
@@ -129,8 +129,8 @@ class TestInjectionParaphrase:
 
     @pytest.mark.parametrize(
         "case",
-        [c for c in INJECTION_BLOCK_CASES if "inj-para" in c.get("tags", [])],
-        ids=[c["id"] for c in INJECTION_BLOCK_CASES if "inj-para" in c.get("tags", [])],
+        [c for c in INJECTION_BLOCK_CASES if "paraphrase" in c.get("tags", [])],
+        ids=[c["id"] for c in INJECTION_BLOCK_CASES if "paraphrase" in c.get("tags", [])],
     )
     def test_paraphrase_injection_blocked(self, case):
         _ensure_policy_loaded()

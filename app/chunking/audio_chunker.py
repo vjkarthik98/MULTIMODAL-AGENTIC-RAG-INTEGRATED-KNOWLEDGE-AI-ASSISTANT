@@ -9,9 +9,21 @@ from typing import Dict, List, Optional, Tuple
 from app.chunking.base_chunker import BaseChunker
 from app.chunking.finance_numbers import deterministic_chunk_id, extract_finance_entities
 from app.ingestion.schema import IngestedDocument, RawExtract, UniversalMetadata
-from app.utils.logger import get_logger
+from app.utils.logger import get_logger, modality_var
+
+import time
+from prometheus_client import Counter, Histogram
 
 logger = get_logger(__name__)
+
+_CHUNKS_TOTAL = Counter(
+    "magik_audio_chunks_total",
+    "Total chunks produced by audio chunker",
+)
+_CHUNK_ERRORS = Counter(
+    "magik_audio_chunk_errors_total",
+    "Total errors in audio chunker",
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -230,101 +242,116 @@ class AudioChunker(BaseChunker):
     ) -> List[IngestedDocument]:
         source = Path(meta.source_path).name or "unknown.mp3"
         surface = "audio_chunker"
+        modality_var.set("audio")
+        _t0 = time.time()
         logger.info(event="chunking_start", modality="audio", source=source, extracts=len(extracts))
         if not extracts:
             logger.warning(event="no_extracts_received", modality="audio", source=source)
             return []
-        docs: List[IngestedDocument] = []
+        try:
+            docs: List[IngestedDocument] = []
 
-        for ext in extracts:
-            if ext.extract_type != "audio_raw":
-                continue
+            for ext in extracts:
+                if ext.extract_type != "audio_raw":
+                    continue
 
-            # Write WAV bytes to a temp file for Whisper and pyannote.
-            raw = ext.raw_bytes or b""
-            if not raw:
-                logger.warning(event="audio_chunker_empty_bytes", source=source)
-                continue
+                # Write WAV bytes to a temp file for Whisper and pyannote.
+                raw = ext.raw_bytes or b""
+                if not raw:
+                    logger.warning(event="audio_chunker_empty_bytes", source=source)
+                    continue
 
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                f.write(raw)
-                wav_path = f.name
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                    f.write(raw)
+                    wav_path = f.name
 
-            try:
-                words = _run_whisper(wav_path)
-
-                # Diarization (optional — skipped if model unavailable).
-                diarization: List[Tuple[float, float, str]] = []
                 try:
-                    diarization = diarize(wav_path)
-                except Exception:
-                    pass
+                    words = _run_whisper(wav_path)
 
-                full_transcript = " ".join(w["word"] for w in words)
-                role_map = _map_speaker_roles(diarization, full_transcript)
-                raw_chunks = _assemble_chunks(words, diarization, role_map)
-
-                for chunk_idx, ch in enumerate(raw_chunks):
-                    transcript = ch["transcript"]
-                    if not transcript.strip():
-                        continue
-
-                    # NER entity extraction.
-                    ner_entities: Dict = {}
+                    # Diarization (optional — skipped if model unavailable).
+                    diarization: List[Tuple[float, float, str]] = []
                     try:
-                        ner_entities = extract_entities(transcript)
+                        diarization = diarize(wav_path)
                     except Exception:
                         pass
 
-                    fin_entities = extract_finance_entities(transcript)
-                    duration = ch["end"] - ch["start"]
-                    word_count = len(transcript.split())
-                    call_section = ch.get("call_section", "prepared_remarks")
+                    full_transcript = " ".join(w["word"] for w in words)
+                    role_map = _map_speaker_roles(diarization, full_transcript)
+                    raw_chunks = _assemble_chunks(words, diarization, role_map)
 
-                    chunk_hash = deterministic_chunk_id(
-                        source, f"audio_{ch['start']:.1f}", chunk_idx
-                    )
-                    structure = {
-                        "chunk_hash_id":    chunk_hash,
-                        "source_file":      source,
-                        "chunk_index":      chunk_idx,
-                        "start_timestamp":  round(ch["start"], 3),
-                        "end_timestamp":    round(ch["end"], 3),
-                        "duration_seconds": round(duration, 3),
-                        "speaker_label":    ch["speaker"],
-                        "speaker_name":     ch.get("name"),
-                        "speaker_role":     ch.get("role"),
-                        "topic_section":    ch.get("topic_section"),
-                        "call_section":     call_section,
-                        "transcript":       transcript,
-                        "finance_entities": {
-                            "regex": fin_entities,
-                            **ner_entities,
-                        },
-                        "word_count":       word_count,
-                        "is_question":      transcript.rstrip().endswith("?"),
-                        "is_answer":        call_section == "qa_session" and not transcript.rstrip().endswith("?"),
-                    }
+                    for chunk_idx, ch in enumerate(raw_chunks):
+                        transcript = ch["transcript"]
+                        if not transcript.strip():
+                            continue
 
-                    doc = self._make_doc(
-                        text=transcript,
-                        modality="mp3",
-                        subtype="speech",
-                        source=source,
-                        page=None,
-                        chunk_idx=chunk_idx,
-                        structure=structure,
-                        meta=meta,
-                        surface=surface,
-                    )
-                    if doc:
-                        docs.append(doc)
+                        # NER entity extraction.
+                        ner_entities: Dict = {}
+                        try:
+                            ner_entities = extract_entities(transcript)
+                        except Exception:
+                            pass
 
-            finally:
-                try:
-                    os.unlink(wav_path)
-                except OSError:
-                    pass
+                        fin_entities = extract_finance_entities(transcript)
+                        duration = ch["end"] - ch["start"]
+                        word_count = len(transcript.split())
+                        call_section = ch.get("call_section", "prepared_remarks")
 
-        logger.info(event="audio_chunking_done", source=source, chunks=len(docs))
-        return docs
+                        chunk_hash = deterministic_chunk_id(
+                            source, f"audio_{ch['start']:.1f}", chunk_idx
+                        )
+                        structure = {
+                            "chunk_hash_id":    chunk_hash,
+                            "source_file":      source,
+                            "chunk_index":      chunk_idx,
+                            "start_timestamp":  round(ch["start"], 3),
+                            "end_timestamp":    round(ch["end"], 3),
+                            "duration_seconds": round(duration, 3),
+                            "speaker_label":    ch["speaker"],
+                            "speaker_name":     ch.get("name"),
+                            "speaker_role":     ch.get("role"),
+                            "topic_section":    ch.get("topic_section"),
+                            "call_section":     call_section,
+                            "transcript":       transcript,
+                            "finance_entities": {
+                                "regex": fin_entities,
+                                **ner_entities,
+                            },
+                            "word_count":       word_count,
+                            "is_question":      transcript.rstrip().endswith("?"),
+                            "is_answer":        call_section == "qa_session" and not transcript.rstrip().endswith("?"),
+                        }
+
+                        doc = self._make_doc(
+                            text=transcript,
+                            modality="mp3",
+                            subtype="speech",
+                            source=source,
+                            page=None,
+                            chunk_idx=chunk_idx,
+                            structure=structure,
+                            meta=meta,
+                            surface=surface,
+                        )
+                        if doc:
+                            docs.append(doc)
+
+                finally:
+                    try:
+                        os.unlink(wav_path)
+                    except OSError:
+                        pass
+
+            logger.info(event="audio_chunking_done", source=source, chunks=len(docs))
+            _CHUNKS_TOTAL.inc(len(docs))
+            return docs
+        except Exception as _exc:
+            _CHUNK_ERRORS.inc()
+            logger.error(event="chunking_failed", modality="audio", source=source, error=str(_exc))
+            raise
+
+    def health_check(self) -> dict:
+        return {
+            "modality": "audio",
+            "status": "ok",
+            "class": self.__class__.__name__,
+        }

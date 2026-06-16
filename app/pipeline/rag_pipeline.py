@@ -488,7 +488,11 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3) -> List[
 
         # Snippet: first 200 chars of text, truncated at word boundary
         snippet_raw = str(text)[:220]
-        snippet = snippet_raw[:snippet_raw.rfind(" ", 0, 200)] if len(snippet_raw) > 200 else snippet_raw
+        if len(snippet_raw) > 200:
+            word_break = snippet_raw.rfind(" ", 0, 200)
+            snippet = snippet_raw[:word_break] if word_break >= 0 else snippet_raw[:200]
+        else:
+            snippet = snippet_raw
 
         out.append({
             "filename":       source_name,

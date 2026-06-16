@@ -73,6 +73,11 @@ hallucination:
     max: 0.72   # numeric guard threshold raised to >6 unsupported numbers; financial docs
     why: "Regression gate: numeric guard on financial docs; numbers appear in multiple formats."
 
+finance:
+  numeric_fidelity:
+    min: 0.95
+    why: "Regression gate: at least 95% of finance numbers cited in answers must appear verbatim in retrieved context (strict 0.5% tolerance, no scale bridging)."
+
 ocr:
   ocr_cer:
     max: 3.0

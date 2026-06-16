@@ -178,7 +178,9 @@ async def verify_otp(req: OTPVerifyRequest):
 
 @router.post("/login/form", response_model=TokenPair, include_in_schema=False)
 async def login_form(form: OAuth2PasswordRequestForm = Depends()) -> TokenPair:
-    """OAuth2 password flow — used by the interactive API docs."""
+    """OAuth2 password flow — used by the interactive API docs (DEBUG mode only)."""
+    if not settings.DEBUG:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     try:
         user = await asyncio.to_thread(_svc.authenticate, form.username, form.password)
     except ValueError as exc:

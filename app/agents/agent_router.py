@@ -12,7 +12,7 @@ from opentelemetry.trace import Status, StatusCode
 from prometheus_client import Counter, Histogram
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from app.agents.agent_schema import AgentDecision
+from app.agents.agent_schema import AgentDecision, AgentSignals
 from app.core.config import settings
 from app.core.model_loader import model_loader
 
@@ -175,21 +175,21 @@ class AgentRouter:
                     return d
 
                 # HARD RULE: GREETING / CHITCHAT
-                if signals["is_greeting"]:
+                if signals.is_greeting:
                     d = self._decision("direct", "greeting_detected", 0.95, session_id)
                     _router_decisions.labels(action="direct", method="hard_rule").inc()
                     self._log_decision(d, signals, start, session_id)
                     return d
 
                 # HARD RULE: CODE QUERY
-                if signals["is_code"]:
+                if signals.is_code:
                     d = self._decision("direct", "code_query", 0.9, session_id)
                     _router_decisions.labels(action="direct", method="hard_rule").inc()
                     self._log_decision(d, signals, start, session_id)
                     return d
 
                 # HARD RULE: MATH QUERY
-                if signals["is_math"]:
+                if signals.is_math:
                     d = self._decision("direct", "math_query", 0.9, session_id)
                     _router_decisions.labels(action="direct", method="hard_rule").inc()
                     self._log_decision(d, signals, start, session_id)
@@ -205,14 +205,14 @@ class AgentRouter:
                     return d
 
                 # HARD RULE: RECENT QUERY — RAG + web fusion
-                if signals["is_recent"]:
+                if signals.is_recent:
                     d = self._decision("hybrid", "recent_hybrid", 0.95, session_id)
                     _router_decisions.labels(action="hybrid", method="hard_rule").inc()
                     self._log_decision(d, signals, start, session_id)
                     return d
 
                 # HARD RULE: MEMORY REFERENCE
-                if signals["is_memory"]:
+                if signals.is_memory:
                     d = self._decision("memory", "memory_reference", 0.9, session_id)
                     _router_decisions.labels(action="memory", method="hard_rule").inc()
                     self._log_decision(d, signals, start, session_id)
@@ -220,14 +220,14 @@ class AgentRouter:
 
                 # HARD RULE: WEB/MARKET DATA — analyst ratings, consensus ratings
                 # are live external data not found in any document.
-                if signals["is_web"]:
+                if signals.is_web:
                     d = self._decision("hybrid", "web_market_signal", 0.88, session_id)
                     _router_decisions.labels(action="hybrid", method="hard_rule").inc()
                     self._log_decision(d, signals, start, session_id)
                     return d
 
                 # FINANCE DOMAIN HARD RULES (Phase 7)
-                if signals.get("is_market_data_query"):
+                if signals.is_market_data_query:
                     d = self._finance_decision(
                         "search", "market_data_live", 0.93, session_id, signals,
                     )
@@ -235,7 +235,7 @@ class AgentRouter:
                     self._log_decision(d, signals, start, session_id)
                     return d
 
-                if signals.get("is_earnings_call_query"):
+                if signals.is_earnings_call_query:
                     d = self._finance_decision(
                         "rag", "earnings_call_kb", 0.92, session_id, signals,
                         modality_hint="mp3",
@@ -244,7 +244,7 @@ class AgentRouter:
                     self._log_decision(d, signals, start, session_id)
                     return d
 
-                if signals.get("is_regulatory_query"):
+                if signals.is_regulatory_query:
                     d = self._finance_decision(
                         "rag", "regulatory_filing_kb", 0.91, session_id, signals,
                         source_type_filter=["pdf", "docx"],
@@ -253,7 +253,7 @@ class AgentRouter:
                     self._log_decision(d, signals, start, session_id)
                     return d
 
-                if signals.get("is_financial_model_query"):
+                if signals.is_financial_model_query:
                     d = self._finance_decision(
                         "rag", "financial_model_kb", 0.90, session_id, signals,
                         subtype_filter=["table", "assumptions"],
@@ -316,7 +316,7 @@ class AgentRouter:
     def _log_decision(
         self,
         decision: AgentDecision,
-        signals: Dict,
+        signals: AgentSignals,
         start: float,
         session_id: str,
     ) -> None:
@@ -325,14 +325,14 @@ class AgentRouter:
             action=decision.action,
             confidence=decision.confidence,
             reason=decision.reason,
-            signal_summary={k: v for k, v in signals.items() if v},
+            signal_summary={k: v for k, v in signals.model_dump().items() if v},
             latency_ms=round((time.time() - start) * 1000, 1),
             session_id=session_id,
         )
 
     # SIGNAL ANALYSIS
 
-    def _analyze(self, query: str) -> Dict:
+    def _analyze(self, query: str) -> AgentSignals:
         q      = query.lower()
         tokens = set(q.split())
 
@@ -341,37 +341,39 @@ class AgentRouter:
         is_regulatory       = any(phrase in q for phrase in _REGULATORY)
         is_financial_model  = any(phrase in q for phrase in _FINANCIAL_MODEL)
 
-        return {
-            "is_recent":              bool(tokens & _RECENT_WORDS),
-            "is_web":                 bool(tokens & _WEB_WORDS),
-            "is_memory":              any(
+        return AgentSignals(
+            is_recent=bool(tokens & _RECENT_WORDS),
+            is_web=bool(tokens & _WEB_WORDS),
+            is_memory=any(
                 re.search(r"\b" + re.escape(w) + r"\b", q, re.IGNORECASE)
                 for w in _MEMORY_WORDS
             ),
-            "is_complex":             (
+            is_complex=(
                 len(tokens) > settings.DECOMPOSITION_MIN_WORDS or
                 bool(tokens & _COMPLEX_KEYWORDS)
             ),
-            "is_reasoning":           bool(tokens & _REASONING_WORDS),
-            "has_multimodal_hint":    bool(tokens & _MULTIMODAL_WORDS),
-            "is_code":                bool(tokens & _CODE_WORDS),
-            "is_greeting":            (bool(tokens & _GREETING_WORDS) and len(tokens) <= 6)
-                                      or bool(re.search(r"\bhow are you\b", q)),
-            "is_math":                bool(tokens & _MATH_WORDS) or bool(_ARITHMETIC_RE.match(q)),
-            "is_security":            bool(tokens & _SECURITY_WORDS),
-            "token_count":            len(tokens),
-            "has_question_mark":      "?" in query,
-            "multi_question":         query.count("?") > 1,
+            is_reasoning=bool(tokens & _REASONING_WORDS),
+            has_multimodal_hint=bool(tokens & _MULTIMODAL_WORDS),
+            is_code=bool(tokens & _CODE_WORDS),
+            is_greeting=(
+                (bool(tokens & _GREETING_WORDS) and len(tokens) <= 6)
+                or bool(re.search(r"\bhow are you\b", q))
+            ),
+            is_math=bool(tokens & _MATH_WORDS) or bool(_ARITHMETIC_RE.match(q)),
+            is_security=bool(tokens & _SECURITY_WORDS),
+            token_count=len(tokens),
+            has_question_mark="?" in query,
+            multi_question=query.count("?") > 1,
             # Finance domain signals
-            "is_market_data_query":      is_market_data,
-            "is_earnings_call_query":    is_earnings_call,
-            "is_regulatory_query":       is_regulatory,
-            "is_financial_model_query":  is_financial_model,
-        }
+            is_market_data_query=is_market_data,
+            is_earnings_call_query=is_earnings_call,
+            is_regulatory_query=is_regulatory,
+            is_financial_model_query=is_financial_model,
+        )
 
     # PROMPT BUILDER
 
-    def _build_prompt(self, query: str, signals: dict) -> str:
+    def _build_prompt(self, query: str, signals: AgentSignals) -> str:
         instruction = (
             "Route the query to exactly ONE of these options:\n"
             "rag | search | direct | memory | hybrid\n\n"
@@ -390,7 +392,7 @@ class AgentRouter:
             "When uncertain, choose rag. Return JSON only. No explanation.\n\n"
         )
 
-        signal_str   = str({k: v for k, v in signals.items() if v})
+        signal_str   = str({k: v for k, v in signals.model_dump().items() if v})
         body         = f"Signals: {signal_str}\nQuery: {query}\n"
         format_block = '{"action":"<route>", "reason":"<brief reason>"}'
 
@@ -409,7 +411,7 @@ class AgentRouter:
     def _llm_route(
         self,
         query: str,
-        signals: dict,
+        signals: AgentSignals,
         session_id: str,
     ) -> AgentDecision:
 
@@ -469,7 +471,7 @@ class AgentRouter:
     def _parse(
         self,
         text: str,
-        signals: dict,
+        signals: AgentSignals,
         session_id: str,
     ) -> AgentDecision:
         try:
@@ -485,7 +487,7 @@ class AgentRouter:
                 action=action,
                 reason=reason,
                 confidence=confidence,
-                signals=signals,
+                signals=signals.model_dump(),
                 session_id=session_id,
             )
 
@@ -494,25 +496,27 @@ class AgentRouter:
 
     # CONFIDENCE SCORING
 
-    def _score_confidence(self, action: str, signals: dict) -> float:
+    def _score_confidence(self, action: str, signals) -> float:
+        if isinstance(signals, dict):
+            signals = AgentSignals(**{k: v for k, v in signals.items() if k in AgentSignals.model_fields})
         score = 0.6
 
-        if signals.get("is_recent") and action in {"search", "hybrid"}:
+        if signals.is_recent and action in {"search", "hybrid"}:
             score += 0.30
 
-        if signals.get("is_memory") and action == "memory":
+        if signals.is_memory and action == "memory":
             score += 0.25
 
-        if signals.get("is_complex") and action in {"rag", "hybrid"}:
+        if signals.is_complex and action in {"rag", "hybrid"}:
             score += 0.20
 
-        if signals.get("has_multimodal_hint") and action in {"rag", "hybrid"}:
+        if signals.has_multimodal_hint and action in {"rag", "hybrid"}:
             score += 0.10
 
-        if signals.get("is_reasoning") and action in {"rag", "direct"}:
+        if signals.is_reasoning and action in {"rag", "direct"}:
             score += 0.05
 
-        if signals.get("multi_question") and action in {"hybrid", "rag"}:
+        if signals.multi_question and action in {"hybrid", "rag"}:
             score += 0.05
 
         return min(round(score, 3), 0.95)
@@ -524,23 +528,25 @@ class AgentRouter:
     def _validate(
         self,
         decision: AgentDecision,
-        signals: dict,
+        signals,
         session_id: str,
     ) -> AgentDecision:
+        if isinstance(signals, dict):
+            signals = AgentSignals(**{k: v for k, v in signals.items() if k in AgentSignals.model_fields})
 
         if decision.action not in {"rag", "search", "direct", "memory", "hybrid"}:
             return self._decision("rag", "invalid_action_fallback", 0.5, session_id)
 
         # OVERRIDE: RECENT SIGNAL ROUTES TO HYBRID — RAG + web fusion
-        if signals.get("is_recent"):
+        if signals.is_recent:
             return self._decision("hybrid", "override_recent_hybrid", 0.95, session_id)
 
         # OVERRIDE: SECURITY KEYWORDS FORCE DIRECT — AVOID RAG ON CREDENTIALS
-        if signals.get("is_security") and decision.action == "rag":
+        if signals.is_security and decision.action == "rag":
             return self._decision("direct", "override_security_signal", 0.8, session_id)
 
         # OVERRIDE: MULTI-QUESTION BENEFITS FROM HYBRID
-        if signals.get("multi_question") and decision.action == "direct":
+        if signals.multi_question and decision.action == "direct":
             return self._decision("hybrid", "override_multi_question", 0.75, session_id)
 
         # OVERRIDE: LLM picked `direct` but the query looks like a factual
@@ -548,10 +554,10 @@ class AgentRouter:
         # Force rag so we never hallucinate a doc answer from parametric memory.
         if (
             decision.action == "direct"
-            and not signals.get("is_greeting")
-            and not signals.get("is_code")
-            and not signals.get("is_math")
-            and signals.get("token_count", 0) >= 5
+            and not signals.is_greeting
+            and not signals.is_code
+            and not signals.is_math
+            and signals.token_count >= 5
         ):
             return self._decision(
                 "rag", "override_factual_lookup", 0.8, session_id,
@@ -584,7 +590,7 @@ class AgentRouter:
         reason: str,
         confidence: float,
         session_id: str,
-        signals: dict,
+        signals: AgentSignals,
         modality_hint: Optional[str] = None,
         source_type_filter: Optional[list] = None,
         subtype_filter: Optional[list] = None,
@@ -595,7 +601,7 @@ class AgentRouter:
             action=action,
             reason=reason,
             confidence=confidence,
-            signals=signals,
+            signals=signals.model_dump() if hasattr(signals, "model_dump") else signals,
             session_id=session_id,
             modality_hint=modality_hint,
             source_type_filter=source_type_filter or [],

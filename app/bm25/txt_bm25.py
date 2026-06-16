@@ -17,11 +17,22 @@ from typing import Any, List, Optional
 
 from rank_bm25 import BM25Plus
 
+from prometheus_client import Counter
+
 from app.bm25.base_bm25 import BaseBM25, _INDEX_VERSION
 from app.core.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_BM25_INDEXED = Counter(
+    "magik_txt_bm25_indexed_total",
+    "Documents indexed in txt BM25",
+)
+_BM25_INDEX_ERRORS = Counter(
+    "magik_txt_bm25_index_errors_total",
+    "Errors in txt BM25 _build_indexed_text",
+)
 
 _ROLE_CEO = {"ceo", "chief executive officer", "chief executive", "president & ceo"}
 _ROLE_CFO = {"cfo", "chief financial officer", "chief financial"}
@@ -79,34 +90,49 @@ class TxtBM25(BaseBM25):
         self._sub_docs_qa:  List[Any] = []
 
     def _build_indexed_text(self, doc: Any) -> str:
-        s = getattr(doc, "structure", {}) or {}
-        parts: List[str] = list(self._base_text(doc))
+        try:
+            s = getattr(doc, "structure", {}) or {}
+            parts: List[str] = list(self._base_text(doc))
 
-        # Extra section_title boost for TXT (base already added ×2; add once more)
-        section_title = (s.get("section_title") or "").strip()
-        if section_title:
-            parts.append(section_title)
+            # Extra section_title boost for TXT (base already added ×2; add once more)
+            section_title = (s.get("section_title") or "").strip()
+            if section_title:
+                parts.append(section_title)
 
-        # Speaker prefix for transcript speaker-turn chunks
-        speaker = (s.get("speaker") or s.get("speaker_name") or "").strip()
-        role    = (s.get("speaker_role") or "").strip()
-        if speaker:
-            parts.append(f"speaker {speaker}")
-        if role:
-            parts.append(f"speaker role {role}")
+            # Speaker prefix for transcript speaker-turn chunks
+            speaker = (s.get("speaker") or s.get("speaker_name") or "").strip()
+            role    = (s.get("speaker_role") or "").strip()
+            if speaker:
+                parts.append(f"speaker {speaker}")
+            if role:
+                parts.append(f"speaker role {role}")
 
-        # FLS amplification: forward-looking statements are high-value for guidance queries
-        if s.get("is_forward_looking"):
-            fls_tokens = "guidance outlook forecast projection expects anticipated"
-            parts.append(fls_tokens)
-            parts.append(fls_tokens)
+            # FLS amplification: forward-looking statements are high-value for guidance queries
+            if s.get("is_forward_looking"):
+                fls_tokens = "guidance outlook forecast projection expects anticipated"
+                parts.append(fls_tokens)
+                parts.append(fls_tokens)
 
-        # Call section token
-        call_section = (s.get("call_section") or "").strip()
-        if call_section:
-            parts.append(call_section.replace("_", " "))
+            # Call section token
+            call_section = (s.get("call_section") or "").strip()
+            if call_section:
+                parts.append(call_section.replace("_", " "))
 
-        return " ".join(parts)
+            _BM25_INDEXED.inc()
+            return " ".join(parts)
+        except Exception as _exc:
+            _BM25_INDEX_ERRORS.inc()
+            logger.warning(
+                event="bm25_index_text_failed",
+                modality=self.modality,
+                error=str(_exc),
+            )
+            return getattr(doc, "text", "") or ""
+
+    def health_check(self, user_id=None) -> dict:
+        base = super().health_check(user_id)
+        base["class"] = self.__class__.__name__
+        return base
 
     # ── Sub-index path helpers ────────────────────────────────────────────────
 

@@ -1,5 +1,7 @@
 import asyncio
+import datetime
 import hashlib
+import re as _re
 import time
 import unicodedata
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -102,9 +104,6 @@ def _normalize(query: str) -> str:
 # Perez | TechCrunch In this article, it is stated that ..."). This deterministic
 # pass removes narration intros, pipe-separated article metadata, and self-
 # referential "the article mentions" phrasing, leaving a clean factual answer.
-import datetime
-import re as _re
-
 _WEB_NARRATION_RE = _re.compile(
     r"^\s*(?:and\s+)?here'?s what (?:we|i) (?:found|have)\b[.:]?\s*"
     r"|^\s*the question\s*:?\s*[^?]*\?\s*"                # echoed "The question: ...?"

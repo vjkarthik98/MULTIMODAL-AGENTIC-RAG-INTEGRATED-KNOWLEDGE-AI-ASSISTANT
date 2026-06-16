@@ -240,7 +240,7 @@ class Settings:
     RERANK_FUSION_WEIGHT: float     = _float("RERANK_FUSION_WEIGHT", 0.3)
     RERANK_POSITION_WEIGHT: float   = _float("RERANK_POSITION_WEIGHT", 0.1)
     RERANK_SCORE_THRESHOLD: float   = _float("RERANK_SCORE_THRESHOLD", 0.1)
-    RERANK_BATCH_SIZE: int          = _int("RERANK_BATCH_SIZE", 8)
+    RERANK_BATCH_SIZE: int          = _int("RERANK_BATCH_SIZE", 32)
     RERANK_SOURCE_MAX_CHUNKS: int   = _int("RERANK_SOURCE_MAX_CHUNKS", 3)
     MMR_ENABLED: bool               = _bool("MMR_ENABLED", True)
     MMR_LAMBDA: float               = _float("MMR_LAMBDA", 0.7)
@@ -447,6 +447,7 @@ class Settings:
     # AGENT
     AGENT_MAX_STEPS: int                 = _int("AGENT_MAX_STEPS", 10)
     AGENT_TIMEOUT_SEC: int               = _int("AGENT_TIMEOUT_SEC", 60)
+    AGENT_TOKEN_BUDGET: int              = _int("AGENT_TOKEN_BUDGET", 32000)
     AGENT_STEP_TIMEOUT_SEC: int          = _int("AGENT_STEP_TIMEOUT_SEC", 30)
     AGENT_HIGH_CONFIDENCE: float         = _float("AGENT_HIGH_CONFIDENCE", 0.7)
     AGENT_LOW_CONFIDENCE: float          = _float("AGENT_LOW_CONFIDENCE", 0.4)

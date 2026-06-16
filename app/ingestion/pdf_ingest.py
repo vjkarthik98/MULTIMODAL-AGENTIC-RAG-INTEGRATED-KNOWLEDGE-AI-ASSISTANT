@@ -44,6 +44,8 @@ _ocr_invocations = Counter(
     "OCR invocations during PDF ingestion",
     [],
 )
+_EXTRACTS_TOTAL = Counter("magik_pdf_extracts_total", "Total extracts produced by pdf ingestor")
+_EXTRACT_ERRORS = Counter("magik_pdf_extract_errors_total", "Errors in pdf ingestor")
 
 _semaphore = asyncio.Semaphore(5)
 
@@ -303,243 +305,256 @@ class PdfIngestor(BaseIngestor):
     Does NOT chunk. The chunker (Phase 2) handles splitting.
     """
 
+    def health_check(self) -> dict:
+        return {
+            "modality": "pdf",
+            "status": "ok",
+            "class": self.__class__.__name__,
+        }
+
     async def extract(
         self,
         path: Path,
         metadata: UniversalMetadata,
     ) -> List[RawExtract]:
+        source = path.name
         file_path = str(path)
         logger.info(event="extraction_start", modality="pdf", file=str(path), size=path.stat().st_size)
-
-        if _is_pdf_encrypted(file_path):
-            raise ValueError(f"PASSWORD_PROTECTED_PDF: {path.name}")
-
-        has_js = _check_pdf_javascript(file_path)
-        if has_js:
-            logger.warning("pdf_javascript_detected", file=path.name)
-
-        is_pdfa = _is_pdfa(file_path)
-        is_xfa = _has_xfa(file_path)
-
-        import fitz
         try:
-            pdf = fitz.open(file_path)
-        except Exception:
-            logger.warning("pdf_corrupt_attempting_repair", file=path.name)
-            repaired_path = await asyncio.get_event_loop().run_in_executor(
-                None, _repair_pdf, file_path
-            )
+            if _is_pdf_encrypted(file_path):
+                raise ValueError(f"PASSWORD_PROTECTED_PDF: {path.name}")
+
+            has_js = _check_pdf_javascript(file_path)
+            if has_js:
+                logger.warning("pdf_javascript_detected", file=path.name)
+
+            is_pdfa = _is_pdfa(file_path)
+            is_xfa = _has_xfa(file_path)
+
+            import fitz
             try:
-                pdf = fitz.open(repaired_path)
-            except Exception as exc:
-                raise ValueError(f"PDF_CORRUPT_UNRECOVERABLE: {exc}")
-
-        total_pages = len(pdf)
-        extracts: List[RawExtract] = []
-        header_footer_counts: Dict[str, int] = {}
-
-        # Estimate body font size from first few text-heavy pages
-        body_font_size: Optional[float] = None
-        try:
-            for pg in list(pdf)[:5]:
-                for block in pg.get_text("dict").get("blocks", []):
-                    if block.get("type") != 0:
-                        continue
-                    for line in block.get("lines", []):
-                        for span in line.get("spans", []):
-                            sz = span.get("size", 0)
-                            if sz > 8 and (body_font_size is None or sz < body_font_size):
-                                body_font_size = round(sz, 1)
-        except Exception:
-            pass
-
-        for i, page in enumerate(pdf, start=1):
-            # Auto-rotation
-            rotation = _get_page_rotation(page)
-            if rotation not in (0, 360):
-                page.set_rotation(0)
-
-            raw_text = (page.get_text() or "").strip()
-
-            # Injection guard on extracted text
-            if raw_text:
-                raw_text = self._sanitize(raw_text, surface="pdf_ingest")
-
-            rect = page.rect
-            page_area = max(rect.width * rect.height, 1)
-            density = _text_density(raw_text, page_area)
-            ocr_conf = 1.0
-            is_ocr = False
-
-            if not raw_text:
-                # Scanned page — full OCR
-                _ocr_invocations.inc()
-                is_ocr = True
+                pdf = fitz.open(file_path)
+            except Exception:
+                logger.warning("pdf_corrupt_attempting_repair", file=path.name)
+                repaired_path = await asyncio.get_event_loop().run_in_executor(
+                    None, _repair_pdf, file_path
+                )
                 try:
-                    pix = page.get_pixmap(dpi=200)
-                    ocr_result, ocr_conf = _ocr_page_image(pix, i)
-                    if ocr_result:
-                        raw_text = ocr_result
+                    pdf = fitz.open(repaired_path)
                 except Exception as exc:
-                    logger.warning("pdf_ocr_fallback_failed", page=i, error=str(exc))
-            elif density < 0.01:
-                _ocr_invocations.inc()
-                try:
-                    pix = page.get_pixmap(dpi=200)
-                    ocr_result, ocr_conf = _ocr_page_image(pix, i)
-                    if ocr_result and len(ocr_result) > len(raw_text):
-                        raw_text = ocr_result
-                        is_ocr = True
-                except Exception as exc:
-                    logger.warning("pdf_ocr_supplemental_failed", page=i, error=str(exc))
+                    raise ValueError(f"PDF_CORRUPT_UNRECOVERABLE: {exc}")
 
-            if not raw_text:
-                continue
+            total_pages = len(pdf)
+            extracts: List[RawExtract] = []
+            header_footer_counts: Dict[str, int] = {}
 
-            # PII scrub
-            raw_text = self._scrub_pii(raw_text, surface="pdf_ingest")
-
-            # Track header/footer candidates
-            lines = raw_text.split("\n")
-            if len(lines) > 2:
-                header_footer_counts[lines[0]] = header_footer_counts.get(lines[0], 0) + 1
-                header_footer_counts[lines[-1]] = header_footer_counts.get(lines[-1], 0) + 1
-
-            # Reading-order correction
-            page_text = _correct_reading_order(raw_text)
-
-            # Multi-column reading order via block bboxes
+            # Estimate body font size from first few text-heavy pages
+            body_font_size: Optional[float] = None
             try:
-                mc_text = _extract_pdf_text_multicolumn(page)
-                if mc_text and len(mc_text) >= len(page_text):
-                    page_text = mc_text
+                for pg in list(pdf)[:5]:
+                    for block in pg.get_text("dict").get("blocks", []):
+                        if block.get("type") != 0:
+                            continue
+                        for line in block.get("lines", []):
+                            for span in line.get("spans", []):
+                                sz = span.get("size", 0)
+                                if sz > 8 and (body_font_size is None or sz < body_font_size):
+                                    body_font_size = round(sz, 1)
             except Exception:
                 pass
 
-            # Determine extract_type: scanned vs prose vs heading
-            font_sz = _detect_font_size(page, page_text[:50])
-            is_bold = _detect_is_bold(page, page_text[:50])
-            is_heading = _detect_heading(page_text, font_sz, is_bold, body_font_size)
-
-            if is_ocr and not raw_text.strip():
-                ext_type = "scanned_page"
-            elif is_heading:
-                ext_type = "heading"
-            else:
-                ext_type = "prose"
-
-            extracts.append(RawExtract(
-                text=page_text,
-                extract_type=ext_type,
-                page=i,
-                bbox=(rect.x0, rect.y0, rect.x1, rect.y1),
-                font_size=font_sz,
-                is_bold=is_bold,
-                raw_source_ref=f"pdf:{path.name}|page:{i}",
-                extra={
-                    "total_pages": total_pages,
-                    "ocr_confidence": ocr_conf,
-                    "is_ocr": is_ocr,
-                    "is_pdfa": is_pdfa,
-                    "has_xfa": is_xfa,
-                    "has_javascript": has_js,
-                },
-            ))
-
-            # Embedded images → image_raw extracts
-            for img_idx, img_ref in enumerate(page.get_images(full=True)):
-                try:
-                    xref = img_ref[0]
-                    base = pdf.extract_image(xref)
-                    img_bytes = base.get("image")
-                    if not img_bytes or len(img_bytes) < 256:
-                        continue
-                    extracts.append(RawExtract(
-                        text="",
-                        extract_type="image_region",
-                        page=i,
-                        raw_source_ref=f"pdf:{path.name}|page:{i}|img:{img_idx}",
-                        raw_bytes=img_bytes,
-                        extra={
-                            "img_ext": base.get("ext", "png"),
-                            "context_text": page_text[:500],
-                        },
-                    ))
-                except Exception as exc:
-                    logger.warning("pdf_image_extract_failed", page=i,
-                                   img_idx=img_idx, error=str(exc))
-
-        # Hyperlinks as footnote extracts
-        try:
             for i, page in enumerate(pdf, start=1):
-                for link in page.get_links():
-                    uri = link.get("uri", "")
-                    if uri:
-                        uri = self._sanitize(uri, surface="pdf_hyperlink_ingest")
-                        extracts.append(RawExtract(
-                            text=f"[HYPERLINK page={i}] {uri}",
-                            extract_type="footnote",
-                            page=i,
-                            raw_source_ref=f"pdf:{path.name}|page:{i}|link",
-                        ))
-        except Exception as exc:
-            logger.warning("pdf_hyperlink_extraction_failed", error=str(exc))
-        finally:
-            pdf.close()
+                # Auto-rotation
+                rotation = _get_page_rotation(page)
+                if rotation not in (0, 360):
+                    page.set_rotation(0)
 
-        # Strip repeated header/footer text from prose extracts
-        repeated = {k for k, v in header_footer_counts.items() if v > 3 and k.strip()}
-        if repeated:
-            for ex in extracts:
-                if ex.extract_type in ("prose", "heading"):
-                    for r in repeated:
-                        ex.text = ex.text.replace(r, "").strip()
+                raw_text = (page.get_text() or "").strip()
 
-        # Tables via pdfplumber
-        try:
-            import pdfplumber
-            with pdfplumber.open(file_path) as pdf_p:
-                for i, page in enumerate(pdf_p.pages, start=1):
-                    for t_idx, table in enumerate(page.extract_tables() or []):
-                        rows = [[str(cell or "").strip() for cell in row] for row in table]
-                        txt = _table_to_text(rows)
-                        md = _table_to_markdown(rows)
-                        if not txt:
-                            continue
-                        combined = self._sanitize(f"{txt}\n\n{md}", surface="pdf_table_ingest")
-                        combined = self._scrub_pii(combined, surface="pdf_table_ingest")
-                        if combined:
-                            extracts.append(RawExtract(
-                                text=combined,
-                                extract_type="table_row",
-                                page=i,
-                                raw_source_ref=f"pdf:{path.name}|page:{i}|table:{t_idx}",
-                                extra={"markdown": md, "table_index": t_idx},
-                            ))
+                # Injection guard on extracted text
+                if raw_text:
+                    raw_text = self._sanitize(raw_text, surface="pdf_ingest")
 
-                # Outline/bookmarks
+                rect = page.rect
+                page_area = max(rect.width * rect.height, 1)
+                density = _text_density(raw_text, page_area)
+                ocr_conf = 1.0
+                is_ocr = False
+
+                if not raw_text:
+                    # Scanned page — full OCR
+                    _ocr_invocations.inc()
+                    is_ocr = True
+                    try:
+                        pix = page.get_pixmap(dpi=200)
+                        ocr_result, ocr_conf = _ocr_page_image(pix, i)
+                        if ocr_result:
+                            raw_text = ocr_result
+                    except Exception as exc:
+                        logger.warning("pdf_ocr_fallback_failed", page=i, error=str(exc))
+                elif density < 0.01:
+                    _ocr_invocations.inc()
+                    try:
+                        pix = page.get_pixmap(dpi=200)
+                        ocr_result, ocr_conf = _ocr_page_image(pix, i)
+                        if ocr_result and len(ocr_result) > len(raw_text):
+                            raw_text = ocr_result
+                            is_ocr = True
+                    except Exception as exc:
+                        logger.warning("pdf_ocr_supplemental_failed", page=i, error=str(exc))
+
+                if not raw_text:
+                    continue
+
+                # PII scrub
+                raw_text = self._scrub_pii(raw_text, surface="pdf_ingest")
+
+                # Track header/footer candidates
+                lines = raw_text.split("\n")
+                if len(lines) > 2:
+                    header_footer_counts[lines[0]] = header_footer_counts.get(lines[0], 0) + 1
+                    header_footer_counts[lines[-1]] = header_footer_counts.get(lines[-1], 0) + 1
+
+                # Reading-order correction
+                page_text = _correct_reading_order(raw_text)
+
+                # Multi-column reading order via block bboxes
                 try:
-                    outline = getattr(pdf_p, "outline", None)
-                    if outline:
-                        outline_text = self._sanitize(str(outline)[:2000], surface="pdf_outline_ingest")
-                        outline_text = self._scrub_pii(outline_text, surface="pdf_outline_ingest")
-                        if outline_text:
-                            extracts.append(RawExtract(
-                                text=f"[OUTLINE]\n{outline_text}",
-                                extract_type="heading",
-                                raw_source_ref=f"pdf:{path.name}|outline",
-                                extra={"is_outline": True},
-                            ))
+                    mc_text = _extract_pdf_text_multicolumn(page)
+                    if mc_text and len(mc_text) >= len(page_text):
+                        page_text = mc_text
                 except Exception:
                     pass
-        except Exception as exc:
-            logger.warning("pdf_table_extraction_failed", error=str(exc))
 
-        if not extracts:
-            raise ValueError("NO_EXTRACTS_PRODUCED")
+                # Determine extract_type: scanned vs prose vs heading
+                font_sz = _detect_font_size(page, page_text[:50])
+                is_bold = _detect_is_bold(page, page_text[:50])
+                is_heading = _detect_heading(page_text, font_sz, is_bold, body_font_size)
 
-        logger.info(event="extraction_complete", modality="pdf", file=str(path), extracts=len(extracts))
-        return extracts
+                if is_ocr and not raw_text.strip():
+                    ext_type = "scanned_page"
+                elif is_heading:
+                    ext_type = "heading"
+                else:
+                    ext_type = "prose"
+
+                extracts.append(RawExtract(
+                    text=page_text,
+                    extract_type=ext_type,
+                    page=i,
+                    bbox=(rect.x0, rect.y0, rect.x1, rect.y1),
+                    font_size=font_sz,
+                    is_bold=is_bold,
+                    raw_source_ref=f"pdf:{path.name}|page:{i}",
+                    extra={
+                        "total_pages": total_pages,
+                        "ocr_confidence": ocr_conf,
+                        "is_ocr": is_ocr,
+                        "is_pdfa": is_pdfa,
+                        "has_xfa": is_xfa,
+                        "has_javascript": has_js,
+                    },
+                ))
+
+                # Embedded images → image_raw extracts
+                for img_idx, img_ref in enumerate(page.get_images(full=True)):
+                    try:
+                        xref = img_ref[0]
+                        base = pdf.extract_image(xref)
+                        img_bytes = base.get("image")
+                        if not img_bytes or len(img_bytes) < 256:
+                            continue
+                        extracts.append(RawExtract(
+                            text="",
+                            extract_type="image_region",
+                            page=i,
+                            raw_source_ref=f"pdf:{path.name}|page:{i}|img:{img_idx}",
+                            raw_bytes=img_bytes,
+                            extra={
+                                "img_ext": base.get("ext", "png"),
+                                "context_text": page_text[:500],
+                            },
+                        ))
+                    except Exception as exc:
+                        logger.warning("pdf_image_extract_failed", page=i,
+                                       img_idx=img_idx, error=str(exc))
+
+            # Hyperlinks as footnote extracts
+            try:
+                for i, page in enumerate(pdf, start=1):
+                    for link in page.get_links():
+                        uri = link.get("uri", "")
+                        if uri:
+                            uri = self._sanitize(uri, surface="pdf_hyperlink_ingest")
+                            extracts.append(RawExtract(
+                                text=f"[HYPERLINK page={i}] {uri}",
+                                extract_type="footnote",
+                                page=i,
+                                raw_source_ref=f"pdf:{path.name}|page:{i}|link",
+                            ))
+            except Exception as exc:
+                logger.warning("pdf_hyperlink_extraction_failed", error=str(exc))
+            finally:
+                pdf.close()
+
+            # Strip repeated header/footer text from prose extracts
+            repeated = {k for k, v in header_footer_counts.items() if v > 3 and k.strip()}
+            if repeated:
+                for ex in extracts:
+                    if ex.extract_type in ("prose", "heading"):
+                        for r in repeated:
+                            ex.text = ex.text.replace(r, "").strip()
+
+            # Tables via pdfplumber
+            try:
+                import pdfplumber
+                with pdfplumber.open(file_path) as pdf_p:
+                    for i, page in enumerate(pdf_p.pages, start=1):
+                        for t_idx, table in enumerate(page.extract_tables() or []):
+                            rows = [[str(cell or "").strip() for cell in row] for row in table]
+                            txt = _table_to_text(rows)
+                            md = _table_to_markdown(rows)
+                            if not txt:
+                                continue
+                            combined = self._sanitize(f"{txt}\n\n{md}", surface="pdf_table_ingest")
+                            combined = self._scrub_pii(combined, surface="pdf_table_ingest")
+                            if combined:
+                                extracts.append(RawExtract(
+                                    text=combined,
+                                    extract_type="table_row",
+                                    page=i,
+                                    raw_source_ref=f"pdf:{path.name}|page:{i}|table:{t_idx}",
+                                    extra={"markdown": md, "table_index": t_idx},
+                                ))
+
+                    # Outline/bookmarks
+                    try:
+                        outline = getattr(pdf_p, "outline", None)
+                        if outline:
+                            outline_text = self._sanitize(str(outline)[:2000], surface="pdf_outline_ingest")
+                            outline_text = self._scrub_pii(outline_text, surface="pdf_outline_ingest")
+                            if outline_text:
+                                extracts.append(RawExtract(
+                                    text=f"[OUTLINE]\n{outline_text}",
+                                    extract_type="heading",
+                                    raw_source_ref=f"pdf:{path.name}|outline",
+                                    extra={"is_outline": True},
+                                ))
+                    except Exception:
+                        pass
+            except Exception as exc:
+                logger.warning("pdf_table_extraction_failed", error=str(exc))
+
+            if not extracts:
+                raise ValueError("NO_EXTRACTS_PRODUCED")
+
+            _EXTRACTS_TOTAL.inc(len(extracts))
+            logger.info(event="extraction_complete", modality="pdf", file=str(path), extracts=len(extracts))
+            return extracts
+        except Exception as _exc:
+            _EXTRACT_ERRORS.inc()
+            logger.error(event="extraction_failed", modality="pdf", source=source, error=str(_exc))
+            raise
 
 
 # ─── Backward-compat ingest() — full pipeline ─────────────────────────────────

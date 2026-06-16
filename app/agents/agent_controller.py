@@ -82,6 +82,15 @@ def _guard_input(query: str, session_id: str = "", correlation_id: str = "") -> 
     return guarded.text
 
 
+def _sanitize(text: str, surface: str = "agent_controller") -> str:
+    """Non-blocking sanitization — strips injection patterns, never raises.
+    Backward-compatible alias used by unit tests and legacy callers."""
+    try:
+        from app.guardrails.input_guard import sanitize as _ig_sanitize
+        return _ig_sanitize(text, surface=surface)
+    except Exception:
+        return text
+
 # OUTPUT GUARD — scrubs template artifacts, PII, fabricated citations before return
 
 def _guard_output(response: str, session_id: str = "", correlation_id: str = "") -> str:
@@ -210,8 +219,9 @@ class AgentExecutor:
 class AgentController:
 
     def __init__(self) -> None:
-        self.executor = AgentExecutor()
-        self.timeout  = max(settings.AGENT_TIMEOUT_SEC, 1)
+        self.executor     = AgentExecutor()
+        self.timeout      = max(settings.AGENT_TIMEOUT_SEC, 1)
+        self.token_budget = settings.AGENT_TOKEN_BUDGET
 
         if settings.AGENT_TIMEOUT_SEC <= 0:
             logger.warning(
@@ -227,7 +237,7 @@ class AgentController:
 
     # MAIN SYNC HANDLE
 
-    def handle(self, query: str, session_id: str) -> Dict[str, Any]:
+    def handle(self, query: str, session_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
 
         if not query or not query.strip():
             return self._reject("empty_query")
@@ -290,6 +300,17 @@ class AgentController:
                 t_agent       = time.time()
                 result        = self._execute_with_timeout(query, session_id)
                 agent_latency = round(time.time() - t_agent, 3)
+
+                # TOKEN BUDGET — third required bound alongside max_steps + timeout
+                tokens_used = (
+                    result.get("tokens_consumed", 0)
+                    or result.get("total_tokens", 0)
+                    or result.get("usage", {}).get("total_tokens", 0)
+                )
+                if tokens_used >= self.token_budget:
+                    raise RuntimeError(
+                        f"AGENT_TOKEN_BUDGET_EXCEEDED: used {tokens_used} >= budget {self.token_budget}"
+                    )
 
                 if not self._validate(result):
                     raise ValueError("INVALID_AGENT_OUTPUT")
@@ -494,11 +515,12 @@ class AgentController:
         self,
         query: str,
         session_id: str,
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
 
         async with _get_semaphore():
             return await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: self.handle(query, session_id),
+                lambda: self.handle(query, session_id, user_id=user_id),
             )
 

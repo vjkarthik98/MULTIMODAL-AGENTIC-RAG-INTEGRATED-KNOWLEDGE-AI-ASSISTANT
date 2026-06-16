@@ -1,6 +1,6 @@
 import pytest
 
-from app.ingestion.text_repair import (
+from app.ingestion.txt_ingest import (
     detect_error_markers,
     extract_version,
     has_title_mismatch,

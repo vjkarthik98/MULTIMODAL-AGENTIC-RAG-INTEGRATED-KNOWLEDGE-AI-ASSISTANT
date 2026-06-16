@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # APP/MAIN.PY — MAGIK FINANCE RAG v1.0
 # FASTAPI APPLICATION ENTRY POINT — WIRES EVERYTHING TOGETHER
 # SECTION 4.6 — LIFESPAN, MIDDLEWARE, OTEL, PROMETHEUS, CORS, RATE LIMIT
@@ -11,8 +13,6 @@ _os.environ["TRANSFORMERS_CACHE"]   = _hf_home + "/hub"
 _os.environ["HF_DATASETS_CACHE"]    = _hf_home + "/datasets"
 _os.environ["HF_HUB_CACHE"]        = _hf_home + "/hub"
 # ────────────────────────────────────────────────────────────────────────────
-
-from __future__ import annotations
 
 import asyncio
 import time
@@ -102,7 +102,7 @@ async def _init_qdrant_async() -> None:
 
 
 def _init_qdrant_sync() -> None:
-    from app.bin.ops.init_qdrant import initialize_qdrant
+    from app.vectorstore.qdrant_store import initialize_qdrant
     initialize_qdrant()
 
 
@@ -226,9 +226,12 @@ async def lifespan(app: FastAPI):
     _setup_otel()
     _setup_prometheus()
 
+    # Auth config check — fail fast if AUTH_ENABLED=False in production
+    from app.core.startup_validator import validate_auth_config, validate_model_manifest
+    validate_auth_config()
+
     # Model manifest check — fail fast if required models are not cached
     try:
-        from app.core.startup_validator import validate_model_manifest
         validate_model_manifest()
     except RuntimeError as exc:
         logger.critical(event="model_manifest_invalid", error=str(exc))

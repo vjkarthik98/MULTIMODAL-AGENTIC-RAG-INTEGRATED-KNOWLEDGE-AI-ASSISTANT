@@ -144,13 +144,13 @@ observability = [
 
 [project.scripts]
 start-api       = "uvicorn app.main:app --reload"
-init-qdrant     = "scripts.init_qdrant:initialize_qdrant"
-download-model  = "scripts.download_model:download_model"
+init-qdrant     = "app.vectorstore.qdrant_store:initialize_qdrant"
+download-model  = "app.bin.models.download_all_models:main"
 
 
 [tool.setuptools.packages.find]
 where   = ["."]
-include = ["app*", "scripts*"]
+include = ["app*"]
 exclude = ["tests*", "notebooks*"]
 
 
@@ -189,7 +189,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**"   = ["S101", "T201", "B011"]
-"scripts/**" = ["T201"]
+"app/bin/**" = ["T201"]
 
 
 # ISORT
@@ -263,7 +263,7 @@ source  = ["app"]
 omit    = [
     "app/core/config.py",
     "tests/*",
-    "scripts/*",
+    "app/bin/*",
 ]
 
 [tool.coverage.report]

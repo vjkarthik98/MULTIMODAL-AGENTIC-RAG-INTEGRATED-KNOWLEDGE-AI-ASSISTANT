@@ -36,7 +36,7 @@ def _check_server(base_url: str) -> bool:
     """Return True if the server health endpoint responds."""
     try:
         import requests
-        r = requests.get(f"{base_url}/health", timeout=5)
+        r = requests.get(f"{base_url}/rag/health", timeout=5)
         return r.status_code < 500
     except Exception:
         return False

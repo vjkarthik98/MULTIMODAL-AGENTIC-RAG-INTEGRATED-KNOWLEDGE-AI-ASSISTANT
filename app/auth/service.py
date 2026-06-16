@@ -12,7 +12,14 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # Argon2 first, bcrypt as fallback — OWASP recommended
-_pwd_ctx = CryptContext(schemes=["argon2", "bcrypt"], deprecated="auto")
+# Explicit parameters per OWASP: time_cost=3, memory_cost=64MB, parallelism=2
+_pwd_ctx = CryptContext(
+    schemes=["argon2", "bcrypt"],
+    deprecated="auto",
+    argon2__time_cost=3,
+    argon2__memory_cost=65536,
+    argon2__parallelism=2,
+)
 
 
 def _hash_password(plain: str) -> str:

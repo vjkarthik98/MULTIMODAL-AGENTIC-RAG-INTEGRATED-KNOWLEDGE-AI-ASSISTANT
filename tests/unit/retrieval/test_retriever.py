@@ -4,7 +4,7 @@ Retriever class requires live Qdrant/BM25 and is not tested here.
 """
 import pytest
 
-from app.retrieval.retriever import (
+from app.retrieval.hybrid_retriever import (
     _hash,
     _mmr,
     _normalize,

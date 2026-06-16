@@ -45,18 +45,24 @@ def test_gdpr_delete_me_with_valid_token_returns_200(client, valid_token):
         assert r.status_code == 200
         data = r.json()
         assert data["status"] == "ok"
-        assert "purged" in data["message"].lower()
+        assert "deleted" in data["message"].lower()
 
 
 def test_gdpr_delete_me_calls_memory_purge(client, registered_user_a, valid_token):
-    """gdpr_purge must be called with the authenticated user's user_id."""
+    """Redis purge_user must be called with the authenticated user's user_id."""
     purge_calls = []
-    original_purge = None
 
-    def fake_purge(self, user_id):
-        purge_calls.append(user_id)
+    mock_redis_mem = MagicMock()
+    mock_redis_mem.purge_user = lambda uid: purge_calls.append(uid)
 
-    with patch("app.memory.memory_manager.MemoryManager.gdpr_purge", fake_purge), \
+    # Patch token_blacklist's _redis() so JWT verification uses a clean stub
+    # (prevents MagicMock.__int__=1 from being mistaken as current_gen=1)
+    mock_bl_redis = MagicMock()
+    mock_bl_redis.get.return_value = None   # TOKEN_GEN key absent → gen=0
+    mock_bl_redis.exists.return_value = 0   # no revoked JTIs
+
+    with patch("app.auth.token_blacklist._redis", return_value=mock_bl_redis), \
+         patch("app.core.infra_registry.infra.get_memory", return_value=mock_redis_mem), \
          patch("app.core.infra_registry.InfraRegistry.get_bm25", return_value=None):
         r = client.delete("/auth/me", headers=_auth_header(valid_token))
         assert r.status_code == 200
@@ -72,5 +78,4 @@ def test_gdpr_delete_me_deactivates_account(client, registered_user_a, valid_tok
         assert r.status_code == 200
 
     doc = mock_mongo_col.find_one({"user_id": registered_user_a.user_id})
-    assert doc is not None
-    assert doc.get("is_active") is False
+    assert doc is None  # GDPR hard-deletes the user document

@@ -763,8 +763,9 @@ class IngestionPipeline:
             progress.emit("chunk", "started")
             t_chunk = time.time()
 
-            from app.chunking.base_chunker import chunk_documents
-            chunks = chunk_documents(docs)
+            # docs from route_ingestion_sync are already per-modality chunked;
+            # use them directly to avoid the legacy re-splitter bypass.
+            chunks = list(docs)
             chunks = _valid_chunks(chunks)
 
             if not chunks:
@@ -805,10 +806,10 @@ class IngestionPipeline:
             progress.emit("embed", "started")
             t_embed = time.time()
 
-            from app.core.model_loader import model_loader
+            from app.embeddings import get_embedder as _get_embedder_for_modality
 
             text_chunks, vision_chunks = _split_by_modality(chunks)
-            embedder = model_loader.get_embedder() if text_chunks else None
+            embedder = _get_embedder_for_modality(modality) if text_chunks else None
 
             micro = getattr(settings, "INGESTION_MICRO_BATCH", 1)
 

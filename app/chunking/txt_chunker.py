@@ -6,14 +6,27 @@ from typing import List, Optional
 
 from app.chunking.base_chunker import BaseChunker
 from app.chunking.finance_numbers import (
+    approx_tokens,
     deterministic_chunk_id,
     extract_finance_entities,
 )
 from app.core.config import settings
 from app.ingestion.schema import IngestedDocument, RawExtract, UniversalMetadata
-from app.utils.logger import get_logger
+from app.utils.logger import get_logger, modality_var
+
+import time
+from prometheus_client import Counter, Histogram
 
 logger = get_logger(__name__)
+
+_CHUNKS_TOTAL = Counter(
+    "magik_txt_chunks_total",
+    "Total chunks produced by txt chunker",
+)
+_CHUNK_ERRORS = Counter(
+    "magik_txt_chunk_errors_total",
+    "Total errors in txt chunker",
+)
 
 _SPEAKER_TURN_RE = re.compile(r"^[A-Z][A-Z &\-]{2,40}:\s", re.MULTILINE)
 _ALL_CAPS_HEADING = re.compile(r"^[A-Z][A-Z\s&/,()]{4,}$")
@@ -69,99 +82,117 @@ class TxtChunker(BaseChunker):
     ) -> List[IngestedDocument]:
         source = Path(meta.source_path).name or "unknown.txt"
         surface = "txt_chunker"
+        modality_var.set("txt")
+        _t0 = time.time()
         logger.info(event="chunking_start", modality="txt", source=source, extracts=len(extracts))
         if not extracts:
             logger.warning(event="no_extracts_received", modality="txt", source=source)
             return []
-        is_transcript_file = _is_transcript(extracts)
+        try:
+            is_transcript_file = _is_transcript(extracts)
 
-        docs: List[IngestedDocument] = []
-        chunk_idx = 0
-        current_section: Optional[str] = None
-        seen_hashes: set = set()
-        char_offset = 0  # running character offset across all extract text
-        paragraph_number = 0  # counter reset per section (MD Phase 1.1)
-        last_section_for_para_counter: Optional[str] = None
+            docs: List[IngestedDocument] = []
+            chunk_idx = 0
+            current_section: Optional[str] = None
+            seen_hashes: set = set()
+            char_offset = 0  # running character offset across all extract text
+            paragraph_number = 0  # counter reset per section (MD Phase 1.1)
+            last_section_for_para_counter: Optional[str] = None
 
-        for extract in extracts:
-            text = (extract.text or "").strip()
-            if not text:
-                continue
-
-            extract_char_start = char_offset
-
-            if extract.extract_type == "speaker_turn":
-                pieces = [text]
-                chunk_type = "speaker_turn"
-            else:
-                title = _detect_section_title(text)
-                if title:
-                    current_section = title
-
-                chunk_type = _detect_chunk_type(text)
-                pieces = self._split_text(text) if chunk_type != "speaker_turn" else [text]
-
-            piece_offset = extract_char_start
-            for piece in pieces:
-                if not piece.strip():
-                    piece_offset += len(piece) + 1
+            for extract in extracts:
+                text = (extract.text or "").strip()
+                if not text:
                     continue
-                h = hash(piece)
-                if h in seen_hashes:
-                    piece_offset += len(piece) + 1
-                    continue
-                seen_hashes.add(h)
 
-                char_start = piece_offset
-                char_end = piece_offset + len(piece)
+                extract_char_start = char_offset
 
-                # Reset paragraph counter when section changes
-                if current_section != last_section_for_para_counter:
-                    paragraph_number = 0
-                    last_section_for_para_counter = current_section
-                if chunk_type == "paragraph":
-                    paragraph_number += 1
+                if extract.extract_type == "speaker_turn":
+                    chunk_type = "speaker_turn"
+                    if approx_tokens(text) <= settings.CHUNK_TARGET_TOKENS:
+                        pieces = [text]
+                    else:
+                        pieces = self._split_text(text)
+                else:
+                    title = _detect_section_title(text)
+                    if title:
+                        current_section = title
 
-                speaker = extract.speaker_label or _extract_speaker(piece)
-                fin_entities = extract_finance_entities(piece)
-                chunk_hash = deterministic_chunk_id(source, extract.raw_source_ref or "txt", chunk_idx)
+                    chunk_type = _detect_chunk_type(text)
+                    pieces = self._split_text(text) if chunk_type != "speaker_turn" else [text]
 
-                structure = {
-                    "chunk_hash_id":    chunk_hash,
-                    "source_file":      source,
-                    "chunk_index":      chunk_idx,
-                    "paragraph_number": paragraph_number,
-                    "char_start":       char_start,
-                    "char_end":         char_end,
-                    "section_title":    current_section,
-                    "speaker":          speaker,
-                    "is_transcript":    is_transcript_file,
-                    "chunk_type":       chunk_type,
-                    "finance_entities": fin_entities,
-                }
+                piece_offset = extract_char_start
+                for piece in pieces:
+                    if not piece.strip():
+                        piece_offset += len(piece) + 1
+                        continue
+                    h = hash(piece)
+                    if h in seen_hashes:
+                        piece_offset += len(piece) + 1
+                        continue
+                    seen_hashes.add(h)
 
-                piece_offset = char_end + 1
+                    char_start = piece_offset
+                    char_end = piece_offset + len(piece)
 
-                subtype = "speaker_turn" if chunk_type == "speaker_turn" else (
-                    "heading" if chunk_type == "section" else "paragraph"
-                )
+                    # Reset paragraph counter when section changes
+                    if current_section != last_section_for_para_counter:
+                        paragraph_number = 0
+                        last_section_for_para_counter = current_section
+                    if chunk_type == "paragraph":
+                        paragraph_number += 1
 
-                doc = self._make_doc(
-                    text=piece,
-                    modality="txt",
-                    subtype=subtype,
-                    source=source,
-                    page=None,
-                    chunk_idx=chunk_idx,
-                    structure=structure,
-                    meta=meta,
-                    surface=surface,
-                )
-                if doc:
-                    docs.append(doc)
-                    chunk_idx += 1
+                    speaker = extract.speaker_label or _extract_speaker(piece)
+                    fin_entities = extract_finance_entities(piece)
+                    chunk_hash = deterministic_chunk_id(source, extract.raw_source_ref or "txt", chunk_idx)
 
-            char_offset += len(text) + 1  # +1 for separator between extracts
+                    structure = {
+                        "chunk_hash_id":    chunk_hash,
+                        "source_file":      source,
+                        "chunk_index":      chunk_idx,
+                        "paragraph_number": paragraph_number,
+                        "char_start":       char_start,
+                        "char_end":         char_end,
+                        "section_title":    current_section,
+                        "speaker":          speaker,
+                        "is_transcript":    is_transcript_file,
+                        "chunk_type":       chunk_type,
+                        "finance_entities": fin_entities,
+                    }
 
-        logger.info(event="txt_chunking_done", source=source, chunks=len(docs))
-        return docs
+                    piece_offset = char_end + 1
+
+                    subtype = "speaker_turn" if chunk_type == "speaker_turn" else (
+                        "heading" if chunk_type == "section" else "paragraph"
+                    )
+
+                    doc = self._make_doc(
+                        text=piece,
+                        modality="txt",
+                        subtype=subtype,
+                        source=source,
+                        page=None,
+                        chunk_idx=chunk_idx,
+                        structure=structure,
+                        meta=meta,
+                        surface=surface,
+                    )
+                    if doc:
+                        docs.append(doc)
+                        chunk_idx += 1
+
+                char_offset += len(text) + 1  # +1 for separator between extracts
+
+            logger.info(event="txt_chunking_done", source=source, chunks=len(docs))
+            _CHUNKS_TOTAL.inc(len(docs))
+            return docs
+        except Exception as _exc:
+            _CHUNK_ERRORS.inc()
+            logger.error(event="chunking_failed", modality="txt", source=source, error=str(_exc))
+            raise
+
+    def health_check(self) -> dict:
+        return {
+            "modality": "txt",
+            "status": "ok",
+            "class": self.__class__.__name__,
+        }

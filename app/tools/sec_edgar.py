@@ -18,6 +18,12 @@ from urllib.parse import urlencode
 import httpx
 import structlog
 
+try:
+    from app.guardrails.input_guard import sanitize as _guard_sanitize
+    _EDGAR_GUARD_AVAILABLE = True
+except Exception:
+    _EDGAR_GUARD_AVAILABLE = False
+
 logger = structlog.get_logger(__name__)
 
 _EDGAR_EFTS_BASE = "https://efts.sec.gov/LATEST/search-index?q={q}&dateRange=custom&startdt={start}&enddt={end}&forms={forms}&hits.hits.total.value=true&hits.hits._source.period_of_report=true&hits.hits._source.entity_name=true&hits.hits._source.file_date=true&hits.hits._source.form_type=true&hits.hits._source.accession_no=true"
@@ -70,15 +76,23 @@ def _parse_hits(hits: List[Dict]) -> List[EdgarResult]:
         else:
             doc_url = "https://www.sec.gov/cgi-bin/browse-edgar"
 
+        raw_company = src.get("entity_name", "")
+        raw_snippet = (h.get("highlight", {}).get("file_date", [""])[0] or
+                       src.get("period_of_report", ""))
+        if _EDGAR_GUARD_AVAILABLE:
+            try:
+                raw_company = _guard_sanitize(raw_company, surface="sec_edgar_ingest")
+                raw_snippet = _guard_sanitize(raw_snippet, surface="sec_edgar_ingest")
+            except Exception:
+                pass
         results.append(EdgarResult(
             accession_number = src.get("accession_no", ""),
             filing_date      = src.get("file_date", ""),
-            company_name     = src.get("entity_name", ""),
+            company_name     = raw_company,
             cik              = cik,
             form_type        = src.get("form_type", ""),
             document_url     = doc_url,
-            snippet          = (h.get("highlight", {}).get("file_date", [""])[0] or
-                                src.get("period_of_report", "")),
+            snippet          = raw_snippet,
         ))
     return results
 

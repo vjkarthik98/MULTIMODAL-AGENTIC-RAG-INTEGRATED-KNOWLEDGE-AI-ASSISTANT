@@ -21,7 +21,6 @@ from app.ingestion.schema import (
     Modality,
     normalize_text,
     redact_pii,
-    sanitize_prompt_injection,
 )
 from app.utils.logger import get_logger
 
@@ -675,6 +674,12 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
         # ID3 METADATA
         id3_meta = _extract_id3(file_path)
+        # Sanitize id3 metadata text fields (untrusted data from audio file tags)
+        try:
+            from app.guardrails.input_guard import sanitize as _gs
+            id3_meta = {k: _gs(str(v), surface="audio_id3_ingest") for k, v in id3_meta.items()}
+        except Exception:
+            pass
 
         # NOISE CLASSIFICATION
         noise_class = _classify_noise(file_path)
@@ -829,13 +834,21 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 try:
                     from app.guardrails.input_guard import sanitize as _gs
                     text = _gs(_text_norm, surface="audio_ingest")
-                except Exception:
-                    text = sanitize_prompt_injection(_text_norm)
+                except Exception as e:
+                    logger.warning(event="sanitize_failed", surface="audio_ingest", error=str(e))
+                    text = _text_norm
 
             if not text or len(text.strip()) < 2:
                 continue
 
             speaker = _get_speaker(seg_start, seg_end, speaker_map)
+            # Sanitize speaker name (diarization model output is untrusted)
+            if speaker:
+                try:
+                    from app.guardrails.input_guard import sanitize as _gs
+                    speaker = _gs(speaker, surface="audio_speaker_ingest")
+                except Exception:
+                    pass
             speaker_role   = _infer_speaker_role(speaker)
             finance_ents   = _extract_finance_entities(text) if not inaudible else {}
             current_call_section = _detect_call_section(text, current_call_section)
@@ -969,6 +982,10 @@ async def async_ingest(file_path: str, session_id: str) -> List[IngestedDocument
 
 from app.ingestion.base_ingest import BaseIngestor
 from app.ingestion.schema import RawExtract, UniversalMetadata
+from prometheus_client import Counter
+
+_EXTRACTS_TOTAL = Counter("magik_audio_extracts_total", "Total extracts produced by audio ingestor")
+_EXTRACT_ERRORS = Counter("magik_audio_extract_errors_total", "Errors in audio ingestor")
 
 
 class AudioIngestor(BaseIngestor):
@@ -978,78 +995,91 @@ class AudioIngestor(BaseIngestor):
     Does NOT transcribe or diarize. The chunker (Phase 2) runs Whisper + pyannote.
     """
 
+    def health_check(self) -> dict:
+        return {
+            "modality": "audio",
+            "status": "ok",
+            "class": self.__class__.__name__,
+        }
+
     async def extract(
         self,
         path: Path,
         metadata: UniversalMetadata,
     ) -> List[RawExtract]:
+        source = path.name
         suffix = path.suffix.lower()
         logger.info(event="extraction_start", modality="audio", file=str(path), size=path.stat().st_size)
-
-        if suffix not in SUPPORTED_AUDIO_FORMATS:
-            raise UnsupportedMimeError(f"UNSUPPORTED_AUDIO_FORMAT: {suffix}")
-
-        file_size = path.stat().st_size
-        if file_size == 0:
-            raise EmptyFileError(str(path))
-        if file_size > settings.MAX_FILE_SIZE_AUDIO:
-            raise FileTooLargeError(f"FILE_TOO_LARGE: {file_size}")
-
-        _check_disk_space(path)
-
-        # DRM / encryption check (can't process DRM audio)
         try:
-            from pydub import AudioSegment
-            audio = AudioSegment.from_file(str(path))
-            duration_s = len(audio) / 1000.0
-        except Exception as exc:
-            if "DRM" in str(exc).upper() or "encrypted" in str(exc).lower():
-                raise ValueError(f"DRM_PROTECTED_AUDIO: {path.name}")
-            # Try ffmpeg repair path
+            if suffix not in SUPPORTED_AUDIO_FORMATS:
+                raise UnsupportedMimeError(f"UNSUPPORTED_AUDIO_FORMAT: {suffix}")
+
+            file_size = path.stat().st_size
+            if file_size == 0:
+                raise EmptyFileError(str(path))
+            if file_size > settings.MAX_FILE_SIZE_AUDIO:
+                raise FileTooLargeError(f"FILE_TOO_LARGE: {file_size}")
+
+            _check_disk_space(path)
+
+            # DRM / encryption check (can't process DRM audio)
             try:
-                import subprocess
-                import tempfile
-                tmp = tempfile.mktemp(suffix=".wav")
-                subprocess.run(
-                    ["ffmpeg", "-y", "-i", str(path), "-ar", "16000", "-ac", "1", tmp],
-                    capture_output=True, timeout=120,
-                )
-                if not Path(tmp).exists() or Path(tmp).stat().st_size == 0:
-                    raise ValueError(f"AUDIO_REPAIR_FAILED: {path.name}")
                 from pydub import AudioSegment
-                audio = AudioSegment.from_wav(tmp)
+                audio = AudioSegment.from_file(str(path))
                 duration_s = len(audio) / 1000.0
-            except Exception as repair_exc:
-                raise ValueError(f"AUDIO_LOAD_FAILED: {repair_exc}")
+            except Exception as exc:
+                if "DRM" in str(exc).upper() or "encrypted" in str(exc).lower():
+                    raise ValueError(f"DRM_PROTECTED_AUDIO: {path.name}")
+                # Try ffmpeg repair path
+                try:
+                    import subprocess
+                    import tempfile
+                    tmp = tempfile.mktemp(suffix=".wav")
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-i", str(path), "-ar", "16000", "-ac", "1", tmp],
+                        capture_output=True, timeout=120,
+                    )
+                    if not Path(tmp).exists() or Path(tmp).stat().st_size == 0:
+                        raise ValueError(f"AUDIO_REPAIR_FAILED: {path.name}")
+                    from pydub import AudioSegment
+                    audio = AudioSegment.from_wav(tmp)
+                    duration_s = len(audio) / 1000.0
+                except Exception as repair_exc:
+                    raise ValueError(f"AUDIO_LOAD_FAILED: {repair_exc}")
 
-        if duration_s < 0.5:
-            raise ValueError(f"AUDIO_TOO_SHORT: {duration_s:.2f}s")
-        if duration_s > settings.MAX_AUDIO_DURATION_SECONDS:
-            raise ValueError(f"AUDIO_TOO_LONG: {duration_s:.0f}s")
+            if duration_s < 0.5:
+                raise ValueError(f"AUDIO_TOO_SHORT: {duration_s:.2f}s")
+            if duration_s > settings.MAX_AUDIO_DURATION_SECONDS:
+                raise ValueError(f"AUDIO_TOO_LONG: {duration_s:.0f}s")
 
-        # Export as 16kHz mono WAV bytes for chunker
-        import io as _io
-        wav_buf = _io.BytesIO()
-        audio.set_frame_rate(16000).set_channels(1).export(wav_buf, format="wav")
-        audio_bytes = wav_buf.getvalue()
+            # Export as 16kHz mono WAV bytes for chunker
+            import io as _io
+            wav_buf = _io.BytesIO()
+            audio.set_frame_rate(16000).set_channels(1).export(wav_buf, format="wav")
+            audio_bytes = wav_buf.getvalue()
 
-        logger.info(event="extraction_complete", modality="audio", file=str(path), extracts=1)
-        return [
-            RawExtract(
-                text="",
-                extract_type="audio_raw",
-                timestamp_start=0.0,
-                timestamp_end=duration_s,
-                raw_source_ref=f"audio:{path.name}",
-                raw_bytes=audio_bytes,
-                extra={
-                    "duration_seconds": duration_s,
-                    "file_size": file_size,
-                    "format": suffix.lstrip("."),
-                    "sample_rate": 16000,
-                    "channels": 1,
-                },
-            )
-        ]
+            _EXTRACTS_TOTAL.inc(1)
+            logger.info(event="extraction_complete", modality="audio", file=str(path), extracts=1)
+            return [
+                RawExtract(
+                    text="",
+                    extract_type="audio_raw",
+                    timestamp_start=0.0,
+                    timestamp_end=duration_s,
+                    raw_source_ref=f"audio:{path.name}",
+                    raw_bytes=audio_bytes,
+                    extra={
+                        "duration_seconds": duration_s,
+                        "file_size": file_size,
+                        "format": suffix.lstrip("."),
+                        "sample_rate": 16000,
+                        "channels": 1,
+                    },
+                )
+            ]
+        except Exception as _exc:
+            _EXTRACT_ERRORS.inc()
+            logger.error(event="extraction_failed", modality="audio", source=source, error=str(_exc))
+            raise
 
 

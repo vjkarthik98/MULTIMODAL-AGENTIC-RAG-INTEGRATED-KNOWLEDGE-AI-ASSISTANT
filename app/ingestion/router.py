@@ -33,6 +33,7 @@ from app.ingestion.video_ingest import VideoIngestor
 from app.ingestion.xlsx_ingest import ingest as excel_ingest
 from app.ingestion.xlsx_ingest import XlsxIngestor
 from app.utils.logger import get_logger
+from app.guardrails.exceptions import GuardrailBlocked
 
 logger = get_logger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -279,7 +280,11 @@ def _clamav_scan(path: Path) -> None:
             status = result.get(str(path), ("OK", ""))[0]
             if status == "FOUND":
                 virus = result[str(path)][1]
-                raise ValueError(f"MALWARE_DETECTED: {virus} in {path.name}")
+                raise GuardrailBlocked(
+                    reason=f"MALWARE_DETECTED: {virus} in {path.name}",
+                    surface="ingestion",
+                    guard_type="malware",
+                )
     except ValueError:
         raise
     except Exception as exc:

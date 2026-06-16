@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import math
 import re
@@ -12,6 +13,27 @@ from app.core.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+try:
+    from prometheus_client import Counter, Histogram
+    _retrieval_duration = Histogram(
+        "retrieval_latency_seconds",
+        "Retrieval latency",
+        ["retriever_type"],
+    )
+    _retrieval_results = Histogram(
+        "retrieval_results_count",
+        "Number of results returned per retrieval",
+        ["retriever_type"],
+    )
+    _retrieval_errors = Counter(
+        "retrieval_errors_total",
+        "Retrieval errors",
+        ["retriever_type", "error_type"],
+    )
+    _PROM_AVAILABLE = True
+except Exception:
+    _PROM_AVAILABLE = False
 
 try:
     import pybreaker
@@ -137,6 +159,16 @@ _MULTI_SOURCE_BOOST: float = 1.15
 
 # RRF CONSTANT
 _RRF_K: int = settings.HYBRID_RRF_K
+
+# FINANCIAL TABLE BOOST — regex patterns hoisted to module level for performance
+_pipe_re      = re.compile(r'\d[\d,]+\s*\||\|\s*\$?\s*\d[\d,]+')
+_narrative_re = re.compile(
+    r'(?:net sales|revenue|income|earnings)\s+(?:decreased|increased|declined|grew)'
+    r'.*?(?:\d+(?:\.\d+)?\s*%|\$\s*\d)',
+    re.IGNORECASE,
+)
+_rounded_re   = re.compile(r'\$\s*\d+\.\d+\s*billion', re.IGNORECASE)
+_exact_re     = re.compile(r'\b\d{2,3},\d{3}\b')
 
 
 class HybridRetriever:
@@ -708,33 +740,49 @@ class HybridRetriever:
                 if "average" in _financial_q_lower or "avg" in _financial_q_lower:
                     _fin_bm25_variants.append("COMPUTED SUMMARY avg 4283.73 2023 trading_days")
 
-            for variant in _expand_query_heuristic(query) + _fin_bm25_variants:
-                variant_res = self._bm25_search(variant, candidate_k, session_id, filters, user_id)
-                for r in variant_res:
-                    meta = r.get("metadata") or {}
-                    key  = self._hash(r.get("text", ""), meta)
-                    if key in seen_bm25_keys:
-                        continue
-                    seen_bm25_keys.add(key)
-                    bm25_res.append(r)
+            # PARALLEL SEARCH — BM25 variant loop, dense vector, and vision run
+            # concurrently via ThreadPoolExecutor (all are sync/CPU+IO bound).
 
-            # VECTOR TEXT SEARCH
-            vec_res: List[Dict] = []
-            if q_vec:
-                vec_res = self._vector_search_text(q_vec, candidate_k, session_id, user_id)
+            def _run_bm25_lanes() -> List[Dict]:
+                _res: List[Dict] = []
+                _seen: set = set()
+                for variant in _expand_query_heuristic(query) + _fin_bm25_variants:
+                    variant_res = self._bm25_search(variant, candidate_k, session_id, filters, user_id)
+                    for r in variant_res:
+                        _meta = r.get("metadata") or {}
+                        _key  = self._hash(r.get("text", ""), _meta)
+                        if _key in _seen:
+                            continue
+                        _seen.add(_key)
+                        _res.append(r)
+                return _res
 
-            # VISION SEARCH — only when vision_collection has indexed points.
-            vis_res: List[Dict] = []
-            if self.vector_store.has_vision_data():
+            def _run_vec_lane() -> List[Dict]:
+                if q_vec:
+                    return self._vector_search_text(q_vec, candidate_k, session_id, user_id)
+                return []
+
+            def _run_vis_lane() -> List[Dict]:
+                if not self.vector_store.has_vision_data():
+                    return []
                 try:
                     v_vec = self._embed_vision_cached(query, session_id=session_id)
-                    vis_res = self._vector_search_vision(v_vec, candidate_k, session_id, user_id)
+                    return self._vector_search_vision(v_vec, candidate_k, session_id, user_id)
                 except Exception as exc:
                     logger.warning(
                         event="vision_search_skipped",
                         error=str(exc),
                         session_id=session_id,
                     )
+                    return []
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as _ex:
+                _f_bm25 = _ex.submit(_run_bm25_lanes)
+                _f_vec  = _ex.submit(_run_vec_lane)
+                _f_vis  = _ex.submit(_run_vis_lane)
+                bm25_res = _f_bm25.result()
+                vec_res  = _f_vec.result()
+                vis_res  = _f_vis.result()
 
             # EARLY EXIT IF ALL EMPTY (text + vision)
             if not bm25_res and not vec_res and not vis_res:
@@ -906,22 +954,7 @@ class HybridRetriever:
                            "highest value", "average", "percentage change")
             )
             if _is_financial_q:
-                _pipe_re = re.compile(r'\d[\d,]+\s*\||\|\s*\$?\s*\d[\d,]+')
-                # Pattern: explicit narrative financial statements like
-                # "Mac net sales decreased 27% or $10.8 billion" — these are
-                # just as authoritative as pipe-table rows but score lower in
-                # dense retrieval because they contain no pipe characters.
-                _narrative_re = re.compile(
-                    r'(?:net sales|revenue|income|earnings)\s+(?:decreased|increased|declined|grew)'
-                    r'.*?(?:\d+(?:\.\d+)?\s*%|\$\s*\d)',
-                    re.IGNORECASE,
-                )
-                # Pattern: rounded-billion summaries ("$383.3 billion", "$97.0 billion")
-                # with NO exact table figures. These are narrative summaries that are
-                # LESS precise than the underlying table data — demote them so the
-                # LLM sees exact millions (383,285) rather than rounded billions.
-                _rounded_re = re.compile(r'\$\s*\d+\.\d+\s*billion', re.IGNORECASE)
-                _exact_re = re.compile(r'\b\d{2,3},\d{3}\b')
+                # (_pipe_re, _narrative_re, _rounded_re, _exact_re are module-level constants)
                 for r in fused:
                     _txt = r.get("text", "") or ""
                     if "[COMPUTED SUMMARY" in _txt:
@@ -974,6 +1007,10 @@ class HybridRetriever:
                     session_id=session_id,
                 )
 
+            if _PROM_AVAILABLE:
+                _retrieval_duration.labels(retriever_type="hybrid").observe(latency)
+                _retrieval_results.labels(retriever_type="hybrid").observe(len(final))
+
             logger.info(
                 event="hybrid_search_success",
                 results=len(final),
@@ -993,6 +1030,11 @@ class HybridRetriever:
             return final
 
         except Exception as exc:
+            if _PROM_AVAILABLE:
+                _retrieval_errors.labels(
+                    retriever_type="hybrid",
+                    error_type=type(exc).__name__,
+                ).inc()
             logger.error(
                 event="hybrid_search_failed",
                 error=str(exc),
@@ -1030,6 +1072,88 @@ class HybridRetriever:
                 "vision": self.w_vision,
             },
         }
+
+
+# ── Module-level pure-function shims (used by unit tests + legacy callers) ──
+
+def _normalize(text: str) -> str:
+    import unicodedata as _ud
+    q = _ud.normalize("NFC", str(text or ""))
+    return " ".join(q.strip().split())
+
+
+def _hash(text: str, meta: Dict) -> str:
+    base = f"{text[:200]}|{meta.get('doc_id', '')}|{meta.get('chunk_id', '')}"
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()
+
+
+def _valid_score(score: float) -> bool:
+    return isinstance(score, (int, float)) and not math.isnan(score) and not math.isinf(score)
+
+
+def _normalize_scores(results: List[Dict]) -> List[Dict]:
+    if not results:
+        return results
+    scores = [r.get("score", 0.0) for r in results]
+    min_s = min(scores)
+    max_s = max(scores)
+    spread = max_s - min_s
+    if spread > 1e-8:
+        for r in results:
+            r["score"] = (r.get("score", 0.0) - min_s) / spread
+    elif max_s > 1e-8:
+        for r in results:
+            r["score"] = 1.0
+    return results
+
+
+def _mmr(
+    results: List[Dict],
+    top_k: int,
+    lambda_param: float = 0.7,
+) -> List[Dict]:
+    if not results:
+        return []
+    selected: List[Dict] = []
+    candidates = list(results)
+
+    def _overlap(a: str, b: str) -> float:
+        sa = set(a.lower().split())
+        sb = set(b.lower().split())
+        if not sa or not sb:
+            return 0.0
+        return len(sa & sb) / len(sa | sb)
+
+    def _cos_sim(ea: List[float], eb: List[float]) -> float:
+        try:
+            dot = sum(x * y for x, y in zip(ea, eb))
+            na = math.sqrt(sum(x * x for x in ea))
+            nb = math.sqrt(sum(x * x for x in eb))
+            return dot / (na * nb + 1e-9)
+        except Exception:
+            return 0.0
+
+    while candidates and len(selected) < top_k:
+        best_idx = 0
+        best_score = float("-inf")
+        for i, candidate in enumerate(candidates):
+            relevance = candidate.get("score", 0.0)
+            if selected:
+                emb_c = candidate.get("embedding")
+                max_sim = max(
+                    _cos_sim(emb_c, s.get("embedding")) if emb_c and s.get("embedding")
+                    else _overlap(candidate.get("text", ""), s.get("text", ""))
+                    for s in selected
+                )
+            else:
+                max_sim = 0.0
+            mmr_score = lambda_param * relevance - (1.0 - lambda_param) * max_sim
+            if mmr_score > best_score:
+                best_score = mmr_score
+                best_idx = i
+        selected.append(candidates.pop(best_idx))
+
+    return selected
 
 
 

@@ -3,7 +3,21 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from prometheus_client import Counter
+
 from app.bm25.base_bm25 import BaseBM25
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+_BM25_INDEXED = Counter(
+    "magik_docx_bm25_indexed_total",
+    "Documents indexed in docx BM25",
+)
+_BM25_INDEX_ERRORS = Counter(
+    "magik_docx_bm25_index_errors_total",
+    "Errors in docx BM25 _build_indexed_text",
+)
 
 
 class DocxBM25(BaseBM25):
@@ -20,37 +34,52 @@ class DocxBM25(BaseBM25):
     modality = "docx"
 
     def _build_indexed_text(self, doc: Any) -> str:
-        s = getattr(doc, "structure", {}) or {}
-        parts: List[str] = list(self._base_text(doc))
+        try:
+            s = getattr(doc, "structure", {}) or {}
+            parts: List[str] = list(self._base_text(doc))
 
-        # Full heading hierarchy
-        hierarchy: List[str] = s.get("heading_hierarchy") or []
-        if hierarchy:
-            parts.append(" ".join(str(h) for h in hierarchy))
+            # Full heading hierarchy
+            hierarchy: List[str] = s.get("heading_hierarchy") or []
+            if hierarchy:
+                parts.append(" ".join(str(h) for h in hierarchy))
 
-        # Heading level token ("heading level 2" helps weight heading chunks)
-        heading_level = s.get("heading_level") or getattr(doc, "heading_level", None)
-        if heading_level is not None:
-            parts.append(f"heading level {heading_level}")
+            # Heading level token ("heading level 2" helps weight heading chunks)
+            heading_level = s.get("heading_level") or getattr(doc, "heading_level", None)
+            if heading_level is not None:
+                parts.append(f"heading level {heading_level}")
 
-        # Defined terms: "adjusted ebitda" → indexed as defined term for retrieval
-        defined_terms: Dict[str, str] = s.get("defined_terms") or {}
-        for term in list(defined_terms.keys())[:10]:
-            parts.append(str(term))
-            parts.append(str(term))  # amplify ×2 — defined terms are retrieval anchors
+            # Defined terms: "adjusted ebitda" → indexed as defined term for retrieval
+            defined_terms: Dict[str, str] = s.get("defined_terms") or {}
+            for term in list(defined_terms.keys())[:10]:
+                parts.append(str(term))
+                parts.append(str(term))  # amplify ×2 — defined terms are retrieval anchors
 
-        # Clause number indexing: "4.3.b.ii" → "section 4 3 b ii"
-        section_number = (s.get("section_number") or "").strip()
-        if section_number:
-            clause_tokens = "section " + section_number.replace(".", " ").replace("(", " ").replace(")", " ")
-            parts.append(clause_tokens)
+            # Clause number indexing: "4.3.b.ii" → "section 4 3 b ii"
+            section_number = (s.get("section_number") or "").strip()
+            if section_number:
+                clause_tokens = "section " + section_number.replace(".", " ").replace("(", " ").replace(")", " ")
+                parts.append(clause_tokens)
 
-        # Table heading if table chunk
-        chunk_type = (s.get("chunk_type") or "").lower()
-        if "table" in chunk_type:
-            table_title = (s.get("table_title") or s.get("section_title") or "").strip()
-            if table_title:
-                parts.append(table_title)
-                parts.append(table_title)
+            # Table heading if table chunk
+            chunk_type = (s.get("chunk_type") or "").lower()
+            if "table" in chunk_type:
+                table_title = (s.get("table_title") or s.get("section_title") or "").strip()
+                if table_title:
+                    parts.append(table_title)
+                    parts.append(table_title)
 
-        return " ".join(parts)
+            _BM25_INDEXED.inc()
+            return " ".join(parts)
+        except Exception as _exc:
+            _BM25_INDEX_ERRORS.inc()
+            logger.warning(
+                event="bm25_index_text_failed",
+                modality=self.modality,
+                error=str(_exc),
+            )
+            return getattr(doc, "text", "") or ""
+
+    def health_check(self, user_id=None) -> dict:
+        base = super().health_check(user_id)
+        base["class"] = self.__class__.__name__
+        return base

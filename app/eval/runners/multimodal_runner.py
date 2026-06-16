@@ -25,13 +25,19 @@ def run_multimodal_suite(cfg: EvalConfig) -> SuiteResult:
     result = SuiteResult(suite="multimodal")
 
     try:
-        from app.retrieval.retriever import Retriever
+        from app.core.infra_registry import infra
+        from app.core.model_loader import model_loader
+        from app.retrieval.hybrid_retriever import HybridRetriever
     except ImportError as e:
         result.breached["import_error"] = str(e)
         return result
 
     try:
-        retriever = Retriever()
+        retriever = HybridRetriever(
+            bm25=infra.get_bm25(),
+            vector_store=infra.get_vector_store(),
+            embedder=model_loader.get_embedder(),
+        )
     except Exception as e:
         result.breached["retriever_init"] = str(e)
         return result
@@ -61,13 +67,11 @@ def run_multimodal_suite(cfg: EvalConfig) -> SuiteResult:
 
             session_id = f"{cfg.session_prefix}_mm_{modality}_{row['id']}"
             try:
-                retrieved = retriever.retrieval(
+                retrieved = retriever.search(
                     query=query,
                     session_id=session_id,
                     top_k=cfg.weaken.top_k or 10,
                     user_id=cfg.user_id,
-                    use_mmr=not cfg.weaken.no_mmr,
-                    use_rrf=not cfg.weaken.no_rrf,
                 )
             except Exception as exc:
                 result.breached[f"{modality}_error_{row['id']}"] = str(exc)
@@ -76,8 +80,11 @@ def run_multimodal_suite(cfg: EvalConfig) -> SuiteResult:
             retrieved_ids = []
             for doc in retrieved:
                 meta = doc.get("metadata") or {}
-                cid = doc.get("chunk_id") or meta.get("chunk_id") or meta.get("doc_id") or meta.get("id")
-                if cid:
+                source = meta.get("source", "") or meta.get("source_file", "")
+                cid = meta.get("chunk_id") or doc.get("chunk_id")
+                if source and cid is not None:
+                    retrieved_ids.append(f"{source}::chunk_{cid}")
+                elif cid is not None:
                     retrieved_ids.append(str(cid))
 
             eval_results.append({

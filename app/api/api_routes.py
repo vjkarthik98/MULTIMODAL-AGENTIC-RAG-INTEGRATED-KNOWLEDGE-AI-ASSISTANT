@@ -2142,8 +2142,8 @@ async def get_source_chunk(
             raise HTTPException(status_code=404, detail="Chunk not found")
         chunk = results[0]
         meta  = chunk.get("metadata", {}) or {}
-        if meta.get("user_id") and meta["user_id"] != user_id:
-            raise HTTPException(status_code=403, detail="Access denied")
+        if meta.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="Forbidden")
         return {
             "chunk_id":   chunk_id,
             "text":       chunk.get("text", ""),

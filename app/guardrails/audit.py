@@ -32,6 +32,9 @@ logger = get_logger("guardrails.audit")
 _HMAC_SECRET: Optional[bytes] = None
 
 
+_audit_logger = structlog.get_logger("guardrails.audit")
+
+
 def _get_hmac_secret() -> bytes:
     global _HMAC_SECRET
     if _HMAC_SECRET is None:
@@ -39,6 +42,11 @@ def _get_hmac_secret() -> bytes:
         if not secret:
             # Derive from app secret key as fallback (still tamper-evident within session)
             secret = os.environ.get("SECRET_KEY", "guardrails-audit-default")
+            if not os.environ.get("AUDIT_HMAC_SECRET") and not os.environ.get("SECRET_KEY"):
+                _audit_logger.warning(
+                    "audit_hmac_fallback",
+                    msg="AUDIT_HMAC_SECRET not set — using default key. Add to .env for production.",
+                )
         _HMAC_SECRET = secret.encode("utf-8")
     return _HMAC_SECRET
 

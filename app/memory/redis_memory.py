@@ -228,6 +228,7 @@ class RedisMemory:
     def _key(self, session_id: str, user_id: Optional[str] = None) -> str:
         if user_id:
             return f"{self.prefix}:{user_id}:{session_id}:history"
+        logger.warning(event="redis_key_unscoped", msg="user_id is None — key not tenant-scoped", session_id=session_id)
         return f"{self.prefix}:{session_id}:history"
 
     def _hash_msg(self, msg: Dict) -> str:

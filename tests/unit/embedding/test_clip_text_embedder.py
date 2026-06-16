@@ -3,12 +3,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.embeddings.clip_text_embedder import (
+from app.embeddings.image_embedder import (
     SiglipTextEmbeddingResult as ClipTextEmbeddingResult,
-    _estimate_tokens,
-    _normalize_text,
-    _sanitize_injection,
-    _sanitize_text,
+    _estimate_siglip_tokens as _estimate_tokens,
+    _normalize_siglip_text as _normalize_text,
+    _sanitize_siglip_injection as _sanitize_injection,
+    _sanitize_siglip_text as _sanitize_text,
     _truncate_to_siglip_limit as _truncate_to_clip_limit,
     _valid_embedding,
 )
@@ -193,7 +193,7 @@ class TestClipTextEmbeddingResult:
         result = self._make_result()
         d = result.to_dict()
         assert "embedding" in d
-        assert d["embedding_dim"] == 512
+        assert d["embedding_dim"] == 1152  # SigLIP so400m uses 1152-dim
 
     def test_attributes_stored(self):
         result = self._make_result()
@@ -209,14 +209,14 @@ class TestClipTextEmbeddingResult:
 class TestClipTextEmbedder:
 
     def _make_embedder(self):
-        from app.embeddings.clip_text_embedder import ClipTextEmbedder
+        from app.embeddings.image_embedder import SiglipTextEmbedder as ClipTextEmbedder
         from unittest.mock import patch
 
         mock_processor = MagicMock()
         mock_model     = MagicMock()
 
-        with patch("app.embeddings.clip_text_embedder.TORCH_AVAILABLE", True), \
-             patch("app.embeddings.clip_text_embedder.settings") as mock_cfg:
+        with patch("app.embeddings.image_embedder.TORCH_AVAILABLE", True), \
+             patch("app.embeddings.image_embedder.settings") as mock_cfg:
             mock_cfg.SIGLIP_MODEL         = "google/siglip-so400m-patch14-384"
             mock_cfg.VISION_EMBEDDING_DIM = 1152
             mock_cfg.EMBEDDING_BATCH_SIZE = 16

@@ -931,6 +931,10 @@ def _chunk_text(text: str, is_transcript: bool = False) -> List[str]:
 
 # ─── Phase 1: TxtIngestor ─────────────────────────────────────────────────────
 
+_EXTRACTS_TOTAL = Counter("magik_txt_extracts_total", "Total extracts produced by txt ingestor")
+_EXTRACT_ERRORS = Counter("magik_txt_extract_errors_total", "Errors in txt ingestor")
+
+
 class TxtIngestor(BaseIngestor):
     """Extracts raw text from TXT/MD/CSV/LOG files → List[RawExtract].
 
@@ -938,116 +942,129 @@ class TxtIngestor(BaseIngestor):
     Does NOT chunk. The chunker (Phase 2) handles splitting.
     """
 
+    def health_check(self) -> dict:
+        return {
+            "modality": "txt",
+            "status": "ok",
+            "class": self.__class__.__name__,
+        }
+
     async def extract(
         self,
         path: Path,
         metadata: UniversalMetadata,
     ) -> List[RawExtract]:
+        source = path.name
         file_size = path.stat().st_size
         logger.info(event="extraction_start", modality="txt", file=str(path), size=file_size)
+        try:
+            # Binary check
+            is_bin = await asyncio.get_event_loop().run_in_executor(None, _is_binary, path)
+            if is_bin:
+                raise ValueError(f"BINARY_FILE_DISGUISED_AS_TEXT: {path.name}")
 
-        # Binary check
-        is_bin = await asyncio.get_event_loop().run_in_executor(None, _is_binary, path)
-        if is_bin:
-            raise ValueError(f"BINARY_FILE_DISGUISED_AS_TEXT: {path.name}")
+            # Load
+            stream_threshold = 5 * 1024 * 1024  # 5 MB
+            if file_size > stream_threshold:
+                raw_text = await asyncio.get_event_loop().run_in_executor(
+                    None, _load_text_streaming, path, settings.MAX_FILE_SIZE_TEXT
+                )
+            else:
+                raw_text = await asyncio.get_event_loop().run_in_executor(None, _load_text, path)
 
-        # Load
-        stream_threshold = 5 * 1024 * 1024  # 5 MB
-        if file_size > stream_threshold:
-            raw_text = await asyncio.get_event_loop().run_in_executor(
-                None, _load_text_streaming, path, settings.MAX_FILE_SIZE_TEXT
+            raw_text = _strip_bom(raw_text)
+            raw_text, null_count = _strip_null_bytes(raw_text)
+            if null_count:
+                logger.warning("null_bytes_stripped", count=null_count, file=path.name)
+
+            # Repair
+            raw_text, _ = await asyncio.get_event_loop().run_in_executor(None, repair_text, raw_text)
+
+            # Normalize
+            text = _normalize_text(raw_text)
+            text = re.sub(r"\n={4,}\n", "\n", text)
+            text = re.sub(r"\n-{4,}\n", "\n", text)
+
+            if not text or text.isspace():
+                raise ValueError("EMPTY_CONTENT_AFTER_NORMALIZE")
+            if len(text) < 50:
+                raise ValueError("TEXT_TOO_SHORT")
+
+            # Injection guard
+            text = self._sanitize(text, surface="txt_ingest")
+            if not text or text.isspace():
+                raise ValueError("INJECTION_ONLY_CONTENT")
+
+            # PII scrub
+            text = self._scrub_pii(text, surface="txt_ingest")
+
+            # Language
+            language = await asyncio.get_event_loop().run_in_executor(None, _detect_language, text)
+
+            # Section splitting — [DOC-NNN] or blank-line for large files
+            sections = await asyncio.get_event_loop().run_in_executor(None, _split_sections, text)
+
+            # For large files without [DOC-NNN]: additionally split on blank lines
+            if len(sections) == 1 and file_size > stream_threshold:
+                body = sections[0][2]
+                parts = [p.strip() for p in body.split("\n\n") if p.strip()]
+                if len(parts) > 1:
+                    sections = [(None, None, p) for p in parts]
+
+            is_transcript = await asyncio.get_event_loop().run_in_executor(
+                None, _detect_transcript_format, text
             )
-        else:
-            raw_text = await asyncio.get_event_loop().run_in_executor(None, _load_text, path)
 
-        raw_text = _strip_bom(raw_text)
-        raw_text, null_count = _strip_null_bytes(raw_text)
-        if null_count:
-            logger.warning("null_bytes_stripped", count=null_count, file=path.name)
+            extracts: List[RawExtract] = []
+            for i, (section_id, section_title, body) in enumerate(sections):
+                if is_placeholder(body):
+                    continue
+                cleaned_body, footnotes = strip_footnotes(body)
+                cleaned_body, error_markers = detect_error_markers(cleaned_body)
+                if not cleaned_body.strip():
+                    continue
 
-        # Repair
-        raw_text, _ = await asyncio.get_event_loop().run_in_executor(None, repair_text, raw_text)
+                extract_type = "speaker_turn" if (
+                    is_transcript and _detect_transcript_format(cleaned_body)
+                ) else "prose"
 
-        # Normalize
-        text = _normalize_text(raw_text)
-        text = re.sub(r"\n={4,}\n", "\n", text)
-        text = re.sub(r"\n-{4,}\n", "\n", text)
+                source_ref = f"file:{path.name}"
+                if section_id:
+                    source_ref += f"|section:{section_id}"
+                elif i > 0:
+                    source_ref += f"|part:{i}"
 
-        if not text or text.isspace():
-            raise ValueError("EMPTY_CONTENT_AFTER_NORMALIZE")
-        if len(text) < 50:
-            raise ValueError("TEXT_TOO_SHORT")
+                extra: Dict[str, Any] = {}
+                if section_id:
+                    extra["section_id"] = section_id
+                if section_title:
+                    extra["section_title"] = section_title
+                if footnotes:
+                    extra["footnotes"] = footnotes
+                if error_markers:
+                    extra["error_markers"] = error_markers
+                if is_transcript:
+                    extra["is_transcript"] = True
+                if language:
+                    extra["language"] = language
 
-        # Injection guard
-        text = self._sanitize(text, surface="txt_ingest")
-        if not text or text.isspace():
-            raise ValueError("INJECTION_ONLY_CONTENT")
+                extracts.append(RawExtract(
+                    text=cleaned_body,
+                    extract_type=extract_type,
+                    raw_source_ref=source_ref,
+                    extra=extra,
+                ))
 
-        # PII scrub
-        text = self._scrub_pii(text, surface="txt_ingest")
+            if not extracts:
+                raise ValueError("NO_EXTRACTS_PRODUCED")
 
-        # Language
-        language = await asyncio.get_event_loop().run_in_executor(None, _detect_language, text)
-
-        # Section splitting — [DOC-NNN] or blank-line for large files
-        sections = await asyncio.get_event_loop().run_in_executor(None, _split_sections, text)
-
-        # For large files without [DOC-NNN]: additionally split on blank lines
-        if len(sections) == 1 and file_size > stream_threshold:
-            body = sections[0][2]
-            parts = [p.strip() for p in body.split("\n\n") if p.strip()]
-            if len(parts) > 1:
-                sections = [(None, None, p) for p in parts]
-
-        is_transcript = await asyncio.get_event_loop().run_in_executor(
-            None, _detect_transcript_format, text
-        )
-
-        extracts: List[RawExtract] = []
-        for i, (section_id, section_title, body) in enumerate(sections):
-            if is_placeholder(body):
-                continue
-            cleaned_body, footnotes = strip_footnotes(body)
-            cleaned_body, error_markers = detect_error_markers(cleaned_body)
-            if not cleaned_body.strip():
-                continue
-
-            extract_type = "speaker_turn" if (
-                is_transcript and _detect_transcript_format(cleaned_body)
-            ) else "prose"
-
-            source_ref = f"file:{path.name}"
-            if section_id:
-                source_ref += f"|section:{section_id}"
-            elif i > 0:
-                source_ref += f"|part:{i}"
-
-            extra: Dict[str, Any] = {}
-            if section_id:
-                extra["section_id"] = section_id
-            if section_title:
-                extra["section_title"] = section_title
-            if footnotes:
-                extra["footnotes"] = footnotes
-            if error_markers:
-                extra["error_markers"] = error_markers
-            if is_transcript:
-                extra["is_transcript"] = True
-            if language:
-                extra["language"] = language
-
-            extracts.append(RawExtract(
-                text=cleaned_body,
-                extract_type=extract_type,
-                raw_source_ref=source_ref,
-                extra=extra,
-            ))
-
-        if not extracts:
-            raise ValueError("NO_EXTRACTS_PRODUCED")
-
-        logger.info(event="extraction_complete", modality="txt", file=str(path), extracts=len(extracts))
-        return extracts
+            _EXTRACTS_TOTAL.inc(len(extracts))
+            logger.info(event="extraction_complete", modality="txt", file=str(path), extracts=len(extracts))
+            return extracts
+        except Exception as _exc:
+            _EXTRACT_ERRORS.inc()
+            logger.error(event="extraction_failed", modality="txt", source=source, error=str(_exc))
+            raise
 
 
 # ─── Backward-compat ingest() — full pipeline (extraction + chunking) ─────────

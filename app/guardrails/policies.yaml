@@ -32,10 +32,23 @@ injection:
       severity: critical
       description: "forget/disregard ... instructions (direct, no middle keyword required)"
 
+    # --- Standalone short-form injection keywords (agent-level, aggressive) ---
+    - pattern: '\bignore\s+previous\b'
+      severity: high
+      description: "ignore previous (standalone — common prompt injection opener)"
+
+    - pattern: '\bforget\s+everything\b'
+      severity: high
+      description: "forget everything (standalone injection pattern)"
+
+    - pattern: '\bact\s+as\b'
+      severity: medium
+      description: "act as (standalone — common jailbreak opener)"
+
     # --- Override / bypass ---
-    - pattern: '\b(?:override|bypass|circumvent|subvert|neutralize)\b[\s\w]{0,15}?\b(?:instructions?|rules?|prompt|safety|filter|guardrail|restriction|constraint)\b'
+    - pattern: '\b(?:override|bypass|circumvent|subvert|neutralize)\b[\s\w]{0,15}?\b(?:instructions?|rules?|prompt|safety|filters?|guardrail|restriction|constraint)\b'
       severity: critical
-      description: "override/bypass instructions/safety"
+      description: "override/bypass instructions/safety (filters? matches both filter and filters)"
 
     # --- You are now / act as ---
     - pattern: '\byou\s+are\s+now\b'

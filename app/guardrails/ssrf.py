@@ -102,6 +102,26 @@ def is_ssrf_risk(url: str, resolve_dns: bool = False) -> bool:
 
     hostname = parsed.hostname or ""
 
+    # Fallback: bare IPv6 without brackets (e.g. http://::1/path) or
+    # bracketed IPv6 that urlparse failed to parse as hostname.
+    if not hostname and parsed.netloc:
+        # Strip port suffix and brackets; try raw netloc as an IP address
+        raw = parsed.netloc.strip("[]")
+        if ":" in raw:
+            # Could be IPv6; try as-is first, then strip port
+            candidates = [raw]
+            if raw.count(":") == 1:
+                candidates.append(raw.rsplit(":", 1)[0])  # strip :port for ipv4:port
+            for candidate in candidates:
+                try:
+                    addr = ipaddress.ip_address(candidate)
+                    if any(addr in net for net in _BLOCKED_CIDRS):
+                        logger.warning("ssrf_blocked_bare_ipv6", netloc=parsed.netloc, url=url[:120])
+                        return True
+                    break
+                except ValueError:
+                    continue
+
     # Literal hostname check
     if hostname in _BLOCKED_HOSTNAMES:
         logger.warning("ssrf_blocked_hostname", hostname=hostname, url=url[:120])

@@ -4,24 +4,6 @@ All notable changes to this project will be documented on this file.
 The format follows Keep a Changelog and Semantic Versioning.
 
 
----
-
-# [0.28.0] - 2026-06-02 — Phase 28: Gradio UI
-
-### Added
-
-- `ui/gradio_app.py` — Gradio 6 Blocks app: login gate, sidebar KB management, streaming chat, transparency panel, thumbs feedback
-- `ui/client.py` — synchronous httpx thin client over all FastAPI endpoints (auth, query, ingest, KB CRUD)
-- `ui/theme.py` — Claude-inspired dark CSS theme (injected via gr.HTML)
-- `ui/feedback.py` — thumbs up/down persists to `app/eval/datasets/gold/feedback_gold.jsonl` (grows Phase-25 gold set)
-- `ui/run.py` — `python ui/run.py` entry point; respects BACKEND_URL / GRADIO_PORT / GRADIO_HOST env vars
-- Login/register tabs; JWT token stored in Gradio State (never in URL)
-- KB sidebar: file list with modality icons, multi-file upload, per-file delete (purges Qdrant + BM25 via API)
-- Transparency accordion: route · confidence · latency · top-5 sources, auto-opens after each response
-- New Chat clears session_id and Redis short-term memory via POST /memory/clear
-
----
-
 # [0.1.0] - Initial Setup
 
 ### Added
@@ -37,7 +19,7 @@ The format follows Keep a Changelog and Semantic Versioning.
 
 # [0.2.0] - FastAPI Integration
 
-### Added 
+### Added
 
 - FastAPI backend for RAG system
 - API endpoints for query handling
@@ -58,7 +40,7 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Modula ingestion architecture
 
 # [0.4.0] - Chunking Integration
-### Added 
+### Added
 - Recursive chunking with overlap
 - Batch embedding pipeline
 - Qdrant vector database integration
@@ -78,7 +60,7 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Retrieval method mismatches
 - Vector Store integration bugs
 
-# [0.5.0] - GGUF Model Integration 
+# [0.5.0] - GGUF Model Integration
 ### Added
 - GGUF model integration using llama.cpp (CPU-based inference)
 - Streaming response support using FastAPI StreaminResponse
@@ -125,7 +107,7 @@ The format follows Keep a Changelog and Semantic Versioning.
 
 # [0.7.0] - Production-grade ingestion pipeline
 
-### Added 
+### Added
 - End-to-end ingestion pipeline orchestration (process_file)
 - Structured API response (status, details, chunks)
 - Logging system for pipeline observability
@@ -135,7 +117,7 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Qdrant storage with document_id grouping
 - Metadata strucutre for better retrieval
 
-### Fixed 
+### Fixed
 - Ingestion returning incorrect format
 - Embedding validation issues
 - Duplicate / untraceable vector storage
@@ -180,7 +162,7 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Production-grade ingestion + query pipeline
 
 # [0.10.0] - Multimodal Video Rag
-### Added 
+### Added
 - Video ingestion pipeline
 - Frame extraction + BLIP captioning
 - Audio extraction + transcription (faster-whisper)
@@ -256,7 +238,7 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Added persistent container strategy (restart policies)
 
 # [0.13.0] - Summarization of Redis Memory
-### Added 
+### Added
 - MemoryManager for automatic summarization
 - LLM-based conversation summarization
 - Conversation history injection into RAG pipeline
@@ -393,7 +375,7 @@ The format follows Keep a Changelog and Semantic Versioning.
 - Model Loading: Centralized loading with retry and timeout handling
 - API & Logging: Structured responses, better error handling, improved observability
 
-### Fixed 
+### Fixed
 - BM25 indexing and retrieval issues
 - Duplicate and low-quality chunk retrieval
 - Incorrect agent routing and fallback behavior

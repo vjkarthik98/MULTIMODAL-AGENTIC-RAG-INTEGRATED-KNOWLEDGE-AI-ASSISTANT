@@ -26,7 +26,6 @@ from app.ingestion.schema import (
     Modality,
     normalize_text,
     redact_pii,
-    sanitize_prompt_injection,
     sha256_file,
 )
 from app.utils.logger import get_logger
@@ -781,8 +780,9 @@ def ingest(
         try:
             from app.guardrails.input_guard import sanitize as _guard_sanitize
             caption_clean = _guard_sanitize(_norm_caption, surface="image_ingest")
-        except Exception:
-            caption_clean = sanitize_prompt_injection(_norm_caption)
+        except Exception as e:
+            logger.warning(event="sanitize_failed", surface="image_caption_ingest", error=str(e))
+            caption_clean = _norm_caption
         cap_conf = _compute_caption_confidence(caption_clean) if caption_clean != "[Image: no caption generated]" else 0.0
         documents.append(
             IngestedDocument(
@@ -821,8 +821,9 @@ def ingest(
             try:
                 from app.guardrails.input_guard import sanitize as _gs
                 ocr_clean = _gs(_ocr_norm, surface="image_ocr_ingest")
-            except Exception:
-                ocr_clean = sanitize_prompt_injection(_ocr_norm)
+            except Exception as e:
+                logger.warning(event="sanitize_failed", surface="image_ocr_ingest", error=str(e))
+                ocr_clean = _ocr_norm
             documents.append(
                 IngestedDocument(
                     text=ocr_clean,
@@ -898,8 +899,9 @@ def ingest(
                 try:
                     from app.guardrails.input_guard import sanitize as _gs
                     page_caption_clean = _gs(_pc_norm, surface="image_page_caption_ingest")
-                except Exception:
-                    page_caption_clean = sanitize_prompt_injection(_pc_norm)
+                except Exception as e:
+                    logger.warning(event="sanitize_failed", surface="image_page_caption_ingest", error=str(e))
+                    page_caption_clean = _pc_norm
 
                 documents.append(
                     IngestedDocument(
@@ -930,8 +932,9 @@ def ingest(
                     try:
                         from app.guardrails.input_guard import sanitize as _gs
                         page_ocr_clean = _gs(_po_norm, surface="image_page_ocr_ingest")
-                    except Exception:
-                        page_ocr_clean = sanitize_prompt_injection(_po_norm)
+                    except Exception as e:
+                        logger.warning(event="sanitize_failed", surface="image_page_ocr_ingest", error=str(e))
+                        page_ocr_clean = _po_norm
                     documents.append(
                         IngestedDocument(
                             text=page_ocr_clean,
@@ -1019,6 +1022,10 @@ async def async_ingest(file_path: str, session_id: str) -> List[IngestedDocument
 
 from app.ingestion.base_ingest import BaseIngestor
 from app.ingestion.schema import RawExtract, UniversalMetadata
+from prometheus_client import Counter
+
+_EXTRACTS_TOTAL = Counter("magik_image_extracts_total", "Total extracts produced by image ingestor")
+_EXTRACT_ERRORS = Counter("magik_image_extract_errors_total", "Errors in image ingestor")
 
 
 class ImageIngestor(BaseIngestor):
@@ -1028,60 +1035,74 @@ class ImageIngestor(BaseIngestor):
     Does NOT caption or OCR. The chunker (Phase 2) calls BLIP2/TrOCR.
     """
 
+    def health_check(self) -> dict:
+        return {
+            "modality": "image",
+            "status": "ok",
+            "class": self.__class__.__name__,
+        }
+
     async def extract(
         self,
         path: Path,
         metadata: UniversalMetadata,
     ) -> List[RawExtract]:
+        source = path.name
         logger.info(event="extraction_start", modality="image", file=str(path), size=path.stat().st_size)
-        _validate_image_file(path)
-        _check_disk_space(path)
-
-        # Load image to validate it opens + apply EXIF rotation + ICC profile
-        img = await asyncio.get_event_loop().run_in_executor(
-            None, _load_image, path, str(getattr(metadata, "session_id", ""))
-        )
-
-        # Capture raw bytes as PNG for chunker
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        raw_bytes = buf.getvalue()
-
-        width, height = img.size
-
-        # Basic EXIF metadata
-        exif_data: dict = {}
         try:
-            from PIL.ExifTags import TAGS
-            raw_exif = img._getexif() or {}
-            exif_data = {TAGS.get(k, k): str(v) for k, v in raw_exif.items() if v is not None}
-        except Exception:
-            pass
+            _validate_image_file(path)
+            _check_disk_space(path)
 
-        # Perceptual hash (for dedup signal in chunker)
-        phash_str: str = ""
-        try:
-            import imagehash
-            phash_str = str(imagehash.phash(img))
-        except Exception:
-            pass
-
-        logger.info(event="extraction_complete", modality="image", file=str(path), extracts=1)
-        return [
-            RawExtract(
-                text="",
-                extract_type="image_raw",
-                bbox=None,
-                raw_source_ref=f"image:{path.name}",
-                raw_bytes=raw_bytes,
-                extra={
-                    "width": width,
-                    "height": height,
-                    "format": path.suffix.lower().lstrip("."),
-                    "phash": phash_str,
-                    "exif": exif_data,
-                    "file_size": path.stat().st_size,
-                },
+            # Load image to validate it opens + apply EXIF rotation + ICC profile
+            img = await asyncio.get_event_loop().run_in_executor(
+                None, _load_image, path, str(getattr(metadata, "session_id", ""))
             )
-        ]
+
+            # Capture raw bytes as PNG for chunker
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            raw_bytes = buf.getvalue()
+
+            width, height = img.size
+
+            # Basic EXIF metadata
+            exif_data: dict = {}
+            try:
+                from PIL.ExifTags import TAGS
+                raw_exif = img._getexif() or {}
+                exif_data = {TAGS.get(k, k): str(v) for k, v in raw_exif.items() if v is not None}
+            except Exception:
+                pass
+
+            # Perceptual hash (for dedup signal in chunker)
+            phash_str: str = ""
+            try:
+                import imagehash
+                phash_str = str(imagehash.phash(img))
+            except Exception:
+                pass
+
+            _EXTRACTS_TOTAL.inc(1)
+            logger.info(event="extraction_complete", modality="image", file=str(path), extracts=1)
+            return [
+                RawExtract(
+                    text="",
+                    extract_type="image_raw",
+                    bbox=None,
+                    raw_source_ref=f"image:{path.name}",
+                    raw_bytes=raw_bytes,
+                    extra={
+                        "width": width,
+                        "height": height,
+                        "format": path.suffix.lower().lstrip("."),
+                        "phash": phash_str,
+                        "exif": exif_data,
+                        "file_size": path.stat().st_size,
+                    },
+                )
+            ]
+        except Exception as _exc:
+            _EXTRACT_ERRORS.inc()
+            logger.error(event="extraction_failed", modality="image", source=source, error=str(_exc))
+            raise
 

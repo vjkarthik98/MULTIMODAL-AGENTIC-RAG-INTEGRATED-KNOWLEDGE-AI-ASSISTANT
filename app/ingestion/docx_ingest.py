@@ -40,6 +40,8 @@ _ingest_errors = Counter(
     "DOCX ingestion errors by type",
     ["error_type"],
 )
+_EXTRACTS_TOTAL = Counter("magik_docx_extracts_total", "Total extracts produced by docx ingestor")
+_EXTRACT_ERRORS = Counter("magik_docx_extract_errors_total", "Errors in docx ingestor")
 
 _semaphore = asyncio.Semaphore(5)
 
@@ -195,230 +197,243 @@ class DocxIngestor(BaseIngestor):
     Does NOT chunk. The chunker (Phase 2) handles splitting.
     """
 
+    def health_check(self) -> dict:
+        return {
+            "modality": "docx",
+            "status": "ok",
+            "class": self.__class__.__name__,
+        }
+
     async def extract(
         self,
         path: Path,
         metadata: UniversalMetadata,
     ) -> List[RawExtract]:
+        source = path.name
         file_path = str(path)
         ext = path.suffix.lower()
         logger.info(event="extraction_start", modality="docx", file=str(path), size=path.stat().st_size)
-
-        if _is_docx_encrypted(file_path):
-            raise ValueError(f"PASSWORD_PROTECTED_DOCX: {path.name}")
-
-        if _has_macros(file_path):
-            logger.warning("docx_macro_detected", file=path.name)
-
-        # .doc → convert first
-        active_path = file_path
-        if ext == ".doc":
-            active_path = await asyncio.get_event_loop().run_in_executor(
-                None, _convert_doc_to_docx, file_path
-            )
-
         try:
-            import docx as python_docx
-            doc = python_docx.Document(active_path)
-        except Exception:
-            logger.warning("docx_corrupt_attempting_repair", file=path.name)
-            repaired = _repair_docx(active_path)
+            if _is_docx_encrypted(file_path):
+                raise ValueError(f"PASSWORD_PROTECTED_DOCX: {path.name}")
+
+            if _has_macros(file_path):
+                logger.warning("docx_macro_detected", file=path.name)
+
+            # .doc → convert first
+            active_path = file_path
+            if ext == ".doc":
+                active_path = await asyncio.get_event_loop().run_in_executor(
+                    None, _convert_doc_to_docx, file_path
+                )
+
             try:
                 import docx as python_docx
-                doc = python_docx.Document(repaired)
-            except Exception as exc:
-                raise ValueError(f"DOCX_CORRUPT_UNRECOVERABLE: {exc}")
-
-        has_content = any((p.text or "").strip() for p in doc.paragraphs) or bool(doc.tables)
-        if not has_content:
-            raise ValueError("EMPTY_DOCUMENT")
-
-        extracts: List[RawExtract] = []
-        current_heading: Optional[str] = None
-
-        # Paragraphs
-        for i, para in enumerate(doc.paragraphs):
-            text = (para.text or "").strip()
-            if not text:
-                continue
-
-            level = _heading_level(para)
-            if level is None and _looks_like_heading(text, para):
-                level = 2
-
-            text = self._sanitize(text, surface="docx_ingest")
-            if not text.strip():
-                continue
-            text = self._scrub_pii(text, surface="docx_ingest")
-
-            style_name: Optional[str] = None
-            try:
-                style_name = para.style.name if para.style else None
+                doc = python_docx.Document(active_path)
             except Exception:
-                pass
-
-            is_bold = False
-            try:
-                runs = [r for r in para.runs if (r.text or "").strip()]
-                if runs:
-                    is_bold = all(bool(r.bold) for r in runs)
-            except Exception:
-                pass
-
-            if level:
-                current_heading = text
-                extracts.append(RawExtract(
-                    text=text,
-                    extract_type="heading",
-                    is_bold=is_bold,
-                    style_name=style_name,
-                    raw_source_ref=f"docx:{path.name}|para:{i}",
-                    extra={
-                        "heading_level": level,
-                        "paragraph_index": i,
-                    },
-                ))
-            else:
-                extracts.append(RawExtract(
-                    text=text,
-                    extract_type="prose",
-                    is_bold=is_bold,
-                    style_name=style_name,
-                    raw_source_ref=f"docx:{path.name}|para:{i}",
-                    extra={
-                        "paragraph_index": i,
-                        "section_title": current_heading,
-                        "defined_terms": _DEFINED_TERM_RE.findall(text),
-                        "clause_numbers": _CLAUSE_NUM_RE.findall(text),
-                    },
-                ))
-
-        # Tables
-        for t_idx, table in enumerate(doc.tables):
-            rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
-            row_texts = []
-            for row in rows:
-                if any(row):
-                    combined_row = " | ".join(str(c or "") for c in row)
-                    combined_row = self._sanitize(combined_row, surface="docx_table_ingest")
-                    combined_row = self._scrub_pii(combined_row, surface="docx_table_ingest")
-                    if combined_row.strip():
-                        row_texts.append(combined_row)
-                        extracts.append(RawExtract(
-                            text=combined_row,
-                            extract_type="table_row",
-                            raw_source_ref=f"docx:{path.name}|table:{t_idx}|row:{len(row_texts)}",
-                            extra={
-                                "table_index": t_idx,
-                                "section_title": current_heading,
-                            },
-                        ))
-
-        # Comments
-        try:
-            from docx.oxml.ns import qn
-            comments_part = doc.part.package.part_related_by(
-                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"
-            )
-            if comments_part:
-                comments_xml = comments_part._element
-                for comment in comments_xml.findall(qn("w:comment")):
-                    author = comment.get(qn("w:author"), "")
-                    date_str = comment.get(qn("w:date"), "")
-                    body_text = " ".join(
-                        p.text for p in comment.iter() if hasattr(p, "text") and p.text
-                    ).strip()
-                    try:
-                        from app.guardrails.pii import scrub_pii
-                        author, _ = scrub_pii(author)
-                    except Exception:
-                        pass
-                    if body_text:
-                        body_text = self._sanitize(body_text, surface="docx_comment_ingest")
-                        body_text = self._scrub_pii(body_text, surface="docx_comment_ingest")
-                        extracts.append(RawExtract(
-                            text=f"[COMMENT by {author} on {date_str}] {body_text}",
-                            extract_type="comment",
-                            raw_source_ref=f"docx:{path.name}|comment",
-                            extra={"comment_author": author, "comment_date": date_str},
-                        ))
-        except Exception:
-            pass
-
-        # Footnotes / endnotes
-        try:
-            for fn_type in ("footnotes", "endnotes"):
+                logger.warning("docx_corrupt_attempting_repair", file=path.name)
+                repaired = _repair_docx(active_path)
                 try:
-                    part = getattr(doc.part, fn_type, None)
-                    if part:
-                        xml_text = part._element.text_content() if hasattr(part._element, "text_content") else ""
-                        xml_text = self._sanitize(xml_text, surface="docx_footnote_ingest")
-                        xml_text = self._scrub_pii(xml_text, surface="docx_footnote_ingest")
-                        if xml_text.strip():
-                            extracts.append(RawExtract(
-                                text=f"[{fn_type.upper()}] {xml_text[:1000]}",
-                                extract_type="footnote",
-                                raw_source_ref=f"docx:{path.name}|{fn_type}",
-                            ))
+                    import docx as python_docx
+                    doc = python_docx.Document(repaired)
+                except Exception as exc:
+                    raise ValueError(f"DOCX_CORRUPT_UNRECOVERABLE: {exc}")
+
+            has_content = any((p.text or "").strip() for p in doc.paragraphs) or bool(doc.tables)
+            if not has_content:
+                raise ValueError("EMPTY_DOCUMENT")
+
+            extracts: List[RawExtract] = []
+            current_heading: Optional[str] = None
+
+            # Paragraphs
+            for i, para in enumerate(doc.paragraphs):
+                text = (para.text or "").strip()
+                if not text:
+                    continue
+
+                level = _heading_level(para)
+                if level is None and _looks_like_heading(text, para):
+                    level = 2
+
+                text = self._sanitize(text, surface="docx_ingest")
+                if not text.strip():
+                    continue
+                text = self._scrub_pii(text, surface="docx_ingest")
+
+                style_name: Optional[str] = None
+                try:
+                    style_name = para.style.name if para.style else None
                 except Exception:
                     pass
-        except Exception:
-            pass
 
-        # Headers / Footers
-        try:
-            for section in doc.sections:
-                for hf_type, hf_obj in [("header", section.header), ("footer", section.footer)]:
-                    hf_text = " ".join(p.text.strip() for p in hf_obj.paragraphs if p.text.strip())
-                    hf_text = self._sanitize(hf_text, surface="docx_headerfooter_ingest")
-                    hf_text = self._scrub_pii(hf_text, surface="docx_headerfooter_ingest")
-                    if hf_text:
-                        extracts.append(RawExtract(
-                            text=f"[{hf_type.upper()}] {hf_text}",
-                            extract_type="header_footer",
-                            raw_source_ref=f"docx:{path.name}|{hf_type}",
-                        ))
-        except Exception:
-            pass
-
-        # Embedded images → raw_bytes for chunker to pass to captioner
-        try:
-            related = getattr(doc.part, "related_parts", {}) or {}
-            seen_blobs: set = set()
-            img_idx = 0
-            for rel_id, part in related.items():
+                is_bold = False
                 try:
-                    ct = getattr(part, "content_type", "") or ""
-                    if not ct.startswith("image/"):
-                        continue
-                    blob = getattr(part, "blob", None)
-                    if not blob or len(blob) < 256:
-                        continue
-                    digest = hashlib.sha256(blob).hexdigest()
-                    if digest in seen_blobs:
-                        continue
-                    seen_blobs.add(digest)
-                    ext_hint = "." + ct.split("/", 1)[-1].split(";", 1)[0].strip().lower()
-                    if ext_hint == ".jpeg":
-                        ext_hint = ".jpg"
+                    runs = [r for r in para.runs if (r.text or "").strip()]
+                    if runs:
+                        is_bold = all(bool(r.bold) for r in runs)
+                except Exception:
+                    pass
+
+                if level:
+                    current_heading = text
                     extracts.append(RawExtract(
-                        text="",
-                        extract_type="image_region",
-                        raw_source_ref=f"docx:{path.name}|img:{img_idx}",
-                        raw_bytes=blob,
-                        extra={"img_ext": ext_hint, "section_title": current_heading},
+                        text=text,
+                        extract_type="heading",
+                        is_bold=is_bold,
+                        style_name=style_name,
+                        raw_source_ref=f"docx:{path.name}|para:{i}",
+                        extra={
+                            "heading_level": level,
+                            "paragraph_index": i,
+                        },
                     ))
-                    img_idx += 1
-                except Exception as exc:
-                    logger.warning("docx_embedded_image_failed", error=str(exc))
-        except Exception as exc:
-            logger.warning("docx_embedded_image_scan_failed", error=str(exc))
+                else:
+                    extracts.append(RawExtract(
+                        text=text,
+                        extract_type="prose",
+                        is_bold=is_bold,
+                        style_name=style_name,
+                        raw_source_ref=f"docx:{path.name}|para:{i}",
+                        extra={
+                            "paragraph_index": i,
+                            "section_title": current_heading,
+                            "defined_terms": _DEFINED_TERM_RE.findall(text),
+                            "clause_numbers": _CLAUSE_NUM_RE.findall(text),
+                        },
+                    ))
 
-        if not extracts:
-            raise ValueError("NO_EXTRACTS_PRODUCED")
+            # Tables
+            for t_idx, table in enumerate(doc.tables):
+                rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
+                row_texts = []
+                for row in rows:
+                    if any(row):
+                        combined_row = " | ".join(str(c or "") for c in row)
+                        combined_row = self._sanitize(combined_row, surface="docx_table_ingest")
+                        combined_row = self._scrub_pii(combined_row, surface="docx_table_ingest")
+                        if combined_row.strip():
+                            row_texts.append(combined_row)
+                            extracts.append(RawExtract(
+                                text=combined_row,
+                                extract_type="table_row",
+                                raw_source_ref=f"docx:{path.name}|table:{t_idx}|row:{len(row_texts)}",
+                                extra={
+                                    "table_index": t_idx,
+                                    "section_title": current_heading,
+                                },
+                            ))
 
-        logger.info(event="extraction_complete", modality="docx", file=str(path), extracts=len(extracts))
-        return extracts
+            # Comments
+            try:
+                from docx.oxml.ns import qn
+                comments_part = doc.part.package.part_related_by(
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"
+                )
+                if comments_part:
+                    comments_xml = comments_part._element
+                    for comment in comments_xml.findall(qn("w:comment")):
+                        author = comment.get(qn("w:author"), "")
+                        date_str = comment.get(qn("w:date"), "")
+                        body_text = " ".join(
+                            p.text for p in comment.iter() if hasattr(p, "text") and p.text
+                        ).strip()
+                        try:
+                            from app.guardrails.pii import scrub_pii
+                            author, _ = scrub_pii(author)
+                        except Exception:
+                            pass
+                        if body_text:
+                            body_text = self._sanitize(body_text, surface="docx_comment_ingest")
+                            body_text = self._scrub_pii(body_text, surface="docx_comment_ingest")
+                            extracts.append(RawExtract(
+                                text=f"[COMMENT by {author} on {date_str}] {body_text}",
+                                extract_type="comment",
+                                raw_source_ref=f"docx:{path.name}|comment",
+                                extra={"comment_author": author, "comment_date": date_str},
+                            ))
+            except Exception:
+                pass
+
+            # Footnotes / endnotes
+            try:
+                for fn_type in ("footnotes", "endnotes"):
+                    try:
+                        part = getattr(doc.part, fn_type, None)
+                        if part:
+                            xml_text = part._element.text_content() if hasattr(part._element, "text_content") else ""
+                            xml_text = self._sanitize(xml_text, surface="docx_footnote_ingest")
+                            xml_text = self._scrub_pii(xml_text, surface="docx_footnote_ingest")
+                            if xml_text.strip():
+                                extracts.append(RawExtract(
+                                    text=f"[{fn_type.upper()}] {xml_text[:1000]}",
+                                    extract_type="footnote",
+                                    raw_source_ref=f"docx:{path.name}|{fn_type}",
+                                ))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Headers / Footers
+            try:
+                for section in doc.sections:
+                    for hf_type, hf_obj in [("header", section.header), ("footer", section.footer)]:
+                        hf_text = " ".join(p.text.strip() for p in hf_obj.paragraphs if p.text.strip())
+                        hf_text = self._sanitize(hf_text, surface="docx_headerfooter_ingest")
+                        hf_text = self._scrub_pii(hf_text, surface="docx_headerfooter_ingest")
+                        if hf_text:
+                            extracts.append(RawExtract(
+                                text=f"[{hf_type.upper()}] {hf_text}",
+                                extract_type="header_footer",
+                                raw_source_ref=f"docx:{path.name}|{hf_type}",
+                            ))
+            except Exception:
+                pass
+
+            # Embedded images → raw_bytes for chunker to pass to captioner
+            try:
+                related = getattr(doc.part, "related_parts", {}) or {}
+                seen_blobs: set = set()
+                img_idx = 0
+                for rel_id, part in related.items():
+                    try:
+                        ct = getattr(part, "content_type", "") or ""
+                        if not ct.startswith("image/"):
+                            continue
+                        blob = getattr(part, "blob", None)
+                        if not blob or len(blob) < 256:
+                            continue
+                        digest = hashlib.sha256(blob).hexdigest()
+                        if digest in seen_blobs:
+                            continue
+                        seen_blobs.add(digest)
+                        ext_hint = "." + ct.split("/", 1)[-1].split(";", 1)[0].strip().lower()
+                        if ext_hint == ".jpeg":
+                            ext_hint = ".jpg"
+                        extracts.append(RawExtract(
+                            text="",
+                            extract_type="image_region",
+                            raw_source_ref=f"docx:{path.name}|img:{img_idx}",
+                            raw_bytes=blob,
+                            extra={"img_ext": ext_hint, "section_title": current_heading},
+                        ))
+                        img_idx += 1
+                    except Exception as exc:
+                        logger.warning("docx_embedded_image_failed", error=str(exc))
+            except Exception as exc:
+                logger.warning("docx_embedded_image_scan_failed", error=str(exc))
+
+            if not extracts:
+                raise ValueError("NO_EXTRACTS_PRODUCED")
+
+            _EXTRACTS_TOTAL.inc(len(extracts))
+            logger.info(event="extraction_complete", modality="docx", file=str(path), extracts=len(extracts))
+            return extracts
+        except Exception as _exc:
+            _EXTRACT_ERRORS.inc()
+            logger.error(event="extraction_failed", modality="docx", source=source, error=str(_exc))
+            raise
 
 
 # ─── Backward-compat ingest() — full pipeline ─────────────────────────────────

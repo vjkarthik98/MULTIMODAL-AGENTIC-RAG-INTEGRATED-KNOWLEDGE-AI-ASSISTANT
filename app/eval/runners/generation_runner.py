@@ -20,7 +20,7 @@ from app.eval.config import EvalConfig
 from app.eval.datasets.gold_loader import load_all_gold
 from app.eval.metrics.base import SuiteResult
 from app.eval.metrics.generation import compute_generation_metrics
-from app.eval.metrics.hallucination import hallucination_rate
+from app.eval.metrics.hallucination import compute_finance_fidelity, hallucination_rate
 from app.eval.metrics.latency import latency_stats
 
 _SERVER_URL = os.getenv("EVAL_SERVER_URL", "http://127.0.0.1:8000")
@@ -153,12 +153,14 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
         sources = pipeline_result.get("sources") or []
         context_texts = [s.get("text") or "" for s in sources if isinstance(s, dict)]
 
+        fidelity = compute_finance_fidelity(answer, context_texts)
         eval_rows.append({
             "query": query,
             "answer": answer,
             "contexts": context_texts,
             "reference_answer": row.get("reference_answer"),
             "retrieved_docs": sources,
+            "finance_fidelity": fidelity,
             "row_id": row["id"],
             "tags": row.get("tags", []),
         })
@@ -170,6 +172,18 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
             result.add(m)
 
         result.add(hallucination_rate(eval_rows))
+
+        # Finance numeric fidelity — fraction of cited numbers grounded in context
+        fidelity_scores = [r["finance_fidelity"] for r in eval_rows if "finance_fidelity" in r]
+        if fidelity_scores:
+            from app.eval.metrics.base import MetricResult
+            avg_fidelity = sum(fidelity_scores) / len(fidelity_scores)
+            result.add(MetricResult(
+                name="finance_fidelity",
+                value=avg_fidelity,
+                n=len(fidelity_scores),
+                notes=f"avg over {len(fidelity_scores)} queries (strict 0.5% tol, no scale bridging)",
+            ))
 
     for m in latency_stats(latencies, prefix="generation").values():
         result.add(m)

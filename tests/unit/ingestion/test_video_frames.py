@@ -4,10 +4,10 @@ Functions that require OpenCV, ffmpeg, or actual video files are not tested here
 """
 import pytest
 
-from app.ingestion.video_frames import (
+from app.ingestion.video_ingest import (
     FrameMetadata,
-    _is_too_dark,
-    _phash_distance,
+    _cv_is_too_dark as _is_too_dark,
+    _cv_phash_distance as _phash_distance,
 )
 
 

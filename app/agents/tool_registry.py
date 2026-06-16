@@ -276,7 +276,7 @@ class ToolRegistry:
     def _register(self) -> None:
 
         # RAG TOOL
-        def rag_tool(query: str, context: Dict, session_id: str):
+        def rag_tool(query: str, context: Dict, session_id: str, user_id: Optional[str] = None):
             if not self.rag_pipeline:
                 return []
             try:
@@ -284,6 +284,7 @@ class ToolRegistry:
                     query=query,
                     session_id=session_id,
                     top_k=settings.RAG_TOP_K,
+                    user_id=user_id,
                 )
                 return result
             except Exception as exc:

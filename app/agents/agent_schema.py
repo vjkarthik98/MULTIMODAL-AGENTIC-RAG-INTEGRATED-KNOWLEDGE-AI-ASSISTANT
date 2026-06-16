@@ -131,6 +131,7 @@ class AgentSignals(BaseModel):
 
     is_recent:              bool  = False
     is_memory:              bool  = False
+    is_web:                 bool  = False
     is_complex:             bool  = False
     is_reasoning:           bool  = False
     has_multimodal_hint:    bool  = False
@@ -146,6 +147,9 @@ class AgentSignals(BaseModel):
     is_regulatory_query:       bool  = False
     is_financial_model_query:  bool  = False
     is_market_data_query:      bool  = False
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
 
     def to_dict(self) -> Dict[str, Any]:
         return self.model_dump()

@@ -1,7 +1,7 @@
 """Retrieval suite runner.
 
-Calls app/retrieval/retriever.py:Retriever.retrieval() directly — the same code production
-runs. Scores recall@k, precision@k, MRR, nDCG, context_precision, hit_rate.
+Calls HybridRetriever.search() — the same code production runs.
+Scores recall@k, precision@k, MRR, nDCG, context_precision, hit_rate.
 """
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ from app.eval.metrics.base import SuiteResult
 from app.eval.metrics.latency import latency_stats
 from app.eval.metrics.retrieval import aggregate_retrieval_metrics
 
+_RETRIEVAL_MODALITIES = ["txt", "pdf", "docx", "xlsx"]
+
 
 def run_retrieval_suite(cfg: EvalConfig) -> SuiteResult:
     """Run the retrieval benchmark against the real Retriever.retrieval() call."""
@@ -22,20 +24,36 @@ def run_retrieval_suite(cfg: EvalConfig) -> SuiteResult:
 
     # Import here so infra (Qdrant, BM25) is only loaded when this suite runs
     try:
-        from app.retrieval.retriever import Retriever
+        from app.core.infra_registry import infra
+        from app.core.model_loader import model_loader
+        from app.retrieval.hybrid_retriever import HybridRetriever
     except ImportError as e:
         result.breached["import_error"] = str(e)
         return result
 
     try:
-        retriever = Retriever()
+        retriever = HybridRetriever(
+            bm25=infra.get_bm25(),
+            vector_store=infra.get_vector_store(),
+            embedder=model_loader.get_embedder(),
+        )
     except Exception as e:
         result.breached["retriever_init"] = str(e)
         return result
 
-    gold_rows = load_gold("txt", gold_dir=cfg.gold_dir)
+    # Load gold rows from all text-based modalities (not just txt)
+    gold_rows: List[Dict[str, Any]] = []
+    for mod in _RETRIEVAL_MODALITIES:
+        try:
+            gold_rows.extend(load_gold(mod, gold_dir=cfg.gold_dir))
+        except FileNotFoundError:
+            pass  # skip missing gold files
+
     if not gold_rows:
-        result.breached["no_gold_data"] = "No curated text_gold.jsonl rows found. Run build_gold_set --ingest first."
+        result.breached["no_gold_data"] = (
+            "No curated gold rows found for modalities: "
+            f"{_RETRIEVAL_MODALITIES}. Run build_gold_set --ingest first."
+        )
         return result
 
     eval_results: List[Dict[str, Any]] = []
@@ -50,13 +68,11 @@ def run_retrieval_suite(cfg: EvalConfig) -> SuiteResult:
         session_id = f"{cfg.session_prefix}_retrieval_{row['id']}"
         q_start = time.time()
         try:
-            retrieved = retriever.retrieval(
+            retrieved = retriever.search(
                 query=query,
                 session_id=session_id,
                 top_k=cfg.weaken.top_k or 10,
                 user_id=cfg.user_id,
-                use_mmr=not cfg.weaken.no_mmr,
-                use_rrf=not cfg.weaken.no_rrf,
             )
         except Exception as exc:
             result.breached[f"retrieval_error_{row['id']}"] = str(exc)
