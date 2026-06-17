@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import heapq
 import math
 import threading
 import time
@@ -246,11 +247,14 @@ def filter_relevant_history(
                 )
                 return history[:top_k]
 
-            now              = time.time()
-            scored:          List[Tuple[float, Dict]] = []
-            scored_count     = 0
-            filtered_count   = 0
-            embed_failed     = 0
+            now          = time.time()
+            # Min-heap of (score, msg_id, msg) capped at top_k entries.
+            # O(n log k) vs O(n log n) sort-then-slice. id(msg) breaks
+            # comparison ties without comparing dicts (which would error).
+            _heap: List[Tuple[float, int, Dict]] = []
+            scored_count  = 0
+            filtered_count = 0
+            embed_failed  = 0
 
             for msg in history:
                 try:
@@ -299,7 +303,11 @@ def filter_relevant_history(
                     if math.isnan(score) or math.isinf(score):
                         continue
 
-                    scored.append((score, msg))
+                    entry = (score, id(msg), msg)
+                    if len(_heap) < top_k:
+                        heapq.heappush(_heap, entry)
+                    elif score > _heap[0][0]:
+                        heapq.heapreplace(_heap, entry)
 
                 except Exception as exc:
                     logger.warning(
@@ -309,7 +317,7 @@ def filter_relevant_history(
                     )
                     continue
 
-            if not scored:
+            if not _heap:
                 logger.debug(
                     "memory_filter_no_results",
                     scored_count=scored_count,
@@ -320,11 +328,14 @@ def filter_relevant_history(
                 span.set_status(Status(StatusCode.OK))
                 return []
 
-            # NORMALIZE SCORES
+            # Extract heap as (score, msg) tuples, normalize, then sort k entries.
+            # top_k heap always contains the global max, so _normalize_scores
+            # produces identical values to normalising the full list then slicing.
+            scored = [(s, m) for s, _, m in _heap]
             scored = _normalize_scores(scored)
             scored.sort(key=lambda x: x[0], reverse=True)
 
-            result  = [m for _, m in scored[:top_k]]
+            result  = [m for _, m in scored]
             latency = round(time.time() - start, 3)
 
             _filter_duration.labels(status="success").observe(latency)

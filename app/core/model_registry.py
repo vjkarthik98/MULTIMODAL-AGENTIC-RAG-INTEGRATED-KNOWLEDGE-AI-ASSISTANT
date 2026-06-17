@@ -187,6 +187,7 @@ class ModelRegistry:
             "trocr":                model_loader.get_trocr,
             "diarizer":             model_loader.get_diarizer,
             "ner":                  model_loader.get_ner,
+            "finbert":              model_loader.get_finbert,
             "image_embedder":       model_loader.get_image_embedder,
             "siglip_text_embedder": model_loader.get_siglip_text_embedder,
             "whisper":              model_loader.get_whisper,

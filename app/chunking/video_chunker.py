@@ -8,9 +8,12 @@ called from within the ingestor before RawExtract objects exist.
 """
 from __future__ import annotations
 
+import bisect
 import os
 import re
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import subprocess
@@ -44,6 +47,10 @@ _CHUNK_ERRORS = Counter(
 
 _FRAME_WINDOW_S = 5.0          # attach frames within ±5s of audio chunk
 _FINANCIAL_TRIGGER_RE = re.compile(r"[$%]|\bbillion\b|\brevenue\b|\bearnings\b", re.I)
+
+# LLaVA-1.5-7B INT8 = ~3.5 GB; semaphore limits concurrent instances to keep
+# total VRAM within A10G 24 GB budget alongside other resident models.
+_LLAVA_SEMAPHORE = threading.Semaphore(settings.VIDEO_CAPTION_CONCURRENCY)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -217,13 +224,23 @@ class VideoChunker(BaseChunker):
                         logger.warning(event="frame_extraction_error", error=str(exc))
                         frame_dicts = []
 
-                    # 5. Caption + OCR each frame.
-                    captioned_frames: Dict[float, Dict] = {
-                        fd["timestamp_start"]: _caption_and_ocr_frame(fd)
-                        for fd in frame_dicts
-                    }
+                    # 5. Caption + OCR each frame — concurrent, VRAM-bounded.
+                    def _caption_safe(fd: Dict) -> Tuple[float, Dict]:
+                        with _LLAVA_SEMAPHORE:
+                            return fd["timestamp_start"], _caption_and_ocr_frame(fd)
+
+                    captioned_frames: Dict[float, Dict] = {}
+                    with ThreadPoolExecutor(
+                        max_workers=settings.VIDEO_CAPTION_CONCURRENCY
+                    ) as _caption_pool:
+                        for ts, result in _caption_pool.map(_caption_safe, frame_dicts):
+                            captioned_frames[ts] = result
 
                     # 6. Build IngestedDocuments (one per audio chunk).
+                    # Pre-sort frame timestamps once for O(log f) bisect window
+                    # lookup instead of O(f) linear dict scan per chunk.
+                    _sorted_ts: List[float] = sorted(captioned_frames)
+
                     for chunk_idx, ch in enumerate(audio_chunks):
                         transcript = ch.get("transcript", "")
                         if not transcript.strip():
@@ -232,10 +249,9 @@ class VideoChunker(BaseChunker):
                         t_start = ch["start"]
                         t_end   = ch["end"]
 
-                        chunk_frames = [
-                            cf for ts, cf in captioned_frames.items()
-                            if t_start - _FRAME_WINDOW_S <= ts <= t_end + _FRAME_WINDOW_S
-                        ]
+                        _lo = bisect.bisect_left (_sorted_ts, t_start - _FRAME_WINDOW_S)
+                        _hi = bisect.bisect_right(_sorted_ts, t_end   + _FRAME_WINDOW_S)
+                        chunk_frames = [captioned_frames[ts] for ts in _sorted_ts[_lo:_hi]]
 
                         visual_ctx = ""
                         slide_bullets: List[str] = []

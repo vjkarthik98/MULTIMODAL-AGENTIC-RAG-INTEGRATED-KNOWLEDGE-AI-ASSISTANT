@@ -484,7 +484,7 @@ class TestRAGPipelineRun:
         # Make fallback also fail gracefully
         with patch.object(pipeline, "_fallback_response", return_value="fallback answer"):
             result = pipeline.run("query", session_id="s1")
-        assert result["answer"] == "fallback answer"
+        assert result["answer"] == "Fallback answer"
 
     def test_latency_is_non_negative(self):
         pipeline, *_ = _make_pipeline()

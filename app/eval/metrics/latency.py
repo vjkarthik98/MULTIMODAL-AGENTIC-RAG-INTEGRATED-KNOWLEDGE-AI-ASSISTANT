@@ -7,10 +7,10 @@ from typing import List
 from app.eval.metrics.base import MetricResult
 
 
-def _percentile(values: List[float], p: float) -> float:
-    if not values:
+def _pct(sorted_v: List[float], p: float) -> float:
+    """Interpolated p-th percentile from a pre-sorted list. O(1) — no sort."""
+    if not sorted_v:
         return float("nan")
-    sorted_v = sorted(values)
     idx = (len(sorted_v) - 1) * p / 100
     lo, hi = int(idx), min(int(idx) + 1, len(sorted_v) - 1)
     frac = idx - lo
@@ -26,6 +26,9 @@ def latency_stats(samples_sec: List[float], prefix: str = "") -> dict:
             f"{tag}p95_sec": MetricResult.empty(f"{tag}p95_sec", "no samples"),
             f"{tag}p99_sec": MetricResult.empty(f"{tag}p99_sec", "no samples"),
         }
+    # Sort once; pass pre-sorted array to O(1) _pct() for all three percentiles.
+    # Before: three separate sorted() calls = O(3n log n). After: O(n log n + 3).
+    sorted_v = sorted(samples_sec)
     n = len(samples_sec)
     # Use bare names for threshold lookup (prefix only when multiple suites need disambiguation)
     p50_name = f"{tag}p50_sec" if tag else "p50_sec"
@@ -34,18 +37,18 @@ def latency_stats(samples_sec: List[float], prefix: str = "") -> dict:
     return {
         p50_name: MetricResult(
             name=p50_name,
-            value=_percentile(samples_sec, 50),
+            value=_pct(sorted_v, 50),
             n=n,
-            notes=f"min={min(samples_sec):.2f}s max={max(samples_sec):.2f}s",
+            notes=f"min={sorted_v[0]:.2f}s max={sorted_v[-1]:.2f}s",
         ),
         p95_name: MetricResult(
             name=p95_name,
-            value=_percentile(samples_sec, 95),
+            value=_pct(sorted_v, 95),
             n=n,
         ),
         p99_name: MetricResult(
             name=p99_name,
-            value=_percentile(samples_sec, 99),
+            value=_pct(sorted_v, 99),
             n=n,
         ),
     }

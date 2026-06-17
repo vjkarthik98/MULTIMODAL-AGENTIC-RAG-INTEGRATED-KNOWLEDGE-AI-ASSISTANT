@@ -541,11 +541,11 @@ class ModelLoader:
             decision = device_manager.decision_for("blip2")
 
             def _load():
-                from transformers import Blip2Processor, Blip2ForConditionalGeneration  # local
+                from transformers import Blip2Processor, Blip2ForConditionalGeneration, BitsAndBytesConfig  # local
                 processor = Blip2Processor.from_pretrained(settings.BLIP2_MODEL)
                 load_kwargs: dict = {}
                 if settings.BLIP2_LOAD_IN_8BIT and decision.device == "cuda":
-                    load_kwargs["load_in_8bit"] = True
+                    load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
                 elif decision.device == "cuda" and decision.dtype == "float16":
                     load_kwargs["torch_dtype"] = _torch_dtype("float16")
                 model = Blip2ForConditionalGeneration.from_pretrained(
@@ -577,11 +577,12 @@ class ModelLoader:
             decision = device_manager.decision_for("llava")
 
             def _load():
-                from transformers import LlavaForConditionalGeneration, AutoProcessor  # local
+                from transformers import LlavaForConditionalGeneration, AutoProcessor, BitsAndBytesConfig  # local
+                import torch
                 processor = AutoProcessor.from_pretrained(settings.LLAVA_MODEL)
                 load_kwargs: dict = {}
                 if settings.LLAVA_LOAD_IN_8BIT and decision.device == "cuda":
-                    load_kwargs["load_in_8bit"] = True
+                    load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
                 elif decision.device == "cuda":
                     load_kwargs["torch_dtype"] = _torch_dtype("float16")
                 model = LlavaForConditionalGeneration.from_pretrained(
@@ -650,7 +651,7 @@ class ModelLoader:
                 import torch
                 pipeline = Pipeline.from_pretrained(
                     settings.DIARIZATION_MODEL,
-                    use_auth_token=settings.HF_TOKEN,
+                    token=settings.HF_TOKEN,
                 )
                 if decision.device == "cuda":
                     pipeline = pipeline.to(torch.device("cuda"))
@@ -700,10 +701,19 @@ class ModelLoader:
             decision = device_manager.decision_for("ner")  # small model, same slot as NER
 
             def _load():
-                from transformers import pipeline as hf_pipeline
+                from transformers import (
+                    BertTokenizer,
+                    BertForSequenceClassification,
+                    pipeline as hf_pipeline,
+                )
+                # yiyanghkust/finbert-tone config.json lacks `model_type`;
+                # explicitly using BERT classes bypasses auto-detection failure.
+                tokenizer = BertTokenizer.from_pretrained(settings.FINBERT_MODEL)
+                model = BertForSequenceClassification.from_pretrained(settings.FINBERT_MODEL)
                 return hf_pipeline(
                     "text-classification",
-                    model=settings.FINBERT_MODEL,
+                    model=model,
+                    tokenizer=tokenizer,
                     device=0 if decision.device == "cuda" else -1,
                     truncation=True,
                     max_length=512,

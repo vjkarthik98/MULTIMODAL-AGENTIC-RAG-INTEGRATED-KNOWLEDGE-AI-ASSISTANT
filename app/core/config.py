@@ -136,12 +136,16 @@ class Settings:
     EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 32)
     EMBEDDING_MAX_BATCH_SIZE: int       = _int("EMBEDDING_MAX_BATCH_SIZE", 64)
     EMBEDDING_MAX_SEQ_LEN: int          = _int("EMBEDDING_MAX_SEQ_LEN", 512)
-    INGESTION_MICRO_BATCH: int          = _int("INGESTION_MICRO_BATCH", 16)
+    INGESTION_MICRO_BATCH: int          = _int("INGESTION_MICRO_BATCH", 32)
     # Clear CUDA cache every N micro-batches during ingestion (OOM guard
     # without the per-chunk empty_cache+gc tax that dominated embed latency).
     INGESTION_CACHE_CLEAR_EVERY: int    = _int("INGESTION_CACHE_CLEAR_EVERY", 8)
+    # Parallelism caps for heavy ML operations — keep within A10G VRAM budget
+    VIDEO_CAPTION_CONCURRENCY: int      = _int("VIDEO_CAPTION_CONCURRENCY", 2)
+    AUDIO_TRANSCRIPTION_WORKERS: int    = _int("AUDIO_TRANSCRIPTION_WORKERS", 2)
+    PDF_OCR_WORKERS: int                = _int("PDF_OCR_WORKERS", 4)
     EMBEDDING_CACHE_TTL: int            = _int("EMBEDDING_CACHE_TTL", 2_592_000)
-    TEXT_EMBEDDING_DIM: int             = _int("TEXT_EMBEDDING_DIM", 1536)
+    TEXT_EMBEDDING_DIM: int             = _int("TEXT_EMBEDDING_DIM", 1024)
     # BGE-large requires instruction prefix on queries only (not documents)
     BGE_QUERY_INSTRUCTION: str          = _str("BGE_QUERY_INSTRUCTION",
                                                "Represent this sentence for searching relevant passages: ")
@@ -768,7 +772,7 @@ class TestSettings:
     def test_defaults_are_valid(self):
         s = Settings()
         assert s.APP_VERSION == "1.0.0"
-        assert s.TEXT_EMBEDDING_DIM == 1536
+        assert s.TEXT_EMBEDDING_DIM == 1024
         assert s.VISION_EMBEDDING_DIM > 0
         assert s.CHUNK_OVERLAP < s.CHUNK_SIZE
         assert s.AGENT_MAX_STEPS > 0

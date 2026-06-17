@@ -28,7 +28,7 @@ _CHUNK_ERRORS = Counter(
     "Total errors in txt chunker",
 )
 
-_SPEAKER_TURN_RE = re.compile(r"^[A-Z][A-Z &\-]{2,40}:\s", re.MULTILINE)
+_SPEAKER_TURN_RE = re.compile(r"^\s*([A-Z][A-Z &\-]{2,40})[:.]\s", re.MULTILINE)
 _ALL_CAPS_HEADING = re.compile(r"^[A-Z][A-Z\s&/,()]{4,}$")
 _NUMBERED_HEADING = re.compile(r"^(\d+\.)+\s+\S")
 _LIST_ITEM = re.compile(r"^[-*•]\s+|^\d+\.\s+")
@@ -57,7 +57,7 @@ def _detect_chunk_type(text: str) -> str:
 
 def _extract_speaker(text: str) -> Optional[str]:
     m = _SPEAKER_TURN_RE.match(text)
-    return m.group().rstrip(": ").strip() if m else None
+    return m.group(1) if m else None
 
 
 def _detect_section_title(text: str) -> Optional[str]:
@@ -68,8 +68,42 @@ def _detect_section_title(text: str) -> Optional[str]:
 
 
 def _is_transcript(extracts: List[RawExtract]) -> bool:
+    # Check if ingestor already tagged extracts as speaker turns
     speaker_turns = sum(1 for e in extracts if e.extract_type == "speaker_turn")
-    return speaker_turns >= 3 or speaker_turns > len(extracts) * 0.3
+    if speaker_turns >= 3 or speaker_turns > len(extracts) * 0.3:
+        return True
+    # Fall back: scan raw text for speaker-name patterns (handles prose extracts)
+    sample = "\n".join(e.text for e in extracts[:3])[:8000]
+    return len(_SPEAKER_TURN_RE.findall(sample)) >= 3
+
+
+def _split_on_speaker_turns(text: str) -> List[tuple]:
+    """Split a prose block into (speaker, text) segments at speaker turn boundaries.
+
+    Returns list of (speaker_label_or_None, segment_text) pairs in document order.
+    """
+    positions: List[tuple] = []
+    for m in _SPEAKER_TURN_RE.finditer(text):
+        # Already anchored to start-of-line by ^\s* — record speaker name from group(1)
+        positions.append((m.start(), m.end(), m.group(1)))
+
+    if not positions:
+        return [(None, text)]
+
+    segments: List[tuple] = []
+    # Text before first speaker turn
+    if positions[0][0] > 0:
+        prefix_text = text[: positions[0][0]].strip()
+        if prefix_text:
+            segments.append((None, prefix_text))
+
+    for i, (start, end, speaker) in enumerate(positions):
+        seg_end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
+        seg_text = text[start:seg_end].strip()
+        if seg_text:
+            segments.append((speaker, seg_text))
+
+    return segments
 
 
 class TxtChunker(BaseChunker):
@@ -106,79 +140,94 @@ class TxtChunker(BaseChunker):
 
                 extract_char_start = char_offset
 
+                # For prose extracts in transcript files, split on speaker boundaries first
+                # so each chunk carries the correct speaker label and subtype.
                 if extract.extract_type == "speaker_turn":
-                    chunk_type = "speaker_turn"
-                    if approx_tokens(text) <= settings.CHUNK_TARGET_TOKENS:
-                        pieces = [text]
-                    else:
-                        pieces = self._split_text(text)
+                    sub_segments: List[tuple] = [(extract.speaker_label, text)]
+                elif is_transcript_file and extract.extract_type == "prose":
+                    sub_segments = _split_on_speaker_turns(text)
                 else:
                     title = _detect_section_title(text)
                     if title:
                         current_section = title
+                    sub_segments = [(None, text)]
 
-                    chunk_type = _detect_chunk_type(text)
-                    pieces = self._split_text(text) if chunk_type != "speaker_turn" else [text]
-
-                piece_offset = extract_char_start
-                for piece in pieces:
-                    if not piece.strip():
-                        piece_offset += len(piece) + 1
+                seg_offset = extract_char_start
+                for seg_speaker, seg_text in sub_segments:
+                    seg_text = seg_text.strip()
+                    if not seg_text:
+                        seg_offset += len(seg_text) + 1
                         continue
-                    h = hash(piece)
-                    if h in seen_hashes:
-                        piece_offset += len(piece) + 1
-                        continue
-                    seen_hashes.add(h)
 
-                    char_start = piece_offset
-                    char_end = piece_offset + len(piece)
+                    is_speaker_seg = bool(seg_speaker) or extract.extract_type == "speaker_turn"
+                    chunk_type = "speaker_turn" if is_speaker_seg else _detect_chunk_type(seg_text)
 
-                    # Reset paragraph counter when section changes
-                    if current_section != last_section_for_para_counter:
-                        paragraph_number = 0
-                        last_section_for_para_counter = current_section
-                    if chunk_type == "paragraph":
-                        paragraph_number += 1
+                    if approx_tokens(seg_text) <= settings.CHUNK_TARGET_TOKENS:
+                        pieces = [seg_text]
+                    else:
+                        pieces = self._split_text(seg_text)
 
-                    speaker = extract.speaker_label or _extract_speaker(piece)
-                    fin_entities = extract_finance_entities(piece)
-                    chunk_hash = deterministic_chunk_id(source, extract.raw_source_ref or "txt", chunk_idx)
+                    piece_offset = seg_offset
+                    for piece in pieces:
+                        if not piece.strip():
+                            piece_offset += len(piece) + 1
+                            continue
+                        h = hash(piece)
+                        if h in seen_hashes:
+                            piece_offset += len(piece) + 1
+                            continue
+                        seen_hashes.add(h)
 
-                    structure = {
-                        "chunk_hash_id":    chunk_hash,
-                        "source_file":      source,
-                        "chunk_index":      chunk_idx,
-                        "paragraph_number": paragraph_number,
-                        "char_start":       char_start,
-                        "char_end":         char_end,
-                        "section_title":    current_section,
-                        "speaker":          speaker,
-                        "is_transcript":    is_transcript_file,
-                        "chunk_type":       chunk_type,
-                        "finance_entities": fin_entities,
-                    }
+                        char_start = piece_offset
+                        char_end = piece_offset + len(piece)
 
-                    piece_offset = char_end + 1
+                        # Reset paragraph counter when section changes
+                        if current_section != last_section_for_para_counter:
+                            paragraph_number = 0
+                            last_section_for_para_counter = current_section
+                        if chunk_type == "paragraph":
+                            paragraph_number += 1
 
-                    subtype = "speaker_turn" if chunk_type == "speaker_turn" else (
-                        "heading" if chunk_type == "section" else "paragraph"
-                    )
+                        speaker = seg_speaker or _extract_speaker(piece)
+                        fin_entities = extract_finance_entities(piece)
+                        chunk_hash = deterministic_chunk_id(source, extract.raw_source_ref or "txt", chunk_idx)
 
-                    doc = self._make_doc(
-                        text=piece,
-                        modality="txt",
-                        subtype=subtype,
-                        source=source,
-                        page=None,
-                        chunk_idx=chunk_idx,
-                        structure=structure,
-                        meta=meta,
-                        surface=surface,
-                    )
-                    if doc:
-                        docs.append(doc)
-                        chunk_idx += 1
+                        structure = {
+                            "chunk_hash_id":    chunk_hash,
+                            "source_file":      source,
+                            "chunk_index":      chunk_idx,
+                            "paragraph_number": paragraph_number,
+                            "char_start":       char_start,
+                            "char_end":         char_end,
+                            "section_title":    current_section,
+                            "speaker":          speaker,
+                            "is_transcript":    is_transcript_file,
+                            "chunk_type":       chunk_type,
+                            "finance_entities": fin_entities,
+                        }
+
+                        piece_offset = char_end + 1
+
+                        subtype = "speaker_turn" if chunk_type == "speaker_turn" else (
+                            "heading" if chunk_type == "section" else "paragraph"
+                        )
+
+                        doc = self._make_doc(
+                            text=piece,
+                            modality="txt",
+                            subtype=subtype,
+                            source=source,
+                            page=None,
+                            chunk_idx=chunk_idx,
+                            structure=structure,
+                            meta=meta,
+                            surface=surface,
+                        )
+                        if doc:
+                            docs.append(doc)
+                            chunk_idx += 1
+
+                    seg_offset += len(seg_text) + 1
 
                 char_offset += len(text) + 1  # +1 for separator between extracts
 

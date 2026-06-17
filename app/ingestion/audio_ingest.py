@@ -8,6 +8,7 @@ import re
 import shutil
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -582,6 +583,17 @@ def _transcribe_file(
     return segments_iter, info, latency
 
 
+def _transcribe_chunk_eager(
+    chunk_file: str,
+    session_id: str,
+) -> Tuple[List[Any], Any, float, float]:
+    """Materialize all segments within the calling thread (GPU GIL released during CTranslate2 ops)."""
+    segments_iter, info, latency = _transcribe_file(chunk_file, session_id)
+    chunk_duration = float(getattr(info, "duration", 0.0) or 0.0)
+    segments = list(segments_iter)
+    return segments, info, latency, chunk_duration
+
+
 # MAIN INGEST
 
 def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
@@ -724,77 +736,86 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
             },
         )
 
-        # TRANSCRIPTION — PARALLEL FOR CHUNKED FILES
+        # TRANSCRIPTION — PARALLEL ACROSS CHUNKS
         all_segments: List[Dict[str, Any]] = []
-        global_offset = 0.0
 
-        for chunk_idx, chunk_file in enumerate(chunk_files):
-            try:
-                segments_iter, info, transcribe_latency = _transcribe_file(chunk_file, session_id)
-                language = getattr(info, "language", None)
-
-                # RTF CHECK — use duration from TranscriptionInfo to avoid re-loading the file
-                chunk_duration = float(getattr(info, "duration", 0.0) or 0.0)
-                rtf = transcribe_latency / max(chunk_duration, 1e-6)
-
-                if rtf > settings.LATENCY_TARGET_AUDIO_RTF:
-                    logger.warning(
-                        event="audio_rtf_exceeded",
-                        rtf=round(rtf, 3),
-                        target=settings.LATENCY_TARGET_AUDIO_RTF,
+        # Submit all chunks concurrently; CTranslate2 releases GIL during CUDA ops,
+        # so two Whisper large-v3 instances (×1.55 GB each) fit safely on A10G 24 GB.
+        chunk_results: List[Tuple[int, List[Any], Any, float, float]] = []
+        with ThreadPoolExecutor(max_workers=settings.AUDIO_TRANSCRIPTION_WORKERS) as pool:
+            futures = {
+                pool.submit(_transcribe_chunk_eager, chunk_file, session_id): chunk_idx
+                for chunk_idx, chunk_file in enumerate(chunk_files)
+            }
+            for fut, chunk_idx in futures.items():
+                try:
+                    segs, info, transcribe_latency, chunk_duration = fut.result()
+                    chunk_results.append((chunk_idx, segs, info, transcribe_latency, chunk_duration))
+                except Exception as exc:
+                    logger.error(
+                        event="audio_chunk_transcription_failed",
                         chunk=chunk_idx,
                         file=source_name,
+                        error=str(exc),
                         session_id=session_id,
                     )
 
-                seg_count = 0
-                for seg in segments_iter:
-                    if seg_count >= settings.MAX_AUDIO_SEGMENTS:
-                        logger.warning(
-                            event="audio_segment_limit_reached",
-                            chunk=chunk_idx,
-                            session_id=session_id,
-                        )
-                        break
+        # Restore chronological order; global_offset must be computed in chunk order.
+        chunk_results.sort(key=lambda x: x[0])
+        global_offset = 0.0
+        for chunk_idx, raw_segs, info, transcribe_latency, chunk_duration in chunk_results:
+            language = getattr(info, "language", None)
 
-                    raw_text = (getattr(seg, "text", "") or "").strip()
-                    seg_start = float(getattr(seg, "start", 0.0)) + global_offset
-                    seg_end = float(getattr(seg, "end", seg_start)) + global_offset
-                    avg_logprob = getattr(seg, "avg_logprob", None)
-                    no_speech_prob = getattr(seg, "no_speech_prob", None)
-
-                    if not raw_text or seg_end <= seg_start:
-                        continue
-
-                    if no_speech_prob is not None and no_speech_prob > 0.8:
-                        logger.debug(
-                            event="audio_segment_skipped_no_speech",
-                            no_speech_prob=no_speech_prob,
-                            chunk=chunk_idx,
-                        )
-                        continue
-
-                    all_segments.append({
-                        "text": raw_text,
-                        "start": seg_start,
-                        "end": seg_end,
-                        "avg_logprob": avg_logprob,
-                        "no_speech_prob": no_speech_prob,
-                        "language": language,
-                        "chunk_idx": chunk_idx,
-                    })
-                    seg_count += 1
-
-                global_offset += chunk_duration
-
-            except Exception as exc:
-                logger.error(
-                    event="audio_chunk_transcription_failed",
+            rtf = transcribe_latency / max(chunk_duration, 1e-6)
+            if rtf > settings.LATENCY_TARGET_AUDIO_RTF:
+                logger.warning(
+                    event="audio_rtf_exceeded",
+                    rtf=round(rtf, 3),
+                    target=settings.LATENCY_TARGET_AUDIO_RTF,
                     chunk=chunk_idx,
                     file=source_name,
-                    error=str(exc),
                     session_id=session_id,
                 )
+
+            seg_count = 0
+            for seg in raw_segs:
+                if seg_count >= settings.MAX_AUDIO_SEGMENTS:
+                    logger.warning(
+                        event="audio_segment_limit_reached",
+                        chunk=chunk_idx,
+                        session_id=session_id,
+                    )
+                    break
+
+                raw_text = (getattr(seg, "text", "") or "").strip()
+                seg_start = float(getattr(seg, "start", 0.0)) + global_offset
+                seg_end = float(getattr(seg, "end", seg_start)) + global_offset
+                avg_logprob = getattr(seg, "avg_logprob", None)
+                no_speech_prob = getattr(seg, "no_speech_prob", None)
+
+                if not raw_text or seg_end <= seg_start:
+                    continue
+
+                if no_speech_prob is not None and no_speech_prob > 0.8:
+                    logger.debug(
+                        event="audio_segment_skipped_no_speech",
+                        no_speech_prob=no_speech_prob,
+                        chunk=chunk_idx,
+                    )
+                    continue
+
+                all_segments.append({
+                    "text": raw_text,
+                    "start": seg_start,
+                    "end": seg_end,
+                    "avg_logprob": avg_logprob,
+                    "no_speech_prob": no_speech_prob,
+                    "language": language,
+                    "chunk_idx": chunk_idx,
+                })
+                seg_count += 1
+
+            global_offset += chunk_duration
 
         if not all_segments:
             raise ValueError("NO_VALID_AUDIO_SEGMENTS")
@@ -1049,7 +1070,7 @@ class AudioIngestor(BaseIngestor):
 
             if duration_s < 0.5:
                 raise ValueError(f"AUDIO_TOO_SHORT: {duration_s:.2f}s")
-            if duration_s > settings.MAX_AUDIO_DURATION_SECONDS:
+            if duration_s > settings.MAX_AUDIO_DURATION_SEC:
                 raise ValueError(f"AUDIO_TOO_LONG: {duration_s:.0f}s")
 
             # Export as 16kHz mono WAV bytes for chunker

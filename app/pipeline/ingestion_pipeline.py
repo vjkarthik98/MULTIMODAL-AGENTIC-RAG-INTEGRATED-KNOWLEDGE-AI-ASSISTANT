@@ -353,7 +353,10 @@ def _split_by_modality(
     return text_docs, vision_docs
 
 
-# SHA-256 DEDUP AT CHUNK LEVEL
+# IN-MEMORY DEDUP AT CHUNK LEVEL
+# Uses Python's built-in hash() — 64-bit, ~0.1µs vs SHA-256's ~8µs per call.
+# Safe here because dedup is in-memory within a single ingestion run; it is
+# not persisted or compared across processes (cross-run dedup uses Qdrant IDs).
 
 def _dedup_chunks(docs: List[IngestedDocument]) -> List[IngestedDocument]:
     seen:   set                    = set()
@@ -361,11 +364,10 @@ def _dedup_chunks(docs: List[IngestedDocument]) -> List[IngestedDocument]:
     for d in docs:
         text      = getattr(d, "text", "")
         structure = getattr(d, "structure", {}) or {}
-        base = f"{text[:100]}|{structure.get('doc_id', '')}|{getattr(d, 'chunk_id', '')}"
-        h = hashlib.sha256(base.encode("utf-8")).hexdigest()
-        if h in seen:
+        key = hash((text[:100], structure.get("doc_id", ""), getattr(d, "chunk_id", "")))
+        if key in seen:
             continue
-        seen.add(h)
+        seen.add(key)
         unique.append(d)
     return unique
 
@@ -404,8 +406,16 @@ def _stream_embed_and_store(
     # periodically + on failure keeps the OOM protection without the tax.
     clear_every = max(int(settings.INGESTION_CACHE_CLEAR_EVERY), 1)
     batches_done = 0
+    qdrant_batch  = max(int(settings.QDRANT_BATCH_SIZE), micro_batch)
 
-    # TEXT CHUNKS — micro-batched embed + batched Qdrant upsert
+    def _flush(pending: list) -> int:
+        if not pending:
+            return 0
+        vector_store.insert_documents(pending, session_id=session_id, user_id=user_id)
+        return len(pending)
+
+    # TEXT CHUNKS — micro-batched embed, accumulated Qdrant upsert
+    pending_text: list = []
     for i in range(0, len(text_chunks), micro_batch):
         batch = text_chunks[i : i + micro_batch]
         t_start = time.time()
@@ -415,9 +425,11 @@ def _stream_embed_and_store(
             if embedded:
                 valid, _ = _valid_embeddings(embedded)
                 if valid:
-                    vector_store.insert_documents(valid, session_id=session_id, user_id=user_id)
-                    total_stored   += len(valid)
+                    pending_text.extend(valid)
                     total_embedded += len(valid)
+                    if len(pending_text) >= qdrant_batch:
+                        total_stored += _flush(pending_text)
+                        pending_text = []
         except Exception as e:
             logger.warning(
                 event="stream_text_embed_failed",
@@ -430,10 +442,14 @@ def _stream_embed_and_store(
         batches_done += 1
         if batches_done % clear_every == 0:
             _clear_cache()
+    # flush remainder
+    total_stored += _flush(pending_text)
+    pending_text = []
 
-    # VISION CHUNKS — micro-batched embed + batched Qdrant upsert
+    # VISION CHUNKS — micro-batched embed, accumulated Qdrant upsert
     if vision_chunks:
         from app.core.model_loader import model_loader as _ml
+        pending_vision: list = []
         for i in range(0, len(vision_chunks), micro_batch):
             batch = vision_chunks[i : i + micro_batch]
             t_vis = time.time()
@@ -444,9 +460,11 @@ def _stream_embed_and_store(
                 combined = vis_embedded + txt_from_vis
                 valid, _ = _valid_embeddings(combined)
                 if valid:
-                    vector_store.insert_documents(valid, session_id=session_id, user_id=user_id)
-                    total_stored   += len(valid)
+                    pending_vision.extend(valid)
                     total_embedded += len(valid)
+                    if len(pending_vision) >= qdrant_batch:
+                        total_stored += _flush(pending_vision)
+                        pending_vision = []
             except Exception as e:
                 logger.warning(
                     event="stream_vision_embed_failed",
@@ -459,6 +477,8 @@ def _stream_embed_and_store(
             batches_done += 1
             if batches_done % clear_every == 0:
                 _clear_cache()
+        # flush remainder
+        total_stored += _flush(pending_vision)
 
     _clear_cache()
     return total_embedded, total_stored

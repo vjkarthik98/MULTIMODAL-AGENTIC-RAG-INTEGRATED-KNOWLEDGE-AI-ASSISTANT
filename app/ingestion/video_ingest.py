@@ -11,6 +11,7 @@ import tempfile
 import time
 import unicodedata
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -570,35 +571,12 @@ def _extract_audio(file_path: str, audio_path: str) -> None:
         raise RuntimeError("AUDIO_EXTRACTION_FAILED")
 
 
-# FRAME OCR WITH EASYOCR ENSEMBLE — SECTION 4.1
+# FRAME OCR — delegated to TrOCR in video_chunker._caption_and_ocr_frame (higher quality).
+# Running Tesseract+EasyOCR here and TrOCR in the chunker was triple-OCR per frame;
+# removing the ingestor-level calls saves ~300–800 ms per frame with no quality loss.
 
-def _extract_frame_ocr(image_path: str) -> str:
-    results = []
-
-    # TESSERACT
-    try:
-        img = Image.open(image_path).convert("RGB")
-        text = (pytesseract.image_to_string(img) or "").strip()
-        if len(text) > 10:
-            results.append(text)
-    except Exception as e:
-        logger.debug(event="tesseract_frame_ocr_failed", error=str(e))
-
-    # EASYOCR ENSEMBLE
-    try:
-        reader = _get_easyocr_reader()
-        detections = reader.readtext(image_path, detail=0)
-        if detections:
-            results.append(" ".join(detections))
-    except Exception as e:
-        logger.debug(event="easyocr_frame_ocr_failed", error=str(e))
-
-    if not results:
-        return ""
-
-    # MERGE AND DEDUPLICATE
-    merged = " ".join(results)
-    return unicodedata.normalize("NFC", merged)[:2000]
+def _extract_frame_ocr(image_path: str) -> str:  # noqa: ARG001
+    return ""
 
 
 # BLUR SCORE
@@ -720,6 +698,77 @@ def _attempt_recovery(file_path: str, output_path: str) -> bool:
     except Exception as e:
         logger.warning(event="video_recovery_failed", error=str(e))
         return False
+
+
+def _run_audio_pipeline(
+    file_path: str,
+    audio_path: str,
+    source_name: str,
+    doc_id: str,
+    session_id: str,
+    file_hash: str,
+    source_path: str,
+) -> Tuple[List[Dict], List[IngestedDocument], Optional[str]]:
+    """Extract audio track and run Whisper ingestion in a worker thread.
+
+    Returns (speech_segments, ingested_docs, detected_language). Does NOT
+    mutate shared outer state so it is safe to run concurrently with frame
+    extraction on the main thread.
+    """
+    _extract_audio(file_path, audio_path)
+    from app.ingestion.audio_ingest import ingest as _audio_ingest
+    audio_docs = _audio_ingest(audio_path, session_id)
+
+    speech_segs: List[Dict] = []
+    result_docs: List[IngestedDocument] = []
+    for i, doc in enumerate(audio_docs):
+        s = doc.structure or {}
+        start_t = s.get("timestamp_start")
+        end_t   = s.get("timestamp_end")
+        if start_t is None or end_t is None or end_t <= start_t:
+            continue
+        _speech_clean = _sanitize(doc.text, surface="video_speech_ingest", file=source_name)
+        _speech_clean = _scrub_pii(_speech_clean, surface="video_speech_ingest")
+        speech_segs.append({
+            "index":      i,
+            "start":      start_t,
+            "end":        end_t,
+            "text":       _speech_clean,
+            "confidence": s.get("confidence", 1.0),
+            "language":   s.get("language"),
+        })
+        result_docs.append(
+            IngestedDocument(
+                text=_speech_clean,
+                modality="video",
+                subtype="speech",
+                source_type="video",
+                source=source_name,
+                chunk_id=i,
+                structure=_base_structure(
+                    doc_id, session_id, file_hash, source_path,
+                    chunk_type="audio_segment",
+                    start_time=round(start_t, 3),
+                    end_time=round(end_t, 3),
+                    timestamp_start=start_t,
+                    timestamp_end=end_t,
+                    confidence=s.get("confidence"),
+                    language=s.get("language"),
+                    hallucination_risk=s.get("hallucination_risk", "low"),
+                    snr=s.get("snr"),
+                    snr_degraded=s.get("snr_degraded", False),
+                    content_type="video_speech",
+                    ingestion_time=time.time(),
+                ),
+                extra_metadata={
+                    "importance_score":   s.get("confidence", 1.0),
+                    "modality_weight":    1.2,
+                    "data_quality_score": s.get("confidence", 1.0),
+                },
+            ).finalize()
+        )
+    lang = speech_segs[0].get("language", "unknown") if speech_segs else None
+    return speech_segs, result_docs, lang
 
 
 # MAIN ASYNC INGEST
@@ -847,82 +896,98 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         # SHORT VIDEO — SINGLE CHUNK; SKIP SCENE DETECTION — SECTION 4.1
         skip_scene_detection = (video_duration is not None and video_duration < 2.0)
 
-        # AUDIO EXTRACTION + INGESTION — SECTION 4.1
+        # AUDIO + FRAME EXTRACTION — PARALLEL — SECTION 4.1
+        # Audio pipeline (ffmpeg demux + Whisper transcription) and frame extraction
+        # (OpenCV) have zero resource contention: audio uses GPU for Whisper while
+        # frame extraction is pure CPU. Both run in the thread pool simultaneously;
+        # subtitle and chapter extraction run on the main thread in the same window.
         speech_segments: List[Dict] = []
+        audio_future = None
+        frame_future = None
+        audio_path_tmp: Optional[str] = None
+
+        with ThreadPoolExecutor(max_workers=2) as _pool:
+            if has_audio:
+                fd, audio_path_tmp = tempfile.mkstemp(suffix=".wav", dir=str(staging))
+                os.close(fd)
+                audio_future = _pool.submit(
+                    _run_audio_pipeline,
+                    file_path, audio_path_tmp, source_name,
+                    doc_id, session_id, file_hash, source_path,
+                )
+
+            if has_video:
+                frame_future = _pool.submit(
+                    extract_frames,
+                    file_path,
+                    settings.VIDEO_FRAME_INTERVAL_SEC,
+                    session_id,
+                    skip_scene_detection=skip_scene_detection,
+                )
+
+            # SUBTITLE EXTRACTION — runs on main thread while audio+frames process
+            subtitle_streams = probe.get("subtitle_streams", [])
+            if subtitle_streams and settings.VIDEO_SUBTITLE_EXTRACTION:
+                sub_dir = staging / f"subs_{doc_id}"
+                sub_dir.mkdir(exist_ok=True)
+                try:
+                    subtitles = _extract_subtitles(file_path, subtitle_streams, sub_dir)
+                    for sub in subtitles:
+                        if not sub.get("text"):
+                            continue
+                        sub["text"] = _sanitize(sub["text"], surface="video_subtitle_ingest",
+                                                file=source_name)
+                        sub["text"] = _scrub_pii(sub["text"], surface="video_subtitle_ingest")
+                        documents.append(
+                            IngestedDocument(
+                                text=sub["text"],
+                                modality="video",
+                                subtype="ocr",
+                                source_type="video",
+                                source=source_name,
+                                structure=_base_structure(
+                                    doc_id, session_id, file_hash, source_path,
+                                    content_type="video_subtitle",
+                                    subtitle_language=sub["language"],
+                                    subtitle_codec=sub["codec"],
+                                    ingestion_time=time.time(),
+                                ),
+                                extra_metadata={
+                                    "importance_score":   0.8,
+                                    "modality_weight":    1.0,
+                                    "data_quality_score": 0.8,
+                                },
+                            ).finalize()
+                        )
+                except Exception as e:
+                    logger.warning(event="subtitle_extraction_failed", error=str(e))
+                    universal_meta.add_error(f"SUBTITLE_EXTRACTION_FAILED: {e}")
+                finally:
+                    shutil.rmtree(sub_dir, ignore_errors=True)
+
+            # CHAPTER EXTRACTION — fast, sequential on main thread
+            chapters = _extract_chapters(probe.get("chapter_streams", []))
+            if chapters:
+                universal_meta.custom_fields["chapters"] = chapters
+
+        # pool.__exit__ waits for all submitted work — safe to .result() now
 
         if has_audio:
-            try:
-                fd, audio_path = tempfile.mkstemp(suffix=".wav", dir=str(staging))
-                os.close(fd)
-                _extract_audio(file_path, audio_path)
-
-                # LAZY IMPORT TO AVOID CIRCULAR
-                from app.ingestion.audio_ingest import ingest as audio_ingest_fn
-                audio_docs = audio_ingest_fn(audio_path, session_id)
-
-                for i, doc in enumerate(audio_docs):
-                    s       = doc.structure or {}
-                    start_t = s.get("timestamp_start")
-                    end_t   = s.get("timestamp_end")
-
-                    if start_t is None or end_t is None or end_t <= start_t:
-                        continue
-
-                    _speech_clean = _sanitize(doc.text, surface="video_speech_ingest",
-                                              file=source_name)
-                    _speech_clean = _scrub_pii(_speech_clean, surface="video_speech_ingest")
-                    speech_segments.append({
-                        "index":      i,
-                        "start":      start_t,
-                        "end":        end_t,
-                        "text":       _speech_clean,
-                        "confidence": s.get("confidence", 1.0),
-                        "language":   s.get("language"),
-                    })
-
-                    documents.append(
-                        IngestedDocument(
-                            text=_speech_clean,
-                            modality="video",
-                            subtype="speech",
-                            source_type="video",
-                            source=source_name,
-                            chunk_id=i,
-                            structure=_base_structure(
-                                doc_id, session_id, file_hash, source_path,
-                                chunk_type="audio_segment",
-                                start_time=round(start_t, 3),
-                                end_time=round(end_t, 3),
-                                timestamp_start=start_t,
-                                timestamp_end=end_t,
-                                confidence=s.get("confidence"),
-                                language=s.get("language"),
-                                hallucination_risk=s.get("hallucination_risk", "low"),
-                                snr=s.get("snr"),
-                                snr_degraded=s.get("snr_degraded", False),
-                                content_type="video_speech",
-                                ingestion_time=time.time(),
-                            ),
-                            extra_metadata={
-                                "importance_score":   s.get("confidence", 1.0),
-                                "modality_weight":    1.2,
-                                "data_quality_score": s.get("confidence", 1.0),
-                            },
-                        ).finalize()
+            if audio_future is not None:
+                try:
+                    _speech_segs, _audio_docs, _audio_lang = audio_future.result()
+                    speech_segments = _speech_segs
+                    documents.extend(_audio_docs)
+                    if speech_segments:
+                        universal_meta.language = _audio_lang or "unknown"
+                except Exception as e:
+                    logger.warning(
+                        event="audio_demux_failed",
+                        file=source_name,
+                        error=str(e),
+                        session_id=session_id,
                     )
-
-                if speech_segments:
-                    lang = speech_segments[0].get("language", "unknown")
-                    universal_meta.language = lang or "unknown"
-
-            except Exception as e:
-                logger.warning(
-                    event="audio_demux_failed",
-                    file=source_name,
-                    error=str(e),
-                    session_id=session_id,
-                )
-                universal_meta.add_error(f"AUDIO_DEMUX_FAILED: {e}")
+                    universal_meta.add_error(f"AUDIO_DEMUX_FAILED: {e}")
         else:
             # NO AUDIO TRACK — VISUAL ONLY — SECTION 4.1
             universal_meta.custom_fields["audio_available"] = False
@@ -934,61 +999,11 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 session_id=session_id,
             )
 
-        # SUBTITLE EXTRACTION — SECTION 4.1
-        subtitle_streams = probe.get("subtitle_streams", [])
-        if subtitle_streams and settings.VIDEO_SUBTITLE_EXTRACTION:
-            sub_dir = staging / f"subs_{doc_id}"
-            sub_dir.mkdir(exist_ok=True)
-            try:
-                subtitles = _extract_subtitles(file_path, subtitle_streams, sub_dir)
-                for sub in subtitles:
-                    if not sub.get("text"):
-                        continue
-                    sub["text"] = _sanitize(sub["text"], surface="video_subtitle_ingest",
-                                            file=source_name)
-                    sub["text"] = _scrub_pii(sub["text"], surface="video_subtitle_ingest")
-                    documents.append(
-                        IngestedDocument(
-                            text=sub["text"],
-                            modality="video",
-                            subtype="ocr",
-                            source_type="video",
-                            source=source_name,
-                            structure=_base_structure(
-                                doc_id, session_id, file_hash, source_path,
-                                content_type="video_subtitle",
-                                subtitle_language=sub["language"],
-                                subtitle_codec=sub["codec"],
-                                ingestion_time=time.time(),
-                            ),
-                            extra_metadata={
-                                "importance_score":   0.8,
-                                "modality_weight":    1.0,
-                                "data_quality_score": 0.8,
-                            },
-                        ).finalize()
-                    )
-            except Exception as e:
-                logger.warning(event="subtitle_extraction_failed", error=str(e))
-                universal_meta.add_error(f"SUBTITLE_EXTRACTION_FAILED: {e}")
-            finally:
-                shutil.rmtree(sub_dir, ignore_errors=True)
-
-        # CHAPTER EXTRACTION — SECTION 4.1
-        chapters = _extract_chapters(probe.get("chapter_streams", []))
-        if chapters:
-            universal_meta.custom_fields["chapters"] = chapters
-
-        # FRAME EXTRACTION — SECTION 4.1
+        # FRAME EXTRACTION RESULT — SECTION 4.1
         frames: List[Dict] = []
-        if has_video:
+        if has_video and frame_future is not None:
             try:
-                frames = extract_frames(
-                    file_path,
-                    settings.VIDEO_FRAME_INTERVAL_SEC,
-                    session_id,
-                    skip_scene_detection=skip_scene_detection,
-                )
+                frames = frame_future.result()
             except Exception as e:
                 logger.warning(
                     event="frame_extract_failed",

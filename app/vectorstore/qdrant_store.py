@@ -248,11 +248,11 @@ class QdrantVectorStore:
             except Exception as exc:
                 logger.warning(
                     "qdrant_dim_check_failed",
-                    name=name,
+                    collection=name,
                     error=str(exc),
                 )
         else:
-            logger.info("qdrant_create_collection", name=name, dim=dim)
+            logger.info("qdrant_create_collection", collection=name, dim=dim)
             self.client.create_collection(
                 collection_name=name,
                 vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
@@ -318,12 +318,31 @@ class QdrantVectorStore:
         _source_type = getattr(d, "source_type", "") or ""
 
         # PDF LOCATOR FIELDS — sub-page chunk position for precise citation
-        # PDF chunks use modality="text" + source_type="pdf", not modality="pdf"
+        # backward-compat path: modality="text" + source_type="pdf"
         if _source_type == "pdf":
             if s.get("sub_chunk_index") is not None:
                 payload["sub_chunk_index"] = int(s["sub_chunk_index"])
             if s.get("total_sub_chunks") is not None:
                 payload["total_sub_chunks"] = int(s["total_sub_chunks"])
+
+        # PDF RICH METADATA — from PdfChunker (modality="pdf")
+        # Provides full Phase 1.2/2.2 metadata for finance-grade retrieval
+        if modality == "pdf":
+            for _k in ("page_number", "page_range", "chunk_type", "section_hierarchy",
+                       "table_title", "column_headers", "row_range", "footnotes",
+                       "footnote_markers", "has_figure", "figure_path", "is_ocr",
+                       "caption", "ocr_text", "chunk_hash_id", "source_file"):
+                _v = s.get(_k)
+                if _v is not None:
+                    payload[_k] = _v
+            if s.get("finance_entities"):
+                payload["finance_entities"] = list(s["finance_entities"])[:20]
+            if s.get("char_start") is not None:
+                payload["char_start"] = int(s["char_start"])
+            if s.get("char_end") is not None:
+                payload["char_end"] = int(s["char_end"])
+            if s.get("token_count") is not None:
+                payload["token_count"] = int(s["token_count"])
 
         # DOCX HEADING LEVEL — hierarchy depth for section-aware retrieval
         if _source_type == "word" and s.get("heading_level") is not None:
@@ -337,6 +356,25 @@ class QdrantVectorStore:
                 payload["row_start"] = int(s["row_start"])
             if s.get("row_end") is not None:
                 payload["row_end"] = int(s["row_end"])
+
+        # TXT/TEXT TRANSCRIPT FIELDS — speaker attribution and call section for earnings call retrieval
+        if modality in ("text", "txt"):
+            if s.get("speaker"):
+                payload["speaker"] = str(s["speaker"])
+            if s.get("call_section"):
+                payload["call_section"] = str(s["call_section"])
+            if s.get("is_transcript"):
+                payload["is_transcript"] = bool(s["is_transcript"])
+            if s.get("chunk_type"):
+                payload["chunk_type"] = str(s["chunk_type"])
+            if s.get("char_start") is not None:
+                payload["char_start"] = int(s["char_start"])
+            if s.get("char_end") is not None:
+                payload["char_end"] = int(s["char_end"])
+            if s.get("token_count") is not None:
+                payload["token_count"] = int(s["token_count"])
+            if s.get("finance_entities"):
+                payload["finance_entities"] = list(s["finance_entities"])[:20]
 
         # AUDIO TEMPORAL FIELDS — top-level so reranker can read them directly
         if modality == "audio":

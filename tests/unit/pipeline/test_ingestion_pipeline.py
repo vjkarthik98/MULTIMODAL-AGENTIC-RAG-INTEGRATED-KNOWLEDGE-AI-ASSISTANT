@@ -192,13 +192,15 @@ class TestValidChunks:
 class TestValidEmbeddings:
 
     def test_valid_text_embedding_384(self):
-        doc = _make_doc(embedding=[0.1] * 384)
+        from app.core.config import settings
+        doc = _make_doc(embedding=[0.1] * settings.TEXT_EMBEDDING_DIM)
         valid, invalid = _valid_embeddings([doc])
         assert len(valid) == 1
         assert invalid == 0
 
     def test_valid_vision_embedding_512(self):
-        doc = _make_doc(embedding=[0.1] * 512)
+        from app.core.config import settings
+        doc = _make_doc(embedding=[0.1] * settings.VISION_EMBEDDING_DIM)
         valid, invalid = _valid_embeddings([doc])
         assert len(valid) == 1
         assert invalid == 0
@@ -216,7 +218,8 @@ class TestValidEmbeddings:
         assert invalid == 1
 
     def test_mixed_valid_invalid(self):
-        valid_doc   = _make_doc(embedding=[0.1] * 384)
+        from app.core.config import settings
+        valid_doc   = _make_doc(embedding=[0.1] * settings.TEXT_EMBEDDING_DIM)
         invalid_doc = _make_doc(embedding=[0.2] * 10)
         valid, invalid = _valid_embeddings([valid_doc, invalid_doc])
         assert len(valid) == 1

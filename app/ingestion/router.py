@@ -23,7 +23,8 @@ from app.ingestion.docx_ingest import ingest as word_ingest
 from app.ingestion.docx_ingest import DocxIngestor
 from app.ingestion.image_ingest import ingest as image_ingest
 from app.ingestion.image_ingest import ImageIngestor
-from app.ingestion.pdf_ingest import ingest as pdf_ingest
+from app.ingestion.pdf_ingest import ingest as pdf_ingest  # kept for backward compat
+from app.ingestion.pdf_ingest import ingest_pdf_full
 from app.ingestion.pdf_ingest import PdfIngestor
 from app.ingestion.schema import IngestedDocument
 from app.ingestion.txt_ingest import ingest as text_ingest
@@ -140,7 +141,7 @@ MODALITY_SIZE_LIMITS: Dict[str, int] = {
 
 INGESTION_HANDLERS: Dict[str, Callable] = {
     "text":  text_ingest,
-    "pdf":   pdf_ingest,
+    "pdf":   ingest_pdf_full,   # full path: PdfIngestor → PdfChunker (rich metadata)
     "word":  word_ingest,
     "excel": excel_ingest,
     "image": image_ingest,

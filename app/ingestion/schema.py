@@ -75,17 +75,43 @@ class EmbeddingSpace(str, Enum):
 
 # ALLOWED MODALITIES AND SUBTYPES
 
-ALLOWED_MODALITIES = {"text", "table", "image", "audio", "video", "pdf", "word", "excel"}
+ALLOWED_MODALITIES = {
+    "text", "table", "pdf",
+    # extension-based names used by per-modality chunkers
+    "txt",                       # txt_chunker
+    "image", "jpg", "jpeg", "png",  # image_chunker
+    "audio", "mp3", "wav",       # audio_chunker
+    "video", "mp4",              # video_chunker
+    "word", "docx",              # docx_chunker
+    "excel", "xlsx",             # xlsx_chunker
+}
+
+_TXT_SUBTYPES   = {"paragraph", "heading", "section", "list", "speaker_turn", "unknown"}
+_IMAGE_SUBTYPES = {"caption", "ocr", "image_frame", "unknown"}
+_AUDIO_SUBTYPES = {"speech", "unknown"}
+_VIDEO_SUBTYPES = {"speech", "frame", "ocr", "transcript_frame", "unknown"}
+_WORD_SUBTYPES  = {"paragraph", "table", "list", "heading", "annotation", "definition", "unknown"}
+_EXCEL_SUBTYPES = {"table_row_group", "assumptions", "named_ranges", "chart_caption", "unknown"}
 
 ALLOWED_SUBTYPES: Dict[str, set] = {
     "text":  {"paragraph", "heading", "page", "chunk", "speaker_turn", "section", "list", "unknown"},
     "table": {"structured", "unknown"},
-    "image": {"caption", "ocr", "image_frame", "unknown"},
-    "audio": {"speech", "unknown"},
-    "video": {"speech", "frame", "ocr", "unknown"},
     "pdf":   {"paragraph", "table", "footnote", "figure_caption", "list", "heading", "ocr", "unknown"},
-    "word":  {"paragraph", "table", "list", "heading", "annotation", "definition", "unknown"},
-    "excel": {"table_row_group", "assumptions", "named_ranges", "chart_caption", "unknown"},
+    # extension-based aliases share subtype sets with their semantic counterparts
+    "txt":  _TXT_SUBTYPES,
+    "image": _IMAGE_SUBTYPES,
+    "jpg":   _IMAGE_SUBTYPES,
+    "jpeg":  _IMAGE_SUBTYPES,
+    "png":   _IMAGE_SUBTYPES,
+    "audio": _AUDIO_SUBTYPES,
+    "mp3":   _AUDIO_SUBTYPES,
+    "wav":   _AUDIO_SUBTYPES,
+    "video": _VIDEO_SUBTYPES,
+    "mp4":   _VIDEO_SUBTYPES,
+    "word":  _WORD_SUBTYPES,
+    "docx":  _WORD_SUBTYPES,
+    "excel": _EXCEL_SUBTYPES,
+    "xlsx":  _EXCEL_SUBTYPES,
 }
 
 ALLOWED_EMBEDDING_SPACES = {"text", "vision"}
@@ -93,12 +119,21 @@ ALLOWED_EMBEDDING_SPACES = {"text", "vision"}
 MODALITY_QUALITY_FLOORS: Dict[str, float] = {
     "text":  0.1,
     "table": 0.1,
-    "image": 0.0,
-    "audio": 0.0,
-    "video": 0.0,
     "pdf":   0.1,
+    "txt":   0.1,
+    "image": 0.0,
+    "jpg":   0.0,
+    "jpeg":  0.0,
+    "png":   0.0,
+    "audio": 0.0,
+    "mp3":   0.0,
+    "wav":   0.0,
+    "video": 0.0,
+    "mp4":   0.0,
     "word":  0.1,
+    "docx":  0.1,
     "excel": 0.1,
+    "xlsx":  0.1,
 }
 
 

@@ -16,6 +16,7 @@ import pickle
 import re
 import time
 from abc import ABC, abstractmethod
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -362,17 +363,14 @@ class BaseBM25(ABC):
 
         stemmed = _stem(expanded)
 
-        seen: Set[str] = set()
-        clean: List[str] = []
-        for tok in stemmed:
-            if not tok or len(tok) <= 1:
-                continue
-            if tok in FINANCE_KEEP or tok not in STOPWORDS:
-                if tok not in seen:
-                    clean.append(tok)
-                    seen.add(tok)
-
-        clean = _expand_scale_variants(clean)
+        # Counter deduplicates and counts term frequencies in one O(n) pass.
+        # list(Counter(...)) preserves first-occurrence order (Python 3.7+)
+        # and gives unique tokens — same semantics as the prior seen+clean loop.
+        freq = Counter(
+            tok for tok in stemmed
+            if tok and len(tok) > 1 and (tok in FINANCE_KEEP or tok not in STOPWORDS)
+        )
+        clean = _expand_scale_variants(list(freq))
         return (bigram_tokens + clean)[:settings.BM25_MAX_TOKENS]
 
     # ── Metadata ──────────────────────────────────────────────────────────────

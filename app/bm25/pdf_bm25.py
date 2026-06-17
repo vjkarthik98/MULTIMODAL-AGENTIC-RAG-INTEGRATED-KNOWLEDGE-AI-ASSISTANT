@@ -61,9 +61,11 @@ class PdfBM25(BaseBM25):
             if sub_idx is not None and sub_total and int(sub_total) > 1:
                 parts.append(f"part {int(sub_idx)+1} of {sub_total}")
 
-            # Finance entities amplification
-            fin_entities = s.get("finance_entities") or {}
-            if isinstance(fin_entities, dict):
+            # Finance entities amplification (extract_finance_entities returns List[str])
+            fin_entities = s.get("finance_entities") or []
+            if isinstance(fin_entities, list):
+                parts.extend(str(x) for x in fin_entities[:5])
+            elif isinstance(fin_entities, dict):
                 for v in fin_entities.values():
                     if isinstance(v, list):
                         parts.extend(str(x) for x in v[:3])

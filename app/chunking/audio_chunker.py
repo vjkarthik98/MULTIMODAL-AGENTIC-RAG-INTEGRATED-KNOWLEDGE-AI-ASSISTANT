@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import os
 import re
 import tempfile
@@ -33,7 +34,7 @@ _CHUNK_ERRORS = Counter(
 def diarize(audio_path: str) -> List[Tuple[float, float, str]]:
     """Run pyannote speaker diarization. Returns (start, end, speaker) tuples."""
     try:
-        from app.core.model_loader import loader
+        from app.core.model_loader import model_loader as loader
         pipeline = loader.get_diarizer()
     except Exception as exc:
         logger.warning(event="diarizer_unavailable", error=str(exc))
@@ -58,7 +59,7 @@ def extract_entities(text: str) -> Dict[str, List[str]]:
     if not text.strip():
         return result
     try:
-        from app.core.model_loader import loader
+        from app.core.model_loader import model_loader as loader
         ner_pipeline = loader.get_ner()
     except Exception as exc:
         logger.warning(event="ner_unavailable", error=str(exc))
@@ -144,7 +145,7 @@ def _map_speaker_roles(
 def _run_whisper(wav_path: str) -> List[Dict]:
     """Transcribe with faster_whisper; returns list of word dicts."""
     try:
-        from app.core.model_loader import loader
+        from app.core.model_loader import model_loader as loader
         model = loader.get_whisper()
         segments, _ = model.transcribe(wav_path, word_timestamps=True)
         words = []
@@ -174,10 +175,17 @@ def _assemble_chunks(
     if not words:
         return []
 
+    # Pre-extract sorted start times for O(log s) binary search.
+    # diarization is already sorted by start (see _diarize caller).
+    # Complexity: O(s) build → O(log s) per query vs O(s) linear scan.
+    _diar_starts: List[float] = [seg[0] for seg in diarization]
+
     def speaker_at(t: float) -> str:
-        for start, end, label in diarization:
-            if start <= t <= end:
-                return label
+        idx = bisect.bisect_right(_diar_starts, t) - 1
+        if idx >= 0:
+            _start, _end, _label = diarization[idx]
+            if t <= _end:
+                return _label
         return "SPEAKER_00"
 
     chunks: List[Dict] = []

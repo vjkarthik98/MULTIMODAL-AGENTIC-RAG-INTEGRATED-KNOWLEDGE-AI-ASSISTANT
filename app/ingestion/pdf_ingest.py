@@ -363,45 +363,99 @@ class PdfIngestor(BaseIngestor):
             except Exception:
                 pass
 
+            # PASS 1: collect page metadata + pixmap bytes for OCR pages.
+            # All PyMuPDF calls stay on main thread (fitz is not thread-safe).
+            _page_records: List[Dict] = []
             for i, page in enumerate(pdf, start=1):
-                # Auto-rotation
                 rotation = _get_page_rotation(page)
                 if rotation not in (0, 360):
                     page.set_rotation(0)
-
                 raw_text = (page.get_text() or "").strip()
-
-                # Injection guard on extracted text
                 if raw_text:
                     raw_text = self._sanitize(raw_text, surface="pdf_ingest")
-
                 rect = page.rect
                 page_area = max(rect.width * rect.height, 1)
                 density = _text_density(raw_text, page_area)
-                ocr_conf = 1.0
-                is_ocr = False
+                needs_full_ocr = not raw_text
+                needs_supl_ocr = bool(raw_text) and density < 0.01
+                pix_info: Optional[Tuple[bytes, int, int]] = None
+                if needs_full_ocr or needs_supl_ocr:
+                    try:
+                        pix = page.get_pixmap(dpi=200)
+                        pix_info = (bytes(pix.samples), pix.width, pix.height)
+                    except Exception as exc:
+                        logger.warning("pdf_pixmap_failed", page=i, error=str(exc))
+                _page_records.append({
+                    "page_num": i, "page": page, "raw_text": raw_text, "rect": rect,
+                    "density": density, "needs_full_ocr": needs_full_ocr,
+                    "needs_supl_ocr": needs_supl_ocr, "pix_info": pix_info,
+                })
 
-                if not raw_text:
-                    # Scanned page — full OCR
+            # PASS 2: parallel Tesseract OCR — Tesseract is thread-safe, semaphore
+            # bounds CPU concurrency to settings.PDF_OCR_WORKERS processes.
+            _ocr_sem = asyncio.Semaphore(settings.PDF_OCR_WORKERS)
+
+            async def _ocr_bytes_async(
+                samples: bytes, w: int, h: int, page_num: int
+            ) -> Tuple[int, Tuple[str, float]]:
+                async with _ocr_sem:
+                    def _run() -> Tuple[str, float]:
+                        try:
+                            import pytesseract
+                            from PIL import Image as _PILImg
+                            img = _PILImg.frombytes("RGB", [w, h], samples)
+                            ocr_text = (pytesseract.image_to_string(img) or "").strip()
+                            data = pytesseract.image_to_data(
+                                img, output_type=pytesseract.Output.DICT
+                            )
+                            confs = [
+                                int(c) for c in data["conf"]
+                                if str(c).lstrip("-").isdigit() and int(c) >= 0
+                            ]
+                            confidence = (
+                                round(sum(confs) / max(len(confs), 1) / 100.0, 3)
+                                if confs else 0.5
+                            )
+                            return ocr_text, confidence
+                        except Exception as exc:
+                            logger.warning("ocr_page_failed", page=page_num, error=str(exc))
+                            return "", 0.0
+                    return page_num, await asyncio.to_thread(_run)
+
+            _ocr_tasks = [
+                _ocr_bytes_async(*rec["pix_info"], rec["page_num"])
+                for rec in _page_records if rec["pix_info"] is not None
+            ]
+            _ocr_results: Dict[int, Tuple[str, float]] = {}
+            if _ocr_tasks:
+                for _pnum, _res in await asyncio.gather(*_ocr_tasks):
+                    _ocr_results[_pnum] = _res
+
+            # PASS 3: finalize extracts using parallel OCR results (main thread).
+            for rec in _page_records:
+                i       = rec["page_num"]
+                page    = rec["page"]
+                raw_text = rec["raw_text"]
+                rect    = rec["rect"]
+                ocr_conf = 1.0
+                is_ocr   = False
+
+                if rec["needs_full_ocr"]:
                     _ocr_invocations.inc()
                     is_ocr = True
-                    try:
-                        pix = page.get_pixmap(dpi=200)
-                        ocr_result, ocr_conf = _ocr_page_image(pix, i)
+                    if i in _ocr_results:
+                        ocr_result, ocr_conf = _ocr_results[i]
                         if ocr_result:
                             raw_text = ocr_result
-                    except Exception as exc:
-                        logger.warning("pdf_ocr_fallback_failed", page=i, error=str(exc))
-                elif density < 0.01:
+                    elif rec["pix_info"] is None:
+                        logger.warning("pdf_ocr_fallback_failed", page=i, error="pixmap unavailable")
+                elif rec["needs_supl_ocr"]:
                     _ocr_invocations.inc()
-                    try:
-                        pix = page.get_pixmap(dpi=200)
-                        ocr_result, ocr_conf = _ocr_page_image(pix, i)
+                    if i in _ocr_results:
+                        ocr_result, ocr_conf = _ocr_results[i]
                         if ocr_result and len(ocr_result) > len(raw_text):
                             raw_text = ocr_result
                             is_ocr = True
-                    except Exception as exc:
-                        logger.warning("pdf_ocr_supplemental_failed", page=i, error=str(exc))
 
                 if not raw_text:
                     continue
@@ -425,6 +479,12 @@ class PdfIngestor(BaseIngestor):
                         page_text = mc_text
                 except Exception:
                     pass
+
+                # Watermark stripping — remove lines that are solely watermark tokens
+                _page_lines = page_text.split("\n")
+                _filtered = [ln for ln in _page_lines if ln.strip().upper() not in _PDF_WATERMARK_STRIP]
+                if len(_filtered) < len(_page_lines):
+                    page_text = "\n".join(_filtered).strip()
 
                 # Determine extract_type: scanned vs prose vs heading
                 font_sz = _detect_font_size(page, page_text[:50])
@@ -544,6 +604,38 @@ class PdfIngestor(BaseIngestor):
                         pass
             except Exception as exc:
                 logger.warning("pdf_table_extraction_failed", error=str(exc))
+
+            # Camelot — lattice (bordered) table fallback for tables pdfplumber misses
+            # Deduplicates against pdfplumber results by first-50-char content hash.
+            try:
+                import camelot
+                _plumber_sigs = {ex.text[:50] for ex in extracts if ex.extract_type == "table_row"}
+                _camelot_tables = camelot.read_pdf(file_path, pages="1-end", flavor="lattice")
+                for ct in _camelot_tables:
+                    if ct.df.empty or ct.parsing_report.get("accuracy", 0) < 50:
+                        continue
+                    rows = [list(ct.df.columns)] + [list(r) for r in ct.df.itertuples(index=False)]
+                    rows = [[str(cell or "").strip() for cell in row] for row in rows]
+                    txt = _table_to_text(rows)
+                    if not txt or txt[:50] in _plumber_sigs:
+                        continue  # skip if empty or already captured by pdfplumber
+                    md = _table_to_markdown(rows)
+                    combined = self._sanitize(f"{txt}\n\n{md}", surface="pdf_table_ingest")
+                    combined = self._scrub_pii(combined, surface="pdf_table_ingest")
+                    if combined:
+                        extracts.append(RawExtract(
+                            text=combined,
+                            extract_type="table_row",
+                            page=ct.page,
+                            raw_source_ref=f"pdf:{path.name}|page:{ct.page}|camelot",
+                            extra={"markdown": md, "extractor": "camelot",
+                                   "accuracy": ct.parsing_report.get("accuracy")},
+                        ))
+                        _plumber_sigs.add(txt[:50])
+            except ImportError:
+                pass  # camelot optional; pdfplumber handles standard tables
+            except Exception as exc:
+                logger.warning("pdf_camelot_extraction_failed", error=str(exc))
 
             if not extracts:
                 raise ValueError("NO_EXTRACTS_PRODUCED")
@@ -936,3 +1028,59 @@ def ingest_sync(file_path: str, session_id: str) -> List[IngestedDocument]:
         return loop.run_until_complete(ingest(file_path, session_id))
     except RuntimeError:
         return asyncio.run(ingest(file_path, session_id))
+
+
+# ─── Production path: PdfIngestor → PdfChunker ────────────────────────────────
+
+async def ingest_pdf_full(file_path: str, session_id: str) -> List[IngestedDocument]:
+    """Production PDF ingestion: PdfIngestor.extract() → PdfChunker.chunk().
+
+    Replaces the backward-compat ingest() as the INGESTION_HANDLERS entry.
+    Produces modality='pdf' docs with full Phase 1.2/2.2 metadata:
+    section_title, section_hierarchy, chunk_type, is_ocr, has_figure,
+    finance_entities, char_start, char_end, token_count, page_range, etc.
+    """
+    from app.ingestion.schema import UniversalMetadata
+    from app.chunking import chunk_raw_extracts
+
+    if not session_id:
+        raise ValueError("SESSION_ID_REQUIRED")
+
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"FILE_NOT_FOUND: {file_path}")
+
+    file_size = path.stat().st_size
+    if file_size == 0:
+        raise ValueError("EMPTY_FILE")
+    if file_size > settings.MAX_FILE_SIZE_PDF:
+        raise ValueError(f"FILE_TOO_LARGE: {file_size}")
+
+    meta = UniversalMetadata(
+        source_path=str(path.resolve()),
+        modality="pdf",
+        file_size_bytes=file_size,
+        custom_fields={"session_id": session_id},
+    )
+
+    ingestor = PdfIngestor()
+    extracts = await ingestor.extract(path, meta)
+
+    if not extracts:
+        raise ValueError("NO_EXTRACTS_PRODUCED")
+
+    docs = chunk_raw_extracts(extracts, meta, "pdf")
+
+    for doc in docs:
+        struct = getattr(doc, "structure", None)
+        if struct is not None and struct.get("session_id") in (None, "default"):
+            struct["session_id"] = session_id
+
+    logger.info(
+        event="ingest_pdf_full_complete",
+        file=path.name,
+        extracts=len(extracts),
+        docs=len(docs),
+        session_id=session_id,
+    )
+    return docs

@@ -28,22 +28,22 @@ def _make_doc(text: str = "Sample text content.", modality: str = "text") -> Ing
 class TestTableToText:
 
     def test_empty_rows_returns_empty(self):
-        from app.ingestion.document_ingest import _table_to_text
+        from app.ingestion.pdf_ingest import _table_to_text
         assert _table_to_text([]) == ""
 
     def test_single_row_returns_joined(self):
-        from app.ingestion.document_ingest import _table_to_text
+        from app.ingestion.pdf_ingest import _table_to_text
         result = _table_to_text([["col1", "col2", "col3"]])
         assert "col1" in result
         assert "col2" in result
 
     def test_empty_row_skipped(self):
-        from app.ingestion.document_ingest import _table_to_text
+        from app.ingestion.pdf_ingest import _table_to_text
         result = _table_to_text([["", "", ""], ["a", "b", "c"]])
         assert "a" in result
 
     def test_multirow_table_has_newlines(self):
-        from app.ingestion.document_ingest import _table_to_text
+        from app.ingestion.pdf_ingest import _table_to_text
         rows = [["h1", "h2"], ["r1", "r2"], ["r3", "r4"]]
         result = _table_to_text(rows)
         assert "\n" in result
@@ -52,18 +52,18 @@ class TestTableToText:
 class TestTableToMarkdown:
 
     def test_empty_returns_empty(self):
-        from app.ingestion.document_ingest import _table_to_markdown
+        from app.ingestion.pdf_ingest import _table_to_markdown
         assert _table_to_markdown([]) == ""
 
     def test_header_and_separator_present(self):
-        from app.ingestion.document_ingest import _table_to_markdown
+        from app.ingestion.pdf_ingest import _table_to_markdown
         rows = [["Name", "Age"], ["Alice", "30"]]
         result = _table_to_markdown(rows)
         assert "Name" in result
         assert "---" in result
 
     def test_body_rows_included(self):
-        from app.ingestion.document_ingest import _table_to_markdown
+        from app.ingestion.pdf_ingest import _table_to_markdown
         rows = [["Col1", "Col2"], ["val1", "val2"]]
         result = _table_to_markdown(rows)
         assert "val1" in result
@@ -75,7 +75,7 @@ class TestTableToMarkdown:
 class TestFileHash:
 
     def test_returns_64_char_hex(self, tmp_path):
-        from app.ingestion.document_ingest import _file_hash
+        from app.ingestion.pdf_ingest import _file_hash
         p = tmp_path / "f.txt"
         p.write_text("hello world")
         result = _file_hash(str(p))
@@ -83,7 +83,7 @@ class TestFileHash:
         assert all(c in "0123456789abcdef" for c in result)
 
     def test_same_content_same_hash(self, tmp_path):
-        from app.ingestion.document_ingest import _file_hash
+        from app.ingestion.pdf_ingest import _file_hash
         p1 = tmp_path / "a.txt"
         p2 = tmp_path / "b.txt"
         p1.write_text("same content")
@@ -91,7 +91,7 @@ class TestFileHash:
         assert _file_hash(str(p1)) == _file_hash(str(p2))
 
     def test_different_content_different_hash(self, tmp_path):
-        from app.ingestion.document_ingest import _file_hash
+        from app.ingestion.pdf_ingest import _file_hash
         p1 = tmp_path / "a.txt"
         p2 = tmp_path / "b.txt"
         p1.write_text("content one")
@@ -104,16 +104,16 @@ class TestFileHash:
 class TestContentHash:
 
     def test_returns_64_char_hex(self):
-        from app.ingestion.document_ingest import _content_hash
+        from app.ingestion.pdf_ingest import _content_hash
         result = _content_hash("hello world")
         assert len(result) == 64
 
     def test_identical_strings_same_hash(self):
-        from app.ingestion.document_ingest import _content_hash
+        from app.ingestion.pdf_ingest import _content_hash
         assert _content_hash("test") == _content_hash("test")
 
     def test_different_strings_different_hash(self):
-        from app.ingestion.document_ingest import _content_hash
+        from app.ingestion.pdf_ingest import _content_hash
         assert _content_hash("abc") != _content_hash("xyz")
 
 
@@ -122,7 +122,7 @@ class TestContentHash:
 class TestDocumentIngestAsync:
 
     def test_missing_file_raises(self, tmp_path):
-        from app.ingestion.document_ingest import ingest
+        from app.ingestion.pdf_ingest import ingest
         path = str(tmp_path / "nonexistent.pdf")
 
         async def _run():
@@ -132,7 +132,7 @@ class TestDocumentIngestAsync:
         asyncio.get_event_loop().run_until_complete(_run())
 
     def test_empty_session_id_raises(self, tmp_path):
-        from app.ingestion.document_ingest import ingest
+        from app.ingestion.pdf_ingest import ingest
         p = tmp_path / "doc.pdf"
         p.write_bytes(b"%PDF-1.4 empty")
 

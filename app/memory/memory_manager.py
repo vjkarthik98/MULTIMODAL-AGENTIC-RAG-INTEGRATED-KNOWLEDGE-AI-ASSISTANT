@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import time
 import unicodedata
+from collections import deque
 from typing import Any, Dict, List, Optional
 
 from app.core.config import settings
@@ -113,23 +114,23 @@ def _dedup(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 # SLIDING WINDOW — SECTION 4.7
+# deque.appendleft() keeps chronological order in a single O(n) pass,
+# eliminating the second list(reversed(...)) allocation of the prior version.
 
 def _apply_sliding_window(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     max_tokens = settings.SLIDING_WINDOW_MAX_TOKENS
     total      = 0
-    trimmed:   List[Dict[str, Any]] = []
+    window: deque = deque()
 
     for msg in reversed(history):
         content   = str(msg.get("content", ""))
         token_est = max(1, len(content) // 4)
-        total    += token_est
-
-        if total > max_tokens:
+        if total + token_est > max_tokens:
             break
+        window.appendleft(msg)
+        total += token_est
 
-        trimmed.append(msg)
-
-    return list(reversed(trimmed))
+    return list(window)
 
 
 # MEMORY MANAGER CLASS

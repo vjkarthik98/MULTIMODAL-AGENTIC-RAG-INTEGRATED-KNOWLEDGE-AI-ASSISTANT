@@ -38,6 +38,18 @@ def _msg(role: str, content: str, embedding=None, ts: float = None) -> Dict:
 DIM = settings.TEXT_EMBEDDING_DIM
 
 
+# ── Fixtures ──────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def sample_history_with_embeddings():
+    vec = [0.9] * DIM
+    return [
+        _msg("user",      "What is RAG?",                  embedding=vec),
+        _msg("assistant", "RAG stands for retrieval-augmented generation.", embedding=vec),
+        _msg("user",      "How does retrieval work?",       embedding=vec),
+    ]
+
+
 # ── _cosine ───────────────────────────────────────────────────────────────────
 
 class TestCosine:

@@ -241,7 +241,7 @@ class ToolRegistry:
         if not tool.name:
             raise ValueError("TOOL_NAME_REQUIRED")
         self.tools[tool.name] = tool
-        logger.debug("tool_registered", name=tool.name, type=tool.tool_type)
+        logger.debug("tool_registered", tool_name=tool.name, type=tool.tool_type)
 
     # GET TOOL — RAISES IF NOT FOUND
 
@@ -269,7 +269,7 @@ class ToolRegistry:
     def deregister(self, tool_name: str) -> None:
         if tool_name in self.tools:
             del self.tools[tool_name]
-            logger.info("tool_deregistered", name=tool_name)
+            logger.info("tool_deregistered", tool_name=tool_name)
 
     # REGISTER ALL BUILT-IN TOOLS
 

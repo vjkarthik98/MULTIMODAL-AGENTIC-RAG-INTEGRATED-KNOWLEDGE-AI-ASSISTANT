@@ -23,7 +23,7 @@ def _make_audio_doc():
 
 
 def _make_embedder():
-    from app.embeddings.text_embedder import TextEmbedder
+    from app.embeddings.base_embedder import TextEmbedder
 
     mock_model = MagicMock()
     mock_model.encode.return_value = np.array([[0.1] * 384])
@@ -35,6 +35,8 @@ def _make_embedder():
     embedder.device = "cpu"
     embedder.expected_dim = 384
     embedder.max_text_len = 4096
+    embedder._query_prompt_name = None
+    embedder._query_prompt_text = None
     return embedder
 
 
@@ -42,8 +44,8 @@ class TestAudioEmbedding:
 
     def test_audio_docs_embedded_via_text_embedder(self):
         embedder = _make_embedder()
-        import app.embeddings.text_embedder as te_mod
-        with patch.object(te_mod, "_cache") as mock_cache:
+        import app.embeddings.base_embedder as te_mod
+        with patch.object(te_mod, "_shared_cache") as mock_cache:
             mock_cache.get.return_value = None
             docs = [_make_audio_doc()]
             result = embedder.embed_documents(docs, session_id="test")
@@ -52,8 +54,8 @@ class TestAudioEmbedding:
     def test_embedded_audio_doc_has_embedding(self):
         embedder = _make_embedder()
         embedder.model.encode.return_value = np.array([[0.2] * 384])
-        import app.embeddings.text_embedder as te_mod
-        with patch.object(te_mod, "_cache") as mock_cache:
+        import app.embeddings.base_embedder as te_mod
+        with patch.object(te_mod, "_shared_cache") as mock_cache:
             mock_cache.get.return_value = None
             docs = [_make_audio_doc()]
             result = embedder.embed_documents(docs, session_id="test")

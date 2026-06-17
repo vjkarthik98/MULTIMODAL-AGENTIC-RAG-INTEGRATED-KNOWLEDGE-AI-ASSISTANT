@@ -15,7 +15,7 @@ def _make_doc(modality="image", embedding_space="vision"):
 
 
 def _make_embedder():
-    from app.embeddings.multimodal_embedder import MultimodalEmbedder
+    from app.embeddings.base_embedder import MultimodalEmbedder
 
     mock_text_embedder  = MagicMock()
     mock_image_embedder = MagicMock()

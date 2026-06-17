@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import hashlib
+import heapq
 import math
 import re
 import time
@@ -201,6 +202,10 @@ class HybridRetriever:
         # VISION LRU CACHE
         self._vision_cache: OrderedDict = OrderedDict()
         self._vision_cache_max: int = min(settings.LRU_CACHE_MAXSIZE, 256)
+
+        # TOKEN SET CACHE — memoises frozenset(text.lower().split()) so each
+        # unique text is tokenised once in MMR instead of O(k²) times.
+        self._token_cache: dict = {}
 
     # HASH
 
@@ -473,11 +478,21 @@ class HybridRetriever:
 
         return selected
 
+    # TOKEN SET HELPER — memoised so each unique text is tokenised once per query.
+    # MMR calls _text_overlap in an O(k²) loop; without caching, text A is re-split
+    # every time it appears as the left or right argument.
+
+    def _token_set(self, text: str) -> frozenset:
+        key = hashlib.md5(text[:500].encode(), usedforsecurity=False).hexdigest()
+        if key not in self._token_cache:
+            self._token_cache[key] = frozenset(text.lower().split())
+        return self._token_cache[key]
+
     # TEXT OVERLAP FOR MMR
 
     def _text_overlap(self, left: str, right: str) -> float:
-        a = set(left.lower().split())
-        b = set(right.lower().split())
+        a = self._token_set(left)
+        b = self._token_set(right)
         if not a or not b:
             return 0.0
         return len(a & b) / len(a | b)
@@ -844,11 +859,12 @@ class HybridRetriever:
             if not combined:
                 return []
 
-            # SORT BY FUSED SCORE
-            fused = sorted(
+            # PARTIAL SORT: top (top_k × 3) by fused score — O(n log k) vs O(n log n).
+            # ×3 headroom ensures filters + MMR reranking have enough candidates.
+            fused = heapq.nlargest(
+                top_k * 3,
                 combined.values(),
                 key=lambda x: x["score"],
-                reverse=True,
             )
 
             # METADATA FILTERING

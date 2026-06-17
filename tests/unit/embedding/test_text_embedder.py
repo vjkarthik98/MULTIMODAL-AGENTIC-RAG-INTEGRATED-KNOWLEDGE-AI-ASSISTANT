@@ -17,7 +17,7 @@ def _make_doc(text="This is a sample text for embedding tests.", modality="text"
 
 def _make_embedder():
     """Build a TextEmbedder with mocked model, bypassing SentenceTransformer loading."""
-    from app.embeddings.text_embedder import TextEmbedder
+    from app.embeddings.base_embedder import TextEmbedder
 
     mock_model = MagicMock()
     mock_model.encode.return_value = np.array([[0.1] * 384])
@@ -29,6 +29,8 @@ def _make_embedder():
     embedder.device = "cpu"
     embedder.expected_dim = 384
     embedder.max_text_len = 4096
+    embedder._query_prompt_name = None
+    embedder._query_prompt_text = None
     return embedder
 
 
@@ -36,8 +38,8 @@ class TestTextEmbedderEmbedDocuments:
 
     def test_embed_documents_returns_list(self):
         embedder = _make_embedder()
-        import app.embeddings.text_embedder as te_mod
-        with patch.object(te_mod, "_cache") as mock_cache:
+        import app.embeddings.base_embedder as te_mod
+        with patch.object(te_mod, "_shared_cache") as mock_cache:
             mock_cache.get.return_value = None
             docs = [_make_doc()]
             result = embedder.embed_documents(docs, session_id="test")
@@ -45,8 +47,8 @@ class TestTextEmbedderEmbedDocuments:
 
     def test_embed_documents_sets_embedding(self):
         embedder = _make_embedder()
-        import app.embeddings.text_embedder as te_mod
-        with patch.object(te_mod, "_cache") as mock_cache:
+        import app.embeddings.base_embedder as te_mod
+        with patch.object(te_mod, "_shared_cache") as mock_cache:
             mock_cache.get.return_value = None
             docs = [_make_doc()]
             result = embedder.embed_documents(docs, session_id="test")
@@ -56,8 +58,8 @@ class TestTextEmbedderEmbedDocuments:
     def test_embed_text_returns_list_of_floats(self):
         embedder = _make_embedder()
         embedder.model.encode.return_value = np.array([0.1] * 384)
-        import app.embeddings.text_embedder as te_mod
-        with patch.object(te_mod, "_cache") as mock_cache:
+        import app.embeddings.base_embedder as te_mod
+        with patch.object(te_mod, "_shared_cache") as mock_cache:
             mock_cache.get.return_value = None
             result = embedder.embed_text("hello world", session_id="test")
         assert isinstance(result, list)

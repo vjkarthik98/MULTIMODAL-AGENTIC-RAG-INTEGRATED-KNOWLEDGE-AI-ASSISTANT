@@ -25,6 +25,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from app.core.config import settings
 from app.ingestion.base_ingest import BaseIngestor
 from app.ingestion.schema import IngestedDocument, RawExtract, UniversalMetadata
+from app.chunking.finance_numbers import approx_tokens, extract_finance_entities
 # ── TEXT REPAIR PASSES ────────────────────────────────────────────────────────
 
 def repair_mojibake(text: str) -> Tuple[str, int]:
@@ -288,7 +289,7 @@ _ZERO_WIDTH_RE = re.compile(r"[​‌‍⁠⁡⁢⁣⁤﻿­]")
 _FANCY_SPACE_RE = re.compile(r"[   -   　]")
 
 _SPEAKER_TURN_RE = re.compile(
-    r"^[ \t]*(?P<speaker>[A-Z][A-Z0-9 \-\.']+(?:\s*[-–]\s*[A-Z][A-Z0-9 \-]+)?)[ \t]*:",
+    r"^[ \t]*(?P<speaker>[A-Z][A-Z0-9 \-\']+(?:\s*[-–]\s*[A-Z][A-Z0-9 \-]+)?)[ \t]*[:\.](?=[ \t])",
     re.MULTILINE,
 )
 _TRANSCRIPT_SEPARATORS = [
@@ -815,14 +816,16 @@ def _restore_finance_numbers(chunk: str, mapping: Dict[str, str]) -> str:
 
 
 def _detect_transcript_format(text: str) -> bool:
-    sample = text[:3000]
+    # 10 000-char window: FOMC opening statements can exceed 7 000 chars before the
+    # first question-and-answer exchange, so 3 000 chars would only capture 1 speaker.
+    sample = text[:10000]
     return len(_SPEAKER_TURN_RE.findall(sample)) >= 3
 
 
 def _extract_speaker(chunk: str) -> Optional[str]:
     first_line = chunk.split("\n")[0].strip()
     m = re.match(
-        r"^(?P<speaker>[A-Z][A-Z0-9 \-\.']+(?:\s*[-–]\s*[A-Z][A-Z0-9 \-]+)?)[ \t]*:",
+        r"^(?P<speaker>[A-Z][A-Z0-9 \-\']+(?:\s*[-–]\s*[A-Z][A-Z0-9 \-]+)?)[ \t]*[:\.](?=[ \t])",
         first_line,
     )
     return m.group("speaker").strip() if m else None
@@ -1218,6 +1221,14 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 seen_hashes: set = set()
                 seen_simhashes: List[int] = []
 
+                # Transcript state — persists across chunk loop iterations
+                _last_speaker: Optional[str] = None
+                _first_speaker: Optional[str] = None
+                _qa_started = False
+                _current_call_section: Optional[str] = "prepared_remarks" if is_transcript else None
+                # Character offset tracking for char_start / char_end payload fields
+                _char_offset: int = 0
+
                 for i, (section_id_val, section_title_val, chunk, section_extras) in enumerate(chunk_tuples):
                     chunk = chunk.strip()
                     if not chunk:
@@ -1275,11 +1286,45 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     if chunk_extra_metadata.get("title_mismatch"):
                         structure_carry_overs["title_mismatch"] = True
 
-                    _speaker = _extract_speaker(chunk) if is_transcript else None
-                    _chunk_type = "speaker_turn" if _speaker else (
+                    _raw_speaker = _extract_speaker(chunk) if is_transcript else None
+                    _chunk_type = "speaker_turn" if _raw_speaker else (
                         "heading" if subtype == "heading" else "paragraph"
                     )
-                    _call_section = _detect_call_section(chunk) if is_transcript else None
+
+                    if is_transcript:
+                        # SPEAKER PROPAGATION — carry last speaker into continuation paragraphs
+                        # so every chunk can be filtered by speaker, not just turn-start chunks.
+                        if _raw_speaker:
+                            _last_speaker = _raw_speaker
+                            _speaker = _raw_speaker
+                        elif _last_speaker and _chunk_type == "paragraph":
+                            _speaker = _last_speaker
+                        else:
+                            _speaker = None
+
+                        # CALL SECTION STATE
+                        # State transition fires once when a second distinct speaker appears.
+                        if _raw_speaker:
+                            if _first_speaker is None:
+                                _first_speaker = _raw_speaker
+                            elif not _qa_started and _raw_speaker != _first_speaker:
+                                _qa_started = True
+                                _current_call_section = "qa_session"
+
+                        if _qa_started:
+                            # Once in Q&A, never downgrade — keyword detection would cause
+                            # false "operator" hits on journalist "thank you" openers.
+                            _call_section = _current_call_section
+                        elif _raw_speaker:
+                            # Pre-Q&A new turn: keyword can still flag an operator transition.
+                            _keyword_section = _detect_call_section(chunk)
+                            _call_section = "operator" if _keyword_section == "operator" else _current_call_section
+                        else:
+                            # Pre-Q&A continuation: never re-classify from keywords alone.
+                            _call_section = _current_call_section
+                    else:
+                        _speaker = None
+                        _call_section = None
 
                     structure_payload: Dict[str, Any] = {
                         "doc_id": doc_id,
@@ -1309,13 +1354,18 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                         "speaker": _speaker,
                         "chunk_type": _chunk_type,
                         "call_section": _call_section,
+                        "char_start": _char_offset,
+                        "char_end": _char_offset + len(chunk),
+                        "token_count": approx_tokens(chunk),
+                        "finance_entities": extract_finance_entities(chunk),
                     }
+                    _char_offset += len(chunk) + 1  # +1 for separator
                     structure_payload.update(structure_carry_overs)
 
                     doc = IngestedDocument(
                         text=chunk,
                         modality="text",
-                        subtype=subtype,
+                        subtype=_chunk_type if _chunk_type == "speaker_turn" else subtype,
                         source_type="file",
                         source=source_name,
                         chunk_id=i,

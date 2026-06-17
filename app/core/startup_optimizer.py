@@ -71,11 +71,53 @@ async def preload_gpu_models() -> None:
 
 
 def _load_models_parallel(requested: List[str]) -> None:
+    """Load models one at a time in priority order with OOM guards between each.
+
+    Parallel loading 12 GPU models simultaneously causes CUDA OOM during
+    peak allocation (loading buffers + target tensors coexist briefly).
+    Sequential loading is slower but reliable on any VRAM budget.
+    """
+    # Priority order: highest-priority / most-critical models first so the
+    # app is usable for text queries while vision/audio models are still loading.
+    _PRIORITY: List[str] = [
+        "text_embedder",    # embedding backbone — needed by every modality
+        "llm",              # GGUF LLM — needed for all answers
+        "reranker",         # cross-encoder — needed for every retrieval
+        "siglip",           # vision backbone (image_embedder + siglip_text_embedder depend on it)
+        "image_embedder",   # depends on siglip being loaded
+        "siglip_text_embedder",
+        "blip2",            # image captioning (INT8, 2.7 GB)
+        "trocr",            # OCR for PDF/image (~1.5 GB)
+        "whisper",          # audio transcription (1.55 GB)
+        "ner",              # NER entity extraction (0.4 GB)
+        "finbert",          # finance sentiment (0.4 GB)
+        "diarizer",         # speaker diarization (0.6 GB) — last, needs HF token
+    ]
+
+    # Only load models that were requested.
+    ordered = [m for m in _PRIORITY if m in requested]
+    # Any requested model not in the priority list goes at the end.
+    ordered += [m for m in requested if m not in _PRIORITY]
+
+    from app.core.model_registry import model_registry
+    import gc
     try:
-        from app.core.model_registry import model_registry
-        model_registry.ensure(requested)
-    except Exception as exc:
-        logger.warning(event="gpu_preload_load_failed", error=str(exc))
+        import torch
+        _has_cuda = torch.cuda.is_available()
+    except Exception:
+        _has_cuda = False
+
+    for name in ordered:
+        try:
+            logger.info(event="model_preload_start", model=name)
+            model_registry.ensure([name])
+            # OOM guard: flush temporary loading buffers between each model.
+            gc.collect()
+            if _has_cuda:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+        except Exception as exc:
+            logger.warning(event="gpu_preload_load_failed", model=name, error=str(exc))
 
 
 def _warmup_cuda_kernels() -> None:
@@ -88,6 +130,11 @@ def _warmup_cuda_kernels() -> None:
     _warmup_llm()
     _warmup_siglip()
     _warmup_blip()
+    _warmup_blip2()
+    _warmup_trocr()
+    _warmup_whisper()
+    _warmup_ner()
+    _warmup_finbert()
     _warmup_reranker()
 
 
@@ -158,6 +205,98 @@ def _warmup_blip() -> None:
         logger.debug(event="cuda_warmup_done", model="blip")
     except Exception as exc:
         logger.warning(event="cuda_warmup_failed", model="blip", error=str(exc))
+
+
+def _warmup_blip2() -> None:
+    if not settings.ENABLE_VISION:
+        return
+    try:
+        from app.core.model_loader import model_loader
+        result = model_loader.get_blip2()
+        if result is None or result[1] is None:
+            return
+        processor, model, device = result
+        if device != "cuda":
+            return
+        import torch
+        dummy = torch.zeros(1, 3, 224, 224, device=device, dtype=torch.float16)
+        with torch.no_grad():
+            model.vision_model(pixel_values=dummy)
+        logger.debug(event="cuda_warmup_done", model="blip2")
+    except Exception as exc:
+        logger.warning(event="cuda_warmup_failed", model="blip2", error=str(exc))
+
+
+def _warmup_trocr() -> None:
+    if not settings.ENABLE_VISION:
+        return
+    try:
+        from app.core.model_loader import model_loader
+        from PIL import Image
+        import numpy as np
+        result = model_loader.get_trocr()
+        if result is None or result[1] is None:
+            return
+        processor, model, device = result
+        dummy_img = Image.fromarray(np.zeros((32, 128, 3), dtype=np.uint8))
+        pixel_values = processor(images=dummy_img, return_tensors="pt").pixel_values.to(device)
+        with __import__("torch").no_grad():
+            model.generate(pixel_values, max_new_tokens=4)
+        logger.debug(event="cuda_warmup_done", model="trocr")
+    except Exception as exc:
+        logger.warning(event="cuda_warmup_failed", model="trocr", error=str(exc))
+
+
+def _warmup_whisper() -> None:
+    if not settings.ENABLE_AUDIO:
+        return
+    try:
+        from app.core.model_loader import model_loader
+        import tempfile, struct, wave, os
+        whisper = model_loader.get_whisper()
+        if whisper is None:
+            return
+        # Generate a 0.1s silent WAV and transcribe it to warm cuDNN kernels.
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            wav_path = f.name
+            with wave.open(f, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes(struct.pack("<" + "h" * 1600, *([0] * 1600)))
+        try:
+            list(whisper.transcribe(wav_path, beam_size=1)[0])
+        finally:
+            os.unlink(wav_path)
+        logger.debug(event="cuda_warmup_done", model="whisper")
+    except Exception as exc:
+        logger.warning(event="cuda_warmup_failed", model="whisper", error=str(exc))
+
+
+def _warmup_ner() -> None:
+    if not settings.ENABLE_AUDIO:
+        return
+    try:
+        from app.core.model_loader import model_loader
+        ner = model_loader.get_ner()
+        if ner is None:
+            return
+        _ = ner("Apple reported quarterly earnings.")
+        logger.debug(event="cuda_warmup_done", model="ner")
+    except Exception as exc:
+        logger.warning(event="cuda_warmup_failed", model="ner", error=str(exc))
+
+
+def _warmup_finbert() -> None:
+    try:
+        from app.core.model_loader import model_loader
+        finbert = model_loader.get_finbert()
+        if finbert is None:
+            return
+        _ = finbert("Revenue increased 12% year over year.")
+        logger.debug(event="cuda_warmup_done", model="finbert")
+    except Exception as exc:
+        logger.warning(event="cuda_warmup_failed", model="finbert", error=str(exc))
 
 
 def _warmup_reranker() -> None:

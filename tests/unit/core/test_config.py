@@ -10,8 +10,8 @@ class TestSettings:
     def test_defaults_are_valid(self):
         s = Settings()
         assert isinstance(s.APP_VERSION, str) and len(s.APP_VERSION) > 0
-        assert s.TEXT_EMBEDDING_DIM == 384
-        assert s.VISION_EMBEDDING_DIM == 512
+        assert s.TEXT_EMBEDDING_DIM == 1024
+        assert s.VISION_EMBEDDING_DIM == 1152
         assert s.CHUNK_OVERLAP < s.CHUNK_SIZE
         assert s.AGENT_MAX_STEPS > 0
         assert s.RAG_TOP_K > 0

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -29,6 +31,9 @@ _CHUNK_ERRORS = Counter(
 
 _TABLE_GROUP_SIZE = 5       # target rows per table chunk
 _TABLE_OVERLAP_ROWS = 2     # rows carried into next table chunk
+
+# BLIP2 INT8 = ~2.7 GB; semaphore limits concurrent instances to stay within A10G 24 GB.
+_BLIP2_SEMAPHORE = threading.Semaphore(2)
 
 
 def _ocr_bytes(raw_bytes: bytes) -> str:
@@ -65,6 +70,7 @@ def _split_table_rows(
     chunk_idx_ref: List[int],
     surface: str,
     section_hierarchy: List[str],
+    char_offset_ref: Optional[List[int]] = None,
 ) -> List[IngestedDocument]:
     docs: List[IngestedDocument] = []
     step = _TABLE_GROUP_SIZE
@@ -83,6 +89,7 @@ def _split_table_rows(
         row_nums = (rows[i].extra.get("row_num", i + 1), rows[min(i + step - 1, len(rows) - 1)].extra.get("row_num", i + step))
         chunk_hash = deterministic_chunk_id(source, f"p{page or 0}_table_r{row_nums[0]}", chunk_idx_ref[0])
 
+        c_start = char_offset_ref[0] if char_offset_ref is not None else 0
         structure = {
             "chunk_hash_id":      chunk_hash,
             "source_file":        source,
@@ -101,8 +108,8 @@ def _split_table_rows(
             "has_figure":         False,
             "figure_path":        None,
             "finance_entities":   fin_entities,
-            "char_start":         0,
-            "char_end":           len(nl_text),
+            "char_start":         c_start,
+            "char_end":           c_start + len(nl_text),
         }
         doc = chunker._make_doc(
             text=nl_text,
@@ -118,6 +125,8 @@ def _split_table_rows(
         if doc:
             docs.append(doc)
             chunk_idx_ref[0] += 1
+            if char_offset_ref is not None:
+                char_offset_ref[0] += len(nl_text) + 1
         i += step - overlap
     return docs
 
@@ -142,6 +151,8 @@ class PdfChunker(BaseChunker):
         try:
             docs: List[IngestedDocument] = []
             chunk_idx = [0]
+            # Cumulative character offset across all emitted chunks for precise citation
+            char_offset = [0]
 
             section_title: Optional[str] = None
             section_hierarchy: List[str] = []
@@ -185,8 +196,8 @@ class PdfChunker(BaseChunker):
                         "has_figure":        False,
                         "figure_path":       None,
                         "finance_entities":  fin_entities,
-                        "char_start":        0,
-                        "char_end":          len(piece),
+                        "char_start":        char_offset[0],
+                        "char_end":          char_offset[0] + len(piece),
                     }
                     doc = self._make_doc(
                         text=piece,
@@ -202,6 +213,7 @@ class PdfChunker(BaseChunker):
                     if doc:
                         docs.append(doc)
                         chunk_idx[0] += 1
+                        char_offset[0] += len(piece) + 1
                 prose_buf = ""
                 prose_footnotes = []
 
@@ -211,12 +223,31 @@ class PdfChunker(BaseChunker):
                     return
                 table_docs = _split_table_rows(
                     pending_table_rows, table_headers, table_page,
-                    section_title, table_title, source, meta, self, chunk_idx, surface, section_hierarchy,
+                    section_title, table_title, source, meta, self, chunk_idx, surface,
+                    section_hierarchy, char_offset_ref=char_offset,
                 )
                 docs.extend(table_docs)
                 pending_table_rows = []
                 table_headers = []
                 table_title = None
+
+            # Pre-compute BLIP2 captions + TrOCR for all image_region extracts
+            # concurrently before the sequential pass. Keyed by id(ext) so the
+            # main loop can look up results without changing its structure.
+            _img_cache: Dict[int, Tuple[str, str]] = {}
+            _img_extracts = [e for e in extracts
+                             if e.extract_type == "image_region" and e.raw_bytes]
+            if _img_extracts:
+                def _caption_and_ocr_safe(ext_obj: RawExtract) -> Tuple[int, str, str]:
+                    raw = ext_obj.raw_bytes or b""
+                    with _BLIP2_SEMAPHORE:
+                        cap = _caption_bytes(raw)
+                        ocr = _ocr_bytes(raw)
+                    return id(ext_obj), cap, ocr
+
+                with ThreadPoolExecutor(max_workers=2) as _img_pool:
+                    for _eid, _cap, _ocr in _img_pool.map(_caption_and_ocr_safe, _img_extracts):
+                        _img_cache[_eid] = (_cap, _ocr)
 
             for ext in extracts:
                 etype = ext.extract_type
@@ -304,8 +335,8 @@ class PdfChunker(BaseChunker):
                             "has_figure":        False,
                             "figure_path":       None,
                             "finance_entities":  fin_entities,
-                            "char_start":        0,
-                            "char_end":          len(piece),
+                            "char_start":        char_offset[0],
+                            "char_end":          char_offset[0] + len(piece),
                         }
                         doc = self._make_doc(
                             text=piece,
@@ -321,14 +352,14 @@ class PdfChunker(BaseChunker):
                         if doc:
                             docs.append(doc)
                             chunk_idx[0] += 1
+                            char_offset[0] += len(piece) + 1
                     continue
 
                 if etype == "image_region":
                     flush_prose()
                     flush_table()
                     raw = ext.raw_bytes or b""
-                    caption_text = _caption_bytes(raw) if raw else ""
-                    ocr_text = _ocr_bytes(raw) if raw else ""
+                    caption_text, ocr_text = _img_cache.get(id(ext), ("", ""))
                     combined = f"{caption_text}\n{ocr_text}".strip()
                     if not combined:
                         continue
@@ -349,8 +380,8 @@ class PdfChunker(BaseChunker):
                         "has_figure":       True,
                         "figure_path":      None,
                         "finance_entities": fin_entities,
-                        "char_start":       0,
-                        "char_end":         len(combined),
+                        "char_start":       char_offset[0],
+                        "char_end":         char_offset[0] + len(combined),
                     }
                     doc = self._make_doc(
                         text=combined,
@@ -366,6 +397,7 @@ class PdfChunker(BaseChunker):
                     if doc:
                         docs.append(doc)
                         chunk_idx[0] += 1
+                        char_offset[0] += len(combined) + 1
                     continue
 
             flush_prose()

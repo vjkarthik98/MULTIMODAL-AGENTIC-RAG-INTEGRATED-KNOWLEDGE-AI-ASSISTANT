@@ -179,7 +179,7 @@ class TestImageIngest:
         real_path = Path(path_str)
 
         with patch("app.ingestion.image_ingest._safe_resolve", return_value=real_path), \
-             patch("app.ingestion.image_ingest._generate_caption", return_value=caption), \
+             patch("app.ingestion.image_ingest._classify_and_caption", return_value=(caption, "photograph", [])), \
              patch("app.ingestion.image_ingest._extract_ocr", return_value=""):
             return ingest(path_str, session_id=session_id)
 

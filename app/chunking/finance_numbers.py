@@ -18,15 +18,18 @@ except Exception:
 # Finance number pattern — these tokens must NEVER be split at internal commas or dots.
 _FIN_RE = re.compile(
     r"""(?x)
-    [$€£¥₹₽][\d,]+(?:\.\d+)?[BMKTbmkt]?                    # $1,234.56B  €2.3T
+    [$€£¥₹₽][\d,]+(?:\.\d+)?[BMKTbmkt]?                        # $1,234.56B  €2.3T
     | [\d,]+(?:\.\d+)?\s?(?:billion|million|trillion|thousand)  # 4.3 billion
-    | -?\d[\d,]*(?:\.\d+)?%                                  # -4.2%  23.5%
-    | \d[\d,]*(?:\.\d+)?\s?bps                               # 350 bps
-    | \d[\d,]*(?:\.\d+)?[xX]                                 # 12.3x
-    | Q[1-4]\s?FY?\s?\d{2,4}                                 # Q3FY25  Q3 2024
-    | FY\s?\d{2,4}                                            # FY2024
-    | H[12]\s?\d{4}                                           # H1 2024
-    | \(\d[\d,]*(?:\.\d+)?\)                                 # (2,345) accounting negative
+    | -?\d[\d,]*(?:\.\d+)?%                                     # -4.2%  23.5%
+    | -?\d[\d,]*(?:\.\d+)?\s+percent(?:age\s+point)?s?          # 2.8 percent / 1/4 percentage point
+    | \d[\d,]*(?:\.\d+)?\s?bps                                  # 350 bps
+    | \d[\d,]*(?:\.\d+)?\s+basis\s+points?                      # 100 basis points
+    | \d/\d\s+percent(?:age\s+point)?s?                         # 1/4 percentage point (fraction)
+    | \d[\d,]*(?:\.\d+)?[xX]                                    # 12.3x
+    | Q[1-4]\s?FY?\s?\d{2,4}                                    # Q3FY25  Q3 2024
+    | FY\s?\d{2,4}                                              # FY2024
+    | H[12]\s?\d{4}                                             # H1 2024
+    | \(\d[\d,]*(?:\.\d+)?\)                                    # (2,345) accounting negative
     """,
     re.IGNORECASE,
 )

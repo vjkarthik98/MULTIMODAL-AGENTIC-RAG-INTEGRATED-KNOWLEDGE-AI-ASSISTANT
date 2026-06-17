@@ -471,10 +471,12 @@ class AgentRouter:
     def _parse(
         self,
         text: str,
-        signals: AgentSignals,
+        signals,
         session_id: str,
     ) -> AgentDecision:
         try:
+            if isinstance(signals, dict):
+                signals = AgentSignals(**{k: v for k, v in signals.items() if k in AgentSignals.model_fields})
             cleaned = self._extract_json(text)
             data    = json.loads(cleaned)
 
