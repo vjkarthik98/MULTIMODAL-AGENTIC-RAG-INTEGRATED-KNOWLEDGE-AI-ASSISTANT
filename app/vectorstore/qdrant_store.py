@@ -344,12 +344,46 @@ class QdrantVectorStore:
             if s.get("token_count") is not None:
                 payload["token_count"] = int(s["token_count"])
 
-        # DOCX HEADING LEVEL — hierarchy depth for section-aware retrieval
+        # DOCX RICH METADATA — from DocxChunker (modality="docx")
+        # Provides full Phase 1.3/2.3 metadata for heading-aware finance retrieval
+        if modality == "docx":
+            for _k in ("heading", "heading_hierarchy", "heading_level", "chunk_type",
+                       "paragraph_index", "table_index", "column_headers", "row_range",
+                       "has_bold_terms", "has_italic_terms", "defined_terms",
+                       "clause_numbers", "chunk_hash_id", "source_file"):
+                _v = s.get(_k)
+                if _v is not None:
+                    payload[_k] = _v
+            if s.get("finance_entities") is not None:
+                payload["finance_entities"] = list(s["finance_entities"])[:20]
+            if s.get("char_start") is not None:
+                payload["char_start"] = int(s["char_start"])
+            if s.get("char_end") is not None:
+                payload["char_end"] = int(s["char_end"])
+            if s.get("token_count") is not None:
+                payload["token_count"] = int(s["token_count"])
+
+        # DOCX HEADING LEVEL (backward-compat — backward-compat path sets source_type="word")
         if _source_type == "word" and s.get("heading_level") is not None:
             payload["heading_level"] = int(s["heading_level"])
 
-        # EXCEL LOCATOR FIELDS — sheet name and row range for cell-level citation
-        if _source_type == "excel":
+        # XLSX RICH METADATA — from XlsxChunker (modality="xlsx")
+        if modality == "xlsx":
+            for _k in ("sheet_name", "sheet_index", "sheet_type", "chunk_type",
+                       "chunk_hash_id", "source_file", "table_region", "semantic_group",
+                       "unit_scale", "currency", "display_format", "is_hidden",
+                       "has_formulas_resolved", "named_ranges_in_chunk",
+                       "column_headers", "row_range"):
+                _v = s.get(_k)
+                if _v is not None:
+                    payload[_k] = _v
+            if s.get("finance_entities") is not None:
+                payload["finance_entities"] = list(s["finance_entities"])[:20]
+            if s.get("token_count") is not None:
+                payload["token_count"] = int(s["token_count"])
+
+        # EXCEL backward-compat — old path: modality="table", source_type="excel"
+        if _source_type == "excel" and modality != "xlsx":
             if s.get("sheet"):
                 payload["sheet_name"] = str(s["sheet"])
             if s.get("row_start") is not None:
@@ -376,14 +410,166 @@ class QdrantVectorStore:
             if s.get("finance_entities"):
                 payload["finance_entities"] = list(s["finance_entities"])[:20]
 
-        # AUDIO TEMPORAL FIELDS — top-level so reranker can read them directly
-        if modality == "audio":
-            if s.get("timestamp_start") is not None:
-                payload["timestamp_start"] = float(s["timestamp_start"])
-            if s.get("timestamp_end") is not None:
-                payload["timestamp_end"] = float(s["timestamp_end"])
-            if s.get("speaker"):
-                payload["speaker"] = str(s["speaker"])
+        # AUDIO RICH METADATA — AudioChunker Phase 1.6/2.6/3.6 fields.
+        # Keys: AudioChunker uses start_timestamp/end_timestamp; legacy ingest uses
+        # timestamp_start/timestamp_end. Both are normalised here so retrievers
+        # can use either key interchangeably.
+        if modality in ("audio", "mp3"):
+            # Timestamps — accept both naming conventions from old and new ingest paths
+            ts_start = s.get("start_timestamp") or s.get("timestamp_start")
+            ts_end   = s.get("end_timestamp")   or s.get("timestamp_end")
+            if ts_start is not None:
+                payload["start_timestamp"] = float(ts_start)
+                payload["timestamp_start"] = float(ts_start)    # backward-compat alias
+            if ts_end is not None:
+                payload["end_timestamp"]   = float(ts_end)
+                payload["timestamp_end"]   = float(ts_end)      # backward-compat alias
+            if s.get("duration_seconds") is not None:
+                payload["duration_seconds"] = float(s["duration_seconds"])
+
+            # Speaker fields
+            spk_label = s.get("speaker_label") or s.get("speaker")
+            if spk_label:
+                payload["speaker_label"] = str(spk_label)
+                payload["speaker"]       = str(spk_label)       # backward-compat alias
+            if s.get("speaker_name"):
+                payload["speaker_name"] = str(s["speaker_name"])
+            if s.get("speaker_role"):
+                payload["speaker_role"] = str(s["speaker_role"])
+
+            # Earnings-call section and topic
+            if s.get("call_section"):
+                payload["call_section"]  = str(s["call_section"])
+            if s.get("topic_section"):
+                payload["topic_section"] = str(s["topic_section"])
+
+            # Chunk statistics
+            if s.get("word_count") is not None:
+                payload["word_count"]  = int(s["word_count"])
+            if s.get("token_count") is not None:
+                payload["token_count"] = int(s["token_count"])
+
+            # Q&A and earnings-call flags
+            if s.get("is_question") is not None:
+                payload["is_question"]     = bool(s["is_question"])
+            if s.get("is_answer") is not None:
+                payload["is_answer"]       = bool(s["is_answer"])
+            if s.get("is_earnings_call") is not None:
+                payload["is_earnings_call"] = bool(s["is_earnings_call"])
+
+            # Audio quality signals forwarded from ingestor
+            if s.get("snr") is not None:
+                payload["snr"]               = float(s["snr"])
+            if s.get("snr_degraded") is not None:
+                payload["snr_degraded"]      = bool(s["snr_degraded"])
+            if s.get("clipping_detected") is not None:
+                payload["clipping_detected"] = bool(s["clipping_detected"])
+
+            # Finance entity map — truncated for index efficiency
+            fe = s.get("finance_entities")
+            if fe and isinstance(fe, dict):
+                payload["finance_entities"] = {
+                    k: v[:10] if isinstance(v, list) else v
+                    for k, v in fe.items()
+                }
+
+            # Verbatim transcript stored alongside .text for re-rank display
+            if s.get("transcript"):
+                payload["transcript"] = str(s["transcript"])[:1000]
+
+            # Deterministic chunk hash for dedup
+            if s.get("chunk_hash_id"):
+                payload["chunk_hash_id"] = str(s["chunk_hash_id"])
+
+        # VIDEO RICH METADATA — VideoChunker Phase 1.7/2.7/3.7 fields.
+        # Mirrors the audio block above; accepts both timestamp naming conventions.
+        if modality in ("video", "mp4"):
+            ts_start = s.get("start_timestamp") or s.get("timestamp_start")
+            ts_end   = s.get("end_timestamp")   or s.get("timestamp_end")
+            if ts_start is not None:
+                payload["start_timestamp"] = float(ts_start)
+                payload["timestamp_start"] = float(ts_start)
+            if ts_end is not None:
+                payload["end_timestamp"]   = float(ts_end)
+                payload["timestamp_end"]   = float(ts_end)
+            if s.get("duration_seconds") is not None:
+                payload["duration_seconds"] = float(s["duration_seconds"])
+
+            # Speaker fields — VideoChunker stores speaker_label/speaker_name/speaker_role
+            spk_label = s.get("speaker_label") or s.get("speaker")
+            if spk_label:
+                payload["speaker_label"] = str(spk_label)
+                payload["speaker"]       = str(spk_label)
+            if s.get("speaker_name"):
+                payload["speaker_name"] = str(s["speaker_name"])
+            if s.get("speaker_role"):
+                payload["speaker_role"] = str(s["speaker_role"])
+
+            # Call section and topic
+            if s.get("call_section"):
+                payload["call_section"]  = str(s["call_section"])
+            if s.get("topic_section"):
+                payload["topic_section"] = str(s["topic_section"])
+
+            # Chunk statistics
+            if s.get("word_count") is not None:
+                payload["word_count"]  = int(s["word_count"])
+            if s.get("token_count") is not None:
+                payload["token_count"] = int(s["token_count"])
+
+            # Q&A and content flags
+            if s.get("is_question") is not None:
+                payload["is_question"]     = bool(s["is_question"])
+            if s.get("is_answer") is not None:
+                payload["is_answer"]       = bool(s["is_answer"])
+            if s.get("is_earnings_call") is not None:
+                payload["is_earnings_call"] = bool(s["is_earnings_call"])
+
+            # Audio quality signals (from video's audio track)
+            if s.get("snr") is not None:
+                payload["snr"]               = float(s["snr"])
+            if s.get("snr_degraded") is not None:
+                payload["snr_degraded"]      = bool(s["snr_degraded"])
+            if s.get("clipping_detected") is not None:
+                payload["clipping_detected"] = bool(s["clipping_detected"])
+
+            # Visual metadata
+            if s.get("has_slide_content") is not None:
+                payload["has_slide_content"] = bool(s["has_slide_content"])
+            if s.get("has_finance_signal") is not None:
+                payload["has_finance_signal"] = bool(s["has_finance_signal"])
+            if s.get("slide_numbers_covered"):
+                payload["slide_numbers_covered"] = list(s["slide_numbers_covered"])[:20]
+
+            # Frame captions — serialised (truncated) for display and re-rank
+            frame_caps = s.get("frame_captions") or []
+            if frame_caps:
+                # Store compact version: timestamp + caption + slide_number
+                compact = []
+                for fc in frame_caps[:10]:
+                    if isinstance(fc, dict):
+                        compact.append({
+                            "frame_timestamp": fc.get("frame_timestamp"),
+                            "frame_caption":   (fc.get("frame_caption") or "")[:200],
+                            "ocr_text":        (fc.get("ocr_text") or "")[:100],
+                            "slide_number":    fc.get("slide_number"),
+                            "scene_change":    fc.get("scene_change", False),
+                            "frame_path":      fc.get("frame_path", ""),
+                        })
+                if compact:
+                    payload["frame_captions"] = compact
+
+            # Finance entities map
+            fe = s.get("finance_entities")
+            if fe and isinstance(fe, dict):
+                payload["finance_entities"] = {
+                    k: v[:10] if isinstance(v, list) else v
+                    for k, v in fe.items()
+                }
+
+            # Verbatim transcript for re-rank display
+            if s.get("transcript"):
+                payload["transcript"] = str(s["transcript"])[:1000]
 
         # XLSX DUAL EMBEDDING — store alt vector in payload so Phase 5 retrieval
         # can reconstruct it for structural table search without a named-vector
@@ -436,11 +622,33 @@ class QdrantVectorStore:
             if s.get("caption"):
                 payload["caption"] = str(s["caption"])[:500]
 
+            # Image classification and title (Phase 1.5/3.5)
+            if s.get("image_type"):
+                payload["image_type"] = str(s["image_type"])
+            if s.get("image_title"):
+                payload["image_title"] = str(s["image_title"])[:200]
+
+            # OCR text — truncated for filtering/re-rank
+            if s.get("ocr_text"):
+                payload["ocr_text"] = str(s["ocr_text"])[:500]
+
+            # Extracted finance numbers (up to 20 for retrieval filtering)
+            if s.get("extracted_numbers"):
+                payload["extracted_numbers"] = list(s["extracted_numbers"])[:20]
+
+            # Time period and data series for chart queries
+            if s.get("time_period"):
+                payload["time_period"] = str(s["time_period"])
+            if s.get("data_series"):
+                payload["data_series"] = [str(x) for x in s["data_series"]][:8]
+
             # Asset path so the UI can render the original file / frame
             if s.get("asset_path"):
                 payload["asset_path"] = str(s["asset_path"])
             elif s.get("frame_path"):
                 payload["asset_path"] = str(s["frame_path"])
+            elif s.get("thumbnail_path"):
+                payload["asset_path"] = str(s["thumbnail_path"])
 
             # Video-specific quality signals
             if s.get("timestamp_sec") is not None:

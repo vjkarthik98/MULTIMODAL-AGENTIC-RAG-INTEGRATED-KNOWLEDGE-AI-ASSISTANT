@@ -43,28 +43,61 @@ class XlsxEmbedder(BaseEmbedder):
       Sheet: {sheet_name} | {markdown_repr}
     """
 
+    @staticmethod
+    def _expand_numbers_for_embedding(text: str) -> str:
+        """Expand scale-suffixed numbers so both '4.3B' and '4300 million' retrieval paths work."""
+        import re
+        _scale_re = re.compile(r'\b(\d[\d,]*\.?\d*)\s*(M|B|K|bn|mn)\b', re.IGNORECASE)
+        _map = {"m": ("million", 1e6), "mn": ("million", 1e6),
+                "b": ("billion", 1e9), "bn": ("billion", 1e9),
+                "k": ("thousand", 1e3)}
+        extras: list = []
+        for m in _scale_re.finditer(text):
+            raw = m.group(1).replace(",", "")
+            suffix = m.group(2).lower()
+            try:
+                val = float(raw)
+                label, factor = _map.get(suffix, ("", 1))
+                abs_val = val * factor
+                extras.append(f"{val} {label}")
+                if suffix in ("b", "bn"):
+                    extras.append(f"{abs_val / 1e6:.0f} million")
+                elif suffix in ("m", "mn"):
+                    extras.append(f"{abs_val / 1e9:.3f} billion")
+            except (ValueError, TypeError):
+                pass
+        if extras:
+            return text + " (" + ", ".join(extras) + ")"
+        return text
+
     def _build_embed_text(self, doc: Any, cleaned_text: str) -> str:
         try:
             s = getattr(doc, "structure", {}) or {}
 
             sheet      = (s.get("sheet_name") or s.get("sheet") or "").strip()
             unit_scale = (s.get("unit_scale") or "").strip()
+            sem_group  = (s.get("semantic_group") or "").strip()
 
             parts = []
             if sheet:
                 parts.append(f"Sheet: {sheet}")
             if unit_scale:
-                parts.append(f"({unit_scale})")
+                parts.append(f"in {unit_scale}")
+            if sem_group:
+                parts.append(sem_group)
 
             prefix = (" | ".join(parts) + " | ") if parts else ""
 
-            # Named-range chunks include assumption names as tokens
-            if (s.get("chunk_type") or getattr(doc, "subtype", "")) in ("named_range", "assumptions"):
-                named = (s.get("named_range") or s.get("semantic_group") or "").strip()
-                if named:
-                    prefix = f"Assumptions: {named} | " + prefix
+            # Named-range / assumptions chunks: surface assumption names prominently
+            chunk_type = s.get("chunk_type") or getattr(doc, "subtype", "")
+            if chunk_type in ("named_range", "named_ranges", "assumptions"):
+                nr_keys = s.get("named_ranges_in_chunk") or []
+                if nr_keys:
+                    prefix = "Financial model assumptions: " + ", ".join(str(k) for k in nr_keys[:5]) + " | " + prefix
 
-            result = (prefix + cleaned_text)[:settings.MAX_PROMPT_CHARS]
+            # Expand scale-suffixed numbers for cross-scale retrieval
+            expanded = self._expand_numbers_for_embedding(cleaned_text)
+            result = (prefix + expanded)[:settings.MAX_PROMPT_CHARS]
             _EMBED_BUILT.inc()
             return result
         except Exception as _exc:

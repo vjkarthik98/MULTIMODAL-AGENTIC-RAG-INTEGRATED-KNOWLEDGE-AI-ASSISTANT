@@ -140,9 +140,6 @@ class XlsxChunker(BaseChunker):
                 row_texts = [r.text for r in rows]
                 nl_text = _rows_to_nl(row_texts, headers, unit_scale, current_sheet or "")
                 md_text = _rows_to_markdown(row_texts, headers)
-                # protect finance numbers before hashing/storing, restore immediately
-                # (no text splitter used here, so protect→restore is a pass-through
-                # that ensures the pipeline is consistent if splitter is added later)
                 _protected, _mapping = protect(nl_text)
                 nl_text = restore(_protected, _mapping)
                 h = hash(nl_text)
@@ -152,8 +149,8 @@ class XlsxChunker(BaseChunker):
 
                 fin_entities = extract_finance_entities(nl_text)
                 row_nums = [
-                    rows[0].extra.get("row_num", 1),
-                    rows[-1].extra.get("row_num", len(rows)),
+                    rows[0].extra.get("row_num", rows[0].extra.get("row_start", 1)),
+                    rows[-1].extra.get("row_num", rows[-1].extra.get("row_end", len(rows))),
                 ]
                 chunk_hash = deterministic_chunk_id(
                     source, f"sheet_{current_sheet}_r{row_nums[0]}_{chunk_idx[0]}", chunk_idx[0]
@@ -161,23 +158,29 @@ class XlsxChunker(BaseChunker):
                 first_row_ref = rows[0].extra.get("cell_ref", "")
                 last_row_ref  = rows[-1].extra.get("cell_ref", "")
                 table_region  = f"{first_row_ref}:{last_row_ref}" if first_row_ref and last_row_ref else ""
+                is_hidden_group = any(r.extra.get("is_hidden", False) for r in rows)
+                sem_group = rows[0].extra.get("semantic_group", "")
+                display_fmt = rows[0].extra.get("display_format", "standard")
+                _smeta = sheet_meta_map.get(current_sheet or "", {})
                 structure = {
                     "chunk_hash_id":         chunk_hash,
                     "source_file":           source,
                     "chunk_index":           chunk_idx[0],
                     "sheet_name":            current_sheet,
                     "sheet_index":           sheet_index[0],
-                    "sheet_type":            _infer_sheet_type(current_sheet),
+                    "sheet_type":            _smeta.get("sheet_type") or _infer_sheet_type(current_sheet),
                     "table_region":          table_region,
                     "named_ranges_in_chunk": [],
                     "chunk_type":            "table_row_group",
                     "row_range":             row_nums,
                     "column_headers":        headers,
-                    "semantic_group":        rows[0].extra.get("semantic_group", ""),
+                    "semantic_group":        sem_group,
                     "unit_scale":            unit_scale,
                     "currency":              currency,
-                    "markdown_repr":         md_text,
+                    "display_format":        display_fmt,
+                    "is_hidden":             is_hidden_group,
                     "has_formulas_resolved": True,
+                    "markdown_repr":         md_text,
                     "finance_entities":      fin_entities,
                 }
                 doc = self._make_doc(
@@ -195,15 +198,26 @@ class XlsxChunker(BaseChunker):
                     docs.append(doc)
                     chunk_idx[0] += 1
 
+            # Track sheet-level metadata from sheet_metadata extracts
+            sheet_meta_map: Dict[str, Dict] = {}
+
             for ext in extracts:
                 etype = ext.extract_type
+
+                # Collect sheet metadata (emitted before row data)
+                if etype == "sheet_metadata":
+                    sn = ext.sheet or ""
+                    sheet_meta_map[sn] = ext.extra or {}
+                    continue
 
                 # Sheet transition — flush what's pending.
                 if ext.sheet and ext.sheet != current_sheet:
                     flush_rows(force=True)
                     current_sheet = ext.sheet
-                    sheet_index[0] += 1
-                    unit_scale = ""
+                    # Prefer sheet_index from metadata; fall back to sequential counter
+                    _smeta = sheet_meta_map.get(current_sheet, {})
+                    sheet_index[0] = _smeta.get("sheet_index", sheet_index[0] + 1)
+                    unit_scale = _smeta.get("unit_scale", "")
                     currency = "USD"
                     column_headers = []
                     pending_rows = []
@@ -224,6 +238,14 @@ class XlsxChunker(BaseChunker):
                     if not nr_text:
                         continue
                     fin_entities = extract_finance_entities(nr_text)
+                    # Named-range keys from the raw dict (workbook-level)
+                    _raw_nr: Dict = ext.extra.get("named_ranges") or {}
+                    if _raw_nr:
+                        nr_keys = list(_raw_nr.keys())
+                    elif ext.extra.get("is_stats_summary"):
+                        nr_keys = []  # stats summary is not a named-range block
+                    else:
+                        nr_keys = [nr_text.split("=")[0].strip()] if "=" in nr_text else []
                     chunk_hash = deterministic_chunk_id(source, f"named_range_{chunk_idx[0]}", chunk_idx[0])
                     structure = {
                         "chunk_hash_id":         chunk_hash,
@@ -233,9 +255,10 @@ class XlsxChunker(BaseChunker):
                         "sheet_index":           sheet_index[0],
                         "sheet_type":            _infer_sheet_type(current_sheet),
                         "table_region":          "",
-                        "named_ranges_in_chunk": [nr_text.split("=")[0].strip()] if "=" in nr_text else [],
+                        "named_ranges_in_chunk": nr_keys[:20],
                         "chunk_type":            "named_ranges",
                         "unit_scale":            unit_scale,
+                        "has_formulas_resolved": True,
                         "finance_entities":      fin_entities,
                     }
                     doc = self._make_doc(

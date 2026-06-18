@@ -19,10 +19,13 @@ from app.core.config import settings
 from app.core.response import ErrorCode, Modality, Severity, UniversalErrorResponse
 from app.ingestion.audio_ingest import ingest as audio_ingest
 from app.ingestion.audio_ingest import AudioIngestor
-from app.ingestion.docx_ingest import ingest as word_ingest
+from app.ingestion.audio_ingest import ingest_audio_full
+from app.ingestion.docx_ingest import ingest as word_ingest  # kept for backward compat
+from app.ingestion.docx_ingest import ingest_docx_full
 from app.ingestion.docx_ingest import DocxIngestor
-from app.ingestion.image_ingest import ingest as image_ingest
+from app.ingestion.image_ingest import ingest as image_ingest  # backward-compat
 from app.ingestion.image_ingest import ImageIngestor
+from app.ingestion.image_ingest import ingest_image_full
 from app.ingestion.pdf_ingest import ingest as pdf_ingest  # kept for backward compat
 from app.ingestion.pdf_ingest import ingest_pdf_full
 from app.ingestion.pdf_ingest import PdfIngestor
@@ -30,9 +33,11 @@ from app.ingestion.schema import IngestedDocument
 from app.ingestion.txt_ingest import ingest as text_ingest
 from app.ingestion.txt_ingest import TxtIngestor
 from app.ingestion.video_ingest import ingest as video_ingest
+from app.ingestion.video_ingest import ingest_video_full
 from app.ingestion.video_ingest import VideoIngestor
-from app.ingestion.xlsx_ingest import ingest as excel_ingest
+from app.ingestion.xlsx_ingest import ingest as excel_ingest  # backward-compat
 from app.ingestion.xlsx_ingest import XlsxIngestor
+from app.ingestion.xlsx_ingest import ingest_xlsx_full
 from app.utils.logger import get_logger
 from app.guardrails.exceptions import GuardrailBlocked
 
@@ -142,11 +147,11 @@ MODALITY_SIZE_LIMITS: Dict[str, int] = {
 INGESTION_HANDLERS: Dict[str, Callable] = {
     "text":  text_ingest,
     "pdf":   ingest_pdf_full,   # full path: PdfIngestor → PdfChunker (rich metadata)
-    "word":  word_ingest,
-    "excel": excel_ingest,
-    "image": image_ingest,
-    "audio": audio_ingest,
-    "video": video_ingest,
+    "word":  ingest_docx_full,   # full path: DocxIngestor → DocxChunker (rich metadata)
+    "excel": ingest_xlsx_full,   # full path: XlsxIngestor → XlsxChunker (rich metadata)
+    "image": ingest_image_full,   # full path: ImageIngestor → ImageChunker (rich metadata)
+    "audio": ingest_audio_full,  # full path: AudioIngestor → AudioChunker (rich metadata)
+    "video": ingest_video_full,  # full path: VideoIngestor → VideoChunker (rich metadata)
 }
 
 # Per-modality ingestor classes exposing .extract(path, meta) -> List[RawExtract].

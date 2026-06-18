@@ -38,7 +38,7 @@ class AudioBM25(BaseBM25):
             s = getattr(doc, "structure", {}) or {}
             parts: List[str] = list(self._base_text(doc))
 
-            # Speaker identity
+            # Speaker identity — name, role, composite "speaker CFO john smith"
             name = (s.get("speaker_name") or s.get("speaker") or
                     getattr(doc, "speaker", None) or "").strip()
             role = (s.get("speaker_role") or "").strip()
@@ -49,27 +49,45 @@ class AudioBM25(BaseBM25):
             if name and role:
                 parts.append(f"speaker {name} {role}")
 
-            # Timestamp token — convert to minute for natural "at 28 minutes" queries
-            ts_s = s.get("timestamp_start") or s.get("start_timestamp") or \
+            # Timestamps — three token forms (spec Phase 3.6):
+            #   "timestamp_1842"  → "find audio near 1842 seconds"
+            #   "time 30"         → "at 30 minutes"
+            #   "at_30_42"        → MM_SS format for "at 30:42"
+            ts_s = s.get("start_timestamp") or s.get("timestamp_start") or \
                    getattr(doc, "timestamp_start", None)
             if ts_s is not None:
                 try:
-                    minute = int(float(ts_s) / 60)
+                    total_sec = int(float(ts_s))
+                    minute    = total_sec // 60
+                    second    = total_sec % 60
+                    parts.append(f"timestamp_{total_sec}")
                     parts.append(f"time {minute}")
                     parts.append(f"minute {minute}")
+                    parts.append(f"at_{minute:02d}_{second:02d}")
                 except (ValueError, TypeError):
                     pass
 
-            # Call section
+            # Call section + composite "prepared remarks CFO" / "qa session analyst"
             call_section = (s.get("call_section") or s.get("topic_section") or "").strip()
             if call_section:
                 parts.append(call_section.replace("_", " "))
+                if role:
+                    parts.append(f"{call_section.replace('_', ' ')} {role.lower()}")
 
-            # Q&A role
+            # Earnings call detection flag
+            if s.get("is_earnings_call", False):
+                parts.append("earnings call conference call quarterly results")
+
+            # Q&A role tokens
             if s.get("is_question"):
                 parts.append("analyst question analyst query")
             elif s.get("is_answer"):
                 parts.append("management answer management response")
+
+            # Topic section (distinct from call_section)
+            topic_section = (s.get("topic_section") or "").strip()
+            if topic_section and topic_section != call_section:
+                parts.append(topic_section.replace("_", " "))
 
             # Finance entity amplification
             fin_entities: dict = s.get("finance_entities") or {}

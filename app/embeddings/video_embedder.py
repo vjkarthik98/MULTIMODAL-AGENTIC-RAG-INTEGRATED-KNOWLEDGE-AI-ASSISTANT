@@ -1,6 +1,7 @@
 """video_embedder.py — Finance-grade embedder for video/webcast chunks."""
 from __future__ import annotations
 
+import re
 from typing import Any, List
 
 from app.embeddings.base_embedder import (
@@ -9,6 +10,8 @@ from app.embeddings.base_embedder import (
 from app.core.config import settings
 from app.utils.logger import get_logger
 from prometheus_client import Counter
+
+_HAS_DIGITS_RE = re.compile(r"\d")
 
 logger = get_logger(__name__)
 
@@ -57,14 +60,40 @@ class VideoEmbedder(BaseEmbedder):
 
         header = self._speaker_header(s)
 
+        # Build [SLIDE N AT ts]: caption blocks from frame_captions
+        slide_parts: List[str] = []
+        for fc in (s.get("frame_captions") or []):
+            if not isinstance(fc, dict):
+                continue
+            caption  = (fc.get("frame_caption") or "").strip()
+            ocr_text = (fc.get("ocr_text") or "").strip()
+            ts       = fc.get("frame_timestamp")
+            slide_num = fc.get("slide_number")
+            if slide_num is not None and ts is not None:
+                tag = f"[SLIDE {slide_num} AT {float(ts):.1f}s]"
+            elif ts is not None:
+                tag = f"[{float(ts):.3f}s]"
+            else:
+                tag = ""
+            if caption:
+                line = f"{tag}: {caption}" if tag else caption
+                slide_parts.append(line)
+                # Numeric doubling — spec: repeat caption TWICE if it contains numbers
+                if _HAS_DIGITS_RE.search(caption):
+                    slide_parts.append(line)
+            if ocr_text:
+                slide_parts.append(f"[ON-SCREEN TEXT]: {ocr_text}")
+
+        # Slide bullets amplified ×3 (primary slide retrieval anchor)
         slide_bullets: List[str] = s.get("slide_bullets") or []
         bullet_block = ""
         if slide_bullets:
             bullet_text = " ".join(str(b) for b in slide_bullets[:10])
             bullet_block = f" {bullet_text} {bullet_text} {bullet_text}"
 
+        slide_block = (" " + " ".join(slide_parts)) if slide_parts else ""
         entity_suffix = self._entity_suffix(s)
-        result = f"{header}{base_text}{bullet_block}{entity_suffix}"
+        result = f"{header}{base_text}{slide_block}{bullet_block}{entity_suffix}"
         return result[:settings.MAX_PROMPT_CHARS]
 
     def _audio_only_text(self, doc: Any) -> str:
@@ -86,14 +115,23 @@ class VideoEmbedder(BaseEmbedder):
         frame_parts: List[str] = []
         for fc in (s.get("frame_captions") or []):
             if isinstance(fc, dict):
-                caption  = (fc.get("caption")  or "").strip()
-                ocr_text = (fc.get("ocr_text") or "").strip()
-                ts       = fc.get("timestamp")
-                ts_tag   = f"[{float(ts):.0f}s]" if ts is not None else ""
+                caption   = (fc.get("frame_caption") or "").strip()
+                ocr_text  = (fc.get("ocr_text") or "").strip()
+                ts        = fc.get("frame_timestamp")
+                slide_num = fc.get("slide_number")
+                if slide_num is not None and ts is not None:
+                    tag = f"[SLIDE {slide_num} AT {float(ts):.1f}s]"
+                elif ts is not None:
+                    tag = f"[{float(ts):.3f}s]"
+                else:
+                    tag = ""
                 if caption:
-                    frame_parts.append(f"{ts_tag} {caption}")
+                    line = f"{tag}: {caption}" if tag else caption
+                    frame_parts.append(line)
+                    if _HAS_DIGITS_RE.search(caption):
+                        frame_parts.append(line)
                 if ocr_text:
-                    frame_parts.append(f"[ON-SCREEN]: {ocr_text}")
+                    frame_parts.append(f"[ON-SCREEN TEXT]: {ocr_text}")
         slide_bullets: List[str] = s.get("slide_bullets") or []
         if slide_bullets:
             bullet_text = " ".join(str(b) for b in slide_bullets[:10])
@@ -106,21 +144,27 @@ class VideoEmbedder(BaseEmbedder):
 
     @staticmethod
     def _speaker_header(s: dict) -> str:
-        parts: List[str] = []
+        # [VIDEO] prefix per Phase 2.7 spec format
+        parts: List[str] = ["[VIDEO]"]
         name = (s.get("speaker_name") or s.get("speaker") or "").strip()
         role = (s.get("speaker_role") or "").strip()
         if name and role:
-            parts.append(f"[Speaker: {name} - {role}]")
+            parts.append(f"[SPEAKER: {name} - {role}]")
         elif name:
-            parts.append(f"[Speaker: {name}]")
+            parts.append(f"[SPEAKER: {name}]")
+        elif role:
+            parts.append(f"[SPEAKER: {role}]")
+        # Millisecond-precision timestamps per spec
         ts_s = s.get("start_timestamp") or s.get("timestamp_start")
         ts_e = s.get("end_timestamp")   or s.get("timestamp_end")
         if ts_s is not None and ts_e is not None:
-            parts.append(f"[{float(ts_s):.0f}s-{float(ts_e):.0f}s]")
+            parts.append(f"[{float(ts_s):.3f}s-{float(ts_e):.3f}s]")
+        elif ts_s is not None:
+            parts.append(f"[{float(ts_s):.3f}s]")
         call_section = (s.get("call_section") or s.get("topic_section") or "").strip()
         if call_section:
-            parts.append(f"[{call_section}]")
-        return (" ".join(parts) + " ") if parts else ""
+            parts.append(f"[{call_section.upper().replace('_', ' ')}]")
+        return " ".join(parts) + " "
 
     @staticmethod
     def _entity_suffix(s: dict) -> str:

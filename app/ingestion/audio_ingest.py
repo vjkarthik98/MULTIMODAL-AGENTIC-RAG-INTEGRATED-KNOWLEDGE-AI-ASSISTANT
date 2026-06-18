@@ -503,20 +503,16 @@ def _diarize(file_path: str, session_id: str) -> Dict[Tuple[float, float], str]:
     if not settings.DIARIZATION_ENABLED:
         return speaker_map
     try:
-        from pyannote.audio import Pipeline
-        token = settings.HF_TOKEN
-        if not token:
+        if not settings.HF_TOKEN:
             logger.warning(event="diarization_skipped_no_hf_token", session_id=session_id)
             return speaker_map
-        pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            use_auth_token=token,
-        )
+        from app.core.model_loader import model_loader
+        pipeline = model_loader.get_diarizer()
+        if pipeline is None:
+            return speaker_map
         diarization = pipeline(file_path)
         for turn, _, speaker in diarization.itertracks(yield_label=True):
             speaker_map[(round(turn.start, 2), round(turn.end, 2))] = speaker
-    except ImportError:
-        logger.warning(event="pyannote_not_installed", session_id=session_id)
     except Exception as exc:
         logger.warning(event="diarization_failed", error=str(exc), session_id=session_id)
     return speaker_map
@@ -578,6 +574,8 @@ def _transcribe_file(
         language=None,
         beam_size=2,
         word_timestamps=False,
+        vad_filter=True,                 # Silero VAD skips silence — 20-40% faster on speech+pauses
+        condition_on_previous_text=False, # prevents hallucination loops on long recordings
     )
     latency = round(time.time() - t_start, 2)
     return segments_iter, info, latency
@@ -699,15 +697,20 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         # MUSIC-ONLY SKIP DIARIZATION
         is_music = noise_class == "music"
 
-        # DIARIZATION
-        speaker_map: Dict[Tuple[float, float], str] = {}
-        if not is_music:
-            speaker_map = _diarize(file_path, session_id)
-
         # LONG AUDIO CHUNKING (> CHUNK_DURATION_SEC) — pass preloaded audio to avoid re-reading original
         chunk_files = _chunk_audio_file(file_path, preloaded=audio)
         temp_chunk_paths = [c for c in chunk_files if c != file_path]
         is_chunked = len(chunk_files) > 1
+
+        # DIARIZATION + TRANSCRIPTION — run concurrently (both are independent on the same file).
+        # Diarization runs in its own thread while transcription threads process audio chunks.
+        # This makes diarization time effectively free on top of transcription time.
+        speaker_map: Dict[Tuple[float, float], str] = {}
+        diarize_future = None
+        diarize_pool = None
+        if not is_music and settings.DIARIZATION_ENABLED:
+            diarize_pool = ThreadPoolExecutor(max_workers=1)
+            diarize_future = diarize_pool.submit(_diarize, file_path, session_id)
 
         # UNIVERSAL METADATA
         metadata = build_universal_metadata(
@@ -759,6 +762,16 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                         error=str(exc),
                         session_id=session_id,
                     )
+
+        # Collect diarization result now that transcription is done.
+        if diarize_future is not None:
+            try:
+                speaker_map = diarize_future.result()
+            except Exception as exc:
+                logger.warning(event="diarization_failed", error=str(exc), session_id=session_id)
+            finally:
+                if diarize_pool is not None:
+                    diarize_pool.shutdown(wait=False)
 
         # Restore chronological order; global_offset must be computed in chunk order.
         chunk_results.sort(key=lambda x: x[0])
@@ -1073,6 +1086,22 @@ class AudioIngestor(BaseIngestor):
             if duration_s > settings.MAX_AUDIO_DURATION_SEC:
                 raise ValueError(f"AUDIO_TOO_LONG: {duration_s:.0f}s")
 
+            # Quality signals — run on the raw audio before mono/resample conversion.
+            snr = _estimate_snr(audio)
+            snr_degraded = snr < settings.AUDIO_SNR_THRESHOLD_DB
+            if audio.dBFS < -60.0:
+                raise ValueError("EMPTY_CONTENT: silent audio below -60 dBFS threshold")
+            if snr_degraded:
+                logger.warning(
+                    event="audio_low_snr",
+                    snr=snr,
+                    threshold=settings.AUDIO_SNR_THRESHOLD_DB,
+                    file=source,
+                )
+            clipping_detected = _detect_clipping(str(path))
+            if clipping_detected:
+                logger.warning(event="audio_clipping_detected", file=source)
+
             # Export as 16kHz mono WAV bytes for chunker
             import io as _io
             wav_buf = _io.BytesIO()
@@ -1095,6 +1124,9 @@ class AudioIngestor(BaseIngestor):
                         "format": suffix.lstrip("."),
                         "sample_rate": 16000,
                         "channels": 1,
+                        "snr": snr,
+                        "snr_degraded": snr_degraded,
+                        "clipping_detected": clipping_detected,
                     },
                 )
             ]
@@ -1102,5 +1134,61 @@ class AudioIngestor(BaseIngestor):
             _EXTRACT_ERRORS.inc()
             logger.error(event="extraction_failed", modality="audio", source=source, error=str(_exc))
             raise
+
+
+async def ingest_audio_full(file_path: str, session_id: str) -> List[IngestedDocument]:
+    """Production audio ingestion: AudioIngestor.extract() → AudioChunker.chunk().
+
+    Replaces the backward-compat ingest() as the INGESTION_HANDLERS entry.
+    Produces modality='mp3' docs with full Phase 1.6/2.6/3.6 metadata:
+    start_timestamp, end_timestamp, duration_seconds, speaker_label, speaker_name,
+    speaker_role, call_section, topic_section, transcript, finance_entities,
+    word_count, token_count, is_question, is_answer.
+    """
+    from app.chunking import chunk_raw_extracts
+    from app.ingestion.schema import UniversalMetadata
+
+    if not session_id:
+        raise ValueError("SESSION_ID_REQUIRED")
+
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"FILE_NOT_FOUND: {file_path}")
+
+    file_size = path.stat().st_size
+    if file_size == 0:
+        raise ValueError("EMPTY_FILE")
+    if file_size > settings.MAX_FILE_SIZE_AUDIO:
+        raise ValueError(f"FILE_TOO_LARGE: {file_size}")
+
+    meta = UniversalMetadata(
+        source_path=str(path.resolve()),
+        modality="audio",
+        file_size_bytes=file_size,
+        custom_fields={"session_id": session_id},
+    )
+
+    ingestor = AudioIngestor()
+    extracts = await ingestor.extract(path, meta)
+
+    if not extracts:
+        raise ValueError("NO_EXTRACTS_PRODUCED")
+
+    docs = chunk_raw_extracts(extracts, meta, "audio")
+
+    for doc in docs:
+        struct = getattr(doc, "structure", None)
+        if struct is not None:
+            if struct.get("session_id") in (None, "default"):
+                struct["session_id"] = session_id
+
+    logger.info(
+        event="ingest_audio_full_complete",
+        file=path.name,
+        extracts=len(extracts),
+        docs=len(docs),
+        session_id=session_id,
+    )
+    return docs
 
 

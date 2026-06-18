@@ -613,13 +613,37 @@ class ModelLoader:
 
             def _load():
                 from transformers import TrOCRProcessor, VisionEncoderDecoderModel  # local
+                from transformers.models.trocr.modeling_trocr import (
+                    TrOCRSinusoidalPositionalEmbedding,
+                )
                 processor = TrOCRProcessor.from_pretrained(settings.TROCR_MODEL)
-                kwargs = {}
-                if decision.device == "cuda" and decision.dtype == "float16":
-                    kwargs["torch_dtype"] = _torch_dtype("float16")
-                model = VisionEncoderDecoderModel.from_pretrained(settings.TROCR_MODEL, **kwargs)
+                model = VisionEncoderDecoderModel.from_pretrained(
+                    settings.TROCR_MODEL,
+                    low_cpu_mem_usage=False,
+                )
                 model.to(decision.device)
+                if decision.device == "cuda" and decision.dtype == "float16":
+                    model.half()
                 model.eval()
+
+                # transformers 5.x fast-init runs module __init__ under a meta-device
+                # context. TrOCRSinusoidalPositionalEmbedding stores its sinusoidal
+                # table in a plain `.weights` attribute (NOT a registered buffer), so
+                # model.to()/.half() never move it — it stays on the meta device and
+                # decoder.forward() dies with "Cannot copy out of meta tensor".
+                # Rebuild that table with real data on the model's device + dtype.
+                _dev = next(model.parameters()).device
+                _dtype = next(model.parameters()).dtype
+                for _m in model.modules():
+                    if isinstance(_m, TrOCRSinusoidalPositionalEmbedding):
+                        _w = getattr(_m, "weights", None)
+                        if _w is not None and (
+                            getattr(_w, "is_meta", False) or _w.device != _dev
+                        ):
+                            _real = _m.get_embedding(
+                                int(_w.shape[0]), int(_w.shape[1]), _m.padding_idx
+                            )
+                            _m.weights = _real.to(device=_dev, dtype=_dtype)
                 return processor, model
 
             self._trocr_processor, self._trocr_model = self._safe_load(_load, "trocr")

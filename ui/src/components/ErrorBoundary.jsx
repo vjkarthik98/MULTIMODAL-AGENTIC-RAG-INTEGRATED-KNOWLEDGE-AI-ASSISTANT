@@ -1,5 +1,6 @@
 import { Component } from 'react'
-import { RefreshCw, BrainCircuit } from 'lucide-react'
+import { RefreshCw } from 'lucide-react'
+import MagikIcon from './MagikIcon'
 
 export default class ErrorBoundary extends Component {
   constructor(props) {
@@ -24,7 +25,7 @@ export default class ErrorBoundary extends Component {
         style={{ background: 'var(--t-bg, #0a0a0a)' }}
       >
         <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-500 to-blue-500 flex items-center justify-center shadow-lg mb-6">
-          <BrainCircuit size={32} strokeWidth={1.7} className="text-white" />
+          <MagikIcon size={32} strokeWidth={1.7} className="text-white" />
         </div>
 
         <h1

@@ -133,17 +133,20 @@ class Settings:
 
     # EMBEDDINGS
     EMBEDDING_MODEL: str                = _str("EMBEDDING_MODEL", "BAAI/bge-large-en-v1.5")
-    EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 32)
-    EMBEDDING_MAX_BATCH_SIZE: int       = _int("EMBEDDING_MAX_BATCH_SIZE", 64)
+    EMBEDDING_BATCH_SIZE: int           = _int("EMBEDDING_BATCH_SIZE", 128)
+    EMBEDDING_MAX_BATCH_SIZE: int       = _int("EMBEDDING_MAX_BATCH_SIZE", 128)
     EMBEDDING_MAX_SEQ_LEN: int          = _int("EMBEDDING_MAX_SEQ_LEN", 512)
     INGESTION_MICRO_BATCH: int          = _int("INGESTION_MICRO_BATCH", 32)
     # Clear CUDA cache every N micro-batches during ingestion (OOM guard
     # without the per-chunk empty_cache+gc tax that dominated embed latency).
     INGESTION_CACHE_CLEAR_EVERY: int    = _int("INGESTION_CACHE_CLEAR_EVERY", 8)
     # Parallelism caps for heavy ML operations — keep within A10G VRAM budget
-    VIDEO_CAPTION_CONCURRENCY: int      = _int("VIDEO_CAPTION_CONCURRENCY", 2)
+    VIDEO_CAPTION_CONCURRENCY: int      = _int("VIDEO_CAPTION_CONCURRENCY", 3)
+    # Shared GPU semaphore — max concurrent ingestion jobs using GPU (embed/Whisper/LLaVA).
+    # 3 jobs × peak ~3GB each = ~9GB working memory + ~14GB resident models = ~23GB on A10G.
+    MAX_CONCURRENT_GPU_JOBS: int        = _int("MAX_CONCURRENT_GPU_JOBS", 3)
     AUDIO_TRANSCRIPTION_WORKERS: int    = _int("AUDIO_TRANSCRIPTION_WORKERS", 2)
-    PDF_OCR_WORKERS: int                = _int("PDF_OCR_WORKERS", 4)
+    PDF_OCR_WORKERS: int                = _int("PDF_OCR_WORKERS", 8)
     EMBEDDING_CACHE_TTL: int            = _int("EMBEDDING_CACHE_TTL", 2_592_000)
     TEXT_EMBEDDING_DIM: int             = _int("TEXT_EMBEDDING_DIM", 1024)
     # BGE-large requires instruction prefix on queries only (not documents)
@@ -554,6 +557,11 @@ class Settings:
     DEFAULT_DEV_USER_ID: str = _str("DEFAULT_DEV_USER_ID", "a3f9c821-4b2e-11ef-9454-0242ac120002")
     TEST_USER_2_ID: str      = _str("TEST_USER_2_ID",      "b7d2e109-4b2e-11ef-9454-0242ac120002")
 
+    # GUEST MODE — trial session limits
+    GUEST_QUERY_LIMIT:        int = _int("GUEST_QUERY_LIMIT",        5)
+    GUEST_FILE_LIMIT:         int = _int("GUEST_FILE_LIMIT",         2)
+    GUEST_SESSION_TTL_HOURS:  int = _int("GUEST_SESSION_TTL_HOURS", 24)
+
     # JWT AUTHENTICATION — Phase 27
     JWT_SECRET_KEY: str                  = _str("JWT_SECRET_KEY", "CHANGE_ME_IN_PRODUCTION")
     JWT_ALGORITHM: str                   = _str("JWT_ALGORITHM", "HS256")
@@ -606,7 +614,7 @@ class Settings:
 
     # EXCEL PROCESSING
     EXCEL_STREAM_READ_ONLY: bool  = _bool("EXCEL_STREAM_READ_ONLY", True)
-    EXCEL_MAX_ROWS: int           = _int("EXCEL_MAX_ROWS", 1_000_000)
+    EXCEL_MAX_ROWS: int           = _int("EXCEL_MAX_ROWS", 50_000)
 
     # KEYWORD EXTRACTION
     KEYWORD_EXTRACTOR: str       = _str("KEYWORD_EXTRACTOR", "yake")

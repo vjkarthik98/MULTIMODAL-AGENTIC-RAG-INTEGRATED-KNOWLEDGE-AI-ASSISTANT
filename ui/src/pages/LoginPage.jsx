@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
-import { Eye, EyeOff, Loader2, Sun, Moon, BrainCircuit, ShieldCheck, RotateCcw } from 'lucide-react'
+import { Eye, EyeOff, Loader2, Sun, Moon, ShieldCheck, RotateCcw } from 'lucide-react'
+import MagikIcon from '../components/MagikIcon'
 import { login, register, verifyOtp } from '../api/client'
 
 const GoogleG = () => (
@@ -11,7 +12,7 @@ const GoogleG = () => (
   </svg>
 )
 
-export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPassword }) {
+export default function LoginPage({ onLogin, onGuestMode, dark, onToggleTheme, onForgotPassword }) {
   const [mounted, setMounted] = useState(false)
   useEffect(() => { requestAnimationFrame(() => setMounted(true)) }, [])
 
@@ -199,7 +200,7 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
       {/* Brand */}
       <div className="flex flex-col items-center mb-6 sm:mb-10 gap-3 sm:gap-4">
         <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl bg-gradient-to-br from-violet-500 to-blue-500 flex items-center justify-center shadow-lg">
-          <BrainCircuit size={28} strokeWidth={1.7} className="text-white" />
+          <MagikIcon size={28} strokeWidth={1.7} className="text-white" />
         </div>
         <div className="text-center">
           <h1 className="text-3xl sm:text-4xl font-bold tracking-tight" style={{
@@ -307,6 +308,23 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
               <GoogleG />
               Continue with Google
             </button>
+
+            {/* Guest CTA — tertiary, below Google, above divider */}
+            {onGuestMode && (
+              <button
+                type="button"
+                onClick={onGuestMode}
+                className="w-full flex items-center justify-center gap-2 rounded-xl py-2.5 px-4 text-sm font-medium transition-all mt-2"
+                style={{ background: 'transparent', border: '1px solid var(--t-bd2)', color: 'var(--t-ph)' }}
+                onMouseEnter={e => { e.currentTarget.style.color = 'var(--t-tx2)'; e.currentTarget.style.borderColor = 'var(--t-bd4)' }}
+                onMouseLeave={e => { e.currentTarget.style.color = 'var(--t-ph)'; e.currentTarget.style.borderColor = 'var(--t-bd2)' }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                </svg>
+                Try without signing in — 5 free queries
+              </button>
+            )}
 
             {/* Divider */}
             <div className="flex items-center gap-3 my-7">

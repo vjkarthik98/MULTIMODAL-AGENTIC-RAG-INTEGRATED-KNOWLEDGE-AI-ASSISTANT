@@ -1,15 +1,16 @@
 import { useState, useEffect, useRef } from 'react'
 import LoginPage from './pages/LoginPage'
+import LoginModal from './components/LoginModal'
 import ChatPage from './pages/ChatPage'
 import ForgotPasswordPage from './pages/ForgotPasswordPage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
-import { getMe, refreshAccessToken, logout as apiLogout } from './api/client'
+import { getMe, refreshAccessToken, logout as apiLogout, createGuestSession, migrateGuestData } from './api/client'
 import { ToastProvider } from './context/ToastContext'
 import Toast from './components/Toast'
 import ErrorBoundary from './components/ErrorBoundary'
 
-// Brain-circuit glyph (matches the in-app BrainCircuit logo), reused across both favicons
-const BRAIN_CIRCUIT_PATHS = `<path d='M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z'/><path d='M9 13a4.5 4.5 0 0 0 3-4'/><path d='M6.003 5.125A3 3 0 0 0 6.401 6.5'/><path d='M3.477 10.896a4 4 0 0 1 .585-.396'/><path d='M6 18a4 4 0 0 1-1.967-.516'/><path d='M12 13h4'/><path d='M12 18h6a2 2 0 0 1 2 2v1'/><path d='M12 8h8'/><path d='M16 8V5a2 2 0 0 1 2-2'/><circle cx='16' cy='13' r='.5'/><circle cx='18' cy='3' r='.5'/><circle cx='20' cy='21' r='.5'/><circle cx='20' cy='8' r='.5'/>`
+// Brain+neuron glyph — two lobes + three neural nodes connected by axons
+const BRAIN_CIRCUIT_PATHS = `<path d='M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.46 2.5 2.5 0 0 1-1.98-3 2.5 2.5 0 0 1-1.32-4.24 3 3 0 0 1 .34-5.58 2.5 2.5 0 0 1 2.98-3.19A2.5 2.5 0 0 1 9.5 2Z'/><path d='M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.46 2.5 2.5 0 0 0 1.98-3 2.5 2.5 0 0 0 1.32-4.24 3 3 0 0 0-.34-5.58 2.5 2.5 0 0 0-2.98-3.19A2.5 2.5 0 0 0 14.5 2Z'/><circle cx='9' cy='8.5' r='1.2' fill='white' stroke='none'/><circle cx='15' cy='8.5' r='1.2' fill='white' stroke='none'/><circle cx='12' cy='13.5' r='1.2' fill='white' stroke='none'/><line x1='9' y1='8.5' x2='15' y2='8.5'/><line x1='9' y1='8.5' x2='12' y2='13.5'/><line x1='15' y1='8.5' x2='12' y2='13.5'/>`
 
 // Two tiny inline SVG favicons — static and pulsing
 const FAVICON_STATIC  = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%238b5cf6'/><stop offset='1' stop-color='%233b82f6'/></linearGradient></defs><rect width='32' height='32' rx='8' fill='url(%23g)'/><g transform='translate(5,5) scale(0.92)' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>${BRAIN_CIRCUIT_PATHS}</g></svg>`
@@ -44,6 +45,7 @@ export default function App() {
   const [dark, setDark] = useState(
     () => !document.documentElement.classList.contains('light')
   )
+  const [showLoginModal, setShowLoginModal] = useState(false)
 
   const toggleTheme = () => {
     setDark(prev => {
@@ -74,6 +76,13 @@ export default function App() {
     localStorage.removeItem('magik_email')
     // device token intentionally kept — it lets this browser skip OTP on next login
   }
+  const clearGuestAuth = () => {
+    sessionStorage.removeItem('magik_guest_token')
+    sessionStorage.removeItem('magik_guest_id')
+    sessionStorage.removeItem('magik_guest_queries')
+    sessionStorage.removeItem('magik_guest_uploads')
+    sessionStorage.removeItem('magik_pending_guest_token')
+  }
 
   useEffect(() => {
     const params       = new URLSearchParams(window.location.search)
@@ -84,7 +93,30 @@ export default function App() {
     if (oauthToken && oauthEmail) {
       persistAuth({ token: oauthToken, refreshToken: oauthRefresh, email: oauthEmail })
       window.history.replaceState({}, '', '/')
-      setAuth({ token: oauthToken, refreshToken: oauthRefresh, email: oauthEmail })
+      // Google OAuth conversion path: if a pending guest token exists, migrate data
+      const pendingGuestToken = sessionStorage.getItem('magik_pending_guest_token')
+      if (pendingGuestToken) {
+        clearGuestAuth()
+        migrateGuestData(oauthToken, pendingGuestToken).catch(() => {
+          // Migration failure is non-fatal — user still gets their real account
+        })
+      }
+      setAuth({ token: oauthToken, refreshToken: oauthRefresh, email: oauthEmail, isGuest: false })
+      setChecking(false)
+      return
+    }
+
+    // Guest session recovery from sessionStorage (tab-isolated, expires on close)
+    const guestToken   = sessionStorage.getItem('magik_guest_token')
+    const guestId      = sessionStorage.getItem('magik_guest_id')
+    const guestQueries = parseInt(sessionStorage.getItem('magik_guest_queries') || '5', 10)
+    const guestUploads = parseInt(sessionStorage.getItem('magik_guest_uploads') || '2', 10)
+    if (guestToken && guestId) {
+      setAuth({
+        token: guestToken, refreshToken: null, email: '',
+        isGuest: true, guestUserId: guestId,
+        queriesLeft: guestQueries, uploadsLeft: guestUploads,
+      })
       setChecking(false)
       return
     }
@@ -120,16 +152,38 @@ export default function App() {
               setAuth({ token: data.access_token, refreshToken: data.refresh_token, email: storedEmail })
               return
             } catch {
-              // refresh token also expired/revoked — only real recourse is sign-in
+              // refresh token also expired/revoked — fall through to guest creation
             }
           }
           clearAuth()
+          // Stored token invalid and refresh failed — silently become a guest
+          _autoGuest()
         })
         .finally(() => setChecking(false))
     } else {
-      setChecking(false)
+      // No stored credentials — chat IS the landing page; create a silent guest session
+      _autoGuest().finally(() => setChecking(false))
     }
   }, [])
+
+  // Creates a silent guest session and sets auth. Used on initial load when no
+  // credentials are found, so the chat UI is shown immediately (ChatGPT-style).
+  const _autoGuest = async () => {
+    try {
+      const data = await createGuestSession()
+      sessionStorage.setItem('magik_guest_token',   data.access_token)
+      sessionStorage.setItem('magik_guest_id',      data.guest_user_id)
+      sessionStorage.setItem('magik_guest_queries', String(data.queries_left))
+      sessionStorage.setItem('magik_guest_uploads', String(data.uploads_left))
+      setAuth({
+        token: data.access_token, refreshToken: null, email: '',
+        isGuest: true, guestUserId: data.guest_user_id,
+        queriesLeft: data.queries_left, uploadsLeft: data.uploads_left,
+      })
+    } catch {
+      // Backend unreachable — leave auth null so LoginPage renders as fallback
+    }
+  }
 
   // Keep the access token fresh while the app is open, so it never has the
   // chance to expire mid-session — and catch up immediately on tab focus in
@@ -162,17 +216,64 @@ export default function App() {
   }, [auth?.refreshToken])
 
   const handleLogin = ({ token, refreshToken, email }) => {
+    clearGuestAuth()
     persistAuth({ token, refreshToken, email })
-    setAuth({ token, refreshToken, email })
+    setAuth({ token, refreshToken, email, isGuest: false })
+    setShowLoginModal(false)
     setPageKey(k => k + 1)
   }
 
+  const handleGuestMode = async () => {
+    try {
+      const data = await createGuestSession()
+      sessionStorage.setItem('magik_guest_token',   data.access_token)
+      sessionStorage.setItem('magik_guest_id',      data.guest_user_id)
+      sessionStorage.setItem('magik_guest_queries', String(data.queries_left))
+      sessionStorage.setItem('magik_guest_uploads', String(data.uploads_left))
+      setAuth({
+        token: data.access_token, refreshToken: null, email: '',
+        isGuest: true, guestUserId: data.guest_user_id,
+        queriesLeft: data.queries_left, uploadsLeft: data.uploads_left,
+      })
+      setPageKey(k => k + 1)
+    } catch (err) {
+      console.error('Guest session creation failed:', err)
+    }
+  }
+
+  // Called from ConversionModal after successful email/password conversion
+  const handleGuestConvert = (realTokenData) => {
+    clearGuestAuth()
+    persistAuth({ token: realTokenData.access_token, refreshToken: realTokenData.refresh_token, email: realTokenData.email })
+    setAuth({ token: realTokenData.access_token, refreshToken: realTokenData.refresh_token, email: realTokenData.email, isGuest: false })
+    setPageKey(k => k + 1)
+  }
+
+  // Called from ConversionModal "Continue with Google" in guest mode
+  const handleGuestGoogleConvert = () => {
+    // Store guest token before redirect so OAuth callback can pick it up
+    if (auth?.isGuest && auth?.token) {
+      sessionStorage.setItem('magik_pending_guest_token', auth.token)
+    }
+    window.location.href = '/auth/google'
+  }
+
   const handleLogout = () => {
-    if (auth) apiLogout(auth.token, auth.refreshToken)
+    if (auth && !auth.isGuest) apiLogout(auth.token, auth.refreshToken)
     clearAuth()
+    clearGuestAuth()
     setAuth(null)
     setPageKey(k => k + 1)
     setFavicon(FAVICON_STATIC)
+  }
+
+  // Update guest limits in auth state (called by ChatPage after each query/upload)
+  const handleGuestLimitsUpdate = (updates) => {
+    setAuth(prev => prev?.isGuest ? { ...prev, ...updates } : prev)
+    if (updates.queriesLeft !== undefined)
+      sessionStorage.setItem('magik_guest_queries', String(updates.queriesLeft))
+    if (updates.uploadsLeft !== undefined)
+      sessionStorage.setItem('magik_guest_uploads', String(updates.uploadsLeft))
   }
 
   const handleStreamingChange = (isStreaming) => {
@@ -206,16 +307,34 @@ export default function App() {
               }}
             />
           ) : auth ? (
-            <ChatPage
-              auth={auth}
-              onLogout={handleLogout}
-              dark={dark}
-              onToggleTheme={toggleTheme}
-              onStreamingChange={handleStreamingChange}
-            />
+            <>
+              <ChatPage
+                auth={auth}
+                onLogout={handleLogout}
+                dark={dark}
+                onToggleTheme={toggleTheme}
+                onStreamingChange={handleStreamingChange}
+                onGuestConvert={handleGuestConvert}
+                onGuestGoogleConvert={handleGuestGoogleConvert}
+                onGuestLimitsUpdate={handleGuestLimitsUpdate}
+                onShowLogin={() => setShowLoginModal(true)}
+              />
+              {showLoginModal && auth?.isGuest && (
+                <LoginModal
+                  onLogin={handleLogin}
+                  onClose={() => setShowLoginModal(false)}
+                  onForgotPassword={() => {
+                    setShowLoginModal(false)
+                    setPage('forgot')
+                    setPageKey(k => k + 1)
+                  }}
+                />
+              )}
+            </>
           ) : (
             <LoginPage
               onLogin={handleLogin}
+              onGuestMode={handleGuestMode}
               dark={dark}
               onToggleTheme={toggleTheme}
               onForgotPassword={() => { setPage('forgot'); setPageKey(k => k + 1) }}

@@ -15,9 +15,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.auth.dependencies import get_current_user
-from app.auth.models import UserPublic
+from app.auth.models import UserPublic, UserRole
 from app.core.config import settings
 from app.core.infra_registry import infra
+from app.retrieval.bm25_retriever import BM25AggregatorRetriever
 from app.utils.logger import get_logger
 from app.utils.paths import user_knowledge_base_dir, user_staging_dir
 
@@ -392,6 +393,17 @@ async def ingest_document(
 
     _rate_limit_check(request)
 
+    # Guest upload limit — enforced atomically in Redis (Lua script, no race condition)
+    if current_user.role == UserRole.GUEST:
+        from app.auth.guest_service import check_and_increment_uploads
+        allowed = await asyncio.to_thread(check_and_increment_uploads, user_id)
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="Guest upload limit reached. Sign up free to continue.",
+                headers={"X-Guest-Upgrade-Required": "true", "X-Guest-Limit-Type": "uploads"},
+            )
+
     try:
         if not file.filename:
             raise HTTPException(status_code=400, detail="Invalid file: missing filename")
@@ -482,132 +494,62 @@ async def ingest_document(
 
         modality = _EXT_MODALITY.get(ext, "unknown")
 
-        # RUN FULL PIPELINE — ingest → chunk → embed → store
-        try:
-            from app.pipeline.ingestion_pipeline import process_file
-            result = await asyncio.to_thread(process_file, str(file_path), session_id, user_id)
-
-        except RuntimeError as exc:
-            # Pipeline wraps ingestor errors as: RuntimeError("INGESTION_FAILED: <original>")
-            inner = str(exc).removeprefix("INGESTION_FAILED: ").strip()
-            if any(inner.startswith(p) for p in _INGEST_422_PREFIXES):
-                error_code = inner.split(":")[0].strip()
-                return JSONResponse(
-                    status_code=422,
-                    content={"request_id": request_id, "error_code": error_code, "detail": inner},
-                )
-            raise HTTPException(status_code=500, detail=str(exc))
-
-        except Exception as exc:
-            err_str = str(exc)
-            if any(err_str.startswith(p) for p in _INGEST_422_PREFIXES):
-                error_code = err_str.split(":")[0].strip()
-                return JSONResponse(
-                    status_code=422,
-                    content={"request_id": request_id, "error_code": error_code, "detail": err_str},
-                )
-            raise HTTPException(status_code=500, detail=err_str)
-
-        # PIPELINE-LEVEL DUPLICATE (detected by pipeline's own hash check)
-        if result.get("status") == "duplicate":
-            latency = round(time.time() - start, 3)
-            import shutil as _shutil
-            kb_dir = user_knowledge_base_dir(user_id)
-            kb_path = kb_dir / filename
-            if not kb_path.exists():
-                _shutil.copy2(str(file_path), str(kb_path))
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "request_id": request_id,
-                    "status":     "duplicate",
-                    "duplicate":  True,
-                    "filename":   filename,
-                    "ext":        ext,
-                    "modality":   modality,
-                    "file_size":  size,
-                    "latency":    latency,
-                },
-            )
-
-        chunks = result.get("chunks", 0)
-        stored = result.get("stored", 0)
-
-        if chunks <= 0:
-            return JSONResponse(
-                status_code=422,
-                content={
-                    "request_id": request_id,
-                    "error_code": "NO_CONTENT_EXTRACTED",
-                    "detail":     "No usable content extracted from file",
-                },
-            )
-
-        if stored == 0:
-            return JSONResponse(
-                status_code=422,
-                content={
-                    "request_id": request_id,
-                    "error_code": "NOTHING_STORED",
-                    "detail":     f"Content extracted ({chunks} chunks) but 0 vectors were stored — embedding or Qdrant error",
-                },
-            )
-
-        # PERSIST TO KNOWLEDGE BASE — only after pipeline confirms content was indexed.
-        # Copying before the pipeline (old behaviour) caused failed uploads to appear
-        # in the sidebar because listKB reads from this directory.
+        # COPY TO KNOWLEDGE BASE NOW — file visible in sidebar immediately while the
+        # pipeline runs in the background. If the background job fails, it removes this file.
         import shutil as _shutil
-        kb_dir = user_knowledge_base_dir(user_id)
+        kb_dir  = user_knowledge_base_dir(user_id)
         kb_path = kb_dir / filename
         _shutil.copy2(str(file_path), str(kb_path))
 
-        # REGISTER DEDUP AFTER SUCCESSFUL PIPELINE
-        pipeline_hash = result.get("file_hash", file_hash)
-        _dedup_set(pipeline_hash, request_id)
+        # REGISTER DEDUP NOW (pre-computed hash) — prevents duplicate submissions
+        # while the background job is still processing.
+        _dedup_set(file_hash, request_id)
+
+        # LAUNCH BACKGROUND PIPELINE — returns job_id in milliseconds.
+        # The background job owns the staging file and will clean it up when done.
+        from app.pipeline.ingestion_pipeline import IngestionPipeline
+        pipeline_instance = IngestionPipeline()
+        job_id = await pipeline_instance.process_file_background(
+            str(file_path), session_id, user_id, kb_path=str(kb_path)
+        )
+
+        # Hand the staging file to the background job — don't let the finally block delete it.
+        file_path = None
 
         latency = round(time.time() - start, 3)
 
         _audit_log(
-            "ingest_completed",
+            "ingest_queued",
             request_id=request_id,
             session_id=session_id,
             file=filename,
-            chunks=chunks,
-            stored=stored,
-            latency=latency,
+            job_id=job_id,
+            ip=_client_ip(request),
         )
 
         logger.info(
-            event="api_ingest_success",
+            event="api_ingest_queued",
             request_id=request_id,
             file=filename,
             ext=ext,
             modality=modality,
             size=size,
-            chunks=chunks,
-            stored=stored,
+            job_id=job_id,
             latency=latency,
             session_id=session_id,
         )
 
         return JSONResponse(
-            status_code=200,
+            status_code=202,
             content={
-                "request_id":        request_id,
-                "status":            "success",
-                "duplicate":         False,
-                "doc_id":            result.get("doc_id", ""),
-                "filename":          filename,
-                "modality":          modality,
-                "chunks":            chunks,
-                "stored":            stored,
-                "session_id":        session_id,
-                "ingestion_time_sec": latency,
-                "pages":             result.get("pages"),
-                "warnings":          result.get("warnings", []),
-                "file_hash":         pipeline_hash,
-                "ext":               ext,
-                "file_size":         size,
+                "request_id": request_id,
+                "status":     "processing",
+                "job_id":     job_id,
+                "filename":   filename,
+                "modality":   modality,
+                "file_size":  size,
+                "ext":        ext,
+                "session_id": session_id,
             },
         )
 
@@ -624,6 +566,8 @@ async def ingest_document(
         raise HTTPException(status_code=500, detail="Ingestion failed")
 
     finally:
+        # Only cleans up when file_path is still set (i.e. an error occurred before
+        # the background job was launched — the job sets file_path=None on success).
         background_tasks.add_task(_cleanup_file, file_path)
 
 
@@ -994,6 +938,26 @@ async def stream_query(
 
     _rate_limit_check(request)
 
+    # Guest query limit — atomic Lua check in Redis, fails open on Redis outage
+    if current_user.role == UserRole.GUEST:
+        from app.auth.guest_service import check_and_increment_queries
+        allowed = await asyncio.to_thread(check_and_increment_queries, current_user.user_id)
+        if not allowed:
+            async def _guest_limit_stream():
+                import json as _json
+                payload = _json.dumps({"__type__": "guest_limit", "limit_type": "queries"})
+                yield f"data: {payload}\n\n"
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(
+                _guest_limit_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "X-Guest-Upgrade-Required": "true",
+                    "X-Accel-Buffering": "no",
+                    "Cache-Control": "no-cache",
+                },
+            )
+
     try:
         query = _clean(request_body.query)
 
@@ -1353,6 +1317,17 @@ async def upload_file(
 
     _rate_limit_check(request)
 
+    # Guest upload limit — same atomic Lua check as /ingest
+    if current_user.role == UserRole.GUEST:
+        from app.auth.guest_service import check_and_increment_uploads
+        allowed = await asyncio.to_thread(check_and_increment_uploads, user_id)
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="Guest upload limit reached. Sign up free to continue.",
+                headers={"X-Guest-Upgrade-Required": "true", "X-Guest-Limit-Type": "uploads"},
+            )
+
     try:
         if not file.filename:
             raise HTTPException(status_code=400, detail="Invalid file: missing filename")
@@ -1614,12 +1589,10 @@ async def gdpr_purge(
         manager = MemoryManager()
         await asyncio.to_thread(manager.gdpr_purge, user_id)
 
-        # BM25 PURGE
+        # BM25 PURGE — clear all per-modality indexes for this user
         try:
-            from app.core.infra_registry import infra
-            bm25 = infra.get_bm25()
-            if bm25 and hasattr(bm25, "purge_by_session"):
-                await asyncio.to_thread(bm25.purge_by_session, user_id)
+            agg = BM25AggregatorRetriever(user_id=user_id)
+            await asyncio.to_thread(agg.clear, user_id)
         except Exception as exc:
             logger.warning(event="gdpr_bm25_purge_failed", error=str(exc))
 
@@ -1819,12 +1792,14 @@ async def delete_knowledge_base_file(
             detail="Failed to purge vectors from the knowledge base index. File was NOT deleted. Please try again.",
         )
 
-    # PURGE FROM BM25 — best-effort; missing BM25 index entry does not block deletion
+    # PURGE FROM BM25 — best-effort; missing BM25 index entry does not block deletion.
+    # Use BM25AggregatorRetriever so all per-modality pkl files (txt, pdf, docx, xlsx,
+    # image, audio, video) are cleaned up — infra.get_bm25() only covers the legacy
+    # single-index path and would silently miss the per-modality indexes.
     bm25_purged = False
     try:
-        bm25 = infra.get_bm25()
-        if bm25 and hasattr(bm25, "delete_by_source"):
-            bm25.delete_by_source(safe_name, user_id=user_id)
+        agg = BM25AggregatorRetriever(user_id=user_id)
+        agg.delete_by_source(safe_name, user_id=user_id)
         bm25_purged = True
     except Exception as exc:
         # BM25 failure is non-fatal — Qdrant is the primary store. Log and continue.

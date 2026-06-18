@@ -786,11 +786,14 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 except Exception:
                     pass
 
-                # Embedded images
+                # Embedded images — collected first, then captioned concurrently
+                # so BLIP2 forward passes overlap instead of running one at a time.
                 try:
+                    import concurrent.futures as _cf
                     related = getattr(doc.part, "related_parts", {}) or {}
                     seen_blobs: set = set()
-                    for rel_id, part in related.items():
+                    image_jobs: List[Tuple[bytes, str]] = []
+                    for _rel_id, part in related.items():
                         try:
                             ct = getattr(part, "content_type", "") or ""
                             if not ct.startswith("image/"):
@@ -805,14 +808,27 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                             ext_hint = "." + ct.split("/", 1)[-1].split(";", 1)[0].strip().lower()
                             if ext_hint == ".jpeg":
                                 ext_hint = ".jpg"
-                            embedded = _ingest_embedded_image_bytes(
-                                blob=blob, ext_hint=ext_hint, session_id=session_id,
-                                parent_doc_id=doc_id, parent_modality="word",
-                                parent_source=source_name,
-                            )
-                            documents.extend(embedded)
+                            image_jobs.append((blob, ext_hint))
                         except Exception as exc:
-                            logger.warning("docx_embedded_image_failed", error=str(exc))
+                            logger.warning("docx_embedded_image_scan_part_failed", error=str(exc))
+
+                    if image_jobs:
+                        def _caption_one(args: Tuple[bytes, str]) -> List[IngestedDocument]:
+                            blob, ext_hint = args
+                            try:
+                                return _ingest_embedded_image_bytes(
+                                    blob=blob, ext_hint=ext_hint, session_id=session_id,
+                                    parent_doc_id=doc_id, parent_modality="word",
+                                    parent_source=source_name,
+                                )
+                            except Exception as exc:
+                                logger.warning("docx_embedded_image_failed", error=str(exc))
+                                return []
+
+                        max_workers = min(len(image_jobs), getattr(settings, "VIDEO_CAPTION_CONCURRENCY", 3))
+                        with _cf.ThreadPoolExecutor(max_workers=max_workers) as img_pool:
+                            for result in img_pool.map(_caption_one, image_jobs):
+                                documents.extend(result)
                 except Exception as exc:
                     logger.warning("docx_embedded_image_scan_failed", error=str(exc))
 
@@ -850,3 +866,58 @@ def ingest_sync(file_path: str, session_id: str) -> List[IngestedDocument]:
         return loop.run_until_complete(ingest(file_path, session_id))
     except RuntimeError:
         return asyncio.run(ingest(file_path, session_id))
+
+
+# ─── Production path: DocxIngestor → DocxChunker ──────────────────────────────
+
+async def ingest_docx_full(file_path: str, session_id: str) -> List[IngestedDocument]:
+    """Production DOCX ingestion: DocxIngestor.extract() → DocxChunker.chunk().
+
+    Produces modality='docx' docs with full Phase 1.3/2.3 metadata:
+    heading_hierarchy, defined_terms, has_bold_terms, has_italic_terms,
+    clause_numbers, finance_entities, char_start, char_end, token_count, etc.
+    """
+    from app.ingestion.schema import UniversalMetadata
+    from app.chunking import chunk_raw_extracts
+
+    if not session_id:
+        raise ValueError("SESSION_ID_REQUIRED")
+
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"FILE_NOT_FOUND: {file_path}")
+
+    file_size = path.stat().st_size
+    if file_size == 0:
+        raise ValueError("EMPTY_FILE")
+    if file_size > settings.MAX_FILE_SIZE_DOCX:
+        raise ValueError(f"FILE_TOO_LARGE: {file_size}")
+
+    meta = UniversalMetadata(
+        source_path=str(path.resolve()),
+        modality="docx",
+        file_size_bytes=file_size,
+        custom_fields={"session_id": session_id},
+    )
+
+    ingestor = DocxIngestor()
+    extracts = await ingestor.extract(path, meta)
+
+    if not extracts:
+        raise ValueError("NO_EXTRACTS_PRODUCED")
+
+    docs = chunk_raw_extracts(extracts, meta, "docx")
+
+    for doc in docs:
+        struct = getattr(doc, "structure", None)
+        if struct is not None and struct.get("session_id") in (None, "default"):
+            struct["session_id"] = session_id
+
+    logger.info(
+        event="ingest_docx_full_complete",
+        file=path.name,
+        extracts=len(extracts),
+        docs=len(docs),
+        session_id=session_id,
+    )
+    return docs

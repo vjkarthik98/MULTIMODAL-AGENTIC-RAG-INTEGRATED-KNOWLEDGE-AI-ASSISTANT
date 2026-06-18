@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# APP/MAIN.PY — MAGIK FINANCE RAG v1.0
+# APP/MAIN.PY — MAGIK FINANCE RAG v0.25.0
 # FASTAPI APPLICATION ENTRY POINT — WIRES EVERYTHING TOGETHER
 # SECTION 4.6 — LIFESPAN, MIDDLEWARE, OTEL, PROMETHEUS, CORS, RATE LIMIT
 
@@ -201,6 +201,16 @@ def _cleanup_temp_dirs() -> None:
                     except Exception:
                         pass
         logger.info(event="temp_dirs_cleaned")
+
+        # Clean up expired guest user directories (guest_* older than TTL + 1h)
+        try:
+            from app.auth.guest_service import cleanup_expired_guest_dirs
+            removed = cleanup_expired_guest_dirs()
+            if removed:
+                logger.info(event="guest_dirs_cleaned", removed=removed)
+        except Exception as _ge:
+            logger.warning(event="guest_dir_cleanup_failed", error=str(_ge))
+
     except Exception as e:
         logger.warning(event="temp_dir_cleanup_failed", error=str(e))
 
@@ -517,6 +527,9 @@ app.include_router(rag_router, prefix="/rag", tags=["RAG"])
 
 from app.auth.router import router as auth_router
 app.include_router(auth_router)  # mounts at /auth (prefix defined in router.py)
+
+from app.auth.guest_router import router as guest_router
+app.include_router(guest_router)  # mounts at /auth/guest*
 
 from app.auth.admin_router import router as admin_router
 app.include_router(admin_router)  # mounts at /admin — requires role=admin JWT

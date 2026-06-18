@@ -33,6 +33,10 @@ _DEFINED_TERM_RE = re.compile(
 )
 _BOLD_TERM_RE = re.compile(r"\*\*(.+?)\*\*")
 _ITALIC_TERM_RE = re.compile(r"\*(.+?)\*|_(.+?)_")
+_CLAUSE_NUM_RE = re.compile(
+    r'\b(?:Section|Clause|Article|§)\s*\d+(?:\.\d+)*(?:\([a-z]\))*(?:\([ivx]+\))*\b',
+    re.IGNORECASE,
+)
 
 _TABLE_GROUP_SIZE = 5
 _TABLE_OVERLAP_ROWS = 2
@@ -105,6 +109,7 @@ class DocxChunker(BaseChunker):
 
                     bold_terms = _BOLD_TERM_RE.findall(piece)
                     italic_terms = [g1 or g2 for g1, g2 in _ITALIC_TERM_RE.findall(piece)]
+                    clause_nums = _CLAUSE_NUM_RE.findall(piece)
                     # Capture defined terms from this prose chunk
                     for m in _DEFINED_TERM_RE.finditer(piece):
                         term = m.group(1).strip()
@@ -124,6 +129,7 @@ class DocxChunker(BaseChunker):
                         "chunk_type":       "paragraph",
                         "has_bold_terms":   bold_terms,
                         "has_italic_terms": italic_terms,
+                        "clause_numbers":   clause_nums,
                         "defined_terms":    {},
                         "finance_entities": fin_entities,
                         "char_start":       char_offset[0],
@@ -159,6 +165,9 @@ class DocxChunker(BaseChunker):
                     header_line = " | ".join(table_headers) if table_headers else ""
                     nl_text = (f"{header_line}\n" if header_line else "") + "\n".join(row_texts)
                     fin_entities = extract_finance_entities(nl_text)
+                    tbl_bold = _BOLD_TERM_RE.findall(nl_text)
+                    tbl_italic = [g1 or g2 for g1, g2 in _ITALIC_TERM_RE.findall(nl_text)]
+                    tbl_clauses = _CLAUSE_NUM_RE.findall(nl_text)
                     row_range = [i + 1, min(i + step, len(pending_table_rows))]
                     chunk_hash = deterministic_chunk_id(source, f"table_r{row_range[0]}_{chunk_idx[0]}", chunk_idx[0])
                     if i == 0:
@@ -175,6 +184,9 @@ class DocxChunker(BaseChunker):
                         "chunk_type":       "table",
                         "column_headers":   table_headers[:],
                         "row_range":        row_range,
+                        "has_bold_terms":   tbl_bold,
+                        "has_italic_terms": tbl_italic,
+                        "clause_numbers":   tbl_clauses,
                         "defined_terms":    {},
                         "finance_entities": fin_entities,
                         "char_start":       char_offset[0],
@@ -318,15 +330,28 @@ class DocxChunker(BaseChunker):
             # Emit a definitions chunk if we collected any defined terms.
             if defined_terms:
                 def_text = "\n".join(f"{k}: {v}" for k, v in defined_terms.items())
+                def_bold = _BOLD_TERM_RE.findall(def_text)
+                def_italic = [g1 or g2 for g1, g2 in _ITALIC_TERM_RE.findall(def_text)]
+                def_clauses = _CLAUSE_NUM_RE.findall(def_text)
                 chunk_hash = deterministic_chunk_id(source, "definitions", chunk_idx[0])
                 structure = {
-                    "chunk_hash_id":   chunk_hash,
-                    "source_file":     source,
-                    "chunk_index":     chunk_idx[0],
-                    "chunk_type":      "definitions",
-                    "defined_terms":   defined_terms,
-                    "finance_entities": [],
+                    "chunk_hash_id":    chunk_hash,
+                    "source_file":      source,
+                    "chunk_index":      chunk_idx[0],
+                    "heading":          current_heading(),
+                    "heading_hierarchy": hierarchy[:],
+                    "heading_level":    len(hierarchy),
+                    "paragraph_index":  paragraph_index[0],
+                    "chunk_type":       "definitions",
+                    "has_bold_terms":   def_bold,
+                    "has_italic_terms": def_italic,
+                    "clause_numbers":   def_clauses,
+                    "defined_terms":    defined_terms,
+                    "finance_entities": extract_finance_entities(def_text),
+                    "char_start":       char_offset[0],
+                    "char_end":         char_offset[0] + len(def_text),
                 }
+                char_offset[0] += len(def_text) + 1
                 doc = self._make_doc(
                     text=def_text,
                     modality="docx",

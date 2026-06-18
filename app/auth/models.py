@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 class UserRole(str, Enum):
     USER = "user"
     ADMIN = "admin"
+    GUEST = "guest"
 
 
 # ── Stored in MongoDB (never returned to clients) ────────────────────────────
@@ -140,4 +141,35 @@ class ResetPasswordRequest(BaseModel):
     def validate_password(cls, v: str) -> str:
         if len(v) < 8:
             raise ValueError("Password must be at least 8 characters")
+        return v
+
+
+# ── Guest mode ────────────────────────────────────────────────────────────────
+
+class GuestSessionResponse(BaseModel):
+    access_token:   str
+    token_type:     str = "bearer"
+    expires_in:     int           # seconds
+    guest_user_id:  str
+    queries_left:   int
+    uploads_left:   int
+
+
+class GuestConvertRequest(BaseModel):
+    guest_token:  str = Field(..., min_length=10)
+    # exactly one of the two flows below must be supplied
+    google_code:  Optional[str] = None
+    google_state: Optional[str] = None
+    email:        Optional[str] = Field(None, min_length=5, max_length=254)
+    password:     Optional[str] = Field(None, min_length=8, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def normalise_email(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip().lower()
+        pattern = r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$"
+        if not re.match(pattern, v):
+            raise ValueError("Invalid email address")
         return v

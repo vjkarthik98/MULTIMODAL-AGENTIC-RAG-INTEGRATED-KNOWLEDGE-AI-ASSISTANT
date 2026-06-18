@@ -1082,6 +1082,23 @@ class ImageIngestor(BaseIngestor):
             except Exception:
                 pass
 
+            # Quality signals — computed here so ImageChunker can store them
+            # without needing to re-load the image.
+            blur_score = _blur_score(img)
+            solid_color = _is_solid_color(img)
+            dominant_colors = _dominant_colors(img)
+            face_count = 0
+            if not settings.IMAGE_PRIVACY_MODE:
+                face_count = _face_count(img)
+            # thumbnail
+            thumb_path_str: Optional[str] = None
+            try:
+                thumb_path_str = _generate_thumbnail(
+                    img, path, str(getattr(metadata, "session_id", ""))
+                )
+            except Exception:
+                pass
+
             _EXTRACTS_TOTAL.inc(1)
             logger.info(event="extraction_complete", modality="image", file=str(path), extracts=1)
             return [
@@ -1098,6 +1115,12 @@ class ImageIngestor(BaseIngestor):
                         "phash": phash_str,
                         "exif": exif_data,
                         "file_size": path.stat().st_size,
+                        # Phase 1.5 quality signals
+                        "blur_score": blur_score,
+                        "solid_color": solid_color,
+                        "dominant_colors": dominant_colors,
+                        "face_count": face_count,
+                        "thumbnail_path": thumb_path_str,
                     },
                 )
             ]
@@ -1106,3 +1129,59 @@ class ImageIngestor(BaseIngestor):
             logger.error(event="extraction_failed", modality="image", source=source, error=str(_exc))
             raise
 
+
+# ─── Phase 1.5: ingest_image_full ─────────────────────────────────────────────
+
+async def ingest_image_full(file_path: str, session_id: str) -> List[IngestedDocument]:
+    """Production image ingestion: ImageIngestor.extract() → ImageChunker.chunk().
+
+    Replaces the backward-compat ingest() as the INGESTION_HANDLERS entry.
+    Produces modality='image' docs with full Phase 1.5/2.5 metadata:
+    image_type, image_title, caption, ocr_text, extracted_numbers, finance_entities,
+    blur_score, quality_score, watermark_detected, face_count, dominant_colors,
+    perceptual_hash, time_period, data_series, token_count.
+    """
+    from app.ingestion.schema import UniversalMetadata
+    from app.chunking import chunk_raw_extracts
+
+    if not session_id:
+        raise ValueError("SESSION_ID_REQUIRED")
+
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"FILE_NOT_FOUND: {file_path}")
+
+    file_size = path.stat().st_size
+    if file_size == 0:
+        raise ValueError("EMPTY_FILE")
+    if file_size > settings.MAX_FILE_SIZE_IMAGE:
+        raise ValueError(f"FILE_TOO_LARGE: {file_size}")
+
+    meta = UniversalMetadata(
+        source_path=str(path.resolve()),
+        modality="image",
+        file_size_bytes=file_size,
+        custom_fields={"session_id": session_id},
+    )
+
+    ingestor = ImageIngestor()
+    extracts = await ingestor.extract(path, meta)
+
+    if not extracts:
+        raise ValueError("NO_EXTRACTS_PRODUCED")
+
+    docs = chunk_raw_extracts(extracts, meta, "image")
+
+    for doc in docs:
+        struct = getattr(doc, "structure", None)
+        if struct is not None and struct.get("session_id") in (None, "default"):
+            struct["session_id"] = session_id
+
+    logger.info(
+        event="ingest_image_full_complete",
+        file=path.name,
+        extracts=len(extracts),
+        docs=len(docs),
+        session_id=session_id,
+    )
+    return docs

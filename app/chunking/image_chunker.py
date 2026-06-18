@@ -55,6 +55,46 @@ _NUMBER_RE = re.compile(
 )
 _MISMATCH_THRESHOLD = 0.20
 
+_TIME_PERIOD_RE = re.compile(
+    r'\b(?:FY|Q[1-4])\s*\d{4}\b'
+    r'|\b\d{4}[-–]\d{2,4}\b'
+    r'|\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?'
+    r'|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4}\b',
+    re.IGNORECASE,
+)
+_DATA_SERIES_RE = re.compile(
+    r'\b(Revenue|Net Income|EBITDA|EPS|FCF|Free Cash Flow|Operating Income'
+    r'|Gross Profit|Net Sales|Operating Margin|EBIT|Earnings|Dividends?'
+    r'|Total Assets|Market Cap|Price|Volume)\b',
+    re.IGNORECASE,
+)
+_WATERMARK_KW = frozenset({
+    "CONFIDENTIAL", "DRAFT", "WATERMARK", "DO NOT DISTRIBUTE",
+    "PROPRIETARY", "INTERNAL USE ONLY", "NOT FOR DISTRIBUTION",
+})
+
+
+def _extract_time_period(text: str) -> Optional[str]:
+    m = _TIME_PERIOD_RE.search(text)
+    return m.group(0).strip() if m else None
+
+
+def _extract_data_series(text: str) -> List[str]:
+    seen: set = set()
+    result: List[str] = []
+    for m in _DATA_SERIES_RE.finditer(text):
+        label = m.group(0).strip()
+        lk = label.lower()
+        if lk not in seen:
+            seen.add(lk)
+            result.append(label)
+    return result[:8]
+
+
+def _detect_watermark(text: str) -> bool:
+    upper = text.upper()
+    return any(kw in upper for kw in _WATERMARK_KW)
+
 
 def _numbers_in(text: str) -> set:
     return set(re.sub(r"[,\s]", "", n.lower()) for n in _NUMBER_RE.findall(text))
@@ -431,24 +471,55 @@ def blip2_classify_image_type(image: "Image.Image", ocr_text: str = "") -> str:
     return _classify_image_type(image, ocr_text)
 
 
+# EasyOCR singleton — loaded once per process; avoids repeated ~2 s init cost.
+_easyocr_reader: Optional[Any] = None
+
+
+def _get_easyocr() -> Any:
+    global _easyocr_reader
+    if _easyocr_reader is None:
+        import easyocr
+        _easyocr_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+    return _easyocr_reader
+
+
 def ocr(image: "Image.Image") -> str:
-    """Run TrOCR large-printed on a PIL Image. Returns '' on failure."""
+    """Run TrOCR → EasyOCR fallback on a PIL Image. Returns '' on failure.
+
+    TrOCR is fast and accurate on clean printed text.
+    EasyOCR handles charts, axis labels, and mixed-layout images that TrOCR misses.
+    """
+    img_rgb = image.convert("RGB")
+
+    # TrOCR (preferred — faster, accurate on single-line printed text)
     try:
         from app.core.model_loader import model_loader
         processor, model, device = model_loader.get_trocr()
-    except Exception as exc:
-        logger.warning(event="trocr_unavailable", error=str(exc))
-        return ""
-    try:
         import torch as _torch
-        img = image.convert("RGB")
-        pixel_values = processor(images=img, return_tensors="pt").pixel_values.to(device)
+        pixel_values = processor(images=img_rgb, return_tensors="pt").pixel_values.to(device)
         with _torch.no_grad():
             generated_ids = model.generate(pixel_values)
-        return processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        result = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        if result:
+            return result
     except Exception as exc:
         logger.warning(event="trocr_ocr_failed", error=str(exc))
-        return ""
+
+    # EasyOCR fallback — stronger on chart labels, numeric grids, mixed layouts
+    try:
+        import numpy as np
+        reader = _get_easyocr()
+        results = reader.readtext(np.array(img_rgb))
+        easy_text = " ".join(r[1] for r in results if r[2] > 0.3).strip()
+        if easy_text:
+            logger.debug(event="easyocr_fallback_used")
+            return easy_text
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.warning(event="easyocr_fallback_failed", error=str(exc))
+
+    return ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -503,6 +574,50 @@ def _blip_caption(
     except Exception as exc:
         logger.warning(event="blip_caption_failed", error=str(exc), session_id=session_id)
         return None
+
+
+_IMAGE_LLAVA_PROMPT = (
+    "USER: <image>\n"
+    "Analyze this financial chart or document image. Report verbatim:\n"
+    "1) Chart type and title\n"
+    "2) All data series with EXACT values read from axis labels\n"
+    "3) Time period covered\n"
+    "4) All axis labels and units\n"
+    "5) Key trends or notable figures\n"
+    "Be precise about numbers — do not round or paraphrase.\n"
+    "ASSISTANT:"
+)
+
+
+def _llava_caption_for_image(image: "Image.Image") -> str:
+    """LLaVA-1.5 captioning for images when BLIP2 + BLIP1 both produce empty output.
+
+    Financial charts are particularly challenging for BLIP2-INT8 because the model
+    was not fine-tuned on dense numeric chart layouts. LLaVA-1.5 handles mixed
+    text+visual layouts better thanks to its instruction-following training.
+    Returns '' on failure so the caller can decide on a further fallback.
+    """
+    try:
+        from app.core.model_loader import model_loader
+        processor, model, device = model_loader.get_llava()
+    except Exception as exc:
+        logger.warning(event="llava_unavailable_for_image", error=str(exc))
+        return ""
+    try:
+        import torch as _torch
+        inputs = processor(
+            text=_IMAGE_LLAVA_PROMPT, images=image, return_tensors="pt"
+        ).to(device)
+        with _torch.no_grad():
+            out = model.generate(**inputs, max_new_tokens=settings.LLAVA_MAX_TOKENS)
+        decoded = processor.decode(out[0], skip_special_tokens=True).strip()
+        if "ASSISTANT:" in decoded:
+            decoded = decoded.split("ASSISTANT:", 1)[-1].strip()
+        logger.debug(event="llava_fallback_caption_used")
+        return decoded
+    except Exception as exc:
+        logger.warning(event="llava_caption_failed_for_image", error=str(exc))
+        return ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -756,12 +871,24 @@ class ImageChunker(BaseChunker):
                 except Exception as exc:
                     logger.warning(event="image_trocr_failed", error=str(exc))
 
-                # Step 2: BLIP2 caption.
+                # Step 2: caption — BLIP2 → BLIP1 → LLaVA fallback chain.
+                # BLIP2-INT8 often produces empty output for dense financial charts;
+                # LLaVA-1.5 instruction-tuning handles those layouts significantly better.
+                session_id = ""
+                try:
+                    cf = getattr(meta, "custom_fields", {}) or {}
+                    session_id = str(cf.get("session_id", "") or "")
+                except Exception:
+                    pass
                 caption_text = ""
                 try:
-                    caption_text = blip2_caption(img)
+                    raw = _blip_caption(img, session_id=session_id)
+                    caption_text = raw or ""
                 except Exception as exc:
-                    logger.warning(event="image_blip2_failed", error=str(exc))
+                    logger.warning(event="image_blip_failed", error=str(exc))
+
+                if not caption_text:
+                    caption_text = _llava_caption_for_image(img)
 
                 # Step 3: SigLIP image type classification (falls back to heuristic).
                 image_type = "infographic"
@@ -787,32 +914,81 @@ class ImageChunker(BaseChunker):
                 extracted_numbers = list(_NUMBER_RE.findall(ocr_text or caption_text))
                 chunk_hash        = deterministic_chunk_id(source, "image_raw_0", chunk_idx)
 
-                # Extract image_title: first sentence/line of caption (MD Phase 1.5)
+                # Extract image_title: first sentence/line of caption
                 raw_title = (caption_text or "").split(".")[0].split("\n")[0].strip()
                 image_title = raw_title[:120] if raw_title else source
 
+                # Time period and data series from text (regex-based)
+                full_text = f"{caption_text} {ocr_text}".strip()
+                time_period = (
+                    ext.extra.get("time_period")
+                    or _extract_time_period(full_text)
+                )
+                data_series = (
+                    ext.extra.get("data_series")
+                    or _extract_data_series(full_text)
+                )
+
+                # Watermark detection from OCR+caption
+                watermark_detected = _detect_watermark(full_text)
+
+                # Caption confidence
+                caption_confidence = _caption_confidence(caption_text) if caption_text else 0.0
+
+                # Quality score from ingestor signals
+                blur_score = ext.extra.get("blur_score")
+                solid_color = ext.extra.get("solid_color", False)
+                quality_score: Optional[float] = None
+                if blur_score is not None:
+                    qs = float(blur_score)
+                    if img_width * img_height > 500_000:
+                        qs = min(qs + 0.1, 1.0)
+                    if watermark_detected:
+                        qs = max(qs - 0.2, 0.0)
+                    if not ocr_text:
+                        qs = max(qs - 0.05, 0.0)
+                    if solid_color:
+                        qs = max(qs - 0.3, 0.0)
+                    quality_score = round(qs, 3)
+
+                # source_path enables _resolve_asset_path() in MultimodalEmbedder so
+                # this doc gets BOTH BGE text embedding AND SigLIP vision embedding.
+                source_path = str(getattr(meta, "source_path", "") or "")
+
                 structure = {
-                    "chunk_hash_id":        chunk_hash,
-                    "source_file":          source,
-                    "chunk_index":          chunk_idx,
-                    "image_type":           image_type,
-                    "image_title":          image_title,
-                    "caption":              caption_text,
-                    "ocr_text":             ocr_text,
-                    "extracted_numbers":    extracted_numbers,
-                    "time_period":          ext.extra.get("time_period"),
-                    "data_series":          ext.extra.get("data_series", []),
-                    "ocr_caption_mismatch": mismatch,
-                    "parent_document":      ext.extra.get("parent_document"),
-                    "parent_page":          ext.extra.get("parent_page"),
-                    "finance_entities":     fin_entities,
-                    "image_width":          img_width,
-                    "image_height":         img_height,
+                    "chunk_hash_id":         chunk_hash,
+                    "source_file":           source,
+                    "source_path":           source_path,
+                    "asset_path":            source_path,
+                    "chunk_index":           chunk_idx,
+                    "image_type":            image_type,
+                    "image_title":           image_title,
+                    "caption":               caption_text,
+                    "caption_confidence":    caption_confidence,
+                    "ocr_text":              ocr_text,
+                    "extracted_numbers":     extracted_numbers,
+                    "time_period":           time_period,
+                    "data_series":           data_series,
+                    "ocr_caption_mismatch":  mismatch,
+                    "parent_document":       ext.extra.get("parent_document"),
+                    "parent_page":           ext.extra.get("parent_page"),
+                    "finance_entities":      fin_entities,
+                    "image_width":           img_width,
+                    "image_height":          img_height,
+                    # Phase 1.5 quality signals from ingestor
+                    "blur_score":            blur_score,
+                    "quality_score":         quality_score,
+                    "solid_color":           solid_color,
+                    "watermark_detected":    watermark_detected,
+                    "face_count":            ext.extra.get("face_count"),
+                    "dominant_colors":       ext.extra.get("dominant_colors", []),
+                    "perceptual_hash":       ext.extra.get("phash"),
+                    "thumbnail_path":        ext.extra.get("thumbnail_path"),
                 }
 
                 doc = self._make_doc(
                     text=combined,
-                    modality="jpg",
+                    modality="image",
                     subtype="caption",
                     source=source,
                     page=None,

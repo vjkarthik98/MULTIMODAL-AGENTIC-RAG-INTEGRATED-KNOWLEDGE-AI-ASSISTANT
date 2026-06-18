@@ -513,6 +513,20 @@ class _ProgressEmitter:
         )
 
 
+# GPU SEMAPHORE — module-level, shared across all IngestionPipeline instances.
+# Prevents OOM when multiple users upload simultaneously — each concurrent GPU job
+# (embedding batch_size=128, Whisper 1.55GB, LLaVA 3.5GB) adds to VRAM pressure.
+# Max 3 concurrent jobs leaves headroom on A10G 24GB with ~14GB resident models.
+_GPU_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+def _gpu_semaphore() -> asyncio.Semaphore:
+    global _GPU_SEMAPHORE
+    if _GPU_SEMAPHORE is None:
+        limit = getattr(settings, "MAX_CONCURRENT_GPU_JOBS", 3)
+        _GPU_SEMAPHORE = asyncio.Semaphore(limit)
+    return _GPU_SEMAPHORE
+
+
 # INGEST JOB — PROGRESS TRACKING (Phase 8)
 
 @dataclass
@@ -583,12 +597,13 @@ class IngestionPipeline:
         session_id: str = "default",
         user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        async with self._semaphore:
-            loop = asyncio.get_event_loop()
-            return await asyncio.wait_for(
-                loop.run_in_executor(None, self.process_file, file_path, session_id, user_id),
-                timeout=settings.FILE_PROCESSING_TIMEOUT_SEC,
-            )
+        async with _gpu_semaphore():        # module-level: shared across all pipeline instances
+            async with self._semaphore:    # instance-level: local concurrency cap
+                loop = asyncio.get_event_loop()
+                return await asyncio.wait_for(
+                    loop.run_in_executor(None, self.process_file, file_path, session_id, user_id),
+                    timeout=settings.FILE_PROCESSING_TIMEOUT_SEC,
+                )
 
     # QUEUE WORKER — SECTION 4.6
 
@@ -623,17 +638,21 @@ class IngestionPipeline:
         return future
 
     # BACKGROUND JOB — return job_id immediately; poll /api/ingestion/status/{job_id}
-    # Used for audio/video ingestion which can take minutes. (Phase 8)
-
-    _BACKGROUND_MODALITIES = {"mp3", "mp4", "audio", "video"}
+    # All modalities use this path — the API no longer blocks waiting for ML work.
 
     async def process_file_background(
         self,
         file_path: str,
         session_id: str = "default",
         user_id: Optional[str] = None,
+        kb_path: Optional[str] = None,
     ) -> str:
-        """Start ingestion in background. Returns job_id immediately."""
+        """Start ingestion in background. Returns job_id immediately.
+
+        kb_path: path where the file was already copied in the KB dir. If the
+        pipeline fails we remove it so a broken file doesn't linger in the sidebar.
+        The staging file at file_path is always deleted when the job finishes.
+        """
         job_id   = str(uuid.uuid4())
         filename = Path(file_path).name
         ext      = Path(file_path).suffix.lstrip(".").lower()
@@ -659,12 +678,34 @@ class IngestionPipeline:
                 job.progress     = 1.0
                 job.chunks_done  = result.get("chunks", 0) if isinstance(result, dict) else 0
                 job.chunks_total = job.chunks_done
+                logger.info(
+                    event="background_ingest_done",
+                    job_id=job_id,
+                    filename=filename,
+                    chunks=job.chunks_done,
+                )
             except Exception as exc:
                 job.status = "error"
                 job.error  = str(exc)
                 logger.warning(event="background_ingest_failed", job_id=job_id, error=str(exc))
+                # Remove the KB copy so a failed file doesn't appear queryable in sidebar.
+                if kb_path:
+                    try:
+                        Path(kb_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
             finally:
                 _store_job(job)
+                # Always clean up the staging file — the background job owns it.
+                try:
+                    staging = Path(file_path)
+                    staging.unlink(missing_ok=True)
+                    parent = staging.parent
+                    # Remove the per-upload staging subdirectory if now empty.
+                    if parent.exists() and not any(parent.iterdir()):
+                        parent.rmdir()
+                except Exception:
+                    pass
 
         asyncio.create_task(_run())
         return job_id

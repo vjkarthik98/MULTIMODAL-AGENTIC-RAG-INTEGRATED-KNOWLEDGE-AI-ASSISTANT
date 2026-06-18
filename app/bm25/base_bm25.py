@@ -576,13 +576,19 @@ class BaseBM25(ABC):
 
     def _norm_scores(self, raw: Any) -> Any:
         if _NP:
-            s    = np.nan_to_num(np.asarray(raw, dtype=float))
+            s      = np.nan_to_num(np.asarray(raw, dtype=float))
             lo, hi = float(s.min()), float(s.max())
-            return (s - lo) / (hi - lo + 1e-10)
+            if hi - lo < 1e-9:
+                # All scores equal (single-doc or perfectly tied corpus).
+                # Normalize by max so a matching doc scores 1.0 instead of 0.
+                return s / (hi + 1e-10)
+            return (s - lo) / (hi - lo)
         s  = [float(x) for x in raw]
         lo = min(s) if s else 0.0
         hi = max(s) if s else 1e-6
-        d  = hi - lo or 1e-10
+        d  = hi - lo
+        if d < 1e-9:
+            return [x / (hi + 1e-10) for x in s]
         return [(x - lo) / d for x in s]
 
     def _topk(self, scores: Any, k: int) -> List[int]:

@@ -103,6 +103,34 @@ def verify_token(token: str, expected_type: str = "access") -> Dict[str, Any]:
     return payload
 
 
+def issue_guest_token(guest_user_id: str) -> Dict[str, Any]:
+    """Issue a single short-lived access token for an ephemeral guest session.
+
+    No refresh token — guest sessions are not renewable; they convert or expire.
+    verify_token() requires no changes: it validates type=access, JTI blacklist,
+    and expiry exactly as it does for real user tokens.
+    """
+    now     = _utcnow()
+    ttl_sec = settings.GUEST_SESSION_TTL_HOURS * 3600
+    exp     = now + timedelta(seconds=ttl_sec)
+    payload = {
+        "sub":   guest_user_id,
+        "email": "",
+        "role":  "guest",
+        "type":  "access",
+        "jti":   str(uuid.uuid4()),
+        "gen":   0,
+        "iat":   int(now.timestamp()),
+        "exp":   int(exp.timestamp()),
+    }
+    token = jwt.encode(payload, _SECRET, algorithm=_ALGORITHM)
+    return {
+        "access_token": token,
+        "token_type":   "bearer",
+        "expires_in":   ttl_sec,
+    }
+
+
 def refresh_access_token(refresh_token: str) -> Dict[str, Any]:
     """Exchange a valid refresh token for a new access token.
 

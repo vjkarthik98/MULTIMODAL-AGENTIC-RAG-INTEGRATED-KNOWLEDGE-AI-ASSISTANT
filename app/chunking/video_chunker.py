@@ -76,14 +76,17 @@ def _extract_audio(video_path: str, wav_path: str) -> bool:
 _VIDEO_FRAME_PROMPT = (
     "USER: <image>\n"
     "Analyze this financial presentation frame. Report verbatim:\n"
-    "1) Slide or chart title\n"
-    "2) All bullet points\n"
-    "3) Every number visible with its label\n"
-    "4) Chart type and all axis labels\n"
+    "1) Slide or chart title (exact wording)\n"
+    "2) All bullet points (verbatim, every word)\n"
+    "3) Every number visible with its exact label (do NOT round or paraphrase)\n"
+    "4) Chart type with all axis labels and legend entries\n"
     "5) Speaker name and title if shown in lower-third\n"
-    "6) Any table headers and cell values\n"
-    "7) Slide number if visible\n"
-    "Be extremely precise about numbers — do not round or paraphrase.\n"
+    "6) Any table headers and every cell value\n"
+    "7) Slide number if visible anywhere on the frame\n"
+    "8) Company name or logo visible\n"
+    "9) Any highlighted, circled, or annotated elements\n"
+    "10) ALL numbers visible anywhere on the slide — including percentages, basis points, multiples\n"
+    "Be extremely precise about numbers — never round, never paraphrase.\n"
     "ASSISTANT:"
 )
 
@@ -119,6 +122,7 @@ def _caption_and_ocr_frame(frame_dict: Dict) -> Dict:
     """Run LLaVA + TrOCR on a frame given its FrameMetadata dict."""
     result = {
         "frame_timestamp": frame_dict["timestamp_start"],
+        "frame_path":      frame_dict.get("path", ""),
         "scene_change":    frame_dict["is_scene_boundary"],
         "frame_caption":   "",
         "ocr_text":        "",
@@ -145,8 +149,10 @@ def _caption_and_ocr_frame(frame_dict: Dict) -> Dict:
     except Exception as exc:
         logger.warning(event="trocr_frame_failed", error=str(exc))
 
+    # Detect slide number from OCR first, then fall back to caption
     ocr_text = result["ocr_text"]
-    m = re.search(r"slide\s*(\d+)", ocr_text, re.I)
+    caption  = result["frame_caption"]
+    m = re.search(r"slide\s*(\d+)", ocr_text, re.I) or re.search(r"slide\s*(\d+)", caption, re.I)
     result["slide_number"] = int(m.group(1)) if m else None
     return result
 
@@ -211,6 +217,19 @@ class VideoChunker(BaseChunker):
                     full_transcript = " ".join(w["word"] for w in words)
                     role_map        = _map_speaker_roles(diarization, full_transcript)
                     audio_chunks    = _assemble_chunks(words, diarization, role_map)
+
+                    # Detect earnings call from full transcript
+                    _ft_lower = full_transcript.lower()
+                    is_earnings_call = any(kw in _ft_lower for kw in (
+                        "earnings call", "quarterly results", "conference call",
+                        "revenue", "earnings per share", "fiscal year",
+                    ))
+
+                    # Forward audio quality signals from ingestor
+                    ext_extra = ext.extra or {}
+                    _snr               = ext_extra.get("snr")
+                    _snr_degraded      = ext_extra.get("snr_degraded", False)
+                    _clipping_detected = ext_extra.get("clipping_detected", False)
 
                     # 4. Frame extraction (import from video_ingest where it lives).
                     try:
@@ -278,6 +297,7 @@ class VideoChunker(BaseChunker):
                             if m:
                                 slide_numbers_covered.append(int(m.group(1)))
 
+                        _words_in_chunk = transcript.split()
                         structure = {
                             "chunk_hash_id":        chunk_hash,
                             "source_file":          source,
@@ -285,9 +305,10 @@ class VideoChunker(BaseChunker):
                             "start_timestamp":      round(t_start, 3),
                             "end_timestamp":        round(t_end, 3),
                             "duration_seconds":     round(t_end - t_start, 3),
-                            "speaker_label":        ch.get("speaker_label"),
-                            "speaker_name":         ch.get("speaker_name"),
-                            "speaker_role":         ch.get("speaker_role"),
+                            # _assemble_chunks returns "speaker", "name", "role" keys
+                            "speaker_label":        ch.get("speaker"),
+                            "speaker_name":         ch.get("name"),
+                            "speaker_role":         ch.get("role"),
                             "topic_section":        ch.get("topic_section"),
                             "call_section":         ch.get("call_section"),
                             "transcript":           transcript,
@@ -300,6 +321,13 @@ class VideoChunker(BaseChunker):
                             "has_finance_signal":   has_finance,
                             "is_question":          ch.get("is_question", False),
                             "is_answer":            ch.get("is_answer", False),
+                            "is_earnings_call":     is_earnings_call,
+                            "word_count":           len(_words_in_chunk),
+                            "token_count":          len(_words_in_chunk),  # approx: 1 word ≈ 1 token
+                            # Audio quality signals from VideoIngestor via RawExtract.extra
+                            "snr":                  _snr,
+                            "snr_degraded":         _snr_degraded,
+                            "clipping_detected":    _clipping_detected,
                         }
 
                         doc = self._make_doc(

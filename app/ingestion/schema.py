@@ -270,6 +270,7 @@ class IngestedDocument(BaseModel):
     structure:      Dict[str, Any]        = Field(default_factory=dict)
     extra_metadata: Dict[str, Any]        = Field(default_factory=dict)
     embedding:      Optional[List[float]] = None
+    embedding_alt:  Optional[List[float]] = None   # secondary embedding (e.g. xlsx markdown repr)
 
     # UNIVERSAL METADATA ATTACHED AT INGEST TIME
     universal_metadata: Optional[UniversalMetadata] = None

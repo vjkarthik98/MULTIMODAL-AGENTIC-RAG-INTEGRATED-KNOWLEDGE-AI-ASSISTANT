@@ -76,6 +76,24 @@ async def get_current_admin_user(
     return current_user
 
 
+async def require_real_user(
+    current_user: UserPublic = Depends(get_current_user),
+) -> UserPublic:
+    """Like get_current_user but rejects guest JWTs with HTTP 402.
+
+    Use on routes that guests must never access (account settings, chat history,
+    logout-all, delete account). The 429 limit checks on ingest/query are handled
+    inline in the route handlers — this dependency is for hard feature exclusions.
+    """
+    if current_user.role == UserRole.GUEST:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail="Guest sessions cannot use this feature. Please sign up to continue.",
+            headers={"X-Guest-Upgrade-Required": "true"},
+        )
+    return current_user
+
+
 async def optional_current_user(
     token: Optional[str] = Depends(oauth2_scheme),
 ) -> Optional[UserPublic]:

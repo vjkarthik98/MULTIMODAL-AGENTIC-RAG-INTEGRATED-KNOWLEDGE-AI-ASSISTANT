@@ -73,24 +73,35 @@ class VideoBM25(BaseBM25):
             if name and role:
                 parts.append(f"speaker {name} {role}")
 
-            ts_s = s.get("timestamp_start") or s.get("start_timestamp") or \
+            ts_s = s.get("start_timestamp") or s.get("timestamp_start") or \
                    getattr(doc, "timestamp_start", None)
             if ts_s is not None:
                 try:
-                    minute = int(float(ts_s) / 60)
+                    total_sec = int(float(ts_s))
+                    minute    = total_sec // 60
+                    second    = total_sec % 60
+                    parts.append(f"timestamp_{total_sec}")
                     parts.append(f"time {minute}")
                     parts.append(f"minute {minute}")
+                    parts.append(f"at_{minute:02d}_{second:02d}")
                 except (ValueError, TypeError):
                     pass
 
             call_section = (s.get("call_section") or s.get("topic_section") or "").strip()
             if call_section:
                 parts.append(call_section.replace("_", " "))
+                # Composite call_section + role phrase (mirrors AudioBM25)
+                if role:
+                    parts.append(f"{call_section.replace('_', ' ')} {role.lower()}")
 
             if s.get("is_question"):
                 parts.append("analyst question analyst query")
             elif s.get("is_answer"):
                 parts.append("management answer management response")
+
+            # Earnings call detection token
+            if s.get("is_earnings_call", False):
+                parts.append("earnings call conference call quarterly results")
 
             fin_entities: dict = s.get("finance_entities") or {}
             if isinstance(fin_entities, dict):
@@ -114,14 +125,21 @@ class VideoBM25(BaseBM25):
             if frame_index is not None:
                 parts.append(f"frame {frame_index}")
 
-            # Frame captions from the visual track
+            # Frame captions — scene change tokens, frame_caption key, numeric repeat
             frame_captions: List[Any] = s.get("frame_captions") or []
             for fc in frame_captions[:5]:
                 if isinstance(fc, dict):
-                    cap = (fc.get("caption") or "").strip()
+                    cap = (fc.get("frame_caption") or "").strip()
                     ocr = (fc.get("ocr_text") or "").strip()
+                    if fc.get("scene_change"):
+                        parts.append("new_slide")
                     if cap:
                         parts.append(cap[:200])
+                        cap_lower = cap.lower()
+                        if any(kw in cap_lower for kw in ("chart", "graph", "bar chart", "line chart", "pie")):
+                            parts.append("chart_appears")
+                        if any(kw in cap_lower for kw in ("table", " row", " column", "spreadsheet")):
+                            parts.append("table_shown")
                     if ocr:
                         parts.append(ocr[:100])
                 elif isinstance(fc, str):
@@ -162,17 +180,25 @@ class VideoBM25(BaseBM25):
         if role:
             parts.append(f"speaker role {role}")
 
-        ts_s = s.get("timestamp_start") or s.get("start_timestamp")
+        ts_s = s.get("start_timestamp") or s.get("timestamp_start")
         if ts_s is not None:
             try:
-                minute = int(float(ts_s) / 60)
+                total_sec = int(float(ts_s))
+                minute    = total_sec // 60
+                second    = total_sec % 60
+                parts.append(f"timestamp_{total_sec}")
                 parts.append(f"time {minute}")
+                parts.append(f"minute {minute}")
+                parts.append(f"at_{minute:02d}_{second:02d}")
             except (ValueError, TypeError):
                 pass
 
         call_section = (s.get("call_section") or s.get("topic_section") or "").strip()
         if call_section:
             parts.append(call_section.replace("_", " "))
+
+        if s.get("is_earnings_call", False):
+            parts.append("earnings call conference call quarterly results")
 
         fin_entities: dict = s.get("finance_entities") or {}
         if isinstance(fin_entities, dict):
@@ -200,13 +226,20 @@ class VideoBM25(BaseBM25):
         frame_captions: List[Any] = s.get("frame_captions") or []
         for fc in frame_captions[:8]:
             if isinstance(fc, dict):
-                cap = (fc.get("caption") or "").strip()
+                cap = (fc.get("frame_caption") or "").strip()
                 ocr = (fc.get("ocr_text") or "").strip()
                 slide_num = fc.get("slide_number")
+                if fc.get("scene_change"):
+                    parts.append("new_slide")
                 if slide_num is not None:
                     parts.append(f"slide {slide_num}")
                 if cap:
                     parts.append(cap[:300])
+                    cap_lower = cap.lower()
+                    if any(kw in cap_lower for kw in ("chart", "graph", "bar chart", "line chart", "pie")):
+                        parts.append("chart_appears")
+                    if any(kw in cap_lower for kw in ("table", " row", " column", "spreadsheet")):
+                        parts.append("table_shown")
                 if ocr:
                     # OCR numbers repeated for weight
                     parts.append(ocr[:200])

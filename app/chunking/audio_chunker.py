@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from app.chunking.base_chunker import BaseChunker
-from app.chunking.finance_numbers import deterministic_chunk_id, extract_finance_entities
+from app.chunking.finance_numbers import (
+    approx_tokens,
+    deterministic_chunk_id,
+    extract_finance_entities,
+)
 from app.ingestion.schema import IngestedDocument, RawExtract, UniversalMetadata
 from app.utils.logger import get_logger, modality_var
 
@@ -40,9 +44,11 @@ def diarize(audio_path: str) -> List[Tuple[float, float, str]]:
         logger.warning(event="diarizer_unavailable", error=str(exc))
         return []
     try:
-        diarization = pipeline(audio_path)
+        raw = pipeline(audio_path)
+        # pyannote ≥3.3 wraps result in DiarizeOutput; unwrap to Annotation.
+        annotation = getattr(raw, "speaker_diarization", raw)
         segments: List[Tuple[float, float, str]] = []
-        for turn, _, speaker in diarization.itertracks(yield_label=True):
+        for turn, _, speaker in annotation.itertracks(yield_label=True):
             segments.append((turn.start, turn.end, speaker))
         return sorted(segments, key=lambda x: x[0])
     except Exception as exc:
@@ -93,19 +99,40 @@ _TOPIC_TRANSITIONS = re.compile(
 
 _CALL_SECTIONS = [
     ("operator_intro",   re.compile(r"\b(welcome|thank you for joining|good (?:morning|afternoon))\b", re.I)),
-    ("qa_session",       re.compile(r"\b(next question|please go ahead|analyst|q&a|question and answer)\b", re.I)),
+    # FOMC/press-conference Q&A: "QUESTION.", "QUESTIONER", reporter intros, "from [outlet]"
+    ("qa_session",       re.compile(
+        r"\b(next question|please go ahead|analyst|q&a|question and answer"
+        r"|QUESTION\b|questioner|from (?:the |)(?:wall street|new york times?|reuters|bloomberg|wsj|cnbc|fox|ap |associated press)"
+        r"|reporter|press conference question)\b",
+        re.I,
+    )),
     ("closing_remarks",  re.compile(r"\b(this concludes|thank you for joining|goodbye)\b", re.I)),
     ("prepared_remarks", re.compile(r".*", re.I)),   # fallback
 ]
 
 _ROLE_KEYWORDS = {
-    "CEO":      re.compile(r"\bceo\b|\bchief executive\b", re.I),
-    "CFO":      re.compile(r"\bcfo\b|\bchief financial\b", re.I),
-    "Analyst":  re.compile(r"\banalyst\b|\bgoldman\b|\bmorgan\b|\bjp morgan\b|\bciti\b", re.I),
-    "Operator": re.compile(r"\boperator\b", re.I),
+    "Fed Chair":  re.compile(r"\b(chairman|chairwoman|chair powell|chair bernanke|chair yellen|chair jerome|federal reserve chair)\b", re.I),
+    "CEO":        re.compile(r"\bceo\b|\bchief executive\b", re.I),
+    "CFO":        re.compile(r"\bcfo\b|\bchief financial\b", re.I),
+    "President":  re.compile(r"\bpresident\b(?!\s+of the\s+united)", re.I),
+    "Analyst":    re.compile(r"\banalyst\b|\bgoldman\b|\bmorgan\b|\bjp morgan\b|\bciti\b|\bbarclays\b|\bubs\b|\bdb\b|\bdeutsche bank\b", re.I),
+    "Reporter":   re.compile(r"\b(reporter|journalist|correspondent|from (?:the |)(?:wall street|new york times?|reuters|bloomberg|wsj|cnbc|fox|ap |associated press|financial times|ft\b))\b", re.I),
+    "Operator":   re.compile(r"\boperator\b", re.I),
+    "COO":        re.compile(r"\bcoo\b|\bchief operating\b", re.I),
 }
 
 _FILLER = re.compile(r"\b(um|uh|er|ah|you know|i mean|like|so|basically|essentially)\b", re.I)
+
+# Spoken name patterns (three forms):
+#   "MR. POWELL:" / "MS. BRAINARD:" — title prefix, all-caps surname
+#   "CHAIRMAN BERNANKE." / "VICE CHAIR WILLIAMS." — FOMC all-caps role+name
+#   "Luca Maestri:" / "Tim Cook," — earnings call title-case name
+_SPOKEN_NAME_RE = re.compile(
+    r"(?:^|\n)\s*(?:MR\.|MS\.|MRS\.|DR\.)\s+([A-Z][A-Z\s\-']+?)[:.]\s"
+    r"|(?:^|\n)\s*(?:CHAIR(?:MAN|WOMAN)?|VICE\s+CHAIR(?:MAN|WOMAN)?|PRESIDENT|GOVERNOR|SECRETARY)\s+([A-Z][A-Z\s\-']{1,30})[:.]\s"
+    r"|([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s*[:,]",
+    re.MULTILINE,
+)
 
 
 def _detect_role(text: str) -> Optional[str]:
@@ -128,18 +155,77 @@ def _remove_fillers(text: str) -> str:
 
 def _map_speaker_roles(
     diarization: List[Tuple[float, float, str]],
-    transcript_text: str,
-) -> Dict[str, str]:
-    """Map SPEAKER_XX labels to roles using the first 60s of transcript."""
-    role_map: Dict[str, str] = {}
-    early = [d for d in diarization if d[0] < 60]
-    for start, end, label in early:
-        if label in role_map:
+    full_transcript: str,
+) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
+    """Map SPEAKER_XX labels to (role, name) using per-speaker transcript context.
+
+    Strategy:
+    1. Parse FOMC-style "MR. POWELL:" and earnings-call "Luca Maestri:" name markers from
+       the surrounding window of each spoken-name occurrence to bind name → speaker.
+    2. Detect role from each speaker's own transcribed text (not the global transcript),
+       so the dominant speaker (CEO/Chair) doesn't pollute everyone else's role.
+    Returns {speaker_label: (role, name)} — both may be None.
+    """
+    role_name_map: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+    if not diarization:
+        return role_name_map
+
+    # --- Build approximate word → time index so we can map name-marker positions ---
+    # diarization is sorted; build start-time list for bisect lookups.
+    import bisect as _bisect
+    _diar_starts = [seg[0] for seg in diarization]
+
+    def _speaker_at_approx(char_pos: int, total_chars: int) -> str:
+        """Estimate speaker label at character position via linear time mapping."""
+        if not diarization:
+            return "SPEAKER_00"
+        total_dur = diarization[-1][1] if diarization else 1.0
+        t = (char_pos / max(total_chars, 1)) * total_dur
+        idx = _bisect.bisect_right(_diar_starts, t) - 1
+        if idx >= 0:
+            _, end, label = diarization[idx]
+            if t <= end:
+                return label
+        return diarization[0][2]
+
+    total_chars = len(full_transcript)
+
+    # --- Map name markers to speaker labels ---
+    label_to_name: Dict[str, str] = {}
+    for m in _SPOKEN_NAME_RE.finditer(full_transcript):
+        # group(1): MR./MS. prefix form  group(2): FOMC CHAIRMAN/PRESIDENT form  group(3): title-case form
+        raw = m.group(1) or m.group(2) or m.group(3) or ""
+        name = raw.strip().title()
+        if not name:
             continue
-        role = _detect_role(transcript_text[:500])
-        if role:
-            role_map[label] = role
-    return role_map
+        spk = _speaker_at_approx(m.start(), total_chars)
+        if spk not in label_to_name:   # keep first (most reliable)
+            label_to_name[spk] = name
+
+    # --- Per-speaker word buckets for independent role detection ---
+    # Split transcript words by time-proportional position.
+    words = full_transcript.split()
+    n = max(len(words), 1)
+    total_dur = diarization[-1][1] if diarization else 1.0
+    speaker_word_buckets: Dict[str, List[str]] = {}
+    for wi, word in enumerate(words):
+        t = (wi / n) * total_dur
+        idx = _bisect.bisect_right(_diar_starts, t) - 1
+        if idx >= 0:
+            _, end, label = diarization[idx]
+            if t <= end:
+                speaker_word_buckets.setdefault(label, []).append(word)
+
+    # --- Assign role and name to each unique speaker label ---
+    ordered_labels = list(dict.fromkeys(seg[2] for seg in diarization))
+    for label in ordered_labels:
+        name = label_to_name.get(label)
+        # Detect role from this speaker's own words (first 500), then fall back to name.
+        own_text = " ".join(speaker_word_buckets.get(label, [])[:500])
+        role = _detect_role(own_text) or (name and _detect_role(name)) or None
+        role_name_map[label] = (role, name)
+
+    return role_name_map
 
 
 def _run_whisper(wav_path: str) -> List[Dict]:
@@ -147,7 +233,12 @@ def _run_whisper(wav_path: str) -> List[Dict]:
     try:
         from app.core.model_loader import model_loader as loader
         model = loader.get_whisper()
-        segments, _ = model.transcribe(wav_path, word_timestamps=True)
+        segments, _ = model.transcribe(
+            wav_path,
+            word_timestamps=True,
+            vad_filter=True,
+            condition_on_previous_text=False,
+        )
         words = []
         for seg in segments:
             if hasattr(seg, "words") and seg.words:
@@ -166,18 +257,30 @@ def _run_whisper(wav_path: str) -> List[Dict]:
         return []
 
 
+def _last_sentence(text: str) -> str:
+    """Return the last complete sentence from text for overlap seeding."""
+    # Split on sentence-ending punctuation followed by space or end-of-string.
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    return sentences[-1] if sentences else ""
+
+
 def _assemble_chunks(
     words: List[Dict],
     diarization: List[Tuple[float, float, str]],
-    role_map: Dict[str, str],
+    role_map: Dict[str, Tuple[Optional[str], Optional[str]]],
 ) -> List[Dict]:
-    """Group words into speaker-aware, topic-bounded chunks."""
+    """Group words into speaker-aware, topic-bounded chunks with 1-sentence overlap.
+
+    Hard boundaries: speaker change (≥ MIN_WORDS buffered), topic transition phrase,
+                     exceeding MAX_WORDS.
+    Soft boundary: nearest sentence end to the target word count.
+    Overlap: last sentence of the previous chunk is prepended to each new chunk so
+             a financial statement split across a boundary remains retrievable.
+    """
     if not words:
         return []
 
-    # Pre-extract sorted start times for O(log s) binary search.
-    # diarization is already sorted by start (see _diarize caller).
-    # Complexity: O(s) build → O(log s) per query vs O(s) linear scan.
+    # Pre-extract sorted diarization start times for O(log s) binary search.
     _diar_starts: List[float] = [seg[0] for seg in diarization]
 
     def speaker_at(t: float) -> str:
@@ -188,11 +291,30 @@ def _assemble_chunks(
                 return _label
         return "SPEAKER_00"
 
+    def _flush(buf: List[str], start: float, end: float, spk: str, overlap_seed: str) -> Dict:
+        raw = " ".join(buf)
+        text = _remove_fillers(raw)
+        role, name = role_map.get(spk, (None, None))
+        topic = _TOPIC_TRANSITIONS.search(raw)
+        # Prepend overlap sentence (context bridge, not counted in word_count)
+        display = f"{overlap_seed} {text}".strip() if overlap_seed else text
+        return {
+            "transcript":    display,
+            "start":         start,
+            "end":           end,
+            "speaker":       spk,
+            "role":          role,
+            "name":          name,
+            "call_section":  _detect_call_section(raw),
+            "topic_section": topic.group(0).replace(" ", "_") if topic else None,
+        }
+
     chunks: List[Dict] = []
     buf_words: List[str] = []
     buf_start = words[0]["start"]
     buf_end = words[0]["end"]
     buf_speaker = speaker_at(buf_start)
+    overlap_seed = ""  # last sentence of previous chunk
 
     for w in words:
         word_text = w["word"]
@@ -206,15 +328,9 @@ def _assemble_chunks(
 
         if over_max or speaker_changed or topic_hit:
             if buf_words:
-                transcript = " ".join(buf_words)
-                chunks.append({
-                    "transcript":   _remove_fillers(transcript),
-                    "start":        buf_start,
-                    "end":          buf_end,
-                    "speaker":      buf_speaker,
-                    "role":         role_map.get(buf_speaker),
-                    "call_section": _detect_call_section(transcript),
-                })
+                chunk = _flush(buf_words, buf_start, buf_end, buf_speaker, overlap_seed)
+                overlap_seed = _last_sentence(chunk["transcript"])
+                chunks.append(chunk)
             buf_words = []
             buf_start = word_start
             buf_speaker = current_speaker
@@ -223,15 +339,7 @@ def _assemble_chunks(
         buf_end = word_end
 
     if buf_words:
-        transcript = " ".join(buf_words)
-        chunks.append({
-            "transcript":   _remove_fillers(transcript),
-            "start":        buf_start,
-            "end":          buf_end,
-            "speaker":      buf_speaker,
-            "role":         role_map.get(buf_speaker),
-            "call_section": _detect_call_section(transcript),
-        })
+        chunks.append(_flush(buf_words, buf_start, buf_end, buf_speaker, overlap_seed))
 
     return chunks
 
@@ -269,6 +377,12 @@ class AudioChunker(BaseChunker):
                     logger.warning(event="audio_chunker_empty_bytes", source=source)
                     continue
 
+                # Pull quality signals forwarded from AudioIngestor.extract().
+                ext_extra = ext.extra or {}
+                snr = ext_extra.get("snr")
+                snr_degraded = ext_extra.get("snr_degraded", False)
+                clipping_detected = ext_extra.get("clipping_detected", False)
+
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                     f.write(raw)
                     wav_path = f.name
@@ -287,6 +401,13 @@ class AudioChunker(BaseChunker):
                     role_map = _map_speaker_roles(diarization, full_transcript)
                     raw_chunks = _assemble_chunks(words, diarization, role_map)
 
+                    # Document-level earnings-call detection — checked once per extract.
+                    _ft_lower = full_transcript.lower()
+                    is_earnings_call = any(kw in _ft_lower for kw in (
+                        "earnings call", "quarterly results", "conference call",
+                        "revenue", "earnings per share", "fiscal year",
+                    ))
+
                     for chunk_idx, ch in enumerate(raw_chunks):
                         transcript = ch["transcript"]
                         if not transcript.strip():
@@ -302,7 +423,15 @@ class AudioChunker(BaseChunker):
                         fin_entities = extract_finance_entities(transcript)
                         duration = ch["end"] - ch["start"]
                         word_count = len(transcript.split())
+                        token_count = approx_tokens(transcript)
                         call_section = ch.get("call_section", "prepared_remarks")
+                        speaker_role = ch.get("role")
+                        speaker_name = ch.get("name")
+                        # Composite label for readability: "Luca Maestri - CFO"
+                        if speaker_name and speaker_role:
+                            speaker_display = f"{speaker_name} - {speaker_role}"
+                        else:
+                            speaker_display = speaker_name or speaker_role
 
                         chunk_hash = deterministic_chunk_id(
                             source, f"audio_{ch['start']:.1f}", chunk_idx
@@ -315,8 +444,8 @@ class AudioChunker(BaseChunker):
                             "end_timestamp":    round(ch["end"], 3),
                             "duration_seconds": round(duration, 3),
                             "speaker_label":    ch["speaker"],
-                            "speaker_name":     ch.get("name"),
-                            "speaker_role":     ch.get("role"),
+                            "speaker_name":     speaker_display,
+                            "speaker_role":     speaker_role,
                             "topic_section":    ch.get("topic_section"),
                             "call_section":     call_section,
                             "transcript":       transcript,
@@ -325,8 +454,13 @@ class AudioChunker(BaseChunker):
                                 **ner_entities,
                             },
                             "word_count":       word_count,
+                            "token_count":      token_count,
                             "is_question":      transcript.rstrip().endswith("?"),
                             "is_answer":        call_section == "qa_session" and not transcript.rstrip().endswith("?"),
+                            "is_earnings_call": is_earnings_call,
+                            "snr":              snr,
+                            "snr_degraded":     snr_degraded,
+                            "clipping_detected": clipping_detected,
                         }
 
                         doc = self._make_doc(

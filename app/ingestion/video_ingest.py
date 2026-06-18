@@ -1910,3 +1910,60 @@ async def extract_frames_async(
         )
 
 
+async def ingest_video_full(file_path: str, session_id: str) -> List[IngestedDocument]:
+    """Production video ingestion: VideoIngestor.extract() → VideoChunker.chunk().
+
+    Replaces the backward-compat ingest() as the INGESTION_HANDLERS entry.
+    Produces modality='mp4' docs with full Phase 1.7/2.7/3.7 metadata:
+    start_timestamp, end_timestamp, duration_seconds, speaker_label, speaker_name,
+    speaker_role, call_section, topic_section, transcript, frame_captions,
+    combined_text, slide_numbers_covered, has_slide_content, is_earnings_call,
+    finance_entities, word_count, token_count, snr, snr_degraded, clipping_detected.
+    """
+    from app.chunking import chunk_raw_extracts
+    from app.ingestion.schema import UniversalMetadata
+
+    if not session_id:
+        raise ValueError("SESSION_ID_REQUIRED")
+
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"FILE_NOT_FOUND: {file_path}")
+
+    file_size = path.stat().st_size
+    if file_size == 0:
+        raise ValueError("EMPTY_FILE")
+    if file_size > settings.MAX_FILE_SIZE_VIDEO:
+        raise ValueError(f"FILE_TOO_LARGE: {file_size}")
+
+    meta = UniversalMetadata(
+        source_path=str(path.resolve()),
+        modality="video",
+        file_size_bytes=file_size,
+        custom_fields={"session_id": session_id},
+    )
+
+    ingestor = VideoIngestor()
+    extracts = await ingestor.extract(path, meta)
+
+    if not extracts:
+        raise ValueError("NO_EXTRACTS_PRODUCED")
+
+    docs = chunk_raw_extracts(extracts, meta, "video")
+
+    for doc in docs:
+        struct = getattr(doc, "structure", None)
+        if struct is not None:
+            if struct.get("session_id") in (None, "default"):
+                struct["session_id"] = session_id
+
+    logger.info(
+        event="ingest_video_full_complete",
+        file=path.name,
+        extracts=len(extracts),
+        docs=len(docs),
+        session_id=session_id,
+    )
+    return docs
+
+

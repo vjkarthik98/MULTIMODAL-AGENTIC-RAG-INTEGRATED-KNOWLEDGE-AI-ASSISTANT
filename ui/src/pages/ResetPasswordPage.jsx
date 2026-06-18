@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import { Eye, EyeOff, Loader2, BrainCircuit, CheckCircle } from 'lucide-react'
+import { Eye, EyeOff, Loader2, CheckCircle } from 'lucide-react'
+import MagikIcon from '../components/MagikIcon'
 import { resetPassword } from '../api/client'
 
 export default function ResetPasswordPage({ token, onSuccess }) {
@@ -58,7 +59,7 @@ export default function ResetPasswordPage({ token, onSuccess }) {
         {/* Brand */}
         <div className="flex flex-col items-center mb-8 gap-3">
           <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-violet-500 to-blue-500 flex items-center justify-center shadow-lg">
-            <BrainCircuit size={28} strokeWidth={1.7} className="text-white" />
+            <MagikIcon size={28} strokeWidth={1.7} className="text-white" />
           </div>
           <h1 className="text-3xl font-bold tracking-tight" style={{
             background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)',

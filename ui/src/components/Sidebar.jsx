@@ -4,11 +4,12 @@ import {
   Upload, X, Loader2, LogOut, FileText, Image, Sheet,
   File, AlertCircle, PanelLeftClose, Sun, Moon,
   SquarePen, FolderOpen, FileVideo, FileAudio, FileType, LetterText, Settings,
-  BrainCircuit, MessageSquare, MoreHorizontal, Pin, PinOff, Pencil,
+  MessageSquare, MoreHorizontal, Pin, PinOff, Pencil,
   Archive, ArchiveRestore, Trash2,
 } from 'lucide-react'
 import { listKB, deleteKBFile, ingestFile, listChatSessions, deleteChatSession, updateChatSession, getIngestionStatus } from '../api/client'
 import { useToast } from '../context/ToastContext'
+import MagikIcon from './MagikIcon'
 
 const EXT_BADGE = {
   PDF:  { label: 'PDF', bg: 'bg-red-700' },
@@ -155,6 +156,8 @@ export default function Sidebar({
   onSetUploadHandler,
   historyClearedAt,
   staleSessionId,
+  onGuestUploadLimit,
+  onShowLogin,
 }) {
   const [dragOver, setDragOver]           = useState(false)
   const [sessions, setSessions]           = useState([])
@@ -455,16 +458,12 @@ export default function Sidebar({
     _doUpload([...fresh, ...dups])
   }
 
-  // Stage labels for real ingestion status polling (audio/video)
+  // Stage progress map — all modalities now return a job_id immediately (server-side background jobs).
+  // queued(2%) → extracting(20%) → chunking(50%) → embedding(80%) → done(100%)
   const _STAGE_PROGRESS = { queued: 2, extracting: 20, chunking: 50, embedding: 80, done: 100, error: 0 }
-  const _AUDIO_VIDEO_EXTS = new Set(['mp3','mp4','wav','m4a','ogg','flac','mov','avi','mkv','webm','opus','aiff','wma'])
-  const _isLongRunning = (filename) => {
-    const ext = (filename.split('.').pop() || '').toLowerCase()
-    return _AUDIO_VIDEO_EXTS.has(ext)
-  }
 
   const _pollJobStatus = async (token, jobId, filename) => {
-    const INTERVAL = 3000, MAX_POLLS = 300  // up to 15 min
+    const INTERVAL = 3000, MAX_POLLS = 600  // up to 30 min (covers large video files)
     for (let i = 0; i < MAX_POLLS; i++) {
       await new Promise(r => setTimeout(r, INTERVAL))
       try {
@@ -486,32 +485,14 @@ export default function Sidebar({
       uploadControllers.current[file.name] = ctrl
 
       setUploadingFiles(prev => new Set([...prev, file.name]))
-      setUploadProgress(prev => ({ ...prev, [file.name]: 0 }))
-
-      const longRunning = _isLongRunning(file.name)
-
-      // For short files: exponential-ease simulation (0→90%)
-      // For audio/video: real stage polling via job_id
-      let sim = null
-      if (!longRunning) {
-        let tick = 0
-        sim = setInterval(() => {
-          tick++
-          const fake = Math.min(Math.round(90 * (1 - Math.exp(-tick / 25))), 90)
-          setUploadProgress(prev =>
-            file.name in prev
-              ? { ...prev, [file.name]: Math.max(prev[file.name], fake) }
-              : prev
-          )
-        }, 200)
-      }
+      setUploadProgress(prev => ({ ...prev, [file.name]: 2 }))  // start at "queued" level
 
       try {
+        // Server returns job_id immediately (<1s) for ALL modalities — file is already
+        // visible in sidebar. Poll real pipeline stages until done.
         const result = await ingestFile(auth.token, file, 'default', ctrl)
-        if (sim) clearInterval(sim)
 
-        if (longRunning && result?.job_id) {
-          // Real status polling for audio/video
+        if (result?.job_id) {
           const { ok, error: pollErr, chunks } = await _pollJobStatus(auth.token, result.job_id, file.name)
           if (ok) {
             setUploadProgress(prev => ({ ...prev, [file.name]: 100 }))
@@ -521,14 +502,17 @@ export default function Sidebar({
             addToast(`Failed: ${file.name}`, 'error')
           }
         } else {
+          // Fallback: older server response without job_id (duplicate or instant result)
           setUploadProgress(prev => ({ ...prev, [file.name]: 100 }))
           addToast(`Uploaded: ${file.name}`, 'success')
         }
       } catch (err) {
-        if (sim) clearInterval(sim)
         if (err.name === 'AbortError') {
           addToast(`Cancelled: ${file.name}`, 'info')
           deleteKBFile(auth.token, file.name).catch(() => {})
+        } else if (err.message?.toLowerCase().includes('guest upload limit')) {
+          if (onGuestUploadLimit) onGuestUploadLimit()
+          else addToast('Sign up free to upload more files', 'info')
         } else {
           errors.push(`${file.name}: ${err.message}`)
           addToast(`Failed: ${file.name}`, 'error')
@@ -591,7 +575,7 @@ export default function Sidebar({
           onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
         >
           <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-blue-500 flex items-center justify-center flex-shrink-0">
-            <BrainCircuit size={16} strokeWidth={2} className="text-white" />
+            <MagikIcon size={16} strokeWidth={2} className="text-white" />
           </div>
         </button>
 
@@ -648,7 +632,7 @@ export default function Sidebar({
       {/* Logo row */}
       <div className="flex items-center gap-3 px-5 pt-5 pb-4">
         <div className="w-9 h-9 bg-gradient-to-br from-violet-500 to-blue-500 rounded-lg flex items-center justify-center flex-shrink-0 shadow">
-          <BrainCircuit size={19} strokeWidth={2} className="text-white" />
+          <MagikIcon size={19} strokeWidth={2} className="text-white" />
         </div>
         <div className="flex-1 min-w-0">
           <div className="text-lg font-bold leading-tight" style={{
@@ -971,41 +955,71 @@ export default function Sidebar({
         )}
       </div>
 
-      {/* User row */}
-      <div ref={menuRef} className="relative px-4 py-3.5" style={{ borderTop: '1px solid var(--t-bd1)' }}>
-
-        {/* Account menu */}
-        {menuOpen && (
-          <AccountMenu
-            panelRef={menuPanelRef}
-            className="absolute left-4 right-4 rounded-xl py-1.5 shadow-xl overflow-hidden z-20"
-            style={{ bottom: 'calc(100% + 6px)' }}
-          />
-        )}
-
-        {/* Trigger row */}
-        <div className="flex items-center gap-3">
+      {/* Bottom section — guest CTA or real user row */}
+      {auth?.isGuest ? (
+        <div className="px-4 pt-4 pb-3" style={{ borderTop: '1px solid var(--t-bd1)' }}>
+          <p className="text-sm font-bold mb-1" style={{ color: 'var(--t-tx1)' }}>
+            Get responses tailored to you
+          </p>
+          <p className="text-xs mb-3 leading-relaxed" style={{ color: 'var(--t-tx5)' }}>
+            Log in to save your documents, chat history, and unlock unlimited queries.
+          </p>
           <button
-            onClick={() => setMenuOpen(o => !o)}
-            title={auth.email}
-            className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 transition-transform"
-            style={{ background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)', transform: menuOpen ? 'scale(1.06)' : 'scale(1)' }}
+            onClick={onShowLogin}
+            className="w-full flex items-center justify-center rounded-full py-3 text-sm font-bold transition-opacity mb-2"
+            style={{ background: 'var(--t-tx1)', color: 'var(--t-bg)' }}
+            onMouseEnter={e => e.currentTarget.style.opacity = '0.88'}
+            onMouseLeave={e => e.currentTarget.style.opacity = '1'}
           >
-            <span className="text-white text-[11px] font-bold tracking-tight">{avatarInitials}</span>
+            Log in
           </button>
-          <span className="flex-1 text-sm truncate min-w-0" style={{ color: 'var(--t-tx4)' }}>{auth.email}</span>
           <button
             onClick={onToggleTheme}
-            className="flex-shrink-0 transition-colors"
-            style={{ color: 'var(--t-tx5)' }}
-            onMouseEnter={e => e.currentTarget.style.color = 'var(--t-accent)'}
-            onMouseLeave={e => e.currentTarget.style.color = 'var(--t-tx5)'}
+            className="w-full flex items-center justify-center gap-1.5 rounded-lg py-1.5 text-xs transition-colors"
+            style={{ color: 'var(--t-tx6)' }}
+            onMouseEnter={e => e.currentTarget.style.color = 'var(--t-tx4)'}
+            onMouseLeave={e => e.currentTarget.style.color = 'var(--t-tx6)'}
             title={dark ? 'Switch to light mode' : 'Switch to dark mode'}
           >
-            {dark ? <Sun size={15} /> : <Moon size={15} />}
+            {dark ? <Sun size={13} /> : <Moon size={13} />}
+            {dark ? 'Light mode' : 'Dark mode'}
           </button>
         </div>
-      </div>
+      ) : (
+        <div ref={menuRef} className="relative px-4 py-3.5" style={{ borderTop: '1px solid var(--t-bd1)' }}>
+          {/* Account menu */}
+          {menuOpen && (
+            <AccountMenu
+              panelRef={menuPanelRef}
+              className="absolute left-4 right-4 rounded-xl py-1.5 shadow-xl overflow-hidden z-20"
+              style={{ bottom: 'calc(100% + 6px)' }}
+            />
+          )}
+
+          {/* Trigger row */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setMenuOpen(o => !o)}
+              title={auth.email}
+              className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 transition-transform"
+              style={{ background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)', transform: menuOpen ? 'scale(1.06)' : 'scale(1)' }}
+            >
+              <span className="text-white text-[11px] font-bold tracking-tight">{avatarInitials}</span>
+            </button>
+            <span className="flex-1 text-sm truncate min-w-0" style={{ color: 'var(--t-tx4)' }}>{auth.email}</span>
+            <button
+              onClick={onToggleTheme}
+              className="flex-shrink-0 transition-colors"
+              style={{ color: 'var(--t-tx5)' }}
+              onMouseEnter={e => e.currentTarget.style.color = 'var(--t-accent)'}
+              onMouseLeave={e => e.currentTarget.style.color = 'var(--t-tx5)'}
+              title={dark ? 'Switch to light mode' : 'Switch to dark mode'}
+            >
+              {dark ? <Sun size={15} /> : <Moon size={15} />}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
 
     {/* KB filename tooltip — portalled to escape overflow container */}

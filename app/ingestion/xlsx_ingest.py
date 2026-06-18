@@ -59,8 +59,131 @@ _PNL_GROUP_MARKERS: List[Tuple[Any, str]] = [
     (re.compile(r'\brevenue\b|\bnet sales\b|\btotal revenue\b', re.IGNORECASE), "Revenue Lines"),
 ]
 
+_ACCOUNTING_NEG_RE = re.compile(r'^\s*\([\d,]+\.?\d*\)\s*$')
+_PERCENTAGE_RE = re.compile(r'^\s*-?\d+\.?\d*\s*%\s*$')
+_MULTIPLE_RE = re.compile(r'^\s*-?\d+\.?\d*\s*[xX]\s*$')
+_ACCOUNTING_FMT_RE = re.compile(r'_\)|#,##0.*\(', re.IGNORECASE)
+
 
 # ─── Utilities ────────────────────────────────────────────────────────────────
+
+def _classify_semantic_group(row_text: str) -> str:
+    for pattern, group in _PNL_GROUP_MARKERS:
+        if pattern.search(row_text):
+            return group
+    return ""
+
+
+def _detect_display_format(value_str: str, number_format: str = "") -> str:
+    """Classify a cell's display format from its string value or number_format attribute."""
+    if _ACCOUNTING_NEG_RE.match(value_str):
+        return "accounting_negative"
+    if _PERCENTAGE_RE.match(value_str):
+        return "percentage"
+    if _MULTIPLE_RE.match(value_str):
+        return "multiple"
+    if number_format and _ACCOUNTING_FMT_RE.search(number_format):
+        return "accounting_negative"
+    return "standard"
+
+
+def _extract_named_ranges(wb: Any) -> Dict[str, Any]:
+    """Extract workbook-level named ranges and resolve single-cell references to values."""
+    result: Dict[str, Any] = {}
+    try:
+        items: List[Tuple[str, Any]] = []
+        try:
+            items = [(name, dn) for name, dn in wb.defined_names.items()]
+        except AttributeError:
+            try:
+                items = [(dn.name, dn) for dn in wb.defined_names.definedName]
+            except Exception:
+                pass
+        for name, dn in items:
+            if name.startswith("_") or not name:
+                continue
+            try:
+                for sheet_title, coord in dn.destinations:
+                    try:
+                        ws = wb[sheet_title]
+                        clean_coord = coord.replace("$", "")
+                        if ":" not in clean_coord:
+                            val = ws[clean_coord].value
+                            if val is not None:
+                                result[name] = val
+                        else:
+                            result[name] = f"{sheet_title}!{coord}"
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return result
+
+
+def _sheet_type_classify(sheet_name: str) -> str:
+    _MAP = {
+        "income": "income_statement", "p&l": "income_statement",
+        "profit": "income_statement", "earnings": "income_statement",
+        "balance": "balance_sheet", "cash": "cash_flow",
+        "capex": "capex", "assump": "assumptions", "input": "assumptions",
+        "dcf": "model", "lbo": "model", "model": "model",
+        "scenario": "scenarios", "case": "scenarios",
+        "pivot": "pivot", "chart": "charts", "dashboard": "dashboard",
+        "summary": "summary", "data": "data",
+    }
+    nl = sheet_name.lower()
+    for key, stype in _MAP.items():
+        if key in nl:
+            return stype
+    return "data"
+
+
+def _load_all_rows_with_meta(
+    ws: Any,
+) -> Tuple[List[Dict], List[Dict], str]:
+    """Return (visible_row_metas, hidden_row_metas, unit_scale).
+
+    Each row_meta: {"cells": List[str], "display_formats": List[str],
+                    "is_hidden": bool, "row_idx": int}
+    """
+    from openpyxl.utils import get_column_letter
+    hidden_col_letters = {
+        col for col, cd in ws.column_dimensions.items() if cd.hidden
+    }
+    visible: List[Dict] = []
+    hidden_rows: List[Dict] = []
+
+    for row_idx, row in enumerate(ws.iter_rows(values_only=False), start=1):
+        rd = ws.row_dimensions.get(row_idx)
+        is_hidden = bool(rd and rd.hidden)
+        cells: List[str] = []
+        formats: List[str] = []
+        for cell in row:
+            col_letter = get_column_letter(cell.column)
+            if col_letter in hidden_col_letters:
+                continue
+            val = cell.value
+            val_str = str(val if val is not None else "").strip()
+            fmt = _detect_display_format(val_str, getattr(cell, "number_format", "") or "")
+            cells.append(val_str)
+            formats.append(fmt)
+
+        if not any(cells):
+            continue
+
+        meta = {"cells": cells, "display_formats": formats,
+                "is_hidden": is_hidden, "row_idx": row_idx}
+        if is_hidden:
+            hidden_rows.append(meta)
+        else:
+            visible.append(meta)
+
+    flat_visible = [r["cells"] for r in visible]
+    unit_scale = _detect_unit_scale(ws.title, flat_visible[:5]) if flat_visible else "units"
+    return visible, hidden_rows, unit_scale
+
 
 def _file_hash(path: str) -> str:
     h = hashlib.sha256()
@@ -355,50 +478,112 @@ class XlsxIngestor(BaseIngestor):
             extracts: List[RawExtract] = []
 
             try:
-                for sheet_name in wb.sheetnames:
+                # ── Named ranges (workbook-level) ─────────────────────────────
+                named_ranges = _extract_named_ranges(wb)
+                if named_ranges:
+                    nr_lines = []
+                    for nr_name, nr_val in named_ranges.items():
+                        # Natural-language: "WACC (Weighted Average Cost of Capital) = 8.5%"
+                        human = nr_name  # keep raw name; BM25 will tokenise it
+                        nr_lines.append(f"{human} = {nr_val}")
+                    nr_text = "\n".join(nr_lines)
+                    nr_text = self._sanitize(nr_text, surface="excel_named_range_ingest")
+                    if nr_text:
+                        extracts.append(RawExtract(
+                            text=nr_text,
+                            extract_type="named_range",
+                            sheet=None,
+                            raw_source_ref=f"xlsx:{path.name}|named_ranges",
+                            extra={"named_ranges": named_ranges, "is_named_range_block": True},
+                        ))
+
+                # ── Per-sheet extraction ──────────────────────────────────────
+                for sheet_idx, sheet_name in enumerate(wb.sheetnames):
                     try:
                         ws = wb[sheet_name]
-                        non_empty, unit_scale = _load_worksheet_rows(ws)
+                        visible_rows, hidden_rows_meta, unit_scale = _load_all_rows_with_meta(ws)
+                        flat_visible = [r["cells"] for r in visible_rows]
 
-                        if not non_empty:
+                        # Cap rows per sheet to avoid runaway processing on huge spreadsheets.
+                        max_rows = getattr(settings, "EXCEL_MAX_ROWS", 50_000)
+                        if len(flat_visible) > max_rows:
+                            logger.warning(
+                                "excel_sheet_rows_capped",
+                                sheet=sheet_name,
+                                original=len(flat_visible),
+                                capped=max_rows,
+                                file=path.name,
+                            )
+                            flat_visible      = flat_visible[:max_rows]
+                            visible_rows      = visible_rows[:max_rows]
+                            hidden_rows_meta  = [r for r in hidden_rows_meta if r.get("row_idx", 0) <= max_rows]
+
+                        if not flat_visible and not hidden_rows_meta:
                             logger.info("excel_empty_sheet_skipped", sheet=sheet_name, file=path.name)
                             continue
 
-                        # Detect unit header (first row with scale keyword)
-                        if non_empty and unit_scale != "units":
-                            unit_header_text = " ".join(non_empty[0]) if non_empty else ""
-                            if unit_header_text:
-                                unit_header_text = self._sanitize(unit_header_text, surface="excel_ingest")
-                                if unit_header_text:
-                                    extracts.append(RawExtract(
-                                        text=unit_header_text,
-                                        extract_type="unit_header",
-                                        sheet=sheet_name,
-                                        raw_source_ref=f"xlsx:{path.name}|sheet:{sheet_name}|unit_header",
-                                        extra={"unit_scale": unit_scale},
-                                    ))
+                        sheet_type = _sheet_type_classify(sheet_name)
+                        has_charts = bool(getattr(ws, "_charts", []))
+                        has_pivot  = bool(getattr(ws, "_pivots", []) or getattr(ws, "PivotTableList", []))
+                        dimensions = ws.dimensions or ""
 
-                        # Row extracts
+                        # Sheet metadata extract
+                        extracts.append(RawExtract(
+                            text="",
+                            extract_type="sheet_metadata",
+                            sheet=sheet_name,
+                            raw_source_ref=f"xlsx:{path.name}|sheet:{sheet_name}|meta",
+                            extra={
+                                "sheet_index": sheet_idx,
+                                "sheet_type":  sheet_type,
+                                "has_charts":  has_charts,
+                                "has_pivot":   has_pivot,
+                                "dimensions":  dimensions,
+                                "unit_scale":  unit_scale,
+                            },
+                        ))
+
+                        # Unit header
+                        if unit_scale != "units" and flat_visible:
+                            unit_hdr = " ".join(flat_visible[0])
+                            unit_hdr = self._sanitize(unit_hdr, surface="excel_ingest")
+                            if unit_hdr:
+                                extracts.append(RawExtract(
+                                    text=unit_hdr,
+                                    extract_type="unit_header",
+                                    sheet=sheet_name,
+                                    raw_source_ref=f"xlsx:{path.name}|sheet:{sheet_name}|unit_header",
+                                    extra={"unit_scale": unit_scale},
+                                ))
+
                         ROWS_PER_CHUNK = settings.EXCEL_ROWS_PER_CHUNK
-                        header_row = non_empty[0] if non_empty else None
+                        header_row = flat_visible[0] if flat_visible else None
 
-                        for batch_start in range(0, len(non_empty), ROWS_PER_CHUNK):
-                            batch = non_empty[batch_start:batch_start + ROWS_PER_CHUNK]
+                        # ── Visible rows → row extracts ───────────────────────
+                        for batch_start in range(0, len(flat_visible), ROWS_PER_CHUNK):
+                            batch_cells = flat_visible[batch_start:batch_start + ROWS_PER_CHUNK]
+                            batch_meta  = visible_rows[batch_start:batch_start + ROWS_PER_CHUNK]
                             row_start = batch_start + 1
-                            row_end = batch_start + len(batch)
+                            row_end   = batch_start + len(batch_cells)
 
-                            if batch_start > 0 and header_row and batch[0] != header_row:
-                                batch = [header_row] + batch
+                            if batch_start > 0 and header_row and batch_cells[0] != header_row:
+                                batch_cells = [header_row] + batch_cells
 
-                            txt = _table_to_text(batch)
+                            txt = _table_to_text(batch_cells)
                             if not txt.strip():
                                 continue
 
+                            sem_group = _classify_semantic_group(txt)
                             chunk_text = f"[Sheet: {sheet_name}, Rows {row_start}-{row_end}]\n{txt}"
                             chunk_text = self._sanitize(chunk_text, surface="excel_ingest")
                             if not chunk_text.strip():
                                 continue
                             chunk_text = self._scrub_pii(chunk_text, surface="excel_ingest")
+
+                            # Dominant display format across batch
+                            all_fmts = [f for r in batch_meta for f in r.get("display_formats", [])]
+                            non_std = [f for f in all_fmts if f != "standard"]
+                            dominant_fmt = max(set(non_std), key=non_std.count) if non_std else "standard"
 
                             extracts.append(RawExtract(
                                 text=chunk_text,
@@ -406,14 +591,42 @@ class XlsxIngestor(BaseIngestor):
                                 sheet=sheet_name,
                                 raw_source_ref=f"xlsx:{path.name}|sheet:{sheet_name}|rows:{row_start}-{row_end}",
                                 extra={
-                                    "unit_scale": unit_scale,
-                                    "row_start": row_start,
-                                    "row_end": row_end,
+                                    "unit_scale":      unit_scale,
+                                    "row_start":       row_start,
+                                    "row_end":         row_end,
+                                    "row_num":         row_start,
+                                    "semantic_group":  sem_group,
+                                    "display_format":  dominant_fmt,
+                                    "sheet_index":     sheet_idx,
+                                    "sheet_type":      sheet_type,
                                 },
                             ))
 
-                        # Statistics summary
-                        summary = _build_stats_summary(sheet_name, non_empty)
+                        # ── Hidden rows → table_row_hidden extracts ───────────
+                        if hidden_rows_meta:
+                            for h_row in hidden_rows_meta:
+                                h_txt = " | ".join(c for c in h_row["cells"] if c)
+                                if not h_txt:
+                                    continue
+                                h_txt = self._sanitize(h_txt, surface="excel_ingest")
+                                h_txt = self._scrub_pii(h_txt, surface="excel_ingest")
+                                if h_txt:
+                                    extracts.append(RawExtract(
+                                        text=h_txt,
+                                        extract_type="table_row_hidden",
+                                        sheet=sheet_name,
+                                        raw_source_ref=f"xlsx:{path.name}|sheet:{sheet_name}|hidden_row:{h_row['row_idx']}",
+                                        extra={
+                                            "unit_scale":  unit_scale,
+                                            "row_num":     h_row["row_idx"],
+                                            "is_hidden":   True,
+                                            "sheet_index": sheet_idx,
+                                            "sheet_type":  sheet_type,
+                                        },
+                                    ))
+
+                        # ── Statistics summary ────────────────────────────────
+                        summary = _build_stats_summary(sheet_name, flat_visible)
                         if summary:
                             extracts.append(RawExtract(
                                 text=summary,
@@ -423,7 +636,7 @@ class XlsxIngestor(BaseIngestor):
                                 extra={"is_stats_summary": True, "unit_scale": unit_scale},
                             ))
 
-                        # Charts
+                        # ── Charts ────────────────────────────────────────────
                         for chart_text in _extract_chart_text(ws, sheet_name):
                             chart_text = self._scrub_pii(chart_text, surface="excel_chart_ingest")
                             if chart_text:
@@ -434,7 +647,7 @@ class XlsxIngestor(BaseIngestor):
                                     raw_source_ref=f"xlsx:{path.name}|sheet:{sheet_name}|chart",
                                 ))
 
-                        # Embedded images
+                        # ── Embedded images ───────────────────────────────────
                         try:
                             for img_idx, img_obj in enumerate(getattr(ws, "_images", []) or []):
                                 try:
@@ -798,3 +1011,33 @@ def ingest_sync(file_path: str, session_id: str) -> List[IngestedDocument]:
         return loop.run_until_complete(ingest(file_path, session_id))
     except RuntimeError:
         return asyncio.run(ingest(file_path, session_id))
+
+
+async def ingest_xlsx_full(file_path: str, session_id: str) -> List[IngestedDocument]:
+    """Production path: XlsxIngestor → XlsxChunker with full Phase 1.4/2.4/3.4 metadata."""
+    from app.ingestion.schema import UniversalMetadata
+    from app.chunking import chunk_raw_extracts
+
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"FILE_NOT_FOUND: {file_path}")
+    file_size = path.stat().st_size
+    if file_size == 0:
+        raise ValueError("EMPTY_FILE")
+    if file_size > settings.MAX_FILE_SIZE_XLSX:
+        raise ValueError(f"FILE_TOO_LARGE: {file_size}")
+
+    meta = UniversalMetadata(
+        source_path=str(path.resolve()),
+        modality="xlsx",
+        file_size_bytes=file_size,
+        custom_fields={"session_id": session_id},
+    )
+    ingestor = XlsxIngestor()
+    extracts = await ingestor.extract(path, meta)
+    docs = chunk_raw_extracts(extracts, meta, "xlsx")
+    for doc in docs:
+        struct = getattr(doc, "structure", None)
+        if struct is not None and struct.get("session_id") in (None, "default"):
+            struct["session_id"] = session_id
+    return docs

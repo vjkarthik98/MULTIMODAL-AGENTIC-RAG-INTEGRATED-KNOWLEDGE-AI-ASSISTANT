@@ -5,6 +5,8 @@ import Sidebar from '../components/Sidebar'
 import SettingsModal from '../components/SettingsModal'
 import MessageBubble from '../components/MessageBubble'
 import TypingIndicator from '../components/TypingIndicator'
+import GuestBanner from '../components/GuestBanner'
+import ConversionModal from '../components/ConversionModal'
 import { streamQuery, queryMeta, getChatSession, patchLastMessage, updateChatSession } from '../api/client'
 import { useToast } from '../context/ToastContext'
 import useIsMobile from '../hooks/useIsMobile'
@@ -66,11 +68,13 @@ function buildSuggestions(kbFiles) {
   })
 }
 
-export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStreamingChange }) {
+export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStreamingChange, onGuestConvert, onGuestGoogleConvert, onGuestLimitsUpdate, onShowLogin }) {
   const [messages, setMessages]           = useState([])
   const [input, setInput]                 = useState('')
   const [kbFiles, setKbFiles]             = useState([])
   const [streaming, setStreaming]         = useState(false)
+  const [showConversionModal, setShowConversionModal] = useState(false)
+  const [conversionTrigger, setConversionTrigger]     = useState('voluntary')
   const [streamingId, setStreamingId]     = useState(null)
   const [autoScroll, setAutoScroll]       = useState(true)
   const [showScrollBtn, setShowScrollBtn] = useState(false)
@@ -404,6 +408,16 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
               ))
               continue
             }
+            // Guest query limit reached — show conversion modal
+            if (parsed && typeof parsed === 'object' && parsed.__type__ === 'guest_limit') {
+              done = true
+              setMessages(prev => prev.filter(m => m.id !== botId))  // remove empty bot bubble
+              setConversionTrigger(parsed.limit_type === 'uploads' ? 'upload_limit' : 'query_limit')
+              setShowConversionModal(true)
+              // Sync zero count to parent so banner updates immediately
+              if (onGuestLimitsUpdate) onGuestLimitsUpdate({ queriesLeft: 0 })
+              break
+            }
             const token = typeof parsed === 'string' ? parsed : raw
             if (token && !refused) {
               fullText += token
@@ -597,6 +611,8 @@ const handleNewChat = () => {
           onSetUploadHandler={chatUploadRef}
           historyClearedAt={historyClearedAt}
           staleSessionId={staleSessionId}
+          onGuestUploadLimit={auth?.isGuest ? () => { setConversionTrigger('upload_limit'); setShowConversionModal(true) } : undefined}
+          onShowLogin={onShowLogin}
         />
       </div>
 
@@ -647,8 +663,8 @@ const handleNewChat = () => {
           </div>
         )}
 
-        {/* Top bar — hamburger (mobile left) + three-dot menu (top-right) */}
-        {(isMobile || messages.length > 0) && (
+        {/* Top bar — hamburger (mobile) + guest auth buttons + three-dot menu */}
+        {(isMobile || messages.length > 0 || auth?.isGuest) && (
           <div className="flex items-center justify-between px-3 pt-3 pb-1 flex-shrink-0">
             {isMobile ? (
               <button
@@ -661,7 +677,34 @@ const handleNewChat = () => {
               </button>
             ) : <span />}
 
-            {messages.length > 0 && (
+            <div className="flex items-center gap-2">
+              {/* Guest auth buttons — Log in (outline pill) + Sign up for free (filled pill) */}
+              {auth?.isGuest && (
+                <>
+                  <button
+                    type="button"
+                    onClick={onShowLogin}
+                    className="text-sm font-semibold px-5 py-1.5 rounded-full transition-colors"
+                    style={{ border: '1px solid var(--t-bd4)', color: 'var(--t-tx1)', background: 'transparent' }}
+                    onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov2)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                  >
+                    Log in
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setConversionTrigger('voluntary'); setShowConversionModal(true) }}
+                    className="text-sm font-semibold px-5 py-1.5 rounded-full transition-opacity"
+                    style={{ background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)', color: 'white' }}
+                    onMouseEnter={e => e.currentTarget.style.opacity = '0.88'}
+                    onMouseLeave={e => e.currentTarget.style.opacity = '1'}
+                  >
+                    Sign up for free
+                  </button>
+                </>
+              )}
+
+              {messages.length > 0 && (
               <div className="relative" ref={chatMenuRef}>
                 <button
                   type="button"
@@ -722,6 +765,7 @@ const handleNewChat = () => {
                 )}
               </div>
             )}
+            </div>
           </div>
         )}
 
@@ -1017,6 +1061,23 @@ const handleNewChat = () => {
           </div>
         </div>
       </div>
+
+      {/* Guest conversion modal — shown when limit hit or user clicks Sign up */}
+      {showConversionModal && auth?.isGuest && (
+        <ConversionModal
+          guestToken={auth.token}
+          trigger={conversionTrigger}
+          onConvert={(data) => {
+            setShowConversionModal(false)
+            if (onGuestConvert) onGuestConvert(data)
+          }}
+          onGoogleConvert={() => {
+            setShowConversionModal(false)
+            if (onGuestGoogleConvert) onGuestGoogleConvert()
+          }}
+          onClose={conversionTrigger === 'voluntary' ? () => setShowConversionModal(false) : undefined}
+        />
+      )}
 
     </div>
   )
