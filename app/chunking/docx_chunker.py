@@ -45,11 +45,11 @@ _TABLE_OVERLAP_ROWS = 2
 def _caption_bytes(raw_bytes: bytes) -> str:
     try:
         from PIL import Image
-        from app.chunking.image_chunker import blip2_caption
+        from app.chunking.image_chunker import blip_caption
         img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
-        return blip2_caption(img)
+        return blip_caption(img)
     except Exception as exc:
-        logger.warning(event="docx_blip2_failed", error=str(exc))
+        logger.warning(event="docx_blip_failed", error=str(exc))
         return ""
 
 

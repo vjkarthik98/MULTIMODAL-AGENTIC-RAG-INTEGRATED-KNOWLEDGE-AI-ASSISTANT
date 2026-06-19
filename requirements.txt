@@ -28,12 +28,18 @@ huggingface_hub>=0.22
 # For CPU-only PyTorch:
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu
 torch>=2.2
+torchvision>=0.17
+torchaudio>=2.2
 sentence-transformers>=2.7
 transformers>=4.39
 sentencepiece>=0.2.0
 accelerate>=1.1.0
 bitsandbytes>=0.46.1
 faster-whisper>=1.0
+qwen-vl-utils>=0.0.8             # image/video preprocessing helper for Qwen2-VL processor
+tiktoken>=0.7                   # tokenisation used in approx_tokens() / finance_numbers.py
+datasets>=2.20                  # HuggingFace datasets — eval harness + model download scripts
+pyannote.audio>=3.1             # speaker diarization (model_loader.get_diarizer)
 
 
 
@@ -55,9 +61,16 @@ PyStemmer>=2.0.1
 
 
 
+# AGENTS / CHAINS
+langchain-core>=0.2             # eval/judges — LLMResult, Generation, PromptValue
+langchain-text-splitters>=0.0.1
+
+
+
 # NUMERICAL / ML
 numpy>=1.26
 scikit-learn>=1.4
+pandas>=2.2
 
 
 
@@ -80,6 +93,9 @@ opencv-python>=4.9
 pytesseract>=0.3
 easyocr>=1.7
 imagehash>=4.3
+cairosvg>=2.7                   # SVG→PNG conversion in image_ingest.py + image_chunker.py
+rawpy>=0.21                     # RAW camera format support (CR2/NEF/ARW) in image_ingest.py
+mediapipe>=0.10                 # face detection / count in image_ingest.py
 # Optional: HEIC/HEIF support for iPhone photos. Safe to omit on systems
 # without libheif; image_ingest only uses it via a soft try/except.
 pillow-heif>=0.16
@@ -88,6 +104,21 @@ pillow-heif>=0.16
 
 # AUDIO PROCESSING
 pydub>=0.25
+numba>=0.59.0                   # pinned: Python 3.12 requires >=0.59.0
+llvmlite>=0.42.0                # pinned: paired with numba>=0.59.0
+librosa>=0.10                   # audio feature extraction / duration analysis in audio_ingest.py
+mutagen>=1.47                   # audio file metadata (bitrate, codec, tags) in audio_ingest.py
+# YAMNet noise/crowd classification — heavy optional deps; audio_ingest imports them
+# inside try/except so the server runs without them, but install for full noise tagging.
+tensorflow>=2.16
+tensorflow-hub>=0.16
+
+
+
+# VIDEO PROCESSING
+av>=12.0                        # PyAV — frame-accurate video reading in video_ingest.py
+imageio-ffmpeg>=0.4             # bundled FFmpeg binary fallback in video_ingest.py
+scenedetect[opencv]>=0.6        # PySceneDetect — adaptive scene detection in video_ingest.py
 
 
 
@@ -97,16 +128,18 @@ pymupdf>=1.23
 camelot-py[cv]>=0.11
 python-docx>=1.1
 openpyxl>=3.1
-pandas>=2.2
 chardet>=5.0
 
 
 
-# TEXT PROCESSING
-langchain-text-splitters>=0.0.1
+# TEXT PROCESSING & NLP
 ftfy>=6.1
 wordsegment>=1.3
 wordfreq>=3.0
+textstat>=0.7                   # readability + lexical metrics in txt_ingest.py
+yake>=0.4                       # unsupervised keyword extraction in txt_ingest.py + summarizer.py
+keybert>=0.8                    # BERT-based keyword extraction in txt_ingest.py + summarizer.py
+lingua-language-detector>=2.0   # fast language detection in txt_ingest.py + pii.py
 
 
 
@@ -132,6 +165,7 @@ presidio-anonymizer>=2.2
 spacy>=3.7                  # Presidio NLP engine (Phase 26 — PII detection)
 # After install, download the model:  python -m spacy download en_core_web_lg
 pyclamd>=0.4.0
+detoxify>=0.5               # toxicity scoring in output_guard.py (_get_detoxify singleton)
 
 
 
@@ -153,8 +187,7 @@ psutil>=5.9
 
 
 # UI
-gradio>=4.0
-httpx>=0.27
+gradio>=6.0
 
 
 
@@ -177,8 +210,3 @@ ruff>=0.4
 isort>=5.13
 mypy>=1.9
 pre-commit>=3.7
-
-
-torch
-torchvision 
-torchaudio 

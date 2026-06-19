@@ -55,7 +55,7 @@ class Settings:
 
     # CORE APPLICATION
     APP_NAME: str        = _str("APP_NAME", "Multimodal Agentic RAG Integrated Knowledge AI Assistant")
-    APP_VERSION: str     = _str("APP_VERSION", "1.0.0")
+    APP_VERSION: str     = _str("APP_VERSION", "0.24.0")
     APP_DESCRIPTION: str = _str("APP_DESCRIPTION", "Production Multimodal Agentic RAG Integrated AI System")
     ENV: str             = _str("ENV", "development")
     DEBUG: bool          = _bool("DEBUG", False)
@@ -142,7 +142,7 @@ class Settings:
     INGESTION_CACHE_CLEAR_EVERY: int    = _int("INGESTION_CACHE_CLEAR_EVERY", 8)
     # Parallelism caps for heavy ML operations — keep within A10G VRAM budget
     VIDEO_CAPTION_CONCURRENCY: int      = _int("VIDEO_CAPTION_CONCURRENCY", 3)
-    # Shared GPU semaphore — max concurrent ingestion jobs using GPU (embed/Whisper/LLaVA).
+    # Shared GPU semaphore — max concurrent ingestion jobs using GPU (embed/Whisper/Qwen2-VL).
     # 3 jobs × peak ~3GB each = ~9GB working memory + ~14GB resident models = ~23GB on A10G.
     MAX_CONCURRENT_GPU_JOBS: int        = _int("MAX_CONCURRENT_GPU_JOBS", 3)
     AUDIO_TRANSCRIPTION_WORKERS: int    = _int("AUDIO_TRANSCRIPTION_WORKERS", 2)
@@ -180,8 +180,7 @@ class Settings:
     RERANKER_DEVICE: str             = _str("RERANKER_DEVICE", "cuda")
     SIGLIP_DEVICE: str               = _str("SIGLIP_DEVICE", "cuda")
     BLIP_DEVICE: str                 = _str("BLIP_DEVICE", "cuda")
-    BLIP2_DEVICE: str                = _str("BLIP2_DEVICE", "cuda")
-    LLAVA_DEVICE: str                = _str("LLAVA_DEVICE", "cuda")
+    QWEN2_VL_DEVICE: str             = _str("QWEN2_VL_DEVICE", "cuda")
     TROCR_DEVICE: str                = _str("TROCR_DEVICE", "cuda")
     DIARIZER_DEVICE: str             = _str("DIARIZER_DEVICE", "cuda")
     NER_DEVICE: str                  = _str("NER_DEVICE", "cuda")
@@ -191,18 +190,14 @@ class Settings:
     # VISION MODELS
     SIGLIP_MODEL: str                = _str("SIGLIP_MODEL", "google/siglip-so400m-patch14-384")
     VISION_EMBEDDING_DIM: int        = _int("VISION_EMBEDDING_DIM", 1152)
-    # BLIP-1 kept for backward-compat during transition; new ingestion uses BLIP2
+    # BLIP — image captioning (Salesforce/blip-image-captioning-large, 1.56 GB fp16)
     BLIP_MODEL: str                  = _str("BLIP_MODEL", "Salesforce/blip-image-captioning-large")
-    BLIP_MAX_TOKENS: int             = _int("BLIP_MAX_TOKENS", 100)
-    BLIP_NUM_BEAMS: int              = _int("BLIP_NUM_BEAMS", 2)
-    # BLIP2 — replaces BLIP-1 for image captioning (Phase 2+)
-    BLIP2_MODEL: str                 = _str("BLIP2_MODEL", "Salesforce/blip2-opt-2.7b")
-    BLIP2_LOAD_IN_8BIT: bool         = _bool("BLIP2_LOAD_IN_8BIT", True)
-    BLIP2_MAX_TOKENS: int            = _int("BLIP2_MAX_TOKENS", 200)
-    # LLaVA — video frame captioning
-    LLAVA_MODEL: str                 = _str("LLAVA_MODEL", "llava-hf/llava-1.5-7b-hf")
-    LLAVA_LOAD_IN_8BIT: bool         = _bool("LLAVA_LOAD_IN_8BIT", True)
-    LLAVA_MAX_TOKENS: int            = _int("LLAVA_MAX_TOKENS", 300)
+    BLIP_MAX_TOKENS: int             = _int("BLIP_MAX_TOKENS", 200)
+    BLIP_NUM_BEAMS: int              = _int("BLIP_NUM_BEAMS", 3)
+    # Qwen2-VL — video frame + financial chart captioning (2B INT8, ~2.2 GB)
+    QWEN2_VL_MODEL: str              = _str("QWEN2_VL_MODEL", "Qwen/Qwen2-VL-2B-Instruct")
+    QWEN2_VL_LOAD_IN_8BIT: bool      = _bool("QWEN2_VL_LOAD_IN_8BIT", True)
+    QWEN2_VL_MAX_TOKENS: int         = _int("QWEN2_VL_MAX_TOKENS", 400)
     # TrOCR — printed OCR for financial documents
     TROCR_MODEL: str                 = _str("TROCR_MODEL", "microsoft/trocr-large-printed")
     MAX_IMAGE_DIM: int               = _int("MAX_IMAGE_DIM", 1024)

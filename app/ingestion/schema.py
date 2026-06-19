@@ -269,8 +269,10 @@ class IngestedDocument(BaseModel):
     # STRUCTURED FIELDS
     structure:      Dict[str, Any]        = Field(default_factory=dict)
     extra_metadata: Dict[str, Any]        = Field(default_factory=dict)
-    embedding:      Optional[List[float]] = None
-    embedding_alt:  Optional[List[float]] = None   # secondary embedding (e.g. xlsx markdown repr)
+    embedding:        Optional[List[float]] = None
+    embedding_alt:    Optional[List[float]] = None   # secondary embedding (e.g. xlsx markdown repr)
+    embedding_audio:  Optional[List[float]] = None   # video: audio-only BGE vector
+    embedding_visual: Optional[List[float]] = None   # video: visual-only BGE vector
 
     # UNIVERSAL METADATA ATTACHED AT INGEST TIME
     universal_metadata: Optional[UniversalMetadata] = None

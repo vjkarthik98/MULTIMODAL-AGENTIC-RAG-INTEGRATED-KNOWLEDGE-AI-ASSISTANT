@@ -1032,7 +1032,7 @@ class ImageIngestor(BaseIngestor):
     """Extracts raw image bytes from image files → List[RawExtract].
 
     Phase 1 responsibility: file validation + PIL load + raw bytes packaging.
-    Does NOT caption or OCR. The chunker (Phase 2) calls BLIP2/TrOCR.
+    Does NOT caption or OCR. The chunker (Phase 2) calls BLIP/Qwen2-VL/TrOCR.
     """
 
     def health_check(self) -> dict:

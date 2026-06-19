@@ -207,7 +207,7 @@ class InfraRegistry:
             asyncio.to_thread(_loader.get_reranker),
             asyncio.to_thread(_loader.get_trocr),
             asyncio.to_thread(_loader.get_ner),
-            # Large models warm lazily on first use (blip2, llava, whisper, diarizer)
+            # Large models warm lazily on first use (qwen2_vl, whisper, diarizer)
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)

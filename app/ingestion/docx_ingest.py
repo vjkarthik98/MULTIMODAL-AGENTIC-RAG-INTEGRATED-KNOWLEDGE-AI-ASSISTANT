@@ -787,7 +787,7 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     pass
 
                 # Embedded images — collected first, then captioned concurrently
-                # so BLIP2 forward passes overlap instead of running one at a time.
+                # so BLIP forward passes overlap instead of running one at a time.
                 try:
                     import concurrent.futures as _cf
                     related = getattr(doc.part, "related_parts", {}) or {}

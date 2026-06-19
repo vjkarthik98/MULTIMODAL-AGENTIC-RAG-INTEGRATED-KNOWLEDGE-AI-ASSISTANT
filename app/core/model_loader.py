@@ -134,13 +134,9 @@ class ModelLoader:
         self._blip_model                         = None
         self._blip_processor                     = None
         self._blip_device:          Optional[str] = None
-        # New Phase MAGIK models
-        self._blip2_model                        = None
-        self._blip2_processor                    = None
-        self._blip2_device:         Optional[str] = None
-        self._llava_model                        = None
-        self._llava_processor                    = None
-        self._llava_device:         Optional[str] = None
+        self._qwen2vl_model                      = None
+        self._qwen2vl_processor                  = None
+        self._qwen2vl_device:       Optional[str] = None
         self._trocr_model                        = None
         self._trocr_processor                    = None
         self._trocr_device:         Optional[str] = None
@@ -527,76 +523,41 @@ class ModelLoader:
 
         return self._reranker
 
-    # BLIP2 — IMAGE CAPTIONING (replaces BLIP-1 in Phase 2+)
+    # QWEN2-VL — VIDEO FRAME + FINANCIAL CHART CAPTIONING (2B INT8, ~2.2 GB)
 
-    def get_blip2(self) -> Tuple:
-        if self._blip2_model:
-            return self._blip2_processor, self._blip2_model, self._blip2_device
+    def get_qwen2_vl(self) -> Tuple:
+        if self._qwen2vl_model:
+            return self._qwen2vl_processor, self._qwen2vl_model, self._qwen2vl_device
 
         with self._lock:
-            if self._blip2_model:
-                return self._blip2_processor, self._blip2_model, self._blip2_device
+            if self._qwen2vl_model:
+                return self._qwen2vl_processor, self._qwen2vl_model, self._qwen2vl_device
 
             self._oom_guard()
-            decision = device_manager.decision_for("blip2")
+            decision = device_manager.decision_for("qwen2_vl")
 
             def _load():
-                from transformers import Blip2Processor, Blip2ForConditionalGeneration, BitsAndBytesConfig  # local
-                processor = Blip2Processor.from_pretrained(settings.BLIP2_MODEL)
-                load_kwargs: dict = {}
-                if settings.BLIP2_LOAD_IN_8BIT and decision.device == "cuda":
-                    load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
-                elif decision.device == "cuda" and decision.dtype == "float16":
-                    load_kwargs["torch_dtype"] = _torch_dtype("float16")
-                model = Blip2ForConditionalGeneration.from_pretrained(
-                    settings.BLIP2_MODEL, **load_kwargs
+                from transformers import Qwen2VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig  # local
+                processor = AutoProcessor.from_pretrained(
+                    settings.QWEN2_VL_MODEL, trust_remote_code=True
                 )
-                if not settings.BLIP2_LOAD_IN_8BIT:
-                    model.to(decision.device)
-                model.eval()
-                return processor, model
-
-            self._blip2_processor, self._blip2_model = self._safe_load(_load, "blip2")
-            self._blip2_device = decision.device
-
-        return self._blip2_processor, self._blip2_model, self._blip2_device
-
-    # LLAVA — VIDEO FRAME CAPTIONING (T4: evict LLM first via _VIDEO_SLOT_LOCK)
-
-    _VIDEO_SLOT_LOCK = threading.Lock()
-
-    def get_llava(self) -> Tuple:
-        if self._llava_model:
-            return self._llava_processor, self._llava_model, self._llava_device
-
-        with self._lock:
-            if self._llava_model:
-                return self._llava_processor, self._llava_model, self._llava_device
-
-            self._oom_guard()
-            decision = device_manager.decision_for("llava")
-
-            def _load():
-                from transformers import LlavaForConditionalGeneration, AutoProcessor, BitsAndBytesConfig  # local
-                import torch
-                processor = AutoProcessor.from_pretrained(settings.LLAVA_MODEL)
-                load_kwargs: dict = {}
-                if settings.LLAVA_LOAD_IN_8BIT and decision.device == "cuda":
+                load_kwargs: dict = {"trust_remote_code": True}
+                if settings.QWEN2_VL_LOAD_IN_8BIT and decision.device == "cuda":
                     load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
                 elif decision.device == "cuda":
                     load_kwargs["torch_dtype"] = _torch_dtype("float16")
-                model = LlavaForConditionalGeneration.from_pretrained(
-                    settings.LLAVA_MODEL, **load_kwargs
+                model = Qwen2VLForConditionalGeneration.from_pretrained(
+                    settings.QWEN2_VL_MODEL, **load_kwargs
                 )
-                if not settings.LLAVA_LOAD_IN_8BIT:
+                if not settings.QWEN2_VL_LOAD_IN_8BIT:
                     model.to(decision.device)
                 model.eval()
                 return processor, model
 
-            self._llava_processor, self._llava_model = self._safe_load(_load, "llava")
-            self._llava_device = decision.device
+            self._qwen2vl_processor, self._qwen2vl_model = self._safe_load(_load, "qwen2_vl")
+            self._qwen2vl_device = decision.device
 
-        return self._llava_processor, self._llava_model, self._llava_device
+        return self._qwen2vl_processor, self._qwen2vl_model, self._qwen2vl_device
 
     # TROCR — PRINTED OCR FOR FINANCIAL DOCUMENTS
 
@@ -675,7 +636,8 @@ class ModelLoader:
                 import torch
                 pipeline = Pipeline.from_pretrained(
                     settings.DIARIZATION_MODEL,
-                    token=settings.HF_TOKEN,
+                    use_auth_token=settings.HF_TOKEN,
+                    cache_dir=str(settings.HF_HOME) + "/hub",
                 )
                 if decision.device == "cuda":
                     pipeline = pipeline.to(torch.device("cuda"))
@@ -759,8 +721,7 @@ class ModelLoader:
             "multimodal":           self._multimodal is not None,
             "whisper":              self._whisper is not None,
             "blip":                 self._blip_model is not None,
-            "blip2":                self._blip2_model is not None,
-            "llava":                self._llava_model is not None,
+            "qwen2_vl":             self._qwen2vl_model is not None,
             "trocr":                self._trocr_model is not None,
             "diarizer":             self._diarizer is not None,
             "ner":                  self._ner is not None,
@@ -801,12 +762,9 @@ class ModelLoader:
             self._blip_model           = None
             self._blip_processor       = None
             self._blip_device          = None
-            self._blip2_model          = None
-            self._blip2_processor      = None
-            self._blip2_device         = None
-            self._llava_model          = None
-            self._llava_processor      = None
-            self._llava_device         = None
+            self._qwen2vl_model        = None
+            self._qwen2vl_processor    = None
+            self._qwen2vl_device       = None
             self._trocr_model          = None
             self._trocr_processor      = None
             self._trocr_device         = None
@@ -817,7 +775,7 @@ class ModelLoader:
             for name in (
                 "LLM", "TextEmbedder", "SigLIP", "SigLIPText",
                 "ImageEmbedder", "MultimodalEmbedder", "Whisper",
-                "BLIP", "blip2", "llava", "trocr", "diarizer", "ner", "Reranker",
+                "BLIP", "qwen2_vl", "trocr", "diarizer", "ner", "Reranker",
             ):
                 _model_loaded.labels(model=name).set(0)
 

@@ -256,9 +256,11 @@ class VideoBM25(BaseBM25):
     # ── Sub-index path helpers ────────────────────────────────────────────────
 
     def _sub_path(self, tag: str, user_id: Optional[str] = None) -> Path:
-        from app.utils.paths import user_data_dir
+        from app.utils.paths import user_dir
         uid = user_id or self._loaded_user_id or "default"
-        return user_data_dir(uid) / "bm25_index" / f"mp4_{tag}.pkl"
+        p = user_dir(uid) / "bm25_index"
+        p.mkdir(parents=True, exist_ok=True)
+        return p / f"mp4_{tag}.pkl"
 
     # ── Override add_documents to also populate sub-indexes ──────────────────
 

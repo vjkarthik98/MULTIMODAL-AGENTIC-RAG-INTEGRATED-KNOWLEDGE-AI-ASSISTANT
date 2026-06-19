@@ -515,7 +515,7 @@ class _ProgressEmitter:
 
 # GPU SEMAPHORE — module-level, shared across all IngestionPipeline instances.
 # Prevents OOM when multiple users upload simultaneously — each concurrent GPU job
-# (embedding batch_size=128, Whisper 1.55GB, LLaVA 3.5GB) adds to VRAM pressure.
+# (embedding batch_size=128, Whisper 1.55GB, Qwen2-VL 2.2GB) adds to VRAM pressure.
 # Max 3 concurrent jobs leaves headroom on A10G 24GB with ~14GB resident models.
 _GPU_SEMAPHORE: Optional[asyncio.Semaphore] = None
 

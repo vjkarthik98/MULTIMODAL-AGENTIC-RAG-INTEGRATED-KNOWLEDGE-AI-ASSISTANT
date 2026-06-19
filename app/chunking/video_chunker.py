@@ -48,9 +48,8 @@ _CHUNK_ERRORS = Counter(
 _FRAME_WINDOW_S = 5.0          # attach frames within ±5s of audio chunk
 _FINANCIAL_TRIGGER_RE = re.compile(r"[$%]|\bbillion\b|\brevenue\b|\bearnings\b", re.I)
 
-# LLaVA-1.5-7B INT8 = ~3.5 GB; semaphore limits concurrent instances to keep
-# total VRAM within A10G 24 GB budget alongside other resident models.
-_LLAVA_SEMAPHORE = threading.Semaphore(settings.VIDEO_CAPTION_CONCURRENCY)
+# Qwen2-VL-2B INT8 = ~2.2 GB; semaphore limits concurrent inference calls.
+_QWEN2VL_SEMAPHORE = threading.Semaphore(settings.VIDEO_CAPTION_CONCURRENCY)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -70,11 +69,10 @@ def _extract_audio(video_path: str, wav_path: str) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MODEL WRAPPERS  (merged from app/models/llava_captioner.py)
+# MODEL WRAPPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
 _VIDEO_FRAME_PROMPT = (
-    "USER: <image>\n"
     "Analyze this financial presentation frame. Report verbatim:\n"
     "1) Slide or chart title (exact wording)\n"
     "2) All bullet points (verbatim, every word)\n"
@@ -86,31 +84,35 @@ _VIDEO_FRAME_PROMPT = (
     "8) Company name or logo visible\n"
     "9) Any highlighted, circled, or annotated elements\n"
     "10) ALL numbers visible anywhere on the slide — including percentages, basis points, multiples\n"
-    "Be extremely precise about numbers — never round, never paraphrase.\n"
-    "ASSISTANT:"
+    "Be extremely precise about numbers — never round, never paraphrase."
 )
 
 
 def caption_frame(image: "PILImage.Image", prompt: Optional[str] = None) -> str:
-    """Caption a single video frame using LLaVA-1.5-7b. Returns '' on failure."""
+    """Caption a single video frame using Qwen2-VL-2B-Instruct. Returns '' on failure."""
     try:
         from app.core.model_loader import model_loader
-        processor, model, device = model_loader.get_llava()
+        processor, model, device = model_loader.get_qwen2_vl()
     except Exception as exc:
-        logger.warning(event="llava_unavailable", error=str(exc))
+        logger.warning(event="qwen2vl_unavailable", error=str(exc))
         return ""
     try:
         import torch as _torch
-        text   = prompt or _VIDEO_FRAME_PROMPT
-        inputs = processor(text=text, images=image, return_tensors="pt").to(device)
+        prompt_text = prompt or _VIDEO_FRAME_PROMPT
+        messages = [
+            {"role": "user", "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": prompt_text},
+            ]}
+        ]
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = processor(text=[text], images=[image], return_tensors="pt").to(device)
         with _torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=settings.LLAVA_MAX_TOKENS)
-        decoded = processor.decode(out[0], skip_special_tokens=True).strip()
-        if "ASSISTANT:" in decoded:
-            decoded = decoded.split("ASSISTANT:", 1)[-1].strip()
-        return decoded
+            out = model.generate(**inputs, max_new_tokens=settings.QWEN2_VL_MAX_TOKENS)
+        generated_ids = [o[len(i):] for i, o in zip(inputs.input_ids, out)]
+        return processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
     except Exception as exc:
-        logger.warning(event="llava_caption_failed", error=str(exc))
+        logger.warning(event="qwen2vl_caption_failed", error=str(exc))
         return ""
 
 
@@ -119,7 +121,7 @@ def caption_frame(image: "PILImage.Image", prompt: Optional[str] = None) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _caption_and_ocr_frame(frame_dict: Dict) -> Dict:
-    """Run LLaVA + TrOCR on a frame given its FrameMetadata dict."""
+    """Run Qwen2-VL + TrOCR on a frame given its FrameMetadata dict."""
     result = {
         "frame_timestamp": frame_dict["timestamp_start"],
         "frame_path":      frame_dict.get("path", ""),
@@ -141,7 +143,7 @@ def _caption_and_ocr_frame(frame_dict: Dict) -> Dict:
     try:
         result["frame_caption"] = caption_frame(img)
     except Exception as exc:
-        logger.warning(event="llava_caption_failed", error=str(exc))
+        logger.warning(event="qwen2vl_caption_failed", error=str(exc))
 
     try:
         from app.chunking.image_chunker import ocr as _ocr
@@ -166,7 +168,7 @@ class VideoChunker(BaseChunker):
 
     Pipeline:
       ffmpeg audio → Whisper → pyannote diarization → audio chunks
-      PySceneDetect/OpenCV frame extraction → LLaVA+TrOCR per frame
+      PySceneDetect/OpenCV frame extraction → Qwen2-VL+TrOCR per frame
       audio-visual sync alignment (±5 s window) → IngestedDocuments.
     """
 
@@ -245,7 +247,7 @@ class VideoChunker(BaseChunker):
 
                     # 5. Caption + OCR each frame — concurrent, VRAM-bounded.
                     def _caption_safe(fd: Dict) -> Tuple[float, Dict]:
-                        with _LLAVA_SEMAPHORE:
+                        with _QWEN2VL_SEMAPHORE:
                             return fd["timestamp_start"], _caption_and_ocr_frame(fd)
 
                     captioned_frames: Dict[float, Dict] = {}

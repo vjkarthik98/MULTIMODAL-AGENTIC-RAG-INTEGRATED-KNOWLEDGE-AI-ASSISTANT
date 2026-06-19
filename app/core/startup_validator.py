@@ -21,13 +21,16 @@ logger = get_logger(__name__)
 REQUIRED_MODELS: Set[str] = {
     "BAAI/bge-large-en-v1.5",
     "BAAI/bge-reranker-large",
-    "Salesforce/blip2-opt-2.7b",
-    "llava-hf/llava-1.5-7b-hf",
-    "openai/whisper-large-v3",
+    "Salesforce/blip-image-captioning-large",
+    "Qwen/Qwen2-VL-2B-Instruct",
+    "Systran/faster-whisper-large-v3",
+    "pyannote/segmentation-3.0",
+    "pyannote/wespeaker-voxceleb-resnet34-LM",
     "pyannote/speaker-diarization-3.1",
     "microsoft/trocr-large-printed",
     "dslim/bert-base-NER",
     "google/siglip-so400m-patch14-384",
+    "yiyanghkust/finbert-tone",
 }
 
 

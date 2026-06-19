@@ -2,7 +2,7 @@
 
 Finance-grade Image chunker + image captioning utilities.
 
-All ML inference (BLIP2, TrOCR, SigLIP, BLIP1 fallback) lives here because
+All ML inference (BLIP, Qwen2-VL, TrOCR, SigLIP) lives here because
 captioning is a chunking concern — it transforms raw image bytes from a
 RawExtract into semantic text for IngestedDocuments.
 
@@ -411,7 +411,7 @@ def _build_quality_metadata(
 # MODEL WRAPPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-_BLIP2_FINANCE_PROMPT = (
+_FINANCE_CAPTION_PROMPT = (
     "You are a financial analyst describing an image for a retrieval system. "
     "Describe: 1) Image type (bar chart, line chart, table, infographic, etc.) "
     "2) Exact title if visible "
@@ -429,30 +429,34 @@ _SIGLIP_IMAGE_TYPES = [
 ]
 
 
-def blip2_caption(image: "Image.Image", prompt: Optional[str] = None) -> str:
-    """Generate a finance-aware caption using BLIP2. Returns '' on failure."""
+def blip_caption(image: "Image.Image", prompt: Optional[str] = None) -> str:
+    """Generate a finance-aware caption using BLIP. Returns '' on failure."""
     try:
         from app.core.model_loader import model_loader
-        processor, model, device = model_loader.get_blip2()
+        processor, model, device = model_loader.get_blip()
     except Exception as exc:
-        logger.warning(event="blip2_unavailable", error=str(exc))
+        logger.warning(event="blip_unavailable", error=str(exc))
         return ""
     try:
         import torch as _torch
-        text_prompt = prompt or _BLIP2_FINANCE_PROMPT
+        text_prompt = prompt or _FINANCE_CAPTION_PROMPT
         inputs = processor(image, text=text_prompt, return_tensors="pt").to(device)
         with _torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=settings.BLIP2_MAX_TOKENS)
+            out = model.generate(
+                **inputs,
+                max_new_tokens=settings.BLIP_MAX_TOKENS,
+                num_beams=settings.BLIP_NUM_BEAMS,
+            )
         result = processor.decode(out[0], skip_special_tokens=True).strip()
         if result.startswith(text_prompt):
             result = result[len(text_prompt):].strip()
         return result
     except Exception as exc:
-        logger.warning(event="blip2_caption_failed", error=str(exc))
+        logger.warning(event="blip_caption_failed", error=str(exc))
         return ""
 
 
-def blip2_classify_image_type(image: "Image.Image", ocr_text: str = "") -> str:
+def classify_image_type(image: "Image.Image", ocr_text: str = "") -> str:
     """Zero-shot image type classification via SigLIP; falls back to heuristic."""
     try:
         from app.core.model_loader import model_loader
@@ -523,7 +527,7 @@ def ocr(image: "Image.Image") -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# BLIP CAPTION  (BLIP2 → BLIP1 fallback; calls blip2_caption above — no cross-layer import)
+# BLIP CAPTION  (BLIP → Qwen2-VL fallback for empty/failed captions)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _blip_caption(
@@ -535,88 +539,58 @@ def _blip_caption(
         logger.warning(event="torch_unavailable_blip_skipped", session_id=session_id)
         return None
 
-    # BLIP2 path (preferred)
     try:
-        result = blip2_caption(image, prompt=text_prompt)
+        result = blip_caption(image, prompt=text_prompt)
         if result:
-            logger.debug(event="blip2_caption_used", session_id=session_id)
+            logger.debug(event="blip_caption_used", session_id=session_id)
             return result
     except Exception as exc:
-        logger.debug(event="blip2_caption_skipped", error=str(exc))
+        logger.debug(event="blip_caption_skipped", error=str(exc))
 
-    # BLIP1 fallback
-    try:
-        from app.core.model_loader import model_loader
-        processor, model, device = model_loader.get_blip()
-        if text_prompt:
-            inputs = processor(image, text=text_prompt, return_tensors="pt").to(device)
-        else:
-            inputs = processor(image, return_tensors="pt").to(device)
-        t_infer = time.time()
-        with torch.no_grad():
-            output = model.generate(
-                **inputs,
-                max_new_tokens=settings.BLIP_MAX_TOKENS,
-                num_beams=settings.BLIP_NUM_BEAMS,
-                repetition_penalty=1.5,
-                no_repeat_ngram_size=3,
-            )
-        infer_latency_ms = round((time.time() - t_infer) * 1000, 1)
-        if infer_latency_ms > settings.LATENCY_TARGET_IMAGE_MS:
-            logger.warning(
-                event="blip_latency_exceeded",
-                latency_ms=infer_latency_ms,
-                target_ms=settings.LATENCY_TARGET_IMAGE_MS,
-                session_id=session_id,
-            )
-        raw = processor.decode(output[0], skip_special_tokens=True)
-        return raw.strip() if raw else None
-    except Exception as exc:
-        logger.warning(event="blip_caption_failed", error=str(exc), session_id=session_id)
-        return None
+    return None
 
 
-_IMAGE_LLAVA_PROMPT = (
-    "USER: <image>\n"
+_IMAGE_QWEN2VL_PROMPT = (
     "Analyze this financial chart or document image. Report verbatim:\n"
     "1) Chart type and title\n"
     "2) All data series with EXACT values read from axis labels\n"
     "3) Time period covered\n"
     "4) All axis labels and units\n"
     "5) Key trends or notable figures\n"
-    "Be precise about numbers — do not round or paraphrase.\n"
-    "ASSISTANT:"
+    "Be precise about numbers — do not round or paraphrase."
 )
 
 
-def _llava_caption_for_image(image: "Image.Image") -> str:
-    """LLaVA-1.5 captioning for images when BLIP2 + BLIP1 both produce empty output.
+def _qwen2vl_caption_for_image(image: "Image.Image") -> str:
+    """Qwen2-VL captioning for images when BLIP produces empty output.
 
-    Financial charts are particularly challenging for BLIP2-INT8 because the model
-    was not fine-tuned on dense numeric chart layouts. LLaVA-1.5 handles mixed
-    text+visual layouts better thanks to its instruction-following training.
-    Returns '' on failure so the caller can decide on a further fallback.
+    Qwen2-VL-2B-Instruct handles dense numeric chart layouts and mixed text+visual
+    layouts via instruction-following training. Returns '' on failure.
     """
     try:
         from app.core.model_loader import model_loader
-        processor, model, device = model_loader.get_llava()
+        processor, model, device = model_loader.get_qwen2_vl()
     except Exception as exc:
-        logger.warning(event="llava_unavailable_for_image", error=str(exc))
+        logger.warning(event="qwen2vl_unavailable_for_image", error=str(exc))
         return ""
     try:
         import torch as _torch
-        inputs = processor(
-            text=_IMAGE_LLAVA_PROMPT, images=image, return_tensors="pt"
-        ).to(device)
+        messages = [
+            {"role": "user", "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": _IMAGE_QWEN2VL_PROMPT},
+            ]}
+        ]
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = processor(text=[text], images=[image], return_tensors="pt").to(device)
         with _torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=settings.LLAVA_MAX_TOKENS)
-        decoded = processor.decode(out[0], skip_special_tokens=True).strip()
-        if "ASSISTANT:" in decoded:
-            decoded = decoded.split("ASSISTANT:", 1)[-1].strip()
-        logger.debug(event="llava_fallback_caption_used")
+            out = model.generate(**inputs, max_new_tokens=settings.QWEN2_VL_MAX_TOKENS)
+        generated_ids = [o[len(i):] for i, o in zip(inputs.input_ids, out)]
+        decoded = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        logger.debug(event="qwen2vl_fallback_caption_used")
         return decoded
     except Exception as exc:
-        logger.warning(event="llava_caption_failed_for_image", error=str(exc))
+        logger.warning(event="qwen2vl_caption_failed_for_image", error=str(exc))
         return ""
 
 
@@ -830,7 +804,7 @@ class ImageChunker(BaseChunker):
     """Finance-grade chunker for image files (charts, infographics, scanned docs).
 
     Each image = exactly 1 chunk (images are atomic).
-    Pipeline: TrOCR → BLIP2 caption → SigLIP image type → consistency check.
+    Pipeline: TrOCR → BLIP/Qwen2-VL caption → SigLIP image type → consistency check.
     """
 
     def chunk(
@@ -871,9 +845,7 @@ class ImageChunker(BaseChunker):
                 except Exception as exc:
                     logger.warning(event="image_trocr_failed", error=str(exc))
 
-                # Step 2: caption — BLIP2 → BLIP1 → LLaVA fallback chain.
-                # BLIP2-INT8 often produces empty output for dense financial charts;
-                # LLaVA-1.5 instruction-tuning handles those layouts significantly better.
+                # Step 2: caption — BLIP → Qwen2-VL fallback chain.
                 session_id = ""
                 try:
                     cf = getattr(meta, "custom_fields", {}) or {}
@@ -888,12 +860,12 @@ class ImageChunker(BaseChunker):
                     logger.warning(event="image_blip_failed", error=str(exc))
 
                 if not caption_text:
-                    caption_text = _llava_caption_for_image(img)
+                    caption_text = _qwen2vl_caption_for_image(img)
 
                 # Step 3: SigLIP image type classification (falls back to heuristic).
                 image_type = "infographic"
                 try:
-                    image_type = blip2_classify_image_type(img, ocr_text)
+                    image_type = classify_image_type(img, ocr_text)
                 except Exception:
                     pass
 

@@ -86,7 +86,7 @@ def _load_models_parallel(requested: List[str]) -> None:
         "siglip",           # vision backbone (image_embedder + siglip_text_embedder depend on it)
         "image_embedder",   # depends on siglip being loaded
         "siglip_text_embedder",
-        "blip2",            # image captioning (INT8, 2.7 GB)
+        "qwen2_vl",         # video/chart captioning (INT8, ~2.2 GB)
         "trocr",            # OCR for PDF/image (~1.5 GB)
         "whisper",          # audio transcription (1.55 GB)
         "ner",              # NER entity extraction (0.4 GB)
@@ -130,7 +130,7 @@ def _warmup_cuda_kernels() -> None:
     _warmup_llm()
     _warmup_siglip()
     _warmup_blip()
-    _warmup_blip2()
+    _warmup_qwen2_vl()
     _warmup_trocr()
     _warmup_whisper()
     _warmup_ner()
@@ -207,24 +207,31 @@ def _warmup_blip() -> None:
         logger.warning(event="cuda_warmup_failed", model="blip", error=str(exc))
 
 
-def _warmup_blip2() -> None:
+def _warmup_qwen2_vl() -> None:
     if not settings.ENABLE_VISION:
         return
     try:
         from app.core.model_loader import model_loader
-        result = model_loader.get_blip2()
+        result = model_loader.get_qwen2_vl()
         if result is None or result[1] is None:
             return
         processor, model, device = result
         if device != "cuda":
             return
+        from PIL import Image as _PIL
         import torch
-        dummy = torch.zeros(1, 3, 224, 224, device=device, dtype=torch.float16)
+        dummy_img = _PIL.new("RGB", (224, 224), color=128)
+        messages = [{"role": "user", "content": [
+            {"type": "image", "image": dummy_img},
+            {"type": "text", "text": "warmup"},
+        ]}]
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = processor(text=[text], images=[dummy_img], return_tensors="pt").to(device)
         with torch.no_grad():
-            model.vision_model(pixel_values=dummy)
-        logger.debug(event="cuda_warmup_done", model="blip2")
+            model.generate(**inputs, max_new_tokens=1)
+        logger.debug(event="cuda_warmup_done", model="qwen2_vl")
     except Exception as exc:
-        logger.warning(event="cuda_warmup_failed", model="blip2", error=str(exc))
+        logger.warning(event="cuda_warmup_failed", model="qwen2_vl", error=str(exc))
 
 
 def _warmup_trocr() -> None:

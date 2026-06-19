@@ -9,8 +9,7 @@ __pycache__/
 # Data — never commit corpus files, user uploads, or indexes
 data/
 
-# Docs
-docs/
+
 
 # Distribution / packaging
 .Python
@@ -252,4 +251,8 @@ dist-ssr/
 *.njsproj
 *.sln
 *.sw?
+.claude
+.vscode
+
+
 

@@ -33,9 +33,9 @@ MODALITY_MODELS: Dict[str, Tuple[str, ...]] = {
     "pdf":      ("text_embedder", "trocr"),
     "word":     ("text_embedder",),
     "excel":    ("text_embedder",),
-    "image":    ("text_embedder", "blip2", "trocr", "siglip", "image_embedder", "siglip_text_embedder"),
+    "image":    ("text_embedder", "blip", "qwen2_vl", "trocr", "siglip", "image_embedder", "siglip_text_embedder"),
     "audio":    ("text_embedder", "whisper", "diarizer", "ner"),
-    "video":    ("text_embedder", "llava", "trocr", "siglip", "image_embedder",
+    "video":    ("text_embedder", "qwen2_vl", "trocr", "siglip", "image_embedder",
                  "siglip_text_embedder", "whisper", "diarizer", "ner"),
 }
 
@@ -166,7 +166,7 @@ class ModelRegistry:
     def _is_enabled(self, name: str) -> bool:
         # Vision models gated by ENABLE_VISION.
         # Audio/diarizer/ner gated by ENABLE_AUDIO.
-        if name in ("siglip", "blip", "blip2", "llava", "trocr",
+        if name in ("siglip", "blip", "qwen2_vl", "trocr",
                     "image_embedder", "siglip_text_embedder"):
             return bool(settings.ENABLE_VISION)
         if name in ("whisper", "diarizer", "ner"):
@@ -182,8 +182,7 @@ class ModelRegistry:
             "text_embedder":        model_loader.get_embedder,
             "siglip":               model_loader.get_siglip,
             "blip":                 model_loader.get_blip,
-            "blip2":                model_loader.get_blip2,
-            "llava":                model_loader.get_llava,
+            "qwen2_vl":             model_loader.get_qwen2_vl,
             "trocr":                model_loader.get_trocr,
             "diarizer":             model_loader.get_diarizer,
             "ner":                  model_loader.get_ner,
@@ -200,7 +199,7 @@ class ModelRegistry:
 
     def snapshot(self) -> Dict[str, bool]:
         all_known = (
-            "llm", "text_embedder", "siglip", "blip", "blip2", "llava",
+            "llm", "text_embedder", "siglip", "blip", "qwen2_vl",
             "trocr", "diarizer", "ner",
             "image_embedder", "siglip_text_embedder", "whisper", "reranker",
         )

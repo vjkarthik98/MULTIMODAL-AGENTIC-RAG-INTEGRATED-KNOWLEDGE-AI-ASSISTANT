@@ -1,17 +1,19 @@
 """
 Central device + dtype policy for the model layer.
 
-Tesla T4 deploy budget: 14.6 GB VRAM, CUDA 13.2.
+A10G 24 GB VRAM deploy target.
 
 GPU models (all_gpu profile) — ALL models run on GPU:
   - Mistral 7B Q4_K_M          ~4.10 GB  (llama-cpp n_gpu_layers=-1)
   - SigLIP SO400M/14@384px     ~1.76 GB  (float16, 878M params)
-  - BLIP large                 ~1.56 GB  (float16, 779M params)
-  - Whisper medium              ~0.38 GB  (int8_float16, weights halved)
-  - BGE-reranker-v2-m3         ~1.14 GB  (float16, 568M params)
-  - Qwen3-Embedding-0.6B       ~1.20 GB  (float16, 600M params)
-  Total static ≈ 10.5 GB  — fits in 15.6 GB with ~5 GB headroom
-  Peak (LLM KV cache 2048 ctx + BLIP 2-beam): ~13 GB
+  - BLIP large                 ~1.56 GB  (float16, 779M params, captioning)
+  - Qwen2-VL-2B-Instruct       ~2.20 GB  (int8, video/chart captioning)
+  - Whisper large-v3           ~1.55 GB  (int8_float16)
+  - BGE-large-en-v1.5          ~1.35 GB  (float16)
+  - BGE-reranker-large         ~1.34 GB  (float16)
+  - TrOCR large-printed        ~1.40 GB  (float16)
+  Total static ≈ 15.3 GB  — fits in 24 GB with ~8.7 GB headroom
+  Peak (LLM KV cache 8192 ctx): ~18 GB
 
 CPU services (no VRAM needed — not models):
   - FastAPI / Uvicorn
@@ -49,8 +51,7 @@ MODEL_NAMES = (
     "text_embedder",
     "siglip",
     "blip",
-    "blip2",
-    "llava",
+    "qwen2_vl",
     "trocr",
     "diarizer",
     "ner",
@@ -63,8 +64,7 @@ _HYBRID_MAP: Dict[str, str] = {
     "llm":            "cuda",
     "siglip":         "cuda",
     "blip":           "cuda",
-    "blip2":          "cuda",
-    "llava":          "cuda",
+    "qwen2_vl":       "cuda",
     "trocr":          "cuda",
     "diarizer":       "cuda",
     "ner":            "cuda",
@@ -174,8 +174,7 @@ class DeviceManager:
             "reranker":      settings.RERANKER_DEVICE,
             "siglip":        settings.SIGLIP_DEVICE,
             "blip":          settings.BLIP_DEVICE,
-            "blip2":         settings.BLIP2_DEVICE,
-            "llava":         settings.LLAVA_DEVICE,
+            "qwen2_vl":      settings.QWEN2_VL_DEVICE,
             "trocr":         settings.TROCR_DEVICE,
             "diarizer":      settings.DIARIZER_DEVICE,
             "ner":           settings.NER_DEVICE,
@@ -225,8 +224,8 @@ class DeviceManager:
                 return ct or "float16"
             if name in ("siglip", "blip", "trocr", "ner") and settings.VISION_HALF_PRECISION:
                 return "float16"
-            if name in ("blip2", "llava"):
-                # 8-bit load handled by get_blip2/get_llava — dtype not used directly
+            if name == "qwen2_vl":
+                # 8-bit load handled by get_qwen2_vl — dtype not used directly
                 return "float16"
             if name == "diarizer":
                 return "float32"  # pyannote does its own dtype management

@@ -32,8 +32,8 @@ _CHUNK_ERRORS = Counter(
 _TABLE_GROUP_SIZE = 5       # target rows per table chunk
 _TABLE_OVERLAP_ROWS = 2     # rows carried into next table chunk
 
-# BLIP2 INT8 = ~2.7 GB; semaphore limits concurrent instances to stay within A10G 24 GB.
-_BLIP2_SEMAPHORE = threading.Semaphore(2)
+# BLIP semaphore limits concurrent caption calls to stay within A10G 24 GB budget.
+_BLIP_SEMAPHORE = threading.Semaphore(2)
 
 
 def _ocr_bytes(raw_bytes: bytes) -> str:
@@ -50,11 +50,11 @@ def _ocr_bytes(raw_bytes: bytes) -> str:
 def _caption_bytes(raw_bytes: bytes) -> str:
     try:
         from PIL import Image
-        from app.chunking.image_chunker import blip2_caption
+        from app.chunking.image_chunker import blip_caption
         img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
-        return blip2_caption(img)
+        return blip_caption(img)
     except Exception as exc:
-        logger.warning(event="pdf_blip2_failed", error=str(exc))
+        logger.warning(event="pdf_blip_failed", error=str(exc))
         return ""
 
 
@@ -231,7 +231,7 @@ class PdfChunker(BaseChunker):
                 table_headers = []
                 table_title = None
 
-            # Pre-compute BLIP2 captions + TrOCR for all image_region extracts
+            # Pre-compute BLIP captions + TrOCR for all image_region extracts
             # concurrently before the sequential pass. Keyed by id(ext) so the
             # main loop can look up results without changing its structure.
             _img_cache: Dict[int, Tuple[str, str]] = {}
@@ -240,7 +240,7 @@ class PdfChunker(BaseChunker):
             if _img_extracts:
                 def _caption_and_ocr_safe(ext_obj: RawExtract) -> Tuple[int, str, str]:
                     raw = ext_obj.raw_bytes or b""
-                    with _BLIP2_SEMAPHORE:
+                    with _BLIP_SEMAPHORE:
                         cap = _caption_bytes(raw)
                         ocr = _ocr_bytes(raw)
                     return id(ext_obj), cap, ocr

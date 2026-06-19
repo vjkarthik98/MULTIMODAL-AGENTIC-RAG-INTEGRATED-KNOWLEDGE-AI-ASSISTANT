@@ -578,6 +578,17 @@ class QdrantVectorStore:
         if emb_alt and isinstance(emb_alt, list) and len(emb_alt) > 0:
             payload["embedding_alt"] = emb_alt
 
+        # VIDEO NAMED VECTORS — audio-only and visual-only BGE embeddings stored
+        # in payload until Qdrant multi-vector migration runs.
+        emb_audio  = getattr(d, "embedding_audio", None)
+        emb_visual = getattr(d, "embedding_visual", None)
+        if emb_audio and isinstance(emb_audio, list) and len(emb_audio) > 0:
+            payload["embedding_audio"]     = emb_audio
+            payload["has_audio_embedding"] = True
+        if emb_visual and isinstance(emb_visual, list) and len(emb_visual) > 0:
+            payload["embedding_visual"]     = emb_visual
+            payload["has_visual_embedding"] = True
+
         # VISION QUALITY FIELDS — stored for image and video frame chunks so
         # retrieval can filter/rank on content quality rather than blind similarity.
         if modality in ("image", "video"):
