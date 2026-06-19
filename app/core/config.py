@@ -41,6 +41,19 @@ def _list(key: str, default: Optional[List[str]] = None) -> List[str]:
         return default or []
     return [item.strip() for item in raw.split(",") if item.strip()]
 
+def _cuda_available() -> bool:
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except Exception:
+        return False
+
+def _auto_device() -> str:
+    return "cuda" if _cuda_available() else "cpu"
+
+def _auto_whisper_compute() -> str:
+    return "int8_float16" if _cuda_available() else "int8"
+
 
 # SETTINGS CLASS
 
@@ -173,19 +186,19 @@ class Settings:
     LLM_GPU_LAYERS_AUTO: bool        = _bool("LLM_GPU_LAYERS_AUTO", True)
     LLM_GPU_LAYERS_ALL: int          = _int("LLM_GPU_LAYERS_ALL", -1)
     LLM_N_CTX: int                   = _int("LLM_N_CTX", 8192)
-    EMBEDDER_HALF_PRECISION: bool    = _bool("EMBEDDER_HALF_PRECISION", True)
-    VISION_HALF_PRECISION: bool      = _bool("VISION_HALF_PRECISION", True)
-    WHISPER_COMPUTE_TYPE: str        = _str("WHISPER_COMPUTE_TYPE", "int8_float16")
-    EMBEDDER_DEVICE: str             = _str("EMBEDDER_DEVICE", "cuda")
-    RERANKER_DEVICE: str             = _str("RERANKER_DEVICE", "cuda")
-    SIGLIP_DEVICE: str               = _str("SIGLIP_DEVICE", "cuda")
-    BLIP_DEVICE: str                 = _str("BLIP_DEVICE", "cuda")
-    QWEN2_VL_DEVICE: str             = _str("QWEN2_VL_DEVICE", "cuda")
-    TROCR_DEVICE: str                = _str("TROCR_DEVICE", "cuda")
-    DIARIZER_DEVICE: str             = _str("DIARIZER_DEVICE", "cuda")
-    NER_DEVICE: str                  = _str("NER_DEVICE", "cuda")
-    WHISPER_DEVICE: str              = _str("WHISPER_DEVICE", "cuda")
-    LLM_DEVICE_HINT: str             = _str("LLM_DEVICE_HINT", "cuda")
+    EMBEDDER_HALF_PRECISION: bool    = _bool("EMBEDDER_HALF_PRECISION", _cuda_available())
+    VISION_HALF_PRECISION: bool      = _bool("VISION_HALF_PRECISION", _cuda_available())
+    WHISPER_COMPUTE_TYPE: str        = _str("WHISPER_COMPUTE_TYPE", _auto_whisper_compute())
+    EMBEDDER_DEVICE: str             = _str("EMBEDDER_DEVICE", _auto_device())
+    RERANKER_DEVICE: str             = _str("RERANKER_DEVICE", _auto_device())
+    SIGLIP_DEVICE: str               = _str("SIGLIP_DEVICE", _auto_device())
+    BLIP_DEVICE: str                 = _str("BLIP_DEVICE", _auto_device())
+    QWEN2_VL_DEVICE: str             = _str("QWEN2_VL_DEVICE", _auto_device())
+    TROCR_DEVICE: str                = _str("TROCR_DEVICE", _auto_device())
+    DIARIZER_DEVICE: str             = _str("DIARIZER_DEVICE", _auto_device())
+    NER_DEVICE: str                  = _str("NER_DEVICE", _auto_device())
+    WHISPER_DEVICE: str              = _str("WHISPER_DEVICE", _auto_device())
+    LLM_DEVICE_HINT: str             = _str("LLM_DEVICE_HINT", _auto_device())
 
     # VISION MODELS
     SIGLIP_MODEL: str                = _str("SIGLIP_MODEL", "google/siglip-so400m-patch14-384")

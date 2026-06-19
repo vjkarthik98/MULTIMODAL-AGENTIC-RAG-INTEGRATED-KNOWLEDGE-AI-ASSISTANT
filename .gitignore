@@ -160,9 +160,6 @@ venv.bak/
 # mkdocs documentation
 /site
 
-# Models
-models/
-*.gguf
 
 # Bundled binaries (use system ffmpeg etc., never commit executables)
 *.exe
@@ -253,6 +250,7 @@ dist-ssr/
 *.sw?
 .claude
 .vscode
+scripts/
 
 
 
