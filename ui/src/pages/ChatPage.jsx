@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { Send, Square, Sparkles, ChevronDown, Menu, Upload, WifiOff, MoreVertical,
-         FileText, Image, Sheet, FileVideo, FileAudio, FileType, LetterText, File as FileIcon } from 'lucide-react'
+         FileText, Image, Sheet, FileVideo, FileAudio, FileType, LetterText, File as FileIcon,
+         Globe } from 'lucide-react'
 import Sidebar from '../components/Sidebar'
 import SettingsModal from '../components/SettingsModal'
 import MessageBubble from '../components/MessageBubble'
@@ -44,6 +45,9 @@ const isExplicitWebQuery = (q) => {
 
 const PLACEHOLDERS = [
   'Ask anything about your files…',
+]
+const WEB_PLACEHOLDERS = [
+  'Search the web…',
 ]
 
 function fileModalityIcon(filename) {
@@ -94,6 +98,7 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
   const [sessionId, setSessionId]         = useState(() => crypto.randomUUID())
   const [selectedFile, setSelectedFile]   = useState(null)
   const [showFilePicker, setShowFilePicker] = useState(false)
+  const [webSearchMode, setWebSearchMode] = useState(false)
   const filePickerRef                     = useRef(null)
   const [loadingSession, setLoadingSession] = useState(false)
   const [inputFocused, setInputFocused]   = useState(false)
@@ -296,7 +301,8 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
 
     // KB-empty guard — respond immediately without a backend call to prevent
     // hallucinated answers when the user hasn't uploaded any files yet.
-    if (kbFiles.length === 0) {
+    // Skip this guard in web search mode: the search tool doesn't need a KB.
+    if (kbFiles.length === 0 && !webSearchMode) {
       const _GREETING = /^(hi+|hello+|hey+|howdy|hiya|greetings|good\s+(morning|afternoon|evening|day))[\s!.,?]*$/i
       const reply = _GREETING.test(text)
         ? `Hello! I'm your AI knowledge assistant.\n\nTo get started, please **upload your documents** using the Files panel in the left sidebar. I support:\n- PDFs, Word documents, Excel spreadsheets\n- Images, audio recordings, videos\n\nOnce your files are uploaded, I'll be ready to answer any questions about your content.`
@@ -348,7 +354,7 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
     }
 
     try {
-      const res = await streamQuery(auth.token, text, sessionId, controller.signal, noCache, fileSources)
+      const res = await streamQuery(auth.token, text, sessionId, controller.signal, noCache, fileSources, webSearchMode)
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}))
         throw new Error(errBody.detail || `Server error ${res.status}`)
@@ -498,7 +504,7 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
       onStreamingChange?.(false)
       setTimeout(() => inputRef.current?.focus(), 50)
     }
-  }, [input, streaming, auth.token, sessionId, selectedFile])
+  }, [input, streaming, auth.token, sessionId, selectedFile, webSearchMode])
 
   const handleStop = useCallback(() => {
     abortRef.current?.abort()
@@ -967,7 +973,7 @@ const handleNewChat = () => {
                 <textarea
                   ref={inputRef}
                   rows={1}
-                  placeholder={PLACEHOLDERS[placeholderIdx]}
+                  placeholder={webSearchMode ? WEB_PLACEHOLDERS[0] : PLACEHOLDERS[placeholderIdx]}
                   value={input}
                   onChange={e => {
                     setInput(e.target.value)
@@ -989,19 +995,23 @@ const handleNewChat = () => {
               {/* BOTTOM — controls row */}
               <div className="flex items-center gap-2 px-3 pb-2.5 pt-0">
 
-                {/* @ file scope button — always visible and clickable */}
+                {/* @ file scope button — disabled in web search mode */}
                 <button
                   type="button"
-                  onClick={() => setShowFilePicker(p => !p)}
-                  title="Scope to a file"
+                  onClick={() => { if (!webSearchMode) setShowFilePicker(p => !p) }}
+                  title={webSearchMode ? 'File scope unavailable in web search mode' : 'Scope to a file'}
                   aria-label="Scope query to a specific file"
+                  disabled={webSearchMode}
                   className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-lg text-[13px] font-semibold transition-all"
-                  style={selectedFile || showFilePicker
-                    ? { background: 'rgba(139,92,246,0.18)', color: 'var(--t-accent)' }
-                    : { background: 'transparent', color: 'var(--t-tx4)' }
+                  style={
+                    webSearchMode
+                      ? { background: 'transparent', color: 'var(--t-tx6)', cursor: 'not-allowed', opacity: 0.35 }
+                      : selectedFile || showFilePicker
+                        ? { background: 'rgba(139,92,246,0.18)', color: 'var(--t-accent)' }
+                        : { background: 'transparent', color: 'var(--t-tx4)' }
                   }
-                  onMouseEnter={e => { if (!selectedFile && !showFilePicker) { e.currentTarget.style.background = 'var(--t-hov)'; e.currentTarget.style.color = 'var(--t-tx2)' } }}
-                  onMouseLeave={e => { if (!selectedFile && !showFilePicker) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--t-tx4)' } }}
+                  onMouseEnter={e => { if (!webSearchMode && !selectedFile && !showFilePicker) { e.currentTarget.style.background = 'var(--t-hov)'; e.currentTarget.style.color = 'var(--t-tx2)' } }}
+                  onMouseLeave={e => { if (!webSearchMode && !selectedFile && !showFilePicker) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--t-tx4)' } }}
                 >
                   @
                 </button>
@@ -1028,6 +1038,26 @@ const handleNewChat = () => {
                 {/* Spacer */}
                 <div className="flex-1" />
 
+                {/* Web search toggle */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !webSearchMode
+                    setWebSearchMode(next)
+                    if (next) { setSelectedFile(null); setShowFilePicker(false) }
+                  }}
+                  title={webSearchMode ? 'Web search ON — click to disable' : 'Search the web instead of your files'}
+                  aria-label={webSearchMode ? 'Disable web search mode' : 'Enable web search mode'}
+                  className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-lg transition-all"
+                  style={webSearchMode
+                    ? { background: 'rgba(14,165,233,0.18)', color: '#0ea5e9', border: '1px solid rgba(14,165,233,0.4)' }
+                    : { background: 'transparent', color: 'var(--t-tx4)', border: '1px solid transparent' }
+                  }
+                  onMouseEnter={e => { if (!webSearchMode) { e.currentTarget.style.background = 'var(--t-hov)'; e.currentTarget.style.color = 'var(--t-tx2)' } }}
+                  onMouseLeave={e => { if (!webSearchMode) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--t-tx4)' } }}
+                >
+                  <Globe size={14} />
+                </button>
 
                 {/* Send / Stop */}
                 <button

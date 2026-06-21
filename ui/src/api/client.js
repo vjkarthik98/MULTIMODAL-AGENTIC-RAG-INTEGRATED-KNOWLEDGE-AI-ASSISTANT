@@ -147,9 +147,10 @@ export function ingestFile(token, file, sessionId = 'default', abortController =
 }
 
 // Returns the raw fetch Response so caller can stream the body
-export function streamQuery(token, query, sessionId, signal, noCache = false, sources = null) {
+export function streamQuery(token, query, sessionId, signal, noCache = false, sources = null, forceWeb = false) {
   const body = { query, session_id: sessionId, no_cache: noCache }
   if (sources && sources.length) body.sources = sources
+  if (forceWeb) body.force_web = true
   return fetch(`${API}/rag/query/stream`, {
     method: 'POST',
     headers: { ...bearer(token), 'Content-Type': 'application/json' },

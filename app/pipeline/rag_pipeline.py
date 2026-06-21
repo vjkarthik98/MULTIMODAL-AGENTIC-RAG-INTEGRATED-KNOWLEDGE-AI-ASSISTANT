@@ -1242,6 +1242,26 @@ class RAGPipeline:
                     docs = sorted(docs, key=lambda d: d.get("score", 0.0), reverse=True)[:settings.RAG_TOP_K]
                 docs = _sandwich_reorder(docs)
 
+                # FINANCIAL CALCULATOR — prepend verified arithmetic to context.
+                # EDGAR — append regulatory filing metadata + collect source chips.
+                _stream_edgar_chips: list = []
+                try:
+                    from app.pipeline.finance_tool_runner import (
+                        run_financial_calculator as _run_calc,
+                        run_sec_edgar_lookup    as _run_edgar,
+                        is_regulatory_query     as _is_reg,
+                    )
+                    _calc_doc = _run_calc(query, docs)
+                    if _calc_doc:
+                        docs = [_calc_doc] + docs
+                    if _is_reg(query):
+                        _edgar_doc, _stream_edgar_chips = _run_edgar(query, session_id)
+                        if _edgar_doc:
+                            docs = docs + [_edgar_doc]
+                except Exception as _ft_err:
+                    logger.warning(event="rag_stream_finance_tools_error",
+                                   error=str(_ft_err), session_id=session_id)
+
                 context = _build_context(docs, settings.MAX_CONTEXT_CHARS)
                 context = _prepend_key_facts(docs, query, context)
 
@@ -1403,9 +1423,18 @@ class RAGPipeline:
                 yield "\x00REPLACE\x00" + answer
 
                 # Emit sources so the client can display them immediately.
+                # Exclude synthetic tool docs (calculator, edgar) from KB chips —
+                # they have modality="tool" and no real filename to display.
+                # SEC EDGAR results are appended separately as web-style chips.
                 try:
                     import json as _json
-                    _p248 = _build_p248_sources(_source_docs)
+                    _real_source_docs = [
+                        d for d in _source_docs
+                        if (d.get("metadata") or {}).get("modality") != "tool"
+                    ]
+                    _p248 = _build_p248_sources(_real_source_docs)
+                    if _stream_edgar_chips:
+                        _p248 = _p248 + _stream_edgar_chips
                     yield "\x00SOURCES\x00" + _json.dumps(_p248)
                 except Exception:
                     pass

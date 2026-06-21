@@ -383,7 +383,12 @@ def _validate_documents(
             doc = doc.finalize()
             doc.structure["session_id"] = session_id
 
-            h = _stable_hash(doc.text)
+            # Include embedding_space in the dedup key so a text (BGE) doc and a
+            # vision (SigLIP) doc that share the same caption text are NOT treated
+            # as duplicates — they go to different collections and serve different
+            # retrieval paths.
+            space = (getattr(doc, "structure", {}) or {}).get("embedding_space", "text")
+            h = _stable_hash(doc.text + "|" + space)
             if h in seen:
                 continue
 

@@ -129,6 +129,7 @@ class QueryRequest(BaseModel):
     # specific uploaded file when the session has many ingested documents.
     sources: Optional[List[str]] = Field(default=None, max_length=20)
     no_cache: bool = Field(default=False)
+    force_web: bool = Field(default=False)
 
     @field_validator("query")
     @classmethod
@@ -1087,7 +1088,8 @@ async def stream_query(
         }
         _q_lower = query.lower()
         _is_web_request = (
-            any(phrase in _q_lower for phrase in _EXPLICIT_WEB_PHRASES)
+            request_body.force_web
+            or any(phrase in _q_lower for phrase in _EXPLICIT_WEB_PHRASES)
             or any(sig in _q_lower for sig in _REALTIME_SIGNALS)
         )
 

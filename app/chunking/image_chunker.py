@@ -860,22 +860,22 @@ class ImageChunker(BaseChunker):
                 except Exception as exc:
                     logger.warning(event="image_trocr_failed", error=str(exc))
 
-                # Step 2: caption — BLIP → Qwen2-VL fallback chain.
+                # Step 2: caption — Qwen2-VL primary (instruction-tuned), BLIP unconditional fallback.
+                # BLIP-1 (blip-image-captioning-large) cannot follow instruction prompts —
+                # it echoes them. Qwen2-VL-2B-Instruct gives detailed financial analysis.
+                # BLIP is kept as a no-prompt fallback for when Qwen2-VL is unavailable.
                 session_id = ""
                 try:
                     cf = getattr(meta, "custom_fields", {}) or {}
                     session_id = str(cf.get("session_id", "") or "")
                 except Exception:
                     pass
-                caption_text = ""
-                try:
-                    raw = _blip_caption(img, session_id=session_id)
-                    caption_text = raw or ""
-                except Exception as exc:
-                    logger.warning(event="image_blip_failed", error=str(exc))
-
+                caption_text = _qwen2vl_caption_for_image(img)
                 if not caption_text:
-                    caption_text = _qwen2vl_caption_for_image(img)
+                    try:
+                        caption_text = _blip_caption(img, session_id=session_id) or ""
+                    except Exception as exc:
+                        logger.warning(event="image_blip_failed", error=str(exc))
 
                 # Step 3: SigLIP image type classification (falls back to heuristic).
                 image_type = "infographic"

@@ -1084,6 +1084,31 @@ def query_pipeline(
                 final_docs = filtered
             # If all chunks are below threshold, keep top-1 to avoid empty context
 
+        # FINANCIAL CALCULATOR — inject verified arithmetic into LLM context.
+        # Prepended so the LLM sees the confirmed result before the raw text chunks.
+        # The synthetic doc has modality="tool" so it is excluded from source chips.
+        _edgar_source_chips: List[Dict[str, Any]] = []
+        try:
+            from app.pipeline.finance_tool_runner import (
+                run_financial_calculator as _run_calc,
+                run_sec_edgar_lookup    as _run_edgar,
+                is_regulatory_query     as _is_reg,
+            )
+            _calc_doc = _run_calc(query, final_docs)
+            if _calc_doc:
+                final_docs = [_calc_doc] + final_docs
+
+            # SEC EDGAR — supplemental regulatory filing lookup.
+            # Appended so KB chunks take retrieval priority; EDGAR is supplemental.
+            # Results also populate _edgar_source_chips for UI chip rendering.
+            if _is_reg(query):
+                _edgar_doc, _edgar_source_chips = _run_edgar(query, session_id)
+                if _edgar_doc:
+                    final_docs = final_docs + [_edgar_doc]
+        except Exception as _ft_err:
+            logger.warning(event="finance_tools_pipeline_error", error=str(_ft_err),
+                           session_id=session_id)
+
         # HYBRID WEB SEARCH — fetch Tavily alongside RAG docs when decision is "hybrid"
         _hybrid_web_docs: List[str] = []
         _hybrid_web_sources: List[Dict[str, Any]] = []
@@ -1251,9 +1276,18 @@ def query_pipeline(
 
         # PHASE 24.8 — build standardised sources[] from ALL reranked docs so
         # citation-index filtering below can match any [n] the LLM produced.
-        p248_sources = _build_sources_array(final_docs, max_items=len(final_docs))
+        # Exclude synthetic tool docs (calculator, edgar) — they have no real
+        # filename/URL to show, and EDGAR chips are added separately below.
+        _real_docs = [
+            d for d in final_docs
+            if (d.get("metadata") or {}).get("modality") != "tool"
+        ]
+        p248_sources = _build_sources_array(_real_docs, max_items=len(_real_docs))
         if decision == "hybrid" and _hybrid_web_sources:
             p248_sources = p248_sources + _hybrid_web_sources[:3]
+        # SEC EDGAR chips — rendered as clickable web-style source links in the UI
+        if _edgar_source_chips:
+            p248_sources = p248_sources + _edgar_source_chips
 
         # Drop doc chunks that are pure retrieval noise (score < floor).
         # Web sources use confidence-based scores so are always kept.
