@@ -177,50 +177,111 @@ class VideoEmbedder(BaseEmbedder):
         return (f" [ENTITIES: {', '.join(entity_tokens)}]") if entity_tokens else ""
 
     def embed_documents(self, docs: List[Any], session_id: str = "default") -> List[Any]:
-        """Embed video docs with THREE named vectors (Phase 2.7).
+        """Embed video docs with THREE named vectors (Phase 2.7) + SigLIP for frames.
 
-        1. Primary (combined) via parent.embed_documents — sets doc.embedding
-        2. Audio-only — sets doc.embedding_audio
-        3. Visual-only — sets doc.embedding_visual
+        transcript_frame docs (embedding_space="text"):
+          doc.embedding        = combined BGE 1024-dim → text_collection
+          doc.embedding_audio  = audio-only BGE 1024-dim (named vector)
+          doc.embedding_visual = visual-only BGE 1024-dim (named vector)
+
+        frame docs (embedding_space="vision", BUG-2 fix):
+          doc.embedding        = SigLIP 1152-dim from frame image → vision_collection
         """
-        results = super().embed_documents(docs, session_id=session_id)
-        if not results:
-            return results
+        from pathlib import Path as _Path
 
-        embedder = self._get_model()
+        # Split by embedding_space before BGE encoding to avoid dimension mismatch.
+        vision_docs = [d for d in docs
+                       if (getattr(d, "structure", None) or {}).get("embedding_space") == "vision"]
+        text_docs   = [d for d in docs if d not in vision_docs]
 
-        for vector_name, text_fn, attr in [
-            ("audio",   self._audio_only_text,   "embedding_audio"),
-            ("visual",  self._visual_only_text,   "embedding_visual"),
-        ]:
-            texts: List[str] = []
-            rdocs: List[Any] = []
-            for doc in results:
-                t = text_fn(doc)
-                if t:
-                    texts.append(t)
-                    rdocs.append(doc)
-            if not texts:
+        # ── Text / transcript docs: existing BGE combined + audio/visual path ──
+        text_results: List[Any] = []
+        if text_docs:
+            text_results = super().embed_documents(text_docs, session_id=session_id)
+
+        if text_results:
+            embedder = self._get_model()
+            for vector_name, text_fn, attr in [
+                ("audio",  self._audio_only_text,  "embedding_audio"),
+                ("visual", self._visual_only_text, "embedding_visual"),
+            ]:
+                texts: List[str] = []
+                rdocs: List[Any] = []
+                for doc in text_results:
+                    t = text_fn(doc)
+                    if t:
+                        texts.append(t)
+                        rdocs.append(doc)
+                if not texts:
+                    continue
+                for i in range(0, len(texts), embedder.batch_size):
+                    batch_texts = texts[i:i + embedder.batch_size]
+                    batch_docs  = rdocs[i:i + embedder.batch_size]
+                    try:
+                        embs = embedder._encode_with_retry(embedder.model, batch_texts)
+                        for doc, emb in zip(batch_docs, embs):
+                            if valid_embedding(emb, embedder.expected_dim):
+                                setattr(doc, attr, emb)
+                                struct = dict(getattr(doc, "structure", {}) or {})
+                                struct[f"has_{vector_name}_embedding"] = True
+                                doc.structure = struct
+                    except Exception as exc:
+                        logger.debug(
+                            event="video_alt_embed_skip",
+                            vector=vector_name,
+                            error=str(exc),
+                        )
+
+        # ── Vision / frame docs: SigLIP 1152-dim from frame image file ──────
+        vision_results: List[Any] = list(vision_docs)  # return even if embed fails
+        if vision_docs:
+            vision_results = self._embed_vision_frames(
+                vision_docs, session_id, _Path
+            )
+
+        return text_results + vision_results
+
+    def _embed_vision_frames(
+        self, docs: List[Any], session_id: str, _Path: Any
+    ) -> List[Any]:
+        """Embed video frame images with SigLIP → vision_collection (1152-dim).
+
+        Docs without a valid asset_path or where SigLIP is unavailable are
+        returned as-is (doc.embedding remains None and qdrant_store skips them).
+        """
+        try:
+            from app.core.model_loader import model_loader
+            # get_siglip() returns (processor, model, device)
+            siglip_processor, siglip_model, siglip_device = model_loader.get_siglip()
+            from app.embeddings.image_embedder import ImageEmbedder
+            ie = ImageEmbedder(
+                model=siglip_model,
+                processor=siglip_processor,
+                device=siglip_device,
+            )
+        except Exception as exc:
+            logger.warning(event="siglip_unavailable_for_video_frames", error=str(exc))
+            return docs
+
+        for doc in docs:
+            s          = getattr(doc, "structure", {}) or {}
+            asset_path = s.get("asset_path", "")
+            if not asset_path or not _Path(asset_path).exists():
                 continue
-            for i in range(0, len(texts), embedder.batch_size):
-                batch_texts = texts[i:i + embedder.batch_size]
-                batch_docs  = rdocs[i:i + embedder.batch_size]
-                try:
-                    embs = embedder._encode_with_retry(embedder.model, batch_texts)
-                    for doc, emb in zip(batch_docs, embs):
-                        if valid_embedding(emb, embedder.expected_dim):
-                            setattr(doc, attr, emb)
-                            struct = dict(getattr(doc, "structure", {}) or {})
-                            struct[f"has_{vector_name}_embedding"] = True
-                            doc.structure = struct
-                except Exception as exc:
-                    logger.debug(
-                        event="video_alt_embed_skip",
-                        vector=vector_name,
-                        error=str(exc),
-                    )
+            try:
+                emb = ie.embed(str(asset_path), session_id=session_id)
+                doc.embedding = emb
+                struct = dict(s)
+                struct["has_visual_embedding"] = True
+                doc.structure = struct
+            except Exception as exc:
+                logger.warning(
+                    event="siglip_frame_embed_failed",
+                    path=asset_path,
+                    error=str(exc),
+                )
 
-        return results
+        return docs
 
     def health_check(self) -> dict:
         return {

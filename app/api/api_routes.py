@@ -341,6 +341,24 @@ def _compute_file_hash(file_path: Path) -> str:
     return h.hexdigest()
 
 
+def _qdrant_has_checksum(user_id: str, file_hash: str) -> bool:
+    """True if chunks with this checksum already exist in Qdrant for this user.
+
+    Qdrant is the source of truth — the in-memory dedup map alone is not, because
+    a user can delete a file (purging its vectors) and re-upload it. We only honor
+    a dedup hit when the vectors actually still exist for the user.
+    """
+    try:
+        vs = infra.get_vector_store()
+        if vs is None:
+            return False
+        return bool(vs.search_by_payload(
+            field="checksum_sha256", value=file_hash, user_id=user_id, limit=1,
+        ))
+    except Exception:
+        return False
+
+
 # ERROR CODE → HTTP 422 DETAIL PREFIXES THAT INDICATE STRUCTURED INGESTION ERRORS
 _INGEST_422_PREFIXES = (
     "EMPTY_FILE",
@@ -456,31 +474,41 @@ async def ingest_document(
         if not _malware_scan(str(file_path)):
             raise HTTPException(status_code=400, detail="File rejected: malware detected")
 
-        # DEDUP CHECK
+        # DEDUP CHECK — per-user (tenant-isolated) AND Qdrant-verified.
+        # The in-memory map is keyed by user_id:hash so one user's upload never
+        # masks another user's identical file. A dedup hit is only honored when the
+        # vectors actually still exist in Qdrant for this user — otherwise (e.g. the
+        # user deleted the file and re-uploaded it) the stale entry is dropped and
+        # the file is re-ingested normally.
         file_hash = await asyncio.to_thread(_compute_file_hash, file_path)
-        if file_hash in _INGEST_DEDUP:
-            latency = round(time.time() - start, 3)
-            # Still copy to kb_dir so the file shows in the sidebar list even
-            # though the vectors are already in Qdrant from a prior upload.
-            import shutil as _shutil
-            kb_dir = user_knowledge_base_dir(user_id)
-            kb_path = kb_dir / filename
-            if not kb_path.exists():
-                _shutil.copy2(str(file_path), str(kb_path))
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "request_id":  request_id,
-                    "status":      "duplicate",
-                    "duplicate":   True,
-                    "file_hash":   file_hash,
-                    "filename":    filename,
-                    "ext":         ext,
-                    "modality":    _EXT_MODALITY.get(ext, "unknown"),
-                    "file_size":   size,
-                    "latency":     latency,
-                },
-            )
+        dedup_key = f"{user_id}:{file_hash}"
+        if dedup_key in _INGEST_DEDUP:
+            if await asyncio.to_thread(_qdrant_has_checksum, user_id, file_hash):
+                latency = round(time.time() - start, 3)
+                # Copy to kb_dir so the file shows in the sidebar list even though
+                # the vectors are already in Qdrant from a prior upload.
+                import shutil as _shutil
+                kb_dir = user_knowledge_base_dir(user_id)
+                kb_path = kb_dir / filename
+                if not kb_path.exists():
+                    _shutil.copy2(str(file_path), str(kb_path))
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "request_id":  request_id,
+                        "status":      "duplicate",
+                        "duplicate":   True,
+                        "file_hash":   file_hash,
+                        "filename":    filename,
+                        "ext":         ext,
+                        "modality":    _EXT_MODALITY.get(ext, "unknown"),
+                        "file_size":   size,
+                        "latency":     latency,
+                    },
+                )
+            # Stale entry — vectors no longer in Qdrant. Drop it and re-ingest.
+            _INGEST_DEDUP.pop(dedup_key, None)
+            logger.info(event="dedup_stale_entry_dropped", file=filename, user_id=user_id)
 
         _audit_log(
             "ingest_received",
@@ -494,19 +522,28 @@ async def ingest_document(
 
         modality = _EXT_MODALITY.get(ext, "unknown")
 
-        # COPY TO KNOWLEDGE BASE NOW — file visible in sidebar immediately while the
-        # pipeline runs in the background. If the background job fails, it removes this file.
-        import shutil as _shutil
+        # kb_path is the intended destination — the pipeline copies here only on success.
+        # We never copy before the pipeline finishes so the file never appears in the
+        # sidebar before embeddings are in Qdrant.
         kb_dir  = user_knowledge_base_dir(user_id)
         kb_path = kb_dir / filename
-        _shutil.copy2(str(file_path), str(kb_path))
 
-        # REGISTER DEDUP NOW (pre-computed hash) — prevents duplicate submissions
+        # REGISTER DEDUP NOW (per-user key) — prevents duplicate submissions
         # while the background job is still processing.
-        _dedup_set(file_hash, request_id)
+        _dedup_set(dedup_key, request_id)
+
+        # INGEST THREAD READINESS GATE — ensure the gpu_ingest_executor thread
+        # has been seeded with PyTorch CUDA context before dispatching any GPU
+        # work.  Without this, a lazy-loaded LLM (llama.cpp) might claim the
+        # CUDA device first and cause a SIGSEGV when the ingest thread later
+        # tries to initialise its own CUBLAS handle.
+        from app.core.startup_optimizer import is_ingest_thread_ready, seed_gpu_ingest_thread
+        if not is_ingest_thread_ready():
+            await asyncio.to_thread(seed_gpu_ingest_thread)
 
         # LAUNCH BACKGROUND PIPELINE — returns job_id in milliseconds.
-        # The background job owns the staging file and will clean it up when done.
+        # The background job owns the staging file, copies to kb_path on success,
+        # and cleans up staging when done.
         from app.pipeline.ingestion_pipeline import IngestionPipeline
         pipeline_instance = IngestionPipeline()
         job_id = await pipeline_instance.process_file_background(
@@ -1397,10 +1434,27 @@ async def upload_file(
             ip=_client_ip(request),
         )
 
-        # INGEST
+        # INGEST THREAD READINESS GATE — mirrors the gate in /ingest.
+        from app.core.startup_optimizer import is_ingest_thread_ready, seed_gpu_ingest_thread
+        if not is_ingest_thread_ready():
+            await asyncio.to_thread(seed_gpu_ingest_thread)
+
+        # INGEST — run on the dedicated gpu_ingest_executor whose single thread
+        # was pre-seeded with PyTorch CUDA context during startup warmup
+        # (or by seed_gpu_ingest_thread() above).  Using asyncio.to_thread()
+        # here dispatches to a random OS thread that has no CUDA context; after
+        # llama.cpp initialises its CUBLAS handle that causes a SIGSEGV.
         from app.pipeline.ingestion_pipeline import process_file
+        from app.core.startup_optimizer import get_gpu_ingest_executor
+        _ingest_loop = asyncio.get_running_loop()
         try:
-            result = await asyncio.to_thread(process_file, str(file_path), session_id, user_id)
+            result = await asyncio.wait_for(
+                _ingest_loop.run_in_executor(
+                    get_gpu_ingest_executor(),
+                    process_file, str(file_path), session_id, user_id,
+                ),
+                timeout=settings.FILE_PROCESSING_TIMEOUT_SEC,
+            )
         except Exception as exc:
             err_str = str(exc).removeprefix("INGESTION_FAILED: ").strip()
             if any(err_str.startswith(p) for p in _INGEST_422_PREFIXES):
@@ -1708,6 +1762,45 @@ def model_health() -> Dict[str, Any]:
 
 # ─── KNOWLEDGE BASE ───────────────────────────────────────────────────────────
 
+def _qdrant_embedded_sources(user_id: str) -> set:
+    """Return the set of source filenames that have at least one point in Qdrant for this user.
+
+    Uses a single scroll (limit=1000) — fast and sufficient for any realistic KB size.
+    Returns empty set on any error so callers degrade gracefully.
+    """
+    try:
+        vs = infra.get_vector_store()
+        if vs is None or not hasattr(vs, "client"):
+            return set()
+        from qdrant_client.http.models import Filter, FieldCondition, MatchValue
+        sources: set = set()
+        for collection in (vs.text_collection, vs.vision_collection):
+            if collection not in getattr(vs, "_collection_cache", {}):
+                continue
+            offset = None
+            while True:
+                points, next_offset = vs.client.scroll(
+                    collection_name=collection,
+                    scroll_filter=Filter(must=[
+                        FieldCondition(key="user_id", match=MatchValue(value=user_id))
+                    ]),
+                    with_payload=True,
+                    with_vectors=False,
+                    limit=500,
+                    offset=offset,
+                )
+                for pt in points:
+                    src = (pt.payload or {}).get("source")
+                    if src:
+                        sources.add(src)
+                if next_offset is None:
+                    break
+                offset = next_offset
+        return sources
+    except Exception:
+        return set()
+
+
 @router.get("/knowledge-base")
 async def list_knowledge_base(
     request: Request,
@@ -1717,17 +1810,32 @@ async def list_knowledge_base(
     user_id = current_user.user_id
     from app.utils.paths import user_knowledge_base_dir
     kb_dir = user_knowledge_base_dir(user_id)
+
+    # Get the set of filenames that actually have embeddings in Qdrant.
+    # Files on disk but absent from Qdrant are orphaned (upload failed mid-run).
+    # We delete them silently so they stop showing in the sidebar.
+    embedded = await asyncio.to_thread(_qdrant_embedded_sources, user_id)
+
     files = []
     for f in sorted(kb_dir.iterdir()):
-        if f.is_file():
-            stat = f.stat()
-            files.append({
-                "filename":      f.name,
-                "size_bytes":    stat.st_size,
-                "size_mb":       round(stat.st_size / (1024 * 1024), 3),
-                "uploaded_at":   stat.st_mtime,
-                "modality":      _EXT_MODALITY.get(f.suffix.lower(), "unknown"),
-            })
+        if not f.is_file():
+            continue
+        # Prune orphans: file on disk but no Qdrant points.
+        if embedded and f.name not in embedded:
+            try:
+                f.unlink(missing_ok=True)
+                logger.info(event="kb_orphan_removed", user_id=user_id, file=f.name)
+            except Exception:
+                pass
+            continue
+        stat = f.stat()
+        files.append({
+            "filename":      f.name,
+            "size_bytes":    stat.st_size,
+            "size_mb":       round(stat.st_size / (1024 * 1024), 3),
+            "uploaded_at":   stat.st_mtime,
+            "modality":      _EXT_MODALITY.get(f.suffix.lower(), "unknown"),
+        })
     return {
         "user_id":    user_id,
         "file_count": len(files),
@@ -1815,6 +1923,14 @@ async def delete_knowledge_base_file(
             logger.info(event="kb_delete_cache_flushed", file=safe_name, entries=cache_flushed)
     except Exception as exc:
         logger.warning(event="kb_delete_cache_flush_failed", file=safe_name, error=str(exc))
+
+    # CLEAR DEDUP ENTRY — so a re-upload of the same file re-ingests instead of
+    # being skipped as a duplicate. Compute the hash before unlinking.
+    try:
+        _del_hash = _compute_file_hash(file_path)
+        _INGEST_DEDUP.pop(f"{user_id}:{_del_hash}", None)
+    except Exception:
+        pass
 
     # DELETE FILE — only reached if Qdrant purge succeeded
     file_path.unlink()
@@ -2079,7 +2195,7 @@ async def submit_feedback(
 
 # GET /api/ingestion/status/{job_id} — poll IngestJob progress
 
-@router.get("/api/ingestion/status/{job_id}")
+@router.get("/ingestion/status/{job_id}")
 async def get_ingestion_status(
     job_id: str,
     request: Request,

@@ -15,8 +15,13 @@ _os.environ["HF_HUB_CACHE"]        = _hf_home + "/hub"
 # ────────────────────────────────────────────────────────────────────────────
 
 import asyncio
+import faulthandler
 import time
 import uuid
+
+# Print full Python + C stack to stderr on SIGSEGV/SIGFPE/SIGABRT so crashes
+# are diagnosable even when uvicorn swallows the output.
+faulthandler.enable()
 from contextlib import asynccontextmanager
 from typing import Any, Dict
 
@@ -94,7 +99,7 @@ def _setup_otel() -> None:
 
 async def _init_qdrant_async() -> None:
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _init_qdrant_sync)
         logger.info(event="qdrant_ready")
     except Exception as e:
@@ -134,27 +139,11 @@ async def _warmup_models_async() -> None:
         return
     try:
         from app.core.startup_optimizer import preload_gpu_models
+        # preload_gpu_models() runs guardrail warmup internally (before LLM)
+        # to guarantee all PyTorch CUDA ops finish before llama.cpp CUBLAS init.
         await preload_gpu_models()
     except Exception as e:
         logger.warning(event="startup_warmup_failed", error=str(e))
-
-    # Guardrail warm-up — pre-initializes Presidio PII engine + jailbreak
-    # corpus embeddings so first request doesn't pay cold-start latency.
-    try:
-        import asyncio as _asyncio
-        loop = _asyncio.get_running_loop()
-        await loop.run_in_executor(None, _warmup_guardrails)
-    except Exception as e:
-        logger.warning(event="guardrail_warmup_failed", error=str(e))
-
-
-def _warmup_guardrails() -> None:
-    try:
-        from app.guardrails import warm_up as guardrail_warm_up
-        guardrail_warm_up()
-        logger.info(event="guardrail_warmup_complete")
-    except Exception as e:
-        logger.warning(event="guardrail_warmup_failed", error=str(e))
 
 
 # AUDIT LOG SETUP — SECTION 5

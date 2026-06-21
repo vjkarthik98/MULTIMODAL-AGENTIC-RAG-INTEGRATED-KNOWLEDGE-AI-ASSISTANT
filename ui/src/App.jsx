@@ -9,16 +9,15 @@ import { ToastProvider } from './context/ToastContext'
 import Toast from './components/Toast'
 import ErrorBoundary from './components/ErrorBoundary'
 
-// Brain+neuron glyph — two lobes + three neural nodes connected by axons
-const BRAIN_CIRCUIT_PATHS = `<path d='M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.46 2.5 2.5 0 0 1-1.98-3 2.5 2.5 0 0 1-1.32-4.24 3 3 0 0 1 .34-5.58 2.5 2.5 0 0 1 2.98-3.19A2.5 2.5 0 0 1 9.5 2Z'/><path d='M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.46 2.5 2.5 0 0 0 1.98-3 2.5 2.5 0 0 0 1.32-4.24 3 3 0 0 0-.34-5.58 2.5 2.5 0 0 0-2.98-3.19A2.5 2.5 0 0 0 14.5 2Z'/><circle cx='9' cy='8.5' r='1.2' fill='white' stroke='none'/><circle cx='15' cy='8.5' r='1.2' fill='white' stroke='none'/><circle cx='12' cy='13.5' r='1.2' fill='white' stroke='none'/><line x1='9' y1='8.5' x2='15' y2='8.5'/><line x1='9' y1='8.5' x2='12' y2='13.5'/><line x1='15' y1='8.5' x2='12' y2='13.5'/>`
+// Static PNG favicon — used for both idle and loading states.
+// Loading state dims the icon slightly via CSS filter.
+const FAVICON_STATIC  = '/logo.png'
+const FAVICON_LOADING = '/logo.png'
 
-// Two tiny inline SVG favicons — static and pulsing
-const FAVICON_STATIC  = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%238b5cf6'/><stop offset='1' stop-color='%233b82f6'/></linearGradient></defs><rect width='32' height='32' rx='8' fill='url(%23g)'/><g transform='translate(5,5) scale(0.92)' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>${BRAIN_CIRCUIT_PATHS}</g></svg>`
-const FAVICON_LOADING = `data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%23a78bfa'/><stop offset='1' stop-color='%2360a5fa'/></linearGradient></defs><rect width='32' height='32' rx='8' fill='url(%23g)'/><g transform='translate(5,5) scale(0.92)' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' opacity='0.75'>${BRAIN_CIRCUIT_PATHS}</g></svg>`
-
-function setFavicon(href) {
+function setFavicon(href, loading = false) {
   let link = document.querySelector("link[rel~='icon']")
   if (!link) { link = document.createElement('link'); link.rel = 'icon'; document.head.appendChild(link) }
+  link.type = 'image/png'
   link.href = href
 }
 
@@ -141,7 +140,23 @@ export default function App() {
         }
       }
       getMeWithRetry(storedToken)
-        .then(() => setAuth({ token: storedToken, refreshToken: storedRefresh, email: storedEmail }))
+        .then(async () => {
+          // Token is valid right now but may be near its 30-min expiry.
+          // Always exchange it for a fresh pair so the first upload/query
+          // never hits a just-expired token before the 20-min interval fires.
+          if (storedRefresh) {
+            try {
+              const data = await refreshAccessToken(storedRefresh)
+              persistAuth({ token: data.access_token, refreshToken: data.refresh_token, email: storedEmail })
+              setAuth({ token: data.access_token, refreshToken: data.refresh_token, email: storedEmail })
+              return
+            } catch {
+              // Refresh failed (edge case: Redis down, multi-tab race).
+              // The stored token is still valid — use it as-is.
+            }
+          }
+          setAuth({ token: storedToken, refreshToken: storedRefresh, email: storedEmail })
+        })
         .catch(async () => {
           // Access token expired (e.g. the browser was closed for a while) —
           // silently renew via the refresh token before forcing a re-login.

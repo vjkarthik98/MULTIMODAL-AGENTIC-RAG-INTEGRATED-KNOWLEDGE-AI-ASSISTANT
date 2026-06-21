@@ -309,20 +309,47 @@ export default function LoginPage({ onLogin, onGuestMode, dark, onToggleTheme, o
               Continue with Google
             </button>
 
-            {/* Guest CTA — tertiary, below Google, above divider */}
+            {/* Guest CTA */}
             {onGuestMode && (
               <button
                 type="button"
                 onClick={onGuestMode}
-                className="w-full flex items-center justify-center gap-2 rounded-xl py-2.5 px-4 text-sm font-medium transition-all mt-2"
-                style={{ background: 'transparent', border: '1px solid var(--t-bd2)', color: 'var(--t-ph)' }}
-                onMouseEnter={e => { e.currentTarget.style.color = 'var(--t-tx2)'; e.currentTarget.style.borderColor = 'var(--t-bd4)' }}
-                onMouseLeave={e => { e.currentTarget.style.color = 'var(--t-ph)'; e.currentTarget.style.borderColor = 'var(--t-bd2)' }}
+                className="w-full flex items-center justify-center gap-2.5 rounded-xl py-3 px-4 text-sm font-medium transition-all mt-2"
+                style={{
+                  background: 'linear-gradient(135deg, rgba(139,92,246,0.08) 0%, rgba(59,130,246,0.06) 100%)',
+                  border: '1px solid rgba(139,92,246,0.25)',
+                  color: 'var(--t-tx2)',
+                }}
+                onMouseEnter={e => {
+                  e.currentTarget.style.background = 'linear-gradient(135deg, rgba(139,92,246,0.14) 0%, rgba(59,130,246,0.10) 100%)'
+                  e.currentTarget.style.borderColor = 'rgba(139,92,246,0.45)'
+                }}
+                onMouseLeave={e => {
+                  e.currentTarget.style.background = 'linear-gradient(135deg, rgba(139,92,246,0.08) 0%, rgba(59,130,246,0.06) 100%)'
+                  e.currentTarget.style.borderColor = 'rgba(139,92,246,0.25)'
+                }}
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="url(#bolt-grad)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <defs>
+                    <linearGradient id="bolt-grad" x1="0" y1="0" x2="1" y2="1">
+                      <stop offset="0%" stopColor="#8b5cf6"/>
+                      <stop offset="100%" stopColor="#3b82f6"/>
+                    </linearGradient>
+                  </defs>
                   <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
                 </svg>
-                Try without signing in — 5 free queries
+                Try without signing in
+                <span
+                  className="text-xs font-semibold px-1.5 py-0.5 rounded-md"
+                  style={{
+                    background: 'linear-gradient(135deg, rgba(139,92,246,0.18), rgba(59,130,246,0.14))',
+                    border: '1px solid rgba(139,92,246,0.3)',
+                    color: '#a78bfa',
+                    letterSpacing: '0.01em',
+                  }}
+                >
+                  5 free
+                </span>
               </button>
             )}
 

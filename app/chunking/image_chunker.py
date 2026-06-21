@@ -439,8 +439,14 @@ def blip_caption(image: "Image.Image", prompt: Optional[str] = None) -> str:
         return ""
     try:
         import torch as _torch
-        text_prompt = prompt or _FINANCE_CAPTION_PROMPT
-        inputs = processor(image, text=text_prompt, return_tensors="pt").to(device)
+        # BLIP-1 cannot follow instruction prompts — it echoes them. So unless a
+        # short caller-supplied prefix is given, caption UNCONDITIONALLY (no text),
+        # which is what blip-image-captioning-large is actually trained for.
+        text_prompt = prompt
+        if text_prompt:
+            inputs = processor(image, text=text_prompt, return_tensors="pt").to(device)
+        else:
+            inputs = processor(image, return_tensors="pt").to(device)
         with _torch.no_grad():
             out = model.generate(
                 **inputs,
@@ -448,7 +454,8 @@ def blip_caption(image: "Image.Image", prompt: Optional[str] = None) -> str:
                 num_beams=settings.BLIP_NUM_BEAMS,
             )
         result = processor.decode(out[0], skip_special_tokens=True).strip()
-        if result.startswith(text_prompt):
+        # Strip any echoed prompt (case-insensitive — BLIP often lowercases it).
+        if text_prompt and result.lower().startswith(text_prompt.lower()):
             result = result[len(text_prompt):].strip()
         return result
     except Exception as exc:
@@ -726,7 +733,15 @@ def classify_and_caption(
             raw_caption = _caption_cache_get(image_hash)
 
         if raw_caption is None:
-            raw_caption = _blip_caption(image, session_id, text_prompt=text_prompt)
+            # Qwen2-VL-2B-Instruct is instruction-tuned and follows the multi-part
+            # finance analyst prompt correctly. BLIP-1 (the configured BLIP_MODEL,
+            # Salesforce/blip-image-captioning-large) CANNOT follow instructions —
+            # it treats the prompt as a prefix and echoes it back as the "caption".
+            # So Qwen2-VL is primary; BLIP is only an unconditional (no-prompt)
+            # fallback that still yields a basic but valid caption.
+            raw_caption = _qwen2vl_caption_for_image(image)
+            if not raw_caption or len(raw_caption.split()) < 5:
+                raw_caption = _blip_caption(image, session_id, text_prompt=None)
             if use_cache and raw_caption:
                 _caption_cache_set(image_hash, raw_caption)
 
@@ -971,6 +986,29 @@ class ImageChunker(BaseChunker):
                 )
                 if doc:
                     docs.append(doc)
+
+                # VISION DOC — a separate vision-space doc so the image also lands
+                # in vision_collection via SigLIP. The caption doc above covers
+                # text_collection. Two docs / two embedding spaces — never one
+                # aliased doc (see _route_documents in base_embedder). The offset
+                # chunk_idx guarantees a distinct Qdrant point id.
+                if source_path and Path(source_path).exists():
+                    vis_structure = dict(structure)
+                    vis_structure["embedding_space"] = "vision"
+                    vis_structure["chunk_index"]     = chunk_idx + 1_000_000
+                    vis_doc = self._make_doc(
+                        text=combined or image_title or caption_text or "image",
+                        modality="image",
+                        subtype="image_frame",
+                        source=source,
+                        page=None,
+                        chunk_idx=chunk_idx + 1_000_000,
+                        structure=vis_structure,
+                        meta=meta,
+                        surface=surface,
+                    )
+                    if vis_doc:
+                        docs.append(vis_doc)
 
             logger.info(event="image_chunking_done", source=source, chunks=len(docs))
             _CHUNKS_TOTAL.inc(len(docs))

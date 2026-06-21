@@ -544,6 +544,9 @@ class ModelLoader:
                 load_kwargs: dict = {"trust_remote_code": True}
                 if settings.QWEN2_VL_LOAD_IN_8BIT and decision.device == "cuda":
                     load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+                    # Force float16 compute so bitsandbytes INT8 never receives bfloat16
+                    # inputs — the bfloat16→float16 cast inside the CUDA kernel segfaults.
+                    load_kwargs["torch_dtype"] = _torch_dtype("float16")
                 elif decision.device == "cuda":
                     load_kwargs["torch_dtype"] = _torch_dtype("float16")
                 model = Qwen2VLForConditionalGeneration.from_pretrained(
@@ -573,15 +576,30 @@ class ModelLoader:
             decision = device_manager.decision_for("trocr")
 
             def _load():
+                import transformers as _tf
                 from transformers import TrOCRProcessor, VisionEncoderDecoderModel  # local
                 from transformers.models.trocr.modeling_trocr import (
                     TrOCRSinusoidalPositionalEmbedding,
                 )
                 processor = TrOCRProcessor.from_pretrained(settings.TROCR_MODEL)
-                model = VisionEncoderDecoderModel.from_pretrained(
-                    settings.TROCR_MODEL,
-                    low_cpu_mem_usage=False,
-                )
+                # Suppress the two known benign weight mismatches:
+                #   MISSING encoder.pooler.* — VisionEncoderDecoderModel allocates a
+                #     pooler the TrOCR checkpoint never saved; cross-attention generation
+                #     never calls it, so we delete it after load.
+                #   UNEXPECTED _float_tensor — legacy sinusoidal PE key in checkpoint
+                #     with no registered parameter in current transformers.
+                _prev = _tf.logging.get_verbosity()
+                _tf.logging.set_verbosity_error()
+                try:
+                    model = VisionEncoderDecoderModel.from_pretrained(
+                        settings.TROCR_MODEL,
+                        low_cpu_mem_usage=False,
+                    )
+                finally:
+                    _tf.logging.set_verbosity(_prev)
+                # Free the randomly-initialised dead pooler so it doesn't waste VRAM.
+                if getattr(model.encoder, "pooler", None) is not None:
+                    model.encoder.pooler = None
                 model.to(decision.device)
                 if decision.device == "cuda" and decision.dtype == "float16":
                     model.half()
@@ -632,6 +650,11 @@ class ModelLoader:
             decision = device_manager.decision_for("diarizer")
 
             def _load():
+                # torchaudio ≥2.1 removed AudioMetaData / .info() / .load() /
+                # .list_audio_backends() from the public API; patch them back
+                # with soundfile-based shims before pyannote.audio is imported.
+                from app.utils.torchaudio_compat import patch_torchaudio
+                patch_torchaudio()
                 from pyannote.audio import Pipeline  # local
                 import torch
                 pipeline = Pipeline.from_pretrained(
@@ -661,13 +684,22 @@ class ModelLoader:
             decision = device_manager.decision_for("ner")
 
             def _load():
+                import transformers as _tf
                 from transformers import pipeline as hf_pipeline  # local
-                return hf_pipeline(
-                    "ner",
-                    model=settings.NER_MODEL,
-                    aggregation_strategy="simple",
-                    device=0 if decision.device == "cuda" else -1,
-                )
+                # Suppress UNEXPECTED bert.pooler.* — BertForTokenClassification drops
+                # the pooler from its architecture, but the dslim checkpoint (derived
+                # from full BERT base) still contains those weights in the file.
+                _prev = _tf.logging.get_verbosity()
+                _tf.logging.set_verbosity_error()
+                try:
+                    return hf_pipeline(
+                        "ner",
+                        model=settings.NER_MODEL,
+                        aggregation_strategy="simple",
+                        device=0 if decision.device == "cuda" else -1,
+                    )
+                finally:
+                    _tf.logging.set_verbosity(_prev)
 
             self._ner = self._safe_load(_load, "ner")
 

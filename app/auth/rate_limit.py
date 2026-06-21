@@ -36,11 +36,9 @@ def check_user_rate_limit(
 
     try:
         from app.core.infra_registry import infra
-        redis = infra.get_memory()
-        if redis is None or not hasattr(redis, "_redis"):
-            return
-
-        r = redis._redis
+        # Local Redis cache (~0.5ms) — sliding-window counters are per-instance
+        # anyway, so local is correct and avoids the ~200ms Upstash round-trip.
+        r = infra.get_cache()
         if r is None:
             return
 

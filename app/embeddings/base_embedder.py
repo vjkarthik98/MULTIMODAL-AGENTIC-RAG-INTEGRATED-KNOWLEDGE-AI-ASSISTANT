@@ -11,6 +11,7 @@ text_embedder.py (legacy pipeline path) is kept untouched alongside this.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 import time
@@ -124,20 +125,29 @@ def sanitize_text(text: str) -> Optional[str]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _EmbeddingCache:
+    """Two-tier embedding cache: in-process dict + LOCAL Redis (~0.5ms/op).
+
+    Backed by infra.get_cache() (local Redis), NOT Upstash — a per-chunk cloud
+    write at ~200ms each was adding ~16s to every ingest. Local writes are ~0.5ms
+    so the per-doc set stays inline without blocking the GPU encode loop. The
+    in-process dict serves immediate re-reads within the same process.
+    """
 
     def __init__(self) -> None:
         self._local: Dict[str, List[float]] = {}
-        self._redis = None
+        self._cache = None
+        self._cache_resolved = False
 
-    def _get_redis(self):
-        if self._redis is not None:
-            return self._redis
+    def _get_cache(self):
+        if self._cache_resolved:
+            return self._cache
         try:
             from app.core.infra_registry import infra
-            self._redis = infra.get_memory()
+            self._cache = infra.get_cache()
         except Exception:
-            self._redis = None
-        return self._redis
+            self._cache = None
+        self._cache_resolved = True
+        return self._cache
 
     def _key(self, text: str, model: str, dim: int) -> str:
         raw = f"{model}:{dim}:{text[:500]}"
@@ -147,13 +157,15 @@ class _EmbeddingCache:
         key = self._key(text, model, dim)
         if key in self._local:
             return self._local[key]
-        redis = self._get_redis()
-        if redis:
+        cache = self._get_cache()
+        if cache is not None:
             try:
-                cached = redis.cache_get(key)
-                if cached and isinstance(cached, list):
-                    self._local[key] = cached
-                    return cached
+                raw = cache.get(key)
+                if raw:
+                    cached = json.loads(raw)
+                    if isinstance(cached, list):
+                        self._local[key] = cached
+                        return cached
             except Exception:
                 pass
         return None
@@ -161,10 +173,10 @@ class _EmbeddingCache:
     def set(self, text: str, model: str, dim: int, embedding: List[float]) -> None:
         key = self._key(text, model, dim)
         self._local[key] = embedding
-        redis = self._get_redis()
-        if redis:
+        cache = self._get_cache()
+        if cache is not None:
             try:
-                redis.cache_set(key, embedding, ttl=settings.EMBEDDING_CACHE_TTL)
+                cache.set(key, json.dumps(embedding), ex=settings.EMBEDDING_CACHE_TTL)
             except Exception:
                 pass
 
@@ -769,26 +781,37 @@ def _resolve_asset_path(doc: Any) -> Optional[str]:
 
 
 def _route_documents(docs: List[Any]) -> Tuple[List[Any], List[Any]]:
+    """Route documents to the text (BGE) or vision (SigLIP) embedder.
+
+    Routing trusts the explicit ``structure["embedding_space"]`` set by the
+    chunkers — a "vision" doc goes to SigLIP/vision_collection, everything else to
+    BGE/text_collection. A single doc is NEVER routed to both: doing so aliased the
+    same object through both embedders, where the second embed overwrote the first
+    (e.g. video frames collapsing to one point, images losing their text vector).
+    Chunkers that want both representations emit two separate docs (one per space).
+
+    Legacy docs without an explicit embedding_space fall back to modality/subtype.
+    """
     text_docs:   List[Any] = []
     vision_docs: List[Any] = []
     for doc in docs:
         try:
+            space = (getattr(doc, "structure", {}) or {}).get("embedding_space")
+            if space == "vision":
+                vision_docs.append(doc)
+                continue
+            if space == "text":
+                text_docs.append(doc)
+                continue
+            # ── Legacy fallback: no explicit embedding_space on the doc ──────────
             modality = getattr(doc, "modality", "")
             subtype  = getattr(doc, "subtype",  "") or ""
-            if modality in ("text", "table"):
+            if modality == "image" and subtype in ("caption", "image_frame") and _resolve_asset_path(doc):
+                vision_docs.append(doc)
+            elif modality == "video" and subtype == "frame":
+                vision_docs.append(doc)
+            else:
                 text_docs.append(doc)
-            elif modality == "audio":
-                text_docs.append(doc)
-            elif modality == "image":
-                text_docs.append(doc)
-                if subtype in ("caption", "image_frame") and _resolve_asset_path(doc):
-                    vision_docs.append(doc)
-            elif modality == "video":
-                if subtype in ("speech", "ocr"):
-                    text_docs.append(doc)
-                elif subtype == "frame":
-                    vision_docs.append(doc)
-                    text_docs.append(doc)
         except Exception as exc:
             logger.warning(event="multimodal_route_failed", error=str(exc))
     return text_docs, vision_docs

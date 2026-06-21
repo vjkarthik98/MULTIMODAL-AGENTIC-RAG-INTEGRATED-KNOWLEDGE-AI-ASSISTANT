@@ -144,16 +144,12 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
     }
   }, [])
 
-  // Favicon pulse while streaming
+  // Favicon — always the PNG logo (no pulse swap while streaming)
   useEffect(() => {
     const link = document.querySelector("link[rel~='icon']")
     if (!link) return
-    if (streaming) {
-      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#863bff" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M9 13a4.5 4.5 0 0 0 3-4"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M12 13h4"/><path d="M12 18h6a2 2 0 0 1 2 2v1"/><path d="M12 8h8"/><path d="M16 8V5a2 2 0 0 1 2-2"/><circle cx="16" cy="13" r=".5" fill="#863bff"/><circle cx="18" cy="3" r=".5" fill="#863bff"/><circle cx="20" cy="21" r=".5" fill="#863bff"/><circle cx="20" cy="8" r=".5" fill="#863bff"/><circle cx="20" cy="8" r="3" fill="none" stroke="#a78bfa" opacity="0.8"><animate attributeName="r" values="3;5;3" dur="1.2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="1.2s" repeatCount="indefinite"/></circle></svg>`
-      link.href = `data:image/svg+xml;base64,${btoa(svg)}`
-    } else {
-      link.href = '/favicon.svg'
-    }
+    link.type = 'image/png'
+    link.href = '/logo.png'
   }, [streaming])
 
   // Keyboard shortcuts
@@ -629,8 +625,8 @@ const handleNewChat = () => {
         sessionId={sessionId}
         showSources={showSources}
         setShowSources={setShowSources}
-        onClearConversation={() => { handleNewChat(); setSettingsOpen(false) }}
-        onClearAllHistory={() => { handleNewChat(); setHistoryClearedAt(Date.now()); setSettingsOpen(false) }}
+        onClearConversation={() => { handleNewChat() }}
+        onClearAllHistory={() => { handleNewChat(); setHistoryClearedAt(Date.now()) }}
       />
 
       {/* Main column */}

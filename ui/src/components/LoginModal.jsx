@@ -19,7 +19,11 @@ export default function LoginModal({ onLogin, onClose, onForgotPassword }) {
     setError('')
     try {
       const data = await apiLogin(email, password)
-      onLogin(data)
+      if (data.otp_required) {
+        setError('OTP verification required. Please sign in from the main login page.')
+        return
+      }
+      onLogin({ token: data.access_token, refreshToken: data.refresh_token, email })
     } catch (err) {
       setError(err.message || 'Invalid email or password')
     } finally {

@@ -105,6 +105,8 @@ class InfraRegistry:
         self._bm25:         Optional[BM25Retriever]     = None
         self._memory:       Optional[RedisMemory]       = None
         self._mongo:        Optional[MongoMemory]       = None
+        self._cache:        Optional[Any]               = None
+        self._cache_failed: bool                        = False
 
         self._initialized: bool = False
 
@@ -196,18 +198,29 @@ class InfraRegistry:
 
         from app.core.model_loader import model_loader as _loader
 
+        def _warm_lang_detector():
+            # Pre-build the lingua language detector (CPU, ~1s) so the first text
+            # upload doesn't pay the cold build cost on the request path.
+            try:
+                from app.ingestion.txt_ingest import warm_language_detector
+                warm_language_detector()
+            except Exception:
+                pass
+
         tasks = [
             # Infra services
             asyncio.to_thread(self.get_vector_store),
             asyncio.to_thread(self.get_bm25),
             asyncio.to_thread(self.get_memory),
             asyncio.to_thread(self.get_mongo),
-            # Small always-on models — warm fast (embedder, reranker, ner, trocr)
+            # Text-path essentials only — warm fast (embedder, reranker).
             asyncio.to_thread(_loader.get_embedder),
             asyncio.to_thread(_loader.get_reranker),
-            asyncio.to_thread(_loader.get_trocr),
-            asyncio.to_thread(_loader.get_ner),
-            # Large models warm lazily on first use (qwen2_vl, whisper, diarizer)
+            # CPU NLP used by every text ingest — warm off the request path.
+            asyncio.to_thread(_warm_lang_detector),
+            # trocr/ner/whisper/qwen2_vl/diarizer/blip warm lazily on first use of
+            # their modality via model_registry.ensure_for_modality() — keeps
+            # startup fast and frees VRAM/RAM for text-only workloads.
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -239,6 +252,45 @@ class InfraRegistry:
         except Exception as exc:
             self._record_failure("qdrant")
             logger.error("qdrant_init_failed", error=str(exc))
+            return None
+
+    # LOCAL REDIS CACHE — hot-path ephemeral state (job status, embedding cache,
+    # token blacklist, rate limits). Backed by LOCAL Redis (settings.LOCAL_CACHE_*),
+    # NOT Upstash, so it never pays the ~200ms cloud round-trip. Returns None if the
+    # local server is unavailable; callers must treat None as "no cache" and degrade
+    # to in-process behavior.
+
+    def get_cache(self) -> Optional[Any]:
+        if self._cache is not None:
+            return self._cache
+        if self._cache_failed:
+            return None
+        try:
+            import redis as _redis_lib
+            client = _redis_lib.Redis(
+                host=settings.LOCAL_CACHE_HOST,
+                port=settings.LOCAL_CACHE_PORT,
+                db=settings.LOCAL_CACHE_DB,
+                socket_timeout=getattr(settings, "REDIS_TIMEOUT", 5),
+                socket_connect_timeout=2,
+                decode_responses=True,
+            )
+            client.ping()
+            self._cache = client
+            logger.info(
+                "local_cache_connected",
+                host=settings.LOCAL_CACHE_HOST,
+                port=settings.LOCAL_CACHE_PORT,
+                db=settings.LOCAL_CACHE_DB,
+            )
+            return self._cache
+        except Exception as exc:
+            self._cache_failed = True
+            logger.warning(
+                "local_cache_unavailable",
+                error=str(exc),
+                hint="start local redis-server for fast hot-path state; degrading to in-process",
+            )
             return None
 
     # BM25 RETRIEVER
@@ -338,6 +390,8 @@ class InfraRegistry:
         self._bm25         = None
         self._memory       = None
         self._mongo        = None
+        self._cache        = None
+        self._cache_failed = False
         self._initialized  = False
 
         for name, cb in self._cb.items():

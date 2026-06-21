@@ -236,7 +236,7 @@ def _guard_path(file_path: str) -> Path:
     allowed_roots = [
         Path(settings.DATA_DIR).resolve(),
         Path(tempfile.gettempdir()).resolve(),
-        Path("C:/temp").resolve(),
+        Path("/tmp").resolve(),
     ]
 
     for root in allowed_roots:
@@ -594,18 +594,23 @@ def route_ingestion_sync(
     session_id: str,
     user_id: Optional[str] = None,
 ) -> List[IngestedDocument]:
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(
-                    asyncio.run,
-                    route_ingestion(file_path, session_id, user_id=user_id),
-                )
-                return future.result()
-        return loop.run_until_complete(route_ingestion(file_path, session_id, user_id=user_id))
-    except RuntimeError:
-        return asyncio.run(route_ingestion(file_path, session_id, user_id=user_id))
+    # ALWAYS run asyncio.run() in a dedicated thread — never in the calling thread.
+    #
+    # In Python 3.12, asyncio.get_event_loop() in a non-main thread raises
+    # RuntimeError.  The old fallback `asyncio.run(...)` ran the new event loop
+    # IN the gpu_ingest executor thread, which corrupts that thread's CUDA state
+    # (asyncio.run clears the thread-local event loop on exit via
+    # asyncio.set_event_loop(None), which in PyTorch 2.12+ invalidates the
+    # thread's cuBLAS handle context).  Subsequent model.encode() calls in the
+    # same thread then SIGSEGV.
+    #
+    # Fix: always off-load asyncio.run() to a fresh OS thread so the gpu_ingest
+    # thread's CUDA state is never touched by asyncio book-keeping.
+    import concurrent.futures as _cf
+    with _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="ingest_sync") as pool:
+        return pool.submit(
+            asyncio.run,
+            route_ingestion(file_path, session_id, user_id=user_id),
+        ).result()
 
 

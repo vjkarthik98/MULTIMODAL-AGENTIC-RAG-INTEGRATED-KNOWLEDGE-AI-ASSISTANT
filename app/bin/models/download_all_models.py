@@ -49,17 +49,17 @@ HF_TOKEN: str = os.getenv("HF_TOKEN", "")
 # Each entry: key, model_id, type, size_gb, gated, optional
 MODELS: list[dict] = [
     # ── Text / embedding ──────────────────────────────────────────────────────
-    {"key": "embedder",  "model_id": "BAAI/bge-large-en-v1.5",               "type": "sentence-transformers", "size_gb": 1.35, "gated": False},
-    {"key": "reranker",  "model_id": "BAAI/bge-reranker-large",               "type": "sentence-transformers", "size_gb": 1.34, "gated": False},
-    {"key": "ner",       "model_id": "dslim/bert-base-NER",                   "type": "transformers",          "size_gb": 0.43, "gated": False},
-    {"key": "finbert",   "model_id": "yiyanghkust/finbert-tone",              "type": "transformers",          "size_gb": 0.44, "gated": False},
-    {"key": "keybert",   "model_id": "sentence-transformers/all-MiniLM-L6-v2","type": "sentence-transformers", "size_gb": 0.09, "gated": False},
+    {"key": "embedder",  "model_id": "BAAI/bge-large-en-v1.5",               "type": "sentence-transformers",    "size_gb": 1.35, "gated": False},
+    {"key": "reranker",  "model_id": "BAAI/bge-reranker-large",               "type": "sentence-transformers",    "size_gb": 1.34, "gated": False},
+    {"key": "ner",       "model_id": "dslim/bert-base-NER",                   "type": "token-classification",     "size_gb": 0.43, "gated": False},
+    {"key": "finbert",   "model_id": "yiyanghkust/finbert-tone",              "type": "sequence-classification",  "size_gb": 0.44, "gated": False},
+    {"key": "keybert",   "model_id": "sentence-transformers/all-MiniLM-L6-v2","type": "sentence-transformers",    "size_gb": 0.09, "gated": False},
 
     # ── Vision ────────────────────────────────────────────────────────────────
-    {"key": "siglip",    "model_id": "google/siglip-so400m-patch14-384",      "type": "transformers",          "size_gb": 1.76, "gated": False},
-    {"key": "blip",      "model_id": "Salesforce/blip-image-captioning-large","type": "transformers",          "size_gb": 0.90, "gated": False},
-    {"key": "qwen2vl",   "model_id": "Qwen/Qwen2-VL-2B-Instruct",            "type": "qwen2vl",               "size_gb": 2.20, "gated": False},
-    {"key": "trocr",     "model_id": "microsoft/trocr-large-printed",         "type": "vision-encoder-decoder","size_gb": 0.36, "gated": False},
+    {"key": "siglip",    "model_id": "google/siglip-so400m-patch14-384",      "type": "transformers",             "size_gb": 1.76, "gated": False},
+    {"key": "blip",      "model_id": "Salesforce/blip-image-captioning-large","type": "blip-captioning",          "size_gb": 0.90, "gated": False},
+    {"key": "qwen2vl",   "model_id": "Qwen/Qwen2-VL-2B-Instruct",            "type": "qwen2vl",                  "size_gb": 2.20, "gated": False},
+    {"key": "trocr",     "model_id": "microsoft/trocr-large-printed",         "type": "vision-encoder-decoder",   "size_gb": 0.36, "gated": False},
 
     # ── Audio ─────────────────────────────────────────────────────────────────
     {"key": "whisper",   "model_id": "Systran/faster-whisper-large-v3",       "type": "faster-whisper",        "size_gb": 1.55, "gated": False},
@@ -108,6 +108,27 @@ def _dl_transformers(model_id: str, token: str) -> None:
     AutoModel.from_pretrained(model_id, **kw)
 
 
+def _dl_token_classification(model_id: str, token: str) -> None:
+    from transformers import AutoModelForTokenClassification, AutoTokenizer
+    kw = {"token": token} if token else {}
+    AutoTokenizer.from_pretrained(model_id, **kw)
+    AutoModelForTokenClassification.from_pretrained(model_id, **kw)
+
+
+def _dl_sequence_classification(model_id: str, token: str) -> None:
+    from transformers import BertForSequenceClassification, BertTokenizer
+    kw = {"token": token} if token else {}
+    BertTokenizer.from_pretrained(model_id, **kw)
+    BertForSequenceClassification.from_pretrained(model_id, **kw)
+
+
+def _dl_blip_captioning(model_id: str, token: str) -> None:
+    from transformers import BlipForConditionalGeneration, BlipProcessor
+    kw = {"token": token} if token else {}
+    BlipProcessor.from_pretrained(model_id, **kw)
+    BlipForConditionalGeneration.from_pretrained(model_id, **kw)
+
+
 def _dl_sentence_transformers(model_id: str) -> None:
     from sentence_transformers import SentenceTransformer, CrossEncoder
     if "reranker" in model_id.lower():
@@ -123,10 +144,18 @@ def _dl_faster_whisper(model_id: str) -> None:
 
 
 def _dl_vision_encoder_decoder(model_id: str, token: str) -> None:
+    import transformers
     from transformers import VisionEncoderDecoderModel, AutoProcessor
     kw = {"token": token} if token else {}
     AutoProcessor.from_pretrained(model_id, **kw)
-    VisionEncoderDecoderModel.from_pretrained(model_id, **kw)
+    # TrOCR: suppress benign MISSING encoder.pooler.* (pooler unused in cross-attention
+    # generation) and UNEXPECTED embed_positions._float_tensor (legacy positional buffer).
+    prev = transformers.logging.get_verbosity()
+    transformers.logging.set_verbosity_error()
+    try:
+        VisionEncoderDecoderModel.from_pretrained(model_id, **kw)
+    finally:
+        transformers.logging.set_verbosity(prev)
 
 
 def _dl_qwen2vl(model_id: str, token: str) -> None:
@@ -268,6 +297,12 @@ def main() -> None:
                 _dl_qwen2vl(model_id, HF_TOKEN if gated else "")
             elif mtype == "vision-encoder-decoder":
                 _dl_vision_encoder_decoder(model_id, HF_TOKEN if gated else "")
+            elif mtype == "blip-captioning":
+                _dl_blip_captioning(model_id, HF_TOKEN if gated else "")
+            elif mtype == "token-classification":
+                _dl_token_classification(model_id, HF_TOKEN if gated else "")
+            elif mtype == "sequence-classification":
+                _dl_sequence_classification(model_id, HF_TOKEN if gated else "")
             else:
                 _dl_transformers(model_id, HF_TOKEN if gated else "")
 

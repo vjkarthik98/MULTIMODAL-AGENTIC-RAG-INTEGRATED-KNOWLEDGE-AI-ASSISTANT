@@ -163,8 +163,13 @@ def _ocr_page_image(pix: Any, page_num: int) -> Tuple[str, float]:
         import pytesseract
         from PIL import Image
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        ocr_text = (pytesseract.image_to_string(img) or "").strip()
-        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+        # Explicit DPI silences Tesseract's "Estimating resolution as N" warnings
+        # (pixmaps carry no DPI metadata).
+        _ocr_cfg = "--dpi 200"
+        ocr_text = (pytesseract.image_to_string(img, config=_ocr_cfg) or "").strip()
+        data = pytesseract.image_to_data(
+            img, output_type=pytesseract.Output.DICT, config=_ocr_cfg
+        )
         confs = [int(c) for c in data["conf"] if str(c).lstrip("-").isdigit() and int(c) >= 0]
         confidence = round(sum(confs) / max(len(confs), 1) / 100.0, 3) if confs else 0.5
         return ocr_text, confidence
@@ -377,7 +382,14 @@ class PdfIngestor(BaseIngestor):
                 page_area = max(rect.width * rect.height, 1)
                 density = _text_density(raw_text, page_area)
                 needs_full_ocr = not raw_text
-                needs_supl_ocr = bool(raw_text) and density < 0.01
+                # Supplemental OCR re-runs Tesseract on pages that already have a
+                # text layer but low density. Off by default — it's slow on filings
+                # (10-Ks) and pages with text rarely need it. Gated behind config.
+                needs_supl_ocr = (
+                    settings.PDF_SUPPLEMENTAL_OCR_ENABLED
+                    and bool(raw_text)
+                    and density < 0.01
+                )
                 pix_info: Optional[Tuple[bytes, int, int]] = None
                 if needs_full_ocr or needs_supl_ocr:
                     try:
@@ -404,9 +416,15 @@ class PdfIngestor(BaseIngestor):
                             import pytesseract
                             from PIL import Image as _PILImg
                             img = _PILImg.frombytes("RGB", [w, h], samples)
-                            ocr_text = (pytesseract.image_to_string(img) or "").strip()
+                            # Pixmaps are rendered at dpi=200 but carry no DPI
+                            # metadata; tell Tesseract explicitly to silence the
+                            # "Estimating resolution as N" warnings/errors.
+                            _ocr_cfg = "--dpi 200"
+                            ocr_text = (
+                                pytesseract.image_to_string(img, config=_ocr_cfg) or ""
+                            ).strip()
                             data = pytesseract.image_to_data(
-                                img, output_type=pytesseract.Output.DICT
+                                img, output_type=pytesseract.Output.DICT, config=_ocr_cfg
                             )
                             confs = [
                                 int(c) for c in data["conf"]

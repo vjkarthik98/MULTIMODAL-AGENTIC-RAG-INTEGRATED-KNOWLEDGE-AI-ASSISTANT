@@ -186,6 +186,80 @@ _STRIP_PREFIXES = [
 # PROMPT INJECTION PATTERNS — consolidated into app/guardrails/policies.yaml (Phase 26)
 
 
+# LLAMA-SERVER HTTP CLIENT
+#
+# Drop-in replacement for the in-process llama_cpp.Llama callable. It proxies
+# inference to a separate llama-server process (launched by start_server.sh)
+# that owns its OWN CUDA context. This is what lets the LLM stay on the GPU
+# without corrupting PyTorch's CUDA context in the main process (the in-process
+# embed-stage SIGSEGV).
+#
+# It mimics the exact surface GGUFModel uses on the loaded model:
+#   - __call__(prompt, max_tokens=, temperature=, ..., stream=True) -> iterator
+#       of {"choices":[{"text": <tok>}]} chunks (same shape as llama_cpp.Llama)
+#   - tokenize(bytes) -> List[int]   (via the server's /extras/tokenize)
+#   - detokenize(List[int]) -> bytes (via /extras/detokenize)
+# so generate(), stream() and _truncate_to_token_budget() work UNCHANGED.
+
+class _LlamaServerClient:
+
+    def __init__(self, base_url: str) -> None:
+        self._base = base_url.rstrip("/")
+        import requests  # local import keeps module import cheap
+        self._requests = requests
+
+    def __call__(self, prompt: str, stream: bool = True, **kwargs: Any):
+        # Map llama_cpp kwargs straight onto the OpenAI-compatible /v1/completions.
+        payload = {
+            "prompt":         prompt,
+            "max_tokens":     kwargs.get("max_tokens"),
+            "temperature":    kwargs.get("temperature"),
+            "top_p":          kwargs.get("top_p"),
+            "top_k":          kwargs.get("top_k"),
+            "min_p":          kwargs.get("min_p"),
+            "repeat_penalty": kwargs.get("repeat_penalty"),
+            "stop":           kwargs.get("stop"),
+            "stream":         True,
+        }
+        payload = {k: v for k, v in payload.items() if v is not None}
+        resp = self._requests.post(
+            f"{self._base}/v1/completions",
+            json=payload,
+            stream=True,
+            timeout=(10, settings.LLM_CALL_TIMEOUT_SEC + 30),
+        )
+        resp.raise_for_status()
+        for raw in resp.iter_lines(decode_unicode=True):
+            if not raw:
+                continue
+            line = raw[6:] if raw.startswith("data: ") else raw
+            if line.strip() == "[DONE]":
+                break
+            try:
+                import json as _json
+                yield _json.loads(line)
+            except Exception:
+                continue
+
+    def tokenize(self, data: bytes) -> List[int]:
+        text = data.decode("utf-8", errors="replace") if isinstance(data, (bytes, bytearray)) else str(data)
+        r = self._requests.post(f"{self._base}/extras/tokenize", json={"input": text}, timeout=30)
+        r.raise_for_status()
+        return list(r.json().get("tokens", []))
+
+    def detokenize(self, tokens: List[int]) -> bytes:
+        r = self._requests.post(f"{self._base}/extras/detokenize", json={"tokens": list(tokens)}, timeout=30)
+        r.raise_for_status()
+        return str(r.json().get("text", "")).encode("utf-8", errors="replace")
+
+    def health(self) -> bool:
+        try:
+            r = self._requests.get(f"{self._base}/v1/models", timeout=5)
+            return r.status_code == 200
+        except Exception:
+            return False
+
+
 # GGUF MODEL CLASS
 
 class GGUFModel:
@@ -266,6 +340,22 @@ class GGUFModel:
             if self._llm:
                 return self._llm
 
+            # SEPARATE-PROCESS PATH — proxy to the llama-server (its own CUDA
+            # context). No in-process llama.cpp, so PyTorch keeps the GPU to
+            # itself in this process and ingestion embeds never SIGSEGV.
+            if settings.LLM_USE_SERVER:
+                base = f"http://{settings.LLM_SERVER_HOST}:{settings.LLM_SERVER_PORT}"
+                client = _LlamaServerClient(base)
+                self._llm = client
+                logger.info(
+                    event="gguf_loaded",
+                    model=self._model_name,
+                    mode="llama_server",
+                    server=base,
+                    n_gpu_layers=self.n_gpu_layers,
+                )
+                return self._llm
+
             if not os.path.exists(self._model_path):
                 raise FileNotFoundError(f"MODEL_NOT_FOUND: {self._model_path}")
 
@@ -313,6 +403,17 @@ class GGUFModel:
     # model to count tokens precisely, then truncates to fit within the context
     # window. Hard floor of 150 output tokens reserved regardless of max_tokens.
     def _truncate_to_token_budget(self, prompt: str, max_tokens: int) -> str:
+        budget = settings.CONTEXT_MAX_TOKENS - max(max_tokens, 150) - 64  # 64-token safety margin
+
+        # FAST PATH — skip the tokenize() round-trip when the prompt clearly fits.
+        # With the LLM in a separate process, tokenize()/detokenize() are HTTP
+        # round-trips that block time-to-first-token. English/finance text averages
+        # well above 2.5 chars/token; if the prompt is shorter than budget*2.5
+        # chars it cannot exceed the token budget, so we return it untouched and
+        # avoid the network call entirely. Long prompts still tokenize precisely.
+        if len(prompt) <= int(budget * 2.5):
+            return prompt
+
         try:
             llm = self._load()
             # tokenize/detokenize touch the shared llama.cpp context — they MUST
@@ -321,7 +422,6 @@ class GGUFModel:
             # KV cache and crashes the process with SIGSEGV).
             with self._lock:
                 token_ids = llm.tokenize(prompt.encode("utf-8", errors="replace"))
-                budget = settings.CONTEXT_MAX_TOKENS - max(max_tokens, 150) - 64  # 64-token safety margin
                 if len(token_ids) <= budget:
                     return prompt
                 token_ids = token_ids[:budget]
@@ -329,7 +429,7 @@ class GGUFModel:
         except Exception as _e:
             # Tokenizer unavailable — fall back to conservative char truncation
             logger.warning(event="gguf_token_truncation_failed", error=str(_e))
-            safe_chars = (settings.CONTEXT_MAX_TOKENS - max(max_tokens, 150) - 64) * 3
+            safe_chars = budget * 3
             return prompt[:safe_chars]
 
     # GENERATE WITH RETRY + CIRCUIT BREAKER — SECTION 2.1

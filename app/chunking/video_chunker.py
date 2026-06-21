@@ -68,6 +68,32 @@ def _extract_audio(video_path: str, wav_path: str) -> bool:
         return False
 
 
+def _measure_snr(wav_path: str) -> dict:
+    """Measure audio quality from an extracted WAV using ffmpeg volumedetect.
+
+    Returns snr (dynamic range in dB), snr_degraded flag, clipping_detected flag.
+    SNR here is estimated as peak - mean volume, a proxy for dynamic range.
+    """
+    out = {"snr": None, "snr_degraded": False, "clipping_detected": False}
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-i", wav_path, "-af", "volumedetect", "-f", "null", "/dev/null"],
+            capture_output=True, text=True, timeout=30,
+        )
+        stderr = r.stderr or ""
+        mean_m = re.search(r"mean_volume:\s*([-\d.]+)\s*dB", stderr)
+        max_m  = re.search(r"max_volume:\s*([-\d.]+)\s*dB",  stderr)
+        if mean_m and max_m:
+            mean_vol = float(mean_m.group(1))
+            max_vol  = float(max_m.group(1))
+            out["snr"]               = round(max_vol - mean_vol, 1)
+            out["snr_degraded"]      = mean_vol < -30.0
+            out["clipping_detected"] = max_vol > -1.0
+    except Exception as exc:
+        logger.warning(event="snr_measurement_failed", error=str(exc))
+    return out
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # MODEL WRAPPERS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -227,11 +253,13 @@ class VideoChunker(BaseChunker):
                         "revenue", "earnings per share", "fiscal year",
                     ))
 
-                    # Forward audio quality signals from ingestor
+                    # Measure audio quality from the extracted WAV (BUG-3 fix).
+                    # Falls back to values from ingestor if measurement fails.
                     ext_extra = ext.extra or {}
-                    _snr               = ext_extra.get("snr")
-                    _snr_degraded      = ext_extra.get("snr_degraded", False)
-                    _clipping_detected = ext_extra.get("clipping_detected", False)
+                    _aq = _measure_snr(wav_path)
+                    _snr               = _aq["snr"]               if _aq["snr"] is not None else ext_extra.get("snr")
+                    _snr_degraded      = _aq["snr_degraded"]      or ext_extra.get("snr_degraded", False)
+                    _clipping_detected = _aq["clipping_detected"] or ext_extra.get("clipping_detected", False)
 
                     # 4. Frame extraction (import from video_ingest where it lives).
                     try:
@@ -345,6 +373,46 @@ class VideoChunker(BaseChunker):
                         )
                         if doc:
                             docs.append(doc)
+
+                    # BUG-2 fix: emit one vision-space frame doc per unique captioned
+                    # frame so it lands in vision_collection via SigLIP embedding.
+                    # Iterating sorted(captioned_frames) guarantees exactly one doc
+                    # per physical frame — no duplicates from the ±5 s audio window.
+                    _vis_base = len(audio_chunks) * 10 + 1
+                    for _vis_idx, (ts, cf) in enumerate(sorted(captioned_frames.items())):
+                        fp  = cf.get("frame_path", "")
+                        cap = cf.get("frame_caption", "").strip()
+                        ocr = cf.get("ocr_text", "").strip()
+                        if not fp or not Path(fp).exists() or (not cap and not ocr):
+                            continue
+                        vis_text      = f"{cap}\n[ON-SCREEN]: {ocr}".strip() if ocr else cap
+                        _vis_chunk_id = _vis_base + _vis_idx
+                        vis_doc = self._make_doc(
+                            text=vis_text,
+                            modality="mp4",
+                            subtype="frame",
+                            source=source,
+                            page=None,
+                            chunk_idx=_vis_chunk_id,
+                            structure={
+                                "source_file":        source,
+                                "chunk_index":        _vis_chunk_id,
+                                "frame_timestamp":    round(ts, 3),
+                                "start_timestamp":    round(ts, 3),
+                                "end_timestamp":      round(ts, 3),
+                                "is_earnings_call":   is_earnings_call,
+                                "finance_entities":   extract_finance_entities(vis_text),
+                                "has_finance_signal": bool(_FINANCIAL_TRIGGER_RE.search(vis_text)),
+                                "asset_path":         fp,
+                                "slide_number":       cf.get("slide_number"),
+                                "scene_change":       cf.get("scene_change", False),
+                                "embedding_space":    "vision",
+                            },
+                            meta=meta,
+                            surface=surface,
+                        )
+                        if vis_doc:
+                            docs.append(vis_doc)
 
             logger.info(event="video_chunking_done", source=source, chunks=len(docs))
             _CHUNKS_TOTAL.inc(len(docs))

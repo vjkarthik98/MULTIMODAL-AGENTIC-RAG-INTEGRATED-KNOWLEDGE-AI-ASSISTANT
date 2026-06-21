@@ -166,7 +166,7 @@ function SourceChip({ source }) {
     if (source.page != null || source.page_number != null) {
       const pg = source.page ?? source.page_number
       suffix = ` · p.${pg}`
-      if (source.section_title) suffix += ` · ${String(source.section_title).slice(0, 30)}`
+      if (source.section_title) suffix += ` · ${String(source.section_title)}`
     } else if (isAudio || isVideo) {
       const ts = fmtTimestamp(source.timestamp_start)
       if (ts) {
@@ -177,12 +177,12 @@ function SourceChip({ source }) {
       suffix = ` · ${source.sheet_name}`
       if (source.row_range) suffix += ` row ${source.row_range}`
     } else if (source.heading) {
-      suffix = ` · ${String(source.heading).slice(0, 40)}`
+      suffix = ` · ${String(source.heading)}`
     } else if (source.section_title && !isTxt) {
       const st = String(source.section_title).trim()
       if (st) suffix = ` · ${st}`
     } else if (source.image_title) {
-      suffix = ` · ${String(source.image_title).slice(0, 30)}`
+      suffix = ` · ${String(source.image_title)}`
     } else if (source.start_time != null) {
       // legacy field
       const ts = fmtTimestamp(source.start_time)

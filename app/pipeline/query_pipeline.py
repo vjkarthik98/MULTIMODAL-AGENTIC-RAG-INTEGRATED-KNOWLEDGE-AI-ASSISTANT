@@ -504,26 +504,60 @@ def _build_sources_array(docs: List[Dict[str, Any]], max_items: int = 3) -> List
 
         raw_section = meta.get("section_title")
         section_title = str(raw_section).strip() if raw_section else None
-        if not section_title and modality in ("table", "excel"):
+        if not section_title and modality in ("table", "excel", "xlsx"):
             import re as _re
             _m = _re.match(r'\[Sheet:\s*([^,\]\n]+)', str(text))
             if _m:
                 section_title = _m.group(1).strip()
-        if not section_title and modality == "image":
-            caption = meta.get("caption")
-            if caption:
-                section_title = str(caption).strip()
+
+        # ── Per-modality locator fields the UI SourceChip reads directly ──────
+        # The chip looks for: heading (docx), sheet_name/row_range (xlsx),
+        # image_title (image), timestamp_start + speaker_name/role (audio/video).
+        # All of these live in the Qdrant payload (meta) but were previously
+        # dropped here, so the chip showed only the filename.
+
+        # DOCX heading
+        heading = meta.get("heading")
+        heading = str(heading).strip() if heading else None
+
+        # XLSX sheet + row range
+        sheet_name = meta.get("sheet_name")
+        sheet_name = str(sheet_name).strip() if sheet_name else None
+        row_range = meta.get("row_range")
+        if row_range is None and meta.get("row_start") is not None:
+            _rs, _re_ = meta.get("row_start"), meta.get("row_end")
+            row_range = f"{_rs}-{_re_}" if _re_ is not None else str(_rs)
+        row_range = str(row_range).strip() if row_range else None
+
+        # IMAGE title / caption
+        image_title = meta.get("image_title") or meta.get("caption")
+        image_title = str(image_title).strip() if image_title else None
+
+        # AUDIO / VIDEO timestamp + speaker. The chip reads `timestamp_start`
+        # (not `start_time`), so expose it under that name too.
+        timestamp_start = start_time
+        speaker_name = meta.get("speaker_name") or meta.get("speaker_label") or meta.get("speaker")
+        speaker_name = str(speaker_name).strip() if speaker_name else None
+        speaker_role = meta.get("speaker_role")
+        speaker_role = str(speaker_role).strip() if speaker_role else None
 
         out.append({
-            "text":          str(text)[:200],
-            "score":         round(score, 6),
-            "source":        source_name,
-            "page_number":   page_number,
-            "section_title": section_title,
-            "start_time":    start_time,
-            "end_time":      end_time,
-            "modality":      modality,
-            "doc_id":        doc_id,
+            "text":            str(text)[:200],
+            "score":           round(score, 6),
+            "source":          source_name,
+            "page_number":     page_number,
+            "section_title":   section_title,
+            "heading":         heading,
+            "sheet_name":      sheet_name,
+            "row_range":       row_range,
+            "image_title":     image_title,
+            "start_time":      start_time,
+            "end_time":        end_time,
+            "timestamp_start": timestamp_start,
+            "speaker_name":    speaker_name,
+            "speaker_role":    speaker_role,
+            "modality":        modality,
+            "doc_id":          doc_id,
         })
     return out
 

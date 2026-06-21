@@ -48,9 +48,15 @@ class BaseIngestor(ABC):
         except Exception:
             return text
 
-    # Shared helper: apply Phase-26 PII scrub
+    # Shared helper: apply Phase-26 PII scrub.
+    # Gated on settings.PII_DETECTION_ENABLED (same flag _redact_pii honors) so the
+    # spaCy/Presidio NER pass (~1.4s/doc) is skipped when PII detection is disabled.
+    # Set PII_DETECTION_ENABLED=true in .env to re-enable ingest-time PII scrubbing.
     @staticmethod
     def _scrub_pii(text: str, surface: str) -> str:
+        from app.core.config import settings
+        if not getattr(settings, "PII_DETECTION_ENABLED", False):
+            return text
         try:
             from app.guardrails.pii import scrub_pii
             clean, _ = scrub_pii(text)

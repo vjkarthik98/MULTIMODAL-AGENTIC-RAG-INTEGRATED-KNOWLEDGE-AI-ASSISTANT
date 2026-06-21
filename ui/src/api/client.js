@@ -305,7 +305,7 @@ export async function patchLastMessage(token, sessionId, content, sources, msgId
 // ── Phase 8/9 — New endpoints ──────────────────────────────────────────────
 
 export async function getIngestionStatus(token, jobId) {
-  const res = await fetch(`${API}/api/ingestion/status/${encodeURIComponent(jobId)}`, {
+  const res = await fetch(`${API}/rag/ingestion/status/${encodeURIComponent(jobId)}`, {
     headers: bearer(token),
   })
   if (!res.ok) throw new Error(`Status check failed (${res.status})`)

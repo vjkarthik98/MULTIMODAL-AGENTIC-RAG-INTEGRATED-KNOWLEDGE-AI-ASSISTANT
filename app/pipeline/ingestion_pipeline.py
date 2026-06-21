@@ -271,19 +271,21 @@ def _scan_corruption(file_path: str) -> List[str]:
 
 # SHA-256 DEDUP CHECK AGAINST QDRANT — SECTION 2.3
 
-def _check_duplicate(file_hash: str, session_id: str) -> bool:
+def _check_duplicate(file_hash: str, session_id: str, user_id: str = "") -> bool:
     if not settings.DEDUP_ENABLED:
         return False
+    if not user_id:
+        return False  # can't do tenant-safe dedup without user_id — skip silently
     try:
         from app.core.infra_registry import infra
         vs = infra.get_vector_store()
         if vs is None:
             return False
-        # GLOBAL dedup — no session_id filter so cross-session re-uploads are caught
         results = vs.search_by_payload(
             field="checksum_sha256",
             value=file_hash,
-            session_id=None,
+            user_id=user_id,
+            session_id=session_id or "",
             limit=1,
         )
         return bool(results)
@@ -498,9 +500,24 @@ class _UnavailableVectorStore:
 
 class _ProgressEmitter:
 
-    def __init__(self, file_name: str, session_id: str) -> None:
+    # Map (stage, status) → IngestJob status string.  Only "started" transitions
+    # are relayed so the job status never goes backwards.
+    _STAGE_MAP: Dict[Tuple[str, str], str] = {
+        ("ingest",  "started"):    "extracting",
+        ("chunk",   "started"):    "chunking",
+        ("embed",   "started"):    "embedding",
+        ("store",   "started"):    "embedding",   # store is fast; keep "embedding" shown
+    }
+
+    def __init__(
+        self,
+        file_name: str,
+        session_id: str,
+        job_cb: Optional[Any] = None,  # Callable[[str], None] — updates IngestJob status
+    ) -> None:
         self.file_name  = file_name
         self.session_id = session_id
+        self._job_cb    = job_cb
 
     def emit(self, stage: str, status: str, **kwargs: Any) -> None:
         logger.info(
@@ -511,6 +528,13 @@ class _ProgressEmitter:
             session_id=self.session_id,
             **kwargs,
         )
+        if self._job_cb:
+            new_status = self._STAGE_MAP.get((stage, status))
+            if new_status:
+                try:
+                    self._job_cb(new_status)
+                except Exception:
+                    pass
 
 
 # GPU SEMAPHORE — module-level, shared across all IngestionPipeline instances.
@@ -552,23 +576,29 @@ def _job_key(job_id: str) -> str:
 
 
 def _store_job(job: IngestJob) -> None:
-    """Persist IngestJob to Redis with a 1-hour TTL. Silently skips if Redis unavailable."""
+    """Persist IngestJob to LOCAL Redis cache with a 1-hour TTL.
+
+    Job status is ephemeral, single-instance state — it goes to the local cache
+    (~0.5ms) not Upstash cloud (~200ms), so per-stage writes during ingest and
+    status-poll reads stay off the cloud round-trip path. Silently skips if the
+    local cache is unavailable.
+    """
     try:
         from app.core.infra_registry import infra
-        redis = infra.get_memory()
-        if redis and hasattr(redis, "client"):
-            redis.client.setex(_job_key(job.job_id), _JOB_TTL_SECONDS, json.dumps(job.to_dict()))
+        cache = infra.get_cache()
+        if cache is not None:
+            cache.set(_job_key(job.job_id), json.dumps(job.to_dict()), ex=_JOB_TTL_SECONDS)
     except Exception:
         pass
 
 
 def get_ingest_job(job_id: str) -> Optional[Dict[str, Any]]:
-    """Fetch IngestJob dict from Redis. Returns None if not found."""
+    """Fetch IngestJob dict from the local Redis cache. Returns None if not found."""
     try:
         from app.core.infra_registry import infra
-        redis = infra.get_memory()
-        if redis and hasattr(redis, "client"):
-            raw = redis.client.get(_job_key(job_id))
+        cache = infra.get_cache()
+        if cache is not None:
+            raw = cache.get(_job_key(job_id))
             if raw:
                 return json.loads(raw)
     except Exception:
@@ -596,12 +626,24 @@ class IngestionPipeline:
         file_path: str,
         session_id: str = "default",
         user_id: Optional[str] = None,
+        _job_cb: Optional[Any] = None,
     ) -> Dict[str, Any]:
+        import functools
         async with _gpu_semaphore():        # module-level: shared across all pipeline instances
             async with self._semaphore:    # instance-level: local concurrency cap
-                loop = asyncio.get_event_loop()
+                # Run on the dedicated GPU ingest executor — its thread already
+                # has PyTorch CUDA initialized from startup warmup.  Using the
+                # default asyncio executor (a brand-new thread) causes a SIGSEGV
+                # because a fresh thread tries to init PyTorch CUBLAS after
+                # llama.cpp already owns the CUDA device.
+                from app.core.startup_optimizer import get_gpu_ingest_executor
+                loop = asyncio.get_running_loop()
+                fn = functools.partial(
+                    self.process_file, file_path, session_id, user_id,
+                    _job_cb=_job_cb,
+                )
                 return await asyncio.wait_for(
-                    loop.run_in_executor(None, self.process_file, file_path, session_id, user_id),
+                    loop.run_in_executor(get_gpu_ingest_executor(), fn),
                     timeout=settings.FILE_PROCESSING_TIMEOUT_SEC,
                 )
 
@@ -631,7 +673,7 @@ class IngestionPipeline:
         session_id: str = "default",
         user_id: Optional[str] = None,
     ) -> asyncio.Future:
-        loop   = asyncio.get_event_loop()
+        loop   = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
         await self._queue.put((file_path, session_id, future, user_id))
         _set_queue_depth(self._queue.qsize())
@@ -669,15 +711,34 @@ class IngestionPipeline:
         )
         _store_job(job)
 
+        def _on_stage(new_status: str) -> None:
+            """Called from the gpu_ingest thread when a pipeline stage starts."""
+            job.status = new_status
+            _store_job(job)
+
         async def _run() -> None:
             try:
                 job.status = "extracting"
                 _store_job(job)
-                result = await self.process_file_async(file_path, session_id, user_id)
+                result = await self.process_file_async(
+                    file_path, session_id, user_id, _job_cb=_on_stage,
+                )
                 job.status       = "done"
                 job.progress     = 1.0
                 job.chunks_done  = result.get("chunks", 0) if isinstance(result, dict) else 0
                 job.chunks_total = job.chunks_done
+                # Copy to knowledge_base only after embeddings are confirmed in Qdrant.
+                if kb_path:
+                    try:
+                        import shutil as _shutil
+                        Path(kb_path).parent.mkdir(parents=True, exist_ok=True)
+                        _shutil.copy2(file_path, kb_path)
+                    except Exception as _cp_err:
+                        logger.warning(
+                            event="background_ingest_kb_copy_failed",
+                            job_id=job_id,
+                            error=str(_cp_err),
+                        )
                 logger.info(
                     event="background_ingest_done",
                     job_id=job_id,
@@ -688,12 +749,7 @@ class IngestionPipeline:
                 job.status = "error"
                 job.error  = str(exc)
                 logger.warning(event="background_ingest_failed", job_id=job_id, error=str(exc))
-                # Remove the KB copy so a failed file doesn't appear queryable in sidebar.
-                if kb_path:
-                    try:
-                        Path(kb_path).unlink(missing_ok=True)
-                    except Exception:
-                        pass
+                # kb_path was never written — nothing to remove.
             finally:
                 _store_job(job)
                 # Always clean up the staging file — the background job owns it.
@@ -717,6 +773,7 @@ class IngestionPipeline:
         file_path: str,
         session_id: str = "default",
         user_id: Optional[str] = None,
+        _job_cb: Optional[Any] = None,
     ) -> Dict[str, Any]:
 
         if not session_id:
@@ -724,7 +781,7 @@ class IngestionPipeline:
 
         file_name = os.path.basename(file_path)
         start     = time.time()
-        progress  = _ProgressEmitter(file_name, session_id)
+        progress  = _ProgressEmitter(file_name, session_id, job_cb=_job_cb)
 
         # OTEL SPAN STUB
         span_ctx: Dict[str, Any] = {"trace_id": str(uuid.uuid4())}
@@ -778,7 +835,7 @@ class IngestionPipeline:
             # SHA-256 HASH + DEDUP — SECTION 2.2 / 2.3
             file_hash = _sha256(file_path)
 
-            if _check_duplicate(file_hash, session_id):
+            if _check_duplicate(file_hash, session_id, user_id=effective_user_id):
                 logger.info(
                     event="ingestion_duplicate_skipped",
                     file=file_name,
@@ -910,18 +967,32 @@ class IngestionPipeline:
             progress.emit("store", "started")
             t_store = time.time()
 
-            # BM25 INDEX UPDATE — after Qdrant upsert succeeds
-            if total > 0:
-                try:
-                    if self.bm25:
-                        self.bm25.add_documents(chunks, session_id=session_id, user_id=user_id)
-                except Exception as e:
-                    logger.error(
-                        event="bm25_update_failed",
-                        error=str(e),
-                        session_id=session_id,
-                    )
-                    _record_error(modality, "bm25_update_failed")
+            # BM25 INDEX UPDATE — runs in a separate thread so it doesn't block
+            # the pipeline return. Qdrant upsert already completed inside
+            # _stream_embed_and_store; BM25 is a local .pkl write and can lag
+            # behind by a few seconds without affecting query correctness
+            # (Qdrant results are available immediately; BM25 catches up before
+            # the next query is likely issued).
+            if total > 0 and self.bm25:
+                _bm25_ref   = self.bm25
+                _chunks_ref = list(chunks)
+                _sess_ref   = session_id
+                _uid_ref    = user_id
+                _mod_ref    = modality
+
+                def _bm25_task() -> None:
+                    try:
+                        _bm25_ref.add_documents(_chunks_ref, session_id=_sess_ref, user_id=_uid_ref)
+                    except Exception as _e:
+                        logger.error(
+                            event="bm25_update_failed",
+                            error=str(_e),
+                            session_id=_sess_ref,
+                        )
+                        _record_error(_mod_ref, "bm25_update_failed")
+
+                import concurrent.futures as _cf
+                _cf.ThreadPoolExecutor(max_workers=1).submit(_bm25_task)
 
             store_latency = round(time.time() - t_store, 2)
             total_latency = round(time.time() - start, 2)

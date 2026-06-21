@@ -110,7 +110,7 @@ class Settings:
     PROMETHEUS_PORT: int          = _int("PROMETHEUS_PORT", 9090)
     PROMETHEUS_METRICS_PATH: str  = _str("PROMETHEUS_METRICS_PATH", "/metrics")
 
-    # PERFORMANCE — defaults tuned for Tesla T4 GPU deployment
+    # PERFORMANCE — defaults tuned for AWS g5.xlarge A10G GPU deployment
     THREAD_POOL_SIZE: int           = _int("THREAD_POOL_SIZE", 8)
     ASYNC_SEMAPHORE_WORKERS: int    = _int("ASYNC_SEMAPHORE_WORKERS", 10)
     MAX_PARALLEL_REQUESTS: int      = _int("MAX_PARALLEL_REQUESTS", 32)
@@ -140,6 +140,15 @@ class Settings:
     LLM_THREADS: int         = _int("LLM_THREADS", 4)
     LLM_N_BATCH: int         = _int("LLM_N_BATCH", 1024)
     LLM_USE_MLOCK: bool      = _bool("LLM_USE_MLOCK", True)
+    # SEPARATE LLM PROCESS — llama.cpp on the GPU must run in its OWN process.
+    # In-process, llama.cpp's CUDA init corrupts PyTorch's CUDA context on worker
+    # threads (embedding SIGSEGVs at ingest time). Running llama.cpp as a separate
+    # llama-server (its own CUDA context) lets the LLM stay on GPU (fast) while
+    # PyTorch owns CUDA in the main process. start_server.sh launches the server;
+    # GGUFModel proxies generate()/stream() to it over HTTP.
+    LLM_USE_SERVER: bool     = _bool("LLM_USE_SERVER", True)
+    LLM_SERVER_HOST: str     = _str("LLM_SERVER_HOST", "127.0.0.1")
+    LLM_SERVER_PORT: int     = _int("LLM_SERVER_PORT", 8081)
     LLM_MAX_RETRIES: int     = _int("LLM_MAX_RETRIES", 3)
     LLM_RETRY_WAIT_MIN: int  = _int("LLM_RETRY_WAIT_MIN", 1)
     LLM_RETRY_WAIT_MAX: int  = _int("LLM_RETRY_WAIT_MAX", 10)
@@ -176,10 +185,10 @@ class Settings:
     EXCEL_SEMANTIC_GROUP: bool       = _bool("EXCEL_SEMANTIC_GROUP", True)
     AUDIO_SPEAKER_SUBINDEX_ENABLED: bool = _bool("AUDIO_SPEAKER_SUBINDEX_ENABLED", False)
 
-    # MODEL DEVICE / WARMUP — Tesla T4 / A10G all_gpu profile
+    # MODEL DEVICE / WARMUP — A10G 24 GB all_gpu profile (AWS g5.xlarge)
     # Profiles: "auto" (CUDA → all_gpu, else cpu), "hybrid", "all_gpu", "all_cpu"
     MODELS_DEVICE_PROFILE: str       = _str("MODELS_DEVICE_PROFILE", "all_gpu")
-    VRAM_BUDGET_GB: float            = _float("VRAM_BUDGET_GB", 13.0)
+    VRAM_BUDGET_GB: float            = _float("VRAM_BUDGET_GB", 22.0)
     WARMUP_AT_STARTUP: bool          = _bool("WARMUP_AT_STARTUP", True)
     WARMUP_MODELS: List[str]         = _list("WARMUP_MODELS", ["text_embedder", "llm", "reranker", "siglip", "blip", "whisper"])
     MODEL_PARALLEL_LOAD: bool        = _bool("MODEL_PARALLEL_LOAD", True)
@@ -314,6 +323,15 @@ class Settings:
     REDIS_CB_RESET_TIMEOUT: int      = _int("REDIS_CB_RESET_TIMEOUT", 30)
     REDIS_MAX_WINDOW_TURNS: int      = _int("REDIS_MAX_WINDOW_TURNS", 40)
     REDIS_MAX_CONNECTIONS: int       = _int("REDIS_MAX_CONNECTIONS", 10)
+    # LOCAL REDIS CACHE — hot-path ephemeral state (job status, embedding cache,
+    # token blacklist, rate limits). Always local (host/port) so it never pays the
+    # ~200ms Upstash cloud round-trip. Durable conversation memory still uses Upstash.
+    LOCAL_CACHE_HOST: str            = _str("LOCAL_CACHE_HOST", "localhost")
+    LOCAL_CACHE_PORT: int            = _int("LOCAL_CACHE_PORT", 6379)
+    LOCAL_CACHE_DB: int              = _int("LOCAL_CACHE_DB", 1)
+    # In-process TTL (seconds) for JWT revocation/generation checks so most authed
+    # requests do zero network. Revocation propagates within this window. 0 disables.
+    AUTH_REVOCATION_CACHE_TTL: int   = _int("AUTH_REVOCATION_CACHE_TTL", 30)
 
     # MONGODB
     MONGO_URI: str                       = _str("MONGO_URI", "mongodb://localhost:27017")
@@ -611,6 +629,10 @@ class Settings:
 
     # DOCUMENT PROCESSING
     PDF_OCR_TEXT_DENSITY_THRESHOLD: float  = _float("PDF_OCR_TEXT_DENSITY_THRESHOLD", 0.1)
+    # Supplemental OCR re-runs Tesseract on pages that already have a text layer but
+    # low text density (tables, sparse pages). Off by default — it's slow on filings
+    # like 10-Ks and pages with text rarely need it. Pages with NO text are always OCR'd.
+    PDF_SUPPLEMENTAL_OCR_ENABLED: bool     = _bool("PDF_SUPPLEMENTAL_OCR_ENABLED", False)
     LIBREOFFICE_ENABLED: bool              = _bool("LIBREOFFICE_ENABLED", True)
     LIBREOFFICE_PATH: str                  = _str("LIBREOFFICE_PATH", "libreoffice")
     LIBREOFFICE_TIMEOUT_SEC: int           = _int("LIBREOFFICE_TIMEOUT_SEC", 60)

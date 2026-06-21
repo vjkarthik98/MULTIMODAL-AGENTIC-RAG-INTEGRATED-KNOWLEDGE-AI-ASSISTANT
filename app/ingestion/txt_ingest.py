@@ -456,11 +456,43 @@ def _normalize_text(text: str) -> str:
     return text.strip()
 
 
+# Module-level cached lingua detector. Building from_all_languages() loads every
+# language n-gram model (~1.2s) — doing it per-extract was a major ingest cost.
+# Built once on first use, then reused for every file. Thread-safe: the builder
+# is idempotent and the worst case under a race is building twice.
+_LANG_DETECTOR = None
+_LANG_DETECTOR_FAILED = False
+
+
+def _get_language_detector():
+    global _LANG_DETECTOR, _LANG_DETECTOR_FAILED
+    if _LANG_DETECTOR is not None or _LANG_DETECTOR_FAILED:
+        return _LANG_DETECTOR
+    try:
+        from lingua import LanguageDetectorBuilder
+        # low_accuracy_mode loads smaller models and is markedly faster; language
+        # routing only needs the dominant language, not fine-grained scoring.
+        _LANG_DETECTOR = (
+            LanguageDetectorBuilder.from_all_languages()
+            .with_low_accuracy_mode()
+            .build()
+        )
+    except Exception:
+        _LANG_DETECTOR_FAILED = True
+    return _LANG_DETECTOR
+
+
+def warm_language_detector() -> None:
+    """Pre-build the lingua detector at startup so the first upload isn't cold."""
+    _get_language_detector()
+
+
 def _detect_language(text: str) -> Optional[str]:
     sample = text[:3000]
     try:
-        from lingua import LanguageDetectorBuilder
-        detector = LanguageDetectorBuilder.from_all_languages().build()
+        detector = _get_language_detector()
+        if detector is None:
+            return None
         lang = detector.detect_language_of(sample)
         if lang:
             return lang.iso_code_639_1.name.lower()

@@ -248,11 +248,30 @@ class JsonFormatter(logging.Formatter):
 
 class StructuredLogger:
 
+    # Field names reserved by the stdlib LogRecord. Passing any of these via
+    # `extra=` makes logging.Logger.makeRecord() raise
+    # "Attempt to overwrite '<key>' in LogRecord". Structured fields that happen
+    # to use one of these names (e.g. logger.info(..., filename=...)) would crash
+    # the caller. We remap any collision to "<key>_" so the value is preserved
+    # and the log call can never fail. See logging.Logger.makeRecord.
+    _RESERVED_LOGRECORD_KEYS = frozenset({
+        "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
+        "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
+        "created", "msecs", "relativeCreated", "thread", "threadName",
+        "processName", "process", "taskName", "message", "asctime",
+    })
+
     def __init__(self, logger: logging.Logger) -> None:
         self._logger = logger
 
     def _build_extra(self, event: Optional[str], **kwargs: Any) -> Dict[str, Any]:
-        return {"event": event, **kwargs}
+        safe: Dict[str, Any] = {"event": event}
+        for key, value in kwargs.items():
+            if key in self._RESERVED_LOGRECORD_KEYS or key == "event":
+                safe[f"{key}_"] = value
+            else:
+                safe[key] = value
+        return safe
 
     def _log(
         self,

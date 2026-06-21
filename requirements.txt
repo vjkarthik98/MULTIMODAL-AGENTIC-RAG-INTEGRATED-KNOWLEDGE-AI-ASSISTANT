@@ -1,5 +1,4 @@
 
-
 # WEB FRAMEWORK
 fastapi>=0.110
 uvicorn[standard]>=0.29
@@ -15,26 +14,42 @@ python-dotenv>=1.0
 
 
 
-# LLM — llama-cpp-python
-# Default install below = CPU build (works everywhere).
-# For GPU on Lightning AI (run this AFTER pip install -r requirements.txt):
-#   CMAKE_ARGS="-DGGML_CUDA=on" pip install "llama-cpp-python>=0.2.60" --upgrade --force-reinstall --no-cache-dir
+# LLM — llama-cpp-python (CUDA 12.x / A10G build)
+# ── MUST be built from source so the CUDA backend is statically linked and
+#    actually enumerates the GPU (the prebuilt wheels' dynamic backend registers
+#    0 devices on this box → silent CPU fallback at ~5 tok/s). Build against the
+#    system CUDA 12.8 toolkit (matches torch+cu124's libcudart.so.12):
+#
+#   CMAKE_ARGS="-DGGML_CUDA=on -DGGML_BACKEND_DL=OFF -DGGML_NATIVE=OFF \
+#     -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc" \
+#   CUDACXX=/usr/local/cuda-12.8/bin/nvcc CUDA_HOME=/usr/local/cuda-12.8 \
+#   pip install "llama-cpp-python==0.3.30" --no-binary llama-cpp-python --force-reinstall --no-cache-dir
+#
+# llama.cpp runs as a SEPARATE process (llama-server, own CUDA context) — in
+# process it corrupts PyTorch's CUDA context on worker threads and SIGSEGVs the
+# embed stage. start_server.sh launches `python -m llama_cpp.server`; the
+# sse-starlette + starlette-context deps below are required by that server.
 llama-cpp-python>=0.2.60
+sse-starlette>=2.0
+starlette-context>=0.3
 huggingface_hub>=0.22
 
 
 
-# EMBEDDINGS & MODELS
-# For CPU-only PyTorch:
-#   pip install torch --index-url https://download.pytorch.org/whl/cpu
-torch>=2.2
-torchvision>=0.17
-torchaudio>=2.2
+# EMBEDDINGS & MODELS — CUDA 12.x / A10G 24 GB
+# ── PyTorch MUST be installed before this file using the cu124 index ──────────
+#   pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 \
+#     --index-url https://download.pytorch.org/whl/cu124
+# pip install -r requirements.txt will upgrade torch to cu130 (PyPI default) — prevent
+# this by running the explicit cu124 install above AFTER requirements.txt.
+torch>=2.6
+torchvision>=0.21
+torchaudio>=2.6
 sentence-transformers>=2.7
 transformers>=4.39
 sentencepiece>=0.2.0
 accelerate>=1.1.0
-bitsandbytes>=0.46.1
+bitsandbytes>=0.46.1            # CUDA auto-detected; int8/int4 quant for Qwen2-VL
 faster-whisper>=1.0
 qwen-vl-utils>=0.0.8             # image/video preprocessing helper for Qwen2-VL processor
 tiktoken>=0.7                   # tokenisation used in approx_tokens() / finance_numbers.py
@@ -108,9 +123,9 @@ numba>=0.59.0                   # pinned: Python 3.12 requires >=0.59.0
 llvmlite>=0.42.0                # pinned: paired with numba>=0.59.0
 librosa>=0.10                   # audio feature extraction / duration analysis in audio_ingest.py
 mutagen>=1.47                   # audio file metadata (bitrate, codec, tags) in audio_ingest.py
-# YAMNet noise/crowd classification — heavy optional deps; audio_ingest imports them
-# inside try/except so the server runs without them, but install for full noise tagging.
-tensorflow>=2.16
+# YAMNet noise/crowd classification — optional, imported inside try/except.
+# [and-cuda] installs GPU-enabled TensorFlow (CUDA 12 runtime bundled by TF).
+tensorflow[and-cuda]>=2.16
 tensorflow-hub>=0.16
 
 

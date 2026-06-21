@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  Upload, X, Loader2, LogOut, FileText, Image, Sheet,
+  Upload, X, Loader2, LogOut, User, FileText, Image, Sheet,
   File, AlertCircle, PanelLeftClose, Sun, Moon,
   SquarePen, FolderOpen, FileVideo, FileAudio, FileType, LetterText, Settings,
   MessageSquare, MoreHorizontal, Pin, PinOff, Pencil,
@@ -9,7 +9,6 @@ import {
 } from 'lucide-react'
 import { listKB, deleteKBFile, ingestFile, listChatSessions, deleteChatSession, updateChatSession, getIngestionStatus } from '../api/client'
 import { useToast } from '../context/ToastContext'
-import MagikIcon from './MagikIcon'
 
 const EXT_BADGE = {
   PDF:  { label: 'PDF', bg: 'bg-red-700' },
@@ -237,30 +236,34 @@ export default function Sidebar({
     }
   }, [renamingId])
 
-  /* ── Account menu (Settings / Log out) — shared by both layouts ── */
+  /* ── Account menu (Settings / Log in or Log out) — shared by both layouts ── */
   const AccountMenu = ({ panelRef, className, style }) => (
     <div ref={panelRef} className={className}
       style={{ background: 'var(--t-card)', border: '1px solid var(--t-bd2)', ...style }}>
+      {!auth?.isGuest && (
+        <>
+          <button
+            onClick={() => { setMenuOpen(false); onOpenSettings?.() }}
+            className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm text-left transition-colors"
+            style={{ color: 'var(--t-tx3)' }}
+            onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov)'}
+            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+          >
+            <Settings size={15} />
+            Settings
+          </button>
+          <div className="h-px mx-2 my-1" style={{ background: 'var(--t-bd1)' }} />
+        </>
+      )}
       <button
-        onClick={() => { setMenuOpen(false); onOpenSettings?.() }}
+        onClick={() => { setMenuOpen(false); auth?.isGuest ? onShowLogin?.() : onLogout() }}
         className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm text-left transition-colors"
         style={{ color: 'var(--t-tx3)' }}
         onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov)'}
         onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
       >
-        <Settings size={15} />
-        Settings
-      </button>
-      <div className="h-px mx-2 my-1" style={{ background: 'var(--t-bd1)' }} />
-      <button
-        onClick={() => { setMenuOpen(false); onLogout() }}
-        className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm text-left transition-colors"
-        style={{ color: 'var(--t-tx3)' }}
-        onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov)'}
-        onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-      >
-        <LogOut size={15} />
-        Log out
+        {auth?.isGuest ? <User size={15} /> : <LogOut size={15} />}
+        {auth?.isGuest ? 'Log in' : 'Log out'}
       </button>
     </div>
   )
@@ -463,7 +466,7 @@ export default function Sidebar({
   const _STAGE_PROGRESS = { queued: 2, extracting: 20, chunking: 50, embedding: 80, done: 100, error: 0 }
 
   const _pollJobStatus = async (token, jobId, filename) => {
-    const INTERVAL = 3000, MAX_POLLS = 600  // up to 30 min (covers large video files)
+    const INTERVAL = 1000, MAX_POLLS = 1800  // poll every 1s; up to 30 min (covers large video files)
     for (let i = 0; i < MAX_POLLS; i++) {
       await new Promise(r => setTimeout(r, INTERVAL))
       try {
@@ -574,9 +577,7 @@ export default function Sidebar({
           onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov2)'}
           onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
         >
-          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-blue-500 flex items-center justify-center flex-shrink-0">
-            <MagikIcon size={16} strokeWidth={2} className="text-white" />
-          </div>
+          <img src="/logo.png" alt="MAGIK" className="w-7 h-7 rounded-lg object-cover flex-shrink-0" />
         </button>
 
         {/* Divider */}
@@ -600,19 +601,32 @@ export default function Sidebar({
           {dark ? <Sun size={16} /> : <Moon size={16} />}
         </IconBtn>
 
-        {/* Avatar → account menu */}
-        <button
-          ref={avatarBtnRef}
-          onClick={() => setMenuOpen(o => !o)}
-          title={auth.email}
-          className="mt-1 w-8 h-8 rounded-full flex items-center justify-center transition-transform"
-          style={{ background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)', transform: menuOpen ? 'scale(1.06)' : 'scale(1)' }}
-        >
-          <span className="text-white text-[11px] font-bold tracking-tight">{avatarInitials}</span>
-        </button>
+        {/* Avatar → account menu (or Log in button for guests) */}
+        {auth?.isGuest ? (
+          <button
+            onClick={onShowLogin}
+            title="Log in"
+            className="mt-1 w-8 h-8 rounded-full flex items-center justify-center transition-colors"
+            style={{ background: 'var(--t-hov2)' }}
+          >
+            <User size={16} style={{ color: 'var(--t-tx3)' }} />
+          </button>
+        ) : (
+          <>
+            <button
+              ref={avatarBtnRef}
+              onClick={() => setMenuOpen(o => !o)}
+              title={auth.email}
+              className="mt-1 w-8 h-8 rounded-full flex items-center justify-center transition-transform"
+              style={{ background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)', transform: menuOpen ? 'scale(1.06)' : 'scale(1)' }}
+            >
+              <span className="text-white text-[11px] font-bold tracking-tight">{avatarInitials}</span>
+            </button>
+          </>
+        )}
       </div>
 
-      {menuOpen && menuPos && createPortal(
+      {!auth?.isGuest && menuOpen && menuPos && createPortal(
         <AccountMenu
           panelRef={menuPanelRef}
           className="fixed w-44 rounded-xl py-1.5 shadow-xl overflow-hidden z-50"
@@ -631,9 +645,7 @@ export default function Sidebar({
 
       {/* Logo row */}
       <div className="flex items-center gap-3 px-5 pt-5 pb-4">
-        <div className="w-9 h-9 bg-gradient-to-br from-violet-500 to-blue-500 rounded-lg flex items-center justify-center flex-shrink-0 shadow">
-          <MagikIcon size={19} strokeWidth={2} className="text-white" />
-        </div>
+        <img src="/logo.png" alt="MAGIK" className="w-9 h-9 rounded-lg object-cover flex-shrink-0 shadow" />
         <div className="flex-1 min-w-0">
           <div className="text-lg font-bold leading-tight" style={{
             background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)',
