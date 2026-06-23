@@ -54,6 +54,83 @@ _PDF_WATERMARK_STRIP = {
     "RESTRICTED", "CLASSIFIED", "DO NOT COPY", "SAMPLE",
 }
 
+# Character-level translation for EDGAR/PDF ligatures and smart punctuation.
+# Applied before any NLP/guardrail pass so downstream tokenisers see plain ASCII.
+_LIGATURE_MAP = str.maketrans({
+    '\xa0':  ' ',    # non-breaking space  →  regular space  (very common in EDGAR: "September\xa028")
+    '\xad':  '',     # soft hyphen          →  drop
+    '’': "'",   # right single quote
+    '‘': "'",   # left  single quote
+    '“': '"',   # left  double quote
+    '”': '"',   # right double quote
+    '–': '-',   # en dash
+    '—': '--',  # em dash
+    '•': '-',   # bullet
+    '…': '...', # ellipsis
+    'ﬁ': 'fi',  # fi ligature
+    'ﬂ': 'fl',  # fl ligature
+    'ﬃ': 'ffi', # ffi ligature
+    'ﬄ': 'ffl', # ffl ligature
+})
+
+
+def _normalize_pdf_text(text: str) -> str:
+    """Normalise EDGAR-specific ligatures, smart quotes, and non-breaking spaces.
+
+    Must run before the guardrail / finance-number pass so the finance regex
+    can match patterns like '$391,035' that would otherwise contain '\xa0'.
+    """
+    text = text.translate(_LIGATURE_MAP)
+    text = re.sub(r' {2,}', ' ', text)   # collapse multiple spaces (keep newlines)
+    return text
+
+
+# ─── SEC 10-K section taxonomy ───────────────────────────────────────────────
+
+_SEC_PART_RE = re.compile(r'^PART\s+([IVX]+)\s*$', re.IGNORECASE)
+_SEC_ITEM_RE = re.compile(r'^Item\s+(\d+[A-Z]?)\.?\s*(.*)', re.IGNORECASE)
+
+_SEC_ITEMS: Dict[str, str] = {
+    "1":   "Business",
+    "1A":  "Risk Factors",
+    "1B":  "Unresolved Staff Comments",
+    "2":   "Properties",
+    "3":   "Legal Proceedings",
+    "4":   "Mine Safety Disclosures",
+    "5":   "Market for Registrant's Common Equity",
+    "6":   "Reserved",
+    "7":   "Management's Discussion and Analysis",
+    "7A":  "Quantitative and Qualitative Disclosures About Market Risk",
+    "8":   "Financial Statements and Supplementary Data",
+    "9":   "Changes in and Disagreements with Accountants",
+    "9A":  "Controls and Procedures",
+    "9B":  "Other Information",
+    "10":  "Directors, Executive Officers and Corporate Governance",
+    "11":  "Executive Compensation",
+    "12":  "Security Ownership",
+    "13":  "Certain Relationships and Related Transactions",
+    "14":  "Principal Accountant Fees and Services",
+    "15":  "Exhibits, Financial Statement Schedules",
+}
+
+
+def _classify_10k_section(text: str) -> Optional[str]:
+    """If text matches a SEC 10-K Part or Item heading, return a canonical label.
+
+    Returns None when the text is ordinary prose, not a section marker.
+    """
+    t = text.strip()
+    m = _SEC_PART_RE.match(t)
+    if m:
+        return f"PART {m.group(1).upper()}"
+    m = _SEC_ITEM_RE.match(t)
+    if m:
+        num   = m.group(1).upper()
+        desc  = (m.group(2) or "").strip()
+        canon = _SEC_ITEMS.get(num, desc)
+        return f"Item {num}. {canon or desc}"
+    return None
+
 
 # ─── Utilities ────────────────────────────────────────────────────────────────
 
@@ -79,12 +156,20 @@ def _quality(text: str) -> float:
 
 
 def _is_pdf_encrypted(file_path: str) -> bool:
+    """Return True only when the PDF requires a password to open.
+
+    EDGAR filings (including Apple 10-K) carry Standard RC4 encryption metadata
+    for digital-rights tracking but are fully accessible without a password.
+    PyMuPDF's `needs_pass` is the correct check — `is_encrypted` is True for
+    any encryption layer regardless of whether a password is actually required,
+    and would incorrectly reject every SEC filing.
+    """
     try:
         import fitz
         doc = fitz.open(file_path)
-        enc = doc.is_encrypted
+        needs_pw = doc.needs_pass
         doc.close()
-        return enc
+        return needs_pw
     except Exception:
         return False
 
@@ -225,7 +310,94 @@ def _correct_reading_order(text: str) -> str:
     return "\n".join(output)
 
 
+def _coalesce_leading_labels(cells: List[str]) -> List[str]:
+    """Merge consecutive leading non-numeric cells into one label cell.
+
+    Fixes pdfplumber splitting long segment names across columns, e.g.:
+    ['Wearables,', 'Home and', 'Accessories', '$37,005', ...] →
+    ['Wearables, Home and Accessories', '$37,005', ...]
+    """
+    import re as _re_cl
+    if len(cells) <= 1:
+        return cells
+    label_parts: List[str] = []
+    j = 0
+    while j < len(cells) and not _re_cl.search(r'[\d$]', cells[j]):
+        label_parts.append(cells[j])
+        j += 1
+    if len(label_parts) <= 1:
+        return cells
+    combined = " ".join(p.rstrip(",").strip() for p in label_parts).strip()
+    return [combined] + list(cells[j:])
+
+
+def _merge_row_cells(row: List[str]) -> List[str]:
+    """Merge adjacent currency/percent fragments so '$' + '201,183' → '$201,183'.
+
+    pdfplumber splits PDF table cells at glyph boundaries, producing many None/empty
+    columns and patterns like ['$', '201,183'] or ['(2)', '%']. We strip empty strings
+    first so adjacency checks work even when None/empty columns separate real values.
+
+    Additional text-strategy splits handled:
+    - '$ 2' + '9,749' → '$29,749'  (split mid-dollar-amount)
+    - '$16,74' + '1' → '$16,741'   (split mid-3-digit group)
+    """
+    import re as _re_merge
+    # Collapse empty strings so adjacency checks below work correctly.
+    cells = [c for c in row if c]
+    merged: List[str] = []
+    i = 0
+    while i < len(cells):
+        cell = cells[i]
+        # Comma-terminated cell — either numeric or text-label continuation.
+        if merged and merged[-1].endswith(","):
+            # Numeric: "$109," + "633" → "$109,633"
+            if cell.replace(".", "").isdigit():
+                merged[-1] += cell
+                i += 1
+                continue
+            # Text label: "Wearables," + "Home and" → "Wearables, Home and"
+            if not any(ch.isdigit() for ch in cell) and not cell.startswith("$"):
+                merged[-1] += " " + cell
+                i += 1
+                continue
+        # "$" followed by any non-empty cell → "$12,345"
+        if cell == "$" and i + 1 < len(cells):
+            merged.append("$" + cells[i + 1])
+            i += 2
+            continue
+        # "$ N" followed by "M,NNN..." — text strategy splits "$ 29,749" into "$ 2"+"9,749"
+        # Pattern: cell is "$ " + digits (no comma), next cell starts with digit + comma groups
+        if (_re_merge.match(r'^\$\s*\d+$', cell) and i + 1 < len(cells)
+                and _re_merge.match(r'^\d(?:,\d{3})*$', cells[i + 1])):
+            merged.append('$' + cell[1:].strip() + cells[i + 1])
+            i += 2
+            continue
+        # "$N,NN" followed by short digit — split mid 3-digit group: "$16,74"+"1"→"$16,741"
+        if (_re_merge.match(r'^\$\d{1,3},\d{1,2}$', cell) and i + 1 < len(cells)
+                and _re_merge.match(r'^\d{1,2}$', cells[i + 1])):
+            merged.append(cell + cells[i + 1])
+            i += 2
+            continue
+        # "(N)" followed by "%" → "(N)%"
+        if cell.startswith("(") and cell.endswith(")") and i + 1 < len(cells) and cells[i + 1] == "%":
+            merged.append(cell + "%")
+            i += 2
+            continue
+        # Any value followed by standalone "%" → "N%"
+        if i + 1 < len(cells) and cells[i + 1] == "%":
+            merged.append(cell + "%")
+            i += 2
+            continue
+        merged.append(cell)
+        i += 1
+    # Coalesce any remaining consecutive leading text-label cells (e.g. after
+    # comma-merge only partially collapsed a multi-word segment name).
+    return _coalesce_leading_labels(merged)
+
+
 def _table_to_text(rows: Iterable[Iterable[object]]) -> str:
+    import re as _re
     cleaned = [
         [str(cell or "").strip() for cell in row]
         for row in (rows or [])
@@ -233,22 +405,229 @@ def _table_to_text(rows: Iterable[Iterable[object]]) -> str:
     ]
     if not cleaned:
         return ""
-    return "\n".join(" | ".join(row) for row in cleaned)
+    result_rows = []
+    for row in cleaned:
+        merged = _merge_row_cells(row)
+        if not merged:
+            continue
+        # Skip rows that contain only prose fragments with no financial content.
+        # Text-strategy pdfplumber may include title/header text as table rows;
+        # we keep only rows that have at least one digit, $, or % character.
+        if not _re.search(r'[\d$%]', " ".join(merged)):
+            continue
+        result_rows.append(" | ".join(merged))
+    return "\n".join(result_rows)
 
 
 def _table_to_markdown(rows: List[List[str]]) -> str:
+    import re as _re_md
     if not rows:
         return ""
-    header = rows[0]
-    separator = ["---"] * len(header)
-    body = rows[1:] if len(rows) > 1 else []
-    lines = [
-        "| " + " | ".join(header) + " |",
-        "| " + " | ".join(separator) + " |",
-    ]
-    for row in body:
-        lines.append("| " + " | ".join(row) + " |")
+    # Apply cell merging to every row before building markdown
+    cleaned_rows = [_merge_row_cells([str(c or "").strip() for c in row]) for row in rows]
+    cleaned_rows = [r for r in cleaned_rows if r]
+    if not cleaned_rows:
+        return ""
+
+    # Detect data-first tables: the first row is actual financial data, not a header.
+    # Signal: first cell is a pure text label (no digits/$ sign) while the remaining
+    # cells are financial values ($ or 5+ digit numbers). This pattern appears in
+    # Apple 10-K gross-margin and product net-sales tables where pdfplumber finds no
+    # separate header row. Using the data row as the markdown header confuses the LLM
+    # into treating segment names as column labels.
+    first_row = cleaned_rows[0]
+    first_cell = first_row[0] if first_row else ""
+    rest_cells = first_row[1:] if len(first_row) > 1 else []
+    _label_first = bool(first_cell) and not _re_md.search(r'[\d$]', first_cell)
+    _finance_values = bool(rest_cells) and bool(_re_md.search(r'\$\d|\b\d{5,}', " ".join(rest_cells)))
+    _is_data_first = _label_first and _finance_values
+
+    if _is_data_first:
+        # All rows are data; generate synthetic fiscal-year header sized to the
+        # widest row so no values are truncated.
+        ncols = max(len(r) for r in cleaned_rows)
+        _base = ["Segment", "FY2024", "FY2023", "FY2022"]
+        header = (_base + [f"Col{j+5}" for j in range(max(0, ncols - 4))])[:ncols]
+        body = cleaned_rows
+        separator = ["---"] * len(header)
+        lines = [
+            "| " + " | ".join(header) + " |",
+            "| " + " | ".join(separator) + " |",
+        ]
+        for row in body:
+            padded = list(row) + [""] * max(0, ncols - len(row))
+            lines.append("| " + " | ".join(padded[:ncols]) + " |")
+    else:
+        # Scan all rows for a fiscal-year header row.
+        # Some tables (e.g. Note 2 – Revenue on page 38) have many prose paragraph
+        # rows before the actual data table, so limiting to the first N rows would
+        # miss the year header. We scan the entire cleaned_rows list.
+        # We distinguish year-header rows from title/description rows by requiring:
+        #   (a) 2+ distinct fiscal years (20XX) when cells are joined, AND
+        #   (b) no individual cell longer than 30 chars (description rows have long
+        #       first cells; prose paragraphs are merged into one very long cell).
+        _year_header_idx = None
+        _years_found: List[str] = []
+        for _scan_idx, _scan_row in enumerate(cleaned_rows):
+            _joined = "".join(_scan_row).replace(" ", "")
+            _yrs = sorted(set(_re_md.findall(r'20\d{2}', _joined)), reverse=True)
+            if len(_yrs) >= 2:
+                _max_cell = max((len(c) for c in _scan_row), default=0)
+                if _max_cell <= 30:
+                    _year_header_idx = _scan_idx
+                    _years_found = _yrs
+                    break
+
+        if _year_header_idx is not None:
+            # Data rows follow the year-header row.
+            _data_rows = cleaned_rows[_year_header_idx + 1:]
+            # Compute ncols from financial data rows only, within the first 20 rows
+            # after the year header.  The thousands-separator pattern (\d{1,3}(?:,\d{3})+)
+            # matches "37,005", "$391,035", "$201,183" etc., but NOT year values like
+            # "2024", "2023," or sentence fragments that incidentally contain digits.
+            _fin_rows = [r for r in _data_rows[:20]
+                         if any(_re_md.search(r'\d{1,3}(?:,\d{3})+', c) for c in r)]
+            ncols = max((len(r) for r in _fin_rows),
+                        default=max((len(r) for r in _data_rows[:20] if r), default=4))
+            # Include Change columns only when the table is wide enough for them.
+            _add_change = ncols > len(_years_found) + 1
+            _clean_hdr: List[str] = ["Segment"]
+            for yr in _years_found:
+                _clean_hdr.append(f"FY{yr}")
+                if _add_change and len(_clean_hdr) < ncols:
+                    _clean_hdr.append("Change")
+            while len(_clean_hdr) < ncols:
+                _clean_hdr.append("")
+            header = _clean_hdr[:ncols]
+            body = _data_rows
+        else:
+            header = cleaned_rows[0]
+            body = cleaned_rows[1:] if len(cleaned_rows) > 1 else []
+
+        separator = ["---"] * len(header)
+        lines = [
+            "| " + " | ".join(header) + " |",
+            "| " + " | ".join(separator) + " |",
+        ]
+        for row in body:
+            lines.append("| " + " | ".join(row) + " |")
     return "\n".join(lines)
+
+
+def _detect_fiscal_years_from_rows(rows: List[List[str]]) -> List[str]:
+    """Return sorted list of FY-prefixed fiscal years found in the first 15 rows."""
+    import re as _re_fy
+    text = " ".join(str(c or "") for row in rows[:15] for c in row)
+    years = sorted(set(_re_fy.findall(r'20\d{2}', text)), reverse=True)
+    return [f"FY{y}" for y in years[:5]]
+
+
+def _infer_table_title(rows: List[List[str]], section_title: str = "") -> str:
+    """Classify a financial table by its dominant keyword pattern."""
+    text = " ".join(str(c or "") for row in rows[:6] for c in row).lower()
+    if "gross margin" in text:
+        return "Gross Margin by Segment"
+    if "net sales" in text and "cost of sales" not in text:
+        return "Net Sales by Product Category"
+    if "provision for income" in text or "effective tax" in text:
+        return "Income Tax Provision"
+    if "repurchase" in text or "capital return" in text:
+        return "Capital Return Program"
+    if "dividend" in text:
+        return "Dividends and Capital Return"
+    if "cost of sales" in text or "operating income" in text:
+        return "Consolidated Statements of Operations"
+    if "cash and cash equivalent" in text or "operating activities" in text:
+        return "Cash Flow Statement"
+    if "shares" in text and ("retained" in text or "equity" in text):
+        return "Shareholders Equity Statement"
+    if section_title:
+        return section_title
+    return "Financial Table"
+
+
+def _table_to_nl_summary(md: str, page: int, table_title: str, doc_name: str = "") -> str:
+    """Convert a clean markdown table into NL sentences for semantic retrieval.
+
+    Each data row becomes: "- Segment: FY2024 $37,005M, FY2023 $39,845M, FY2022 $41,241M"
+    so that embedding similarity aligns tightly with queries like "Wearables revenue 2024".
+    """
+    import re as _re_nl
+    lines = [l.strip() for l in md.strip().split("\n") if l.strip()]
+    if not lines:
+        return ""
+
+    # Locate the clean header row that contains FY20XX tokens
+    header_cells: Optional[List[str]] = None
+    data_start = 0
+    for i, line in enumerate(lines):
+        if "|" not in line:
+            continue
+        cells = [c.strip() for c in line.split("|") if c.strip()]
+        if not cells:
+            continue
+        if all(_re_nl.match(r"-+$", c) for c in cells):
+            continue
+        if _re_nl.search(r"FY20\d{2}|Segment", " ".join(cells), _re_nl.I):
+            header_cells = cells
+            data_start = i + 2  # skip header + separator
+            break
+
+    if header_cells is None:
+        return ""
+
+    # Identify which column indexes carry FY20XX values
+    year_cols: List[str] = []
+    year_idxs: List[int] = []
+    for j, c in enumerate(header_cells):
+        if _re_nl.match(r"FY20\d{2}$", c):
+            year_cols.append(c)
+            year_idxs.append(j)
+
+    if not year_cols:
+        return ""
+
+    loc = ", ".join(p for p in [doc_name, f"Page {page}" if page else ""] if p)
+    header_str = " | ".join(header_cells)
+    out = [f"{table_title} ({loc})" if loc else table_title,
+           f"Columns: {header_str}", ""]
+
+    for line in lines[data_start:]:
+        if "|" not in line:
+            continue
+        cells = [c.strip() for c in line.split("|") if c.strip()]
+        if not cells or all(_re_nl.match(r"-+$", c) for c in cells):
+            continue
+        segment = cells[0]
+        # Skip empty, disclosure/footnote rows (very long first cells)
+        if not segment or not any(ch.isalpha() for ch in segment) or len(segment) > 70:
+            continue
+        val_parts: List[str] = []
+        for yr, idx in zip(year_cols, year_idxs):
+            if idx < len(cells):
+                v = cells[idx]
+                if not v or v in ("---", "—", ""):
+                    continue
+                # Normalize "$ 383,285" (space after $) → "$383,285"
+                v = _re_nl.sub(r'^\$\s+', '$', v)
+                # Accept comma-formatted amounts: "37,005", "$201,183", "$383,285"
+                _plain  = _re_nl.match(r"^\d{1,3}(?:,\d{3})+$", v)
+                _dollar = _re_nl.match(r"^\$\d{1,3}(?:,\d{3})+$", v)
+                # Accept percentage values: "37.2%", "24.1%", "46.2%", "(7)%"
+                _pct    = _re_nl.match(r"^-?\d+(?:\.\d+)?%$", v) or _re_nl.match(r"^\(\d+(?:\.\d+)?\)%$", v)
+                if not (_plain or _dollar or _pct):
+                    continue
+                if _plain:
+                    v = f"${v}M"
+                elif _dollar:
+                    v = f"{v}M"
+                # Percentages kept as-is (e.g. "37.2%")
+                val_parts.append(f"{yr} {v}")
+        # Only emit the row when at least one fiscal-year value is a real financial amount
+        if val_parts:
+            out.append(f"- {segment}: {', '.join(val_parts)}")
+
+    return "\n".join(out) if len(out) > 3 else ""
 
 
 def _detect_font_size(page: Any, text_block: str) -> Optional[float]:
@@ -285,8 +664,13 @@ def _detect_is_bold(page: Any, text_block: str) -> bool:
 def _detect_heading(text: str, font_size: Optional[float], is_bold: bool,
                     body_font_size: Optional[float]) -> bool:
     t = text.strip()
-    if not t or len(t) > 120:
+    if not t or len(t) > 250:
         return False
+    # SEC 10-K Part / Item headings are always headings regardless of length or terminal char.
+    # "Item 7. Management's Discussion and Analysis of Financial Condition and Results of
+    # Operations" is 88 chars / 15+ words — the generic rules below would miss it.
+    if _classify_10k_section(t) is not None:
+        return True
     words = t.split()
     if not (1 <= len(words) <= 15):
         return False
@@ -377,6 +761,9 @@ class PdfIngestor(BaseIngestor):
                     page.set_rotation(0)
                 raw_text = (page.get_text() or "").strip()
                 if raw_text:
+                    # Normalise EDGAR ligatures/non-breaking spaces BEFORE guardrail
+                    # so the finance regex sees plain '$391,035' not '$\xa0391,035'.
+                    raw_text = _normalize_pdf_text(raw_text)
                     raw_text = self._sanitize(raw_text, surface="pdf_ingest")
                 rect = page.rect
                 page_area = max(rect.width * rect.height, 1)
@@ -490,11 +877,15 @@ class PdfIngestor(BaseIngestor):
                 # Reading-order correction
                 page_text = _correct_reading_order(raw_text)
 
-                # Multi-column reading order via block bboxes
+                # Multi-column reading order via block bboxes.
+                # _extract_pdf_text_multicolumn calls page.get_text() fresh,
+                # so we must re-apply normalization before length comparison.
                 try:
                     mc_text = _extract_pdf_text_multicolumn(page)
-                    if mc_text and len(mc_text) >= len(page_text):
-                        page_text = mc_text
+                    if mc_text:
+                        mc_text = _normalize_pdf_text(mc_text)
+                        if len(mc_text) >= len(page_text):
+                            page_text = mc_text
                 except Exception:
                     pass
 
@@ -507,7 +898,13 @@ class PdfIngestor(BaseIngestor):
                 # Determine extract_type: scanned vs prose vs heading
                 font_sz = _detect_font_size(page, page_text[:50])
                 is_bold = _detect_is_bold(page, page_text[:50])
-                is_heading = _detect_heading(page_text, font_sz, is_bold, body_font_size)
+                # For heading detection, check the first non-blank line —
+                # headings are at the top of the page, not the full page text.
+                _first_line = next((ln.strip() for ln in page_text.split("\n") if ln.strip()), "")
+                is_heading = _detect_heading(_first_line or page_text, font_sz, is_bold, body_font_size)
+
+                # Classify SEC 10-K Part/Item headings for downstream hierarchy building
+                _sec_label = _classify_10k_section(_first_line) if _first_line else None
 
                 if is_ocr and not raw_text.strip():
                     ext_type = "scanned_page"
@@ -531,6 +928,7 @@ class PdfIngestor(BaseIngestor):
                         "is_pdfa": is_pdfa,
                         "has_xfa": is_xfa,
                         "has_javascript": has_js,
+                        "sec_section": _sec_label,   # canonical SEC label e.g. "Item 7. MD&A"
                     },
                 ))
 
@@ -575,35 +973,136 @@ class PdfIngestor(BaseIngestor):
             finally:
                 pdf.close()
 
-            # Strip repeated header/footer text from prose extracts
-            repeated = {k for k, v in header_footer_counts.items() if v > 3 and k.strip()}
+            # Strip repeated header/footer text from prose extracts.
+            # Guard: minimum 4 characters to prevent single-digit footnote markers
+            # (e.g. "1", "2", "3") from being treated as headers and corrupting
+            # every financial number in the document via str.replace.
+            repeated = {
+                k for k, v in header_footer_counts.items()
+                if v > 3 and k.strip() and len(k.strip()) >= 4
+                and not k.strip().replace(",", "").replace(".", "").isdigit()
+            }
             if repeated:
                 for ex in extracts:
                     if ex.extract_type in ("prose", "heading"):
                         for r in repeated:
                             ex.text = ex.text.replace(r, "").strip()
 
-            # Tables via pdfplumber
+            # Build page → last known section title so pdfplumber table extracts
+            # (appended after all prose) can carry the correct section context to the chunker.
+            _page_to_section: Dict[int, str] = {}
+            _last_sec = ""
+            for _ex in extracts:
+                if _ex.extract_type == "heading" and _ex.text:
+                    _last_sec = _ex.text.strip()
+                if _ex.page is not None and _last_sec:
+                    _page_to_section[_ex.page] = _last_sec
+
+            # Tables via pdfplumber — dual strategy for borderless financial tables.
+            # Lines strategy gives clean bordered tables; text strategy captures
+            # borderless tables (e.g., Apple 10K product category breakdown) that
+            # lines strategy partially misses. We use text strategy when it finds
+            # more financial data rows (rows containing digits or $) for the same page.
             try:
                 import pdfplumber
+                import re as _plumber_re
+                _TEXT_STRAT = {
+                    "vertical_strategy": "text",
+                    "horizontal_strategy": "text",
+                }
+
+                def _count_data_rows(tables: list) -> int:
+                    return sum(
+                        1 for t in tables for r in t
+                        if any(_plumber_re.search(r'[\d$]', str(c or '')) for c in r)
+                    )
+
                 with pdfplumber.open(file_path) as pdf_p:
                     for i, page in enumerate(pdf_p.pages, start=1):
-                        for t_idx, table in enumerate(page.extract_tables() or []):
+                        lines_tables = page.extract_tables() or []
+                        if not lines_tables:
+                            continue
+                        # Prefer text strategy when it captures more financial rows
+                        # (handles borderless financial statement tables)
+                        best_tables = lines_tables
+                        try:
+                            text_tables = page.extract_tables(_TEXT_STRAT) or []
+                            lines_dr = _count_data_rows(lines_tables)
+                            text_dr = _count_data_rows(text_tables)
+                            # Use text strategy only when it finds significantly more data rows
+                            # (indicates a borderless table missed by lines strategy, e.g. the
+                            # Apple 10K product-category breakdown which lines strategy truncates).
+                            # Threshold lines*2+2 prevents text strategy from "winning" on pages
+                            # where it merely counts prose sentences containing year numbers.
+                            # Quality check: reject text strategy if it still shatters dollar
+                            # amounts AFTER _merge_row_cells repair. D1 fix handles common
+                            # patterns ("$ 2"+"9,749"→"$29,749"); this gate catches unfixable
+                            # residual fragments that confuse the LLM.
+                            def _has_unrepaired_shatter(tables: list) -> bool:
+                                import re as _qre
+                                for t in tables:
+                                    for row in t:
+                                        raw = [str(c or "").strip() for c in row if (c or "").strip()]
+                                        repaired = _merge_row_cells(raw)
+                                        for c in repaired:
+                                            # Still lone "$ N" (< 3 digits) after repair
+                                            if _qre.match(r'^\$\s*\d{1,2}$', c):
+                                                return True
+                                            # Still truncated comma group after repair
+                                            if _qre.match(r'^\$?\d{1,3},\d{1,2}$', c):
+                                                return True
+                                return False
+
+                            if text_dr > lines_dr * 2 + 2 and not _has_unrepaired_shatter(text_tables):
+                                best_tables = text_tables
+                        except Exception:
+                            pass
+
+                        for t_idx, table in enumerate(best_tables):
                             rows = [[str(cell or "").strip() for cell in row] for row in table]
-                            txt = _table_to_text(rows)
                             md = _table_to_markdown(rows)
-                            if not txt:
+                            if not md.strip():
                                 continue
-                            combined = self._sanitize(f"{txt}\n\n{md}", surface="pdf_table_ingest")
-                            combined = self._scrub_pii(combined, surface="pdf_table_ingest")
-                            if combined:
+                            _sec_ctx = _page_to_section.get(i, "")
+                            _t_title = _infer_table_title(rows, _sec_ctx)
+                            _fiscal_yrs = _detect_fiscal_years_from_rows(rows)
+
+                            # Store ONLY clean markdown — no garbled raw text that confuses the LLM
+                            md_clean = self._sanitize(md, surface="pdf_table_ingest")
+                            md_clean = self._scrub_pii(md_clean, surface="pdf_table_ingest")
+                            if md_clean:
                                 extracts.append(RawExtract(
-                                    text=combined,
+                                    text=md_clean,
                                     extract_type="table_row",
                                     page=i,
                                     raw_source_ref=f"pdf:{path.name}|page:{i}|table:{t_idx}",
-                                    extra={"markdown": md, "table_index": t_idx},
+                                    extra={
+                                        "markdown": md_clean,
+                                        "table_index": t_idx,
+                                        "section_title": _sec_ctx,
+                                        "fiscal_years": _fiscal_yrs,
+                                        "table_title": _t_title,
+                                    },
                                 ))
+
+                            # NL summary: "- Wearables: FY2024 $37,005M, FY2023 $39,845M"
+                            # High semantic overlap with natural language queries.
+                            _nl = _table_to_nl_summary(md, i, _t_title, path.stem)
+                            if _nl:
+                                _nl_clean = self._sanitize(_nl, surface="pdf_table_ingest")
+                                _nl_clean = self._scrub_pii(_nl_clean, surface="pdf_table_ingest")
+                                if _nl_clean:
+                                    extracts.append(RawExtract(
+                                        text=_nl_clean,
+                                        extract_type="table_summary",
+                                        page=i,
+                                        raw_source_ref=f"pdf:{path.name}|page:{i}|table:{t_idx}|nl",
+                                        extra={
+                                            "fiscal_years": _fiscal_yrs,
+                                            "table_title": _t_title,
+                                            "section_title": _sec_ctx,
+                                        },
+                                    ))
 
                     # Outline/bookmarks
                     try:
@@ -634,22 +1133,41 @@ class PdfIngestor(BaseIngestor):
                         continue
                     rows = [list(ct.df.columns)] + [list(r) for r in ct.df.itertuples(index=False)]
                     rows = [[str(cell or "").strip() for cell in row] for row in rows]
-                    txt = _table_to_text(rows)
-                    if not txt or txt[:50] in _plumber_sigs:
-                        continue  # skip if empty or already captured by pdfplumber
                     md = _table_to_markdown(rows)
-                    combined = self._sanitize(f"{txt}\n\n{md}", surface="pdf_table_ingest")
-                    combined = self._scrub_pii(combined, surface="pdf_table_ingest")
-                    if combined:
+                    _md_sig = md[:50]
+                    if not md.strip() or _md_sig in _plumber_sigs:
+                        continue
+                    _t_title = _infer_table_title(rows)
+                    _fiscal_yrs = _detect_fiscal_years_from_rows(rows)
+                    md_clean = self._sanitize(md, surface="pdf_table_ingest")
+                    md_clean = self._scrub_pii(md_clean, surface="pdf_table_ingest")
+                    if md_clean:
                         extracts.append(RawExtract(
-                            text=combined,
+                            text=md_clean,
                             extract_type="table_row",
                             page=ct.page,
                             raw_source_ref=f"pdf:{path.name}|page:{ct.page}|camelot",
-                            extra={"markdown": md, "extractor": "camelot",
-                                   "accuracy": ct.parsing_report.get("accuracy")},
+                            extra={
+                                "markdown": md_clean,
+                                "extractor": "camelot",
+                                "accuracy": ct.parsing_report.get("accuracy"),
+                                "fiscal_years": _fiscal_yrs,
+                                "table_title": _t_title,
+                            },
                         ))
-                        _plumber_sigs.add(txt[:50])
+                        _plumber_sigs.add(_md_sig)
+                    _nl = _table_to_nl_summary(md, ct.page, _t_title, path.stem)
+                    if _nl:
+                        _nl_clean = self._sanitize(_nl, surface="pdf_table_ingest")
+                        _nl_clean = self._scrub_pii(_nl_clean, surface="pdf_table_ingest")
+                        if _nl_clean:
+                            extracts.append(RawExtract(
+                                text=_nl_clean,
+                                extract_type="table_summary",
+                                page=ct.page,
+                                raw_source_ref=f"pdf:{path.name}|page:{ct.page}|camelot|nl",
+                                extra={"fiscal_years": _fiscal_yrs, "table_title": _t_title},
+                            ))
             except ImportError:
                 pass  # camelot optional; pdfplumber handles standard tables
             except Exception as exc:
@@ -783,6 +1301,7 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
                     raw_text = (page.get_text() or "").strip()
                     if raw_text:
+                        raw_text = _normalize_pdf_text(raw_text)
                         raw_text = _sanitize_text(raw_text, surface="pdf_ingest")
 
                     rect = page.rect
@@ -895,8 +1414,13 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                             logger.warning("pdf_image_extract_failed", page=i,
                                            img_idx=img_idx, error=str(exc))
 
-                # Strip repeated headers/footers
-                repeated = {k for k, v in header_footer_counts.items() if v > 3 and k.strip()}
+                # Strip repeated headers/footers.
+                # Guard: minimum 4 characters — see extract() for full rationale.
+                repeated = {
+                    k for k, v in header_footer_counts.items()
+                    if v > 3 and k.strip() and len(k.strip()) >= 4
+                    and not k.strip().replace(",", "").replace(".", "").isdigit()
+                }
                 if repeated:
                     for d in documents:
                         if d.modality == "text":

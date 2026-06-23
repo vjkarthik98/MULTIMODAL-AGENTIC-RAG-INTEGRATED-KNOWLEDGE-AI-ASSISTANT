@@ -261,10 +261,13 @@ class TestBuildFilter:
         result = store._build_filter(user_id="user_1")
         assert result is not None
 
-    def test_session_id_produces_filter(self):
+    def test_session_id_does_not_produce_filter(self):
+        # session_id is a tracing field only — must NOT add a filter condition
+        # because documents are ingested with session_id="default" while queries
+        # arrive with per-request IDs, causing zero results if filtered.
         store  = _make_store()
         result = store._build_filter(session_id="sess_1")
-        assert result is not None
+        assert result is None
 
     def test_modality_filter_applied(self):
         store = _make_store()
@@ -275,7 +278,11 @@ class TestBuildFilter:
     def test_combined_conditions(self):
         store  = _make_store()
         result = store._build_filter(user_id="u1", session_id="s1")
+        # session_id ignored; only user_id contributes
         assert result is not None
+        keys = [c.key for c in result.must]
+        assert "session_id" not in keys
+        assert "user_id" in keys
 
     def test_no_modality_filter_no_session_no_user_returns_none(self):
         store = _make_store()

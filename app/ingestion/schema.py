@@ -96,7 +96,7 @@ _EXCEL_SUBTYPES = {"table_row_group", "assumptions", "named_ranges", "chart_capt
 ALLOWED_SUBTYPES: Dict[str, set] = {
     "text":  {"paragraph", "heading", "page", "chunk", "speaker_turn", "section", "list", "unknown"},
     "table": {"structured", "unknown"},
-    "pdf":   {"paragraph", "table", "footnote", "figure_caption", "list", "heading", "ocr", "unknown"},
+    "pdf":   {"paragraph", "table", "table_summary", "footnote", "figure_caption", "list", "heading", "ocr", "unknown"},
     # extension-based aliases share subtype sets with their semantic counterparts
     "txt":  _TXT_SUBTYPES,
     "image": _IMAGE_SUBTYPES,

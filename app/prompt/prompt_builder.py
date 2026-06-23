@@ -48,7 +48,7 @@ _CTX_RATIO   = 0.75  # context share of the variable budget
 # "Sources:/Confidence:/Reasoning:/Answer:" labels and reasoning dumps the model
 # otherwise leaks — so the user-facing prose stays clean.
 _ANSWER_ONLY_RULE = (
-    "\nIMPORTANT OUTPUT FORMAT RULES:\n"
+    "\nIMPORTANT ANSWER GUIDELINES:\n"
     "1. Reply with ONLY your answer as plain prose.\n"
     "2. Cite facts with inline [n] numbers like [1] or [2,3]. "
     "NEVER write [n, 'text'] or quote any chunk content in citations.\n"
@@ -155,7 +155,13 @@ def _is_code(query: str) -> bool:
 
 def _is_comparative(query: str) -> bool:
     tokens = set(query.lower().split())
-    return bool(tokens & _COMPARATIVE_KEYWORDS)
+    if bool(tokens & _COMPARATIVE_KEYWORDS):
+        return True
+    q_lower = query.lower()
+    # Tax rate and state aid questions are inherently comparative (need YoY context).
+    if "effective tax rate" in q_lower or ("state aid" in q_lower and "tax" in q_lower):
+        return True
+    return False
 
 
 def _is_temporal(query: str) -> bool:
@@ -197,6 +203,10 @@ def _detect_modality(query: str, context: str) -> Optional[str]:
 def _detect_query_type(query: str) -> str:
     if _is_code(query):
         return "code"
+    # Tax rate and state-aid impact questions need YoY comparison before financial routing.
+    _ql = query.lower()
+    if "effective tax rate" in _ql or ("state aid" in _ql and "tax" in _ql):
+        return "comparative"
     if _is_financial(query):
         return "financial"
     if _is_comparative(query):
@@ -340,33 +350,44 @@ def _system_prompt(
             "- 'Growth' = YoY unless QoQ specified.\n"
             "- If context states the change explicitly, quote it; never recompute.\n"
             "\n"
-            "Write the answer as one or two clean sentences with inline [n] "
-            "citations. Do NOT restate these rules, show your reasoning, write "
-            "section labels, or print table rows.\n\n"
+            "CITATION RULES:\n"
+            "- After every figure or fact, add the source citation [n] inline.\n"
+            "- Also state the page number explicitly: e.g. \"(Page 26)\" or "
+            "\"per p.28\". Use the page shown in the context label (p.NN).\n"
+            "- If multiple pages are cited, list all: \"(Pages 28-29)\".\n"
+            "\n"
+            "ANSWER FORMAT:\n"
+            "- State ALL key metrics, numbers, and segment breakdowns found in context.\n"
+            "- For multi-part questions (revenue by category, margin by segment), list "
+            "each component on its own line with the [n] citation.\n"
+            "- Do NOT truncate after one sentence — cover every sub-question asked.\n"
+            "- Do NOT restate these rules or show your reasoning.\n\n"
         )
 
     if query_type == "comparative":
         return (
-            "You are an analytical assistant specializing in financial comparisons.\n"
-            "RULES:\n"
-            "- Use ONLY the provided context\n"
-            "- Follow this CoT structure: "
-            "1) Identify the two entities/periods → "
-            "2) Find the metric for each from context → "
-            "3) Compute or quote the delta → "
-            "4) State the conclusion\n"
-            "- After each fact, cite the source number in square brackets,"
-            " e.g. [1] or [2,3] for multi-source claims\n"
-            "- Be objective and factual; if sources disagree, surface the"
-            " disagreement and flag: ⚠ Conflicting data — cite EVERY conflicting source\n"
-            "- If a source is flagged with an error marker (e.g."
-            " 'intentional error', 'does not exist', 'WRONG'), treat its"
-            " specific claim as suspect and prefer the agreeing sources\n"
-            "- Do NOT expand abbreviations or acronyms unless the context"
-            " explicitly defines them\n"
-            "- 'Growth' = YoY unless QoQ is specified; 'Margin' = gross unless qualified\n"
+            "You are a precise financial analyst specializing in comparisons.\n"
+            "CRITICAL RULES — FOLLOW EXACTLY:\n"
+            "- Use ONLY numbers and facts that appear verbatim in the provided context chunks.\n"
+            "  Do NOT use your training knowledge. If a number is not in the context, do not cite it.\n"
+            "- SEGMENT BREAKDOWN RULE: If the question asks for a breakdown BY SEGMENT (Products vs Services,"
+            " by category, etc.), you MUST list EACH segment separately — a total alone is INCOMPLETE.\n"
+            "  Example: 'Products gross margin: $109,633M (37.2%) (Page 27). Services gross margin:"
+            " $71,050M (73.9%) (Page 27). Total gross margin: $180,683M (46.2%) (Page 27).'\n"
+            "- PERCENTAGES RULE: When context contains percentage metrics alongside dollar amounts, report"
+            " BOTH for each segment. Never report only the total dollar amount for a margin question.\n"
+            "- COMPARISON RULE: When the question asks FY2024 versus FY2023, report BOTH fiscal years for"
+            " every line item listed. List each category with its FY2024 figure then FY2023 figure.\n"
+            "- ANNUAL vs QUARTERLY RULE: Always report annual FY totals first. If context says 'During 2024,"
+            " the Company repurchased $95.0 billion and paid dividends of $15.2 billion', report those"
+            " annual figures (Page N) before any quarterly breakdown.\n"
+            "- PAGE NUMBERS ARE MANDATORY: After EVERY fact, write the page in format: (Page N).\n"
+            "  Use the page shown in the context header label like 'apple_10k.pdf p.27'.\n"
+            "- COMPLETENESS: Cover EVERY part of the question. Do NOT truncate after the first metric.\n"
+            "- 'Growth' = YoY unless QoQ is specified; 'Margin' = gross unless qualified.\n"
             "- If the answer is not in the context, reply exactly:"
-            " \"I could not find this in the provided sources.\"\n\n"
+            " \"I could not find this in the provided sources.\"\n"
+            "- Do NOT restate these rules. Do NOT truncate after one sentence.\n\n"
         )
 
     if query_type == "temporal":

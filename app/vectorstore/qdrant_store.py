@@ -329,7 +329,7 @@ class QdrantVectorStore:
         # Provides full Phase 1.2/2.2 metadata for finance-grade retrieval
         if modality == "pdf":
             for _k in ("page_number", "page_range", "chunk_type", "section_hierarchy",
-                       "table_title", "column_headers", "row_range", "footnotes",
+                       "table_title", "column_headers", "fiscal_years", "row_range", "footnotes",
                        "footnote_markers", "has_figure", "figure_path", "is_ocr",
                        "caption", "ocr_text", "chunk_hash_id", "source_file"):
                 _v = s.get(_k)
@@ -954,10 +954,10 @@ class QdrantVectorStore:
                 warning="_build_filter called without user_id — unscoped filter will match all tenants",
             )
 
-        if session_id:
-            conditions.append(
-                FieldCondition(key="session_id", match=MatchValue(value=session_id))
-            )
+        # session_id is a correlation/tracing field stored in the payload; it is
+        # NOT used as a retrieval filter. Documents are ingested with session_id
+        # "default" but queries arrive with per-request session IDs — filtering
+        # on session_id would return zero results for every knowledge-base query.
 
         if self.modality_filter:
             conditions.append(

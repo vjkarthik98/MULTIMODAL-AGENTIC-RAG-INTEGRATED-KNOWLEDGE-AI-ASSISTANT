@@ -491,23 +491,21 @@ class Planner:
         )
 
     def _finance_regulatory(self, signals: Dict) -> ExecutionPlan:
-        """Archetype: regulatory_filing — PDF/DOCX KB + optional EDGAR + reason."""
+        """Archetype: regulatory_filing — PDF/DOCX KB + reason."""
         return ExecutionPlan(
             steps=self._optimize([
-                ExecutionStep(tool="rag",          description="Retrieve regulatory filing from KB (PDF/DOCX)", cost=COST_MEDIUM),
-                ExecutionStep(tool="sec_edgar_search", description="EDGAR supplemental lookup", optional=True, cost=COST_HIGH),
-                ExecutionStep(tool="reason",       description="Regulatory filing analysis", cost=COST_HIGH),
+                ExecutionStep(tool="rag",    description="Retrieve regulatory filing from KB (PDF/DOCX)", cost=COST_MEDIUM),
+                ExecutionStep(tool="reason", description="Regulatory filing analysis", cost=COST_HIGH),
             ]),
             trace={"type": "finance_regulatory"},
         )
 
     def _finance_model(self, signals: Dict) -> ExecutionPlan:
-        """Archetype: financial_model — table/assumptions chunks + calculate + reason."""
+        """Archetype: financial_model — table/assumptions chunks + reason."""
         return ExecutionPlan(
             steps=self._optimize([
-                ExecutionStep(tool="rag",                  description="Retrieve table and assumption chunks", cost=COST_MEDIUM),
-                ExecutionStep(tool="financial_calculator", description="Verify arithmetic (YoY/margin/EPS)", optional=True, cost=COST_LOW),
-                ExecutionStep(tool="reason",               description="Financial model analysis", cost=COST_HIGH),
+                ExecutionStep(tool="rag",    description="Retrieve table and assumption chunks", cost=COST_MEDIUM),
+                ExecutionStep(tool="reason", description="Financial model analysis", cost=COST_HIGH),
             ]),
             trace={"type": "finance_financial_model"},
         )

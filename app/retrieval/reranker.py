@@ -291,6 +291,12 @@ class Reranker:
     # Hard-limit chunks per doc_id so one document cannot dominate top_k.
 
     def _apply_source_cap(self, results: List[Dict]) -> List[Dict]:
+        # When results come from a single document, skip the per-doc cap to avoid
+        # dropping relevant chunks — diversity filtering isn't needed for mono-doc.
+        unique_doc_ids = {(r.get("metadata") or {}).get("doc_id", "") for r in results}
+        if len(unique_doc_ids) <= 1:
+            return results
+
         count: Dict[str, int] = {}
         output: List[Dict] = []
         for r in results:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -14,6 +15,21 @@ from app.chunking.finance_numbers import (
 from app.core.config import settings
 from app.ingestion.schema import IngestedDocument, RawExtract, UniversalMetadata
 from app.utils.logger import get_logger, modality_var
+
+# SEC 10-K heading patterns — duplicated here to keep per-modality file
+# boundaries clean (chunker must not import from pdf_ingest).
+_SEC_PART_RE = re.compile(r'^PART\s+([IVX]+)\s*$', re.IGNORECASE)
+_SEC_ITEM_RE = re.compile(r'^Item\s+(\d+[A-Z]?)\.?\s*(.*)', re.IGNORECASE)
+
+
+def _classify_sec_heading(text: str) -> Optional[str]:
+    """Return 'part', 'item', or None for the given heading text."""
+    t = text.strip()
+    if _SEC_PART_RE.match(t):
+        return "part"
+    if _SEC_ITEM_RE.match(t):
+        return "item"
+    return None
 
 import time
 from prometheus_client import Counter, Histogram
@@ -29,8 +45,8 @@ _CHUNK_ERRORS = Counter(
     "Total errors in pdf chunker",
 )
 
-_TABLE_GROUP_SIZE = 5       # target rows per table chunk
-_TABLE_OVERLAP_ROWS = 2     # rows carried into next table chunk
+# Each table_row / table_summary RawExtract represents one complete table;
+# no row-batching is needed — we emit exactly one chunk per extract.
 
 # BLIP semaphore limits concurrent caption calls to stay within A10G 24 GB budget.
 _BLIP_SEMAPHORE = threading.Semaphore(2)
@@ -58,77 +74,80 @@ def _caption_bytes(raw_bytes: bytes) -> str:
         return ""
 
 
-def _split_table_rows(
-    rows: List[RawExtract],
-    headers: List[str],
-    page: Optional[int],
+def _make_table_chunk(
+    ext: RawExtract,
+    chunk_type: str,
+    subtype: str,
     section_title: Optional[str],
-    table_title: Optional[str],
+    section_hierarchy: List[str],
     source: str,
     meta: UniversalMetadata,
     chunker: "PdfChunker",
     chunk_idx_ref: List[int],
+    char_offset_ref: List[int],
     surface: str,
-    section_hierarchy: List[str],
-    char_offset_ref: Optional[List[int]] = None,
-) -> List[IngestedDocument]:
-    docs: List[IngestedDocument] = []
-    step = _TABLE_GROUP_SIZE
-    overlap = _TABLE_OVERLAP_ROWS
-    i = 0
-    while i < len(rows):
-        group = rows[i: i + step]
-        row_texts = [r.text for r in group]
-        if headers:
-            header_line = " | ".join(headers)
-            nl_text = f"{table_title or 'Table'} ({section_title or ''})\n{header_line}\n"
-        else:
-            nl_text = f"{table_title or 'Table'} ({section_title or ''})\n"
-        nl_text += "\n".join(row_texts)
-        fin_entities = extract_finance_entities(nl_text)
-        row_nums = (rows[i].extra.get("row_num", i + 1), rows[min(i + step - 1, len(rows) - 1)].extra.get("row_num", i + step))
-        chunk_hash = deterministic_chunk_id(source, f"p{page or 0}_table_r{row_nums[0]}", chunk_idx_ref[0])
+) -> Optional[IngestedDocument]:
+    """Emit exactly one IngestedDocument from a table_row or table_summary RawExtract."""
+    extra = ext.extra or {}
+    md_text = extra.get("markdown", ext.text or "")
+    nl_text = ext.text or md_text
+    if not nl_text.strip():
+        return None
 
-        c_start = char_offset_ref[0] if char_offset_ref is not None else 0
-        structure = {
-            "chunk_hash_id":      chunk_hash,
-            "source_file":        source,
-            "chunk_index":        chunk_idx_ref[0],
-            "page_number":        page,
-            "page_range":         [page, page] if page else None,
-            "chunk_type":         "table",
-            "section_title":      section_title,
-            "section_hierarchy":  section_hierarchy[:],
-            "table_title":        table_title,
-            "column_headers":     headers,
-            "row_range":          list(row_nums),
-            "is_ocr":             False,
-            "footnotes":          [],
-            "footnote_markers":   [],
-            "has_figure":         False,
-            "figure_path":        None,
-            "finance_entities":   fin_entities,
-            "char_start":         c_start,
-            "char_end":           c_start + len(nl_text),
-        }
-        doc = chunker._make_doc(
-            text=nl_text,
-            modality="pdf",
-            subtype="table",
-            source=source,
-            page=page,
-            chunk_idx=chunk_idx_ref[0],
-            structure=structure,
-            meta=meta,
-            surface=surface,
-        )
-        if doc:
-            docs.append(doc)
-            chunk_idx_ref[0] += 1
-            if char_offset_ref is not None:
-                char_offset_ref[0] += len(nl_text) + 1
-        i += step - overlap
-    return docs
+    _t_title = extra.get("table_title", "")
+    _fiscal_yrs = extra.get("fiscal_years", [])
+    _sec = (extra.get("section_title") or section_title or "").strip()
+    _bad_sec = any(kw in _sec for kw in ("Exhibit", "Trading Policy", "Appendix"))
+
+    # Prefix: "<TableTitle> (Page N)" so LLM has unambiguous context without
+    # needing to read the garbled pdfplumber year-header row.
+    _label = _t_title or "Financial Table"
+    _page_str = f"Page {ext.page}" if ext.page else ""
+    _loc = ", ".join(p for p in [_page_str] if p)
+    _prefix = f"{_label} ({_loc})" if _loc else _label
+
+    # For markdown table chunks prefix once; summary chunks already self-describe.
+    chunk_text = nl_text if chunk_type == "financial_table_summary" else f"{_prefix}\n\n{nl_text}"
+
+    fin_entities = extract_finance_entities(chunk_text)
+    chunk_hash = deterministic_chunk_id(source, f"p{ext.page or 0}_{chunk_type}_{chunk_idx_ref[0]}", chunk_idx_ref[0])
+
+    structure = {
+        "chunk_hash_id":      chunk_hash,
+        "source_file":        source,
+        "chunk_index":        chunk_idx_ref[0],
+        "page_number":        ext.page,
+        "page_range":         [ext.page, ext.page] if ext.page else None,
+        "chunk_type":         chunk_type,
+        "section_title":      _sec if not _bad_sec else None,
+        "section_hierarchy":  section_hierarchy[:],
+        "table_title":        _t_title or None,
+        "column_headers":     _fiscal_yrs,
+        "fiscal_years":       _fiscal_yrs,
+        "row_range":          None,
+        "is_ocr":             False,
+        "footnotes":          [],
+        "footnote_markers":   [],
+        "has_figure":         False,
+        "finance_entities":   fin_entities,
+        "char_start":         char_offset_ref[0],
+        "char_end":           char_offset_ref[0] + len(chunk_text),
+    }
+    doc = chunker._make_doc(
+        text=chunk_text,
+        modality="pdf",
+        subtype=subtype,
+        source=source,
+        page=ext.page,
+        chunk_idx=chunk_idx_ref[0],
+        structure=structure,
+        meta=meta,
+        surface=surface,
+    )
+    if doc:
+        chunk_idx_ref[0] += 1
+        char_offset_ref[0] += len(chunk_text) + 1
+    return doc
 
 
 class PdfChunker(BaseChunker):
@@ -160,9 +179,6 @@ class PdfChunker(BaseChunker):
             prose_page: Optional[int] = None
             prose_footnotes: List[str] = []
             pending_table_rows: List[RawExtract] = []
-            table_headers: List[str] = []
-            table_title: Optional[str] = None
-            table_page: Optional[int] = None
             seen_hashes: set = set()
 
             def flush_prose() -> None:
@@ -218,18 +234,24 @@ class PdfChunker(BaseChunker):
                 prose_footnotes = []
 
             def flush_table() -> None:
-                nonlocal pending_table_rows, table_headers, table_title, table_page
-                if not pending_table_rows:
-                    return
-                table_docs = _split_table_rows(
-                    pending_table_rows, table_headers, table_page,
-                    section_title, table_title, source, meta, self, chunk_idx, surface,
-                    section_hierarchy, char_offset_ref=char_offset,
-                )
-                docs.extend(table_docs)
+                nonlocal pending_table_rows
+                for _ext in pending_table_rows:
+                    _doc = _make_table_chunk(
+                        ext=_ext,
+                        chunk_type="financial_table",
+                        subtype="table",
+                        section_title=section_title,
+                        section_hierarchy=section_hierarchy,
+                        source=source,
+                        meta=meta,
+                        chunker=self,
+                        chunk_idx_ref=chunk_idx,
+                        char_offset_ref=char_offset,
+                        surface=surface,
+                    )
+                    if _doc:
+                        docs.append(_doc)
                 pending_table_rows = []
-                table_headers = []
-                table_title = None
 
             # Pre-compute BLIP captions + TrOCR for all image_region extracts
             # concurrently before the sequential pass. Keyed by id(ext) so the
@@ -260,34 +282,69 @@ class PdfChunker(BaseChunker):
                     flush_table()
                     heading_text = (ext.text or "").strip()
                     if heading_text:
-                        section_title = heading_text
-                        # Manage hierarchy stack by font size proxy (larger font = higher level)
-                        font = ext.font_size or 12.0
-                        if font >= 16:
+                        # Prefer canonical SEC label from ingestor (e.g. "Item 7. MD&A")
+                        sec_label = (ext.extra or {}).get("sec_section") or heading_text
+                        sec_kind  = _classify_sec_heading(heading_text)
+                        font      = ext.font_size or 12.0
+
+                        if sec_kind == "part":
+                            # PART I / II / III → reset to top level
+                            section_hierarchy = [sec_label]
+                            section_title = sec_label
+                        elif sec_kind == "item":
+                            # Item N → second level under current Part
+                            section_hierarchy = section_hierarchy[:1] + [sec_label]
+                            section_title = sec_label
+                        elif font >= 16:
                             section_hierarchy = [heading_text]
+                            section_title = heading_text
                         elif font >= 14:
                             section_hierarchy = section_hierarchy[:1] + [heading_text]
+                            section_title = heading_text
                         else:
+                            # Sub-section (3rd level): keep Part + Item, append this
                             section_hierarchy = section_hierarchy[:2] + [heading_text]
+                            section_title = heading_text
                     continue
 
                 if etype == "footnote":
                     prose_footnotes.append((ext.text or "").strip())
                     continue
 
+                if etype == "table_summary":
+                    # NL summary chunk — one per table, emitted immediately (no batching).
+                    flush_prose()
+                    flush_table()
+                    _ext_sec = (ext.extra or {}).get("section_title")
+                    if _ext_sec:
+                        section_title = _ext_sec
+                    _doc = _make_table_chunk(
+                        ext=ext,
+                        chunk_type="financial_table_summary",
+                        subtype="table",
+                        section_title=section_title,
+                        section_hierarchy=section_hierarchy,
+                        source=source,
+                        meta=meta,
+                        chunker=self,
+                        chunk_idx_ref=chunk_idx,
+                        char_offset_ref=char_offset,
+                        surface=surface,
+                    )
+                    if _doc:
+                        docs.append(_doc)
+                    continue
+
                 if etype == "table_row":
+                    # Each extract = one complete table (clean markdown).
+                    # Accumulate per-page then flush on page change or non-table extract.
                     flush_prose()
                     row_text = (ext.text or "").strip()
                     if not row_text:
                         continue
-                    # First row in a new table batch = detect if it's headers
-                    if not pending_table_rows:
-                        table_page = ext.page
-                        # Heuristic: if the text has no numbers it's a header row
-                        import re
-                        if not re.search(r"\d", row_text):
-                            table_headers = [c.strip() for c in row_text.split("|") if c.strip()]
-                            continue
+                    _ext_sec = (ext.extra or {}).get("section_title")
+                    if _ext_sec:
+                        section_title = _ext_sec
                     pending_table_rows.append(ext)
                     continue
 
