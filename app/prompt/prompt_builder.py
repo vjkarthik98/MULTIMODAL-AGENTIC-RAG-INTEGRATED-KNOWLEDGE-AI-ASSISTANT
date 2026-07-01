@@ -49,19 +49,26 @@ _CTX_RATIO   = 0.75  # context share of the variable budget
 # otherwise leaks — so the user-facing prose stays clean.
 _ANSWER_ONLY_RULE = (
     "\nIMPORTANT ANSWER GUIDELINES:\n"
-    "1. Reply with ONLY your answer as plain prose.\n"
-    "2. Cite facts with inline [n] numbers like [1] or [2,3]. "
+    "1. Reply with ONLY your answer as flowing prose paragraphs. "
+    "Do NOT use numbered lists, bullet points, or section headings.\n"
+    "2. Cite facts with inline [n] numbers like [1] or [2,3] immediately after the "
+    "fact you are citing. NEVER write (Page X) or any page numbers inside your answer text. "
     "NEVER write [n, 'text'] or quote any chunk content in citations.\n"
-    "3. NEVER copy filenames, section titles, or text from the [n] (...) "
-    "source labels into your answer.\n"
-    "4. Do NOT add 'Sources:', 'Confidence:', 'Reasoning:', 'Answer:', or "
-    "any other section labels.\n"
+    "3. NEVER copy filenames, section titles, chunk IDs, or page numbers from source labels "
+    "into your answer text. Page references are shown separately in the source panel.\n"
+    "4. Do NOT add 'Sources:', 'Confidence:', 'Reasoning:', 'Answer:', or separate "
+    "section headings. Do NOT list source pages or any (Page X) references at the end of "
+    "your answer.\n"
     "5. Do not restate these instructions in your reply.\n"
     "6. Do NOT show reasoning steps, working, or intermediate calculations. "
     "Do NOT reproduce context rows, table rows, or examples from the instructions. "
     "Start your answer DIRECTLY with the factual answer sentence.\n"
     "7. Do NOT output raw data rows (e.g. 'Date | Value | ...' or "
     "'Row: ...' or '→ FY20XX=...'). Report only the final answer value.\n"
+    "8. Answer the question fully — include EVERY figure the question asks for "
+    "(e.g. all requested segments and both fiscal years) — but do NOT add "
+    "tangential details the question did not request (e.g. liquidity or cash "
+    "balances when asked about tax). Be complete on-topic, not broad.\n"
 )
 
 # PROMPT INJECTION PATTERNS — consolidated into app/guardrails/policies.yaml (Phase 26)

@@ -1176,6 +1176,45 @@ class PdfIngestor(BaseIngestor):
             if not extracts:
                 raise ValueError("NO_EXTRACTS_PRODUCED")
 
+            # PAGE-NUMBER REMAP — the extract `page` values above are 1-based PDF
+            # page INDICES. Filings (10-K/10-Q) have cover/TOC pages before printed
+            # page 1, so the PDF index is offset from the document's own printed
+            # page number (what a reader looks up and what a citation should show).
+            # Recover the printed page from each page's footer ("... 2024 Form 10-K
+            # | 40" or "40 | Apple Inc. ...") and remap; where a footer is absent,
+            # apply the median offset. No-op for docs whose footers carry no page.
+            try:
+                _foot_re = re.compile(
+                    r'Form\s*10-?K\s*\|\s*(\d{1,3})\b|\b(\d{1,3})\s*\|\s*Apple\s+Inc',
+                    re.IGNORECASE,
+                )
+                _printed: Dict[int, int] = {}
+                for _rec in _page_records:
+                    _tail = (_rec.get("raw_text") or "")[-400:]
+                    _mm = _foot_re.search(_tail)
+                    if _mm:
+                        try:
+                            _printed[_rec["page_num"]] = int(_mm.group(1) or _mm.group(2))
+                        except (TypeError, ValueError):
+                            pass
+                if len(_printed) >= 3:
+                    _offs = sorted(idx - pp for idx, pp in _printed.items())
+                    _median_off = _offs[len(_offs) // 2]
+                    if _median_off != 0:
+                        for _ex in extracts:
+                            if getattr(_ex, "page", None) is not None:
+                                _mapped = _printed.get(_ex.page, _ex.page - _median_off)
+                                if _mapped and _mapped >= 1:
+                                    _ex.page = _mapped
+                        logger.info(
+                            event="pdf_page_remap_applied",
+                            median_offset=_median_off,
+                            footer_pages=len(_printed),
+                            file=str(path),
+                        )
+            except Exception as _remap_err:
+                logger.warning(event="pdf_page_remap_failed", error=str(_remap_err))
+
             _EXTRACTS_TOTAL.inc(len(extracts))
             logger.info(event="extraction_complete", modality="pdf", file=str(path), extracts=len(extracts))
             return extracts

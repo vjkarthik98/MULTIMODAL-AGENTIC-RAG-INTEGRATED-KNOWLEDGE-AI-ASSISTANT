@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, Children } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { FileText, Globe, Copy, ThumbsUp, ThumbsDown, Check, RotateCcw, Pencil,
@@ -45,6 +45,45 @@ function parseInlineCitations(content) {
   // collapse any double spaces, then trim the trailing edge.
   clean = clean.replace(/\s+([.,;!?])/g, '$1').replace(/[ \t]{2,}/g, ' ').trimEnd()
   return { cleanContent: clean, inlineSources: found }
+}
+
+// Perplexity-style page anchors [p.38] are deterministically inserted by the
+// backend (rag_pipeline._attach_page_citations). They carry no filename, so
+// parseInlineCitations leaves them intact — here we render each one as a small
+// teal superscript pill instead of raw "[p.38]" text.
+const PAGE_CITE_RE = /\[p\.(\d+)\]/g
+
+function CitePill({ page }) {
+  // Rendered inline at the SAME font size as the answer prose (no superscript,
+  // no pill chip) — just an accent-coloured "[p.26]" reference so it reads as a
+  // natural part of the sentence.
+  return (
+    <span
+      title={`Source: page ${page}`}
+      style={{ color: 'var(--t-accent)', fontWeight: 500, whiteSpace: 'nowrap' }}
+    >
+      {' '}[p.{page}]
+    </span>
+  )
+}
+
+// Walk a ReactMarkdown node's children and replace [p.N] substrings inside text
+// nodes with <CitePill> elements; non-string children pass through unchanged.
+function injectPageCites(children) {
+  return Children.map(children, (child) => {
+    if (typeof child !== 'string') return child
+    const parts = []
+    let last = 0
+    let m
+    PAGE_CITE_RE.lastIndex = 0
+    while ((m = PAGE_CITE_RE.exec(child)) !== null) {
+      if (m.index > last) parts.push(child.slice(last, m.index))
+      parts.push(<CitePill key={`${m.index}-${m[1]}`} page={m[1]} />)
+      last = m.index + m[0].length
+    }
+    if (last < child.length) parts.push(child.slice(last))
+    return parts.length ? parts : child
+  })
 }
 
 // Deduplicate sources: web sources by hostname, file sources by basename.
@@ -162,11 +201,17 @@ function SourceChip({ source }) {
     const isVideo = ['video', 'mp4'].includes(mod)
     const isXlsx  = ['excel', 'xlsx'].includes(mod)
 
-    // Priority order: page → timestamp → sheet+row → heading → section_title → image_title
+    // Priority order: (paged docs) short clean section → timestamp → sheet+row → ...
+    // The PAGE NUMBER is NOT shown on the chip — it lives inline in the answer as
+    // a [p.N] reference, so the chip stays the clean document identity
+    // ("apple_10k.pdf"), optionally + a short clean section heading. Long strings
+    // or chunks full of digits are raw chunk text (bad section_title metadata) and
+    // are skipped so the chip never shows a giant data dump.
     if (source.page != null || source.page_number != null) {
-      const pg = source.page ?? source.page_number
-      suffix = ` · p.${pg}`
-      if (source.section_title) suffix += ` · ${String(source.section_title)}`
+      const stRaw = String(source.section_title || source.heading || '').trim()
+      if (stRaw && stRaw.length <= 45 && !/\d{3,}/.test(stRaw)) {
+        suffix = ` · ${stRaw}`
+      }
     } else if (isAudio || isVideo) {
       const ts = fmtTimestamp(source.timestamp_start)
       if (ts) {
@@ -202,18 +247,32 @@ function SourceChip({ source }) {
   )
 
   if (isWeb) {
+    // Title + domain card (Perplexity/ChatGPT "Sources" style). Falls back to a
+    // domain-only chip when the article title isn't available.
+    const webTitle = typeof source === 'object' ? String(source.title || '').trim() : ''
     return (
       <a
         href={raw}
         target="_blank"
         rel="noopener noreferrer"
-        title={raw}
-        className={`${chipClass} cursor-pointer hover:opacity-80`}
-        style={{ ...chipStyle, textDecoration: 'none' }}
+        title={webTitle || raw}
+        className="inline-flex items-start gap-2 rounded-xl px-2.5 py-1.5 mr-1.5 mb-1.5 max-w-[280px] align-top transition-colors cursor-pointer"
+        style={{ background: 'var(--t-chp)', border: '1px solid var(--t-chpb)', textDecoration: 'none' }}
         onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--t-accent)'}
         onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--t-chpb)'}
       >
-        {chipIcon}{chipText}
+        {chipIcon}
+        <span className="flex flex-col min-w-0">
+          {webTitle && (
+            <span className="text-[11px] leading-snug font-medium line-clamp-2"
+              style={{ color: 'var(--t-tx3)' }}>
+              {webTitle}
+            </span>
+          )}
+          <span className="text-[10px] leading-tight truncate" style={{ color }}>
+            {label}
+          </span>
+        </span>
       </a>
     )
   }
@@ -405,6 +464,8 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
                     code: ({ inline, children }) => (
                       <CodeBlock inline={inline}>{children}</CodeBlock>
                     ),
+                    p: ({ children }) => <p>{injectPageCites(children)}</p>,
+                    li: ({ children }) => <li>{injectPageCites(children)}</li>,
                   }}
                 >
                   {cleanContent}

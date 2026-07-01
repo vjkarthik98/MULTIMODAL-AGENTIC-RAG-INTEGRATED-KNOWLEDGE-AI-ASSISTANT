@@ -1,7 +1,7 @@
 # MAGIK Multimodal RAG — Query & Response Benchmark Dataset
 
-**Purpose:** Ground-truth query–response pairs for RAG accuracy evaluation, embedding alignment, and eval harness calibration.  
-**Coverage:** 35 queries across 7 files (28 RAG + 7 Web Search), 5 per file.  
+**Purpose:** Ground-truth query–response pairs for RAG accuracy evaluation, embedding alignment, and eval harness calibration.
+**Coverage:** 35 queries across 7 files (28 RAG + 7 Web Search), 5 per file.
 **Citation format by modality:**
 
 | Modality | Citation Format |
@@ -40,7 +40,7 @@ Apple's net sales by category (in millions):
 
 iPhone revenue was essentially flat. Services was the standout, growing 13% driven primarily by higher revenue from advertising, the App Store, and cloud services. Wearables, Home and Accessories declined 7%, primarily due to lower Wearables and Accessories sales. iPad fell 6% due to lower iPad Pro and entry-level iPad sales.
 
-**Source:** Apple Inc. Form 10-K, **Page 26** — Products and Services Performance table.
+**Source:** Apple Inc. Form 10-K, **Page 23** — Net Sales by Category (Products and Services Performance, MD&A); **Page 29** — Consolidated Statements of Operations.
 
 ---
 
@@ -60,7 +60,7 @@ Apple's gross margin improved substantially in FY2024 (dollars in millions):
 
 Total gross margin expanded 210 basis points year-over-year to 46.2%. Products gross margin improved due to cost savings, partially offset by an unfavorable product mix and currency headwinds. Services gross margin increased due to both higher revenue and a more favorable Services mix. This is the first time Apple's total gross margin exceeded 46%.
 
-**Source:** Apple Inc. Form 10-K, **Page 27** — Gross Margin table; **Page 32** — Consolidated Statements of Operations.
+**Source:** Apple Inc. Form 10-K, **Page 24** — Gross Margin table (MD&A); **Page 29** — Consolidated Statements of Operations.
 
 ---
 
@@ -78,7 +78,7 @@ The EU State Aid Decision resulted in a one-time income tax charge of **$10.2 bi
 
 The primary reasons the effective rate exceeded the statutory rate were: the one-time State Aid charge, state income taxes, and a higher effective rate on foreign earnings — partially offset by R&D credits and share-based compensation tax benefits.
 
-**Source:** Apple Inc. Form 10-K, **Page 28** — Provision for Income Taxes; **Page 29** — State Aid Decision Tax Payable.
+**Source:** Apple Inc. Form 10-K, **Page 25** — Provision for Income Taxes (MD&A); **Page 26** — State Aid Decision Tax Payable; **Page 40** — Note 5, Income Taxes (provision table & effective tax rate reconciliation).
 
 ---
 
@@ -98,7 +98,7 @@ In FY2024, Apple returned a combined **$110.2 billion** to shareholders:
 
 Operating cash flow for FY2024 was **$118.254 billion**, easily funding the capital return program. Free cash flow (operating cash less capex of $9.447B) was approximately **$108.8 billion**.
 
-**Source:** Apple Inc. Form 10-K, **Page 29** — Capital Return Program; **Page 35** — Shareholders' Equity Statement; **Page 36** — Consolidated Statements of Cash Flows.
+**Source:** Apple Inc. Form 10-K, **Page 26** — Capital Return Program (MD&A); **Page 32** — Consolidated Statements of Shareholders' Equity; **Page 33** — Consolidated Statements of Cash Flows.
 
 ---
 
@@ -408,8 +408,8 @@ The Moody's downgrade on May 16, 2025 was the last of the three major agencies t
 ---
 
 ## FILE 5 — `aapl-20240928_g2.jpg`
-**Apple Inc. 5-Year Cumulative Total Return Comparison Chart**  
-**Caption:** *"Comparison of 5-Year Cumulative Total Return Among Apple Inc., the S&P 500 Index and the Dow Jones U.S. Technology Supersector Index"*  
+**Apple Inc. 5-Year Cumulative Total Return Comparison Chart**
+**Caption:** *"Comparison of 5-Year Cumulative Total Return Among Apple Inc., the S&P 500 Index and the Dow Jones U.S. Technology Supersector Index"*
 **Period:** September 27, 2019 – September 28, 2024 | Base: $100
 
 ---
@@ -493,8 +493,8 @@ From the September 28, 2024 chart endpoint, Apple's stock performance was driven
 ---
 
 ## FILE 6 — `FOMC Press Conference September 18, 2024.mp3`
-**Duration:** 49 minutes 46 seconds | 44.1 kHz stereo MP3  
-**Event:** FOMC Press Conference, September 18, 2024  
+**Duration:** 49 minutes 46 seconds | 44.1 kHz stereo MP3
+**Event:** FOMC Press Conference, September 18, 2024
 **Host:** Michelle Smith (Federal Reserve) | **Primary Speaker:** Chair Jerome Powell
 
 ---
@@ -586,10 +586,10 @@ The Federal Reserve cut interest rates **three times** in 2024:
 ---
 
 ## FILE 7 — `Q4 2025 Earnings Call.mp4`
-**Duration:** 54 minutes 35 seconds | 1280×720 H.264 / AAC stereo  
-**Event:** Apple Financial Results Conference Call — Q4 Fiscal Year 2025  
-**Recorded:** October 30, 2025 · 2:00 PM PT / 5:00 PM ET  
-**Platform:** Benzinga live stream recording (AAPL TradingView 1-min chart + embedded earnings audio)  
+**Duration:** 54 minutes 35 seconds | 1280×720 H.264 / AAC stereo
+**Event:** Apple Financial Results Conference Call — Q4 Fiscal Year 2025
+**Recorded:** October 30, 2025 · 2:00 PM PT / 5:00 PM ET
+**Platform:** Benzinga live stream recording (AAPL TradingView 1-min chart + embedded earnings audio)
 **Participants:** Tim Cook (CEO), Kevan Parekh (CFO), Suhasini Chandramouli (IR)
 
 ---

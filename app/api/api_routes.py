@@ -1107,19 +1107,21 @@ async def stream_query(
                         logger.info(event="stream_web_search", session_id=session_id)
 
                         _web_sources = _tool_out.get("sources") or []
+                        _web_titles  = _tool_out.get("titles") or []
 
                         async def web_event_stream():
                             for piece in _stream_chunks(_web_answer):
                                 yield _sse(piece)
                                 await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
-                            # Emit the web source URLs as a typed sources event so
-                            # the client renders them as clickable web chips below
-                            # the answer (same contract as the KB path's sentinel).
+                            # Emit the web sources (URL + article title) as a typed
+                            # sources event so the client renders them as title+domain
+                            # cards below the answer (same contract as the KB path).
                             if _web_sources:
                                 _payload = [
                                     {"source": u, "modality": "web",
+                                     "title": (_web_titles[_i] if _i < len(_web_titles) else ""),
                                      "page_number": None, "start_time": None}
-                                    for u in _web_sources if u
+                                    for _i, u in enumerate(_web_sources) if u
                                 ]
                                 yield f'data: {{"__type__":"sources","data":{json.dumps(_payload)}}}\n\n'
                             yield "data: [DONE]\n\n"
@@ -2228,6 +2230,7 @@ async def get_source_chunk(
         results = vs.search_by_payload(
             field="chunk_id",
             value=chunk_id,
+            user_id=user_id,
             session_id=None,
             limit=1,
         )
@@ -2265,6 +2268,7 @@ async def list_kb_files(
         results = vs.search_by_payload(
             field="user_id",
             value=user_id,
+            user_id=user_id,
             session_id=None,
             limit=1000,
         )
@@ -2307,6 +2311,7 @@ async def delete_kb_file(
         results = vs.search_by_payload(
             field="checksum_sha256",
             value=file_hash,
+            user_id=user_id,
             session_id=None,
             limit=1000,
         )
@@ -2347,6 +2352,7 @@ async def get_transcript(
         results = vs.search_by_payload(
             field="checksum_sha256",
             value=file_hash,
+            user_id=user_id,
             session_id=None,
             limit=2000,
         )

@@ -163,6 +163,37 @@ def _hash(text: str) -> str:
     return hashlib.sha256(text[:300].encode("utf-8")).hexdigest()
 
 
+def _title_from_doc(doc: str) -> str:
+    """Recover the article title from a processed web doc stored as 'Title: content'.
+
+    Returns "" when there is no clean leading title (so the UI falls back to the
+    domain). Guards against treating an early sentence colon as a title, and
+    strips the redundant trailing " - Site Name" / " | Section" suffix and any
+    dangling ellipsis (the domain is already shown on the card's second line).
+    """
+    if not doc:
+        return ""
+    head = doc.split(":", 1)[0].strip() if ":" in doc[:160] else ""
+    if not (3 <= len(head) <= 120):
+        return ""
+    # Repeatedly drop a trailing short site-name / section suffix after the last
+    # " - " / " | " etc. Titles can chain several ("… | Technology | The Guardian"),
+    # so keep stripping until none remain. Only a SHORT tail is treated as a
+    # suffix — a long tail (e.g. "iPhone 17 Pro — first look at the new phone") is
+    # part of the real title and preserved.
+    _changed = True
+    while _changed:
+        _changed = False
+        for sep in (" | ", " - ", " – ", " — "):
+            idx = head.rfind(sep)
+            if idx > 0 and len(head) - idx - len(sep) <= 25:
+                head = head[:idx].strip()
+                _changed = True
+    # Remove a dangling ellipsis / trailing separators left by truncation.
+    head = _re.sub(r'[\s.…|\-–—]+$', '', head).strip()
+    return head if len(head) >= 3 else ""
+
+
 # SSRF GUARD — delegates to consolidated ssrf.py (Phase 26)
 
 def _is_ssrf_risk(url: str) -> bool:
@@ -292,6 +323,8 @@ class WebSearchTool:
                 )
                 processed["documents"] = reranked_docs[:self.max_docs]
                 processed["sources"]   = reranked_sources[:self.max_docs]
+                # Article titles, aligned 1:1 with sources (docs are "Title: content").
+                processed["titles"]    = [_title_from_doc(d) for d in processed["documents"]]
 
                 # LLM SUMMARIZATION
                 t_llm       = time.time()
@@ -320,6 +353,7 @@ class WebSearchTool:
                 return {
                     "answer":    answer,
                     "sources":   processed["sources"],
+                    "titles":    processed.get("titles", []),
                     "documents": processed["documents"],
                     "confidence": confidence,
                     "metadata": {

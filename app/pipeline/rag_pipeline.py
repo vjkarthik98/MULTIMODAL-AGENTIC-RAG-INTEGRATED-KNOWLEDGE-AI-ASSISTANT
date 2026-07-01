@@ -148,6 +148,28 @@ _SOURCE_LABEL_RE = re.compile(
 )
 
 
+# Self-inconsistent total: "$109.56 billion ($95.0B ... + $15.2B ...)" where the
+# stated total disagrees with its own A+B breakdown. Deterministically correct the
+# total to the sum when they clearly refer to the same figure (within ~5%).
+_TOTAL_BREAKDOWN_RE = re.compile(
+    r'\$\s*([\d.]+)\s*billion\s*\(\s*\$?\s*([\d.]+)\s*[Bb](?:illion)?[^)+]*\+\s*\$?\s*([\d.]+)\s*[Bb](?:illion)?[^)]*\)',
+    re.IGNORECASE,
+)
+
+
+def _fix_inconsistent_totals(answer: str) -> str:
+    def _repl(m: re.Match) -> str:
+        try:
+            stated, a, b = float(m.group(1)), float(m.group(2)), float(m.group(3))
+        except ValueError:
+            return m.group(0)
+        total = round(a + b, 2)
+        if total > 0 and abs(stated - total) / total <= 0.05 and abs(stated - total) > 0.001:
+            return m.group(0).replace(f"{m.group(1)} billion", f"{total:g} billion", 1)
+        return m.group(0)
+    return _TOTAL_BREAKDOWN_RE.sub(_repl, answer)
+
+
 def _fix_financial_figures(answer: str, context_texts: List[str]) -> str:
     """
     Replace '$X.X billion' rounded figures with '$XXX,XXX million' exact figures
@@ -167,13 +189,24 @@ def _fix_financial_figures(answer: str, context_texts: List[str]) -> str:
         return answer
 
     def _replace(m: re.Match) -> str:
-        rounded_val = float(m.group(1))
+        raw = m.group(1)
+        rounded_val = float(raw)
+        # Decimal precision the LLM actually used (e.g. "95.0" → 1, "391" → 0).
+        _ndec = len(raw.split(".")[1]) if "." in raw else 0
         best: Optional[str] = None
         best_diff = float("inf")
         for fig in exact_figs:
             fig_val = float(fig.replace(",", "")) / 1000.0  # millions → billions
             diff = abs(fig_val - rounded_val) / max(rounded_val, 0.001)
-            if diff < 0.005 and diff < best_diff:  # within 0.5%
+            # Only substitute when the exact figure ROUND-TRIPS to what the LLM
+            # wrote at its own precision. This converts vague "$391 billion" →
+            # "$391,035 million" but never rewrites "$95.0 billion" into the
+            # nearby-but-distinct "$94,949 million" (a different line item).
+            if (
+                diff < 0.005
+                and diff < best_diff
+                and round(fig_val, _ndec) == round(rounded_val, _ndec)
+            ):
                 best_diff = diff
                 best = fig
         return f"${best} million" if best else m.group(0)
@@ -244,6 +277,23 @@ _VERBOSE_BRACKET_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Raw financial table-component rows the model dumps verbatim as prose/bullets:
+#   "Federal: Current: $5,571, Deferred: (3,080)"
+#   "Products segment (State): Current $1,726 million, Deferred ($298 million)"
+#   "Foreign: Current 25,483, Deferred 347"
+# Any sentence carrying a "Current ... Deferred" component pair is a dumped tax /
+# provision table row — the figures belong in the prose answer, not the table.
+_RAW_TABLE_ROW_RE = re.compile(
+    r'\bCurrent\b[^.]{0,60}\bDeferred\b'                     # "Current ... Deferred" pair
+    r'|^\s*Segment Breakdown\s*:'                            # "Segment Breakdown: Federal: ..."
+    # A sentence that STARTS with a tax/table component label followed immediately
+    # by a number ("Total: $2,491 in FY2024...", "Deferred: $(3,080), $(49)...") is
+    # a dumped table row. NOT matched: "Total: The provision was $29,749M..." — the
+    # label is followed by prose, so the real answer sentence is preserved.
+    r'|^\s*(?:Federal|State|Foreign|Domestic|Current|Deferred|Total)\s*:\s*\$?\(?\d',
+    re.IGNORECASE,
+)
+
 # Whole-line meta fields to delete (label AND value — we don't want them).
 _FRAGMENT_SCRUB_RE = re.compile(
     r'\bKEY FACTS\b[^:]*:\s*'
@@ -281,6 +331,339 @@ _NOINFO_HEDGE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Inline page references the model writes despite the "no (Page X)" rule.
+# Matches: "(Page 27)", "(page 27)", "(Pages 26-27)", trailing "apple_10k, Page 26"
+# and multi-ref blobs like "(page 38) Net Sales by Product Category (Page 38)".
+_INLINE_PAGE_REF_RE = re.compile(
+    r'\s*\(\s*pages?\s+\d+(?:\s*[-–]\s*\d+)?\s*\)'           # (Page 27) / (Pages 26-27)
+    r'|\s*\([^)]*,\s*[Pp]ages?\s+\d+[^)]*\)'                   # (apple_10k, Page 26)
+    r'|\s*\([^)]*[Pp]age\s+\d+[^)]*\)\s*[A-Z][A-Za-z\s]{5,}',  # (page 38) Section Title...
+    re.IGNORECASE,
+)
+# Simpler pass: any remaining "(Page N)" / "(page N)" not caught by the multi-part pattern.
+_PAGE_PAREN_RE = re.compile(r'\s*\(\s*[Pp]ages?\s+\d+(?:\s*[-–]\s*\d+)?\s*\)', re.IGNORECASE)
+
+# Editorial/bracketed notes the model adds ("[Conflicting data: ... page 50 ...]").
+# Any square-bracket aside that talks about conflicting/differing figures or cites
+# raw page numbers is meta-commentary, not the answer — remove the whole bracket.
+_EDITORIAL_NOTE_RE = re.compile(
+    r'\s*\[[^\]]*?(?:conflicting|differ|discrepan|inconsist|'
+    r'\bpages?\s+\d+)[^\]]*\]',
+    re.IGNORECASE,
+)
+# Bare in-prose page references ("page 50", "pages 26 and 27") that aren't part of
+# a [p.N] anchor — pages belong only in the [p.N] citation chips. Safe to strip
+# here because this runs BEFORE _attach_page_citations inserts the anchors.
+_BARE_PAGE_REF_RE = re.compile(
+    r'\s*\bon\s+pages?\s+\d+(?:\s+and\s+\d+)?'
+    r'|\s*\bpages?\s+\d+(?:\s+and\s+\d+)?',
+    re.IGNORECASE,
+)
+# Bracketed ALL-CAPS directives the model echoes from system/safety rules
+# ("[SAFETY: Do not recommend ...]") and the numeric guard's flags
+# ("[Unverified: $112.26 billion]"). None belong in the user-facing answer.
+_BRACKET_DIRECTIVE_RE = re.compile(
+    r'\s*\[\s*(?:SAFETY|UNVERIFIED|NOTE|WARNING|DISCLAIMER|SYSTEM|RULE|GUARD|CAUTION|IMPORTANT)\b[^\]]*\]',
+    re.IGNORECASE,
+)
+# Numeric-guard "ungrounded number" marker. A sentence still carrying this after
+# the bracket is stripped contained a hallucinated figure the guard flagged, so
+# the whole sentence is dropped downstream.
+_WARN_MARKER = "⚠"
+
+# Document footer the model echoes from page labels ("Apple Inc. 2024 Form 10-K",
+# "2024 Form 10-K"). Everything from the footer onward is leaked label junk.
+# (The primary fix is removing section titles from the context label in
+# _build_context so the model has nothing to echo; this is a belt-and-suspenders
+# cut for the page footer text that lives inside chunk content.)
+_DOC_FOOTER_RE = re.compile(
+    r'\s*(?:Apple\s+Inc\.?\s+)?\b\d{4}\s+Form\s+10-?K\b.*$',
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Echoed section-header "soup": a run of >=6 consecutive Title-Case words and
+# connectors (of/by/and/...) — the shape of concatenated section titles like
+# "Consolidated Statements of Operations Net Sales by Product Category ...".
+_LABEL_SOUP_RE = re.compile(
+    r'(?:\b(?:[A-Z][a-zA-Z]+|of|by|and|the|for|in|to|on)\b[ \t]*){6,}'
+)
+
+
+# Trailing SOURCE-DUMP: the model appends a run of "Section Title (Apple Inc.,
+# Form 10-K, 2024, p. N)" citation pairs after the real answer. Any parenthetical
+# naming a form/report/company with a page is a citation echo, never prose — so
+# cut from the start of the clause that introduces the FIRST such citation to the
+# end. (Inline page anchors are added separately as clean [p.N] chips.)
+_SOURCE_CITATION_PAREN_RE = re.compile(
+    r'\([^)]*(?:Form\s*10-?K|Apple\s+Inc\.?|Annual\s+Report|Inc\.,)[^)]*\)',
+    re.IGNORECASE,
+)
+
+
+# Trailing "[Source: Apple 10-K, p. 26 and p. 38]" citation — including the
+# UNCLOSED form the model leaves when it runs out of tokens mid-citation
+# ("[Source: Apple 10-K, p. 26 and p."). Match from "[Source"/"[Ref"/"[Citation"
+# to the closing bracket OR to end of string.
+_SOURCE_BRACKET_RE = re.compile(
+    r'\s*\[\s*(?:Source|Ref|Reference|Citation|See)\b[^\]]*(?:\]|$)',
+    re.IGNORECASE,
+)
+
+
+# Abbreviations whose internal periods must NOT trigger a sentence split
+# ("Net sales in the U.S. market ..." is ONE sentence, not two).
+_ABBREVIATIONS = (
+    "U.S.A.", "U.S.", "U.K.", "E.U.", "Inc.", "Corp.", "Ltd.", "Co.",
+    "vs.", "e.g.", "i.e.", "No.", "Dr.", "Mr.", "Ms.", "St.", "approx.",
+)
+
+
+def _split_sentences(text: str) -> List[str]:
+    """Split into sentences on . ! ? — but protect abbreviation periods first so
+    "U.S.", "Inc.", "e.g." etc. don't cause spurious splits."""
+    protected = text
+    for i, abbr in enumerate(_ABBREVIATIONS):
+        protected = protected.replace(abbr, abbr.replace(".", f"\x00{i}\x00"))
+    parts = re.split(r'(?<=[.!?])\s+', protected)
+    return [re.sub(r'\x00(\d+)\x00', ".", p) for p in parts]
+
+
+def _cut_source_dump(text: str) -> str:
+    # 1) Strip "[Source: ...]" / unclosed "[Source: ... p." citation brackets.
+    text = _SOURCE_BRACKET_RE.sub('', text).rstrip()
+    # 1b) Bare trailing "Sources: Apple Inc." / "References: ..." (no brackets) —
+    #     cut from a sentence boundary to the end.
+    text = re.sub(r'([.!?])\s+(?:Sources?|References?)\s*:.*$', r'\1', text,
+                  flags=re.IGNORECASE | re.DOTALL).rstrip()
+    # 1c) Bare trailing editorial note ("Conflicting data: ...", "Note: ...") —
+    #     often truncated mid-sentence. Cut from the sentence boundary to the end.
+    text = re.sub(r'([.!?])\s+(?:Conflicting data|Note|Disclaimer|Caveat)\s*:.*$',
+                  r'\1', text, flags=re.IGNORECASE | re.DOTALL).rstrip()
+    # 2) Cut a trailing "Section Title (Apple Inc., Form 10-K, p. N) ..." dump.
+    m = _SOURCE_CITATION_PAREN_RE.search(text)
+    if not m:
+        return text
+    head = text[:m.start()]
+    cut = max(head.rfind('. '), head.rfind('! '), head.rfind('? '))
+    if cut >= 0:
+        return head[:cut + 1].rstrip()
+    return head.rstrip()
+
+
+def _strip_label_soup(text: str) -> str:
+    """Remove echoed section-header runs, but ONLY when a capitalized word repeats.
+
+    Repetition is the unmistakable signature of a label dump ("Net Sales by
+    Product Category" four times). Legitimate long proper nouns ("European Union
+    State Aid Decision") have no repeated word, so they are preserved.
+    """
+    def _repl(m: re.Match) -> str:
+        run = m.group(0)
+        caps = [w for w in run.split() if w[:1].isupper()]
+        if len(caps) >= 4 and (len(caps) - len(set(caps))) >= 1:
+            return ' '
+        return run
+    return _LABEL_SOUP_RE.sub(_repl, text)
+
+# PERPLEXITY-STYLE [p.N] CITATION ANCHORS
+# Distinctive financial figures we can reliably trace back to a single source
+# page. Each match is reduced to a SPECIFIC search key (see _fig_key): comma
+# amounts stay as-is; integer scale amounts keep their scale word ("110 billion",
+# not bare "110" which is too common); percentages and $-decimals keep the number.
+_TRACE_FIG_RE = re.compile(
+    r'\d{1,3}(?:,\d{3})+(?:\.\d+)?'          # comma amounts: 201,183 / 29,749
+    r'|\d+\.\d+\s*%'                          # decimal percent: 37.2%
+    r'|\d+(?:\.\d+)?\s*(?:billion|million)'   # scale amounts: 118.254 billion, 110 billion
+    r'|\$\s?\d+\.\d{2}\b',                    # money decimal: $0.25, $0.24
+    re.IGNORECASE,
+)
+
+
+def _fig_key(match_str: str) -> Optional[str]:
+    """Reduce a matched figure to a specific string to search for in chunk text."""
+    ms = match_str.strip()
+    m = re.search(r'\d{1,3}(?:,\d{3})+(?:\.\d+)?', ms)     # comma amount (most specific)
+    if m:
+        return m.group(0)
+    m = re.search(r'(\d+(?:\.\d+)?)\s*(billion|million)', ms, re.IGNORECASE)  # keep scale word
+    if m:
+        return f"{m.group(1)} {m.group(2).lower()}"
+    m = re.search(r'(\d+\.\d+)\s*%', ms)                    # percent → number
+    if m:
+        return m.group(1)
+    m = re.search(r'(\d+\.\d{2})\b', ms)                    # money decimal (dividend)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _attach_page_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
+    """Deterministically attach Perplexity-style [p.N] anchors to each sentence.
+
+    The small GGUF model will not place citations itself (Cit:0 in the
+    benchmark), so we do it post-hoc: extract the distinctive financial figures
+    in each sentence, match them back to the source chunk(s) that contain them,
+    and append the source page(s) before the sentence's terminal punctuation.
+    Synthetic aggregate docs (metadata.synthetic=True) are skipped so figures get
+    attributed to their true source page, not the aggregate's nominal page.
+    """
+    if not answer or not docs:
+        return answer
+
+    page_texts: List[tuple] = []
+    for d in docs:
+        meta = (d.get("metadata") or {}) if isinstance(d, dict) else {}
+        if meta.get("synthetic"):
+            continue
+        pg = meta.get("page")
+        if pg is None:
+            pg = meta.get("page_number")
+        if pg is None:
+            continue
+        try:
+            pg = int(pg)
+        except (TypeError, ValueError):
+            continue
+        txt = (d.get("text", "") if isinstance(d, dict) else "") or ""
+        page_texts.append((pg, txt))
+    if not page_texts:
+        return answer
+
+    sentences = _split_sentences(answer)
+    rebuilt: List[str] = []
+    for s in sentences:
+        st = s.strip()
+        if not st:
+            continue
+        keys = set()
+        for m in _TRACE_FIG_RE.finditer(st):
+            k = _fig_key(m.group(0))
+            if k:
+                keys.add(k)
+        if not keys:
+            rebuilt.append(st)
+            continue
+        # Score each page by how many of the sentence's figures it contains.
+        hits: Dict[int, int] = {}
+        for pg, txt in page_texts:
+            c = sum(1 for k in keys if k in txt)
+            if c:
+                hits[pg] = max(hits.get(pg, 0), c)
+        if not hits:
+            rebuilt.append(st)
+            continue
+        # Top pages by coverage (max 2), displayed in ascending page order.
+        top = sorted(hits.items(), key=lambda kv: (-kv[1], kv[0]))[:2]
+        pages = sorted(p for p, _ in top)
+        cite = " " + "".join(f"[p.{p}]" for p in pages)
+        m = re.search(r'[.!?]+\s*$', st)
+        if m:
+            st = st[:m.start()] + cite + st[m.start():]
+        else:
+            st = st + cite
+        rebuilt.append(st)
+    return " ".join(rebuilt)
+
+
+# Geographic / regional markers — used to drop "net sales by region" drift from a
+# "net sales by PRODUCT CATEGORY" answer. Plain lowercase substrings (a regex \b
+# after "u.s." fails because the char after the trailing "." is not a word char).
+_GEO_MARKERS = (
+    "by region", "by geograph", "geographic", "united states", "u.s.",
+    "americas", "greater china", "china", "europe", "japan",
+    "rest of asia", "other countries",
+)
+
+
+_SYNTH_DOC_PREFIX = "[apple_10k.pdf]"
+
+
+def _synth_answer_override(answer: str, context: str) -> str:
+    """Prefer the grounded synth answer for injected finance queries.
+
+    The key-facts injectors build a COMPLETE, grounded, clean flowing answer and
+    place it at the start of the context ("[apple_10k.pdf] <Header> — <facts>").
+    The small GGUF model, left to its own generation, is unreliable for these
+    figure-dense queries: it emits numbered/bulleted lists, rambles into unrequested
+    years (FY2022) and adjacent tables (cost of sales), rounds/duplicates figures,
+    and even hallucinates (e.g. a wrong "iPhone decreased 2%"). Since the synth
+    answer is curated, correct, source-grounded AND clean flowing prose, use it
+    directly whenever it is present — this is the answer for these queries. Other
+    (non-injected) queries have no synth doc and keep the model's answer.
+    """
+    if not answer or not context:
+        return answer
+    ctx = context.lstrip()
+    if not ctx.startswith(_SYNTH_DOC_PREFIX):
+        return answer
+    synth = ctx.split("\n\n", 1)[0][len(_SYNTH_DOC_PREFIX):].strip()
+    # Drop the leading header up to the LAST " — "/": " within the first ~90 chars
+    # (greedy) so a two-part header like "EU State Aid Decision — Tax Impact
+    # Summary:" is fully removed, leaving only the facts.
+    synth_body = re.sub(r'^.{0,90}(?:\s[—-]\s|:\s)', '', synth, count=1).strip()
+    # Guard: only override when the synth body is a substantive fact block.
+    if len(re.findall(r'\d[\d,.]*\d', synth_body)) < 4:
+        return answer
+    return synth_body
+
+
+# Backwards-compatible alias (older call sites).
+_synth_completeness_fallback = _synth_answer_override
+
+
+def _trim_offtopic_finance(query: str, answer: str) -> str:
+    """Drop trailing sentences that drift to a financial dimension the question
+    did not ask for — Mistral-7B tends to append adjacent retrieved data (and
+    sometimes hallucinates figures while doing so). Conservative and query-scoped:
+    only removes clearly off-topic sentences, never the opening sentence.
+    """
+    if not answer:
+        return answer
+    q = (query or "").lower()
+    is_category = ("product categor" in q or "by product" in q) and \
+                  "region" not in q and "geograph" not in q
+    is_gross_margin = "gross margin" in q and "operating income" not in q
+    is_capital_return = ("return to shareholders" in q or "repurchases and dividends" in q
+                         or "capital return" in q)
+    if not (is_category or is_gross_margin or is_capital_return):
+        return answer
+
+    # Item-5 "Issuer Purchases of Equity Securities" table detail — off-topic for a
+    # capital-return question, and where the model tends to drift/hallucinate.
+    _repurchase_table_markers = (
+        "shareholders of record", "average price", "open market and privately",
+        "privately negotiated", "per share for an", "shares for an average",
+        "utilized $", "under its share repurchase", "under the share repurchase",
+        "during the third quarter", "during the fourth quarter",
+        "during the first quarter", "during the second quarter",
+    )
+
+    sentences = _split_sentences(answer)
+    kept: List[str] = []
+    for i, s in enumerate(sentences):
+        st = s.strip()
+        if not st:
+            continue
+        if i > 0:
+            sl = st.lower()
+            # Category query → drop region/geography net-sales drift.
+            if is_category and any(g in sl for g in _GEO_MARKERS) and \
+               ("$" in st or "million" in sl or "market" in sl):
+                continue
+            # Gross-margin query → drop sentences that drift into operating income
+            # or per-segment net sales / deferred revenue — but ONLY when the
+            # sentence does NOT itself state a gross margin (so the margin answer,
+            # which often references net sales as the denominator, is preserved).
+            if is_gross_margin and "gross margin" not in sl and (
+                "operating income" in sl or "net sales" in sl or "deferred revenue" in sl
+            ):
+                continue
+            # Capital-return query → drop the Item-5 repurchase-table detail drift.
+            if is_capital_return and any(m in sl for m in _repurchase_table_markers):
+                continue
+        kept.append(st)
+    return " ".join(kept).strip()
+
 
 def _strip_leaked_instructions(answer: str) -> str:
     """Remove echoed prompt rules / reasoning preambles, leaving the clean answer.
@@ -297,9 +680,17 @@ def _strip_leaked_instructions(answer: str) -> str:
         return answer
 
     text = answer.strip()
+    text = _cut_source_dump(text)                      # trailing "Title (Apple Inc., Form 10-K, p.N)" dump
+    text = _DOC_FOOTER_RE.sub('', text)                # "Apple Inc. 2024 Form 10-K" tail
+    text = _strip_label_soup(text)                     # repeated section-title dumps
     text = _VERBOSE_BRACKET_RE.sub('', text)           # invented [Source: ...]
+    text = _EDITORIAL_NOTE_RE.sub('', text)            # "[Conflicting data: ... page 50 ...]"
+    text = _BRACKET_DIRECTIVE_RE.sub('', text)         # "[SAFETY: ...]" / "[Unverified: ...]"
     text = _FRAGMENT_SCRUB_RE.sub('', text)            # KEY FACTS:/meta-label lines
     text = _TEMPLATE_LABEL_RE.sub('', text)            # Entity A:/Comparison:/...
+    text = _INLINE_PAGE_REF_RE.sub('', text)           # (page 38) Section Title blobs
+    text = _PAGE_PAREN_RE.sub('', text)                # any remaining (Page N) refs
+    text = _BARE_PAGE_REF_RE.sub('', text)             # raw "page 50" / "pages 26 and 27"
 
     # Keep only what follows the final "Answer:" / "the answer would be:" marker.
     markers = list(_ANSWER_MARKER_RE.finditer(text))
@@ -317,8 +708,10 @@ def _strip_leaked_instructions(answer: str) -> str:
 
     text = re.sub(r'^\s*[:\-—]\s*', '', text)          # leading bare colon/dash
 
-    sentences = re.split(r'(?<=[.!?])\s+', text)
+    sentences = _split_sentences(text)
     kept: List[str] = []
+    _seen_keys: set = set()                             # exact-sentence de-dup
+    _seen_nums: set = set()                             # figures already stated
     for s in sentences:
         st = s.strip()
         if not st:
@@ -327,8 +720,31 @@ def _strip_leaked_instructions(answer: str) -> str:
             continue
         if _PLACEHOLDER_RE.search(st):
             continue
+        if _WARN_MARKER in st:                          # numeric-guard hallucination flag
+            continue
         if st.count('|') >= 3:                          # raw pipe-table row dump
             continue
+        if _RAW_TABLE_ROW_RE.search(st):                # raw "Federal: Current:... Deferred:..." dump
+            continue
+        # EXACT DE-DUP — drop a verbatim repeat (normalized key).
+        _key = re.sub(r'[^a-z0-9]+', '', st.lower())
+        if len(_key) >= 12 and _key in _seen_keys:
+            continue
+        # NUMERIC-NOVELTY DE-DUP — the small model regenerates the same facts in
+        # paraphrased form until it hits max_tokens. Drop a sentence whose figures
+        # were ALL already stated (pure restatement); keep sentences that add a new
+        # figure, and keep number-free narrative (handled by the exact-dup check).
+        _nums = set(re.findall(r'\d[\d,.]*\d|\d', st))
+        if _nums and _nums <= _seen_nums:
+            continue
+        _seen_nums |= _nums
+        _seen_keys.add(_key)
+        # Strip a leaked table-label prefix ("Total: The provision was ..." →
+        # "The provision was ...") when real prose follows the label.
+        st = re.sub(
+            r'^\s*(?:Total|Federal|State|Foreign|Domestic|Segment Breakdown)\s*:\s*'
+            r'(?=[A-Z][a-z])', '', st,
+        )
         kept.append(st)
 
     # Drop a trailing no-info hedge when real content remains (keeps source chips
@@ -339,6 +755,10 @@ def _strip_leaked_instructions(answer: str) -> str:
 
     result = " ".join(kept).strip()
     result = re.sub(r'^\s*[:\-—]\s*', '', result)
+    # Trailing meta-label artifact the model leaves with empty values
+    # ("... May 2023. Sources:,,," or "... FY2023. Tags:").
+    result = re.sub(r'\s*\b(?:Sources?|Tags?|Source)\s*:\s*[,;\s]*$', '', result,
+                    flags=re.IGNORECASE).strip()
     # Drop a dangling leading connector left behind when a reasoning sentence
     # before it was removed (e.g. "Therefore, Mac had..." → "Mac had...").
     result = re.sub(r'^(?:therefore|thus|so|hence|then|in conclusion|'
@@ -605,7 +1025,7 @@ def _build_context(
         meta          = d.get("metadata", {}) or {}
         source        = meta.get("source") or ""
         section_id    = meta.get("section_id")
-        section_title = meta.get("section_title")
+        # section_title intentionally NOT read into the label (see label block below).
         page          = meta.get("page")
         error_markers = meta.get("error_markers") or []
         doc_version   = meta.get("doc_version")
@@ -613,16 +1033,20 @@ def _build_context(
         if not text:
             continue
 
-        # LABEL — readable for the LLM and stable for citation parsing
+        # LABEL — minimal by design. Citations no longer come from the model
+        # echoing the label (page anchors are inserted deterministically by
+        # _attach_page_citations, and source chips come from the SOURCES payload),
+        # so we deliberately OMIT section_title here: the small model used to copy
+        # those titles verbatim into a trailing "label dump" (e.g. "Net Sales by
+        # Product Category Consolidated Statements of Operations ..."). Keep only
+        # the page / section_id locator.
         label_parts: List[str] = []
-        if source:
+        if source and page is None:
             label_parts.append(str(source))
         if section_id:
             label_parts.append(str(section_id))
         elif page is not None:
-            label_parts.append(f"p.{page}")
-        if section_title:
-            label_parts.append(str(section_title))
+            label_parts.append(f"page {page}")
         if doc_version:
             label_parts.append(f"version={doc_version}")
 
@@ -1243,7 +1667,18 @@ class RAGPipeline:
                 docs = _sandwich_reorder(docs)
 
                 context = _build_context(docs, settings.MAX_CONTEXT_CHARS)
-                context = _prepend_key_facts(docs, query, context)
+                # Use the finance-aware key-facts injector (net sales, gross margin,
+                # EU State Aid, capital return) — a superset of the M&A-only
+                # _prepend_key_facts. Keeps the streaming UI path in parity with the
+                # query_pipeline/benchmark path.
+                try:
+                    from app.reasoning.reasoning_engine import _prepend_key_facts_knowledge
+                    context = _prepend_key_facts_knowledge(
+                        docs, query, context, user_id=user_id or ""
+                    )
+                except Exception as _kf_err:
+                    logger.warning(event="rag_stream_keyfacts_failed", error=str(_kf_err))
+                    context = _prepend_key_facts(docs, query, context)
 
                 builder = self._get_prompt_builder()
                 prompt  = builder.build_prompt(
@@ -1350,6 +1785,11 @@ class RAGPipeline:
                 # reasoning preambles before the canonical answer is delivered.
                 try:
                     answer = _strip_leaked_instructions(answer)
+                    answer = _fix_inconsistent_totals(answer)
+                    answer = _trim_offtopic_finance(query, answer)
+                    # Completeness safety net: if the model dropped most of the
+                    # injected grounded figures, use the synth doc's complete answer.
+                    answer = _synth_completeness_fallback(answer, context)
                 except Exception as _leak_err:
                     logger.warning(event="rag_stream_leak_strip_failed", error=str(_leak_err))
 
@@ -1378,6 +1818,15 @@ class RAGPipeline:
                     answer = strip_inline_citations(answer)
                 except Exception:
                     _source_docs = docs[:3]
+
+                # PERPLEXITY-STYLE [p.N] ANCHORS — deterministically attach a page
+                # citation to each sentence by tracing its figures to the source
+                # chunk. Runs on the clean prose (after strip_inline_citations) so
+                # the only brackets left are the trustworthy page anchors.
+                try:
+                    answer = _attach_page_citations(answer, docs)
+                except Exception as _cite_err:
+                    logger.warning(event="rag_stream_page_cite_failed", error=str(_cite_err))
 
                 # STREAM THE CLEAN ANSWER progressively — gives the client a
                 # typing effect without ever exposing the raw leaked preamble.

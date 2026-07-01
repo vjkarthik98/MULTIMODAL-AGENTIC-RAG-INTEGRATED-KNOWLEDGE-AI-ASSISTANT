@@ -112,6 +112,18 @@ _FINANCIAL_MODEL: frozenset = frozenset({
     "dcf", "lbo", "valuation", "projection", "sensitivity",
     "wacc", "financial model", "assumptions", "model output",
 })
+# Financial-STATEMENT metrics that live inside the ingested 10-K / annual report.
+# A question about these for a company + fiscal year is document-grounded (RAG),
+# NOT a live-web lookup — even when it references a real-world event like the EU
+# State Aid Decision. Without this the LLM router non-deterministically sent
+# "EU State Aid Decision ... Apple's tax provision ... FY2024" to pure web search.
+_FINANCIAL_STATEMENT: frozenset = frozenset({
+    "tax provision", "provision for income taxes", "effective tax rate",
+    "state aid", "deferred tax", "gross margin", "operating margin",
+    "operating income", "net sales", "cost of sales", "capital return",
+    "share repurchase", "shareholders' equity", "shareholders equity",
+    "cash flow from operations", "income tax charge", "provision for income tax",
+})
 
 
 # NORMALIZE QUERY
@@ -257,6 +269,21 @@ class AgentRouter:
                     d = self._finance_decision(
                         "rag", "financial_model_kb", 0.90, session_id, signals,
                         subtype_filter=["table", "assumptions"],
+                    )
+                    _router_decisions.labels(action="rag", method="finance_hard_rule").inc()
+                    self._log_decision(d, signals, start, session_id)
+                    return d
+
+                # FINANCIAL-STATEMENT METRICS — tax provision, effective tax rate,
+                # gross margin, net sales, capital return, EU State Aid impact, etc.
+                # These live in the ingested 10-K, so force RAG. Placed AFTER the
+                # is_recent/is_web/market-data rules above, so "latest ... stock
+                # price" still routes to hybrid/search first; only pure document
+                # metric questions reach here.
+                if any(kw in query.lower() for kw in _FINANCIAL_STATEMENT):
+                    d = self._finance_decision(
+                        "rag", "financial_statement_kb", 0.90, session_id, signals,
+                        source_type_filter=["pdf", "docx"],
                     )
                     _router_decisions.labels(action="rag", method="finance_hard_rule").inc()
                     self._log_decision(d, signals, start, session_id)

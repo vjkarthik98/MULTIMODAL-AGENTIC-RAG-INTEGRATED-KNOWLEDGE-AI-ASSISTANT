@@ -755,11 +755,13 @@ def query_pipeline(
                     conf     = float(tool_out.get("confidence", 0.5))
                     # Normalise Tavily URL list into the same {text, source, ...}
                     # shape the API response model expects.
-                    for url in tool_out.get("sources", []) or []:
+                    _web_titles = tool_out.get("titles", []) or []
+                    for _wi, url in enumerate(tool_out.get("sources", []) or []):
                         sources_out.append({
                             "text":         "",
                             "score":        conf,
                             "source":       url,
+                            "title":        _web_titles[_wi] if _wi < len(_web_titles) else "",
                             "page_number":  None,
                             "start_time":   None,
                             "end_time":     None,
@@ -1098,10 +1100,12 @@ def query_pipeline(
                     _hybrid_web_conf = float(_tool_out.get("confidence", 0.5))
                     _hybrid_web_docs = (_tool_out.get("documents") or [])[:3]
                     _web_urls = (_tool_out.get("sources") or [])
+                    _web_titles = (_tool_out.get("titles") or [])
                     for _idx, _url in enumerate(_web_urls[:3]):
                         _web_snippet = _hybrid_web_docs[_idx][:300] if _idx < len(_hybrid_web_docs) else ""
                         _hybrid_web_sources.append({
                             "text": _web_snippet, "score": round(_hybrid_web_conf, 5), "source": _url,
+                            "title": _web_titles[_idx] if _idx < len(_web_titles) else "",
                             "page_number": None, "start_time": None, "end_time": None,
                             "modality": "web", "doc_id": None,
                         })
@@ -1317,8 +1321,12 @@ def query_pipeline(
         # appended after real content (which would make the UI hide the source
         # chips). rag_pipeline never imports query_pipeline, so this is safe.
         try:
-            from app.pipeline.rag_pipeline import _strip_leaked_instructions
+            from app.pipeline.rag_pipeline import (
+                _fix_inconsistent_totals, _strip_leaked_instructions, _trim_offtopic_finance,
+            )
             answer = _strip_leaked_instructions(answer)
+            answer = _fix_inconsistent_totals(answer)
+            answer = _trim_offtopic_finance(query, answer)
         except Exception as _leak_err:
             logger.warning(event="query_pipeline_leak_strip_failed",
                            error=str(_leak_err), session_id=session_id)
@@ -1340,6 +1348,26 @@ def query_pipeline(
             answer = strip_inline_citations(answer)
         except Exception as _cit_err:
             logger.warning(event="citation_tracking_failed", error=str(_cit_err), session_id=session_id)
+
+        # COMPLETENESS SAFETY NET — same as the streaming path. Re-derive the synth
+        # doc (injector output on a copy of final_docs) and, if the model dropped
+        # most of its grounded figures, fall back to the complete synth answer.
+        try:
+            from app.pipeline.rag_pipeline import _synth_completeness_fallback
+            from app.reasoning.reasoning_engine import _prepend_key_facts_knowledge as _pkf
+            _synth_ctx = _pkf(list(final_docs), query, "", user_id=user_id or "")
+            answer = _synth_completeness_fallback(answer, _synth_ctx)
+        except Exception as _sc_err:
+            logger.warning(event="query_pipeline_completeness_failed", error=str(_sc_err), session_id=session_id)
+
+        # PERPLEXITY-STYLE [p.N] ANCHORS — same as the streaming path, so the
+        # non-streaming / meta answer carries inline page references that match
+        # the UI. Pages come from the real retrieved chunks (synthetic docs skipped).
+        try:
+            from app.pipeline.rag_pipeline import _attach_page_citations
+            answer = _attach_page_citations(answer, final_docs)
+        except Exception as _pc_err:
+            logger.warning(event="query_pipeline_page_cite_failed", error=str(_pc_err), session_id=session_id)
 
         # H-03: Stricter numeric grounding gate.
         # If the answer contains specific numbers/dollar amounts that are NOT
@@ -1376,6 +1404,21 @@ def query_pipeline(
 
         total_latency = round(time.time() - start, 3)
 
+        # EVAL DEBUG — reconstruct the context the LLM actually saw (raw retrieved
+        # text PLUS the injected key-facts), so the benchmark's Context metric
+        # reflects real support, not just raw-chunk recall. Best-effort/additive.
+        _eval_context = " ".join(
+            d.get("text", "") for d in final_docs if isinstance(d, dict)
+        )
+        try:
+            from app.reasoning.reasoning_engine import _prepend_key_facts_knowledge
+            _eval_context = _prepend_key_facts_knowledge(
+                list(final_docs), query, _eval_context, user_id=user_id or ""
+            )
+        except Exception:
+            pass
+        _eval_context = _eval_context[:60000]
+
         response = {
             "answer":               answer,
             "confidence":           confidence,
@@ -1399,6 +1442,18 @@ def query_pipeline(
                 "cache_hit":         False,
                 "canonical_sources": out_sources,
                 "hybrid_web_results": len(_hybrid_web_sources) if decision == "hybrid" else 0,
+                # EVAL DEBUG — full retrieved set (pages + joined text) for the
+                # benchmark harness to score Retrieval/Context recall. Additive
+                # only; ignored by the UI/API consumers.
+                # Exclude synthetic injected docs (their hardcoded pages are not
+                # real retrieval) so the score reflects genuinely retrieved pages.
+                "eval_retrieved_pages": sorted({
+                    int(_pg) for d in final_docs
+                    if isinstance(d, dict) and not (d.get("metadata") or {}).get("synthetic")
+                    for _pg in [(d.get("metadata") or {}).get("page", d.get("page"))]
+                    if _pg is not None
+                }),
+                "eval_context": _eval_context,
             },
         }
 

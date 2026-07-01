@@ -801,6 +801,11 @@ def strip_inline_citations(text: str) -> str:
     cleaned = re.sub(r'\s+([,.;:!?])', r'\1', cleaned)
     cleaned = re.sub(r'\(\s*\)', '', cleaned)            # empty parens
     cleaned = re.sub(r'[ \t]+\n', '\n', cleaned)
+    # An orphaned "Sources:"/"Tags:" label left after the [n] tokens it referenced
+    # were removed (e.g. "Sources: [1],[2],[3]" → "Sources:,,," → ""). Drop the
+    # bare label and its leftover separators wherever it now trails the text.
+    cleaned = re.sub(r'\s*\b(?:Sources?|Tags?)\s*:\s*[,;\s]*$', '', cleaned,
+                     flags=re.IGNORECASE)
     return cleaned.strip()
 
 

@@ -170,7 +170,8 @@ export default function Sidebar({
   const sessionMenuPanelRef                = useRef(null)
   const renameInputRef                     = useRef(null)
   const [uploadingFiles, setUploadingFiles] = useState(new Set())
-  const [uploadProgress, setUploadProgress] = useState({}) // filename → 0-100
+  const [uploadProgress, setUploadProgress] = useState({}) // filename → 0-100 (smoothed, displayed)
+  const uploadTargets = useRef({})       // filename → real stage target the bar eases toward
   const uploadControllers = useRef({}) // filename → AbortController
   const [uploadError, setUploadError]     = useState('')
   const [dupPrompt, setDupPrompt]         = useState(null) // { fresh: File[], dups: File[] }
@@ -343,6 +344,42 @@ export default function Sidebar({
 
   useEffect(() => { refreshKB() }, [])
 
+  /* ── Smooth upload progress animator ───────────────────────────────────────
+   * The server reports progress in coarse stages (queued 2% → extracting 20% →
+   * chunking 50% → embedding 80% → done 100%), polled once per second, which
+   * makes the bar jump (2→20→80). This ticks the *displayed* percentage up by a
+   * small amount every ~70ms toward the current stage target, so the user sees a
+   * continuous 1%, 2%, 3%… count. While a stage is still processing (display has
+   * reached its target but it isn't done yet) the bar trickles forward slowly,
+   * capped below the next milestone, so it never looks frozen or overshoots. */
+  useEffect(() => {
+    if (uploadingFiles.size === 0) return
+    let tick = 0
+    const id = setInterval(() => {
+      tick++
+      setUploadProgress(prev => {
+        let changed = false
+        const next = { ...prev }
+        for (const name of Object.keys(next)) {
+          const target = uploadTargets.current[name] ?? next[name]
+          const cur = next[name]
+          if (cur < target) {
+            // Ease toward the real milestone — faster when far, ≥1 so it always moves.
+            next[name] = Math.min(target, cur + Math.max(1, Math.ceil((target - cur) / 10)))
+            changed = true
+          } else if (target < 100 && cur < 95 && tick % 8 === 0) {
+            // Stage still processing: gentle trickle so the bar keeps moving,
+            // but never reaches the next milestone (cap a bit below 100).
+            next[name] = Math.min(95, cur + 1)
+            changed = true
+          }
+        }
+        return changed ? next : prev
+      })
+    }, 70)
+    return () => clearInterval(id)
+  }, [uploadingFiles])
+
   /* ── Recents (saved chat sessions) ── */
   const refreshSessions = async () => {
     try {
@@ -471,8 +508,13 @@ export default function Sidebar({
       await new Promise(r => setTimeout(r, INTERVAL))
       try {
         const job = await getIngestionStatus(token, jobId)
-        const pct = _STAGE_PROGRESS[job.status] ?? Math.round((job.progress || 0) * 100)
-        setUploadProgress(prev => filename in prev ? { ...prev, [filename]: pct } : prev)
+        // Prefer the server's real fractional progress when it's ahead of the
+        // coarse stage floor, so the bar reflects actual chunk progress.
+        const stagePct = _STAGE_PROGRESS[job.status] ?? 0
+        const realPct = Math.round((job.progress || 0) * 100)
+        const pct = Math.max(stagePct, realPct)
+        // Set the TARGET; the animator eases the displayed value toward it.
+        uploadTargets.current[filename] = Math.max(uploadTargets.current[filename] || 0, pct)
         if (job.status === 'done') return { ok: true, chunks: job.chunks_done }
         if (job.status === 'error') return { ok: false, error: job.error || 'Processing failed' }
       } catch (_) { /* network blip — keep polling */ }
@@ -488,7 +530,8 @@ export default function Sidebar({
       uploadControllers.current[file.name] = ctrl
 
       setUploadingFiles(prev => new Set([...prev, file.name]))
-      setUploadProgress(prev => ({ ...prev, [file.name]: 2 }))  // start at "queued" level
+      uploadTargets.current[file.name] = 2                       // queued target
+      setUploadProgress(prev => ({ ...prev, [file.name]: 0 }))   // animate up from 0
 
       try {
         // Server returns job_id immediately (<1s) for ALL modalities — file is already
@@ -498,7 +541,8 @@ export default function Sidebar({
         if (result?.job_id) {
           const { ok, error: pollErr, chunks } = await _pollJobStatus(auth.token, result.job_id, file.name)
           if (ok) {
-            setUploadProgress(prev => ({ ...prev, [file.name]: 100 }))
+            uploadTargets.current[file.name] = 100        // let the animator finish to 100
+            await new Promise(r => setTimeout(r, 550))    // ...and let that climb render
             addToast(`Uploaded: ${file.name}${chunks ? ` (${chunks} chunks)` : ''}`, 'success')
           } else {
             errors.push(`${file.name}: ${pollErr}`)
@@ -506,7 +550,8 @@ export default function Sidebar({
           }
         } else {
           // Fallback: older server response without job_id (duplicate or instant result)
-          setUploadProgress(prev => ({ ...prev, [file.name]: 100 }))
+          uploadTargets.current[file.name] = 100
+          await new Promise(r => setTimeout(r, 550))
           addToast(`Uploaded: ${file.name}`, 'success')
         }
       } catch (err) {
@@ -525,6 +570,7 @@ export default function Sidebar({
       }
       setUploadingFiles(prev => { const s = new Set(prev); s.delete(file.name); return s })
       setUploadProgress(prev => { const p = { ...prev }; delete p[file.name]; return p })
+      delete uploadTargets.current[file.name]
     }
     if (errors.length) setUploadError(errors.join('; '))
     await refreshKB()
