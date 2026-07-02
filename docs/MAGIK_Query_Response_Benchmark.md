@@ -224,7 +224,7 @@ Goldman Sachs rates Apple **BUY** with a **12-month price target of $245.00**, i
 
 ### Q12 · RAG
 
-**Query:** What are the three pillars of Goldman Sachs' investment thesis that support their BUY rating on Apple?
+**Query:** What are the three pillars of Goldman Sachs'Investment thesis that support their BUY rating on Apple?
 
 **Answer:**
 

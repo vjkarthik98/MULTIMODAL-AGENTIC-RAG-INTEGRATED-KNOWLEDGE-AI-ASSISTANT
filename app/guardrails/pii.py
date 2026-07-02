@@ -121,6 +121,38 @@ def _apply_extra_regex(text: str) -> str:
 # 0.6-1.0, so 0.5 keeps genuine detections while dropping low-confidence noise.
 _PII_SCORE_THRESHOLD = 0.35
 
+# Presidio's URL recognizer matches "word.tld" shapes — and ".do" is a valid
+# ccTLD (Dominican Republic), so document filenames like "report.docx" get
+# matched as a URL on "report.do", leaving "cx" as a separate trailing token
+# and corrupting the filename into "report_<URL>cx" wherever it is cited.
+# This is a precision fix (drop that one false-positive span), not a weakening
+# of the guardrail — a genuine URL never continues into a known file extension.
+_DOC_EXTENSIONS = {
+    "docx", "doc", "pdf", "xlsx", "xls", "pptx", "ppt", "csv", "txt",
+    "jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff",
+    "mp3", "mp4", "wav", "mov", "avi", "json", "xml", "md",
+}
+_WORD_CHAR_RE = re.compile(r"[A-Za-z0-9_]")
+
+
+def _is_filename_false_positive(text: str, start: int, end: int) -> bool:
+    """True if a URL-entity match is actually a truncated filename extension."""
+    j = end
+    while j < len(text) and _WORD_CHAR_RE.match(text[j]):
+        j += 1
+    full_token = text[start:j]
+    if "." not in full_token:
+        return False
+    ext = full_token.rsplit(".", 1)[-1].lower()
+    return ext in _DOC_EXTENSIONS
+
+
+def _filter_false_positives(text: str, results: list) -> list:
+    return [
+        r for r in results
+        if not (r.entity_type == "URL" and _is_filename_false_positive(text, r.start, r.end))
+    ]
+
 
 def detect_pii(text: str, language: str = "en") -> List[dict]:
     """Detect PII entities in text. Returns list of {entity_type, start, end, score}."""
@@ -136,6 +168,7 @@ def detect_pii(text: str, language: str = "en") -> List[dict]:
             entities=_get_entity_types(),
             score_threshold=_PII_SCORE_THRESHOLD,
         )
+        results = _filter_false_positives(text, results)
         return [
             {
                 "entity_type": r.entity_type,
@@ -173,6 +206,7 @@ def scrub_pii(text: str, language: str = "en") -> tuple[str, bool]:
             entities=_get_entity_types(),
             score_threshold=_PII_SCORE_THRESHOLD,
         )
+        results = _filter_false_positives(text, results)
         if not results:
             # No Presidio hits — still apply regex
             scrubbed = _apply_extra_regex(text)

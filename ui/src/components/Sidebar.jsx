@@ -342,7 +342,13 @@ export default function Sidebar({
     setLoadingKB(false)
   }
 
-  useEffect(() => { refreshKB() }, [])
+  // Re-fetch whenever the session identity changes (login/logout, guest<->real
+  // user, or account switch) — not just on mount. Without auth?.token in the
+  // deps, a stale closure keeps whatever the FIRST-mounted auth fetched even
+  // after `auth` later flips (e.g. the initial auth-check race in App.jsx),
+  // leaking one session's KB/Recents into another's UI. Clear immediately so
+  // the previous session's data never lingers on screen while refetching.
+  useEffect(() => { prevFilenamesRef.current = new Set(); setKbFiles([]); refreshKB() }, [auth?.token])
 
   /* ── Smooth upload progress animator ───────────────────────────────────────
    * The server reports progress in coarse stages (queued 2% → extracting 20% →
@@ -391,6 +397,15 @@ export default function Sidebar({
   // Refetch on mount, and again whenever a generation finishes — that's the
   // only moment a session's title/recency in Mongo can actually have changed.
   useEffect(() => { if (!streaming) refreshSessions() }, [streaming])
+
+  // Refetch (and clear immediately, before the round-trip) whenever the
+  // session identity changes — see the matching KB-refresh effect above for
+  // why auth?.token must be a dependency: without it, a stale closure keeps
+  // showing whichever session's Recents were fetched first, leaking one
+  // account's chat history into another session's UI (e.g. the auth-check
+  // race in App.jsx resolving to a guest after the real user's data already
+  // rendered).
+  useEffect(() => { setSessions([]); refreshSessions() }, [auth?.token])
 
   // When all history is cleared, empty the list instantly without a round-trip.
   useEffect(() => { if (historyClearedAt) setSessions([]) }, [historyClearedAt])

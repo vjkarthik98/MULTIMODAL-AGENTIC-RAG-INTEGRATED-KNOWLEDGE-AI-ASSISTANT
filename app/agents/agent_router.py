@@ -239,6 +239,23 @@ class AgentRouter:
                     return d
 
                 # FINANCE DOMAIN HARD RULES (Phase 7)
+                # Financial-MODEL terms ("dcf", "wacc", "valuation", "assumptions", ...)
+                # are checked BEFORE the generic market-data phrases below. A question
+                # like "base/bull/bear case DCF assumptions and implied price target"
+                # matches both is_financial_model_query AND is_market_data_query (via
+                # "price target"), but DCF/WACC/valuation model detail lives in the
+                # ingested research report, not a live feed — so the document-specific
+                # signal must win, or financial-model questions get force-routed to
+                # web search and never see the KB table that actually answers them.
+                if signals.is_financial_model_query:
+                    d = self._finance_decision(
+                        "rag", "financial_model_kb", 0.90, session_id, signals,
+                        subtype_filter=["table", "assumptions"],
+                    )
+                    _router_decisions.labels(action="rag", method="finance_hard_rule").inc()
+                    self._log_decision(d, signals, start, session_id)
+                    return d
+
                 if signals.is_market_data_query:
                     d = self._finance_decision(
                         "search", "market_data_live", 0.93, session_id, signals,
@@ -260,15 +277,6 @@ class AgentRouter:
                     d = self._finance_decision(
                         "rag", "regulatory_filing_kb", 0.91, session_id, signals,
                         source_type_filter=["pdf", "docx"],
-                    )
-                    _router_decisions.labels(action="rag", method="finance_hard_rule").inc()
-                    self._log_decision(d, signals, start, session_id)
-                    return d
-
-                if signals.is_financial_model_query:
-                    d = self._finance_decision(
-                        "rag", "financial_model_kb", 0.90, session_id, signals,
-                        subtype_filter=["table", "assumptions"],
                     )
                     _router_decisions.labels(action="rag", method="finance_hard_rule").inc()
                     self._log_decision(d, signals, start, session_id)

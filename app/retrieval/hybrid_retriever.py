@@ -161,12 +161,27 @@ _MULTI_SOURCE_BOOST: float = 1.15
 # RRF CONSTANT
 _RRF_K: int = settings.HYBRID_RRF_K
 
+# NUMERIC TOKEN DETECTION FOR MMR OVERLAP — see _token_set below.
+_NUMERIC_TOKEN_RE = re.compile(r'^[\(\$\-\+]*\d[\d,\.]*%?\)?[mbk]?\)?[,.;:]?$', re.IGNORECASE)
+
+
+def _is_numeric_token(tok: str) -> bool:
+    return bool(_NUMERIC_TOKEN_RE.match(tok))
+
 # FINANCIAL TABLE BOOST — regex patterns hoisted to module level for performance
 _pipe_re      = re.compile(r'\d[\d,]+\s*\||\|\s*\$?\s*\d[\d,]+')
+# Metric noun and decline/growth verb, allowing an intervening clause (a
+# dollar figure, "of total X", a year) rather than requiring direct adjacency.
+# The original `revenue\s+(?:decreased|...)` pattern missed real phrasing like
+# "...total revenue ($66.95 billion) in FY2024, declining -7.7% YoY..." —
+# confirmed this let a risk-narrative paragraph lose the pipe-table boost
+# below to a same-topic data table that lacks the qualitative content asked
+# about, even though it ranked #2/44 on both raw BM25 and dense search.
 _narrative_re = re.compile(
-    r'(?:net sales|revenue|income|earnings)\s+(?:decreased|increased|declined|grew)'
+    r'(?:net sales|revenue|income|earnings)\b(?:.{0,60}?)'
+    r'\s*(?:decreased|increased|declined|declining|grew|growing|falling|fell)'
     r'.*?(?:\d+(?:\.\d+)?\s*%|\$\s*\d)',
-    re.IGNORECASE,
+    re.IGNORECASE | re.DOTALL,
 )
 _rounded_re   = re.compile(r'\$\s*\d+\.\d+\s*billion', re.IGNORECASE)
 _exact_re     = re.compile(r'\b\d{2,3},\d{3}\b')
@@ -481,11 +496,23 @@ class HybridRetriever:
     # TOKEN SET HELPER — memoised so each unique text is tokenised once per query.
     # MMR calls _text_overlap in an O(k²) loop; without caching, text A is re-split
     # every time it appears as the left or right argument.
+    #
+    # Numeric tokens ($66,952M, 17.1%, -7.7%) are excluded from the overlap set.
+    # A table row and its own prose risk narrative legitimately share the same
+    # figures without being redundant content — MMR's word-overlap penalty was
+    # treating "cites the same number" as "duplicate", burying the more useful
+    # of the two chunks (confirmed: a docx risk paragraph ranking #2/44 in both
+    # raw BM25 and dense search fell to ~#41 after MMR, chiefly because it
+    # shared "17.1%"/"-7.7%"/"China" tokens with an already-selected revenue
+    # table). Non-numeric word overlap still catches genuine near-duplicates.
 
     def _token_set(self, text: str) -> frozenset:
         key = hashlib.md5(text[:500].encode(), usedforsecurity=False).hexdigest()
         if key not in self._token_cache:
-            self._token_cache[key] = frozenset(text.lower().split())
+            tokens = text.lower().split()
+            self._token_cache[key] = frozenset(
+                t for t in tokens if not _is_numeric_token(t)
+            )
         return self._token_cache[key]
 
     # TEXT OVERLAP FOR MMR

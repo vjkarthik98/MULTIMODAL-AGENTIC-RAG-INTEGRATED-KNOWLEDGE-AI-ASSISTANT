@@ -84,6 +84,16 @@ export default function App() {
   }
 
   useEffect(() => {
+    // Guard against React StrictMode's dev-only double-invocation of this
+    // effect: without `cancelled`, two concurrent getMeWithRetry/_autoGuest
+    // chains can race, and whichever setAuth() call lands LAST wins — non-
+    // deterministically producing a guest session even though the other,
+    // now-stale invocation already authenticated as the real stored user
+    // (and its Sidebar/ChatPage mount already fetched that user's real KB
+    // files and chat history, which then linger on screen under the newer,
+    // guest `auth`). Only the current (non-cleaned-up) invocation may commit.
+    let cancelled = false
+
     const params       = new URLSearchParams(window.location.search)
     const oauthToken   = params.get('magik_token')
     const oauthRefresh = params.get('magik_refresh')
@@ -100,6 +110,7 @@ export default function App() {
           // Migration failure is non-fatal — user still gets their real account
         })
       }
+      if (cancelled) return
       setAuth({ token: oauthToken, refreshToken: oauthRefresh, email: oauthEmail, isGuest: false })
       setChecking(false)
       return
@@ -111,6 +122,7 @@ export default function App() {
     const guestQueries = parseInt(sessionStorage.getItem('magik_guest_queries') || '5', 10)
     const guestUploads = parseInt(sessionStorage.getItem('magik_guest_uploads') || '2', 10)
     if (guestToken && guestId) {
+      if (cancelled) return
       setAuth({
         token: guestToken, refreshToken: null, email: '',
         isGuest: true, guestUserId: guestId,
@@ -141,12 +153,14 @@ export default function App() {
       }
       getMeWithRetry(storedToken)
         .then(async () => {
+          if (cancelled) return
           // Token is valid right now but may be near its 30-min expiry.
           // Always exchange it for a fresh pair so the first upload/query
           // never hits a just-expired token before the 20-min interval fires.
           if (storedRefresh) {
             try {
               const data = await refreshAccessToken(storedRefresh)
+              if (cancelled) return
               persistAuth({ token: data.access_token, refreshToken: data.refresh_token, email: storedEmail })
               setAuth({ token: data.access_token, refreshToken: data.refresh_token, email: storedEmail })
               return
@@ -155,14 +169,17 @@ export default function App() {
               // The stored token is still valid — use it as-is.
             }
           }
+          if (cancelled) return
           setAuth({ token: storedToken, refreshToken: storedRefresh, email: storedEmail })
         })
         .catch(async () => {
+          if (cancelled) return
           // Access token expired (e.g. the browser was closed for a while) —
           // silently renew via the refresh token before forcing a re-login.
           if (storedRefresh) {
             try {
               const data = await refreshAccessToken(storedRefresh)
+              if (cancelled) return
               persistAuth({ token: data.access_token, refreshToken: data.refresh_token, email: storedEmail })
               setAuth({ token: data.access_token, refreshToken: data.refresh_token, email: storedEmail })
               return
@@ -170,22 +187,28 @@ export default function App() {
               // refresh token also expired/revoked — fall through to guest creation
             }
           }
+          if (cancelled) return
           clearAuth()
           // Stored token invalid and refresh failed — silently become a guest
-          _autoGuest()
+          _autoGuest(() => cancelled)
         })
-        .finally(() => setChecking(false))
+        .finally(() => { if (!cancelled) setChecking(false) })
     } else {
       // No stored credentials — chat IS the landing page; create a silent guest session
-      _autoGuest().finally(() => setChecking(false))
+      _autoGuest(() => cancelled).finally(() => { if (!cancelled) setChecking(false) })
     }
+
+    return () => { cancelled = true }
   }, [])
 
   // Creates a silent guest session and sets auth. Used on initial load when no
   // credentials are found, so the chat UI is shown immediately (ChatGPT-style).
-  const _autoGuest = async () => {
+  // `isCancelled` (optional) lets the caller's effect veto a stale result —
+  // see the StrictMode race-guard comment on the auth-check effect above.
+  const _autoGuest = async (isCancelled) => {
     try {
       const data = await createGuestSession()
+      if (isCancelled?.()) return
       sessionStorage.setItem('magik_guest_token',   data.access_token)
       sessionStorage.setItem('magik_guest_id',      data.guest_user_id)
       sessionStorage.setItem('magik_guest_queries', String(data.queries_left))

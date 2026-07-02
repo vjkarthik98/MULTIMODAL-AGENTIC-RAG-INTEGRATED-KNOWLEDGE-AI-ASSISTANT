@@ -562,6 +562,7 @@ class BM25Retriever:
             "sub_chunk_index":   s.get("sub_chunk_index"),
             "total_sub_chunks":  s.get("total_sub_chunks"),
             # ── DOCX locators ─────────────────────────────────────────────────
+            "heading":           s.get("heading"),
             "heading_level":     s.get("heading_level"),
             # ── XLSX locators ─────────────────────────────────────────────────
             "sheet_name":        s.get("sheet") or s.get("section_title"),

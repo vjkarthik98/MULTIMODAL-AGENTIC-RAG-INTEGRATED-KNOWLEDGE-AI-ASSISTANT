@@ -1081,9 +1081,17 @@ async def stream_query(
             "search online", "look online", "from internet", "from the internet",
             "find on the internet", "look it up",
         })
+        # NOTE: bare "current" and "share price" were removed — both are
+        # ordinary terms inside static finance documents ("current rating",
+        # "current price target", "12-month price target ... share price of
+        # $207.00"), not exclusively live-data requests. They forced ANY
+        # matching question to skip the knowledge base entirely ("no KB file
+        # sources shown at all" — see below), silently dropping ingested
+        # DOCX/PDF context for common document questions. The remaining
+        # signals are specific enough to real-time intent to keep.
         _REALTIME_SIGNALS = {
-            "today", "now", "current", "latest", "live", "right now",
-            "stock price", "share price", "price today", "news today",
+            "today", "now", "latest", "live", "right now",
+            "stock price", "price today", "news today",
             "this week", "this month", "currently trading",
         }
         _q_lower = query.lower()

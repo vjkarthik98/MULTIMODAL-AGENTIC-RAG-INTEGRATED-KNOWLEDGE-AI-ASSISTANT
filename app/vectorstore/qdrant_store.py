@@ -1058,9 +1058,23 @@ class QdrantVectorStore:
                 ).inc()
                 span.set_status(Status(StatusCode.ERROR, str(exc)))
                 span.record_exception(exc)
-                logger.error(
-                    "qdrant_search_failed",
+                # A named vector that doesn't exist on this collection (e.g.
+                # "vector_alt" — only some modalities have a secondary
+                # table/numeric embedding space) is an EXPECTED, already-
+                # handled fallback for callers like
+                # hybrid_retriever._vector_search_alt(), not a real failure.
+                # Logging it at ERROR every time drowns out genuine Qdrant
+                # problems in the logs.
+                _is_missing_named_vector = (
+                    vector_name is not None
+                    and "not existing vector name" in str(exc).lower()
+                )
+                _log = logger.warning if _is_missing_named_vector else logger.error
+                _log(
+                    "qdrant_search_missing_named_vector" if _is_missing_named_vector
+                    else "qdrant_search_failed",
                     collection=collection,
+                    vector_name=vector_name,
                     session_id=session_id,
                     error=str(exc),
                 )

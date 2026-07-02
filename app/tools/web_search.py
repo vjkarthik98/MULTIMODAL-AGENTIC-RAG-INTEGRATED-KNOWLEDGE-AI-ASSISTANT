@@ -163,6 +163,40 @@ def _hash(text: str) -> str:
     return hashlib.sha256(text[:300].encode("utf-8")).hexdigest()
 
 
+_ELLIPSIS_TAIL_RE = _re.compile(r'\s*(?:\.\.\.|…)\s*$')
+_MD_HEADING_RE = _re.compile(r'#{1,2}\s+([^\n#.!?]{8,160}[.!?]?)')
+
+
+def _recover_truncated_title(doc: str, truncated_head: str) -> str:
+    """Some search providers truncate a long `title` field with a trailing
+    "...". The full headline is usually restated later in the snippet body
+    (a markdown "# Heading" or the content simply repeating the headline
+    before the real article text starts) — recover it so the UI never shows
+    a title cut off mid-sentence.
+    """
+    core = _ELLIPSIS_TAIL_RE.sub('', truncated_head).strip()
+    if len(core) < 8:
+        return ""
+    anchor = core[:24].lower()
+
+    for m in _MD_HEADING_RE.finditer(doc):
+        cand = m.group(1).strip()
+        if cand.lower().startswith(anchor) and not _ELLIPSIS_TAIL_RE.search(cand):
+            return cand
+
+    idx = doc.lower().find(anchor, len(truncated_head))
+    if idx != -1:
+        window = doc[idx: idx + 200]
+        stop = window.find(' ... ')
+        if stop == -1:
+            stop = window.find(' … ')
+        cand = window[:stop].strip() if stop != -1 else window.strip()
+        cand = _re.sub(r'[\s.…]+$', '', cand)
+        if len(cand) > len(core) and len(cand) <= 160:
+            return cand
+    return ""
+
+
 def _title_from_doc(doc: str) -> str:
     """Recover the article title from a processed web doc stored as 'Title: content'.
 
@@ -176,6 +210,13 @@ def _title_from_doc(doc: str) -> str:
     head = doc.split(":", 1)[0].strip() if ":" in doc[:160] else ""
     if not (3 <= len(head) <= 120):
         return ""
+    # The provider's own `title` field is sometimes pre-truncated with "..."
+    # for long headlines — recover the untruncated form before any further
+    # processing (suffix-stripping below then applies to the full title).
+    if _ELLIPSIS_TAIL_RE.search(head):
+        recovered = _recover_truncated_title(doc, head)
+        if recovered:
+            head = recovered
     # Repeatedly drop a trailing short site-name / section suffix after the last
     # " - " / " | " etc. Titles can chain several ("… | Technology | The Guardian"),
     # so keep stripping until none remain. Only a SHORT tail is treated as a

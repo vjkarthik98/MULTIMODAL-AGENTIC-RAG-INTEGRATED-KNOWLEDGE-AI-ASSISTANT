@@ -162,6 +162,27 @@ def _looks_like_heading(text: str, paragraph: Any) -> bool:
     return False
 
 
+def _iter_body_blocks(doc: Any):
+    """Yield ('paragraph', Paragraph, para_idx) / ('table', Table, tbl_idx) in true
+    document reading order (python-docx's .paragraphs / .tables lose relative
+    order — a document with headings interspersed between tables needs them
+    walked together via the body XML so heading attribution stays correct).
+    """
+    from docx.oxml.ns import qn
+    from docx.text.paragraph import Paragraph
+    from docx.table import Table
+
+    para_idx = 0
+    tbl_idx = 0
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            yield ("paragraph", Paragraph(child, doc), para_idx)
+            para_idx += 1
+        elif child.tag == qn("w:tbl"):
+            yield ("table", Table(child, doc), tbl_idx)
+            tbl_idx += 1
+
+
 def _format_table_rows(rows: List[List[str]]) -> str:
     lines = []
     for row in rows:
@@ -246,83 +267,89 @@ class DocxIngestor(BaseIngestor):
             extracts: List[RawExtract] = []
             current_heading: Optional[str] = None
 
-            # Paragraphs
-            for i, para in enumerate(doc.paragraphs):
-                text = (para.text or "").strip()
-                if not text:
-                    continue
+            # Paragraphs + tables, walked together in true document order so a
+            # table's heading/section attribution reflects the heading it
+            # actually sits under, not whichever heading happens to be last in
+            # the document (python-docx's .paragraphs/.tables lose that order).
+            for block_type, block, idx in _iter_body_blocks(doc):
+                if block_type == "paragraph":
+                    para = block
+                    i = idx
+                    text = (para.text or "").strip()
+                    if not text:
+                        continue
 
-                level = _heading_level(para)
-                if level is None and _looks_like_heading(text, para):
-                    level = 2
+                    level = _heading_level(para)
+                    if level is None and _looks_like_heading(text, para):
+                        level = 2
 
-                text = self._sanitize(text, surface="docx_ingest")
-                if not text.strip():
-                    continue
-                text = self._scrub_pii(text, surface="docx_ingest")
+                    text = self._sanitize(text, surface="docx_ingest")
+                    if not text.strip():
+                        continue
+                    text = self._scrub_pii(text, surface="docx_ingest")
 
-                style_name: Optional[str] = None
-                try:
-                    style_name = para.style.name if para.style else None
-                except Exception:
-                    pass
+                    style_name: Optional[str] = None
+                    try:
+                        style_name = para.style.name if para.style else None
+                    except Exception:
+                        pass
 
-                is_bold = False
-                try:
-                    runs = [r for r in para.runs if (r.text or "").strip()]
-                    if runs:
-                        is_bold = all(bool(r.bold) for r in runs)
-                except Exception:
-                    pass
+                    is_bold = False
+                    try:
+                        runs = [r for r in para.runs if (r.text or "").strip()]
+                        if runs:
+                            is_bold = all(bool(r.bold) for r in runs)
+                    except Exception:
+                        pass
 
-                if level:
-                    current_heading = text
-                    extracts.append(RawExtract(
-                        text=text,
-                        extract_type="heading",
-                        is_bold=is_bold,
-                        style_name=style_name,
-                        raw_source_ref=f"docx:{path.name}|para:{i}",
-                        extra={
-                            "heading_level": level,
-                            "paragraph_index": i,
-                        },
-                    ))
+                    if level:
+                        current_heading = text
+                        extracts.append(RawExtract(
+                            text=text,
+                            extract_type="heading",
+                            is_bold=is_bold,
+                            style_name=style_name,
+                            raw_source_ref=f"docx:{path.name}|para:{i}",
+                            extra={
+                                "heading_level": level,
+                                "paragraph_index": i,
+                            },
+                        ))
+                    else:
+                        extracts.append(RawExtract(
+                            text=text,
+                            extract_type="prose",
+                            is_bold=is_bold,
+                            style_name=style_name,
+                            raw_source_ref=f"docx:{path.name}|para:{i}",
+                            extra={
+                                "paragraph_index": i,
+                                "section_title": current_heading,
+                                "defined_terms": _DEFINED_TERM_RE.findall(text),
+                                "clause_numbers": _CLAUSE_NUM_RE.findall(text),
+                            },
+                        ))
                 else:
-                    extracts.append(RawExtract(
-                        text=text,
-                        extract_type="prose",
-                        is_bold=is_bold,
-                        style_name=style_name,
-                        raw_source_ref=f"docx:{path.name}|para:{i}",
-                        extra={
-                            "paragraph_index": i,
-                            "section_title": current_heading,
-                            "defined_terms": _DEFINED_TERM_RE.findall(text),
-                            "clause_numbers": _CLAUSE_NUM_RE.findall(text),
-                        },
-                    ))
-
-            # Tables
-            for t_idx, table in enumerate(doc.tables):
-                rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
-                row_texts = []
-                for row in rows:
-                    if any(row):
-                        combined_row = " | ".join(str(c or "") for c in row)
-                        combined_row = self._sanitize(combined_row, surface="docx_table_ingest")
-                        combined_row = self._scrub_pii(combined_row, surface="docx_table_ingest")
-                        if combined_row.strip():
-                            row_texts.append(combined_row)
-                            extracts.append(RawExtract(
-                                text=combined_row,
-                                extract_type="table_row",
-                                raw_source_ref=f"docx:{path.name}|table:{t_idx}|row:{len(row_texts)}",
-                                extra={
-                                    "table_index": t_idx,
-                                    "section_title": current_heading,
-                                },
-                            ))
+                    table = block
+                    t_idx = idx
+                    rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
+                    row_texts = []
+                    for row in rows:
+                        if any(row):
+                            combined_row = " | ".join(str(c or "") for c in row)
+                            combined_row = self._sanitize(combined_row, surface="docx_table_ingest")
+                            combined_row = self._scrub_pii(combined_row, surface="docx_table_ingest")
+                            if combined_row.strip():
+                                row_texts.append(combined_row)
+                                extracts.append(RawExtract(
+                                    text=combined_row,
+                                    extract_type="table_row",
+                                    raw_source_ref=f"docx:{path.name}|table:{t_idx}|row:{len(row_texts)}",
+                                    extra={
+                                        "table_index": t_idx,
+                                        "section_title": current_heading,
+                                    },
+                                ))
 
             # Comments
             try:

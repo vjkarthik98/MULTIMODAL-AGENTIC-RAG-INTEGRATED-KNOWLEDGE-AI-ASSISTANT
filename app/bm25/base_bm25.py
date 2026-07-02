@@ -390,6 +390,7 @@ class BaseBM25(ABC):
             "language":           s.get("language"),
             "section_id":         s.get("section_id"),
             "section_title":      s.get("section_title"),
+            "heading":            s.get("heading"),
             "is_forward_looking": s.get("is_forward_looking", False),
             "section_number":     s.get("section_number"),
             "sub_chunk_index":    s.get("sub_chunk_index"),

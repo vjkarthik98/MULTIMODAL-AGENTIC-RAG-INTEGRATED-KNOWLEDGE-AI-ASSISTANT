@@ -96,6 +96,16 @@ _FINANCIAL_TOKENS = frozenset({
     "decline", "assets", "liabilities", "equity", "capex", "depreciation",
     "amortization", "goodwill", "impairment", "acquisition", "segment",
     "guidance", "outlook", "forecast",
+    # Investment-research vocabulary — a question like "what are the three
+    # pillars of the investment thesis" has none of the above tokens, so it
+    # fell through to the "general" catch-all template ("one or two
+    # sentences"), which this small model does not reliably follow — observed
+    # it ignoring the instruction and dumping an unfocused numbered list of
+    # every fact in context instead. The "financial" template's explicit
+    # RULES block is what actually keeps this model grounded and complete.
+    "thesis", "pillars", "pillar", "rating", "recommendation", "upside",
+    "downside", "valuation", "consensus", "analyst", "target",
+    "risk", "risks", "exposure", "concentration", "headwind", "tailwind",
 })
 
 # MULTIMODAL KEYWORDS
@@ -191,6 +201,12 @@ def _is_financial(query: str) -> bool:
 
 
 def _detect_modality(query: str, context: str) -> Optional[str]:
+    # DOCX chunks are cited by section (e.g. "[report.docx 4.1 DCF Model Key
+    # Assumptions]"), never by page — checked first so the financial/comparative
+    # templates below can swap their PDF-style "(Page N)" citation instruction
+    # for a section-based one without touching the PDF-serving branches at all.
+    if ".docx" in context.lower():
+        return "docx"
     combined = (query + " " + context).lower()
     tokens   = set(combined.split())
     if tokens & _IMAGE_KEYWORDS:
@@ -323,6 +339,45 @@ def _system_prompt(
             " claim as suspect\n"
             "- No hallucination. If the answer is not in the context,"
             " reply exactly: \"I could not find this in the provided sources.\"\n\n"
+        )
+
+    # DOCX sources are cited by section, not page — a separate branch so the
+    # PDF-serving "financial"/"comparative" templates below stay byte-for-byte
+    # unchanged (PDF citations must keep using "(Page N)").
+    if modality == "docx" and query_type in ("financial", "comparative"):
+        return (
+            "You are a precise financial analyst. Answer the user's QUERY using "
+            "ONLY the CONTEXT chunks.\n"
+            "\n"
+            "WHAT TO INCLUDE:\n"
+            "- Answer the SPECIFIC question asked, and answer it COMPLETELY. If "
+            "the question asks for a rating, a price target and the upside, give "
+            "all three. If it asks for base, bull and bear cases, give all "
+            "three with their numbers. If it asks about one specific risk (e.g. "
+            "China revenue concentration), answer about THAT risk only.\n"
+            "- The context also contains chunks about OTHER metrics the question "
+            "did not ask about (other risk factors, segment tables, comps, EPS, "
+            "balance-sheet lines). Ignore them. A chunk being present does not "
+            "make it relevant. Do not list extra figures the question did not "
+            "ask for.\n"
+            "- Use only numbers that appear verbatim in the context. Never "
+            "calculate, infer, or recall from memory. A table row such as "
+            "\"Implied Price Target | $245.00 | $285.00 | $190.00\" gives the "
+            "base, bull and bear price targets; \"WACC | 8.5% | 8.0% | 9.5%\" "
+            "gives the base, bull and bear WACC.\n"
+            "- If two sources give conflicting values, report BOTH and flag: "
+            "Conflicting data.\n"
+            "\n"
+            "HOW TO WRITE IT:\n"
+            "- Write flowing prose in complete sentences — one short paragraph. "
+            "NO bullet points, NO dashes, NO numbered lists (\"1. 2. 3.\"), NO "
+            "\"Key Metrics:\" heading. Write it the way an analyst would explain "
+            "it out loud.\n"
+            "- Do NOT put any bracket tags, citations, page numbers or section "
+            "numbers in the text — sources are shown separately below.\n"
+            "- Do NOT write labels like \"First sentence:\", \"Answer:\", or "
+            "\"In response to your query\". Do NOT restate these instructions. "
+            "Just write the answer directly.\n\n"
         )
 
     if query_type == "financial":
@@ -586,6 +641,12 @@ class PromptBuilder:
 
                 span.set_attribute("injection.detected", was_injected)
 
+                # MODALITY DETECTION — on the pre-scrub context. Presidio's URL
+                # recognizer false-positives on "*.docx" filenames (".do" is a
+                # valid ccTLD), mangling them into "report_<URL>cx" — after PII
+                # scrub the ".docx" substring this check looks for is gone.
+                modality_context = context
+
                 # PII SCRUB BEFORE PROMPT INJECTION
                 if scrub_pii:
                     context = _scrub_pii(context)
@@ -595,7 +656,7 @@ class PromptBuilder:
                 query_type = _detect_query_type(query)
                 structured = _is_structured(query)
                 is_code    = _is_code(query)
-                modality   = _detect_modality(query, context)
+                modality   = _detect_modality(query, modality_context)
 
                 span.set_attribute("query.type", query_type)
                 span.set_attribute("query.modality", modality or "text")

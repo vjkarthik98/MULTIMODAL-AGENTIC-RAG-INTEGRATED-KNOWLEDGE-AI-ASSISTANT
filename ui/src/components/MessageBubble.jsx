@@ -41,17 +41,29 @@ function parseInlineCitations(content) {
     .replace(MANGLED_CITATION_RE, '')
     .replace(NUMERIC_CITATION_RE, '')
     .replace(PII_TAG_RE, '')
+  // Safety net: the "§" section symbol must NEVER reach the screen. The current
+  // backend emits plain "[4.1]" section citations, but older cached messages
+  // may still contain "[§4.1]" — drop the bare symbol so those degrade to a
+  // clean "[4.1]" (which the citation injector then colours) instead of showing
+  // a stray "§".
+  clean = clean.replace(/§\s*/g, '')
   // Tidy whitespace left where markers were removed: " ." → "." and
   // collapse any double spaces, then trim the trailing edge.
   clean = clean.replace(/\s+([.,;!?])/g, '$1').replace(/[ \t]{2,}/g, ' ').trimEnd()
   return { cleanContent: clean, inlineSources: found }
 }
 
-// Perplexity-style page anchors [p.38] are deterministically inserted by the
-// backend (rag_pipeline._attach_page_citations). They carry no filename, so
-// parseInlineCitations leaves them intact — here we render each one as a small
-// teal superscript pill instead of raw "[p.38]" text.
-const PAGE_CITE_RE = /\[p\.(\d+)\]/g
+// Deterministic citations inserted by the backend:
+//   • PDF  → [p.38]  (rag_pipeline._attach_page_citations)
+//   • DOCX → [4.1] inline and [4.1 DCF Model Key Assumptions] in the trailing
+//            "Sources:" line (rag_pipeline._attach_section_citations)
+// A DOCX section citation is a bracket that STARTS WITH A DIGIT AND CONTAINS A
+// DOT ("[4.1]", "[5.1.1]", "[1. Executive Summary]") — distinct from a bare
+// numeric citation "[1]" (which is stripped) and from ordinary prose. There is
+// NO "§" symbol anywhere, so no stray symbol can ever appear even if a render
+// path misses this colouring. Both carry no filename, so parseInlineCitations
+// leaves them intact and we render each as an accent-coloured reference.
+const CITE_TOKEN_RE = /\[p\.(\d+)\]|\[(\d+\.[^\]\n]*?)\]/g
 
 function CitePill({ page }) {
   // Rendered inline at the SAME font size as the answer prose (no superscript,
@@ -67,18 +79,36 @@ function CitePill({ page }) {
   )
 }
 
-// Walk a ReactMarkdown node's children and replace [p.N] substrings inside text
-// nodes with <CitePill> elements; non-string children pass through unchanged.
+function SectionCitePill({ label }) {
+  // Accent-coloured section reference. Inline uses a short number ("4.1"); the
+  // trailing Sources line uses the full heading ("4.1 DCF Model Key
+  // Assumptions"). Either way we show "[label]" in the accent colour.
+  return (
+    <span
+      title={`Source: ${label}`}
+      style={{ color: 'var(--t-accent)', fontWeight: 500 }}
+    >
+      {' '}[{label}]
+    </span>
+  )
+}
+
+// Walk a ReactMarkdown node's children and replace [p.N] / [N.N…] substrings
+// inside text nodes with coloured pill elements; non-strings pass through.
 function injectPageCites(children) {
   return Children.map(children, (child) => {
     if (typeof child !== 'string') return child
     const parts = []
     let last = 0
     let m
-    PAGE_CITE_RE.lastIndex = 0
-    while ((m = PAGE_CITE_RE.exec(child)) !== null) {
+    CITE_TOKEN_RE.lastIndex = 0
+    while ((m = CITE_TOKEN_RE.exec(child)) !== null) {
       if (m.index > last) parts.push(child.slice(last, m.index))
-      parts.push(<CitePill key={`${m.index}-${m[1]}`} page={m[1]} />)
+      if (m[1] !== undefined) {
+        parts.push(<CitePill key={`${m.index}-p${m[1]}`} page={m[1]} />)
+      } else {
+        parts.push(<SectionCitePill key={`${m.index}-s${m[2]}`} label={m[2]} />)
+      }
       last = m.index + m[0].length
     }
     if (last < child.length) parts.push(child.slice(last))
@@ -200,6 +230,10 @@ function SourceChip({ source }) {
     const isAudio = ['audio', 'mp3'].includes(mod)
     const isVideo = ['video', 'mp4'].includes(mod)
     const isXlsx  = ['excel', 'xlsx'].includes(mod)
+    // DOCX sections are cited inline and in the trailing "Sources:" line of the
+    // answer, so the chip stays the clean document identity (filename only) —
+    // no "· 4.1 DCF Model Key Assumptions" suffix duplicated here.
+    const isDocx  = ['docx', 'doc', 'word'].includes(mod)
 
     // Priority order: (paged docs) short clean section → timestamp → sheet+row → ...
     // The PAGE NUMBER is NOT shown on the chip — it lives inline in the answer as
@@ -221,9 +255,9 @@ function SourceChip({ source }) {
     } else if (isXlsx && source.sheet_name) {
       suffix = ` · ${source.sheet_name}`
       if (source.row_range) suffix += ` row ${source.row_range}`
-    } else if (source.heading) {
+    } else if (source.heading && !isDocx) {
       suffix = ` · ${String(source.heading)}`
-    } else if (source.section_title && !isTxt) {
+    } else if (source.section_title && !isTxt && !isDocx) {
       const st = String(source.section_title).trim()
       if (st) suffix = ` · ${st}`
     } else if (source.image_title) {
@@ -256,7 +290,7 @@ function SourceChip({ source }) {
         target="_blank"
         rel="noopener noreferrer"
         title={webTitle || raw}
-        className="inline-flex items-start gap-2 rounded-xl px-2.5 py-1.5 mr-1.5 mb-1.5 max-w-[280px] align-top transition-colors cursor-pointer"
+        className="flex items-start gap-2 rounded-xl px-2.5 py-1.5 w-full h-full transition-colors cursor-pointer"
         style={{ background: 'var(--t-chp)', border: '1px solid var(--t-chpb)', textDecoration: 'none' }}
         onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--t-accent)'}
         onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--t-chpb)'}
@@ -264,7 +298,7 @@ function SourceChip({ source }) {
         {chipIcon}
         <span className="flex flex-col min-w-0">
           {webTitle && (
-            <span className="text-[11px] leading-snug font-medium line-clamp-2"
+            <span className="text-[11px] leading-snug font-medium break-words"
               style={{ color: 'var(--t-tx3)' }}>
               {webTitle}
             </span>
@@ -509,12 +543,28 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
                 </div>
               )}
 
-              {/* Sources inside the bubble — hidden when answer says no info was found */}
-              {showSources && allSources.length > 0 && !isStreaming && !isNoInfoResponse(cleanContent) && (
-                <div className="mt-3 pt-2.5 flex flex-wrap" style={{ borderTop: '1px solid var(--t-bbd)' }}>
-                  {allSources.map((src, i) => <SourceChip key={i} source={src} />)}
-                </div>
-              )}
+              {/* Sources inside the bubble — hidden when answer says no info was found.
+                  Web sources render in an aligned 2-column grid (Perplexity/ChatGPT
+                  "Sources" style) so card edges line up; other chips keep the
+                  compact flex-wrap row. */}
+              {showSources && allSources.length > 0 && !isStreaming && !isNoInfoResponse(cleanContent) && (() => {
+                const webSrcs   = allSources.filter(s => typeof s === 'object' && s.modality === 'web')
+                const otherSrcs = allSources.filter(s => !(typeof s === 'object' && s.modality === 'web'))
+                return (
+                  <div className="mt-3 pt-2.5" style={{ borderTop: '1px solid var(--t-bbd)' }}>
+                    {webSrcs.length > 0 && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 items-stretch">
+                        {webSrcs.map((src, i) => <SourceChip key={i} source={src} />)}
+                      </div>
+                    )}
+                    {otherSrcs.length > 0 && (
+                      <div className={`flex flex-wrap ${webSrcs.length > 0 ? 'mt-2' : ''}`}>
+                        {otherSrcs.map((src, i) => <SourceChip key={i} source={src} />)}
+                      </div>
+                    )}
+                  </div>
+                )
+              })()}
             </>
           )}
         </div>

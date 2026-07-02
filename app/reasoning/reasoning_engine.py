@@ -610,6 +610,11 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
             _parsed = []
             for m in _row_re.finditer(_cand):
                 cat = m.group(1).strip().rstrip("(1)").strip()
+                # Skip "Total" rows — the total is already stated explicitly as
+                # the first sentence, and this row is prone to PDF text-extraction
+                # kerning artifacts on this table (e.g. "Total n et sales").
+                if cat.lower().replace(" ", "").startswith("total"):
+                    continue
                 if "Service" in cat:
                     cat = "Services"
                 _parsed.append(
@@ -1059,8 +1064,12 @@ def _build_cot_prompt(
     citation_rules = (
         "CITATION RULES:\n"
         "- Write a full prose answer that directly addresses the QUERY using facts from KNOWLEDGE.\n"
-        "- After each factual sentence, append the matching source tag from KNOWLEDGE.\n"
-        "- Use ONLY tags listed below. Never invent tags or filenames.\n"
+        "- Each KNOWLEDGE chunk starts with its own tag, e.g. [source.ext locator].\n"
+        "  After each factual sentence, append THAT chunk's tag — the one directly\n"
+        "  in front of the fact you just used, not a tag from a different chunk.\n"
+        "- Do NOT collect tags at the end of the answer. Attach each tag immediately\n"
+        "  after the sentence it supports, copied character-for-character.\n"
+        "- Use ONLY tags listed below. Never invent, shorten, or merge tags.\n"
         f"{tag_list}\n"
     )
 

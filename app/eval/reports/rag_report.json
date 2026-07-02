@@ -81,6 +81,144 @@
       "duration_sec": 890.1422128677368,
       "judge": "gguf_mistral",
       "dataset_version": null
+    },
+    "retrieval_pdf": {
+      "suite": "retrieval_pdf",
+      "modality": "pdf",
+      "metrics": {
+        "recall_at_5": {
+          "name": "recall_at_5",
+          "value": 0.0,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "recall_at_10": {
+          "name": "recall_at_10",
+          "value": 0.0,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "mrr": {
+          "name": "mrr",
+          "value": 0.0,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "ndcg_at_10": {
+          "name": "ndcg_at_10",
+          "value": 0.0,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "context_precision": {
+          "name": "context_precision",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: all queries had TODO relevant_chunk_ids",
+          "sub": {}
+        },
+        "hit_rate": {
+          "name": "hit_rate",
+          "value": 0.0,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval__p50_sec": {
+          "name": "retrieval__p50_sec",
+          "value": 0.08752560615539551,
+          "n": 5,
+          "notes": "min=0.09s max=0.35s",
+          "sub": {}
+        },
+        "retrieval__p95_sec": {
+          "name": "retrieval__p95_sec",
+          "value": 0.3013284206390381,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval__p99_sec": {
+          "name": "retrieval__p99_sec",
+          "value": 0.34387145042419437,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        }
+      }
+    },
+    "retrieval_docx": {
+      "suite": "retrieval_docx",
+      "modality": "docx",
+      "metrics": {
+        "recall_at_5": {
+          "name": "recall_at_5",
+          "value": 0.8333333333333334,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "recall_at_10": {
+          "name": "recall_at_10",
+          "value": 0.8333333333333334,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "mrr": {
+          "name": "mrr",
+          "value": 0.65,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "ndcg_at_10": {
+          "name": "ndcg_at_10",
+          "value": 0.6290995948691814,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "context_precision": {
+          "name": "context_precision",
+          "value": NaN,
+          "n": 0,
+          "notes": "empty: all queries had TODO relevant_chunk_ids",
+          "sub": {}
+        },
+        "hit_rate": {
+          "name": "hit_rate",
+          "value": 1.0,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval__p50_sec": {
+          "name": "retrieval__p50_sec",
+          "value": 0.08731412887573242,
+          "n": 5,
+          "notes": "min=0.09s max=3.48s",
+          "sub": {}
+        },
+        "retrieval__p95_sec": {
+          "name": "retrieval__p95_sec",
+          "value": 3.483165836334228,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        },
+        "retrieval__p99_sec": {
+          "name": "retrieval__p99_sec",
+          "value": 3.4835634422302246,
+          "n": 5,
+          "notes": "",
+          "sub": {}
+        }
+      }
     }
   }
 }

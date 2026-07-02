@@ -511,10 +511,9 @@ def _attach_page_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
         return answer
 
     page_texts: List[tuple] = []
+    synth_page_texts: List[tuple] = []
     for d in docs:
         meta = (d.get("metadata") or {}) if isinstance(d, dict) else {}
-        if meta.get("synthetic"):
-            continue
         pg = meta.get("page")
         if pg is None:
             pg = meta.get("page_number")
@@ -525,8 +524,11 @@ def _attach_page_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
         except (TypeError, ValueError):
             continue
         txt = (d.get("text", "") if isinstance(d, dict) else "") or ""
-        page_texts.append((pg, txt))
-    if not page_texts:
+        if meta.get("synthetic"):
+            synth_page_texts.append((pg, txt))
+        else:
+            page_texts.append((pg, txt))
+    if not page_texts and not synth_page_texts:
         return answer
 
     sentences = _split_sentences(answer)
@@ -544,11 +546,20 @@ def _attach_page_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
             rebuilt.append(st)
             continue
         # Score each page by how many of the sentence's figures it contains.
+        # Real (non-synthetic) source pages take priority; only fall back to a
+        # synthetic aggregate doc's nominal page when no real chunk carries the
+        # figure (e.g. a hardcoded-but-verified fact whose source page fell
+        # outside this query's retrieved window) — better than no citation.
         hits: Dict[int, int] = {}
         for pg, txt in page_texts:
             c = sum(1 for k in keys if k in txt)
             if c:
                 hits[pg] = max(hits.get(pg, 0), c)
+        if not hits:
+            for pg, txt in synth_page_texts:
+                c = sum(1 for k in keys if k in txt)
+                if c:
+                    hits[pg] = max(hits.get(pg, 0), c)
         if not hits:
             rebuilt.append(st)
             continue
@@ -563,6 +574,115 @@ def _attach_page_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
             st = st + cite
         rebuilt.append(st)
     return " ".join(rebuilt)
+
+
+_SECTION_ID_NUMERIC_RE = re.compile(r'^\d+(?:\.\d+)*$')
+
+
+def _attach_section_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
+    """Perplexity-style section citations for DOCX answers.
+
+    DOCX chunks never carry a page number, so _attach_page_citations no-ops on
+    an all-DOCX answer, and the small GGUF model doesn't self-cite reliably —
+    so we attach citations deterministically here, in two places:
+
+      1. INLINE  — after each sentence, the short section NUMBER of the chunk
+                   whose text contains that sentence's figures, e.g. "[4.1]".
+      2. FOOTER  — one "Sources: [4.1 DCF Model Key Assumptions] ..." line at
+                   the end, listing the FULL section headings actually used.
+
+    The marker is a plain bracketed section number — NO "§" symbol anywhere, so
+    even a render path that misses the UI colouring can only ever show "[4.1]",
+    never a stray "§". A section citation is distinguished from ordinary text
+    (and from bare numeric citations like "[1]") by starting with a digit and
+    containing a dot, e.g. "[4.1]" / "[5.1.1]" / "[1. Executive Summary]" — the
+    UI matches exactly that. Runs AFTER strip_inline_citations, which already
+    removed any citation-shaped text the model emitted itself.
+    """
+    if not answer or not docs:
+        return answer
+
+    # (section_id, full_heading, chunk_text) for each DOCX chunk in context.
+    sections: List[tuple] = []
+    for d in docs:
+        meta = (d.get("metadata") or {}) if isinstance(d, dict) else {}
+        if str(meta.get("modality") or "") != "docx":
+            continue
+        heading = str(meta.get("heading") or meta.get("section_title") or "").strip()
+        if not heading:
+            continue
+        sid = str(meta.get("section_id") or "").strip()
+        txt = (d.get("text", "") if isinstance(d, dict) else "") or ""
+        sections.append((sid, heading, txt))
+    if not sections:
+        return answer
+
+    def _dotted(sid: str) -> bool:
+        # A section number the UI can safely colour: starts with a digit AND
+        # contains a dot (4.1, 5.1.1). Bare "1"/"6" are excluded so an inline
+        # "[1]" can never collide with a numeric citation the UI strips.
+        return bool(_SECTION_ID_NUMERIC_RE.match(sid)) and "." in sid
+
+    def _footer_ok(heading: str) -> bool:
+        # Heading the UI can colour in the Sources line: starts with a number
+        # then a dot (e.g. "4.1 DCF...", "1. Executive Summary").
+        return bool(re.match(r'^\d+\.', heading))
+
+    sentences = _split_sentences(answer)
+    rebuilt: List[str] = []
+    cited: List[tuple] = []       # ordered unique (sid, heading) actually used
+    cited_seen: set = set()
+
+    for s in sentences:
+        st = s.strip()
+        if not st:
+            continue
+        keys = set()
+        for m in _TRACE_FIG_RE.finditer(st):
+            k = _fig_key(m.group(0))
+            if k:
+                keys.add(k)
+        if not keys:
+            rebuilt.append(st)
+            continue
+        # Score each section by how many of the sentence's figures its text
+        # contains; prefer a dotted section (clean inline label) on ties.
+        scored: List[tuple] = []
+        for sid, heading, txt in sections:
+            c = sum(1 for k in keys if k in txt)
+            if c:
+                scored.append((c, 0 if _dotted(sid) else 1, sid, heading))
+        if not scored:
+            rebuilt.append(st)
+            continue
+        scored.sort(key=lambda h: (-h[0], h[1]))
+        _c, _pref, sid, heading = scored[0]
+        if (sid, heading) not in cited_seen:
+            cited_seen.add((sid, heading))
+            cited.append((sid, heading))
+        # Inline marker only for dotted section numbers (keeps prose clean and
+        # avoids "[1]"-style collisions); other sources are credited in the
+        # footer below.
+        if _dotted(sid):
+            m = re.search(r'[.!?]+\s*$', st)
+            cite = f" [{sid}]"
+            st = (st[:m.start()] + cite + st[m.start():]) if m else (st + cite)
+        rebuilt.append(st)
+
+    body = " ".join(rebuilt)
+    if not cited:
+        return answer
+
+    # Footer: dotted sections first (sorted by number), then any other heading
+    # that still starts with "N." so the UI can colour it. Capped at 4.
+    dotted = sorted((c for c in cited if _dotted(c[0])),
+                    key=lambda c: [int(p) for p in c[0].split(".")])
+    other = [c for c in cited if not _dotted(c[0]) and _footer_ok(c[1])]
+    footer_headings = [h for _sid, h in (dotted + other)][:4]
+    if not footer_headings:
+        return body
+    footer = "Sources: " + ", ".join(f"[{h}]" for h in footer_headings)
+    return f"{body}\n\n{footer}"
 
 
 # Geographic / regional markers — used to drop "net sales by region" drift from a
@@ -1133,6 +1253,57 @@ def _sandwich_reorder(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [best] + middle + [second]
 
 
+def _doc_key(d: Dict[str, Any]) -> str:
+    """Stable identity for a retrieved doc — chunk hash if present, else text."""
+    meta = d.get("metadata") or {}
+    return str(meta.get("chunk_hash_id") or meta.get("chunk_id") or (d.get("text") or "")[:80])
+
+
+def _focus_docx_context(
+    reranked: List[Dict[str, Any]],
+    hybrid_top: List[Dict[str, Any]],
+    max_chunks: int = 5,
+) -> List[Dict[str, Any]]:
+    """Trim a DOCX answer's context to a small, high-signal set.
+
+    Keeps: the reranker's confident chunks (those above a score cliff relative
+    to its top score) UNION the hybrid retriever's own top-3. The union matters
+    because the cross-encoder reranker is unreliable on finance sections — it
+    sometimes buries the true answer chunk (e.g. ranks a "China risk assessment"
+    footnote above the "5.1.1 China Revenue Concentration Risk" section), while
+    the hybrid (BM25+dense) order keeps the real section near the top. Feeding
+    the small model this focused set instead of all 10-19 chunks stops it
+    drifting into unrelated tables and giving lazy partial answers.
+    """
+    if not reranked:
+        return reranked
+    top_score = max((d.get("score", 0.0) or 0.0) for d in reranked)
+    cutoff = max(top_score * 0.25, 0.05)
+
+    kept: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    def _add(d: Dict[str, Any]) -> None:
+        k = _doc_key(d)
+        if k not in seen:
+            seen.add(k)
+            kept.append(d)
+
+    # 1) reranker chunks above the cliff (in reranker order)
+    for d in reranked:
+        if (d.get("score", 0.0) or 0.0) >= cutoff:
+            _add(d)
+    # 2) hybrid's own top-3 anchor (covers reranker mis-rankings)
+    for d in hybrid_top:
+        _add(d)
+    # 3) if still nothing substantive, fall back to reranker top-3
+    if not kept:
+        for d in reranked[:3]:
+            _add(d)
+
+    return kept[:max_chunks]
+
+
 def _adaptive_temperature(query: str) -> float:
     """Derive the generation temperature from the query type (factual vs generative)."""
     try:
@@ -1646,6 +1817,14 @@ class RAGPipeline:
                     )
                     return
 
+                # Hybrid retrieval's own top-3 (before rerank). For DOCX the
+                # cross-encoder reranker is unreliable on finance sections — it
+                # over-weights lexical footnote matches (e.g. a "China risk
+                # assessment based on IDC data" note) and buries the actual
+                # content section — so we keep the hybrid order as a fallback
+                # anchor below.
+                _hybrid_top = list(docs[:3])
+
                 # RERANK — use the module-level singleton so the cross-encoder model
                 # is loaded once and shared across all streaming requests. Fixes
                 # "lost in the middle" failures where BM25/Qdrant cosine rank 1
@@ -1664,6 +1843,17 @@ class RAGPipeline:
                 except Exception as _re_err:
                     logger.warning(event="rag_stream_rerank_failed", error=str(_re_err))
                     docs = sorted(docs, key=lambda d: d.get("score", 0.0), reverse=True)[:settings.RAG_TOP_K]
+
+                # DOCX FOCUS: feeding a small 7B model 10-19 chunks makes it drift
+                # (dump unrelated tables, or give a lazy partial answer). Whole
+                # finance tables are now single chunks, so the answer usually
+                # lives in 1-2 high-signal chunks. Build a tight context = the
+                # reranker's confident chunks (score cliff) UNION the hybrid
+                # top-3 (covers the cases where the reranker buried the answer),
+                # capped small. PDF and other modalities are untouched.
+                if docs and str((docs[0].get("metadata") or {}).get("modality") or "") == "docx":
+                    docs = _focus_docx_context(docs, _hybrid_top, max_chunks=5)
+
                 docs = _sandwich_reorder(docs)
 
                 context = _build_context(docs, settings.MAX_CONTEXT_CHARS)
@@ -1824,7 +2014,12 @@ class RAGPipeline:
                 # chunk. Runs on the clean prose (after strip_inline_citations) so
                 # the only brackets left are the trustworthy page anchors.
                 try:
+                    _before_cite = answer
                     answer = _attach_page_citations(answer, docs)
+                    if answer == _before_cite:
+                        # No page-numbered chunks (e.g. an all-DOCX context) —
+                        # fall back to section-based anchors.
+                        answer = _attach_section_citations(answer, docs)
                 except Exception as _cite_err:
                     logger.warning(event="rag_stream_page_cite_failed", error=str(_cite_err))
 

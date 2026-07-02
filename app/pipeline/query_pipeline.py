@@ -882,12 +882,20 @@ def query_pipeline(
         # Gated heuristically: the decomposer is an extra serialized LLM call,
         # and measured logs show it returns a single subquery on virtually all
         # simple questions. Only structurally multi-part queries pay for it.
+        # NOTE: query_decomposer._dedup_against_original() strips any sub-query
+        # that duplicates the original — it assumes the caller keeps searching
+        # the original query alongside the sub-queries. Replacing `queries`
+        # outright (instead of prepending) silently dropped the original,
+        # which is often the single best-ranked query for a chunk that a
+        # narrower sub-query doesn't match as strongly (confirmed: a docx
+        # chunk ranking #2/44 on the original query fell to ~#41 once only
+        # the decomposed sub-queries were searched).
         queries = [query]
         if _should_decompose(query):
             try:
                 sub = decomposer.decompose(query, session_id=session_id)
                 if sub:
-                    queries = sub[:settings.DECOMPOSITION_MAX_SUBQUERIES]
+                    queries = [query] + sub[:settings.DECOMPOSITION_MAX_SUBQUERIES]
             except Exception as e:
                 logger.warning(
                     event="decompose_failed",

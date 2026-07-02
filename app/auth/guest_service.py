@@ -45,6 +45,21 @@ def _redis():
     return None
 
 
+def _is_upstash(r) -> bool:
+    # upstash-redis is a REST client with a different eval()/pipeline() API
+    # shape than redis-py (eval takes keys=[...]/args=[...] lists, not
+    # positional numkeys+*args; pipeline batches flush via .exec(), not a
+    # no-arg .execute()). Detect by class module rather than importing
+    # upstash_redis here (it may not be installed when redis-py is in use).
+    return type(r).__module__.startswith("upstash_redis")
+
+
+def _eval_incr_if_under(r, key: str, limit: int, ttl: int):
+    if _is_upstash(r):
+        return r.eval(_LUA_INCR_IF_UNDER, keys=[key], args=[str(limit), str(ttl)])
+    return r.eval(_LUA_INCR_IF_UNDER, 1, key, limit, ttl)
+
+
 # ── Session lifecycle ─────────────────────────────────────────────────────────
 
 def create_guest_session() -> str:
@@ -53,10 +68,19 @@ def create_guest_session() -> str:
     r = _redis()
     if r:
         try:
-            pipe = r.pipeline()
-            pipe.set(f"guest:{guest_id}:queries", 0, ex=_TTL)
-            pipe.set(f"guest:{guest_id}:uploads", 0, ex=_TTL)
-            pipe.execute()
+            if _is_upstash(r):
+                # upstash-redis's Pipeline.set() queues the command; the batch
+                # is sent by .exec(), not a no-arg .execute() (that name means
+                # something else on this client — see _is_upstash docstring).
+                pipe = r.pipeline()
+                pipe.set(f"guest:{guest_id}:queries", 0, ex=_TTL)
+                pipe.set(f"guest:{guest_id}:uploads", 0, ex=_TTL)
+                pipe.exec()
+            else:
+                pipe = r.pipeline()
+                pipe.set(f"guest:{guest_id}:queries", 0, ex=_TTL)
+                pipe.set(f"guest:{guest_id}:uploads", 0, ex=_TTL)
+                pipe.execute()
         except Exception as exc:
             logger.warning(event="guest_session_redis_init_failed", error=str(exc))
     logger.info(event="guest_session_created", guest_id=guest_id)
@@ -94,12 +118,8 @@ def check_and_increment_queries(guest_id: str) -> bool:
     if r is None:
         return True
     try:
-        result = r.eval(
-            _LUA_INCR_IF_UNDER,
-            1,
-            f"guest:{guest_id}:queries",
-            settings.GUEST_QUERY_LIMIT,
-            _TTL,
+        result = _eval_incr_if_under(
+            r, f"guest:{guest_id}:queries", settings.GUEST_QUERY_LIMIT, _TTL,
         )
         return bool(result)
     except Exception as exc:
@@ -116,12 +136,8 @@ def check_and_increment_uploads(guest_id: str) -> bool:
     if r is None:
         return True
     try:
-        result = r.eval(
-            _LUA_INCR_IF_UNDER,
-            1,
-            f"guest:{guest_id}:uploads",
-            settings.GUEST_FILE_LIMIT,
-            _TTL,
+        result = _eval_incr_if_under(
+            r, f"guest:{guest_id}:uploads", settings.GUEST_FILE_LIMIT, _TTL,
         )
         return bool(result)
     except Exception as exc:
@@ -139,7 +155,7 @@ def check_guest_create_rate(client_ip: str) -> bool:
         return True
     key = f"guest_create:{client_ip}"
     try:
-        result = r.eval(_LUA_INCR_IF_UNDER, 1, key, 5, 600)
+        result = _eval_incr_if_under(r, key, 5, 600)
         return bool(result)
     except Exception:
         return True

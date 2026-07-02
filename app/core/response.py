@@ -781,6 +781,16 @@ _FILENAME_CITATION_RE = re.compile(r'\s*\[[^\]\n]*?\.[A-Za-z0-9]{2,4}\s*\]')
 # bracketed token that has no spaces and contains an underscore or a <PLACEHOLDER>
 # is an identifier, never prose — strip it.
 _STEM_CITATION_RE = re.compile(r'\s*\[[^\]\s]*(?:_[^\]\s]*|<[A-Za-z_]{2,20}>[^\]\s]*)\]')
+# DOCX section-number citation attempts the model invents mid-sentence despite
+# being told not to — [§4.1], [4.1], [5.1.1], [1: 2.1]. The final citation is
+# appended once at the end of the answer instead (see rag_pipeline
+# _attach_section_citations), so any of these shapes found in the body is
+# leftover noise, never intentional prose. The first alternative requires a
+# decimal point so a legitimate bare "[1]" numeric citation isn't touched.
+_SECTION_CITATION_RE = re.compile(
+    r'\s*\[\s*§?\s*\d+(?:\.\d+)+\s*\]'
+    r'|\s*\[\s*§?\s*\d+\s*:\s*\d+(?:\.\d+)*\s*\]'
+)
 
 
 def strip_inline_citations(text: str) -> str:
@@ -796,6 +806,7 @@ def strip_inline_citations(text: str) -> str:
     cleaned = _STRUCT_MARKER_RE.sub('', cleaned)
     cleaned = _FILENAME_CITATION_RE.sub('', cleaned)
     cleaned = _STEM_CITATION_RE.sub('', cleaned)
+    cleaned = _SECTION_CITATION_RE.sub('', cleaned)
     # Collapse whitespace and repair punctuation spacing left by removals.
     cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)
     cleaned = re.sub(r'\s+([,.;:!?])', r'\1', cleaned)
