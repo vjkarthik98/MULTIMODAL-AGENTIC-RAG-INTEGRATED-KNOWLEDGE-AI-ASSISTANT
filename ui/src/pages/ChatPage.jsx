@@ -259,7 +259,14 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
     .replace(/\s*\[[^\]\n]*<[A-Z_]{2,20}>[^\]\n]*\]/g, '')                // mangled cite tag, e.g. [aapl_def14a_<URL>cx] (scrubber ate the .docx)
     .replace(/\n?(Answer Tags|Confidence|Sources Used|Reasoning)\s*:\s*[^\n]*/gi, '')
     .replace(/\n?Sources?\s*:\s*\([^)]{1,40}\)[^\n]*/gi, '')             // "Sources: (tag) description" cite block
-    .replace(/\n?Sources?\s*:\s*\[[^\]]{1,80}\][^\n]*/gi, '')            // "Sources: [tag] description" cite block
+    // "Sources: [tag] description" cite block — but NOT a genuine DOCX section-
+    // citation footer, which the backend deterministically appends in exactly
+    // this shape (rag_pipeline._attach_section_citations: "Sources: [4.1 DCF
+    // Model Key Assumptions], [5.1.1 China Revenue...]"). This regex used to
+    // strip that footer outright (a real backend citation, not a leak) because
+    // it couldn't tell the two apart; a genuine section citation always starts
+    // with "digit(s).", so exempt that shape via negative lookahead.
+    .replace(/\n?Sources?\s*:\s*\[(?!\d+\.)[^\]]{1,80}\][^\n]*/gi, '')
     .replace(/\n?\s*Sources?\s*:\s*$/im, '')                              // trailing bare "Sources:" the LLM appended
     .replace(/\n?Therefore,?\s+the\s+answer\s+is\s*:?\s*<text>[\s\S]*?<\/text>/gi, '')
     .replace(/\n?Therefore,?\s+the\s+answer\s+is\s*:?[^\n]*/gi, '')

@@ -63,6 +63,22 @@ _ACCOUNTING_NEG_RE = re.compile(r'^\s*\([\d,]+\.?\d*\)\s*$')
 _PERCENTAGE_RE = re.compile(r'^\s*-?\d+\.?\d*\s*%\s*$')
 _MULTIPLE_RE = re.compile(r'^\s*-?\d+\.?\d*\s*[xX]\s*$')
 _ACCOUNTING_FMT_RE = re.compile(r'_\)|#,##0.*\(', re.IGNORECASE)
+_PERCENT_FMT_RE = re.compile(r'%')
+
+
+def _format_percent_cell(value: float) -> str:
+    """Render a percentage-formatted cell using its OWN display scale (x100),
+    not the raw stored fraction. openpyxl returns the underlying float (e.g.
+    0.0466 for a cell Excel displays as "4.66%"); passing that raw fraction
+    into embeddings/context with no "%" marker is ambiguous, and the LLM has
+    been observed reproducing it verbatim with a bare "%" appended — a 100x
+    magnitude error (accuracy phase 2026-07)."""
+    s = f"{value * 100:.3f}"
+    if "." in s:
+        int_part, dec_part = s.split(".", 1)
+        dec_part = dec_part.rstrip("0")
+        s = int_part + (f".{dec_part}" if dec_part else "")
+    return s + "%"
 
 
 # ─── Utilities ────────────────────────────────────────────────────────────────
@@ -165,8 +181,12 @@ def _load_all_rows_with_meta(
             if col_letter in hidden_col_letters:
                 continue
             val = cell.value
-            val_str = str(val if val is not None else "").strip()
-            fmt = _detect_display_format(val_str, getattr(cell, "number_format", "") or "")
+            number_format = getattr(cell, "number_format", "") or ""
+            if isinstance(val, (int, float)) and not isinstance(val, bool) and _PERCENT_FMT_RE.search(number_format):
+                val_str = _format_percent_cell(float(val))
+            else:
+                val_str = str(val if val is not None else "").strip()
+            fmt = _detect_display_format(val_str, number_format)
             cells.append(val_str)
             formats.append(fmt)
 

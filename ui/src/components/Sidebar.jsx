@@ -604,7 +604,10 @@ export default function Sidebar({
       await deleteKBFile(auth.token, filename)
       setKbFiles(prev => prev.filter(f => f.filename !== filename))
       prevFilenamesRef.current.delete(filename)
-    } catch {}
+      addToast(`Deleted: ${filename}`, 'success')
+    } catch (err) {
+      addToast(err.message || `Failed to delete: ${filename}`, 'error')
+    }
   }
 
   const handleDrop = (e) => {

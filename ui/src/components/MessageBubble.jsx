@@ -25,8 +25,21 @@ const MANGLED_CITATION_RE = /\s*\[[^\]\n]*<[A-Z_]{2,20}>[^\]\n]*\]/g
 // Bare PII placeholder tags that leaked into the prose (e.g. a webcast "<URL>").
 const PII_TAG_RE = /<(?:PERSON|LOCATION|ORG|NRP|GPE|DATE_TIME|AGE|ID|URL|IP_ADDRESS|US_SSN|CREDIT_CARD|PHONE_NUMBER|EMAIL_ADDRESS)>/gi
 
+// DOCX section citations (rag_pipeline._attach_section_citations): the backend
+// inserts inline "[1.2]" markers after cited sentences PLUS a trailing
+// "Sources: [1.2 Investment Thesis], [5.1.1 China Revenue...]" footer with the
+// full heading names. Per product decision these no longer render inline in
+// the prose (kept minimal like PDF's "[p.N]") — pull the full heading names
+// out of the footer (falling back to the bare inline number if no footer is
+// present) and render them once at the end of the answer, no "Sources:"
+// label (DocxCitations component, same treatment as XLSX's end-of-answer
+// citation).
+const DOCX_FOOTER_RE = /\n*Sources?:\s*((?:\[\d+(?:\.\d+)*[^\]\n]*\](?:,\s*)?)+)\s*$/i
+const DOCX_HEADING_RE = /\[(\d+(?:\.\d+)*[^\]\n]*)\]/g
+const DOCX_INLINE_SECTION_RE = /\s*\[(\d+(?:\.\d+)+)[^\]\n]*\]/g
+
 function parseInlineCitations(content) {
-  if (!content) return { cleanContent: content, inlineSources: [] }
+  if (!content) return { cleanContent: content, inlineSources: [], docxSections: [] }
   const found = []
   let clean = content.replace(CITATION_RE, (_, name, page) => {
     const src = { source: name }
@@ -34,6 +47,30 @@ function parseInlineCitations(content) {
     found.push(src)
     return ''
   })
+
+  // Pull DOCX section citations out of the text entirely (footer first, since
+  // it carries the full heading name; then any remaining bare inline
+  // markers as a fallback), deduped, in first-seen order.
+  const docxSections = []
+  const seenSections = new Set()
+  const footerMatch = clean.match(DOCX_FOOTER_RE)
+  if (footerMatch) {
+    let hm
+    DOCX_HEADING_RE.lastIndex = 0
+    while ((hm = DOCX_HEADING_RE.exec(footerMatch[1])) !== null) {
+      const h = hm[1].trim()
+      if (!seenSections.has(h)) { seenSections.add(h); docxSections.push(h) }
+    }
+    clean = clean.slice(0, footerMatch.index)
+  }
+  clean = clean.replace(DOCX_INLINE_SECTION_RE, (_m, sid) => {
+    if (docxSections.length === 0 && !seenSections.has(sid)) {
+      seenSections.add(sid)
+      docxSections.push(sid)
+    }
+    return ''
+  })
+
   // Strip mangled cite tags, bare numeric citations, and leftover PII tags so
   // no citation/placeholder marker remains in the response text — all sources
   // live only in the chips below.
@@ -41,29 +78,21 @@ function parseInlineCitations(content) {
     .replace(MANGLED_CITATION_RE, '')
     .replace(NUMERIC_CITATION_RE, '')
     .replace(PII_TAG_RE, '')
-  // Safety net: the "§" section symbol must NEVER reach the screen. The current
-  // backend emits plain "[4.1]" section citations, but older cached messages
-  // may still contain "[§4.1]" — drop the bare symbol so those degrade to a
-  // clean "[4.1]" (which the citation injector then colours) instead of showing
-  // a stray "§".
+  // Safety net: the "§" section symbol must NEVER reach the screen (older
+  // cached messages may still contain "[§4.1]").
   clean = clean.replace(/§\s*/g, '')
   // Tidy whitespace left where markers were removed: " ." → "." and
   // collapse any double spaces, then trim the trailing edge.
   clean = clean.replace(/\s+([.,;!?])/g, '$1').replace(/[ \t]{2,}/g, ' ').trimEnd()
-  return { cleanContent: clean, inlineSources: found }
+  return { cleanContent: clean, inlineSources: found, docxSections }
 }
 
-// Deterministic citations inserted by the backend:
-//   • PDF  → [p.38]  (rag_pipeline._attach_page_citations)
-//   • DOCX → [4.1] inline and [4.1 DCF Model Key Assumptions] in the trailing
-//            "Sources:" line (rag_pipeline._attach_section_citations)
-// A DOCX section citation is a bracket that STARTS WITH A DIGIT AND CONTAINS A
-// DOT ("[4.1]", "[5.1.1]", "[1. Executive Summary]") — distinct from a bare
-// numeric citation "[1]" (which is stripped) and from ordinary prose. There is
-// NO "§" symbol anywhere, so no stray symbol can ever appear even if a render
-// path misses this colouring. Both carry no filename, so parseInlineCitations
-// leaves them intact and we render each as an accent-coloured reference.
-const CITE_TOKEN_RE = /\[p\.(\d+)\]|\[(\d+\.[^\]\n]*?)\]/g
+// PDF page citation, e.g. "[p.38]" (rag_pipeline._attach_page_citations). This
+// is the only inline citation kept mid-prose — DOCX's "[4.1]" markers are
+// extracted out entirely by parseInlineCitations and rendered once at the end
+// of the answer instead (DocxCitations), so CITE_TOKEN_RE only ever needs to
+// match the page-number shape here.
+const CITE_TOKEN_RE = /\[p\.(\d+)\]/g
 
 function CitePill({ page }) {
   // Rendered inline at the SAME font size as the answer prose (no superscript,
@@ -80,9 +109,9 @@ function CitePill({ page }) {
 }
 
 function SectionCitePill({ label }) {
-  // Accent-coloured section reference. Inline uses a short number ("4.1"); the
-  // trailing Sources line uses the full heading ("4.1 DCF Model Key
-  // Assumptions"). Either way we show "[label]" in the accent colour.
+  // Accent-coloured DOCX section reference, e.g. "[1.2 Investment Thesis]" —
+  // shown once at the end of the answer (DocxCitations), never inline, and
+  // never prefixed with a "Sources:" label.
   return (
     <span
       title={`Source: ${label}`}
@@ -93,8 +122,19 @@ function SectionCitePill({ label }) {
   )
 }
 
-// Walk a ReactMarkdown node's children and replace [p.N] / [N.N…] substrings
-// inside text nodes with coloured pill elements; non-strings pass through.
+function DocxCitations({ sections }) {
+  if (!sections || sections.length === 0) return null
+  return (
+    <div className="mt-1 text-[15px] leading-relaxed">
+      {sections.map((label, i) => <SectionCitePill key={i} label={label} />)}
+    </div>
+  )
+}
+
+// Walk a ReactMarkdown node's children and replace [p.N] substrings inside
+// text nodes with coloured PDF page-citation elements; non-strings pass
+// through. DOCX section citations never reach here — parseInlineCitations
+// strips them from cleanContent before it hits ReactMarkdown.
 function injectPageCites(children) {
   return Children.map(children, (child) => {
     if (typeof child !== 'string') return child
@@ -104,11 +144,7 @@ function injectPageCites(children) {
     CITE_TOKEN_RE.lastIndex = 0
     while ((m = CITE_TOKEN_RE.exec(child)) !== null) {
       if (m.index > last) parts.push(child.slice(last, m.index))
-      if (m[1] !== undefined) {
-        parts.push(<CitePill key={`${m.index}-p${m[1]}`} page={m[1]} />)
-      } else {
-        parts.push(<SectionCitePill key={`${m.index}-s${m[2]}`} label={m[2]} />)
-      }
+      parts.push(<CitePill key={`${m.index}-p${m[1]}`} page={m[1]} />)
       last = m.index + m[0].length
     }
     if (last < child.length) parts.push(child.slice(last))
@@ -215,7 +251,10 @@ function fmtTimestamp(sec) {
      timestamp_start, timestamp_end, speaker_role, speaker_name,
      call_section, row_range, chunk_type, image_title, slide_numbers, snippet }
 */
-function SourceChip({ source }) {
+/* Shared label/suffix derivation used by both the web source card and the
+   inline end-of-answer citation text — single source of truth so the two
+   renderers never drift (e.g. one showing a page number the other omits). */
+function getSourceLabelParts(source) {
   const isWeb  = typeof source === 'object' && source.modality === 'web'
   const raw    = typeof source === 'string' ? source : (source.source || source.filename || source.file || String(source))
 
@@ -229,10 +268,11 @@ function SourceChip({ source }) {
     const isTxt  = mod === 'text' || mod === 'txt'
     const isAudio = ['audio', 'mp3'].includes(mod)
     const isVideo = ['video', 'mp4'].includes(mod)
-    const isXlsx  = ['excel', 'xlsx'].includes(mod)
-    // DOCX sections are cited inline and in the trailing "Sources:" line of the
-    // answer, so the chip stays the clean document identity (filename only) —
-    // no "· 4.1 DCF Model Key Assumptions" suffix duplicated here.
+    // DOCX sections and XLSX sheet+row are cited via a colored inline pill at
+    // the end of the answer (XlsxCitePill below, same pattern as CitePill's
+    // "[p.N]" for PDF), so the chip stays the clean document identity
+    // (filename only) — no "· 4.1 DCF Model Key Assumptions" / "· Country
+    // Lookup row [1, 23]" suffix duplicated here.
     const isDocx  = ['docx', 'doc', 'word'].includes(mod)
 
     // Priority order: (paged docs) short clean section → timestamp → sheet+row → ...
@@ -252,9 +292,6 @@ function SourceChip({ source }) {
         const speaker = source.speaker_name || source.speaker_role || ''
         suffix = speaker ? ` · ${speaker} ${ts}` : ` · ${ts}`
       }
-    } else if (isXlsx && source.sheet_name) {
-      suffix = ` · ${source.sheet_name}`
-      if (source.row_range) suffix += ` row ${source.row_range}`
     } else if (source.heading && !isDocx) {
       suffix = ` · ${String(source.heading)}`
     } else if (source.section_title && !isTxt && !isDocx) {
@@ -269,9 +306,50 @@ function SourceChip({ source }) {
     }
   }
 
+  return { isWeb, raw, label, suffix, color: getModalityColor(source, isWeb) }
+}
+
+/* XLSX sheet+row citation — same visual treatment as CitePill's "[p.26]" for
+   PDF and SectionCitePill's "[4.1]" for DOCX: plain accent-colored text, no
+   chip background/border, appended at the end of the answer. Shows ONLY the
+   locator ("Country Lookup row [1, 23]") — the filename lives in the
+   separate Sources chip area below, exactly like PDF/DOCX. */
+function XlsxCitePill({ source }) {
+  const sheet = source.sheet_name
+  if (!sheet) return null
+  const rowRange = source.row_range
+  // row_range already carries its own brackets ("[1, 23]") — do NOT also wrap
+  // the whole label in an outer "[...]" (that produced "[Sheet row [1, 23]]",
+  // a double-bracket bug). Unlike CitePill's bare "[p.26]", the label here is
+  // shown unwrapped: "Sheet row [1, 23]".
+  const rr = Array.isArray(rowRange) ? `[${rowRange.join(', ')}]` : rowRange
+  const label = rr ? `${sheet} row ${rr}` : sheet
+  return (
+    <span
+      title={`Source: ${label}`}
+      style={{ color: 'var(--t-accent)', fontWeight: 500 }}
+    >
+      {' '}{label}
+    </span>
+  )
+}
+
+function XlsxCitations({ sources }) {
+  const xlsxSrcs = (sources || []).filter(
+    s => typeof s === 'object' && ['excel', 'xlsx'].includes(s.modality) && s.sheet_name
+  )
+  if (xlsxSrcs.length === 0) return null
+  return (
+    <div className="mt-1 text-[15px] leading-relaxed">
+      {xlsxSrcs.map((s, i) => <XlsxCitePill key={i} source={s} />)}
+    </div>
+  )
+}
+
+function SourceChip({ source }) {
+  const { isWeb, raw, label, suffix, color } = getSourceLabelParts(source)
   const chipClass   = "inline-flex items-start gap-1.5 text-[11px] leading-4 rounded-2xl px-2.5 py-1 mr-1.5 mb-1 select-none transition-colors max-w-full"
   const chipStyle   = { background: 'var(--t-chp)', border: '1px solid var(--t-chpb)', color: 'var(--t-tx4)' }
-  const color       = getModalityColor(source, isWeb)
   const chipIcon    = <SourceIcon source={source} isWeb={isWeb} />
   const chipText    = (
     <span className="break-words">
@@ -368,7 +446,7 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
   }
 
   // Parse inline citations from LLM content and merge with structured sources, deduped
-  const { cleanContent, inlineSources } = parseInlineCitations(message.content)
+  const { cleanContent, inlineSources, docxSections } = parseInlineCitations(message.content)
   const allSources = deduplicateSources(message.sources, inlineSources)
 
   const handleCopy = async () => {
@@ -506,6 +584,16 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
                 </ReactMarkdown>
               </div>
 
+              {/* XLSX sheet+row / DOCX section citation — colored text at the end
+                  of the answer, no "Sources:" label. The filename itself
+                  renders in the Sources chip area below. */}
+              {showSources && !isStreaming && !isNoInfoResponse(cleanContent) && (
+                <>
+                  <XlsxCitations sources={allSources} />
+                  <DocxCitations sections={docxSections} />
+                </>
+              )}
+
               {/* Numeric verification badges — rendered after stream completes */}
               {!isStreaming && message.verification_results && message.verification_results.length > 0 && (
                 <div className="mt-2 flex flex-wrap gap-1.5">
@@ -546,7 +634,10 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
               {/* Sources inside the bubble — hidden when answer says no info was found.
                   Web sources render in an aligned 2-column grid (Perplexity/ChatGPT
                   "Sources" style) so card edges line up; other chips keep the
-                  compact flex-wrap row. */}
+                  compact flex-wrap row. Chips show the clean document identity
+                  (filename, +short section for paged docs) — page/sheet+row/
+                  section locators live inline in the answer instead (see
+                  injectPageCites / XlsxCitations above), never duplicated here. */}
               {showSources && allSources.length > 0 && !isStreaming && !isNoInfoResponse(cleanContent) && (() => {
                 const webSrcs   = allSources.filter(s => typeof s === 'object' && s.modality === 'web')
                 const otherSrcs = allSources.filter(s => !(typeof s === 'object' && s.modality === 'web'))

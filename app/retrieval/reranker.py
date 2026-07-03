@@ -290,21 +290,33 @@ class Reranker:
     # SOURCE DIVERSITY CAP
     # Hard-limit chunks per doc_id so one document cannot dominate top_k.
 
+    def _cap_key(self, r: Dict) -> Tuple[str, Optional[str]]:
+        # Cap on (doc_id, sheet_name) rather than doc_id alone: for a multi-sheet
+        # XLSX workbook, doc_id is identical across every sheet, so a single huge
+        # sheet (e.g. 1000+ rows -> 50+ near-duplicate row-group chunks) can
+        # otherwise crowd out every other sheet's candidates with zero diversity
+        # enforcement (accuracy phase 2026-07). sheet_name is None for every
+        # non-XLSX modality, so this is a no-op there — the key degenerates back
+        # to plain doc_id and behavior is unchanged for PDF/DOCX/etc.
+        m = r.get("metadata") or {}
+        return (m.get("doc_id", ""), m.get("sheet_name"))
+
     def _apply_source_cap(self, results: List[Dict]) -> List[Dict]:
-        # When results come from a single document, skip the per-doc cap to avoid
-        # dropping relevant chunks — diversity filtering isn't needed for mono-doc.
-        unique_doc_ids = {(r.get("metadata") or {}).get("doc_id", "") for r in results}
-        if len(unique_doc_ids) <= 1:
+        # When results come from a single document (and, for XLSX, a single
+        # sheet), skip the cap to avoid dropping relevant chunks — diversity
+        # filtering isn't needed for a mono-doc/mono-sheet result set.
+        unique_keys = {self._cap_key(r) for r in results}
+        if len(unique_keys) <= 1:
             return results
 
-        count: Dict[str, int] = {}
+        count: Dict[Tuple[str, Optional[str]], int] = {}
         output: List[Dict] = []
         for r in results:
-            doc_id = (r.get("metadata") or {}).get("doc_id", "")
-            n = count.get(doc_id, 0)
+            key = self._cap_key(r)
+            n = count.get(key, 0)
             if n >= self.source_max_chunks:
                 continue
-            count[doc_id] = n + 1
+            count[key] = n + 1
             output.append(r)
         return output
 

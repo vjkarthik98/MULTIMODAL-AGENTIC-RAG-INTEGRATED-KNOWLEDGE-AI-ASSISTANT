@@ -565,9 +565,15 @@ class BM25Retriever:
             "heading":           s.get("heading"),
             "heading_level":     s.get("heading_level"),
             # ── XLSX locators ─────────────────────────────────────────────────
-            "sheet_name":        s.get("sheet") or s.get("section_title"),
-            "row_start":         s.get("row_start"),
-            "row_end":           s.get("row_end"),
+            # xlsx_chunker.py's structure dict uses "sheet_name" (not "sheet")
+            # and a combined "row_range" list (not separate row_start/row_end) —
+            # the old key names here never matched, so every XLSX source lost
+            # its sheet/row citation once routed through BM25 (accuracy phase
+            # 2026-07). Read both shapes defensively.
+            "sheet_name":        s.get("sheet_name") or s.get("sheet") or s.get("section_title"),
+            "row_range":         s.get("row_range"),
+            "row_start":         s.get("row_start") or (s.get("row_range") or [None])[0],
+            "row_end":           s.get("row_end") or (s.get("row_range") or [None, None])[-1],
             # ── Audio / video locators ────────────────────────────────────────
             "timestamp_start":   s.get("timestamp_start"),
             "timestamp_end":     s.get("timestamp_end"),

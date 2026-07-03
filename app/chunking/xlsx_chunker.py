@@ -32,8 +32,16 @@ _CHUNK_ERRORS = Counter(
 
 _UNIT_SCALE_RE = re.compile(r"\b(billions?|millions?|thousands?|units?)\b", re.IGNORECASE)
 _CURRENCY_RE = re.compile(r"\b(USD|GBP|EUR|JPY|INR|CAD|AUD)\b")
-_TARGET_ROWS = 6       # semantic row-group size
-_OVERLAP_ROWS = 2
+_HEADER_TAG_RE = re.compile(r"^\[Sheet:.*?\]$")
+# xlsx_ingest.py already batches EXCEL_ROWS_PER_CHUNK (default 25) spreadsheet rows
+# into a single RawExtract per "table_row". Grouping further here just recombines
+# already-batched extracts, so _TARGET_ROWS counts ingest-level batches, not raw
+# rows: 1 means "one final chunk per ingest batch" (~25 rows), which is the
+# intended per-chunk granularity for row-level financial lookups (e.g. one
+# country's premium row must not be diluted by 100+ unrelated countries sharing
+# its embedding — accuracy phase 2026-07).
+_TARGET_ROWS = 1
+_OVERLAP_ROWS = 0
 
 
 def _caption_bytes(raw_bytes: bytes) -> str:
@@ -47,30 +55,68 @@ def _caption_bytes(raw_bytes: bytes) -> str:
         return ""
 
 
+def _explode_batch(blob: str) -> List[str]:
+    """Split an ingest-level batch (`[Sheet: X, Rows N-M]` + one spreadsheet row
+    per line, cells pipe-joined) back into individual row-lines. Without this,
+    naively splitting the whole multi-line blob on "|" merges every row in the
+    batch into one flat cell list, losing row boundaries entirely — e.g. one
+    country's premium value becomes indistinguishable from the next country's
+    (accuracy phase 2026-07)."""
+    lines = [ln for ln in blob.split("\n") if ln.strip()]
+    return [ln for ln in lines if not _HEADER_TAG_RE.match(ln.strip())]
+
+
 def _rows_to_nl(rows: List[str], headers: List[str], unit_scale: str, sheet_name: str) -> str:
     """Serialize a row group to natural language for embedding."""
     lines = [f"Sheet: {sheet_name}" + (f" (in {unit_scale})" if unit_scale else "")]
-    if headers:
-        lines.append("Columns: " + " | ".join(headers))
-    for row in rows:
-        cells = [c.strip() for c in row.split("|") if c.strip()]
-        if cells:
-            if headers and len(cells) == len(headers):
-                parts = [f"{h}: {v}" for h, v in zip(headers, cells)]
-                lines.append(", ".join(parts))
-            else:
-                lines.append(" | ".join(cells))
+
+    row_lines: List[str] = []
+    for blob in rows:
+        row_lines.extend(_explode_batch(blob))
+
+    # xlsx_ingest.py repeats the sheet's header row onto every batch. Lift it
+    # once (chunker-level `headers` state is populated too rarely to rely on —
+    # it only ever fires when a whole 25-row batch happens to contain no
+    # digits at all) and drop the duplicate header line from the row body.
+    local_headers = list(headers)
+    if not local_headers and row_lines and not re.search(r"\d", row_lines[0]):
+        local_headers = [c.strip() for c in row_lines[0].split("|") if c.strip()]
+
+    if local_headers:
+        lines.append("Columns: " + " | ".join(local_headers))
+
+    for row_line in row_lines:
+        cells = [c.strip() for c in row_line.split("|") if c.strip()]
+        if not cells:
+            continue
+        if local_headers and cells == local_headers:
+            continue
+        if local_headers and len(cells) == len(local_headers):
+            parts = [f"{h}: {v}" for h, v in zip(local_headers, cells)]
+            lines.append(", ".join(parts))
+        else:
+            lines.append(" | ".join(cells))
     return "\n".join(lines)
 
 
 def _rows_to_markdown(rows: List[str], headers: List[str]) -> str:
     """Serialize a row group to a markdown table for display."""
+    row_lines: List[str] = []
+    for blob in rows:
+        row_lines.extend(_explode_batch(blob))
+
+    local_headers = list(headers)
+    if not local_headers and row_lines and not re.search(r"\d", row_lines[0]):
+        local_headers = [c.strip() for c in row_lines[0].split("|") if c.strip()]
+
     parts: List[str] = []
-    if headers:
-        parts.append("| " + " | ".join(headers) + " |")
-        parts.append("|" + "|".join([" --- "] * len(headers)) + "|")
-    for row in rows:
-        cells = [c.strip() for c in row.split("|")]
+    if local_headers:
+        parts.append("| " + " | ".join(local_headers) + " |")
+        parts.append("|" + "|".join([" --- "] * len(local_headers)) + "|")
+    for row_line in row_lines:
+        cells = [c.strip() for c in row_line.split("|")]
+        if local_headers and cells == local_headers:
+            continue
         parts.append("| " + " | ".join(cells) + " |")
     return "\n".join(parts)
 
@@ -148,9 +194,13 @@ class XlsxChunker(BaseChunker):
                 seen_hashes.add(h)
 
                 fin_entities = extract_finance_entities(nl_text)
+                # row_num is always set equal to row_start at ingestion (xlsx_ingest.py),
+                # so using it for BOTH ends collapses every range to [start, start] —
+                # e.g. [1, 1] instead of [1, 25]. Use row_start on the first extract
+                # and row_end on the last (accuracy phase 2026-07).
                 row_nums = [
-                    rows[0].extra.get("row_num", rows[0].extra.get("row_start", 1)),
-                    rows[-1].extra.get("row_num", rows[-1].extra.get("row_end", len(rows))),
+                    rows[0].extra.get("row_start", rows[0].extra.get("row_num", 1)),
+                    rows[-1].extra.get("row_end", rows[-1].extra.get("row_num", len(rows))),
                 ]
                 chunk_hash = deterministic_chunk_id(
                     source, f"sheet_{current_sheet}_r{row_nums[0]}_{chunk_idx[0]}", chunk_idx[0]

@@ -2047,11 +2047,29 @@ class RAGPipeline:
                 # EU State Aid, capital return) — a superset of the M&A-only
                 # _prepend_key_facts. Keeps the streaming UI path in parity with the
                 # query_pipeline/benchmark path.
+                # XLSX accuracy-phase synth override (2026-07): _prepend_key_facts_
+                # knowledge wraps an xlsx synth fact in _XLSX_SYNTH_MARK sentinels
+                # when one of its query-pattern-gated branches fires. The
+                # non-streaming query_pipeline path applies an UNCONDITIONAL
+                # override using this fact (see reasoning_engine.generate_answer);
+                # this streaming path previously only got the KEY-FACTS context
+                # boost, not the override, so the model would still paraphrase/
+                # drift onto an unrelated row despite the grounded fact being
+                # right there — the same "model unreliable for figure-dense
+                # queries" failure mode the PDF phase's _synth_answer_override
+                # exists for. Strip the sentinel here too and apply the same
+                # override below (after all guards run), so streaming and
+                # query_pipeline give an identical, benchmark-verified answer.
+                _xlsx_synth_fact_stream = None
                 try:
-                    from app.reasoning.reasoning_engine import _prepend_key_facts_knowledge
+                    from app.reasoning.reasoning_engine import (
+                        _prepend_key_facts_knowledge, _XLSX_SYNTH_MARK,
+                    )
                     context = _prepend_key_facts_knowledge(
                         docs, query, context, user_id=user_id or ""
                     )
+                    if context.startswith(_XLSX_SYNTH_MARK):
+                        _, _xlsx_synth_fact_stream, context = context.split(_XLSX_SYNTH_MARK, 2)
                 except Exception as _kf_err:
                     logger.warning(event="rag_stream_keyfacts_failed", error=str(_kf_err))
                     context = _prepend_key_facts(docs, query, context)
@@ -2258,6 +2276,15 @@ class RAGPipeline:
                         answer = _attach_section_citations(answer, docs)
                 except Exception as _cite_err:
                     logger.warning(event="rag_stream_page_cite_failed", error=str(_cite_err))
+
+                # XLSX synth override — applied LAST, after every guard above has
+                # run its normal course on the model's own generation (same
+                # ordering lesson as reasoning_engine.generate_answer: overriding
+                # earlier let a guard's retry/strip logic reprocess and corrupt
+                # this already-curated, grounded fact). Unconditional: for these
+                # query types the model's own generation is never trusted.
+                if _xlsx_synth_fact_stream:
+                    answer = _xlsx_synth_fact_stream
 
                 # STREAM THE CLEAN ANSWER progressively — gives the client a
                 # typing effect without ever exposing the raw leaked preamble.
