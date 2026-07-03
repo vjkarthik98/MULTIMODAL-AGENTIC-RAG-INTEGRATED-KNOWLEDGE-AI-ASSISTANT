@@ -63,6 +63,17 @@ class TxtEmbedder(BaseEmbedder):
             if s.get("chunk_type") == "section" and section:
                 text += f" {section} {section}"
 
+            # Repeat this chunk's own detected finance figures once more at the
+            # end. A numeric query ("what was the rate", "how much did X rise")
+            # embeds close to the exact figure it's asking about; chunks that
+            # only mention a number once, mid-sentence, among unrelated prose
+            # can under-rank against chunks that happen to repeat it. This
+            # boosts a chunk's own real, already-extracted numbers — it never
+            # introduces a number that isn't verbatim in the chunk.
+            fin_entities = s.get("finance_entities")
+            if fin_entities:
+                text += " " + " ".join(str(e) for e in fin_entities[:12])
+
             result = text[:settings.MAX_PROMPT_CHARS]
             logger.debug(event="embed_text_built", modality="txt", chars=len(result))
             _EMBED_BUILT.inc()

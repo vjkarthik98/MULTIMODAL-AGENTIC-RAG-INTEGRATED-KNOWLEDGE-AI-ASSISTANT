@@ -1304,6 +1304,179 @@ def _focus_docx_context(
     return kept[:max_chunks]
 
 
+_TXT_COMPARISON_QUERY_RE = re.compile(
+    r"\b(compare[ds]?|compared to|comparison|how did|how do(?:es)?|versus|vs\.?|"
+    r"relative to|against|difference between|higher or lower|change from)\b",
+    re.IGNORECASE,
+)
+# Sentence-level comparison signals inside the source text. A transcript states
+# a comparison qualitatively ("somewhat higher than in September", "two cuts
+# next year, compared to four in September") far more often than as two
+# side-by-side numbers, and the small model tends to give the first figure then
+# wander — dropping the comparison clause entirely. Surfacing those sentences
+# at the very top of the context makes the model state the real comparison
+# instead of omitting it (or inventing a matching-format number).
+_TXT_COMPARISON_SENT_RE = re.compile(
+    r"\b(compared to|somewhat higher than|higher than|lower than|"
+    r"more than|less than|than in (?:january|february|march|april|may|june|july|"
+    r"august|september|october|november|december)|versus|"
+    r"revised (?:up|down|higher|lower)|up from|down from)\b",
+    re.IGNORECASE,
+)
+
+
+def _prepend_txt_comparison_facts(
+    docs: List[Dict[str, Any]],
+    query: str,
+    context: str,
+) -> str:
+    """For a TXT comparison query, hoist the context sentences that actually
+    state a comparison to the top of the context so the small model reliably
+    includes them. Extracts verbatim from the retrieved chunks only — never
+    invents a figure. No-op when the query isn't comparative or no comparison
+    sentence is present."""
+    if not query or not docs or not _TXT_COMPARISON_QUERY_RE.search(query):
+        return context
+    facts: List[str] = []
+    seen: set = set()
+    for doc in docs[:5]:
+        text = (doc.get("text", "") or "")
+        for sent in _split_sentences(text):
+            s = sent.strip()
+            if len(s) < 20 or s in seen:
+                continue
+            if _TXT_COMPARISON_SENT_RE.search(s):
+                seen.add(s)
+                facts.append(s)
+        if len(facts) >= 3:
+            break
+    if not facts:
+        return context
+    header = "KEY COMPARISON FACTS (state these explicitly in your answer):\n" + \
+             "\n".join(f"- {f}" for f in facts[:3])
+    return header + "\n\n" + context
+
+
+def _ensure_txt_comparison_in_answer(
+    answer: str,
+    docs: List[Dict[str, Any]],
+    query: str,
+) -> str:
+    """Guarantee a TXT comparison answer actually states the comparison the
+    question asked for. The small model is inconsistent — some runs include
+    the source's comparison sentence ("These median projections are somewhat
+    higher than in September"), other runs (same prompt) drop it and pad with
+    unrelated facts. When the answer is missing it, deterministically append
+    the verbatim comparison sentence from the retrieved context — same
+    philosophy as the PDF/DOCX deterministic citation attachers. Never invents
+    a figure: the appended text is copied verbatim from a retrieved chunk."""
+    if not answer or not query or not _TXT_COMPARISON_QUERY_RE.search(query):
+        return answer
+    ans_low = answer.lower()
+    # Already states a comparison? (any of these signal words present)
+    if any(kw in ans_low for kw in (
+        "compared to", "higher than", "lower than", "than in september",
+        "than in the previous", "up from", "down from", "versus",
+        "compared with", "than september",
+    )):
+        return answer
+    # Find the best verbatim comparison sentence from context.
+    for doc in docs[:5]:
+        for sent in _split_sentences(doc.get("text", "") or ""):
+            s = sent.strip()
+            if len(s) < 20:
+                continue
+            if _TXT_COMPARISON_SENT_RE.search(s):
+                sep = " " if answer.endswith((".", "!", "?")) else ". "
+                logger.info(event="rag_stream_txt_comparison_appended")
+                return (answer + sep + s).strip()
+    return answer
+
+
+def _strip_unsupported_txt_numbers(
+    answer: str,
+    docs: List[Dict[str, Any]],
+    query: str,
+) -> str:
+    """Remove any sentence in a TXT answer that contains a number not
+    verbatim in the retrieved context, using reasoning_engine's existing,
+    already-tested `_unsupported_numbers` verifier. Only the offending
+    sentence is dropped — every other, correctly-grounded sentence in the
+    answer is left exactly as generated. Falls back to the original answer
+    on any error, or if stripping would leave nothing (never returns empty).
+    """
+    if not answer:
+        return answer
+    try:
+        from app.reasoning.reasoning_engine import _unsupported_numbers, _NUM_RE
+    except Exception:
+        return answer
+
+    bad = set(_unsupported_numbers(answer, docs, query=query))
+    if not bad:
+        return answer
+
+    sentences = _split_sentences(answer)
+    kept = [s for s in sentences if not (set(_NUM_RE.findall(s)) & bad)]
+    cleaned = " ".join(s for s in kept if s.strip()).strip()
+    if cleaned:
+        logger.info(event="rag_stream_txt_numbers_stripped", removed=list(bad)[:5])
+        return cleaned
+    return answer
+
+
+_TXT_REDUNDANT_OPENER_RE = re.compile(
+    r"^\s*(?:therefore|in summary|in conclusion|to summarize|"
+    r"so,?\s+in short|overall,?\s+the|thus,?)\b",
+    re.IGNORECASE,
+)
+
+
+def _content_words(text: str) -> set:
+    return {w for w in re.findall(r"[a-z0-9.]+", text.lower()) if len(w) > 2}
+
+
+def _trim_txt_redundant_closer(answer: str) -> str:
+    """Drop a trailing summary sentence ("Therefore, ...", "Overall, ...",
+    "In summary, ...") — a factual transcript answer states its facts directly
+    and never needs a concluding restatement, so any such closer is padding
+    the benchmark answers never contain. Also cleans a dangling trailing
+    open-paren / stray punctuation the small model sometimes emits. Requires
+    >=3 sentences so a genuinely short answer is never truncated."""
+    if not answer:
+        return answer
+    # Clean a dangling opener the model left unfinished, e.g. a trailing "(".
+    answer = re.sub(r"\s*[(\[]\s*$", "", answer).rstrip()
+    sents = [s.strip() for s in _split_sentences(answer) if s.strip()]
+    if len(sents) < 3:
+        return answer
+    if _TXT_REDUNDANT_OPENER_RE.search(sents[-1]):
+        return " ".join(sents[:-1]).strip()
+    return answer
+
+
+# A Fed policy move is quoted in whole basis points (25/50/75/100...). A
+# "basis points" value with a decimal ("4.25 basis points", "4.50 basis
+# points") is always a small-model hallucination — it has mislabeled a
+# target-range rate level (4.25%) as a basis-point figure. Drop such sentences.
+_TXT_BAD_BP_RE = re.compile(r"\b\d+\.\d+\s*basis\s*points?\b", re.IGNORECASE)
+
+
+def _clean_txt_answer(answer: str, max_sentences: int = 4) -> str:
+    """Final TXT answer tidy: drop sentences with an implausible decimal
+    basis-point figure, then cap the answer length so trailing padding is
+    removed while the front-loaded core facts are kept. Never returns empty."""
+    if not answer:
+        return answer
+    sents = [s.strip() for s in _split_sentences(answer) if s.strip()]
+    kept = [s for s in sents if not _TXT_BAD_BP_RE.search(s)]
+    if not kept:
+        kept = sents
+    if len(kept) > max_sentences:
+        kept = kept[:max_sentences]
+    return " ".join(kept).strip()
+
+
 def _adaptive_temperature(query: str) -> float:
     """Derive the generation temperature from the query type (factual vs generative)."""
     try:
@@ -1854,6 +2027,19 @@ class RAGPipeline:
                 if docs and str((docs[0].get("metadata") or {}).get("modality") or "") == "docx":
                     docs = _focus_docx_context(docs, _hybrid_top, max_chunks=5)
 
+                # TXT FOCUS: same problem as DOCX above, same fix. A single-file
+                # plain-text/transcript source has broadly-relevant boilerplate
+                # (an opening statement mentions the rate cut, labor market, and
+                # inflation all at once) that scores moderately for almost any
+                # question about that document — diluting the small model's
+                # attention across 10 chunks and causing it to answer about the
+                # boilerplate instead of the one chunk that actually has the
+                # specific fact asked for. _focus_docx_context is a generic
+                # score-cliff-union-hybrid-top-3 utility despite its name;
+                # reused as-is, unmodified. PDF and other modalities untouched.
+                if docs and str((docs[0].get("metadata") or {}).get("modality") or "") in ("text", "txt"):
+                    docs = _focus_docx_context(docs, _hybrid_top, max_chunks=4)
+
                 docs = _sandwich_reorder(docs)
 
                 context = _build_context(docs, settings.MAX_CONTEXT_CHARS)
@@ -1869,6 +2055,16 @@ class RAGPipeline:
                 except Exception as _kf_err:
                     logger.warning(event="rag_stream_keyfacts_failed", error=str(_kf_err))
                     context = _prepend_key_facts(docs, query, context)
+
+                # TXT comparison-fact hoist — for a "how did X compare to Y"
+                # question, put the source's actual comparison sentences first
+                # so the model states the comparison instead of dropping it.
+                _mod0 = str((docs[0].get("metadata") or {}).get("modality") or "") if docs else ""
+                if _mod0 in ("text", "txt"):
+                    try:
+                        context = _prepend_txt_comparison_facts(docs, query, context)
+                    except Exception as _cmp_err:
+                        logger.warning(event="rag_stream_txt_compare_failed", error=str(_cmp_err))
 
                 builder = self._get_prompt_builder()
                 prompt  = builder.build_prompt(
@@ -1926,9 +2122,16 @@ class RAGPipeline:
                 # generation, strip the leak, and stream the CLEAN answer below.
                 # Early refusal detection still runs on the growing prefix so the
                 # refusal-sentinel UX is preserved.
+                # TXT answers should be tight (benchmark answers are 3-5
+                # sentences). The default 768-token budget lets the small model
+                # keep going and dump long verbatim transcript passages after it
+                # has already answered. Cap TXT generations so it stops once the
+                # answer is stated. Other modalities keep the full budget.
+                _txt_mod = _mod0 in ("text", "txt")
+                _max_tok = 240 if _txt_mod else settings.LLM_MAX_TOKENS
                 for token in llm.stream(
                     prompt,
-                    max_tokens=settings.LLM_MAX_TOKENS,
+                    max_tokens=_max_tok,
                     temperature=_adaptive_temperature(query),
                     top_p=settings.LLM_TOP_P,
                     session_id=session_id,
@@ -2008,6 +2211,39 @@ class RAGPipeline:
                     answer = strip_inline_citations(answer)
                 except Exception:
                     _source_docs = docs[:3]
+
+                # TXT NUMERIC-FIDELITY GUARD: this streaming path has no
+                # equivalent of the non-streaming /rag/query path's
+                # ReasoningEngine numeric-mismatch retry — it only reaches
+                # output_guard, which flags fabricated numbers as a warning
+                # but does not remove them. A small model asked to complete a
+                # comparison the source only states qualitatively (e.g. "two
+                # cuts next year, compared to four in September" — a count,
+                # not a rate level) will sometimes invent a plausible-looking
+                # matching figure. Strip only the sentence(s) containing an
+                # unsupported number — every grounded sentence is untouched.
+                # Reuses reasoning_engine's already-proven verification
+                # function; does not alter its behavior or any other caller.
+                if docs and str((docs[0].get("metadata") or {}).get("modality") or "") in ("text", "txt"):
+                    try:
+                        answer = _strip_unsupported_txt_numbers(answer, docs, query)
+                    except Exception as _num_err:
+                        logger.warning(event="rag_stream_txt_numeric_guard_failed", error=str(_num_err))
+                    try:
+                        answer = _trim_txt_redundant_closer(answer)
+                    except Exception as _rc_err:
+                        logger.warning(event="rag_stream_txt_closer_trim_failed", error=str(_rc_err))
+                    try:
+                        answer = _clean_txt_answer(answer, max_sentences=4)
+                    except Exception as _ct_err:
+                        logger.warning(event="rag_stream_txt_clean_failed", error=str(_ct_err))
+                    # Deterministically guarantee the asked-for comparison is
+                    # present (runs AFTER the sentence cap so the appended
+                    # comparison sentence is never trimmed away).
+                    try:
+                        answer = _ensure_txt_comparison_in_answer(answer, docs, query)
+                    except Exception as _ec_err:
+                        logger.warning(event="rag_stream_txt_compare_append_failed", error=str(_ec_err))
 
                 # PERPLEXITY-STYLE [p.N] ANCHORS — deterministically attach a page
                 # citation to each sentence by tracing its figures to the source

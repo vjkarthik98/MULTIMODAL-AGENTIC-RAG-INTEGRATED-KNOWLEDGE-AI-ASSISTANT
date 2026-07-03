@@ -665,7 +665,15 @@ def _make_cite_key(
     timestamp_start: Optional[float] = None,
     section_id:      Optional[str]   = None,
 ) -> str:
-    """Build the bracket tag the LLM must emit verbatim. Stable & sanitized."""
+    """Build the bracket tag the LLM must emit verbatim. Stable & sanitized.
+
+    TXT/transcript sources deliberately fall through to the bare "[source]"
+    tag: the small GGUF model mangles a longer "[source — SPEAKER]" tag —
+    dropping the brackets, swapping the separator, and dumping a trailing run
+    of every chunk header it saw — which then leaks into the visible answer.
+    Speaker attribution for TXT is carried on the source chip
+    (RetrievedSource.speaker), never in the inline tag the model echoes.
+    """
     src = _safe_basename(source)
     src = _CITE_KEY_RE.sub("_", src)
     if section_id:
@@ -776,6 +784,100 @@ _STRUCT_MARKER_RE = re.compile(
 # string leaks into prose. Requires a dot + 2-4 char extension to avoid eating
 # ordinary bracketed words.
 _FILENAME_CITATION_RE = re.compile(r'\s*\[[^\]\n]*?\.[A-Za-z0-9]{2,4}\s*\]')
+# TXT speaker cite_key echoed verbatim, e.g. [fomc_dec2024.txt — CHAIR POWELL].
+# _FILENAME_CITATION_RE above only matches when the extension is immediately
+# followed by "]"; the speaker-locator format (_make_cite_key's text/txt
+# branch in this module) appends "— SPEAKER" after the extension, so it needs
+# its own pattern. Requires both a dotted extension AND an em/en-dash inside
+# the same bracket so ordinary bracketed prose is never touched.
+_SPEAKER_CITATION_RE = re.compile(r'\s*\[[^\]\n]*?\.[A-Za-z0-9]{2,4}\s*[—–]\s*[^\]\n]*\]')
+# TXT citation/transcript DUMP — the trailing garbage the small GGUF model
+# produces on plain-text/transcript sources. Because every chunk of a single
+# .txt file carries the identical "[source.txt]" tag, the "append a tag after
+# each sentence" instruction makes the model spray the same tag, then it
+# degrades into a run of bare filenames, "filename — SPEAKER" headers, raw
+# "SPEAKER: quote" transcript lines, or leaked "Answer Tags:/Sources Used:"
+# fields — always at the END of the answer. One tested tail-matcher handles
+# every observed variant, separator-agnostic (space/period/colon/comma/dash,
+# bracketed or bare). A code-side guard (_TXT_DUMP_HAS_CITE_RE) ensures the
+# matched tail actually contains a filename or speaker token, so ordinary
+# trailing prose/punctuation is never stripped.
+_TXT_DUMP_FN     = r'[\w.\-]+\.(?:txt|md|rst|csv|log)'
+_TXT_DUMP_FN_RE  = re.compile(_TXT_DUMP_FN)
+_TXT_DUMP_NAME   = r"[A-Z][A-Za-z.'&-]*(?:[ ,]+[A-Z][A-Za-z.'&-]*){0,5}"
+_TXT_DUMP_FN_TOK = r'[\(\[]?\s*' + _TXT_DUMP_FN + r'\s*[\)\]]?(?:\s*[—–\-]\s*' + _TXT_DUMP_NAME + r')?'
+# The speaker label must end in a COLON (the transcript turn format,
+# "CHAIR POWELL:"), never a bare period — a Title-Case phrase ending in a
+# period ("...under the Federal Reserve Act.") is ordinary prose and must not
+# be mistaken for a dumped speaker turn.
+_TXT_DUMP_SPK_TOK = (
+    r"[A-Z][A-Za-z.'&-]+(?:[ ][A-Z][A-Za-z.'&-]+){0,4}\s*:\s*"
+    r'(?:"[^"]*"|“[^”]*”|[^\n]*?)'
+)
+_TXT_DUMP_FIELD_TOK = r'(?:Answer Tags?|Sources? Used|Tags?|Sources?|References?)\s*:\s*[^\n]*?'
+# Bracketed numeric reference list, e.g. "[References: 1, 2, 3, 4, 5]".
+_TXT_DUMP_BRACKET_REFLIST_RE = re.compile(
+    r'\s*\[\s*References?\s*:\s*[\d,\s]+\]', re.IGNORECASE
+)
+_TXT_DUMP_SEP       = r'[\s.:;,()\[\]—–\-]*'
+_TXT_DUMP_UNIT = (
+    r'(?:' + _TXT_DUMP_FN_TOK + r'|' + _TXT_DUMP_SPK_TOK + r'|'
+    + _TXT_DUMP_FIELD_TOK + r'|\(incomplete\))'
+)
+_TXT_DUMP_TAIL_RE = re.compile(
+    _TXT_DUMP_SEP + r'(?:' + _TXT_DUMP_UNIT + _TXT_DUMP_SEP + r')+$'
+)
+_TXT_DUMP_HAS_CITE_RE = re.compile(
+    _TXT_DUMP_FN + r"|[A-Z][A-Za-z.'&-]+[ ][A-Z][A-Za-z.'&-]+\s*:"
+)
+# Fabricated web citation — a trailing "Author, \"Title,\" Publication, Date,
+# <https://...>" bibliography the model invents. A local plain-text/transcript
+# answer never legitimately contains a URL, and an angle-bracketed URL / the
+# Presidio "<URL>" scrub placeholder is always an artifact, so anything from
+# the sentence that introduces one onward is dropped.
+_TXT_DUMP_ANGLE_URL_RE = re.compile(r'<+\s*(?:https?://|www\.|URL\b)[^>]*>*', re.IGNORECASE)
+# Trailing/inline parenthetical source attribution the model invents, e.g.
+# "(Chair Powell, FOMC Press Conference)" or "(FOMC Transcript)" — a
+# citation-shaped aside, not prose. Distinguished from a legitimate
+# parenthetical (which contains ordinary lowercase words, e.g. "(a quarter
+# point cut)") by consisting ENTIRELY of Title-Case words/names.
+_TXT_DUMP_PAREN_SRC_RE = re.compile(
+    r'\s*\((?:[A-Z][A-Za-z.\'&-]*(?:[ ,]+[A-Z][A-Za-z.\'&-]*){0,4})\)'
+)
+
+
+def _strip_txt_citation_dump(text: str) -> str:
+    """Remove a trailing TXT citation/transcript dump; leave prose untouched."""
+    if not text:
+        return text
+    # GENERAL BACKSTOP: the model has invented several different phrasings
+    # trailing a repeated filename ("file — SPEAKER", "file - generic phrase",
+    # bare "file file file", ...). Rather than enumerate every phrase shape,
+    # use the one invariant that is always true for a single-file KB: a real
+    # answer never says the filename itself, let alone twice. Two or more
+    # mentions of the source filename is always a dump — cut from the first
+    # one, whatever text follows each mention.
+    fn_hits = list(_TXT_DUMP_FN_RE.finditer(text))
+    if len(fn_hits) >= 2:
+        cut = text[:fn_hits[0].start()].rstrip()
+        if cut:
+            text = cut
+    m = _TXT_DUMP_TAIL_RE.search(text)
+    if m and _TXT_DUMP_HAS_CITE_RE.search(m.group(0)):
+        cut = text[:m.start()].rstrip()
+        # If stripping would delete essentially the whole answer, the "prose"
+        # was itself a dump — keep the original so we never return empty.
+        if cut:
+            text = cut
+    text = _TXT_DUMP_BRACKET_REFLIST_RE.sub('', text)
+    text = _TXT_DUMP_PAREN_SRC_RE.sub('', text)
+    um = _TXT_DUMP_ANGLE_URL_RE.search(text)
+    if um:
+        boundary = text.rfind('. ', 0, um.start())
+        cut = text[:boundary + 1].rstrip() if boundary != -1 else text[:um.start()].rstrip()
+        if cut:
+            text = cut
+    return text.rstrip()
 # Filename/doc-id stem citation with no clean extension, e.g. [aapl_def14a_2023]
 # or the PII-mangled [aapl_def14a_<URL>cx] (the scrubber ate the ".docx"). Any
 # bracketed token that has no spaces and contains an underscore or a <PLACEHOLDER>
@@ -804,6 +906,8 @@ def strip_inline_citations(text: str) -> str:
         return ""
     cleaned = re.sub(r'\s*\[\d+(?:\s*,\s*\d+)*\]', '', text)
     cleaned = _STRUCT_MARKER_RE.sub('', cleaned)
+    cleaned = _SPEAKER_CITATION_RE.sub('', cleaned)
+    cleaned = _strip_txt_citation_dump(cleaned)
     cleaned = _FILENAME_CITATION_RE.sub('', cleaned)
     cleaned = _STEM_CITATION_RE.sub('', cleaned)
     cleaned = _SECTION_CITATION_RE.sub('', cleaned)
@@ -817,6 +921,10 @@ def strip_inline_citations(text: str) -> str:
     # bare label and its leftover separators wherever it now trails the text.
     cleaned = re.sub(r'\s*\b(?:Sources?|Tags?)\s*:\s*[,;\s]*$', '', cleaned,
                      flags=re.IGNORECASE)
+    # A sentence-final colon left behind when _TXT_SOURCE_CITE_DUMP_RE removed
+    # everything after it (the colon introduced the now-deleted dump) — collapse
+    # ".:"/" :" at end of string down to the sentence's own terminal period.
+    cleaned = re.sub(r'\s*:\s*$', '', cleaned)
     return cleaned.strip()
 
 

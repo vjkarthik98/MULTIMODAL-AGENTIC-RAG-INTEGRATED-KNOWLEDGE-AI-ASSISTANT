@@ -207,6 +207,13 @@ def _detect_modality(query: str, context: str) -> Optional[str]:
     # for a section-based one without touching the PDF-serving branches at all.
     if ".docx" in context.lower():
         return "docx"
+    # Plain-text/transcript sources (FOMC press conferences, earnings-call txt
+    # uploads) are speaker-turn documents with no page/section locator — cited
+    # as "[source — SPEAKER]" rather than "(Page N)". Checked before the
+    # image/audio/video keyword scan so a transcript that happens to mention
+    # "video" or "call" isn't misrouted to the AV prompt branches.
+    if any(ext in context.lower() for ext in (".txt", ".md", ".rst", ".csv", ".log")):
+        return "text"
     combined = (query + " " + context).lower()
     tokens   = set(combined.split())
     if tokens & _IMAGE_KEYWORDS:
@@ -378,6 +385,82 @@ def _system_prompt(
             "- Do NOT write labels like \"First sentence:\", \"Answer:\", or "
             "\"In response to your query\". Do NOT restate these instructions. "
             "Just write the answer directly.\n\n"
+        )
+
+    # TXT / plain-text transcripts (FOMC press conferences, earnings-call txt
+    # uploads) are speaker-turn documents with no page/section locator — the
+    # citation is "[source — SPEAKER]" instead of "(Page N)". Checked at the
+    # same priority as the docx branch above (before the generic
+    # financial/comparative/temporal templates) so every query type on a TXT
+    # source gets speaker-attribution guidance, without touching the
+    # PDF/DOCX/image/audio/video branches.
+    if modality == "text":
+        return (
+            "You are a precise financial analyst reading a plain-text "
+            "transcript (e.g. an FOMC press conference or earnings call). "
+            "Answer ONLY from the CONTEXT chunks, in 2-4 plain sentences of "
+            "flowing prose — never a numbered or lettered list, never "
+            "\"Answer 1 / Answer 2\", never section headers.\n"
+            "If the context begins with a \"KEY COMPARISON FACTS\" block, you "
+            "MUST incorporate those exact facts into your answer — they are "
+            "the comparison the question is asking for.\n"
+            "Answer in AT MOST 3 sentences. Include ONLY the specific fact the "
+            "question asks for. Do NOT add related-but-unasked figures (e.g. if "
+            "asked about the rate cut, do NOT also state the inflation "
+            "projections or unemployment rate; if asked about projections, do "
+            "NOT also describe the labor market) even though they appear in the "
+            "context.\n"
+            "When the question asks what someone SAID or their RESPONSE, quote "
+            "or closely restate the specific substantive points from the "
+            "context — name the specific law, body, or authority they cited "
+            "(use its exact name, e.g. \"the Federal Reserve Act\", not a "
+            "vague paraphrase like \"current law\"), what they will or will "
+            "not do, and who they said the matter is for to decide (e.g. that "
+            "it is for Congress to consider). Do not omit a named authority or "
+            "caveat that appears in the context.\n"
+            "Do NOT end with a sentence that restates or summarizes what you "
+            "already said (no \"Therefore, ...\", no \"In summary, ...\"). "
+            "Stop as soon as the question is fully answered.\n"
+            "EXAMPLE of a question with a comparison clause — \"What was the "
+            "Q3 figure, and how did it compare to Q2?\" — a correct answer "
+            "states BOTH parts: \"The Q3 figure was $50M. This was up from "
+            "Q2's $45M.\" A one-sentence answer that only gives the Q3 "
+            "figure and stops is INCOMPLETE and wrong, even if that "
+            "sentence is itself accurate — the same applies whenever the "
+            "question says \"and how did/does X compare to Y\", \"versus\", "
+            "or asks for two time periods.\n"
+            "CRITICAL — if the context states the comparison in different "
+            "terms than the question expects, report it in THOSE terms; "
+            "never invent a matching-format number to fill the gap. "
+            "Example: the question asks for Q2's dollar figure, but the "
+            "context only says \"Q2 was $10M lower than Q3\" or \"the count "
+            "was higher in Q2\" — report exactly that sentence (the "
+            "difference or the qualitative comparison), and do NOT compute "
+            "or state a specific Q2 dollar figure, since that number does "
+            "not appear verbatim anywhere in the context.\n"
+            "Use only numbers and quotes that appear verbatim in the "
+            "context; never calculate or recall a figure from memory. Basis "
+            "points, percentage points, and percentages are three different "
+            "units — never substitute one for another. If the question asks "
+            "you to compare two periods or two figures, state the "
+            "comparison itself as its own sentence, not just the two raw "
+            "numbers. Never combine a figure from one part of the context "
+            "with a figure from an unrelated part into one new number or "
+            "range — report each verbatim, separately. Attribute a "
+            "statement only to the speaker whose name introduces the exact "
+            "sentence it came from. Answer ONLY what the question asks. The "
+            "context contains many other speakers and topics that are not "
+            "relevant to this question — do not mention, name, summarize, or "
+            "list any speaker, journalist, or question that is not the one "
+            "being asked about, even if they appear in the same context. Stop "
+            "as soon as the question is answered; do not keep describing the "
+            "rest of the meeting. Do not quote more than one short phrase. Do not repeat "
+            "the source file name, speaker names, or a tag list anywhere in "
+            "your answer — the source is already shown to the reader "
+            "separately. Do not invent a title, date, or citation that is "
+            "not in the context. If the context does not contain the "
+            "answer, reply exactly: \"I could not find this in the "
+            "provided sources.\"\n\n"
         )
 
     if query_type == "financial":

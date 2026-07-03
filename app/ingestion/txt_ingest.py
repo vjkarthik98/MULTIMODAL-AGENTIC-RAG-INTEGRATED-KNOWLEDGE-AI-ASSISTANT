@@ -25,7 +25,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from app.core.config import settings
 from app.ingestion.base_ingest import BaseIngestor
 from app.ingestion.schema import IngestedDocument, RawExtract, UniversalMetadata
-from app.chunking.finance_numbers import approx_tokens, extract_finance_entities
+from app.chunking.finance_numbers import approx_tokens, extract_finance_entities, protect, restore
 # ── TEXT REPAIR PASSES ────────────────────────────────────────────────────────
 
 def repair_mojibake(text: str) -> Tuple[str, int]:
@@ -41,6 +41,35 @@ def repair_mojibake(text: str) -> Tuple[str, int]:
     except Exception as exc:
         logger.warning("mojibake_repair_failed", error=str(exc))
         return text, 0
+
+
+_AMBIGUOUS_FRACTION_RE = re.compile(r"(?<!\d)(\d)(1/4|1/2|3/4)(?!\d)")
+_FRACTION_TO_DECIMAL   = {"1/4": ".25", "1/2": ".50", "3/4": ".75"}
+
+
+def normalize_ambiguous_fractions(text: str) -> Tuple[str, int]:
+    """Rewrite a digit glued directly to a quarter-fraction (e.g. '41/4') into
+    an unambiguous decimal ('4.25').
+
+    This pattern is a common PDF/transcript-to-text artifact: the source
+    Unicode fraction '4¼' (four and a quarter) loses its space when
+    converted to ASCII '4' + '1/4', producing '41/4' — which a small LLM can
+    misparse as a single number (e.g. reading '41/4-41/2 percent' as
+    something other than '4.25-4.50 percent'). FOMC rate targets and SEP
+    figures are frequently written this way ('41/4-41/2 percent', '21/2
+    percent'), so left unrepaired this directly threatens finance numeric
+    fidelity. Only fires when the fraction is glued to a preceding digit;
+    a properly spaced fraction like '1/4 percentage point' is untouched.
+    """
+    if not text:
+        return text, 0
+    count = [0]
+
+    def _sub(m: re.Match) -> str:
+        count[0] += 1
+        return f"{m.group(1)}{_FRACTION_TO_DECIMAL[m.group(2)]}"
+
+    return _AMBIGUOUS_FRACTION_RE.sub(_sub, text), count[0]
 
 
 _LOG_LINE_RE        = re.compile(r"^\s*---\s*LOG\s+ENTRY", re.IGNORECASE)
@@ -241,6 +270,47 @@ def extract_version(section_id: Optional[str], section_title: Optional[str]) -> 
     return None
 
 
+def dewrap_hard_linebreaks(text: str) -> Tuple[str, int]:
+    """Collapse hard line-wrap newlines into spaces so a sentence that only
+    wraps because the source file was formatted to a fixed line width (e.g.
+    an ~80-char press-release layout) is never fragmented by the chunker.
+
+    RecursiveCharacterTextSplitter treats a bare "\\n" as a high-priority
+    split point (second only to a blank line) — but in this kind of source
+    file a single newline mid-paragraph is usually just where the original
+    line ended, not a real boundary. Concretely: "...3.9 percent at the end
+    of next year and\\n3.4 percent at the end of 2026." is ONE sentence
+    split across two physical lines; left unrepaired, the chunker reliably
+    puts "3.9 percent" and "3.4 percent" in two different chunks, so a
+    single-chunk answer can only ever report one of the two figures.
+
+    A newline is preserved (never merged) when it is a genuine boundary:
+    - a blank line (paragraph break), or
+    - the next line starts a new speaker turn ("CHAIR POWELL. ...").
+    Every other single newline is a hard-wrap artifact and gets replaced
+    with a space. Speaker-turn detection is verified unaffected by this
+    pass (same turn count before/after on the FOMC transcript).
+    """
+    if not text:
+        return text, 0
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+    out: List[str] = []
+    merges = 0
+    for i, line in enumerate(lines):
+        if i == 0:
+            out.append(line)
+            continue
+        prev = out[-1] if out else ""
+        stripped = line.strip()
+        if not stripped or not prev.strip() or _SPEAKER_TURN_RE.match(line):
+            out.append(line)
+            continue
+        out[-1] = prev.rstrip() + " " + stripped
+        merges += 1
+    return "\n".join(out), merges
+
+
 def repair_text(raw: str) -> Tuple[str, Dict[str, int]]:
     stats: Dict[str, int] = {}
     if not raw or not getattr(settings, "TEXT_REPAIR_ENABLED", True):
@@ -250,10 +320,18 @@ def repair_text(raw: str) -> Tuple[str, Dict[str, int]]:
         text, n = repair_mojibake(text)
         if n:
             stats["mojibake_chars_changed"] = n
+    if getattr(settings, "TEXT_REPAIR_DEWRAP", True):
+        text, n = dewrap_hard_linebreaks(text)
+        if n:
+            stats["hard_linebreaks_dewrapped"] = n
     if getattr(settings, "TEXT_REPAIR_NOISE_LINES", True):
         text, n = strip_noise_lines(text)
         if n:
             stats["noise_lines_dropped"] = n
+    if getattr(settings, "TEXT_REPAIR_AMBIGUOUS_FRACTIONS", True):
+        text, n = normalize_ambiguous_fractions(text)
+        if n:
+            stats["ambiguous_fractions_normalized"] = n
     return text, stats
 from app.utils.logger import get_logger
 
@@ -292,10 +370,6 @@ _SPEAKER_TURN_RE = re.compile(
     r"^[ \t]*(?P<speaker>[A-Z][A-Z0-9 \-\']+(?:\s*[-–]\s*[A-Z][A-Z0-9 \-]+)?)[ \t]*[:\.](?=[ \t])",
     re.MULTILINE,
 )
-_TRANSCRIPT_SEPARATORS = [
-    "\nOPERATOR:", "\nCEO:", "\nCFO:", "\nCTO:", "\nCOO:",
-    "\nANALYST:", "\nMODERATOR:", "\nQUESTION:", "\nANSWER:",
-]
 _CALL_SECTIONS = {
     "prepared_remarks": ["prepared remarks", "opening remarks", "opening statement"],
     "qa_session": ["question and answer", "q and a", "q&a session",
@@ -833,20 +907,6 @@ def _chunk_table(header: str, data_rows: List[str], min_size: Optional[int] = No
     return chunks
 
 
-def _protect_finance_numbers(text: str) -> Tuple[str, Dict[str, str]]:
-    placeholder = "\x02COMMA\x03"
-    _INNER_COMMA_RE = re.compile(r"(?<=\d),(?=\d)")
-    protected = _INNER_COMMA_RE.sub(placeholder, text)
-    mapping = {placeholder: ","}
-    return protected, mapping
-
-
-def _restore_finance_numbers(chunk: str, mapping: Dict[str, str]) -> str:
-    for placeholder, original in mapping.items():
-        chunk = chunk.replace(placeholder, original)
-    return chunk
-
-
 def _detect_transcript_format(text: str) -> bool:
     # 10 000-char window: FOMC opening statements can exceed 7 000 chars before the
     # first question-and-answer exchange, so 3 000 chars would only capture 1 speaker.
@@ -886,6 +946,60 @@ def _extract_section_headings(text: str) -> List[Tuple[int, str]]:
     return headings
 
 
+def _split_speaker_aware(text: str, target_size: int, overlap: int) -> List[str]:
+    """Split transcript text into pieces that never cross a speaker-turn boundary.
+
+    Without this, RecursiveCharacterTextSplitter's generic separators cut a long
+    answer mid-paragraph; the downstream chunk-loop's speaker carry-over
+    (_extract_speaker + _last_speaker) then mislabels the continuation piece
+    with whatever speaker tag last appeared at chunk-start — attributing one
+    speaker's words to another (a citation-attribution defect, not a cosmetic
+    one). Splitting at every detected turn boundary first guarantees each
+    piece belongs to exactly one speaker; a turn longer than target_size is
+    sub-split, but the sub-pieces still never absorb a neighboring speaker's
+    text since the split point is the turn boundary itself.
+    """
+    matches = list(_SPEAKER_TURN_RE.finditer(text))
+    if len(matches) < 2:
+        return []
+
+    segments: List[str] = []
+    if matches[0].start() > 0:
+        pre = text[: matches[0].start()].strip()
+        if pre:
+            segments.append(pre)
+    for i, m in enumerate(matches):
+        seg_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        seg = text[m.start():seg_end].strip()
+        if seg:
+            segments.append(seg)
+
+    try:
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        sub_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=target_size,
+            chunk_overlap=overlap,
+            separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""],
+        )
+    except Exception:
+        sub_splitter = None
+
+    pieces: List[str] = []
+    for seg in segments:
+        if len(seg) <= target_size:
+            pieces.append(seg)
+        elif sub_splitter is not None:
+            pieces.extend(p.strip() for p in sub_splitter.split_text(seg) if p.strip())
+        else:
+            step = max(target_size - overlap, 1)
+            pieces.extend(
+                seg[i:i + target_size].strip()
+                for i in range(0, len(seg), step)
+                if seg[i:i + target_size].strip()
+            )
+    return pieces
+
+
 def _chunk_text(text: str, is_transcript: bool = False) -> List[str]:
     table_chunks: List[str] = []
     pipe_blocks = _extract_pipe_table_blocks(text)
@@ -904,39 +1018,37 @@ def _chunk_text(text: str, is_transcript: bool = False) -> List[str]:
             table_chunks.extend(_chunk_table(header, data_rows))
         text = non_table_text
 
-    protected_text, num_mapping = _protect_finance_numbers(text)
+    protected_text, num_mapping = protect(text)
 
     chunks: List[str] = []
-    try:
-        from langchain_text_splitters import RecursiveCharacterTextSplitter
-        if is_transcript:
-            separators = _TRANSCRIPT_SEPARATORS + [
-                "\n[DOC-", "\nPART ", "\nITEM ", "\nSECTION ",
-                "\n====", "\n----", "\n####", "\n###", "\n##", "\n#",
-                "\n\n", "\n", ". ", "! ", "? ", " ", "",
-            ]
-        else:
+    if is_transcript:
+        chunks = _split_speaker_aware(protected_text, settings.CHUNK_SIZE, settings.CHUNK_OVERLAP)
+        chunks = [restore(c.strip(), num_mapping) for c in chunks if c.strip()]
+
+    if not chunks:
+        try:
+            from langchain_text_splitters import RecursiveCharacterTextSplitter
             separators = [
                 "\n[DOC-", "\nPART ", "\nITEM ", "\nSECTION ",
                 "\n====", "\n----", "\n####", "\n###", "\n##", "\n#",
                 "\n\n", "\n", ". ", "! ", "? ", " ", "",
             ]
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=settings.CHUNK_SIZE,
-            chunk_overlap=settings.CHUNK_OVERLAP,
-            separators=separators,
-        )
-        chunks = splitter.split_text(protected_text)
-        chunks = [_restore_finance_numbers(c.strip(), num_mapping) for c in chunks if c.strip()]
-    except Exception:
-        chunks = []
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=settings.CHUNK_SIZE,
+                chunk_overlap=settings.CHUNK_OVERLAP,
+                separators=separators,
+            )
+            chunks = splitter.split_text(protected_text)
+            chunks = [restore(c.strip(), num_mapping) for c in chunks if c.strip()]
+        except Exception:
+            chunks = []
 
     if not chunks:
         size = settings.CHUNK_SIZE
         overlap = settings.CHUNK_OVERLAP
         step = max(size - overlap, 1)
         for i in range(0, len(protected_text), step):
-            ch = _restore_finance_numbers(protected_text[i:i + size].strip(), num_mapping)
+            ch = restore(protected_text[i:i + size].strip(), num_mapping)
             if ch:
                 chunks.append(ch)
 

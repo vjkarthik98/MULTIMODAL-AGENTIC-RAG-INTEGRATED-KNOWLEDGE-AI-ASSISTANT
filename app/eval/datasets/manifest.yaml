@@ -1,53 +1,48 @@
-# Gold-set manifest — version-pins each gold file by SHA-256.
-# Updated automatically by: python -m app.eval.datasets.build_gold_set --validate
-# Never edit manually without also updating the sha256.
-
-dataset_version: "0.1.0"
-created_at: "2026-05-25"
-
+dataset_version: 0.1.0
+created_at: '2026-05-25'
 gold_files:
   text_gold.jsonl:
-    sha256: ""
-    triples_total: 0
-    triples_curated: 0
-    note: "SEC 10-K/10-Q TXT + heliosphere/aquavolt/meridian benchmarks"
+    sha256: ed64e270ce75d0800767aea5f3aee2251459c69348241bf88193b990b4a59639
+    triples_total: 21
+    triples_curated: 19
+    note: SEC 10-K/10-Q TXT + heliosphere/aquavolt/meridian benchmarks
   pdf_gold.jsonl:
-    sha256: ""
-    triples_total: 0
-    triples_curated: 0
-    note: "SEC 10-K/10-Q PDFs"
+    sha256: 595f819013be85fd0af1390435664e07fb2e57fb0278aa49dc5bccbd2276135e
+    triples_total: 6
+    triples_curated: 5
+    note: SEC 10-K/10-Q PDFs
   docx_gold.jsonl:
-    sha256: ""
-    triples_total: 0
-    triples_curated: 0
-    note: "Investor presentations"
+    sha256: b8d9cf1a70fe1b7ad30f6d3de2ce61bfd9776425817df87ecd2cee4329171651
+    triples_total: 6
+    triples_curated: 5
+    note: Investor presentations
   xlsx_gold.jsonl:
-    sha256: ""
-    triples_total: 0
-    triples_curated: 0
-    note: "Financial statement tables"
+    sha256: cc587de584fc7187d699869cdd8a1f5db044288649361e5cdf23add25d25d702
+    triples_total: 4
+    triples_curated: 3
+    note: Financial statement tables
   image_gold.jsonl:
-    sha256: ""
-    triples_total: 0
-    triples_curated: 0
-    note: "Revenue charts, scanned 10-K covers"
+    sha256: a8b03f425f94f841613e823618b8f601c90afbcedbbf52c1c0675bd1dd6e0d28
+    triples_total: 3
+    triples_curated: 2
+    note: Revenue charts, scanned 10-K covers
   audio_gold.jsonl:
-    sha256: ""
-    triples_total: 0
-    triples_curated: 0
-    note: "Earnings-call MP3 segments"
+    sha256: 2d14f61a24dc41fec91dc6c1dcc604a2a3540a8e2a252095d3ef5df3fbcc2630
+    triples_total: 3
+    triples_curated: 2
+    note: Earnings-call MP3 segments
   video_gold.jsonl:
-    sha256: ""
-    triples_total: 0
-    triples_curated: 0
-    note: "CNBC clips, IR earnings videos"
+    sha256: 4860e024b2c79d498eba38bf27d05e72c2a8c35a6e2a43aac954aa3f8da5772d
+    triples_total: 3
+    triples_curated: 2
+    note: CNBC clips, IR earnings videos
   routing_gold.jsonl:
-    sha256: ""
+    sha256: ''
     triples_total: 0
     triples_curated: 0
-    note: "{query, expected_route} labelled pairs"
+    note: '{query, expected_route} labelled pairs'
   e2e_gold.jsonl:
-    sha256: ""
+    sha256: ''
     triples_total: 0
     triples_curated: 0
-    note: "Cross-modal multi-hop finance questions"
+    note: Cross-modal multi-hop finance questions
