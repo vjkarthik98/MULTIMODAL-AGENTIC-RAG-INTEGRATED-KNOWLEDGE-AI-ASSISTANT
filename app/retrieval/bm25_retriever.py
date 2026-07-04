@@ -575,9 +575,22 @@ class BM25Retriever:
             "row_start":         s.get("row_start") or (s.get("row_range") or [None])[0],
             "row_end":           s.get("row_end") or (s.get("row_range") or [None, None])[-1],
             # ── Audio / video locators ────────────────────────────────────────
-            "timestamp_start":   s.get("timestamp_start"),
-            "timestamp_end":     s.get("timestamp_end"),
-            "speaker":           s.get("speaker"),
+            # audio_chunker.py's structure dict uses "start_timestamp"/
+            # "end_timestamp" (reversed word order) and "speaker_name"/
+            # "speaker_label"/"speaker_role" (not a single "speaker" key) — the
+            # old key names here never matched, so every audio source lost its
+            # speaker/timestamp citation once routed through BM25 (accuracy
+            # phase 2026-07, same class of bug as the XLSX sheet_name fix
+            # above). Read both shapes defensively.
+            "timestamp_start":   s.get("timestamp_start") or s.get("start_timestamp"),
+            "timestamp_end":     s.get("timestamp_end") or s.get("end_timestamp"),
+            "start_timestamp":   s.get("start_timestamp") or s.get("timestamp_start"),
+            "end_timestamp":     s.get("end_timestamp") or s.get("timestamp_end"),
+            "speaker":           s.get("speaker") or s.get("speaker_name") or s.get("speaker_label"),
+            "speaker_name":      s.get("speaker_name") or s.get("speaker_label") or s.get("speaker"),
+            "speaker_label":     s.get("speaker_label"),
+            "speaker_role":      s.get("speaker_role"),
+            "call_section":      s.get("call_section"),
             "frame_index":       s.get("frame_index"),
             # ── Image / video caption ─────────────────────────────────────────
             "caption":           s.get("caption"),

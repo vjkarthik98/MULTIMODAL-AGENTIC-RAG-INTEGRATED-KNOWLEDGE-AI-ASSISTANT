@@ -545,13 +545,26 @@ export default function Sidebar({
       uploadControllers.current[file.name] = ctrl
 
       setUploadingFiles(prev => new Set([...prev, file.name]))
-      uploadTargets.current[file.name] = 2                       // queued target
+      uploadTargets.current[file.name] = 0
       setUploadProgress(prev => ({ ...prev, [file.name]: 0 }))   // animate up from 0
+
+      // Real network-transfer progress (actual bytes sent), mapped to the
+      // first 15% of the bar — the remaining 15-100% is real backend
+      // pipeline progress from _pollJobStatus below. Previously this whole
+      // phase sat frozen at a hardcoded "2%" for as long as the real upload
+      // took (tens of seconds for a large audio/video file), so the animator's
+      // time-based trickle was the only thing moving the bar — it looked like
+      // progress but wasn't tied to anything real. Math.max guards against a
+      // late/out-of-order progress event regressing the bar.
+      const onUploadProgress = (fraction) => {
+        const pct = Math.round(fraction * 15)
+        uploadTargets.current[file.name] = Math.max(uploadTargets.current[file.name] || 0, pct)
+      }
 
       try {
         // Server returns job_id immediately (<1s) for ALL modalities — file is already
         // visible in sidebar. Poll real pipeline stages until done.
-        const result = await ingestFile(auth.token, file, 'default', ctrl)
+        const result = await ingestFile(auth.token, file, 'default', ctrl, onUploadProgress)
 
         if (result?.job_id) {
           const { ok, error: pollErr, chunks } = await _pollJobStatus(auth.token, result.job_id, file.name)

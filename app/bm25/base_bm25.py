@@ -399,9 +399,19 @@ class BaseBM25(ABC):
             "sheet_name":         s.get("sheet") or s.get("sheet_name"),
             "row_start":          s.get("row_start"),
             "row_end":            s.get("row_end"),
-            "timestamp_start":    s.get("timestamp_start"),
-            "timestamp_end":      s.get("timestamp_end"),
-            "speaker":            s.get("speaker"),
+            # audio_chunker.py stores "start_timestamp"/"end_timestamp" (reversed
+            # word order) and "speaker_name"/"speaker_label"/"speaker_role" (no
+            # single "speaker" key) — read both shapes defensively (accuracy
+            # phase 2026-07, same class of bug as the sheet_name fix above).
+            "timestamp_start":    s.get("timestamp_start") or s.get("start_timestamp"),
+            "timestamp_end":      s.get("timestamp_end") or s.get("end_timestamp"),
+            "start_timestamp":    s.get("start_timestamp") or s.get("timestamp_start"),
+            "end_timestamp":      s.get("end_timestamp") or s.get("timestamp_end"),
+            "speaker":            s.get("speaker") or s.get("speaker_name") or s.get("speaker_label"),
+            "speaker_name":       s.get("speaker_name") or s.get("speaker_label") or s.get("speaker"),
+            "speaker_label":      s.get("speaker_label"),
+            "speaker_role":       s.get("speaker_role"),
+            "call_section":       s.get("call_section"),
             "frame_index":        s.get("frame_index"),
             "caption":            s.get("caption"),
             "ingestion_time":     s.get("ingestion_time"),

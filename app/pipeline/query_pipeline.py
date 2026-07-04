@@ -487,8 +487,23 @@ def _build_sources_array(docs: List[Dict[str, Any]], max_items: int = 3) -> List
 
         start_time: Optional[float] = None
         end_time:   Optional[float] = None
-        raw_start = meta.get("start_time") if meta.get("start_time") is not None else meta.get("timestamp_start")
-        raw_end   = meta.get("end_time")   if meta.get("end_time")   is not None else meta.get("timestamp_end")
+        # Audio/video chunks store start_timestamp/end_timestamp (reversed word
+        # order vs. the timestamp_start/timestamp_end checked above) — without
+        # this fallback every audio/video source silently loses its timestamp.
+        raw_start = (
+            meta.get("start_time")
+            if meta.get("start_time") is not None
+            else meta.get("timestamp_start")
+            if meta.get("timestamp_start") is not None
+            else meta.get("start_timestamp")
+        )
+        raw_end = (
+            meta.get("end_time")
+            if meta.get("end_time") is not None
+            else meta.get("timestamp_end")
+            if meta.get("timestamp_end") is not None
+            else meta.get("end_timestamp")
+        )
         if raw_start is not None:
             try:
                 start_time = float(raw_start)

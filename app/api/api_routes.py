@@ -26,6 +26,47 @@ logger = get_logger(__name__)
 
 router = APIRouter()
 
+# Strong references for fire-and-forget model pre-warm tasks (see
+# _prewarm_models_for_upload below) — asyncio does not keep an unreferenced
+# Task alive, so without this set a GC pass could cancel warm-up mid-load.
+_PENDING_PREWARM_TASKS: set = set()
+
+
+def _prewarm_models_for_upload(ext: str) -> None:
+    """Kick off model loading for the likely modality the instant the
+    filename is known, instead of waiting for the file to be fully written,
+    malware-scanned, hashed, and re-detected via magic bytes in
+    route_ingestion(). That whole chain previously gated the first
+    model_registry.ensure_for_modality() call, so a 45MB audio upload paid
+    for Whisper/pyannote/NER loading (tens of seconds) only AFTER the upload
+    had already finished — this runs the load concurrently with it instead.
+
+    Extension-based, so it's a guess (a .doc misdetected as corrupted Word
+    or a container mismatch could differ from the magic-byte result) — fire
+    and forget. route_ingestion()'s own ensure_for_modality() call is
+    idempotent (already-loaded models are skipped), so a wrong guess just
+    means the correct models load at their normal (later) time — never
+    slower than before, only sometimes faster.
+    """
+    try:
+        from app.ingestion.router import EXT_TO_MODALITY
+        from app.core.model_registry import model_registry
+
+        modality = EXT_TO_MODALITY.get(ext)
+        if not modality:
+            return
+
+        loop = asyncio.get_event_loop()
+        # run_in_executor() submits to the thread pool immediately and
+        # returns an already-scheduled Future — NOT a coroutine, so it must
+        # not be passed through create_task() (raises TypeError). Track the
+        # Future itself for the GC-safety/cleanup purpose described above.
+        future = loop.run_in_executor(None, model_registry.ensure_for_modality, modality)
+        _PENDING_PREWARM_TASKS.add(future)
+        future.add_done_callback(_PENDING_PREWARM_TASKS.discard)
+    except Exception as exc:
+        logger.debug(event="upload_prewarm_skip", ext=ext, error=str(exc))
+
 
 def get_current_user_id(request: Request, explicit_user_id: Optional[str] = None) -> str:
     """
@@ -435,6 +476,10 @@ async def ingest_document(
                 status_code=400,
                 detail=f"Unsupported file type: {ext}",
             )
+
+        # Fire model pre-warm now, in parallel with the disk write / malware
+        # scan / hashing below — see _prewarm_models_for_upload docstring.
+        _prewarm_models_for_upload(ext)
 
         max_size = _size_limit(ext)
         staging_dir = user_staging_dir(user_id)
@@ -1389,6 +1434,10 @@ async def upload_file(
                 status_code=400,
                 detail=f"Unsupported file type: {ext}",
             )
+
+        # Fire model pre-warm now, in parallel with the disk write / malware
+        # scan / hashing below — see _prewarm_models_for_upload docstring.
+        _prewarm_models_for_upload(ext)
 
         max_size = _size_limit(ext)
 

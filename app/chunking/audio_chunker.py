@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import bisect
+import math
 import os
 import re
 import tempfile
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -13,6 +16,7 @@ from app.chunking.finance_numbers import (
     deterministic_chunk_id,
     extract_finance_entities,
 )
+from app.core.config import settings
 from app.ingestion.schema import IngestedDocument, RawExtract, UniversalMetadata
 from app.utils.logger import get_logger, modality_var
 
@@ -36,7 +40,15 @@ _CHUNK_ERRORS = Counter(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def diarize(audio_path: str) -> List[Tuple[float, float, str]]:
-    """Run pyannote speaker diarization. Returns (start, end, speaker) tuples."""
+    """Run pyannote speaker diarization. Returns (start, end, speaker) tuples.
+
+    The pyannote/speaker-diarization-3.1 pipeline internally loads and runs
+    three models in sequence (segmentation-3.0 for voice-activity/change
+    detection, a speaker-embedding model for clustering, and the diarization
+    pipeline itself which agglomeratively clusters those embeddings) —
+    Pipeline.from_pretrained() pulls in all three, so a single get_diarizer()
+    call already exercises the full pyannote stack.
+    """
     try:
         from app.core.model_loader import model_loader as loader
         pipeline = loader.get_diarizer()
@@ -54,6 +66,98 @@ def diarize(audio_path: str) -> List[Tuple[float, float, str]]:
     except Exception as exc:
         logger.warning(event="diarization_failed", error=str(exc))
         return []
+
+
+def _merge_fragmented_hosts(
+    diarization: List[Tuple[float, float, str]],
+) -> List[Tuple[float, float, str]]:
+    """Collapse diarization labels that are almost certainly the same speaker
+    but got split into multiple pseudo-identities by pyannote's clustering.
+
+    This is a known failure mode on hour-scale, single-dominant-speaker audio
+    (earnings calls, press conferences): a continuous host/chair voice
+    periodically drifts in the embedding space over 30-45+ minutes and gets
+    re-clustered under a new label, while each one-off questioner still gets
+    a single short, correctly-isolated label. Any label whose total talk time
+    is a large share of the recording (or a large multiple of the median
+    speaker's talk time) is treated as a "host candidate"; when 2+ such
+    candidates exist they are merged into the single label with the most
+    total duration. Real multi-host recordings with genuinely comparable
+    talk time are unaffected as long as there's no evidence of fragmentation
+    (only 2+ candidates plus this share test trigger a merge).
+    """
+    if not diarization:
+        return diarization
+
+    total_dur: Dict[str, float] = defaultdict(float)
+    for start, end, label in diarization:
+        total_dur[label] += (end - start)
+
+    file_duration = max((e for _, e, _ in diarization), default=0.0)
+    if file_duration <= 0 or len(total_dur) < 2:
+        return diarization
+
+    durations = sorted(total_dur.values())
+    median_dur = durations[len(durations) // 2]
+
+    host_candidates = [
+        label for label, dur in total_dur.items()
+        if dur >= 0.10 * file_duration or (median_dur > 0 and dur >= 3 * median_dur)
+    ]
+    logger.info(
+        event="audio_speaker_fragment_check",
+        n_labels=len(total_dur),
+        file_duration_sec=round(file_duration, 1),
+        median_dur_sec=round(median_dur, 1),
+        host_candidates=host_candidates,
+        top5=sorted(({k: round(v, 1) for k, v in total_dur.items()}).items(), key=lambda kv: -kv[1])[:5],
+    )
+    if len(host_candidates) < 2:
+        return diarization
+
+    canonical = max(host_candidates, key=lambda l: total_dur[l])
+    remap = {label: canonical for label in host_candidates if label != canonical}
+    if not remap:
+        return diarization
+
+    logger.info(
+        event="audio_speaker_fragments_merged",
+        canonical=canonical,
+        merged=list(remap.keys()),
+        canonical_duration_sec=round(total_dur[canonical], 1),
+    )
+    return [(s, e, remap.get(lbl, lbl)) for s, e, lbl in diarization]
+
+
+def _label_at_time(
+    t: float,
+    diar_starts: List[float],
+    diarization: List[Tuple[float, float, str]],
+) -> str:
+    """Speaker label at time t, snapping to the NEAREST turn across gaps.
+
+    pyannote turns rarely cover 100% of the timeline (breaths, micro-pauses,
+    detection gaps between turns of the SAME speaker) — any word whose
+    timestamp falls in such a gap needs the label of whichever turn is
+    temporally closest, not a hardcoded fallback. A fixed fallback (e.g.
+    always "SPEAKER_00", or always the first turn) systematically
+    misattributes every gap-word for the whole recording to one label,
+    fabricating a large phantom "extra speaker" out of a single continuous
+    speaker's own natural pauses.
+    """
+    if not diarization:
+        return "SPEAKER_00"
+    idx = bisect.bisect_right(diar_starts, t) - 1
+    if idx < 0:
+        return diarization[0][2]
+    start, end, label = diarization[idx]
+    if t <= end:
+        return label
+    if idx + 1 < len(diarization):
+        next_start, _next_end, next_label = diarization[idx + 1]
+        if (next_start - t) < (t - end):
+            return next_label
+    return label
 
 
 _ENTITY_KEYS = {"ORG": "companies", "PER": "persons", "LOC": "locations", "MISC": "misc"}
@@ -123,16 +227,25 @@ _ROLE_KEYWORDS = {
 
 _FILLER = re.compile(r"\b(um|uh|er|ah|you know|i mean|like|so|basically|essentially)\b", re.I)
 
-# Spoken name patterns (three forms):
-#   "MR. POWELL:" / "MS. BRAINARD:" — title prefix, all-caps surname
-#   "CHAIRMAN BERNANKE." / "VICE CHAIR WILLIAMS." — FOMC all-caps role+name
-#   "Luca Maestri:" / "Tim Cook," — earnings call title-case name
-_SPOKEN_NAME_RE = re.compile(
-    r"(?:^|\n)\s*(?:MR\.|MS\.|MRS\.|DR\.)\s+([A-Z][A-Z\s\-']+?)[:.]\s"
-    r"|(?:^|\n)\s*(?:CHAIR(?:MAN|WOMAN)?|VICE\s+CHAIR(?:MAN|WOMAN)?|PRESIDENT|GOVERNOR|SECRETARY)\s+([A-Z][A-Z\s\-']{1,30})[:.]\s"
-    r"|([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s*[:,]",
-    re.MULTILINE,
+# Self-introduction near the start of a speaker's own turn, e.g. reporters/
+# analysts stating their affiliation: "Greg Robb from MarketWatch.com",
+# "this is Colby Smith with the New York Times".
+_SELF_INTRO_RE = re.compile(
+    r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\s+(?:from|with|of)\s+(?:the\s+)?"
+    r"([A-Z][A-Za-z0-9&.\-]+(?:\s+[A-Za-z0-9&.\-]+){0,4})"
 )
+
+# Vocative address opening a turn — "Chair Powell, ..." / "Mr. Chairman, ...".
+# Case-insensitive and tolerant of lowercase ASR output (unlike a self-intro,
+# this is a short fixed phrase so a loose match stays low-risk).
+_CHAIR_ADDRESS_RE = re.compile(
+    r"\b(?:chair|chairman|chairwoman)\s+([a-z]+)\b|\bmr\.?\s+chairman\b",
+    re.IGNORECASE,
+)
+_CHAIR_ADDRESS_STOPWORDS = {
+    "of", "the", "and", "is", "was", "said", "noted", "board", "person", "here",
+}
+_TURN_LEAD_WORDS = 20  # leading words of a turn counted as "near the start"
 
 
 def _detect_role(text: str) -> Optional[str]:
@@ -149,80 +262,106 @@ def _detect_call_section(text: str) -> str:
     return "prepared_remarks"
 
 
+_DECIMAL_SPACING_RE = re.compile(r"(\d)\s+\.\s*(\d)")
+_HYPHEN_SPACING_RE = re.compile(r"(\w)\s+-(\w)")
+
+
+def _fix_asr_spacing(text: str) -> str:
+    """Collapse faster-whisper's spurious space before decimal points/hyphens.
+
+    This model consistently emits "2 .2 percent" instead of "2.2 percent" and
+    "dual -mandate" instead of "dual-mandate" for this audio. Left unfixed,
+    "2.2" (correctly formatted by the LLM in its answer) never string-matches
+    "2 .2" (as stored in the retrieved context), so the numeric-faithfulness
+    guard in reasoning_engine.py flags a real, correctly-cited number as
+    "unsupported" and discards an otherwise-faithful answer.
+    """
+    text = _DECIMAL_SPACING_RE.sub(r"\1.\2", text)
+    text = _HYPHEN_SPACING_RE.sub(r"\1-\2", text)
+    return text
+
+
 def _remove_fillers(text: str) -> str:
+    text = _fix_asr_spacing(text)
     return re.sub(r"\s+", " ", _FILLER.sub("", text)).strip()
 
 
 def _map_speaker_roles(
     diarization: List[Tuple[float, float, str]],
-    full_transcript: str,
+    words: List[Dict],
 ) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
-    """Map SPEAKER_XX labels to (role, name) using per-speaker transcript context.
+    """Map SPEAKER_XX labels to (role, name) using turn-anchored context.
 
-    Strategy:
-    1. Parse FOMC-style "MR. POWELL:" and earnings-call "Luca Maestri:" name markers from
-       the surrounding window of each spoken-name occurrence to bind name → speaker.
-    2. Detect role from each speaker's own transcribed text (not the global transcript),
-       so the dominant speaker (CEO/Chair) doesn't pollute everyone else's role.
-    Returns {speaker_label: (role, name)} — both may be None.
+    Binds names using exact word timestamps rather than proportional
+    character-position estimation over the joined transcript — on a long
+    recording that estimate drifts far enough from real time that a name
+    mentioned in one turn gets bound to whichever unrelated turn the linear
+    estimate happens to land on. Two independent, turn-anchored signals:
+      1. Self-introduction — "<Name> from/with <Outlet>" near the start of a
+         speaker's own turn (reporters/analysts stating their affiliation).
+      2. Vocative address — a turn opens by addressing "Chair <Surname>" /
+         "Mr. Chairman"; the addressee is whoever speaks in the immediately
+         following (different-label) turn.
+    Falls back to per-speaker role-keyword detection when no name is bound.
     """
     role_name_map: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
-    if not diarization:
+    if not diarization or not words:
         return role_name_map
 
-    # --- Build approximate word → time index so we can map name-marker positions ---
-    # diarization is sorted; build start-time list for bisect lookups.
-    import bisect as _bisect
     _diar_starts = [seg[0] for seg in diarization]
 
-    def _speaker_at_approx(char_pos: int, total_chars: int) -> str:
-        """Estimate speaker label at character position via linear time mapping."""
-        if not diarization:
-            return "SPEAKER_00"
-        total_dur = diarization[-1][1] if diarization else 1.0
-        t = (char_pos / max(total_chars, 1)) * total_dur
-        idx = _bisect.bisect_right(_diar_starts, t) - 1
-        if idx >= 0:
-            _, end, label = diarization[idx]
-            if t <= end:
-                return label
-        return diarization[0][2]
+    def _label_at(t: float) -> str:
+        return _label_at_time(t, _diar_starts, diarization)
 
-    total_chars = len(full_transcript)
+    # Group words into contiguous per-speaker turns using the real diarization
+    # boundaries (ground truth), independent of chunk-assembly granularity.
+    turns: List[Dict] = []
+    for w in words:
+        lbl = _label_at(w["start"])
+        if not turns or turns[-1]["label"] != lbl:
+            turns.append({"label": lbl, "words": [w["word"]]})
+        else:
+            turns[-1]["words"].append(w["word"])
 
-    # --- Map name markers to speaker labels ---
     label_to_name: Dict[str, str] = {}
-    for m in _SPOKEN_NAME_RE.finditer(full_transcript):
-        # group(1): MR./MS. prefix form  group(2): FOMC CHAIRMAN/PRESIDENT form  group(3): title-case form
-        raw = m.group(1) or m.group(2) or m.group(3) or ""
-        name = raw.strip().title()
-        if not name:
-            continue
-        spk = _speaker_at_approx(m.start(), total_chars)
-        if spk not in label_to_name:   # keep first (most reliable)
-            label_to_name[spk] = name
+    label_to_role: Dict[str, str] = {}
 
-    # --- Per-speaker word buckets for independent role detection ---
-    # Split transcript words by time-proportional position.
-    words = full_transcript.split()
-    n = max(len(words), 1)
-    total_dur = diarization[-1][1] if diarization else 1.0
-    speaker_word_buckets: Dict[str, List[str]] = {}
-    for wi, word in enumerate(words):
-        t = (wi / n) * total_dur
-        idx = _bisect.bisect_right(_diar_starts, t) - 1
-        if idx >= 0:
-            _, end, label = diarization[idx]
-            if t <= end:
-                speaker_word_buckets.setdefault(label, []).append(word)
+    for i, turn in enumerate(turns):
+        lead_text = " ".join(turn["words"][:_TURN_LEAD_WORDS])
+
+        # Signal 1: self-introduction near the start of this speaker's own turn.
+        if turn["label"] not in label_to_name:
+            m = _SELF_INTRO_RE.search(lead_text)
+            if m:
+                label_to_name[turn["label"]] = m.group(1).strip().title()
+
+        # Signal 2: vocative address — bind the addressee to the NEXT turn.
+        # A specific surname ("Chair Powell") is allowed to upgrade a prior
+        # generic binding ("Chair", from a bare "Mr. Chairman" address earlier
+        # in the recording) — first-match-wins would otherwise let whichever
+        # phrasing happens to occur first permanently block the better one.
+        m = _CHAIR_ADDRESS_RE.search(lead_text)
+        if m and i + 1 < len(turns):
+            next_label = turns[i + 1]["label"]
+            surname_raw = (m.group(1) or "").strip().lower()
+            already_specific = label_to_name.get(next_label, "") not in ("", "Chair")
+            if next_label != turn["label"] and not already_specific:
+                if surname_raw and surname_raw not in _CHAIR_ADDRESS_STOPWORDS:
+                    label_to_name[next_label] = f"Chair {surname_raw.title()}"
+                    label_to_role[next_label] = "Federal Reserve Chair"
+                elif not surname_raw and next_label not in label_to_name:
+                    label_to_name[next_label] = "Chair"
+                    label_to_role[next_label] = "Federal Reserve Chair"
 
     # --- Assign role and name to each unique speaker label ---
-    ordered_labels = list(dict.fromkeys(seg[2] for seg in diarization))
+    ordered_labels = list(dict.fromkeys(t["label"] for t in turns))
+    speaker_text: Dict[str, str] = defaultdict(str)
+    for t in turns:
+        speaker_text[t["label"]] += " " + " ".join(t["words"][:200])
+
     for label in ordered_labels:
         name = label_to_name.get(label)
-        # Detect role from this speaker's own words (first 500), then fall back to name.
-        own_text = " ".join(speaker_word_buckets.get(label, [])[:500])
-        role = _detect_role(own_text) or (name and _detect_role(name)) or None
+        role = label_to_role.get(label) or _detect_role(speaker_text.get(label, "")[:1500])
         role_name_map[label] = (role, name)
 
     return role_name_map
@@ -257,11 +396,86 @@ def _run_whisper(wav_path: str) -> List[Dict]:
         return []
 
 
+def _transcribe_long_audio(wav_path: str, duration_sec: float) -> List[Dict]:
+    """Transcribe audio, splitting into AUDIO_CHUNK_DURATION_SEC segments first
+    for anything longer than that.
+
+    A single faster-whisper call over an hour-scale recording measurably
+    degrades quality in the later portion of the file (dropped capitalization,
+    garbled proper nouns) compared to transcribing the same audio region in
+    isolation — confirmed by direct comparison on this pipeline's FOMC test
+    file. Splitting into bounded segments and transcribing each independently
+    (as the legacy ingest() path already did) avoids that drift; segments run
+    concurrently across AUDIO_TRANSCRIPTION_WORKERS since CTranslate2 releases
+    the GIL during CUDA ops.
+    """
+    if duration_sec <= 0 or duration_sec <= settings.AUDIO_CHUNK_DURATION_SEC:
+        return _run_whisper(wav_path)
+
+    from pydub import AudioSegment
+    audio = AudioSegment.from_wav(wav_path)
+    chunk_sec = settings.AUDIO_CHUNK_DURATION_SEC
+    n_segments = math.ceil(duration_sec / chunk_sec)
+
+    segment_paths: List[Tuple[str, float]] = []
+    for i in range(n_segments):
+        start_ms = int(i * chunk_sec * 1000)
+        end_ms = int(min((i + 1) * chunk_sec, duration_sec) * 1000)
+        seg = audio[start_ms:end_ms]
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        seg.export(tmp.name, format="wav")
+        tmp.close()
+        segment_paths.append((tmp.name, i * chunk_sec))
+
+    words: List[Dict] = []
+    try:
+        with ThreadPoolExecutor(max_workers=settings.AUDIO_TRANSCRIPTION_WORKERS) as pool:
+            futures = {pool.submit(_run_whisper, p): off for p, off in segment_paths}
+            results: List[Tuple[float, List[Dict]]] = []
+            for fut, off in futures.items():
+                try:
+                    seg_words = fut.result()
+                    for w in seg_words:
+                        w["start"] += off
+                        w["end"] += off
+                    results.append((off, seg_words))
+                except Exception as exc:
+                    logger.warning(event="audio_segment_transcribe_failed", offset=off, error=str(exc))
+        results.sort(key=lambda r: r[0])
+        for _, seg_words in results:
+            words.extend(seg_words)
+    finally:
+        for p, _off in segment_paths:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+    return words
+
+
+_OVERLAP_MAX_WORDS = 30
+
+
 def _last_sentence(text: str) -> str:
-    """Return the last complete sentence from text for overlap seeding."""
-    # Split on sentence-ending punctuation followed by space or end-of-string.
-    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
-    return sentences[-1] if sentences else ""
+    """Return the last complete sentence from text for overlap seeding.
+
+    Bounded fallback: when a chunk has no sentence-ending punctuation at all
+    (spoken audio frequently lacks terminal punctuation on disfluent stretches),
+    the naive split returns the WHOLE chunk as "one sentence". Feeding that
+    back in as the next chunk's overlap_seed compounds every subsequent chunk
+    — each one swallows all of its predecessors' text — producing chunks that
+    balloon past 1000 words and read as near-duplicates of each other. Cap the
+    fallback to the last _OVERLAP_MAX_WORDS words so overlap size stays
+    bounded regardless of punctuation.
+    """
+    text = text.strip()
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    last = sentences[-1] if sentences else ""
+    words = last.split()
+    if len(words) > _OVERLAP_MAX_WORDS:
+        last = " ".join(words[-_OVERLAP_MAX_WORDS:])
+    return last
 
 
 def _assemble_chunks(
@@ -284,12 +498,7 @@ def _assemble_chunks(
     _diar_starts: List[float] = [seg[0] for seg in diarization]
 
     def speaker_at(t: float) -> str:
-        idx = bisect.bisect_right(_diar_starts, t) - 1
-        if idx >= 0:
-            _start, _end, _label = diarization[idx]
-            if t <= _end:
-                return _label
-        return "SPEAKER_00"
+        return _label_at_time(t, _diar_starts, diarization)
 
     def _flush(buf: List[str], start: float, end: float, spk: str, overlap_seed: str) -> Dict:
         raw = " ".join(buf)
@@ -388,17 +597,19 @@ class AudioChunker(BaseChunker):
                     wav_path = f.name
 
                 try:
-                    words = _run_whisper(wav_path)
+                    duration_sec = ext_extra.get("duration_seconds") or 0.0
+                    words = _transcribe_long_audio(wav_path, duration_sec)
 
                     # Diarization (optional — skipped if model unavailable).
                     diarization: List[Tuple[float, float, str]] = []
                     try:
                         diarization = diarize(wav_path)
+                        diarization = _merge_fragmented_hosts(diarization)
                     except Exception:
                         pass
 
                     full_transcript = " ".join(w["word"] for w in words)
-                    role_map = _map_speaker_roles(diarization, full_transcript)
+                    role_map = _map_speaker_roles(diarization, words)
                     raw_chunks = _assemble_chunks(words, diarization, role_map)
 
                     # Document-level earnings-call detection — checked once per extract.

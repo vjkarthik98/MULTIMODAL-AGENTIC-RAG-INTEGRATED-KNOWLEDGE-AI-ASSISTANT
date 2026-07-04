@@ -473,13 +473,26 @@ class QdrantVectorStore:
                     for k, v in fe.items()
                 }
 
-            # Verbatim transcript stored alongside .text for re-rank display
+            # Verbatim transcript stored alongside .text for re-rank display.
+            # Matches QDRANT_TEXT_MAX_CHARS (2000) rather than an inconsistent
+            # separate 1000-char cap — some chunks run well past 1000 chars
+            # and were losing their tail (e.g. the exact rate figure sentence)
+            # from the citation/context view even though .text kept it.
             if s.get("transcript"):
-                payload["transcript"] = str(s["transcript"])[:1000]
+                payload["transcript"] = str(s["transcript"])[:settings.QDRANT_TEXT_MAX_CHARS]
 
             # Deterministic chunk hash for dedup
             if s.get("chunk_hash_id"):
                 payload["chunk_hash_id"] = str(s["chunk_hash_id"])
+
+            # FinBERT finance-tone annotation (added post-embedding by
+            # AudioEmbedder._annotate_finbert_tone) — was missing from this
+            # whitelist entirely, so the model ran but its output never
+            # reached Qdrant.
+            if s.get("finance_tone"):
+                payload["finance_tone"] = str(s["finance_tone"])
+            if s.get("finance_tone_score") is not None:
+                payload["finance_tone_score"] = float(s["finance_tone_score"])
 
         # VIDEO RICH METADATA — VideoChunker Phase 1.7/2.7/3.7 fields.
         # Mirrors the audio block above; accepts both timestamp naming conventions.

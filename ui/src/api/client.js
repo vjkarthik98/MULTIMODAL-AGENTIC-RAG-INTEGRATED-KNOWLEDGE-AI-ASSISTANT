@@ -119,7 +119,7 @@ export async function deleteKBFile(token, filename) {
   return res.json()
 }
 
-export function ingestFile(token, file, sessionId = 'default', abortController = null) {
+export function ingestFile(token, file, sessionId = 'default', abortController = null, onProgress = null) {
   return new Promise((resolve, reject) => {
     const form = new FormData()
     form.append('file', file)
@@ -129,6 +129,14 @@ export function ingestFile(token, file, sessionId = 'default', abortController =
     xhr.setRequestHeader('Authorization', `Bearer ${token}`)
     if (abortController) {
       abortController.signal.addEventListener('abort', () => xhr.abort(), { once: true })
+    }
+    if (onProgress) {
+      // Real network-transfer progress (bytes actually sent), not a timer —
+      // lengthComputable is false only for chunked/unknown-size bodies, which
+      // FormData file uploads never are.
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(e.loaded / e.total)
+      }
     }
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {

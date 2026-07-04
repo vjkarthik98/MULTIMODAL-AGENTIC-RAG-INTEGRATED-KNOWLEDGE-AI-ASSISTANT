@@ -31,6 +31,17 @@ class AudioEmbedder(BaseEmbedder):
     so queries like "AAPL Q3 revenue" hit the right speaker segment.
     """
 
+    def embed_documents(self, documents: List[Any], session_id: str = "default") -> List[Any]:
+        results = super().embed_documents(documents, session_id=session_id)
+        # FinBERT tone annotation is globally opt-in (extra GPU pass per batch,
+        # settings.FINBERT_ENABLED defaults off since most modalities get no
+        # retrieval benefit from it). Fed press conferences / earnings calls
+        # are exactly the case FinBERT-tone was built for, so audio always
+        # gets tone-tagged regardless of the global default.
+        if not settings.FINBERT_ENABLED and results:
+            self._annotate_finbert_tone(results)
+        return results
+
     def _build_embed_text(self, doc: Any, cleaned_text: str) -> str:
         try:
             s = getattr(doc, "structure", {}) or {}
