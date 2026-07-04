@@ -59,14 +59,23 @@ _TIME_PERIOD_RE = re.compile(
     r'\b(?:FY|Q[1-4])\s*\d{4}\b'
     r'|\b\d{4}[-–]\d{2,4}\b'
     r'|\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?'
-    r'|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4}\b',
+    r'|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)'
+    r'\s+\d{1,2},?\s*\d{4}\b'
+    # Stock-performance-graph date axes: "9/27/19" ... "9/28/24"
+    r'|\b\d{1,2}/\d{1,2}/\d{2,4}\b'
+    r'|\b\d+[\s-]*[Yy]ear\b',
     re.IGNORECASE,
 )
 _DATA_SERIES_RE = re.compile(
     r'\b(Revenue|Net Income|EBITDA|EPS|FCF|Free Cash Flow|Operating Income'
     r'|Gross Profit|Net Sales|Operating Margin|EBIT|Earnings|Dividends?'
-    r'|Total Assets|Market Cap|Price|Volume)\b',
-    re.IGNORECASE,
+    r'|Total Assets|Market Cap|Price|Volume)\b'
+    # Stock-performance-graph series: benchmark indices and issuer names,
+    # e.g. "S&P 500 Index", "Dow Jones U.S. Technology Supersector Index",
+    # "Apple Inc." — the near-universal SEC Item 5 cumulative-return chart.
+    r'|\b[A-Z][\w&.]*(?:\s+[A-Z0-9][\w&.]*){0,6}\s+Index\b'
+    r'|\b(?!(?:Among|The|And|For|With|From|This|That|These|Those|A|An)\b)'
+    r'[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?\s+Inc\.?\b',
 )
 _WATERMARK_KW = frozenset({
     "CONFIDENTIAL", "DRAFT", "WATERMARK", "DO NOT DISTRIBUTE",
@@ -88,6 +97,13 @@ def _extract_data_series(text: str) -> List[str]:
         if lk not in seen:
             seen.add(lk)
             result.append(label)
+    # Drop entries that are pure substrings of a longer match — the same
+    # index name recurs across caption + OCR text and can be re-matched
+    # starting mid-phrase (e.g. "P 500 Index" inside "S&P 500 Index").
+    result = [
+        label for label in result
+        if not any(label.lower() in other.lower() and label != other for other in result)
+    ]
     return result[:8]
 
 
@@ -173,6 +189,411 @@ def _classify_image_type(image: "Image.Image", ocr_text: str = "") -> str:
         pass
 
     return "infographic"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DETERMINISTIC LINE-CHART DIGITIZATION
+# ══════════════════════════════════════════════════════════════════════════════
+# The resident VLM (Qwen2-VL-2B) cannot reliably read exact values off a line
+# chart — verified: it rounds every series to the nearest gridline and swaps
+# the ranking of visually-similar dashed lines. No amount of prompting fixed
+# this (tested: OCR-text grounding, per-tick value tables — both made results
+# worse, see project_image_modality_accuracy_phase memory). This module
+# sidesteps the VLM entirely for the one sub-task it cannot do: it uses
+# OCR bounding boxes (not just text) to calibrate the chart's pixel-to-value
+# axes, then traces each line's actual pixel path and classifies it against
+# the legend's own dash pattern. Zero model inference — pure geometry —  so
+# results are exact, not guessed. Gated to image_type == "line_chart" with
+# a distinct dollar y-axis and date x-axis; returns None (no-op, caller falls
+# back to the VLM caption alone) if that calibration can't be established.
+
+_DOLLAR_LABEL_RE = re.compile(r'^[$S]\s*([\d,]+)\.?0*$', re.IGNORECASE)
+_DATE_LABEL_RE   = re.compile(r'^(\d{1,2})/(\d{1,2})/(\d{2,4})$')
+_CHART_DARK_THRESH = 100
+_CHART_MIN_RUN_PX  = 2
+_CHART_MAX_JUMP_PX = 14
+_CHART_REACQUIRE_GAP = 4
+_CHART_REACQUIRE_MAX_JUMP = 60
+
+
+def _chart_run_lengths(mask_1d) -> List[Tuple[int, int]]:
+    """Contiguous True-run (start, length) pairs in a 1D boolean array."""
+    runs: List[Tuple[int, int]] = []
+    in_run, start = False, 0
+    for i, v in enumerate(mask_1d):
+        if v and not in_run:
+            in_run, start = True, i
+        elif not v and in_run:
+            in_run = False
+            runs.append((start, i - start))
+    if in_run:
+        runs.append((start, len(mask_1d) - start))
+    return runs
+
+
+def _digitize_line_chart(image: "Image.Image", ocr_boxes: list) -> Optional[Dict[str, Any]]:
+    """Extract exact per-series values at each x-axis tick from a line chart.
+
+    Returns {"series": [...], "ticks": [...], "values_by_tick": {tick: {name: value}}}
+    or None if this image doesn't calibrate as a dollar-axis/date-axis line chart.
+    """
+    if not ocr_boxes:
+        return None
+    try:
+        import numpy as np
+        arr = np.array(image.convert("L"))
+        h, w = arr.shape
+        dark = arr < _CHART_DARK_THRESH
+
+        # Y-axis calibration from "$100".."$500"-style labels (any count/spacing).
+        y_points = []
+        for bbox, text, _conf in ocr_boxes:
+            m = _DOLLAR_LABEL_RE.match(text.strip())
+            if not m:
+                continue
+            try:
+                value = float(m.group(1).replace(",", ""))
+            except ValueError:
+                continue
+            ys = [p[1] for p in bbox]
+            y_points.append(((min(ys) + max(ys)) / 2, value))
+        if len(y_points) < 2:
+            return None
+        ys_arr   = np.array([p[0] for p in y_points])
+        vals_arr = np.array([p[1] for p in y_points])
+        A = np.vstack([ys_arr, np.ones_like(ys_arr)]).T
+        slope, intercept = np.linalg.lstsq(A, vals_arr, rcond=None)[0]
+        if slope >= 0:  # a real y-axis must decrease in value as pixel-y increases
+            return None
+        pixel_to_value = lambda y: slope * y + intercept  # noqa: E731
+
+        # X-axis calibration from date labels (M/D/YY or M/D/YYYY).
+        x_points = []
+        for bbox, text, _conf in ocr_boxes:
+            if _DATE_LABEL_RE.match(text.strip()):
+                xs = [p[0] for p in bbox]
+                x_points.append(((min(xs) + max(xs)) / 2, text.strip()))
+        x_points.sort()
+        if len(x_points) < 2:
+            return None
+
+        # Legend: series names sit in the bottom band of the image; the dash
+        # swatch for each sits immediately to its left.
+        legend = [
+            (bbox, text.strip()) for bbox, text, conf in ocr_boxes
+            if min(p[1] for p in bbox) > h * 0.85 and conf > 0.5
+            and len(text.strip()) > 3
+            and not _DATE_LABEL_RE.match(text.strip())
+            and not _DOLLAR_LABEL_RE.match(text.strip())
+        ]
+        legend.sort(key=lambda t: min(p[0] for p in t[0]))
+        if len(legend) < 2:
+            return None
+
+        series_signatures: Dict[str, float] = {}
+        for i, (bbox, name) in enumerate(legend):
+            text_x0 = min(p[0] for p in bbox)
+            text_y  = int(sum(p[1] for p in bbox) / len(bbox))
+            prev_end = (min(p[0] for p in legend[i - 1][0]) - 20) if i > 0 else max(0, text_x0 - 130)
+            sx0, sx1 = int(max(prev_end, text_x0 - 130)), int(text_x0 - 8)
+            if sx1 <= sx0:
+                continue
+            row = dark[max(0, text_y - 6):text_y + 7, sx0:sx1].any(axis=0)
+            total = sx1 - sx0
+            duty  = sum(l for _, l in _chart_run_lengths(row)) / total if total else 0.0
+            series_signatures[name] = duty
+        if len(series_signatures) < 2:
+            return None
+
+        # Curve tracing: column-scan for dark-pixel runs, track N lines by
+        # nearest-y proximity from a seed column where all N are separated.
+        y_top = max(0, int(min(y for y, _ in y_points)) - 20)
+        y_bot = min(h, int(max(y for y, _ in y_points)) + 60)
+        x_left  = max(0, int(x_points[0][0]) - 20)
+        x_right = min(w, int(x_points[-1][0]) + 20)
+        n_lines = len(series_signatures)
+
+        def col_centers(x: int) -> List[float]:
+            col = dark[y_top:y_bot, x]
+            return sorted(
+                y_top + s + l / 2
+                for s, l in _chart_run_lengths(col) if l >= _CHART_MIN_RUN_PX
+            )
+
+        cols = [(x, col_centers(x)) for x in range(x_left, x_right, 2)]
+        seed_idx = None
+        for i, (_x, centers) in enumerate(cols):
+            if len(centers) == n_lines and all(
+                centers[j + 1] - centers[j] > 12 for j in range(n_lines - 1)
+            ):
+                seed_idx = i
+                break
+        if seed_idx is None:
+            return None
+
+        seed_x, seed_centers = cols[seed_idx]
+        track_ids = [f"line{i}" for i in range(n_lines)]
+        tracks    = {k: {seed_x: seed_centers[i]} for i, k in enumerate(track_ids)}
+
+        def _trace(cols_slice, seed_centers):
+            last_y    = {k: seed_centers[i] for i, k in enumerate(track_ids)}
+            gap_count = {k: 0 for k in track_ids}
+            for x, centers in cols_slice:
+                avail = list(centers)
+                candidates = sorted(
+                    (abs(c - last_y[k]), k, c) for k in track_ids for c in avail
+                )
+                assigned_t, assigned_c = set(), set()
+                for dist, k, c in candidates:
+                    if k in assigned_t or c in assigned_c or dist > _CHART_MAX_JUMP_PX:
+                        continue
+                    tracks[k][x] = c
+                    last_y[k] = c
+                    gap_count[k] = 0
+                    assigned_t.add(k)
+                    assigned_c.add(c)
+                leftover_t = [k for k in track_ids if k not in assigned_t]
+                leftover_c = [c for c in avail if c not in assigned_c]
+                for k in leftover_t:
+                    gap_count[k] += 1
+                if (leftover_t and leftover_c and len(leftover_t) == len(leftover_c)
+                        and all(gap_count[k] >= _CHART_REACQUIRE_GAP for k in leftover_t)):
+                    cand2 = sorted(
+                        (abs(c - last_y[k]), k, c) for k in leftover_t for c in leftover_c
+                    )
+                    ut, uc = set(), set()
+                    for dist, k, c in cand2:
+                        if k in ut or c in uc or dist > _CHART_REACQUIRE_MAX_JUMP:
+                            continue
+                        tracks[k][x] = c
+                        last_y[k] = c
+                        gap_count[k] = 0
+                        ut.add(k)
+                        uc.add(c)
+
+        _trace(cols[seed_idx + 1:], seed_centers)
+        _trace(list(reversed(cols[:seed_idx])), seed_centers)
+
+        # Classify each traced line against a legend name via duty-cycle match
+        # (fraction of columns where that line has ink — distinguishes solid
+        # vs. long-dash vs. short-dash lines independent of their y-position,
+        # so it still works through a region where two lines' values converge).
+        traj_sig = {}
+        for k in track_ids:
+            xs = sorted(tracks[k].keys())
+            span = (xs[-1] - xs[0]) // 2 if len(xs) > 1 else 1
+            traj_sig[k] = len(xs) / span if span else 0.0
+
+        name_cands = sorted(
+            (abs(traj_sig[k] - sig), name, k)
+            for name, sig in series_signatures.items() for k in track_ids
+        )
+        used_names, used_tracks, name_by_track = set(), set(), {}
+        for _diff, name, k in name_cands:
+            if name in used_names or k in used_tracks:
+                continue
+            name_by_track[k] = name
+            used_names.add(name)
+            used_tracks.add(k)
+
+        edge_labels = {x_points[0][1], x_points[-1][1]}
+        values_by_tick: Dict[str, Dict[str, float]] = {}
+        for tx, label in x_points:
+            row: Dict[str, float] = {}
+            for k in track_ids:
+                xs = sorted(tracks[k].keys())
+                if not xs:
+                    continue
+                nearest = min(xs, key=lambda x: abs(x - tx))
+                # Interior ticks: require a close match or skip (don't guess).
+                # Edge ticks (first/last): the lines start/end bunched or run
+                # off the traceable range, so fall back to this track's
+                # nearest actual traced point regardless of distance rather
+                # than silently omitting the series.
+                if abs(nearest - tx) > 15 and label not in edge_labels:
+                    continue
+                row[name_by_track.get(k, k)] = round(pixel_to_value(tracks[k][nearest]))
+            values_by_tick[label] = row
+
+        # Common-base snap for indexed / cumulative-total-return charts: every
+        # series is defined to start at the same base value (almost always the
+        # lowest round axis value, e.g. $100), but at the first tick all lines
+        # are bunched together so per-line pixel tracking is imprecise (reads
+        # e.g. $111/$103/$102 instead of $100). When the first tick's reads are
+        # all tightly clustered AND near a round base, snap them all to that
+        # base — this makes the derived percentages exact without affecting any
+        # other tick. Guarded so it never fires on a genuinely-fanned start.
+        first_label = x_points[0][1]
+        first_row = values_by_tick.get(first_label, {})
+        if len(first_row) >= 2:
+            vals = list(first_row.values())
+            vmin, vmax, vmean = min(vals), max(vals), sum(vals) / len(vals)
+            axis_min = float(vals_arr.min())
+            base_candidates = [b for b in (100.0, axis_min, 1000.0, 10.0) if b > 0]
+            base = min(base_candidates, key=lambda b: abs(b - vmean))
+            if (vmax - vmin) <= 0.15 * vmean and abs(vmean - base) <= 0.15 * base:
+                for name in first_row:
+                    first_row[name] = round(base)
+
+        return {
+            "series":         list(series_signatures.keys()),
+            "ticks":          [lbl for _, lbl in x_points],
+            "values_by_tick": values_by_tick,
+        }
+    except Exception as exc:
+        logger.warning(event="chart_digitize_failed", error=str(exc))
+        return None
+
+
+def _series_trajectory(digitized: Dict[str, Any], name: str) -> List[Tuple[str, float]]:
+    """Ordered (tick, value) pairs for one series, skipping ticks it's absent from."""
+    out: List[Tuple[str, float]] = []
+    for tick in digitized["ticks"]:
+        row = digitized["values_by_tick"].get(tick, {})
+        if name in row:
+            out.append((tick, float(row[name])))
+    return out
+
+
+def _describe_series_trends(digitized: Dict[str, Any]) -> str:
+    """Deterministic natural-language trend statements per series, computed
+    only from the verified pixel values. This is what lets the generation LLM
+    answer 'what happened between period A and B' (drawdown) and 'when did it
+    plateau' correctly — without it, the model was left to infer trends from a
+    bare value table and sometimes mis-mapped periods to values.
+
+    For each series it states: start→end, the single largest peak-to-trough
+    drawdown (with the two ticks and percent drop), and the flattest multi-tick
+    run (a plateau/consolidation), each anchored to the exact tick labels.
+
+    Percent figures are spelled out as "N percent" (never "N%") and explicitly
+    labelled "(a percentage, not a dollar amount)" — observed the generation
+    LLM occasionally writing a percent number with a "$" in front of it (e.g.
+    "~$329" when it meant "~329 percent" and the dollar total was actually
+    ~$429), because "+329%" and "$429" look similar side by side. Spelling
+    the unit out and labelling it removes the ambiguity at the source instead
+    of hoping every generation gets it right.
+    """
+    lines: List[str] = [
+        "CHART TRENDS (per series, computed from the pixel-read values above — "
+        "state every dollar figure below with a leading '~', e.g. '~$429', since "
+        "chart-reading is an approximation, not an exact-to-the-dollar figure. "
+        "Percent figures are written as 'N percent' — NEVER put a '$' in front "
+        "of a percent figure, they are two different units):"
+    ]
+    for name in digitized["series"]:
+        traj = _series_trajectory(digitized, name)
+        if len(traj) < 2:
+            continue
+        (t0, v0), (tN, vN) = traj[0], traj[-1]
+        pct = ((vN - v0) / v0 * 100) if v0 else 0.0
+        parts = [
+            f"started ~${v0:.0f} ({t0}) and ended ~${vN:.0f} ({tN}) — "
+            f"a percentage gain of approximately {pct:.0f} percent "
+            f"(a percentage, not a dollar amount)"
+        ]
+
+        # Largest peak-to-trough drawdown: scan for the biggest drop from a
+        # running max to a later trough.
+        peak_t, peak_v = traj[0]
+        worst_dd, dd_from, dd_to = 0.0, None, None
+        for tick, val in traj:
+            if val > peak_v:
+                peak_v, peak_t = val, tick
+            dd = (val - peak_v) / peak_v if peak_v else 0.0
+            if dd < worst_dd:
+                worst_dd, dd_from, dd_to = dd, (peak_t, peak_v), (tick, val)
+        if dd_from and worst_dd <= -0.08:  # only report a meaningful (>8%) drawdown
+            parts.append(
+                f"declined from ~${dd_from[1]:.0f} ({dd_from[0]}) to ~${dd_to[1]:.0f} "
+                f"({dd_to[0]}) — a drawdown of approximately {abs(worst_dd)*100:.0f} percent "
+                f"(a percentage, not a dollar amount)"
+            )
+
+        # Flattest consecutive run of >=2 ticks (plateau/consolidation): the
+        # window whose max/min spread relative to its mean is smallest.
+        best_run, best_spread = None, None
+        for i in range(len(traj)):
+            for j in range(i + 1, len(traj)):
+                window = [v for _, v in traj[i:j + 1]]
+                mean = sum(window) / len(window)
+                spread = (max(window) - min(window)) / mean if mean else 1.0
+                # prefer longer runs; only consider genuinely-flat (<12% spread) windows
+                if spread < 0.12 and (best_run is None or (j - i) > (best_run[1] - best_run[0])):
+                    best_run, best_spread = (i, j), spread
+        if best_run and (best_run[1] - best_run[0]) >= 1:
+            i, j = best_run
+            lo = min(v for _, v in traj[i:j + 1])
+            hi = max(v for _, v in traj[i:j + 1])
+            parts.append(
+                f"was roughly flat (a plateau) between ~${lo:.0f} and ~${hi:.0f} "
+                f"from {traj[i][0]} to {traj[j][0]}"
+            )
+
+        lines.append(f"  {name}: " + "; ".join(parts) + ".")
+    return "\n".join(lines)
+
+
+def _format_digitized_chart(digitized: Dict[str, Any]) -> str:
+    """Render the digitized series/tick table + deterministic trend statements
+    as plain text for the caption and for retrieval — these pixel-calibrated
+    values take precedence over anything the VLM guessed (it fabricates chart
+    values outright; this is a real measurement), but a chart reading is still
+    an approximation, not an exact-to-the-dollar figure, so every value here
+    is prefixed with '~' and downstream generation is told to keep that prefix
+    rather than state a bare, falsely-precise number."""
+    lines = ["CHART VALUES — pixel-calibrated reads (state every figure with a leading '~', e.g. '~$429'):"]
+    for tick in digitized["ticks"]:
+        row = digitized["values_by_tick"].get(tick, {})
+        if not row:
+            continue
+        parts = [f"{name}=~${val:.0f}" for name, val in row.items()]
+        lines.append(f"  {tick}: " + ", ".join(parts))
+    trends = _describe_series_trends(digitized)
+    if trends:
+        lines.append("")
+        lines.append(trends)
+    return "\n".join(lines)
+
+
+_CAPTION_TRENDS_CUT_RE = re.compile(r'\n\s*5\)\s')
+# Any $-amount, optionally in a comma-separated list ("$100, $150, $200"), plus
+# a leading colon that introduced it ("Apple Inc.: $100, $150" → "Apple Inc.").
+_DOLLAR_CLAIM_RE = re.compile(r'\s*:?\s*\$\s?[\d,]+(?:\.\d+)?(?:\s*,\s*\$\s?[\d,]+(?:\.\d+)?)*')
+
+
+def _replace_vlm_trends_with_verified(caption_text: str, digitized: Dict[str, Any]) -> str:
+    """Reconcile the VLM caption with verified pixel data for a digitized chart.
+
+    The VLM (even the 7B) cannot read exact chart values — it lists axis
+    gridlines as if they were series values and gives visually-similar dashed
+    lines identical fabricated sequences. Since the deterministic digitizer
+    supplies the real numbers (injected separately into the chunk text), this:
+
+      1. cuts the VLM's own '5) Key trends' section (its worst numeric guesses)
+         and replaces it with the verified end-of-period ranking, and
+      2. strips every remaining $-amount from the VLM's prose, so the ONLY
+         dollar figures anywhere in the chunk are the verified ones.
+
+    The VLM's qualitative wording (which series leads, overall shape) is kept —
+    that is where a bigger model genuinely helps.
+    """
+    if not caption_text or not digitized:
+        return caption_text
+    last_tick = digitized["ticks"][-1] if digitized.get("ticks") else None
+    row = digitized["values_by_tick"].get(last_tick, {}) if last_tick else {}
+    if not row:
+        return caption_text
+
+    m = _CAPTION_TRENDS_CUT_RE.search(caption_text)
+    kept = caption_text[:m.start()].rstrip() if m else caption_text.rstrip()
+    # Remove the VLM's fabricated dollar figures from the kept prose.
+    kept = _DOLLAR_CLAIM_RE.sub("", kept)
+
+    ranked = sorted(row.items(), key=lambda kv: kv[1], reverse=True)
+    ranked_desc = "; ".join(f"{name} at ~${val:.0f}" for name, val in ranked)
+    trend_line = f"5) Key trends: as of {last_tick}, ranked highest to lowest: {ranked_desc}."
+    return f"{kept}\n\n{trend_line}"
 
 
 def _finance_caption_prompt(image_type: str) -> str:
@@ -494,15 +915,45 @@ def _get_easyocr() -> Any:
     return _easyocr_reader
 
 
-def ocr(image: "Image.Image") -> str:
-    """Run TrOCR → EasyOCR fallback on a PIL Image. Returns '' on failure.
+_DOLLAR_MISREAD_RE = re.compile(r'(?<![A-Za-z0-9])S(\d{2,4}(?:\.\d+)?)\b')
 
-    TrOCR is fast and accurate on clean printed text.
-    EasyOCR handles charts, axis labels, and mixed-layout images that TrOCR misses.
+
+def _normalize_ocr_text(text: str) -> str:
+    """Fix the common EasyOCR '$' → 'S' misread on bold axis-label glyphs.
+
+    A bare "S" immediately followed by 2-4 digits (e.g. "S500") is never a
+    real word in finance chart labels — it is virtually always a misread
+    dollar sign (e.g. "$500"), so this substitution is safe.
+    """
+    return _DOLLAR_MISREAD_RE.sub(r"$\1", text)
+
+
+def ocr(image: "Image.Image") -> str:
+    """Run EasyOCR → TrOCR fallback on a PIL Image. Returns '' on failure.
+
+    EasyOCR handles charts, axis labels, tables, and mixed-layout images —
+    i.e. almost every finance image type this corpus contains (see
+    _IMAGE_TYPES). TrOCR is a single-line printed-text recognizer; run only
+    as a fallback since it degenerates to near-empty output on multi-region
+    layouts like charts (verified: returns a single stray digit on a clean
+    5-series line chart that EasyOCR reads correctly end-to-end).
     """
     img_rgb = image.convert("RGB")
 
-    # TrOCR (preferred — faster, accurate on single-line printed text)
+    # EasyOCR (preferred — handles multi-region chart/table layouts)
+    try:
+        import numpy as np
+        reader = _get_easyocr()
+        results = reader.readtext(np.array(img_rgb))
+        easy_text = " ".join(r[1] for r in results if r[2] > 0.3).strip()
+        if easy_text:
+            return _normalize_ocr_text(easy_text)
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.warning(event="easyocr_ocr_failed", error=str(exc))
+
+    # TrOCR fallback — for simple single-line printed text only
     try:
         from app.core.model_loader import model_loader
         processor, model, device = model_loader.get_trocr()
@@ -512,25 +963,82 @@ def ocr(image: "Image.Image") -> str:
             generated_ids = model.generate(pixel_values)
         result = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
         if result:
-            return result
+            logger.debug(event="trocr_fallback_used")
+            return _normalize_ocr_text(result)
     except Exception as exc:
-        logger.warning(event="trocr_ocr_failed", error=str(exc))
+        logger.warning(event="trocr_fallback_failed", error=str(exc))
 
-    # EasyOCR fallback — stronger on chart labels, numeric grids, mixed layouts
+    return ""
+
+
+def _get_ocr_boxes(image: "Image.Image") -> list:
+    """EasyOCR results with bounding boxes, for chart digitization (which
+    needs pixel positions, not just joined text). Returns [] on failure —
+    caller treats that as "can't digitize", not an error.
+    """
     try:
         import numpy as np
         reader = _get_easyocr()
-        results = reader.readtext(np.array(img_rgb))
-        easy_text = " ".join(r[1] for r in results if r[2] > 0.3).strip()
-        if easy_text:
-            logger.debug(event="easyocr_fallback_used")
-            return easy_text
-    except ImportError:
-        pass
+        return reader.readtext(np.array(image.convert("RGB")))
     except Exception as exc:
-        logger.warning(event="easyocr_fallback_failed", error=str(exc))
+        logger.warning(event="ocr_boxes_failed", error=str(exc))
+        return []
 
-    return ""
+
+def _ocr_text_from_boxes(ocr_boxes: list) -> str:
+    """Join EasyOCR box results into a single text string (same rule as
+    ocr()), so a single OCR pass can feed both text and box-based extraction."""
+    if not ocr_boxes:
+        return ""
+    text = " ".join(r[1] for r in ocr_boxes if r[2] > 0.3).strip()
+    return _normalize_ocr_text(text) if text else ""
+
+
+def _extract_title_from_ocr_boxes(ocr_boxes: list, image_height: int) -> Optional[str]:
+    """Extract the chart/figure title from OCR — the text lines in the top
+    band of the image (above the plot area), which for finance charts is the
+    human-readable title/subtitle (e.g. "Comparison of 5-Year Cumulative Total
+    Return Among Apple Inc., the S&P 500 Index and ..."). More reliable than
+    trusting the VLM to quote its own title. Returns None if no clear title
+    band exists (caller falls back to the VLM-quoted title).
+    """
+    if not ocr_boxes or image_height <= 0:
+        return None
+    title_lines = []
+    for bbox, text, conf in ocr_boxes:
+        top_y = min(p[1] for p in bbox)
+        t = text.strip()
+        if (top_y < image_height * 0.13 and conf > 0.5 and len(t) >= 8
+                and not _DATE_LABEL_RE.match(t) and not _DOLLAR_LABEL_RE.match(t)):
+            title_lines.append((top_y, min(p[0] for p in bbox), t))
+    if not title_lines:
+        return None
+    # reading order: top-to-bottom, then left-to-right
+    title_lines.sort(key=lambda x: (round(x[0] / 15), x[1]))
+    title = " ".join(t for _, _, t in title_lines).strip()
+    title = _normalize_ocr_text(title)
+    # An ALL-CAPS main heading reads better title-cased for display; leave
+    # already-mixed-case text (subtitles, proper nouns like "S&P", "U.S.")
+    # untouched.
+    _SMALL_WORDS = {"of", "the", "and", "a", "an", "in", "on", "to", "for", "vs"}
+
+    def _smart_case(word: str, is_first: bool) -> str:
+        # Re-case "shouty" words — all-uppercase, only letters/digits/hyphens
+        # (incl. "5-YEAR"). Skip acronym/symbol tokens like "S&P", "U.S." (they
+        # contain "&"/"." and must stay as-is) and already-mixed-case words.
+        if not re.fullmatch(r'[A-Z0-9]+(?:-[A-Z0-9]+)*', word):
+            return word
+        if not any(c.isalpha() for c in word):
+            return word  # pure number like "500" — leave it
+        recased = "-".join(p.capitalize() for p in word.split("-"))
+        low = recased.lower()
+        if not is_first and low in _SMALL_WORDS:
+            return low
+        return recased
+
+    words = title.split()
+    title = " ".join(_smart_case(w, i == 0) for i, w in enumerate(words))
+    return title[:150] if title else None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -573,6 +1081,14 @@ def _qwen2vl_caption_for_image(image: "Image.Image") -> str:
 
     Qwen2-VL-2B-Instruct handles dense numeric chart layouts and mixed text+visual
     layouts via instruction-following training. Returns '' on failure.
+
+    NOTE: injecting OCR-extracted axis/legend text into this prompt as
+    "grounding" was tried and measured worse, not better — the 2B model
+    over-indexed on the OCR list's reading order and inverted the entire
+    value ranking (Apple, the highest line, got assigned the *lowest*
+    value). Without that injection the model at least correctly identifies
+    Apple as the highest series, so grounding was reverted. OCR text is
+    still used independently for metadata/retrieval (see chunk()).
     """
     try:
         from app.core.model_loader import model_loader
@@ -853,12 +1369,25 @@ class ImageChunker(BaseChunker):
 
                 img_width, img_height = img.size
 
-                # Step 1: OCR (ground-truth numbers).
+                # Step 1: OCR (ground-truth numbers) — one EasyOCR pass with
+                # bounding boxes, reused for text, title, and digitization.
                 ocr_text = ""
+                ocr_boxes: list = []
                 try:
-                    ocr_text = ocr(img)
+                    ocr_boxes = _get_ocr_boxes(img)
+                    ocr_text = _ocr_text_from_boxes(ocr_boxes)
+                    if not ocr_text:  # EasyOCR found nothing → TrOCR fallback path
+                        ocr_text = ocr(img)
                 except Exception as exc:
-                    logger.warning(event="image_trocr_failed", error=str(exc))
+                    logger.warning(event="image_ocr_failed", error=str(exc))
+                    try:
+                        ocr_text = ocr(img)
+                    except Exception:
+                        pass
+
+                # Chart/figure title from the top-of-image OCR band (reliable,
+                # human-readable — used as the citation caption for all images).
+                ocr_title = _extract_title_from_ocr_boxes(ocr_boxes, img_height)
 
                 # Step 2: caption — Qwen2-VL primary (instruction-tuned), BLIP unconditional fallback.
                 # BLIP-1 (blip-image-captioning-large) cannot follow instruction prompts —
@@ -889,21 +1418,94 @@ class ImageChunker(BaseChunker):
                 if mismatch:
                     logger.warning(event="ocr_caption_mismatch", source=source)
 
-                # Step 5: Combine (prefer OCR numbers as ground truth).
-                combined = f"{image_type}: {caption_text}"
+                # Step 4.5: deterministic chart digitization (line charts only).
+                # The VLM caption above cannot reliably read exact values off
+                # a line chart (verified — see module docstring above
+                # _digitize_line_chart). For this one image_type, pixel-level
+                # axis calibration + curve tracing gives exact numbers instead
+                # of a guess, so it is injected ahead of the VLM's own
+                # (less reliable) numeric reading.
+                digitized_text = ""
+                digitized = None
+                if image_type == "line_chart":
+                    try:
+                        digitized = _digitize_line_chart(img, ocr_boxes)
+                        if digitized:
+                            digitized_text = _format_digitized_chart(digitized)
+                            logger.info(event="chart_digitized", source=source,
+                                        series=len(digitized["series"]))
+                    except Exception as exc:
+                        logger.warning(event="chart_digitize_error", error=str(exc))
+
+                # Step 4.6: when digitization succeeds, the VLM's own numeric
+                # "trends" claim is not just unnecessary but actively harmful —
+                # verified: with both the correct and the VLM's guessed
+                # numbers present in the same context, the 7B generation model
+                # sometimes quoted the wrong (VLM) ones anyway. Cut that
+                # section out and replace it with one built only from the
+                # verified values, so only one set of numbers ever reaches
+                # generation.
+                if digitized:
+                    caption_text = _replace_vlm_trends_with_verified(caption_text, digitized)
+
+                # Step 5: Combine. Verified digitized values go right after
+                # OCR and BEFORE the VLM caption — text is capped at
+                # QDRANT_TEXT_MAX_CHARS (2000) and truncates from the end, so
+                # the exact numbers must never be the part that gets cut if a
+                # caption happens to run long; the VLM's approximate
+                # narrative is the least reliable part and the safest to lose.
+                combined = f"{image_type}:"
                 if ocr_text:
                     combined += f"\n{ocr_text}"
+                if digitized_text:
+                    combined += f"\n{digitized_text}"
+                combined += f"\n{caption_text}"
                 combined = combined.strip()
                 if not combined:
                     continue
 
-                fin_entities      = extract_finance_entities(combined)
-                extracted_numbers = list(_NUMBER_RE.findall(ocr_text or caption_text))
+                fin_entities = extract_finance_entities(combined)
+                # Combine OCR + caption (not "ocr_text or caption_text") — a
+                # short but non-empty OCR read (e.g. a single stray digit)
+                # would otherwise fully mask richer numbers present only in
+                # the caption text.
+                #
+                # Digitized values go FIRST and are never dropped by the
+                # [:20] cap below (deduped afterward): image_bm25.py indexes
+                # every entry in this list directly, but doc.text (which also
+                # carries the digitized block) is truncated to BM25_MAX_TEXT_
+                # CHARS (1000) by _base_text() — verified this chart's own
+                # digitized block fits inside that cap today, but a chart with
+                # more series/ticks could push it past 1000 chars and silently
+                # drop values from BM25 with no error. Putting them here too
+                # makes retrieval of the actual answer values robust
+                # regardless of doc.text length.
+                digitized_numbers: List[str] = []
+                if digitized:
+                    for row in digitized["values_by_tick"].values():
+                        for val in row.values():
+                            digitized_numbers.append(f"${val:.0f}")
+                extracted_numbers = list(dict.fromkeys(
+                    digitized_numbers + _NUMBER_RE.findall(f"{ocr_text} {caption_text}")
+                ))[:20]
                 chunk_hash        = deterministic_chunk_id(source, "image_raw_0", chunk_idx)
 
-                # Extract image_title: first sentence/line of caption
-                raw_title = (caption_text or "").split(".")[0].split("\n")[0].strip()
-                image_title = raw_title[:120] if raw_title else source
+                # Extract image_title (the human-readable caption shown in
+                # citations, for ALL images). Priority:
+                #   1. OCR title band at the top of the image — most reliable,
+                #      it's the chart's own printed title.
+                #   2. The title Qwen2-VL quotes in its caption ("... titled X").
+                #   3. First caption sentence (stripped of "1) " list markers).
+                if ocr_title:
+                    image_title = ocr_title[:150]
+                else:
+                    _quote_match = re.search(r'["“]([^"”]{5,150})["”]', caption_text or "")
+                    if _quote_match:
+                        image_title = _quote_match.group(1).strip()[:150]
+                    else:
+                        raw_title = re.sub(r'^\d+\)\s*', '', (caption_text or "").strip())
+                        raw_title = raw_title.split(".")[0].split("\n")[0].strip()
+                        image_title = raw_title[:150] if raw_title else source
 
                 # Time period and data series from text (regex-based)
                 full_text = f"{caption_text} {ocr_text}".strip()
@@ -971,6 +1573,7 @@ class ImageChunker(BaseChunker):
                     "dominant_colors":       ext.extra.get("dominant_colors", []),
                     "perceptual_hash":       ext.extra.get("phash"),
                     "thumbnail_path":        ext.extra.get("thumbnail_path"),
+                    "digitized_chart_values": digitized_text or None,
                 }
 
                 doc = self._make_doc(

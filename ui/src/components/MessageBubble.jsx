@@ -298,7 +298,10 @@ function getSourceLabelParts(source) {
       const st = String(source.section_title).trim()
       if (st) suffix = ` · ${st}`
     } else if (source.image_title) {
-      suffix = ` · ${String(source.image_title)}`
+      // Image chip stays the clean file identity ("aapl-20240928_g2.jpg") —
+      // NO title suffix here. The chart title is shown as an accent-colored
+      // citation pill at the END of the answer (ImageCitePill), exactly like
+      // the XLSX sheet+row pill and the filename-only XLSX chip below it.
     } else if (source.start_time != null) {
       // legacy field
       const ts = fmtTimestamp(source.start_time)
@@ -342,6 +345,46 @@ function XlsxCitations({ sources }) {
   return (
     <div className="mt-1 text-[15px] leading-relaxed">
       {xlsxSrcs.map((s, i) => <XlsxCitePill key={i} source={s} />)}
+    </div>
+  )
+}
+
+/* Image/chart citation — same visual treatment as XlsxCitePill (accent-colored
+   text at the end of the answer). Shows the chart's own TITLE as the locator
+   (e.g. "Comparison of 5-Year Cumulative Total Return"); the filename lives
+   separately in the Sources chip area below, exactly like XLSX/PDF/DOCX. */
+function ImageCitePill({ source }) {
+  let title = String(source.image_title || '').trim()
+  if (!title) return null
+  // Prefer the main title line (before a "… Among <series> …" subtitle).
+  const amongIdx = title.search(/\s+Among\s+/i)
+  if (amongIdx > 20) title = title.slice(0, amongIdx).trim()
+  if (title.length > 90) {
+    const cut = title.lastIndexOf(' ', 90)
+    title = (cut > 40 ? title.slice(0, cut) : title.slice(0, 90)).trim() + '…'
+  }
+  return (
+    <span title={`Source: ${title}`} style={{ color: 'var(--t-accent)', fontWeight: 500 }}>
+      {' '}{title}
+    </span>
+  )
+}
+
+function ImageCitations({ sources }) {
+  const imgSrcs = (sources || []).filter(
+    s => typeof s === 'object' && s.modality === 'image' && s.image_title
+  )
+  if (imgSrcs.length === 0) return null
+  // De-dup by title so one chart cited by both its text+vision chunks shows once.
+  const seen = new Set()
+  const unique = imgSrcs.filter(s => {
+    const k = String(s.image_title || '').trim()
+    if (seen.has(k)) return false
+    seen.add(k); return true
+  })
+  return (
+    <div className="mt-1 text-[15px] leading-relaxed">
+      {unique.map((s, i) => <ImageCitePill key={i} source={s} />)}
     </div>
   )
 }
@@ -591,6 +634,7 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
                 <>
                   <XlsxCitations sources={allSources} />
                   <DocxCitations sections={docxSections} />
+                  <ImageCitations sources={allSources} />
                 </>
               )}
 

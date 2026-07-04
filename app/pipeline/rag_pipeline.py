@@ -685,6 +685,200 @@ def _attach_section_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
     return f"{body}\n\n{footer}"
 
 
+def _attach_image_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
+    """Footer citation for image/chart answers.
+
+    Image chunks carry no page or section number, so both _attach_page_citations
+    and _attach_section_citations no-op on an all-image context, leaving the
+    answer with no visible source. This appends a clean "Source:" footer naming
+    the chart's own title and file, e.g.:
+
+        Source: Comparison of 5-Year Cumulative Total Return … [aapl-20240928_g2.jpg]
+
+    matching the ChatGPT/Gemini pattern of crediting the figure inline in the
+    answer, in addition to the source chip the UI renders below the bubble.
+    """
+    if not answer or not docs:
+        return answer
+    seen: set = set()
+    cites: List[str] = []
+    for d in docs:
+        meta = (d.get("metadata") or {}) if isinstance(d, dict) else {}
+        if str(meta.get("modality") or "") != "image":
+            continue
+        src = str(meta.get("source") or meta.get("filename") or "").strip()
+        if not src or src in seen:
+            continue
+        seen.add(src)
+        title = str(meta.get("image_title") or "").strip()
+        # Keep the footer readable: a short title prefix + the filename anchor
+        # (the UI colours the bracketed filename as the clickable source).
+        if title and len(title) > 90:
+            title = title[:87].rstrip() + "…"
+        cites.append(f"{title} [{src}]" if title else f"[{src}]")
+    if not cites:
+        return answer
+    return f"{answer.rstrip()}\n\nSource: " + "; ".join(cites[:3])
+
+
+# ── DETERMINISTIC IMAGE-CHART ANSWER SYNTHESIS ─────────────────────────────
+# Mirrors the XLSX synth-answer-override pattern below (a small quantized
+# generation LLM is not trusted for figure-dense answers there either) — for
+# image charts specifically, verified over repeated benchmark runs: even
+# after the injected context explicitly labels every number ("~$429" vs.
+# "329 percent", spelled out, never both units on one figure), Mistral-7B-
+# Instruct-Q4 still sometimes states the WRONG series' dollar value or
+# swaps a percent for a dollar figure when the question asks for "dollar
+# terms" or a multi-series "how did X compare to Y and Z" — apparently
+# because it must track 3 series × 6 ticks × 2 units of very similar-looking
+# numbers at once. The underlying digitized data is always correct (see
+# image_chunker.py's _digitize_line_chart); this only replaces the model's
+# OWN restating of numbers it already has in front of it.
+#
+# Deliberately narrow: fires only for "give me a value" / "compare series"
+# questions and explicitly excludes drawdown/plateau/"what happened between"
+# phrasing, which the LLM + the CHART TRENDS narrative already answer
+# correctly (verified) — this override must never make a working answer
+# worse.
+_CHART_VALUES_BLOCK_RE = re.compile(
+    r'CHART VALUES[^\n]*:\n((?:  [^\n]+\n?)+)'
+)
+_CHART_VALUE_ROW_RE = re.compile(r'^\s*(\S+):\s*(.+)$')
+_CHART_VALUE_ITEM_RE = re.compile(r'([^=,]+?)=~?\$([\d,]+)')
+_CHART_TREND_EXCLUDE_WORDS = (
+    "plateau", "consolidation", "drawdown", "declin", "happened between",
+    "when did", "what happened", "dip", "trough", "peak",
+)
+
+
+_MDY_TICK_RE = re.compile(r'\b(\d{1,2})/(\d{1,2})/(\d{2})\b')
+_MONTH_NAMES = (
+    "", "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
+
+
+def _expand_chart_dates(text: str) -> str:
+    """Rewrite compact chart axis-tick dates ('9/25/21') as full written-out
+    dates ('September 25, 2021') anywhere they appear in an image-answer.
+
+    The digitizer stores axis labels in the compact M/D/YY form it read off
+    the chart (see image_chunker.py's ticks), and that form flows verbatim
+    into both the deterministic synth answer and the LLM's own prose (which
+    quotes the CHART TRENDS narrative built from the same ticks). Reformatting
+    once here — on the final answer text, right before it's shown — fixes
+    display for both paths without needing to re-ingest already-stored chunks.
+    """
+    def _sub(m: "re.Match[str]") -> str:
+        month, day, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            return m.group(0)
+        year = 2000 + yy if yy < 70 else 1900 + yy
+        return f"{_MONTH_NAMES[month]} {day}, {year}"
+    return _MDY_TICK_RE.sub(_sub, text)
+
+
+def _parse_digitized_chart_values(context: str) -> Dict[str, Dict[str, float]]:
+    """Parse the 'CHART VALUES' block _format_digitized_chart wrote into the
+    chunk text back into {tick: {series_name: value}}. Pure text parsing —
+    no new Qdrant payload field needed; works off the same text already in
+    the retrieved context. Returns {} if no such block is present (e.g. the
+    image isn't a digitized line chart) or the chunk sizes.
+    """
+    m = _CHART_VALUES_BLOCK_RE.search(context)
+    if not m:
+        return {}
+    values_by_tick: Dict[str, Dict[str, float]] = {}
+    for line in m.group(1).splitlines():
+        rm = _CHART_VALUE_ROW_RE.match(line)
+        if not rm:
+            continue
+        tick, rest = rm.groups()
+        row: Dict[str, float] = {}
+        for im in _CHART_VALUE_ITEM_RE.finditer(rest):
+            name, val = im.groups()
+            try:
+                row[name.strip()] = float(val.replace(",", ""))
+            except ValueError:
+                continue
+        if row:
+            values_by_tick[tick] = row
+    return values_by_tick
+
+
+def _synthesize_image_chart_answer(query: str, context: str) -> Optional[str]:
+    """Deterministically build the answer for a chart-value or multi-series
+    comparison question directly from digitized data, bypassing free-form
+    generation for exactly the question types it has repeatedly gotten wrong.
+    Returns None (caller falls through to the normal LLM answer) when the
+    context has no digitized chart, or the query looks like a drawdown/
+    plateau/"what happened" question (already correctly handled elsewhere).
+    """
+    q_lower = query.lower()
+    if any(w in q_lower for w in _CHART_TREND_EXCLUDE_WORDS):
+        return None
+
+    values_by_tick = _parse_digitized_chart_values(context)
+    if len(values_by_tick) < 2:
+        return None
+    ticks = list(values_by_tick.keys())
+    first_tick, last_tick = ticks[0], ticks[-1]
+    series_names = [n for n in values_by_tick[last_tick] if n in values_by_tick[first_tick]]
+    if not series_names:
+        return None
+
+    def _pct(name: str) -> Optional[float]:
+        v0 = values_by_tick[first_tick].get(name)
+        v1 = values_by_tick[last_tick].get(name)
+        if not v0:
+            return None
+        return (v1 - v0) / v0 * 100
+
+    # Which series does the query actually name? Match on any word >3 chars
+    # from each series name appearing in the query (e.g. "Apple" in
+    # "Apple Inc.").
+    named = [
+        name for name in series_names
+        if any(tok.lower() in q_lower for tok in re.split(r'[\s,.]+', name) if len(tok) > 3)
+    ]
+
+    is_comparison = (
+        len(named) >= 2 or "compare" in q_lower or " vs " in q_lower
+        or "how did" in q_lower or "versus" in q_lower
+    )
+
+    if is_comparison and len(series_names) >= 2:
+        ranked = sorted(series_names, key=lambda n: values_by_tick[last_tick][n], reverse=True)
+        parts = []
+        for name in ranked:
+            v1 = values_by_tick[last_tick][name]
+            pct = _pct(name)
+            if pct is None:
+                continue
+            parts.append(f"{name} ended at ~${v1:.0f} (a gain of approximately {pct:.0f} percent)")
+        if len(parts) < 2:
+            return None
+        return (
+            f"Comparing the {len(parts)} series from {first_tick} to {last_tick}: "
+            + "; ".join(parts) + "."
+        )
+
+    if named:
+        name = named[0]
+        v0 = values_by_tick[first_tick][name]
+        v1 = values_by_tick[last_tick][name]
+        pct = _pct(name)
+        if pct is None:
+            return None
+        return (
+            f"{name}'s cumulative total return from {first_tick} to {last_tick} was "
+            f"approximately {pct:.0f} percent, representing an ending value of "
+            f"approximately ${v1:.0f} for every ${v0:.0f} invested at the start."
+        )
+
+    return None
+
+
 # Geographic / regional markers — used to drop "net sales by region" drift from a
 # "net sales by PRODUCT CATEGORY" answer. Plain lowercase substrings (a regex \b
 # after "u.s." fails because the char after the trailing "." is not a word char).
@@ -994,20 +1188,14 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3) -> List[
             if _m:
                 section_title = _m.group(1).strip()
 
-        # Image: prefer chart title extracted from OCR text over BLIP caption,
-        # because BLIP often produces generic descriptions ("Graph showing...").
-        # The OCR text contains the actual chart title as a readable line.
-        if modality == "image" and not section_title:
-            _title_m = re.search(
-                r'(?:U\.S\.?|US)\s+(?:GDP|GNP|CPI|unemployment|employment)[^\n\r]{5,60}',
-                str(text), re.IGNORECASE,
-            )
-            if _title_m:
-                section_title = _title_m.group(0).strip()[:80]
-            else:
-                caption = meta.get("caption")
-                if caption:
-                    section_title = str(caption).strip()
+        # Image: the clean chart title lives in meta["image_title"] (set by the
+        # image chunker from the caption's quoted title). Do NOT fall back to
+        # the full caption for section_title — the caption is a multi-paragraph
+        # analysis dump and previously rendered as a giant citation. Leave
+        # section_title empty for images; the UI cites images by clean filename
+        # chip + length-guarded image_title, matching XLSX/DOCX.
+        if modality == "image":
+            section_title = None
 
         # Phase 6.3 rich citation fields — flow directly from chunk structure
         sheet_name   = meta.get("sheet_name")
@@ -2274,6 +2462,12 @@ class RAGPipeline:
                         # No page-numbered chunks (e.g. an all-DOCX context) —
                         # fall back to section-based anchors.
                         answer = _attach_section_citations(answer, docs)
+                    # NOTE: image answers are NOT given an inline "Source: <title>"
+                    # prose footer — it duplicated the source chip the UI already
+                    # renders below the bubble (the chart title now shows on that
+                    # chip as a caption), which read as two citations for one
+                    # source. Images are cited by the chip alone, like the clean
+                    # filename chips for the other modalities.
                 except Exception as _cite_err:
                     logger.warning(event="rag_stream_page_cite_failed", error=str(_cite_err))
 
@@ -2285,6 +2479,28 @@ class RAGPipeline:
                 # query types the model's own generation is never trusted.
                 if _xlsx_synth_fact_stream:
                     answer = _xlsx_synth_fact_stream
+
+                # IMAGE CHART synth override — same "don't trust the model on
+                # figure-dense answers" rationale as the XLSX override above,
+                # for chart-value/comparison questions specifically (verified
+                # over repeated runs: the model restates a correct-looking but
+                # WRONG series' dollar value, or a percent as if it were a
+                # dollar figure, when asked "in dollar terms" or to compare
+                # multiple series). Only overrides for question types this was
+                # actually observed on — drawdown/plateau questions are
+                # excluded inside the function and keep using the (already
+                # correct) LLM + CHART TRENDS narrative path.
+                if docs and str((docs[0].get("metadata") or {}).get("modality") or "") == "image":
+                    try:
+                        _img_synth = _synthesize_image_chart_answer(query, context)
+                        if _img_synth:
+                            answer = _img_synth
+                    except Exception as _img_synth_err:
+                        logger.warning(event="rag_stream_image_synth_failed", error=str(_img_synth_err))
+                    try:
+                        answer = _expand_chart_dates(answer)
+                    except Exception as _date_err:
+                        logger.warning(event="rag_stream_image_date_expand_failed", error=str(_date_err))
 
                 # STREAM THE CLEAN ANSWER progressively — gives the client a
                 # typing effect without ever exposing the raw leaked preamble.

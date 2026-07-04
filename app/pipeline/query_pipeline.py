@@ -529,8 +529,12 @@ def _build_sources_array(docs: List[Dict[str, Any]], max_items: int = 3) -> List
             row_range = f"{_rs}-{_re_}" if _re_ is not None else str(_rs)
         row_range = str(row_range).strip() if row_range else None
 
-        # IMAGE title / caption
-        image_title = meta.get("image_title") or meta.get("caption")
+        # IMAGE title — the clean, short chart/image title only. Never fall
+        # back to the full caption here: the caption is a multi-paragraph
+        # analysis dump and must not land on the source chip (the chip shows
+        # clean file identity, matching XLSX/DOCX). The UI additionally
+        # length-guards this before display.
+        image_title = meta.get("image_title")
         image_title = str(image_title).strip() if image_title else None
 
         # AUDIO / VIDEO timestamp + speaker. The chip reads `timestamp_start`
@@ -1372,10 +1376,39 @@ def query_pipeline(
         # non-streaming / meta answer carries inline page references that match
         # the UI. Pages come from the real retrieved chunks (synthetic docs skipped).
         try:
-            from app.pipeline.rag_pipeline import _attach_page_citations
+            from app.pipeline.rag_pipeline import (
+                _attach_page_citations, _attach_section_citations,
+            )
+            _before_cite = answer
             answer = _attach_page_citations(answer, final_docs)
+            if answer == _before_cite:
+                answer = _attach_section_citations(answer, final_docs)
+            # Image answers: cited by the source chip (with chart-title caption)
+            # in the UI, not an inline prose footer — avoids a duplicate citation.
         except Exception as _pc_err:
             logger.warning(event="query_pipeline_page_cite_failed", error=str(_pc_err), session_id=session_id)
+
+        # IMAGE CHART synth override — same rationale/gating as the streaming
+        # path's _synthesize_image_chart_answer (see rag_pipeline.py): the
+        # generation model has repeatedly restated the wrong series' dollar
+        # value, or a percent as a dollar figure, for "dollar terms" /
+        # multi-series comparison questions specifically.
+        if final_docs and str((final_docs[0].get("metadata") or {}).get("modality") or "") == "image":
+            try:
+                from app.pipeline.rag_pipeline import _synthesize_image_chart_answer
+                _img_context = "\n".join(
+                    d.get("text", "") for d in final_docs if isinstance(d, dict)
+                )
+                _img_synth = _synthesize_image_chart_answer(query, _img_context)
+                if _img_synth:
+                    answer = _img_synth
+            except Exception as _img_synth_err:
+                logger.warning(event="query_pipeline_image_synth_failed", error=str(_img_synth_err), session_id=session_id)
+            try:
+                from app.pipeline.rag_pipeline import _expand_chart_dates
+                answer = _expand_chart_dates(answer)
+            except Exception as _date_err:
+                logger.warning(event="query_pipeline_image_date_expand_failed", error=str(_date_err), session_id=session_id)
 
         # H-03: Stricter numeric grounding gate.
         # If the answer contains specific numbers/dollar amounts that are NOT

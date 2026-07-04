@@ -216,8 +216,13 @@ class Settings:
     BLIP_MODEL: str                  = _str("BLIP_MODEL", "Salesforce/blip-image-captioning-large")
     BLIP_MAX_TOKENS: int             = _int("BLIP_MAX_TOKENS", 200)
     BLIP_NUM_BEAMS: int              = _int("BLIP_NUM_BEAMS", 3)
-    # Qwen2-VL — video frame + financial chart captioning (2B INT8, ~2.2 GB)
-    QWEN2_VL_MODEL: str              = _str("QWEN2_VL_MODEL", "Qwen/Qwen2-VL-2B-Instruct")
+    # Qwen2-VL — video frame + financial chart captioning.
+    # Upgraded 2B→7B (INT8, ~9.5 GB): the 7B produces materially richer,
+    # more accurate chart/figure descriptions. VRAM verified to fit — image
+    # work peaks ~20 GB of the 22 GB budget (device_manager evicts idle models
+    # under pressure). Exact numeric chart values come from the deterministic
+    # digitizer in image_chunker.py regardless of model size.
+    QWEN2_VL_MODEL: str              = _str("QWEN2_VL_MODEL", "Qwen/Qwen2-VL-7B-Instruct")
     QWEN2_VL_LOAD_IN_8BIT: bool      = _bool("QWEN2_VL_LOAD_IN_8BIT", True)
     QWEN2_VL_MAX_TOKENS: int         = _int("QWEN2_VL_MAX_TOKENS", 400)
     # TrOCR — printed OCR for financial documents

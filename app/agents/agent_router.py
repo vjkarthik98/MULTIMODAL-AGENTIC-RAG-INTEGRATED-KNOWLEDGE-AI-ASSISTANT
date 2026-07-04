@@ -78,12 +78,18 @@ _EXPLICIT_WEB_PHRASES = frozenset({
     "search for historical", "search for recent", "search for latest",
 })
 _MEMORY_WORDS     = {
-    "earlier", "previous", "last time", "we discussed", "you said", "before",
+    "last time", "we discussed", "you said",
     "you mentioned", "earlier you", "last conversation", "what did we",
     "you told me", "earlier you said", "what did we talk", "we talked about",
-    "our conversation", "you mentioned earlier", "recall", "remember when",
+    "our conversation", "you mentioned earlier", "remember when",
     "previously you", "in our last",
 }
+# NOTE: bare "before", "earlier", "previous", "recall" were REMOVED — they
+# match ordinary document questions ("before FY2024 acceleration", "the
+# previous quarter", "recall notice"), which mis-routed real KB lookups to
+# the memory store (it then answers "I don't have a record of discussing
+# that"). Genuine conversation references use the multi-word phrases kept
+# above ("you said", "we discussed", "earlier you", ...).
 _COMPLEX_KEYWORDS = {"compare", "difference", "process", "steps", "vs", "versus", "explain"}
 _REASONING_WORDS  = {"why", "how", "explain", "reason", "cause", "because"}
 _MULTIMODAL_WORDS = {"image", "video", "diagram", "chart", "audio", "photo", "picture", "figure"}
@@ -585,6 +591,16 @@ class AgentRouter:
         # OVERRIDE: MULTI-QUESTION BENEFITS FROM HYBRID
         if signals.multi_question and decision.action == "direct":
             return self._decision("hybrid", "override_multi_question", 0.75, session_id)
+
+        # OVERRIDE: LLM picked `memory` with no memory signal. Genuine memory
+        # queries carry an explicit memory keyword and are already caught by the
+        # hard rule before the LLM runs (is_memory=True → memory). Reaching here
+        # with action="memory" but is_memory=False means the small router model
+        # hallucinated a conversational intent — e.g. "When did Apple's return
+        # plateau in the chart …" reads as a follow-up but is a document lookup.
+        # Route to RAG so it answers from the KB instead of denying knowledge.
+        if decision.action == "memory" and not signals.is_memory:
+            return self._decision("rag", "override_memory_no_signal", 0.8, session_id)
 
         # OVERRIDE: LLM picked `direct` but the query looks like a factual
         # lookup (interrogative + non-trivial length + not greeting/code/math).

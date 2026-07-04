@@ -22,7 +22,7 @@ REQUIRED_MODELS: Set[str] = {
     "BAAI/bge-large-en-v1.5",
     "BAAI/bge-reranker-large",
     "Salesforce/blip-image-captioning-large",
-    "Qwen/Qwen2-VL-2B-Instruct",
+    settings.QWEN2_VL_MODEL,  # image/video/chart captioning (2B or 7B per config)
     "Systran/faster-whisper-large-v3",
     "pyannote/segmentation-3.0",
     "pyannote/wespeaker-voxceleb-resnet34-LM",
