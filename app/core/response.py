@@ -783,7 +783,24 @@ _STRUCT_MARKER_RE = re.compile(
 # Bare filename citation, e.g. [report.pdf], [gdp.jpg] — strip so no provenance
 # string leaks into prose. Requires a dot + 2-4 char extension to avoid eating
 # ordinary bracketed words.
-_FILENAME_CITATION_RE = re.compile(r'\s*\[[^\]\n]*?\.[A-Za-z0-9]{2,4}\s*\]')
+# Matches "[<name>.<ext>]" AND "[<name>.<ext> <locator>]" where the locator is a
+# timestamp/page appended after the extension, e.g. the reasoning engine's audio
+# citation "[FOMC Press Conference September 18_ 2024.mp3 t=00:07]" or a page
+# form "[report.pdf p.6]". Requires a dotted file extension inside the bracket,
+# so ordinary bracketed prose is never touched.
+_CITE_FILE_EXT = (
+    r'(?:mp3|mp4|wav|m4a|flac|ogg|aac|opus|pdf|txt|md|docx?|xlsx?|xls|csv|pptx?|'
+    r'jpe?g|png|gif|webp|bmp|tiff?|heic|svg|mov|avi|mkv|webm)'
+)
+# Matches a citation bracket whose content contains a KNOWN file extension —
+# "[report.pdf]", "[report.pdf p.6]", or the reasoning engine's audio form
+# "[FOMC Press Conference September 18_ 2024.mp3 t=00:07]". Using an explicit
+# extension list (not "\.\w+") avoids stripping legitimate bracketed prose that
+# merely contains a decimal, e.g. "[see section 3.14 for details]".
+_FILENAME_CITATION_RE = re.compile(
+    r'\s*\[[^\]\n]*?\.' + _CITE_FILE_EXT + r'(?:\s+[^\]\n]*)?\s*\]',
+    re.IGNORECASE,
+)
 # TXT speaker cite_key echoed verbatim, e.g. [fomc_dec2024.txt — CHAIR POWELL].
 # _FILENAME_CITATION_RE above only matches when the extension is immediately
 # followed by "]"; the speaker-locator format (_make_cite_key's text/txt
@@ -914,6 +931,12 @@ def strip_inline_citations(text: str) -> str:
     # Collapse whitespace and repair punctuation spacing left by removals.
     cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)
     cleaned = re.sub(r'\s+([,.;:!?])', r'\1', cleaned)
+    # Orphaned separators left where a comma-separated citation list was removed,
+    # e.g. "...point. [tag1], [tag2]" → "...point.," or "...point., ,". Drop a
+    # comma/semicolon that now trails a sentence terminator or another comma.
+    cleaned = re.sub(r'([.!?])\s*[,;](?:\s*[,;])*', r'\1', cleaned)
+    cleaned = re.sub(r',\s*(?=[,;])', '', cleaned)
+    cleaned = re.sub(r'[,;]\s*([.!?])', r'\1', cleaned)
     cleaned = re.sub(r'\(\s*\)', '', cleaned)            # empty parens
     cleaned = re.sub(r'[ \t]+\n', '\n', cleaned)
     # An orphaned "Sources:"/"Tags:" label left after the [n] tokens it referenced
@@ -925,6 +948,10 @@ def strip_inline_citations(text: str) -> str:
     # everything after it (the colon introduced the now-deleted dump) — collapse
     # ".:"/" :" at end of string down to the sentence's own terminal period.
     cleaned = re.sub(r'\s*:\s*$', '', cleaned)
+    # A trailing comma/semicolon left where a citation list ended the text
+    # ("...the 50bp cut, [tag], [tag]" → "...the 50bp cut,"). Never valid at the
+    # end of an answer — drop it (and add back a period if the text now ends bare).
+    cleaned = re.sub(r'[\s,;]+$', '', cleaned)
     return cleaned.strip()
 
 

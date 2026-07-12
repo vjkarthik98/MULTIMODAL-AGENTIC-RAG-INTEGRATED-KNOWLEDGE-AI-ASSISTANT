@@ -158,6 +158,13 @@ export default function Sidebar({
   onGuestUploadLimit,
   onShowLogin,
 }) {
+  // Stable per-user identity — unlike auth?.token, this does NOT change when
+  // the silent-refresh interval or a visibilitychange-triggered refresh
+  // rotates the access token (App.jsx). Effects below that need to refetch
+  // on a genuine login/logout/account-switch, but NOT on every token
+  // rotation, key off this instead of auth?.token.
+  const authIdentity = auth?.email || auth?.guestUserId || null
+
   const [dragOver, setDragOver]           = useState(false)
   const [sessions, setSessions]           = useState([])
   const [loadingSessions, setLoadingSessions] = useState(true)
@@ -343,12 +350,19 @@ export default function Sidebar({
   }
 
   // Re-fetch whenever the session identity changes (login/logout, guest<->real
-  // user, or account switch) — not just on mount. Without auth?.token in the
+  // user, or account switch) — not just on mount. Without authIdentity in the
   // deps, a stale closure keeps whatever the FIRST-mounted auth fetched even
   // after `auth` later flips (e.g. the initial auth-check race in App.jsx),
   // leaking one session's KB/Recents into another's UI. Clear immediately so
   // the previous session's data never lingers on screen while refetching.
-  useEffect(() => { prevFilenamesRef.current = new Set(); setKbFiles([]); refreshKB() }, [auth?.token])
+  // Keyed on authIdentity (email/guestUserId), NOT auth?.token: the silent
+  // token-refresh interval and visibilitychange handler in App.jsx rotate
+  // the token every ~20 min (or on every tab focus) for the SAME user —
+  // keying on the raw token blanked and re-fetched the KB/Recents lists on
+  // every rotation, a visible "reload" flicker with no actual identity
+  // change, and could momentarily show a false "knowledge base is empty"
+  // message if a query landed inside that refetch window.
+  useEffect(() => { prevFilenamesRef.current = new Set(); setKbFiles([]); refreshKB() }, [authIdentity])
 
   /* ── Smooth upload progress animator ───────────────────────────────────────
    * The server reports progress in coarse stages (queued 2% → extracting 20% →
@@ -400,12 +414,13 @@ export default function Sidebar({
 
   // Refetch (and clear immediately, before the round-trip) whenever the
   // session identity changes — see the matching KB-refresh effect above for
-  // why auth?.token must be a dependency: without it, a stale closure keeps
+  // why authIdentity (not auth?.token — rotates every silent refresh for the
+  // same user) must be a dependency: without it, a stale closure keeps
   // showing whichever session's Recents were fetched first, leaking one
   // account's chat history into another session's UI (e.g. the auth-check
   // race in App.jsx resolving to a guest after the real user's data already
   // rendered).
-  useEffect(() => { setSessions([]); refreshSessions() }, [auth?.token])
+  useEffect(() => { setSessions([]); refreshSessions() }, [authIdentity])
 
   // When all history is cleared, empty the list instantly without a round-trip.
   useEffect(() => { if (historyClearedAt) setSessions([]) }, [historyClearedAt])

@@ -563,6 +563,12 @@ class IngestJob:
     chunks_done:  int   = 0
     chunks_total: int   = 0
     error:        Optional[str] = None
+    # Wall-clock start + file size — used by the status endpoint to synthesise a
+    # smooth, time-based progress estimate during the long audio/video
+    # transcription phase (Whisper + diarization), which otherwise reports no
+    # incremental progress and leaves the upload bar stalled.
+    started_at:   float = 0.0
+    size_bytes:   int   = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -703,11 +709,17 @@ class IngestionPipeline:
             "mp4": "mp4", "mov": "mp4", "avi": "mp4",
         }.get(ext, ext)
 
+        try:
+            _size_bytes = Path(file_path).stat().st_size
+        except OSError:
+            _size_bytes = 0
         job = IngestJob(
             job_id=job_id,
             filename=filename,
             modality=modality,
             status="queued",
+            started_at=time.time(),
+            size_bytes=_size_bytes,
         )
         _store_job(job)
 

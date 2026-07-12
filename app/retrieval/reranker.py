@@ -67,6 +67,27 @@ _STOPWORDS: Set[str] = frozenset({  # type: ignore[assignment]
 # sigmoid(logit) < 0.04 ≈ logit < −3.18 → document is almost certainly off-topic.
 _FLOOR_SIGMOID: float = 0.04
 
+# TRANSCRIPT SECTION RE-WEIGHTING (audio/video/txt-transcript chunks only).
+# A cross-encoder ranks a Q&A chunk that literally contains "cut rates by 50
+# basis points" (a reporter's question) above the prepared-remarks ANNOUNCEMENT
+# that actually states the cut ("...by a half percentage point") — the
+# announcement never says the digits. For a FACTUAL query about what a speaker
+# said/did, the authoritative prepared-remarks statement should outrank a Q&A
+# fragment. Applies ONLY to chunks carrying `call_section` (audio/video and
+# txt-transcript) — PDF/DOCX/XLSX/image have none, so their factor is 1.0.
+# Boost/penalty are uniform within a section, so they only ever change
+# prepared_remarks-vs-qa_session ORDER; within-section ordering is untouched.
+_SECTION_PREPARED_BOOST: float = 1.18
+_SECTION_QA_PENALTY:     float = 0.74
+
+# Meta-queries explicitly ABOUT the Q&A ("what did reporter X ask") legitimately
+# want the question/answer chunks — the re-weighting is disabled for them.
+_META_QUERY_RE = re.compile(
+    r"\b(ask|asked|asks|asking|question(?:ed|s)?|inquir\w+|"
+    r"reporter|journalist|correspondent|analyst)\b",
+    re.IGNORECASE,
+)
+
 
 class Reranker:
 
@@ -411,6 +432,20 @@ class Reranker:
 
     # COMPUTE FINAL SCORES
 
+    @staticmethod
+    def _section_factor(meta: Dict, query_is_meta: bool) -> float:
+        """prepared-remarks vs Q&A re-weighting — see module notes. Returns 1.0
+        (no-op) for any chunk without a `call_section` (every non-transcript
+        modality) and for meta-queries about the Q&A itself."""
+        section = meta.get("call_section")
+        if not section or query_is_meta:
+            return 1.0
+        if section == "prepared_remarks":
+            return _SECTION_PREPARED_BOOST
+        if section == "qa_session":
+            return _SECTION_QA_PENALTY
+        return 1.0
+
     def _compute_final_scores(
         self,
         valid_docs: List[Dict],
@@ -419,6 +454,9 @@ class Reranker:
         query: str = "",
     ) -> List[Dict]:
         results: List[Dict] = []
+
+        # Computed once per query: is this query explicitly ABOUT the Q&A?
+        query_is_meta = bool(_META_QUERY_RE.search(query or ""))
 
         for i, (d, s) in enumerate(zip(valid_docs, model_scores)):
             meta = dict(d.get("metadata", {}) or {})
@@ -439,10 +477,13 @@ class Reranker:
             # EXACT MATCH BOOST: reward verbatim key-term hits (up to +5%)
             em_boost = 1.0 + self._exact_match_boost(query, d.get("text", ""))
 
+            # TRANSCRIPT SECTION FACTOR (prepared-remarks vs Q&A; transcripts only)
+            section_factor = self._section_factor(meta, query_is_meta)
+
             final_score = (
                 self.w_model * float(s) +
                 self.w_fusion * fusion_score
-            ) * position_boost * modality_boost * em_boost
+            ) * position_boost * modality_boost * em_boost * section_factor
 
             if not self._valid_score(final_score):
                 continue
@@ -585,6 +626,29 @@ class Reranker:
 
             # MMR DIVERSITY (embedding cosine similarity when available)
             results = self._mmr(results, top_k)
+
+            # TRANSCRIPT AUTHORITY REORDER (deterministic; transcripts only).
+            # Runs LAST — after MMR — so nothing reshuffles it. For a FACTUAL
+            # (non-meta) question about what a speaker said/did, a prepared-
+            # remarks ANNOUNCEMENT is the authoritative source. But a cross-
+            # encoder ranks a Q&A chunk that literally repeats the query's digits
+            # ("cut rates by 50 basis points", a reporter's hypothetical) above
+            # the announcement ("...by a half percentage point"), which then
+            # becomes the citation and drives the answer. When the #1 result is a
+            # qa_session chunk and a prepared_remarks chunk sits in the top window
+            # with ≥40% of the top score (genuinely relevant, not noise), promote
+            # that announcement to #1. No-op for meta-queries ("what did reporter
+            # X ask") and for every non-transcript modality (no call_section).
+            if len(results) > 1 and not _META_QUERY_RE.search(query or ""):
+                top_meta = results[0].get("metadata") or {}
+                if top_meta.get("call_section") == "qa_session":
+                    top_score = results[0].get("score", 0.0) or 0.0
+                    for j in range(1, min(len(results), 6)):
+                        m = results[j].get("metadata") or {}
+                        if (m.get("call_section") == "prepared_remarks"
+                                and (results[j].get("score", 0.0) or 0.0) >= 0.40 * top_score):
+                            results.insert(0, results.pop(j))
+                            break
 
             total_latency = round(time.time() - start, 3)
 

@@ -1,6 +1,7 @@
 """audio_embedder.py — Finance-grade embedder for audio/transcript chunks."""
 from __future__ import annotations
 
+import re
 from typing import Any, List
 
 from app.embeddings.base_embedder import BaseEmbedder
@@ -9,6 +10,38 @@ from app.utils.logger import get_logger
 from prometheus_client import Counter
 
 logger = get_logger(__name__)
+
+# Spoken Fed-style rate-change phrasings carry NO digits ("half percentage
+# point"), so a query asking "by how much did the Fed cut / 50 basis points"
+# lexically and semantically matches the Q&A DISCUSSION of the cut (reporters
+# who literally say "50 basis points") far better than the actual rate-cut
+# ANNOUNCEMENT — which is the chunk that should rank first. Amplify each spoken
+# form into its numeric equivalents at embed time so the announcement chunk is
+# retrievable by number too. Amplification only affects the embedding vector;
+# the stored transcript and the answer text are untouched.
+_RATE_WORD_MAP = [
+    (re.compile(r"\bthree(?:\s+|-)quarters?\s+of\s+a\s+percentage\s+point", re.I),
+     "75 basis points 0.75 percentage point"),
+    (re.compile(r"\b(?:a\s+)?half(?:\s+of)?\s+a?\s*percentage\s+point", re.I),
+     "50 basis points 0.50 percentage point half point rate cut"),
+    (re.compile(r"\bhalf\s+point\b", re.I),
+     "50 basis points 0.50 percentage point"),
+    (re.compile(r"\b(?:a\s+)?quarter(?:\s+of\s+a)?\s+percentage\s+point", re.I),
+     "25 basis points 0.25 percentage point quarter point"),
+    (re.compile(r"\bquarter\s+point\b", re.I),
+     "25 basis points 0.25 percentage point"),
+    (re.compile(r"\b(?:a\s+)?full\s+percentage\s+point", re.I),
+     "100 basis points 1.00 percentage point"),
+]
+
+
+def _amplify_rate_expressions(text: str) -> List[str]:
+    """Return numeric amplification tokens for any spoken rate expression found."""
+    out: List[str] = []
+    for pat, expansion in _RATE_WORD_MAP:
+        if pat.search(text):
+            out.append(expansion)
+    return out
 
 _EMBED_BUILT = Counter(
     "magik_audio_embed_text_built_total",
@@ -86,6 +119,12 @@ class AudioEmbedder(BaseEmbedder):
 
             suffix = (f" [ENTITIES: {', '.join(entity_tokens)}]") if entity_tokens else ""
 
+            # Numeric amplification for spoken rate-change phrasings — makes the
+            # rate-cut ANNOUNCEMENT chunk ("half percentage point") retrievable
+            # by queries phrased with digits ("50 basis points", "how much").
+            rate_tokens = _amplify_rate_expressions(cleaned_text)
+            rate_suffix = (f" [RATE: {', '.join(rate_tokens)}]") if rate_tokens else ""
+
             # Q&A section token for section-aware retrieval.
             qa_token = ""
             if s.get("is_question"):
@@ -93,7 +132,7 @@ class AudioEmbedder(BaseEmbedder):
             elif s.get("is_answer"):
                 qa_token = " [management answer]"
 
-            result = f"{header}{cleaned_text}{qa_token}{suffix}"
+            result = f"{header}{cleaned_text}{qa_token}{rate_suffix}{suffix}"
             result = result[:settings.MAX_PROMPT_CHARS]
             logger.debug(event="embed_text_built", modality="audio", chars=len(result))
             _EMBED_BUILT.inc()

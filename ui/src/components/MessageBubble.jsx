@@ -287,11 +287,10 @@ function getSourceLabelParts(source) {
         suffix = ` · ${stRaw}`
       }
     } else if (isAudio || isVideo) {
-      const ts = fmtTimestamp(source.timestamp_start)
-      if (ts) {
-        const speaker = source.speaker_name || source.speaker_role || ''
-        suffix = speaker ? ` · ${speaker} ${ts}` : ` · ${ts}`
-      }
+      // Speaker + timestamp is rendered as an accent-colored pill at the END of
+      // the answer (AudioCitations below), same pattern as XLSX sheet+row and
+      // Image title — so the chip stays the clean file identity (filename only).
+      suffix = ''
     } else if (source.heading && !isDocx) {
       suffix = ` · ${String(source.heading)}`
     } else if (source.section_title && !isTxt && !isDocx) {
@@ -385,6 +384,44 @@ function ImageCitations({ sources }) {
   return (
     <div className="mt-1 text-[15px] leading-relaxed">
       {unique.map((s, i) => <ImageCitePill key={i} source={s} />)}
+    </div>
+  )
+}
+
+/* Audio/video speaker+timestamp citation — same visual treatment as XlsxCitePill
+   and ImageCitePill (accent-colored text at the end of the answer, above the
+   Sources chips). Shows "Speaker · m:ss"; the filename lives separately in the
+   Sources chip area below, exactly like PDF/DOCX/XLSX/Image. */
+function AudioCitePill({ source }) {
+  const ts = fmtTimestamp(source.timestamp_start != null ? source.timestamp_start : source.start_time)
+  if (!ts) return null
+  const speaker = String(source.speaker_name || source.speaker_role || '').trim()
+  const label = speaker ? `${speaker} · ${ts}` : ts
+  return (
+    <span title={`Source: ${label}`} style={{ color: 'var(--t-accent)', fontWeight: 500 }}>
+      {' '}{label}
+    </span>
+  )
+}
+
+function AudioCitations({ sources }) {
+  const avSrcs = (sources || []).filter(
+    s => typeof s === 'object'
+      && ['audio', 'mp3', 'video', 'mp4'].includes(s.modality)
+      && (s.timestamp_start != null || s.start_time != null)
+  )
+  if (avSrcs.length === 0) return null
+  // De-dup by speaker+timestamp so the same cited segment shows once.
+  const seen = new Set()
+  const unique = avSrcs.filter(s => {
+    const ts = s.timestamp_start != null ? s.timestamp_start : s.start_time
+    const k = `${s.speaker_name || s.speaker_role || ''}|${ts}`
+    if (seen.has(k)) return false
+    seen.add(k); return true
+  })
+  return (
+    <div className="mt-1 text-[15px] leading-relaxed">
+      {unique.map((s, i) => <AudioCitePill key={i} source={s} />)}
     </div>
   )
 }
@@ -635,6 +672,7 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
                   <XlsxCitations sources={allSources} />
                   <DocxCitations sections={docxSections} />
                   <ImageCitations sources={allSources} />
+                  <AudioCitations sources={allSources} />
                 </>
               )}
 

@@ -1202,6 +1202,28 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3) -> List[
         heading      = meta.get("heading") or meta.get("heading_hierarchy")
         speaker_role = meta.get("speaker_role")
         speaker_name = meta.get("speaker_name") or meta.get("speaker_label")
+        # Never surface a raw diarization label ("SPEAKER_10") as the speaker on
+        # a citation — it's not a real name. When the turn is a reporter's
+        # question, "Reporter" is the meaningful attribution; otherwise drop it
+        # and let the timestamp stand alone (the answer prose still names the
+        # speaker when it's known).
+        if speaker_name and re.match(r"^SPEAKER_\d+$", str(speaker_name).strip()):
+            _sec = str(meta.get("call_section") or "")
+            _is_reporter_turn = (
+                _sec == "qa_session"
+                or meta.get("is_question")
+                # A reporter naming their outlet ("... from/with MarketWatch/the
+                # New York Times/...") — even when diarization left the turn
+                # unnamed and the section mislabelled. High-precision on a known
+                # outlet, so it won't tag the chair/host.
+                or re.search(
+                    r"\b(?:from|with)\s+(?:the\s+)?(?:MarketWatch|New\s+York\s+Times|"
+                    r"Wall\s+Street\s+Journal|Reuters|Bloomberg|CNBC|Associated\s+Press|"
+                    r"Financial\s+Times|Politico|Washington\s+Post|Economist|Axios|Semafor)\b",
+                    str(text), re.IGNORECASE,
+                )
+            )
+            speaker_name = "Reporter" if _is_reporter_turn else None
         row_range    = meta.get("row_range")
         chunk_type   = meta.get("chunk_type") or meta.get("content_type")
         call_section = meta.get("call_section") or meta.get("topic_section")
@@ -2272,6 +2294,51 @@ class RAGPipeline:
                     except Exception as _cmp_err:
                         logger.warning(event="rag_stream_txt_compare_failed", error=str(_cmp_err))
 
+                # AUDIO/VIDEO ANSWER GENERATION — route through the SAME reasoning
+                # engine the (benchmark-validated) non-streaming query_pipeline
+                # uses, instead of the single-shot raw llm.stream below. On the
+                # small GGUF model, single-shot generation over a spoken-word
+                # transcript is unstable: it drifts into invented "Q:/A:" echoes,
+                # answers a neighbouring fact, or hallucinates a figure — and it
+                # diverges from the validated path. reasoning_engine.generate_
+                # answer is deterministic, grounded, and numeric-faithfulness-
+                # guarded. Its buffered answer is streamed through the identical
+                # clean-up/citation path below. Scoped to AV-dominant results
+                # only — documents keep the existing single-shot path.
+                _av_dominant = False
+                if docs:
+                    _mods = [str((d.get("metadata") or {}).get("modality") or "").lower()
+                             for d in docs[:5]]
+                    _av_hits = [m for m in _mods if m in ("audio", "mp3", "video", "mp4")]
+                    _av_dominant = len(_av_hits) > len(_mods) / 2
+
+                _av_reasoned_answer: Optional[str] = None
+                if _av_dominant:
+                    try:
+                        from app.pipeline.query_pipeline import _get_reasoning_components
+                        _reasoning, _ = _get_reasoning_components(self._get_llm())
+                        # Focused context: the small model drifts and mixes facts
+                        # when fed ~20 broadly-relevant transcript chunks (a press
+                        # conference has boilerplate that scores moderately for
+                        # almost any question). The answer lives in the top 1-3
+                        # chunks after reranking, so pass a tight set — this keeps
+                        # the answer on the specific fact asked and citing the #1
+                        # chunk, instead of synthesising a vague summary.
+                        _av_docs = docs[:5]
+                        _r_out = _reasoning.generate_answer(
+                            query=query,
+                            retrieved_docs=_av_docs,
+                            memory_context="",
+                            session_id=session_id,
+                            user_id=user_id or "",
+                        )
+                        _cand = (_r_out.get("answer") or "").strip()
+                        if _cand:
+                            _av_reasoned_answer = _cand
+                    except Exception as _rex:
+                        logger.warning(event="rag_stream_av_reasoning_failed",
+                                       error=str(_rex), session_id=session_id)
+
                 builder = self._get_prompt_builder()
                 prompt  = builder.build_prompt(
                     query=query,
@@ -2335,23 +2402,33 @@ class RAGPipeline:
                 # answer is stated. Other modalities keep the full budget.
                 _txt_mod = _mod0 in ("text", "txt")
                 _max_tok = 240 if _txt_mod else settings.LLM_MAX_TOKENS
-                for token in llm.stream(
-                    prompt,
-                    max_tokens=_max_tok,
-                    temperature=_adaptive_temperature(query),
-                    top_p=settings.LLM_TOP_P,
-                    session_id=session_id,
-                ):
-                    collected_tokens.append(token)
-                    if refusal_mode or prefix_checked:
-                        continue
-                    hold += token
-                    if len(hold) < _STREAM_PREFIX_GATE:
-                        continue
-                    if _is_llm_refusal(hold):
+                if _av_reasoned_answer is not None:
+                    # AV answer already generated by the reasoning engine above —
+                    # feed it into the same buffer the raw stream would fill, so
+                    # the downstream refusal/citation/clean-up path is identical.
+                    collected_tokens.append(_av_reasoned_answer)
+                    if _is_llm_refusal(_av_reasoned_answer):
                         refusal_mode = True
                     else:
                         prefix_checked = True
+                else:
+                    for token in llm.stream(
+                        prompt,
+                        max_tokens=_max_tok,
+                        temperature=_adaptive_temperature(query),
+                        top_p=settings.LLM_TOP_P,
+                        session_id=session_id,
+                    ):
+                        collected_tokens.append(token)
+                        if refusal_mode or prefix_checked:
+                            continue
+                        hold += token
+                        if len(hold) < _STREAM_PREFIX_GATE:
+                            continue
+                        if _is_llm_refusal(hold):
+                            refusal_mode = True
+                        else:
+                            prefix_checked = True
 
                 # OUTPUT GUARD — Phase 26 P1b: guard the COMPLETE answer.
                 # Whole-answer checks (groundedness, template artifacts, toxicity,

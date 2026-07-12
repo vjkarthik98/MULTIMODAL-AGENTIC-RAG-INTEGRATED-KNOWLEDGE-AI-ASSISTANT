@@ -2267,6 +2267,23 @@ async def get_ingestion_status(
     job = get_ingest_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
+    # Audio/video transcription (Whisper + diarization) is the long phase and
+    # reports no incremental progress on its own, so the upload bar would stall.
+    # Synthesise a smooth estimate from elapsed time vs an expected duration
+    # derived from file size (~6s per MB observed for large-v3 on GPU), capped
+    # below 1.0 so it never shows "done" before the pipeline actually finishes.
+    try:
+        if (job.get("status") in ("extracting", "queued")
+                and str(job.get("modality")) in ("mp3", "mp4")
+                and float(job.get("progress") or 0.0) < 0.9
+                and float(job.get("started_at") or 0.0) > 0.0):
+            elapsed  = time.time() - float(job["started_at"])
+            size_mb  = max(1.0, float(job.get("size_bytes") or 0) / (1024 * 1024))
+            expected = max(20.0, size_mb * 6.0)
+            est      = min(0.90, elapsed / expected)
+            job["progress"] = max(float(job.get("progress") or 0.0), round(est, 3))
+    except Exception:
+        pass
     return job
 
 

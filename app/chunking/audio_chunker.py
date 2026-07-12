@@ -214,26 +214,71 @@ _CALL_SECTIONS = [
     ("prepared_remarks", re.compile(r".*", re.I)),   # fallback
 ]
 
+# News outlets a reporter names when self-introducing at a press conference.
+_NEWS_OUTLETS = (
+    r"(?:MarketWatch|New\s+York\s+Times|NYT|Wall\s+Street\s+Journal|WSJ|Reuters|"
+    r"Bloomberg|CNBC|Fox(?:\s+Business)?|Associated\s+Press|\bAP\b|Financial\s+Times|"
+    r"\bFT\b|Politico|Axios|Yahoo|Barron'?s|Washington\s+Post|Economist|NPR|CBS|"
+    r"ABC|NBC|The\s+Hill|American\s+Banker|Nikkei|Semafor)"
+)
+
 _ROLE_KEYWORDS = {
     "Fed Chair":  re.compile(r"\b(chairman|chairwoman|chair powell|chair bernanke|chair yellen|chair jerome|federal reserve chair)\b", re.I),
     "CEO":        re.compile(r"\bceo\b|\bchief executive\b", re.I),
     "CFO":        re.compile(r"\bcfo\b|\bchief financial\b", re.I),
-    "President":  re.compile(r"\bpresident\b(?!\s+of the\s+united)", re.I),
-    "Analyst":    re.compile(r"\banalyst\b|\bgoldman\b|\bmorgan\b|\bjp morgan\b|\bciti\b|\bbarclays\b|\bubs\b|\bdb\b|\bdeutsche bank\b", re.I),
-    "Reporter":   re.compile(r"\b(reporter|journalist|correspondent|from (?:the |)(?:wall street|new york times?|reuters|bloomberg|wsj|cnbc|fox|ap |associated press|financial times|ft\b))\b", re.I),
+    # NOTE: "President" is intentionally NOT a role keyword. In FOMC transcripts
+    # "president" almost always refers to a regional-Fed president MENTIONED in
+    # speech ("New York Fed President John Williams"), not the speaker's own
+    # role — matching it mislabelled reporters as "President". Company/earnings-
+    # call presidents are named via the self-intro/role signals instead.
+    "Analyst":    re.compile(r"\banalyst\b|\bgoldman\b|\bmorgan\b|\bjp morgan\b|\bciti\b|\bbarclays\b|\bubs\b|\bdeutsche bank\b", re.I),
+    "Reporter":   re.compile(r"\b(reporter|journalist|correspondent|from (?:the |)(?:wall street|new york times?|reuters|bloomberg|wsj|cnbc|fox|associated press|financial times|marketwatch|politico|washington post))\b", re.I),
     "Operator":   re.compile(r"\boperator\b", re.I),
     "COO":        re.compile(r"\bcoo\b|\bchief operating\b", re.I),
 }
 
 _FILLER = re.compile(r"\b(um|uh|er|ah|you know|i mean|like|so|basically|essentially)\b", re.I)
 
-# Self-introduction near the start of a speaker's own turn, e.g. reporters/
-# analysts stating their affiliation: "Greg Robb from MarketWatch.com",
-# "this is Colby Smith with the New York Times".
+# Reporter self-introduction: "<Name> from/with <known news outlet>", e.g.
+# "Greg Robb from MarketWatch.com", "Gina Smialek with the New York Times".
+# Anchored on a KNOWN outlet (not a generic capitalized word) so it stays
+# high-precision, and CASE-INSENSITIVE so it still fires on the all-lowercase
+# ASR that faster-whisper produces in the busy Q&A section. Group 1 is the
+# 1-3 word reporter name immediately preceding "from/with <outlet>".
 _SELF_INTRO_RE = re.compile(
-    r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\s+(?:from|with|of)\s+(?:the\s+)?"
-    r"([A-Z][A-Za-z0-9&.\-]+(?:\s+[A-Za-z0-9&.\-]+){0,4})"
+    r"\b([A-Za-z][A-Za-z'’]+(?:\s+[A-Za-z][A-Za-z'’]+){0,2})\s+(?:from|with)\s+"
+    r"(?:the\s+)?" + _NEWS_OUTLETS,
+    re.IGNORECASE,
 )
+# Words that are never part of a reporter's name — guards against capturing a
+# trailing sentence fragment ("...took all of that data with Reuters") as the
+# name. Any match whose name tokens are all stopwords is rejected.
+_INTRO_NAME_STOPWORDS = {
+    "the", "that", "this", "data", "it", "them", "us", "questions", "question",
+    "you", "chair", "here", "and", "our", "your", "is", "was", "hi", "hello",
+    "thanks", "thank", "yeah", "so", "just", "now", "again", "well", "of", "all",
+    "into", "account", "took", "take", "taken", "look", "looked", "go", "going",
+    "get", "got", "sort", "kind", "lot", "some", "any", "over", "out", "up",
+    "down", "back", "then", "than", "been", "being", "have", "has", "had", "do",
+    "does", "did", "will", "would", "could", "should", "on", "in", "at", "to",
+    "for", "with", "from", "we", "i", "he", "she", "they", "my", "his", "her",
+    "along", "shared", "spoke", "talked", "along", "put",
+}
+
+
+def _clean_intro_name(raw: str) -> Optional[str]:
+    """Return a plausible 1-2 token reporter name from a self-intro capture,
+    or None if it looks like a sentence fragment rather than a name."""
+    toks = [w.strip(".,'’") for w in raw.split()
+            if w.strip(".,'’").lower() not in _INTRO_NAME_STOPWORDS]
+    toks = [w for w in toks if w.isalpha()]
+    if not toks:
+        return None
+    name = " ".join(toks[-2:])  # keep the last 1-2 tokens (first + surname)
+    surname = name.split()[-1]
+    if len(surname) < 3:        # a real surname is ≥3 letters
+        return None
+    return name.title()
 
 # Vocative address opening a turn — "Chair Powell, ..." / "Mr. Chairman, ...".
 # Case-insensitive and tolerant of lowercase ASR output (unlike a self-intro,
@@ -327,14 +372,25 @@ def _map_speaker_roles(
     label_to_role: Dict[str, str] = {}
 
     for i, turn in enumerate(turns):
-        lead_text = " ".join(turn["words"][:_TURN_LEAD_WORDS])
+        # Scan the first ~40 words of the turn (not the whole turn): a reporter's
+        # self-intro sits at the very start, and diarization sometimes prepends
+        # a few words of the previous (host) speaker — but scanning deep into a
+        # long chair turn risks matching an incidental "...that data with
+        # Reuters". 40 words comfortably covers a prepended tail + the intro.
+        lead_text = " ".join(turn["words"][:40])
 
-        # Signal 1: self-introduction near the start of this speaker's own turn.
+        # Signal 1: reporter self-introduction ("<Name> from/with <outlet>").
+        # Only a reporter says "<name> from <outlet>", so binding it to this
+        # turn's label can't mis-name the chair/host.
         if turn["label"] not in label_to_name:
             m = _SELF_INTRO_RE.search(lead_text)
             if m:
-                label_to_name[turn["label"]] = m.group(1).strip().title()
+                name = _clean_intro_name(m.group(1))
+                if name:
+                    label_to_name[turn["label"]] = name
+                    label_to_role[turn["label"]] = "Reporter"
 
+        lead_text = " ".join(turn["words"][:_TURN_LEAD_WORDS])
         # Signal 2: vocative address — bind the addressee to the NEXT turn.
         # A specific surname ("Chair Powell") is allowed to upgrade a prior
         # generic binding ("Chair", from a bare "Mr. Chairman" address earlier
@@ -367,6 +423,23 @@ def _map_speaker_roles(
     return role_name_map
 
 
+# Priming prompt — biases faster-whisper toward proper capitalization,
+# punctuation, and the domain's proper nouns (Fed officials, news outlets,
+# reporter self-introductions). Without it the model drifts to all-lowercase,
+# unpunctuated text in the busier Q&A half of a press conference, which both
+# breaks reporter self-intro detection (the name regex needs capitalized names)
+# and makes cited answers read as a raw transcript dump.
+_WHISPER_INITIAL_PROMPT = (
+    "The following is a Federal Reserve press conference and financial earnings "
+    "call, transcribed with correct capitalization and punctuation. Chair "
+    "Jerome Powell delivers prepared remarks and answers questions. Reporters "
+    "introduce themselves before asking, for example: \"Hi Chair Powell, Greg "
+    "Robb from MarketWatch\" or \"Gina Smialek with the New York Times.\" Other "
+    "outlets include the Wall Street Journal, Reuters, Bloomberg, CNBC, the "
+    "Associated Press, Politico, and the Washington Post."
+)
+
+
 def _run_whisper(wav_path: str) -> List[Dict]:
     """Transcribe with faster_whisper; returns list of word dicts."""
     try:
@@ -377,6 +450,8 @@ def _run_whisper(wav_path: str) -> List[Dict]:
             word_timestamps=True,
             vad_filter=True,
             condition_on_previous_text=False,
+            initial_prompt=_WHISPER_INITIAL_PROMPT,
+            beam_size=5,
         )
         words = []
         for seg in segments:
@@ -409,12 +484,19 @@ def _transcribe_long_audio(wav_path: str, duration_sec: float) -> List[Dict]:
     concurrently across AUDIO_TRANSCRIPTION_WORKERS since CTranslate2 releases
     the GIL during CUDA ops.
     """
-    if duration_sec <= 0 or duration_sec <= settings.AUDIO_CHUNK_DURATION_SEC:
+    # Cap transcription-segment length at 10 min. faster-whisper's output
+    # quality (capitalization, punctuation, proper nouns) is most consistent on
+    # ~10-min windows; the earlier 30-min windows drifted to unpunctuated
+    # lowercase in their later portion (the FOMC Q&A section). Each segment is
+    # re-primed with _WHISPER_INITIAL_PROMPT, so more/shorter segments means the
+    # casing prompt takes effect more often, not less.
+    _TRANSCRIBE_SEGMENT_SEC = 600
+    if duration_sec <= 0 or duration_sec <= _TRANSCRIBE_SEGMENT_SEC:
         return _run_whisper(wav_path)
 
     from pydub import AudioSegment
     audio = AudioSegment.from_wav(wav_path)
-    chunk_sec = settings.AUDIO_CHUNK_DURATION_SEC
+    chunk_sec = _TRANSCRIBE_SEGMENT_SEC
     n_segments = math.ceil(duration_sec / chunk_sec)
 
     segment_paths: List[Tuple[str, float]] = []
