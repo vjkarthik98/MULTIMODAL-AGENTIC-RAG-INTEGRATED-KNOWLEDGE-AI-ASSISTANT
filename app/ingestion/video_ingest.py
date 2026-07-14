@@ -1729,11 +1729,31 @@ def _extract_frames_pyscenedetect(
     interlaced   = probe.get("interlaced", False)
     video_id     = os.path.basename(video_path)
 
-    scene_timestamps = _detect_scenes_pyscenedetect(video_path, threshold)
-    all_timestamps   = sorted(set([0.0] + [ts for ts in scene_timestamps if ts > 0.1]))
+    # AdaptiveDetector needs its own correctly-scaled threshold, not the
+    # OpenCV mean-absdiff SCENE_CHANGE_THRESHOLD that used to be passed here.
+    adaptive_threshold = settings.VIDEO_SCENE_ADAPTIVE_THRESHOLD
+    scene_timestamps = [ts for ts in _detect_scenes_pyscenedetect(video_path, adaptive_threshold)
+                        if ts > 0.1]
+
+    # Blend scene cuts with uniform timeline samples. An earnings/investor
+    # webcast is a near-static chart + persistent ticker overlay: scene
+    # detection alone finds ~1 boundary and misses the chart/ticker at later
+    # points in the call. Uniform coverage guarantees max_frames spread across
+    # the whole recording; scene cuts still contribute their (few) real
+    # transitions. Downstream pHash dedup drops any that are truly identical.
+    uniform_ts: List[float] = []
+    if settings.VIDEO_UNIFORM_TIMELINE_COVERAGE and duration > 0 and max_frames > 0:
+        span = min(duration, max_duration)
+        uniform_ts = [round(i * span / max_frames, 3) for i in range(max_frames)]
+
+    all_timestamps = sorted(set([0.0] + scene_timestamps + uniform_ts))
     if len(all_timestamps) > max_frames:
-        step = max(len(all_timestamps) // max_frames, 1)
-        all_timestamps = all_timestamps[::step][:max_frames]
+        # Even-subsample down to max_frames (preserves timeline spread rather
+        # than truncating to the first max_frames seconds).
+        step = len(all_timestamps) / float(max_frames)
+        all_timestamps = [all_timestamps[min(int(i * step), len(all_timestamps) - 1)]
+                          for i in range(max_frames)]
+        all_timestamps = sorted(set(all_timestamps))
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -1770,7 +1790,7 @@ def _extract_frames_pyscenedetect(
             if not _cv_save_frame(frame, frame_path):
                 continue
             ph = _cv_compute_phash(frame_path)
-            if ph and seen_phashes and min(_cv_phash_distance(ph, e) for e in seen_phashes) < 8:
+            if ph and seen_phashes and min(_cv_phash_distance(ph, e) for e in seen_phashes) < settings.VIDEO_FRAME_DEDUP_HAMMING:
                 Path(frame_path).unlink(missing_ok=True)
                 _VF_FRAMES_SKIPPED.labels(reason="duplicate_phash").inc()
                 continue

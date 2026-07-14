@@ -6,7 +6,7 @@ import re
 import time
 import unicodedata
 import uuid
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Tuple
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -1119,7 +1119,422 @@ def _normalize_docs(docs: List[Any]) -> List[Dict[str, Any]]:
 
 # PHASE 24.8 — STANDARDISED SOURCES ARRAY
 
-def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3) -> List[Dict[str, Any]]:
+def _fetch_video_frame_docs(user_id: Optional[str], source_name: Optional[str]) -> List[Dict[str, Any]]:
+    """Load a video's frame (vision) docs from vision_collection.
+
+    Video answers are multimodal: the spoken content is cited by speaker +
+    timestamp (transcript chunks), but the on-screen evidence (the earnings
+    ticker, the price chart) lives in the frame docs, which hybrid fusion drops
+    from a text-query's ranked list. Pull them here so a video citation can show
+    BOTH the audio timestamp and the frame caption. Returns doc-dicts sorted by
+    frame timestamp. Tenant-scoped by user_id; empty on any failure.
+    """
+    if not user_id:
+        return []
+    try:
+        from app.core.infra_registry import infra
+        from qdrant_client.http import models as _qm
+        store  = infra.get_vector_store()
+        client = getattr(store, "client", None)
+        if client is None:
+            return []
+        must = [_qm.FieldCondition(key="user_id", match=_qm.MatchValue(value=user_id))]
+        if source_name:
+            must.append(_qm.FieldCondition(key="source", match=_qm.MatchValue(value=source_name)))
+        pts, _ = client.scroll(
+            collection_name="vision_collection",
+            scroll_filter=_qm.Filter(must=must),
+            limit=64, with_payload=True, with_vectors=False,
+        )
+        frames: List[Dict[str, Any]] = []
+        for p in pts:
+            pl = dict(p.payload or {})
+            frames.append({"text": pl.get("text", ""), "score": 0.0, "metadata": pl})
+        frames.sort(key=lambda d: (d["metadata"].get("frame_timestamp")
+                                   or d["metadata"].get("start_timestamp") or 0.0))
+        return frames
+    except Exception:
+        return []
+
+
+# Cast/section map per (user, source) — an earnings-call structure is
+# deterministic, so we resolve exec names once and reuse. Small, bounded.
+_VIDEO_CAST_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
+# A person's name: capitalized words with lowercase bodies — stops at a period,
+# comma, or lowercase word, so "Kevan Parekh. After that" → "Kevan Parekh".
+_NAME_RE   = r"([A-Z][a-z'’-]+(?:\s+[A-Z][a-z'’-]+){1,2})"
+_IR_INTRO_RE = re.compile(r"my name is\s+" + _NAME_RE, re.IGNORECASE)
+_CEO_RE      = re.compile(r"\bCEO\s+" + _NAME_RE)
+_CFO_RE      = re.compile(r"\bCFO\s+" + _NAME_RE)
+
+
+def _resolve_video_cast(user_id: Optional[str], source_name: Optional[str]) -> Dict[str, Any]:
+    """Resolve an earnings video's cast + prepared-remarks section boundaries.
+
+    The diarizer collapses the execs into a single "host" label, so per-turn
+    speaker identity is lost. But an earnings call names its cast in the IR
+    intro ("Apple CEO Tim Cook ... followed by CFO Kevan Parekh ... My name is
+    Suhasini Chandramouli") and hands off deterministically ("Thank you,
+    Suhasini" → CEO; "Thanks, Tim" → CFO; then Q&A). We read the transcript once
+    and derive who-speaks-when from that structure. Cached per (user, source).
+    Returns {} when the cast can't be resolved (non-earnings video).
+    """
+    if not user_id or not source_name:
+        return {}
+    key = (user_id, source_name)
+    if key in _VIDEO_CAST_CACHE:
+        return _VIDEO_CAST_CACHE[key]
+    cast: Dict[str, Any] = {}
+    try:
+        from app.core.infra_registry import infra
+        from qdrant_client.http import models as _qm
+        client = getattr(infra.get_vector_store(), "client", None)
+        if client is None:
+            return {}
+        pts, _ = client.scroll(
+            collection_name="text_collection",
+            scroll_filter=_qm.Filter(must=[
+                _qm.FieldCondition(key="user_id", match=_qm.MatchValue(value=user_id)),
+                _qm.FieldCondition(key="source",  match=_qm.MatchValue(value=source_name)),
+            ]),
+            limit=300, with_payload=True, with_vectors=False,
+        )
+        rows = []
+        for p in pts:
+            pl = p.payload or {}
+            if str(pl.get("embedding_space") or "") == "vision":
+                continue
+            ts = pl.get("start_timestamp")
+            if ts is None:
+                ts = pl.get("timestamp_start") or 0.0
+            rows.append((float(ts), str(pl.get("transcript") or pl.get("text") or ""),
+                         str(pl.get("call_section") or "")))
+        rows.sort(key=lambda r: r[0])
+        if not rows:
+            return {}
+        head = " ".join(r[1] for r in rows[:4])
+        def _grab(rx):
+            m = rx.search(head)
+            return " ".join(w.capitalize() for w in m.group(1).split()) if m else None
+        cast["ir"]  = _grab(_IR_INTRO_RE)
+        cast["ceo"] = _grab(_CEO_RE)
+        cast["cfo"] = _grab(_CFO_RE)
+        cook_start = parekh_start = qa_start = None
+        for ts, txt, sec in rows:
+            tl = txt.lower()
+            if cook_start is None and ("thank you, suhasini" in tl or "thanks, suhasini" in tl
+                                       or "proud to report" in tl):
+                cook_start = ts
+            if parekh_start is None and re.search(r"thank(?:s| you),?\s+tim\b", tl):
+                parekh_start = ts
+            if qa_start is None and (sec == "qa_session" or "first question" in tl
+                                     or "floor is now open" in tl):
+                qa_start = ts
+        cast["cook_start"], cast["parekh_start"], cast["qa_start"] = cook_start, parekh_start, qa_start
+        if not (cast.get("ceo") or cast.get("cfo") or cast.get("ir")):
+            cast = {}
+    except Exception:
+        cast = {}
+    if cast:                       # don't cache a transient empty result
+        _VIDEO_CAST_CACHE[key] = cast
+    return cast
+
+
+def _video_speaker_name(cast: Dict[str, Any], ts: Optional[float],
+                        call_section: str) -> Tuple[Optional[str], Optional[str]]:
+    """Map a cited timestamp to (name, role) for the exec speaking (prepared
+    remarks only). Returns (None, None) for Q&A or when unresolved."""
+    if not cast or ts is None:
+        return None, None
+    try:
+        ts = float(ts)
+    except (TypeError, ValueError):
+        return None, None
+    qa = cast.get("qa_start")
+    if call_section == "qa_session" or (qa is not None and ts >= qa):
+        return None, None   # Q&A — leave to role/analyst attribution
+    cook = cast.get("cook_start")
+    parekh = cast.get("parekh_start")
+    if cook is not None and ts < cook:
+        return cast.get("ir"), "Investor Relations"   # IR intro / safe harbour
+    if parekh is not None and ts >= parekh:
+        return cast.get("cfo"), "CFO"                 # CFO prepared remarks
+    if cook is not None:
+        return cast.get("ceo"), "CEO"                 # CEO prepared remarks
+    return None, None
+
+
+def _split_frame_caption(text: str) -> Tuple[str, Optional[str]]:
+    """Split a frame doc's stored text into (VLM caption, on-screen OCR text)."""
+    t = str(text or "")
+    if "[ON-SCREEN]" in t:
+        cap, ocr = t.split("[ON-SCREEN]", 1)
+        return cap.strip(), (ocr.lstrip(":").strip() or None)
+    return t.strip(), None
+
+
+def _clean_frame_label(caption: str) -> Optional[str]:
+    """Distil a frame caption into a short, citation-grade label.
+
+    The stored caption is a verbose VLM description ("AAPL, Apple Inc. at
+    $283.80, up 4.96% ... Q4 2025 EPS $1.85 Beats $1.76 Estimate, Sales
+    $102.466B Beats ...") — not something to surface raw in a citation. Pull
+    only the on-screen headline metric (the earnings-ticker beat), dropping the
+    chart stock price / daily-change noise. Returns None when the frame is just
+    a price chart, so the UI can fall back to a generic "On-screen chart" label.
+    """
+    c = str(caption or "")
+    parts: List[str] = []
+    # EPS: "EPS $1.85 Beats $1.76", "$1.85 EPS beats $1.76", or the comma form
+    # "$1.85 EPS, $1.76 estimate".
+    m = (re.search(r"EPS\s*\$?([\d.]+)\s*beats?\s*(?:the\s*)?(?:estimate\s*(?:of\s*)?)?\$?([\d.]+)", c, re.I)
+         or re.search(r"\$?([\d.]+)\s*EPS\s*beats?\s*(?:the\s*)?(?:estimate\s*(?:of\s*)?)?\$?([\d.]+)", c, re.I)
+         or re.search(r"\$([\d.]+)\s*EPS\s*,?\s*\$?([\d.]+)\s*(?:estimate|est)", c, re.I))
+    if m:
+        parts.append(f"EPS ${m.group(1)} beats ${m.group(2)}")
+    # Sales/revenue: "Sales $102.466B Beats $102.171B" or "$102.466B revenue, $102.171B estimate".
+    m2 = (re.search(r"(?:sales|revenue)\s*\$?([\d.]+\s*B)\s*beats?\s*(?:the\s*)?(?:estimate\s*(?:of\s*)?)?\$?([\d.]+\s*B)", c, re.I)
+          or re.search(r"\$([\d.]+\s*B)\s*(?:revenue|sales)\s*,?\s*\$?([\d.]+\s*B)\s*(?:estimate|est)", c, re.I))
+    if m2:
+        parts.append(f"Sales ${m2.group(1).replace(' ', '')} beats ${m2.group(2).replace(' ', '')}")
+    if parts:
+        return " · ".join(parts)
+    # No beat ticker — surface a slide number if the caption names one, else None.
+    ms = re.search(r"slide\s*(\d+)", c, re.I)
+    if ms:
+        return f"Slide {ms.group(1)}"
+    return None
+
+
+# ── VIDEO answer-grounding helpers (streaming AV path) ───────────────────────
+# Re-applied after the LLM upgrade (Mistral-7B -> Qwen2.5-14B): this exact
+# context-engineering (aspect-decomposed retrieval + frame stock-price
+# masking) measurably improved answer accuracy on the 7B (43.8% -> 56.2%
+# streaming-eval score) but was reverted because it also destabilized other
+# answers on that model (Q33 100% -> 0%, occasional false refusals) — the 7B
+# was too fragile for any context change to be net-safe. Qwen2.5-14B is a
+# materially stronger instruction-follower; re-enabling this under the new
+# model is the intended next step, not a redo of a failed idea.
+_ASPECT_STOP = frozenset((
+    "what", "when", "which", "were", "with", "that", "this", "your", "about",
+    "did", "does", "the", "and", "for", "was", "are", "how", "why", "who",
+    "apple", "call", "quarter", "these", "they", "their", "from", "into", "said",
+    "say", "says", "during", "regarding", "whether", "tell", "company", "results",
+    "reported", "report", "also", "year", "over",
+))
+
+# Vocabulary that means a question is actually about the reported figures the
+# beat-ticker frame conveys (EPS/revenue vs. analyst ESTIMATE) — used to gate
+# that frame into the AV answer context only when relevant (see
+# _build_av_stream_context: unconditionally including it made every video
+# answer lead with the EPS/revenue beat regardless of what was asked).
+# Deliberately narrow to the "beat vs. estimate" framing itself, not bare
+# "revenue"/"eps" — those appear in nearly every finance question (Q32's
+# Services revenue, Q33's FY revenue, ...) and would pull the QUARTERLY
+# actuals-vs-estimate ticker into questions that have nothing to do with it.
+_REPORTED_RESULTS_WORDS_LOCAL = frozenset((
+    "beat", "beating", "beats", "estimate", "estimates",
+))
+
+
+def _split_query_aspects(query: str, max_aspects: int = 5) -> List[str]:
+    """Split a multi-part question into its aspect phrases (on commas / 'and' /
+    semicolons / sub-clauses). Keeps phrases with enough content to be a
+    meaningful retrieval target on their own.
+
+    Threshold is >=1 real content word, not >=2: a short trailing aspect like
+    "...and M&A?" splits down to just the phrase "M&A" (a single token after
+    stopword-filtering), which used to fail a >=2-word minimum and silently
+    vanish from the aspect list — so a 4-part question was decomposed into 3
+    parts and the model was never even asked about M&A. One genuine finance
+    term/phrase (not just leftover stopwords) is a meaningful retrieval target
+    on its own.
+    """
+    parts = re.split(r"\s*(?:,|\band\b|;|\?)\s*", query, flags=re.IGNORECASE)
+    out: List[str] = []
+    for p in parts:
+        p = p.strip()
+        content = [w for w in re.findall(r"[a-z0-9&]+", p.lower())
+                   if len(w) > 2 and w not in _ASPECT_STOP]
+        if len(content) >= 1:
+            out.append(p)
+    return out[:max_aspects]
+
+
+def _doc_is_frame_like(d: Dict[str, Any]) -> bool:
+    m = d.get("metadata") or {}
+    if str(m.get("embedding_space") or "") == "vision":
+        return True
+    if str(m.get("subtype") or m.get("content_type") or "") == "frame":
+        return True
+    if m.get("asset_path") or m.get("frame_timestamp") is not None:
+        return True
+    return "[ON-SCREEN]" in str(d.get("text") or "")
+
+
+def _doc_is_true_frame(d: Dict[str, Any]) -> bool:
+    """Metadata-only frame check — is this doc ITSELF a separate frame/vision
+    record (not a spoken-transcript doc). Unlike _doc_is_frame_like(), this
+    has no text-substring fallback: a transcript chunk can legitimately embed
+    a nearby frame's "[VISUAL AT ...]"/"[ON-SCREEN]" OCR annotation inline
+    (the chunker attaches on-screen context to the surrounding spoken text),
+    and _doc_is_frame_like's blanket "[ON-SCREEN]" check wrongly excludes
+    that whole transcript chunk as if it were the frame itself — dropping
+    real spoken content (e.g. the CFO's "$416 billion for the fiscal year"
+    line, chunked right next to a stock-ticker frame reference) out of the
+    grounding context entirely."""
+    m = d.get("metadata") or {}
+    if str(m.get("embedding_space") or "") == "vision":
+        return True
+    if str(m.get("subtype") or m.get("content_type") or "") == "frame":
+        return True
+    return m.get("asset_path") is not None or m.get("frame_timestamp") is not None
+
+
+def _mask_frame_stock_price(d: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove the on-screen chart PRICE clause ('at $283.80', 'up 4.96% from
+    the previous day') from a FRAME doc's grounding text so the model can't
+    report the stock price as an earnings figure. Transcript docs are returned
+    byte-identical (the "up 8% from a year ago" YoY figure is never touched —
+    this only matches the frame's daily-change phrasing)."""
+    if not _doc_is_frame_like(d):
+        return d
+    t = str(d.get("text") or "")
+    c = re.sub(r"\b(?:at|with a price of)\s*\$[\d,]+\.\d+\b", "", t, flags=re.IGNORECASE)
+    c = re.sub(r",?\s*\bup\s+[\d.]+%\s*from\s+(?:the\s+)?previous\s+(?:day|close)[^,.;\n]*",
+               "", c, flags=re.IGNORECASE)
+    if c == t:
+        return d
+    nd = dict(d)
+    nd["text"] = c
+    return nd
+
+
+def _build_av_stream_context(query: str, docs: List[Dict[str, Any]], retriever: Any,
+                             session_id: str, user_id: Optional[str], filters: Any,
+                             source_name: Optional[str]) -> List[Dict[str, Any]]:
+    """Grounding context for the streaming AV answer.
+
+    QUERY DECOMPOSITION: a multi-part earnings question ("guidance, iPhone Air,
+    AI models, M&A") reranks to chunks about only ONE part, so the model
+    answers one part and drops the rest. Split the question into aspect
+    phrases and run a small SEMANTIC sub-retrieval for each (handles synonyms
+    like guidance<->outlook), union those with the top reranked docs plus one
+    beat-ticker frame, and mask frame stock-prices. Purely additive over
+    docs[:5], so a working single-aspect answer is never degraded. Fires for
+    any genuinely multi-part question (>=2 aspects) — a 2-aspect question
+    (e.g. "full-year revenue, AND what records did it set") still reranks to
+    chunks about only one of the two: the real FY-total-revenue sentence lives
+    in an otherwise debt/cash-heavy chunk that a plain top-5 rerank drops
+    entirely, while a *different* record-setting chunk (the Services quarterly
+    record) dominates the top-5 instead. A single-aspect (1) question answers
+    fine from docs[:5] alone; augmenting it just dilutes the context for no
+    benefit.
+    """
+    # ONLY when the question is actually about revenue/EPS/beat-estimate.
+    # Unconditionally letting a stock-chart/ticker frame's on-screen OCR
+    # ("Apple Q4 EPS $1.85 Beats $1.76 Estimate, Sales $102.466B Beat
+    # $102.171B Estimate") into context made the model lead with that fact
+    # regardless of what was asked (a Services/antitrust question, a
+    # December-guidance question, ...) — the ticker text is compact and
+    # quotable enough that the model reached for it even when irrelevant.
+    # Gate it on the same vocabulary the router uses to recognize a
+    # reported-results question. This must apply to EVERY source of frame
+    # docs, not just the dedicated fetch below — a chart-caption frame can
+    # also rank into the plain top-5 rerank (docs[:5]) on its own keyword
+    # density, so `base`/`aspect_docs` are filtered the same way.
+    _ql = query.lower()
+    _beat_relevant = any(w in _ql for w in _REPORTED_RESULTS_WORDS_LOCAL)
+
+    # Filter frames from the WHOLE candidate list before taking the top 5 —
+    # not just within docs[:5] — so losing a frame never shrinks `base` below
+    # 5 real transcript docs (a top-5 that happened to include 2 chart-frame
+    # docs would otherwise leave only 3 grounding docs behind, with nothing
+    # to replace them).
+    base = [d for d in docs if _beat_relevant or not _doc_is_true_frame(d)][:5]
+
+    # NAMED-SPEAKER BOOST — "What did Tim Cook say about X" reranks to
+    # whichever chunk best matches X semantically, even when that chunk is
+    # actually the CFO's remarks (both execs discuss guidance/outlook, and
+    # the CFO's numbers-heavy phrasing often matches a numeric-sounding
+    # aspect better). The citation is then technically accurate to its
+    # source but answers the wrong person. When the query names an exec,
+    # prefer candidates that fall inside that exec's own resolved speaking
+    # window over equally-ranked candidates from the other exec's window.
+    _named_speaker: Optional[str] = None
+    if re.search(r"\btim\s+cook\b|\bcook\b|\bceo\b", _ql):
+        _named_speaker = "ceo"
+    elif re.search(r"\bkevan\s+parekh\b|\bparekh\b|\bcfo\b", _ql):
+        _named_speaker = "cfo"
+    _speaker_cast = (_resolve_video_cast(user_id, source_name)
+                     if _named_speaker else {})
+
+    def _in_named_speaker_window(d: Dict[str, Any]) -> bool:
+        if not _named_speaker or not _speaker_cast:
+            return True   # no preference — don't reorder
+        m = d.get("metadata") or {}
+        ts = m.get("start_timestamp")
+        if ts is None:
+            return True   # unknown timestamp — neutral, don't demote
+        try:
+            ts = float(ts)
+        except (TypeError, ValueError):
+            return True
+        cook_start   = _speaker_cast.get("cook_start")
+        parekh_start = _speaker_cast.get("parekh_start")
+        qa_start     = _speaker_cast.get("qa_start")
+        if _named_speaker == "ceo":
+            return (cook_start is not None and ts >= cook_start
+                    and (parekh_start is None or ts < parekh_start))
+        return (parekh_start is not None and ts >= parekh_start
+                and (qa_start is None or ts < qa_start))
+
+    aspect_docs: List[Dict[str, Any]] = []
+    try:
+        aspects = _split_query_aspects(query)
+        if len(aspects) >= 2:
+            for asp in aspects:
+                try:
+                    # top_k=4, not 2: retrieval ranking has run-to-run jitter
+                    # (GPU TF32/benchmark-mode float non-determinism), so a
+                    # narrow top_k occasionally misses the one chunk that
+                    # actually answers this aspect. A wider candidate pool
+                    # makes the aspect fallback robust to that jitter.
+                    _raw = retriever.search(query=asp, session_id=session_id,
+                                            top_k=4, user_id=user_id, filters=filters)
+                    _ad = _dedup_docs(_normalize_docs(_raw))
+                    if _named_speaker and _speaker_cast:
+                        _ad.sort(key=lambda d: 0 if _in_named_speaker_window(d) else 1)
+                except Exception:
+                    _ad = []
+                for d in _ad[:4]:
+                    if _doc_is_true_frame(d):
+                        continue            # transcript only for grounding
+                    aspect_docs.append(d)
+    except Exception:
+        aspect_docs = []
+    # One metric-bearing frame (the beat ticker) for the on-screen figures.
+    beat_frame = None
+    if _beat_relevant:
+        for f in _fetch_video_frame_docs(user_id, source_name):
+            cap, _ = _split_frame_caption(f.get("text") or "")
+            if _clean_frame_label(cap):
+                beat_frame = f
+                break
+    pool = base + aspect_docs + ([beat_frame] if beat_frame else [])
+    seen: set = set()
+    out: List[Dict[str, Any]] = []
+    for d in pool:
+        k = str(d.get("text") or "")[:80]
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        out.append(_mask_frame_stock_price(d))
+    return out[:9]
+
+
+def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3,
+                        user_id: Optional[str] = None) -> List[Dict[str, Any]]:
     import os as _os
     out: List[Dict[str, Any]] = []
     for doc in docs[:max_items]:
@@ -1224,11 +1639,74 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3) -> List[
                 )
             )
             speaker_name = "Reporter" if _is_reporter_turn else None
+        # VIDEO Q&A ANALYST fallback — earnings-call analysts self-identify
+        # via their investment bank/firm ("Ben from Evercore"), not a news
+        # outlet, so _is_reporter_turn's outlet regex above (tuned for
+        # FOMC-style press-conference reporters) never fires for them; and
+        # the ingested call_section label can be wrong for some Q&A turns
+        # (still tagged "prepared_remarks"). Use the resolved cast's own
+        # qa_start boundary (query-time, cached, video-scoped) as a second,
+        # more reliable signal: past that point in this specific video, an
+        # unnamed speaker is a Q&A analyst, not a mislabeled host — show
+        # "Analyst" instead of leaving the citation a bare, context-free
+        # timestamp with nothing else to it.
+        if not speaker_name and modality in ("mp4", "video"):
+            # meta["user_id"] often doesn't survive the retriever/rerank/fusion
+            # chain for regular (non-frame) docs — the request's own user_id
+            # (always known to the caller) is the reliable fallback.
+            _cast_fb = _resolve_video_cast(meta.get("user_id") or user_id, source_name)
+            _qa_fb = _cast_fb.get("qa_start")
+            _ts_fb = start_time
+            if _ts_fb is None:
+                _raw_ts_fb = meta.get("start_timestamp")
+                _ts_fb = float(_raw_ts_fb) if _raw_ts_fb is not None else None
+            if _qa_fb is not None and _ts_fb is not None and _ts_fb >= _qa_fb:
+                speaker_name = "Analyst"
         row_range    = meta.get("row_range")
         chunk_type   = meta.get("chunk_type") or meta.get("content_type")
         call_section = meta.get("call_section") or meta.get("topic_section")
         image_title  = meta.get("image_title")
         slide_numbers = meta.get("slide_numbers_covered")
+
+        # VIDEO FRAME (vision) citation — a captioned keyframe. Carries the
+        # on-screen caption + OCR + the frame's own timestamp so the client can
+        # render a distinct "visual" citation next to the spoken (transcript)
+        # ones. Detected by embedding_space="vision" or subtype/type "frame".
+        frame_timestamp: Optional[float] = None
+        frame_caption:   Optional[str]   = None
+        frame_label:     Optional[str]   = None
+        on_screen_text:  Optional[str]   = None
+        asset_path:      Optional[str]   = None
+        _is_frame = (
+            str(meta.get("embedding_space") or "") == "vision"
+            or str(meta.get("subtype") or meta.get("content_type") or chunk_type or "") == "frame"
+        )
+        if _is_frame:
+            chunk_type = "frame"
+            _ft = meta.get("frame_timestamp")
+            if _ft is None:
+                _ft = meta.get("start_timestamp") if meta.get("start_timestamp") is not None \
+                    else meta.get("timestamp_start")
+            if _ft is not None:
+                try:
+                    frame_timestamp = float(_ft)
+                except (TypeError, ValueError):
+                    frame_timestamp = None
+            asset_path = meta.get("asset_path") or None
+            # Frames are written to the ephemeral temp_frames dir (swept on
+            # restart), so a stored path may no longer exist — don't hand the
+            # client a broken image URL; the caption text stands on its own.
+            if asset_path and not _os.path.exists(asset_path):
+                asset_path = None
+            frame_caption, on_screen_text = _split_frame_caption(text)
+            # Short, citation-grade label (the on-screen headline metric) — this
+            # is what the client shows; the raw caption/OCR are kept but not
+            # surfaced verbatim.
+            frame_label = _clean_frame_label(frame_caption)
+            frame_caption = (frame_caption[:200] or None) if frame_caption else None
+            # A frame's timestamp is the citation's timestamp so the time chip shows.
+            if start_time is None and frame_timestamp is not None:
+                start_time = frame_timestamp
 
         # Clean heading_hierarchy list → readable string
         if isinstance(heading, list):
@@ -1264,6 +1742,13 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3) -> List[
             "chunk_type":     chunk_type,
             "image_title":    image_title,
             "slide_numbers":  slide_numbers,
+            # Video-frame (visual) citation fields — None on non-frame sources.
+            "is_frame":         _is_frame,
+            "frame_timestamp":  frame_timestamp,
+            "frame_label":      frame_label,
+            "frame_caption":    frame_caption,
+            "on_screen_text":   on_screen_text,
+            "asset_path":       asset_path,
             "snippet":        snippet,
             "text":           snippet,
             "score":          round(score, 6),
@@ -1991,7 +2476,7 @@ class RAGPipeline:
             context = _build_context(docs, settings.MAX_CONTEXT_CHARS)
 
             # Phase 24.8 — standardised sources array with page_number/start_time/end_time
-            p248_sources = _build_p248_sources(docs)
+            p248_sources = _build_p248_sources(docs, user_id=user_id)
             sources = p248_sources
             full_context = _compose(history_text, context)
             full_context = full_context[:settings.MAX_PROMPT_CHARS]
@@ -2317,24 +2802,77 @@ class RAGPipeline:
                     try:
                         from app.pipeline.query_pipeline import _get_reasoning_components
                         _reasoning, _ = _get_reasoning_components(self._get_llm())
-                        # Focused context: the small model drifts and mixes facts
-                        # when fed ~20 broadly-relevant transcript chunks (a press
-                        # conference has boilerplate that scores moderately for
-                        # almost any question). The answer lives in the top 1-3
-                        # chunks after reranking, so pass a tight set — this keeps
-                        # the answer on the specific fact asked and citing the #1
-                        # chunk, instead of synthesising a vague summary.
-                        _av_docs = docs[:5]
+                        # Focused context: the model drifts and mixes facts when
+                        # fed ~20 broadly-relevant transcript chunks. Base is the
+                        # top-5 reranked; for VIDEO we additionally decompose
+                        # multi-part questions into aspects and pull the best
+                        # transcript chunk for each, add one beat-ticker frame,
+                        # and mask frame stock-prices (which the model otherwise
+                        # reads as earnings). Additive over docs[:5].
+                        _top_mod = str(((docs[:1] or [{}])[0].get("metadata") or {}).get("modality") or "")
+                        if _top_mod in ("mp4", "video"):
+                            _av_src = (((docs[:1] or [{}])[0].get("metadata") or {}).get("source")
+                                       or ((docs[:1] or [{}])[0].get("metadata") or {}).get("filename"))
+                            _av_docs = _build_av_stream_context(
+                                query, docs, retriever, session_id, user_id,
+                                _stream_filters, _av_src)
+                        else:
+                            _av_docs = docs[:5]
                         _r_out = _reasoning.generate_answer(
-                            query=query,
-                            retrieved_docs=_av_docs,
-                            memory_context="",
-                            session_id=session_id,
-                            user_id=user_id or "",
-                        )
+                            query=query, retrieved_docs=_av_docs, memory_context="",
+                            session_id=session_id, user_id=user_id or "")
                         _cand = (_r_out.get("answer") or "").strip()
                         if _cand:
                             _av_reasoned_answer = _cand
+                            # PHASE C — VERIFY + ASSEMBLE: for a genuinely
+                            # multi-part question (same >=3-aspect gate as the
+                            # context builder above), check whether the primary
+                            # answer actually covers every aspect asked; if one
+                            # is visibly missing, run ONE bounded follow-up
+                            # generation on just that aspect and append it.
+                            # Deliberately not per-aspect answer synthesis (see
+                            # module docstring) — this only ever appends to an
+                            # already-generated, already-safe primary answer.
+                            if _top_mod in ("mp4", "video"):
+                                try:
+                                    from app.agents.video_answer_agent import (
+                                        verify_aspect_coverage, assemble_answer,
+                                    )
+                                    _aspects_chk = _split_query_aspects(query)
+                                    if len(_aspects_chk) >= 3:
+                                        _coverage = verify_aspect_coverage(_cand, _aspects_chk)
+                                        if _coverage.missing:
+                                            def _followup(asp: str) -> Optional[str]:
+                                                try:
+                                                    _fu_raw = retriever.search(
+                                                        query=asp, session_id=session_id, top_k=4,
+                                                        user_id=user_id, filters=_stream_filters)
+                                                    _fu_docs = _dedup_docs(_normalize_docs(_fu_raw))[:4]
+                                                except Exception:
+                                                    _fu_docs = []
+                                                if not _fu_docs:
+                                                    return None
+                                                _fu_out = _reasoning.generate_answer(
+                                                    query=asp, retrieved_docs=_fu_docs,
+                                                    memory_context="",
+                                                    session_id=session_id + "|followup",
+                                                    user_id=user_id or "")
+                                                _fu_ans = (_fu_out.get("answer") or "").strip()
+                                                return (_fu_ans if _fu_ans
+                                                       and not _is_llm_refusal(_fu_ans) else None)
+                                            _assembled = assemble_answer(
+                                                _cand, _coverage, followup_fn=_followup,
+                                                max_followups=1)
+                                            if _assembled != _cand:
+                                                _av_reasoned_answer = _assembled
+                                                logger.info(
+                                                    event="rag_stream_video_agent_followup",
+                                                    aspect=_coverage.missing[0][:60],
+                                                    session_id=session_id)
+                                except Exception as _vex:
+                                    logger.warning(
+                                        event="rag_stream_video_agent_verify_failed",
+                                        error=str(_vex), session_id=session_id)
                     except Exception as _rex:
                         logger.warning(event="rag_stream_av_reasoning_failed",
                                        error=str(_rex), session_id=session_id)
@@ -2495,6 +3033,147 @@ class RAGPipeline:
                 except Exception:
                     _source_docs = docs[:3]
 
+                # VIDEO multimodal citation — cite BOTH the spoken source
+                # (speaker + timestamp) and the on-screen frame (caption +
+                # timestamp). Two corrections over the raw reranked order:
+                #   1. Timestamp accuracy — the reranker often puts the IR
+                #      safe-harbor / operator intro on top (it lists "revenue,
+                #      gross margin, ..."), so the cited timestamp points at 0:00
+                #      instead of where the figure is actually said. Re-pick the
+                #      spoken sources by overlap with the ANSWER text and demote
+                #      operator_intro, so the timestamp lands on the real moment.
+                #   2. Attach the frame nearest that moment (fusion drops frames
+                #      from a text query's ranked list, so we fetch them directly).
+                # Video-scoped: only fires when the answer is a video chunk.
+                try:
+                    if _source_docs:
+                        _lead_meta = _source_docs[0].get("metadata") or {}
+                        _is_video = str(_lead_meta.get("modality") or "") in ("mp4", "video")
+                        def _doc_is_frame(_d):
+                            _m = _d.get("metadata") or {}
+                            return (str(_m.get("embedding_space") or "") == "vision"
+                                    or str(_m.get("subtype") or _m.get("content_type") or "") == "frame")
+                        if _is_video:
+                            _src_name = _lead_meta.get("source") or _lead_meta.get("filename")
+                            # Split any retrieved frame out; rank the SPOKEN sources
+                            # by overlap with the ANSWER (so the cited timestamp is
+                            # the real moment), demoting the IR safe-harbor / intro.
+                            _spoken_only = [d for d in _source_docs if not _doc_is_frame(d)]
+                            _ans_words = {w for w in re.findall(r"[a-z0-9$%.]{4,}", answer.lower())}
+                            def _cite_rank(_d, _idx):
+                                _m = _d.get("metadata") or {}
+                                _txt = str(_d.get("text") or "").lower()
+                                _ov = sum(1 for w in _ans_words if w in _txt)
+                                _sec = str(_m.get("call_section") or "")
+                                if _sec == "operator_intro":
+                                    _ov -= 8
+                                elif _sec == "prepared_remarks":
+                                    _ov += 2
+                                elif _sec == "qa_session":
+                                    _ov -= 1
+                                return (_ov, -_idx)
+                            _spoken = sorted(list(enumerate(_spoken_only)),
+                                             key=lambda p: _cite_rank(p[1], p[0]), reverse=True)
+                            _spoken_docs = [d for _i, d in _spoken][:2]
+
+                            # Resolve exec names (Tim Cook / Kevan Parekh / Suhasini)
+                            # from the call's cast + section structure — the diarizer
+                            # collapses them, but an earnings call names its cast.
+                            _cast = _resolve_video_cast(user_id, _src_name)
+                            if _cast:
+                                for _d in _spoken_docs:
+                                    _dm = _d.get("metadata") or {}
+                                    _exist = str(_dm.get("speaker_name") or "").strip()
+                                    # Only keep an existing name if it's a REAL name,
+                                    # not a raw diarization label ("SPEAKER_01").
+                                    if _exist and not re.match(r"^SPEAKER_\d+$", _exist):
+                                        continue
+                                    _sts = (_dm.get("start_time")
+                                            if _dm.get("start_time") is not None
+                                            else _dm.get("timestamp_start")
+                                            if _dm.get("timestamp_start") is not None
+                                            else _dm.get("start_timestamp"))
+                                    _nm, _rl = _video_speaker_name(
+                                        _cast, _sts, str(_dm.get("call_section") or ""))
+                                    if _nm:
+                                        _dm = dict(_dm)
+                                        _dm["speaker_name"] = _nm
+                                        if _rl:
+                                            _dm["speaker_role"] = _rl
+                                        _d["metadata"] = _dm
+
+                            # Pick ONE citation frame (HYBRID: nearest metric-bearing
+                            # frame within ~90s of the cited moment, else nearest
+                            # metric, else nearest). Fetch directly (fusion drops
+                            # frames); fall back to any retrieved frame.
+                            #
+                            # The "metric-bearing" tier boost is gated on the SAME
+                            # beat/estimate vocabulary as the generation-context
+                            # frame gate (_build_av_stream_context) — this video's
+                            # only metric-bearing frame is the "EPS $1.85 beats
+                            # $1.76" ticker, so an ungated has_metric bonus made it
+                            # win the citation slot on every video question
+                            # regardless of topic (a Services/antitrust question,
+                            # a December-guidance question, ...), even though the
+                            # generation context itself had already stopped citing
+                            # it. Off-topic and nothing near the cited moment →
+                            # omit the frame chip rather than attach a random one.
+                            _frames = _fetch_video_frame_docs(user_id, _src_name)
+                            if not _frames:
+                                _frames = [d for d in _source_docs if _doc_is_frame(d)]
+                            _best_frame = None
+                            if _frames and _spoken_docs:
+                                _beat_relevant_cite = any(
+                                    w in query.lower() for w in _REPORTED_RESULTS_WORDS_LOCAL)
+                                # Drop metric-bearing (beat-ticker) frames from the
+                                # candidate pool entirely when off-topic — not just
+                                # deprioritize them. This video's ticker frame is
+                                # one of only a handful ever captured, so it can
+                                # still be the temporally-NEAREST frame to a given
+                                # cited moment even with zero content-relevance
+                                # bonus; only removing it from consideration (not
+                                # just demoting its tier) stops proximity alone
+                                # from re-selecting it for an unrelated question.
+                                if not _beat_relevant_cite:
+                                    _frames = [
+                                        f for f in _frames
+                                        if not _clean_frame_label(
+                                            _split_frame_caption(f.get("text") or "")[0])
+                                    ]
+                                _tm = _spoken_docs[0].get("metadata") or {}
+                                _near = (_tm.get("start_time")
+                                         if _tm.get("start_time") is not None
+                                         else _tm.get("timestamp_start")
+                                         if _tm.get("timestamp_start") is not None
+                                         else _tm.get("start_timestamp"))
+                                _near = float(_near) if _near is not None else 0.0
+                                _FRAME_WIN = 90.0
+                                def _frame_key(_f):
+                                    _cap, _ = _split_frame_caption(_f.get("text") or "")
+                                    _has_metric = (_beat_relevant_cite
+                                                  and _clean_frame_label(_cap) is not None)
+                                    _fm = _f.get("metadata") or {}
+                                    _fts = (_fm.get("frame_timestamp")
+                                            or _fm.get("start_timestamp") or 0.0)
+                                    _dist = abs(float(_fts) - _near)
+                                    if _has_metric and _dist <= _FRAME_WIN:
+                                        _tier = 0
+                                    elif _has_metric:
+                                        _tier = 1
+                                    elif _dist <= _FRAME_WIN:
+                                        _tier = 2
+                                    else:
+                                        _tier = 3
+                                    return (_tier, _dist)
+                                if _frames:
+                                    _candidate = min(_frames, key=_frame_key)
+                                    if _frame_key(_candidate)[0] < 3:
+                                        _best_frame = _candidate
+                            if _spoken_docs:
+                                _source_docs = _spoken_docs + ([_best_frame] if _best_frame else [])
+                except Exception as _fr_err:
+                    logger.debug(event="rag_stream_frame_citation_skip", error=str(_fr_err))
+
                 # TXT NUMERIC-FIDELITY GUARD: this streaming path has no
                 # equivalent of the non-streaming /rag/query path's
                 # ReasoningEngine numeric-mismatch retry — it only reaches
@@ -2605,7 +3284,8 @@ class RAGPipeline:
                 # Emit sources so the client can display them immediately.
                 try:
                     import json as _json
-                    _p248 = _build_p248_sources(_source_docs)
+                    _p248 = _build_p248_sources(_source_docs, max_items=max(3, len(_source_docs)),
+                                                user_id=user_id)
                     yield "\x00SOURCES\x00" + _json.dumps(_p248)
                 except Exception:
                     pass

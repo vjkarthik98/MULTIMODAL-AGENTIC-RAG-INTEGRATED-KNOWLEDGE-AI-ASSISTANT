@@ -23,7 +23,7 @@ from PIL import Image as PILImage
 from app.chunking.audio_chunker import (
     _assemble_chunks,
     _map_speaker_roles,
-    _run_whisper,
+    _merge_fragmented_hosts,
 )
 from app.chunking.base_chunker import BaseChunker
 from app.chunking.finance_numbers import deterministic_chunk_id, extract_finance_entities
@@ -95,22 +95,134 @@ def _measure_snr(wav_path: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# VIDEO ASR — earnings-webcast tuned transcription (video-scoped)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Video-specific Whisper priming prompt. The shared audio prompt in
+# audio_chunker.py is FOMC/Powell-tuned (Federal Reserve press conference); an
+# investor/earnings webcast needs company-executive priming instead so
+# faster-whisper keeps correct capitalization and gets the proper nouns
+# (executive names, product names, financial metrics) right. Owned by the
+# video pipeline; must NOT be shared back into the audio prompt.
+_VIDEO_WHISPER_PROMPT = (
+    "The following is a corporate quarterly earnings conference call and investor "
+    "webcast, transcribed with correct capitalization and punctuation. Company "
+    "executives — the CEO, the CFO, and the head of Investor Relations — deliver "
+    "prepared remarks on revenue, diluted EPS, gross margin, Services, iPhone, and "
+    "year-over-year growth, then take questions from sell-side analysts who "
+    "introduce themselves and their firm. Speakers include Tim Cook, Kevan Parekh, "
+    "and Suhasini Chandramouli. Figures such as $102.5 billion in revenue, $1.85 "
+    "EPS, 8% growth, and all-time records are stated precisely."
+)
+
+# Match the audio pipeline's proven 10-minute transcription window: a single
+# faster-whisper call over an hour-scale recording degrades in the later portion
+# (dropped capitalization, garbled proper nouns), which is exactly the Q&A half
+# of an earnings call. 600 s windows keep each call short enough that the casing
+# prompt stays effective throughout.
+_VIDEO_TRANSCRIBE_SEGMENT_SEC = 600
+
+
+def _run_whisper_video(wav_path: str) -> List[Dict]:
+    """Transcribe with faster-whisper using the earnings-webcast prompt.
+
+    Mirrors audio_chunker._run_whisper but swaps in the video-domain priming
+    prompt. Returns a list of word dicts ({"word","start","end"}).
+    """
+    try:
+        from app.core.model_loader import model_loader as loader
+        model = loader.get_whisper()
+        segments, _ = model.transcribe(
+            wav_path,
+            word_timestamps=True,
+            vad_filter=True,
+            condition_on_previous_text=False,
+            initial_prompt=_VIDEO_WHISPER_PROMPT,
+            beam_size=5,
+        )
+        words: List[Dict] = []
+        for seg in segments:
+            if hasattr(seg, "words") and seg.words:
+                for w in seg.words:
+                    words.append({"word": w.word, "start": w.start, "end": w.end})
+            else:
+                words.append({"word": seg.text, "start": seg.start, "end": seg.end})
+        return words
+    except Exception as exc:
+        logger.warning(event="video_whisper_failed", error=str(exc))
+        return []
+
+
+def _transcribe_video_audio(wav_path: str, duration_sec: float) -> List[Dict]:
+    """Segmented transcription for video audio (>10 min → 600 s windows).
+
+    Video previously called _run_whisper directly (a single call over the whole
+    track), inheriting the exact long-audio quality degradation the audio
+    pipeline already solved with segmentation. This mirrors
+    audio_chunker._transcribe_long_audio but uses the video Whisper prompt and
+    keeps the logic inside the video-owned file.
+    """
+    if duration_sec <= 0 or duration_sec <= _VIDEO_TRANSCRIBE_SEGMENT_SEC:
+        return _run_whisper_video(wav_path)
+
+    import math as _math
+    from pydub import AudioSegment
+
+    audio = AudioSegment.from_wav(wav_path)
+    chunk_sec = _VIDEO_TRANSCRIBE_SEGMENT_SEC
+    n_segments = _math.ceil(duration_sec / chunk_sec)
+
+    segment_paths: List[Tuple[str, float]] = []
+    for i in range(n_segments):
+        start_ms = int(i * chunk_sec * 1000)
+        end_ms = int(min((i + 1) * chunk_sec, duration_sec) * 1000)
+        seg = audio[start_ms:end_ms]
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        seg.export(tmp.name, format="wav")
+        tmp.close()
+        segment_paths.append((tmp.name, i * chunk_sec))
+
+    words: List[Dict] = []
+    try:
+        with ThreadPoolExecutor(max_workers=settings.AUDIO_TRANSCRIPTION_WORKERS) as pool:
+            futures = {pool.submit(_run_whisper_video, p): off for p, off in segment_paths}
+            results: List[Tuple[float, List[Dict]]] = []
+            for fut, off in futures.items():
+                try:
+                    seg_words = fut.result()
+                    for w in seg_words:
+                        w["start"] += off
+                        w["end"] += off
+                    results.append((off, seg_words))
+                except Exception as exc:
+                    logger.warning(event="video_segment_transcribe_failed", offset=off, error=str(exc))
+        results.sort(key=lambda r: r[0])
+        for _, seg_words in results:
+            words.extend(seg_words)
+    finally:
+        for p, _off in segment_paths:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+    return words
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MODEL WRAPPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Concise, retrieval-oriented prompt. Verbatim on-screen text (ticker bars,
+# headline crawls) is captured separately by TrOCR, so the VLM only needs a
+# short factual summary of the visual — this keeps generation short (fast) and
+# focused on what a finance query actually retrieves on: chart, prices, and any
+# highlighted headline/metric. Bounded by VIDEO_CAPTION_MAX_TOKENS.
 _VIDEO_FRAME_PROMPT = (
-    "Analyze this financial presentation frame. Report verbatim:\n"
-    "1) Slide or chart title (exact wording)\n"
-    "2) All bullet points (verbatim, every word)\n"
-    "3) Every number visible with its exact label (do NOT round or paraphrase)\n"
-    "4) Chart type with all axis labels and legend entries\n"
-    "5) Speaker name and title if shown in lower-third\n"
-    "6) Any table headers and every cell value\n"
-    "7) Slide number if visible anywhere on the frame\n"
-    "8) Company name or logo visible\n"
-    "9) Any highlighted, circled, or annotated elements\n"
-    "10) ALL numbers visible anywhere on the slide — including percentages, basis points, multiples\n"
-    "Be extremely precise about numbers — never round, never paraphrase."
+    "This is a frame from a financial earnings webcast (chart, ticker, or slide). "
+    "In 2-3 sentences, state concisely: the chart or slide title; the asset/ticker "
+    "shown and its visible price or level; and any headline, metric, or number "
+    "visible on screen (revenue, EPS, percentages) — copy numbers exactly, never "
+    "round. Be brief and factual."
 )
 
 
@@ -118,7 +230,9 @@ def caption_frame(image: "PILImage.Image", prompt: Optional[str] = None) -> str:
     """Caption a single video frame using Qwen2-VL-2B-Instruct. Returns '' on failure."""
     try:
         from app.core.model_loader import model_loader
-        processor, model, device = model_loader.get_qwen2_vl()
+        # Video-specific (smaller) captioner — see get_qwen2_vl_video. Keeps a
+        # 1-hour ingest within VRAM alongside Whisper/pyannote/SigLIP + llama-server.
+        processor, model, device = model_loader.get_qwen2_vl_video()
     except Exception as exc:
         logger.warning(event="qwen2vl_unavailable", error=str(exc))
         return ""
@@ -134,7 +248,7 @@ def caption_frame(image: "PILImage.Image", prompt: Optional[str] = None) -> str:
         text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = processor(text=[text], images=[image], return_tensors="pt").to(device)
         with _torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=settings.QWEN2_VL_MAX_TOKENS)
+            out = model.generate(**inputs, max_new_tokens=settings.VIDEO_CAPTION_MAX_TOKENS)
         generated_ids = [o[len(i):] for i, o in zip(inputs.input_ids, out)]
         return processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
     except Exception as exc:
@@ -231,19 +345,25 @@ class VideoChunker(BaseChunker):
                         logger.warning(event="video_no_audio", source=source)
                         continue
 
-                    # 2. Whisper transcription.
-                    words = _run_whisper(wav_path)
+                    # 2. Whisper transcription — segmented (600 s windows) so an
+                    #    hour-scale earnings call does not degrade in its Q&A half.
+                    _duration_sec = float((ext.extra or {}).get("duration_seconds") or 0.0)
+                    words = _transcribe_video_audio(wav_path, _duration_sec)
 
-                    # 3. Diarization.
+                    # 3. Diarization (+ host-fragment merge, matching audio).
                     diarization: List[Tuple[float, float, str]] = []
                     try:
                         from app.chunking.audio_chunker import diarize as _diarize
                         diarization = _diarize(wav_path)
+                        diarization = _merge_fragmented_hosts(diarization)
                     except Exception:
                         pass
 
                     full_transcript = " ".join(w["word"] for w in words)
-                    role_map        = _map_speaker_roles(diarization, full_transcript)
+                    # _map_speaker_roles expects the word-dict list (it anchors
+                    # names to word timestamps) — passing the joined string here
+                    # crashed ingestion whenever diarization returned segments.
+                    role_map        = _map_speaker_roles(diarization, words)
                     audio_chunks    = _assemble_chunks(words, diarization, role_map)
 
                     # Detect earnings call from full transcript
@@ -284,6 +404,16 @@ class VideoChunker(BaseChunker):
                     ) as _caption_pool:
                         for ts, result in _caption_pool.map(_caption_safe, frame_dicts):
                             captioned_frames[ts] = result
+
+                    # Release the VLM's transient activations/KV-cache before the
+                    # embedding stage (SigLIP frames + BGE text) so a long ingest
+                    # doesn't stack peaks and OOM on a shared GPU.
+                    try:
+                        import torch as _torch
+                        if _torch.cuda.is_available():
+                            _torch.cuda.empty_cache()
+                    except Exception:
+                        pass
 
                     # 6. Build IngestedDocuments (one per audio chunk).
                     # Pre-sort frame timestamps once for O(log f) bisect window

@@ -568,6 +568,102 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
         except Exception:
             return []
 
+    # VIDEO / EARNINGS-CALL prefix — surface the query-specific fact sentence(s).
+    # An earnings-call speaker turn packs many figures into one chunk (e.g. a
+    # single turn states "$28.8B Services ... EPS $1.85 ... $416B for the fiscal
+    # year"); a small model reading the whole chunk answers with the first/most
+    # prominent figure rather than the one the question asks for. Extract the
+    # sentences that best match the query intent AND carry a figure, and prepend
+    # them so the model answers the specific question. Strictly gated on video
+    # (mp4) docs — no effect on any other modality. Generic (no file-specific
+    # facts): pure query-to-sentence extraction over the retrieved video chunks.
+    _top_mods = [(d.get("metadata") or {}).get("modality") for d in docs[:5]]
+    _vid_hits = [m for m in _top_mods if m in ("mp4", "video")]
+    if _top_mods and len(_vid_hits) > len(_top_mods) / 2:   # video-DOMINANT only
+        import re as _vre
+        _STOP = frozenset((
+            "what", "when", "which", "were", "with", "that", "this", "your", "about",
+            "did", "does", "the", "and", "for", "was", "are", "how", "why", "who",
+            "apple", "apples", "call", "quarter", "these", "they", "their", "from",
+            "into", "said", "say", "says", "during", "regarding", "whether",
+        ))
+        _KEEP_SHORT = frozenset(("eps", "yoy", "m&a", "ai"))
+        _num_re = _vre.compile(r"[$%]|\bbillion\b|\bmillion\b|\bpercent\b|\bdouble[- ]digit\b|\brecord\b|\bbasis point|\bestimate|\bbeat")
+
+        def _wordset(text: str) -> set:
+            return {w for w in _vre.findall(r"[a-z][a-z'&]+", text.lower())
+                    if (len(w) > 3 or w in _KEEP_SHORT) and w not in _STOP}
+
+        _sentences: List[str] = []
+        for doc in docs[:6]:
+            if (doc.get("metadata") or {}).get("modality") not in ("mp4", "video"):
+                continue
+            _text = _vre.sub(r"\[[^\]]*\]", " ", doc.get("text", "") or "")   # strip [VISUAL..]/[ON-SCREEN..] tags
+            for _sent in _vre.split(r"(?<=[.!?])\s+", _text):
+                s = _sent.strip()
+                if 25 <= len(s) <= 320:
+                    _sentences.append(s)
+
+        def _best_matches(qwords: set, limit: int) -> List[str]:
+            _scored = []
+            for s in _sentences:
+                sl = s.lower()
+                overlap = sum(1 for w in qwords if w in sl)
+                if overlap == 0:
+                    continue
+                _sc = overlap + (1.5 if _num_re.search(sl) else 0.0)
+                _scored.append((_sc, s))
+            _scored.sort(key=lambda x: x[0], reverse=True)
+            return [s for _sc, s in _scored[:limit]]
+
+        # Multi-part questions (e.g. "what was Services revenue, why was it
+        # significant, and what did the CFO say about X?") were previously
+        # scored against ONE pooled keyword set. A CFO's rapid-fire summary
+        # turn is dense with $/%/billion figures, so it wins the +1.5 numeric
+        # bonus against nearly any query sharing even one generic finance
+        # word ("revenue") — monopolizing all 3 fact slots and crowding out
+        # a qualitative, non-numeric answer to a different sub-question (e.g.
+        # "was it organic, or did the antitrust ruling contribute?" has no $
+        # figure of its own). Score per aspect instead so each sub-question
+        # gets its own best-matching sentence, independent of how numerically
+        # dense its competitors are.
+        try:
+            from app.pipeline.rag_pipeline import _split_query_aspects as _sqa
+            _aspects = _sqa(query) if query else []
+        except Exception:
+            _aspects = []
+
+        _seen: set = set()
+        _facts: List[str] = []
+        if len(_aspects) >= 2:
+            for asp in _aspects:
+                _aw = _wordset(asp)
+                if not _aw:
+                    continue
+                for s in _best_matches(_aw, limit=3):
+                    k = s[:60].lower()
+                    if k in _seen:
+                        continue
+                    _seen.add(k)
+                    _facts.append(s)
+                    break
+                if len(_facts) >= 3:
+                    break
+        else:
+            _qwords = _wordset(q)
+            for s in _best_matches(_qwords, limit=10):
+                k = s[:60].lower()
+                if k in _seen:
+                    continue
+                _seen.add(k)
+                _facts.append(s)
+                if len(_facts) >= 3:
+                    break
+        if _facts:
+            _prefix = ("KEY FACTS (answer the question using these exact figures and wording): "
+                       + " | ".join(_facts)[:600] + " ")
+            return _prefix + knowledge
+
     # M&A prefix — facts about acquisitions/mergers
     _MA_Q  = frozenset(["acquisition", "merger", "acquired", "deal", "takeover"])
     _MA_CK = frozenset(["acquired", "acquisition", "merger", "assumed", "fdic", "purchase"])

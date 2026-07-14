@@ -388,40 +388,74 @@ function ImageCitations({ sources }) {
   )
 }
 
-/* Audio/video speaker+timestamp citation — same visual treatment as XlsxCitePill
-   and ImageCitePill (accent-colored text at the end of the answer, above the
-   Sources chips). Shows "Speaker · m:ss"; the filename lives separately in the
-   Sources chip area below, exactly like PDF/DOCX/XLSX/Image. */
-function AudioCitePill({ source }) {
-  const ts = fmtTimestamp(source.timestamp_start != null ? source.timestamp_start : source.start_time)
-  if (!ts) return null
-  const speaker = String(source.speaker_name || source.speaker_role || '').trim()
-  const label = speaker ? `${speaker} · ${ts}` : ts
+/* Compact "moment" chip for an audio/video citation — an icon, an optional
+   short label, and the timestamp (accent-colored). One clean chip per cited
+   moment, industry-standard (ChatGPT/Gemini/NotebookLM) style: no raw caption
+   or OCR dumps. */
+function MomentChip({ icon, label, ts, title }) {
+  const t = fmtTimestamp(ts)
+  if (!label && !t) return null
   return (
-    <span title={`Source: ${label}`} style={{ color: 'var(--t-accent)', fontWeight: 500 }}>
-      {' '}{label}
+    <span
+      title={title || undefined}
+      className="inline-flex items-center gap-1 text-[11px] leading-4 rounded-full px-2 py-0.5 mr-1.5 mb-1 select-none max-w-full"
+      style={{ background: 'var(--t-chp)', border: '1px solid var(--t-chpb)', color: 'var(--t-tx4)' }}
+    >
+      <span aria-hidden style={{ flexShrink: 0 }}>{icon}</span>
+      {label ? <span className="truncate">{label}</span> : null}
+      {t ? <span style={{ color: 'var(--t-accent)', fontWeight: 600 }}>{label ? '· ' : ''}{t}</span> : null}
     </span>
   )
 }
 
+/* Audio/video citation row — one compact chip per cited moment: a speaker chip
+   for spoken content ("🗣 Tim Cook (CEO) · 3:49") and a frame chip for on-screen
+   evidence ("🖼 EPS $1.85 beats $1.76 · 2:43"), falling back to "🖼 On-screen
+   chart · 2:43" when no clean metric distils out. The filename lives in the
+   Sources chip area below (like PDF/DOCX/XLSX/Image). */
 function AudioCitations({ sources }) {
   const avSrcs = (sources || []).filter(
     s => typeof s === 'object'
       && ['audio', 'mp3', 'video', 'mp4'].includes(s.modality)
-      && (s.timestamp_start != null || s.start_time != null)
+      && (s.timestamp_start != null || s.start_time != null || s.frame_timestamp != null)
   )
   if (avSrcs.length === 0) return null
-  // De-dup by speaker+timestamp so the same cited segment shows once.
+
+  const spokenSrcs = avSrcs.filter(s => !s.is_frame)
+  const frameSrcs  = avSrcs.filter(s => s.is_frame)
+
+  // De-dup spoken by speaker+timestamp.
   const seen = new Set()
-  const unique = avSrcs.filter(s => {
+  const uniqueSpoken = spokenSrcs.filter(s => {
     const ts = s.timestamp_start != null ? s.timestamp_start : s.start_time
     const k = `${s.speaker_name || s.speaker_role || ''}|${ts}`
     if (seen.has(k)) return false
     seen.add(k); return true
   })
+  // De-dup frames by timestamp.
+  const fseen = new Set()
+  const uniqueFrames = frameSrcs.filter(s => {
+    const k = `${s.frame_timestamp != null ? s.frame_timestamp : (s.timestamp_start ?? s.start_time)}`
+    if (fseen.has(k)) return false
+    fseen.add(k); return true
+  })
+
   return (
-    <div className="mt-1 text-[15px] leading-relaxed">
-      {unique.map((s, i) => <AudioCitePill key={i} source={s} />)}
+    <div className="mt-1.5 flex flex-wrap items-center">
+      {uniqueSpoken.map((s, i) => {
+        const name = String(s.speaker_name || '').trim()
+        const role = String(s.speaker_role || '').trim()
+        const speaker = (name && role && name.toLowerCase() !== role.toLowerCase())
+          ? `${name} (${role})`
+          : (name || role || '')
+        const ts = s.timestamp_start != null ? s.timestamp_start : s.start_time
+        return <MomentChip key={`s${i}`} icon="🗣" label={speaker || null} ts={ts} title="Spoken source" />
+      })}
+      {uniqueFrames.map((s, i) => {
+        const ts = s.frame_timestamp != null ? s.frame_timestamp : (s.timestamp_start ?? s.start_time)
+        const label = String(s.frame_label || '').trim() || 'On-screen chart'
+        return <MomentChip key={`f${i}`} icon="🖼" label={label} ts={ts} title={s.frame_caption || 'On-screen frame'} />
+      })}
     </div>
   )
 }
@@ -672,7 +706,10 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
                   <XlsxCitations sources={allSources} />
                   <DocxCitations sections={docxSections} />
                   <ImageCitations sources={allSources} />
-                  <AudioCitations sources={allSources} />
+                  {/* Raw (un-deduped) sources: audio/video citations need the
+                      frame source, which shares the video's filename and would
+                      otherwise be collapsed by the basename dedup used for chips. */}
+                  <AudioCitations sources={message.sources && message.sources.length ? message.sources : allSources} />
                 </>
               )}
 

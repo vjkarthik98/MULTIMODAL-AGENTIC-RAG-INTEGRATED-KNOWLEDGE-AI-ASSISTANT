@@ -116,6 +116,13 @@ class Settings:
     MAX_PARALLEL_REQUESTS: int      = _int("MAX_PARALLEL_REQUESTS", 32)
     REQUEST_TIMEOUT_SEC: int        = _int("REQUEST_TIMEOUT_SEC", 120)
     FILE_PROCESSING_TIMEOUT_SEC: int = _int("FILE_PROCESSING_TIMEOUT_SEC", 300)
+    # Audio/video ingestion (Whisper transcription + pyannote diarization + frame
+    # captioning) legitimately runs for many minutes: a 54-min earnings call takes
+    # ~6 min, a 1-hour video ~15-20 min. The 300s doc timeout would fire mid-run,
+    # mark the job failed, and delete the staging file — after which frame
+    # extraction hits VIDEO_NOT_FOUND (vision frames lost) and the upload reports
+    # failure even though text partially stored. Media gets a generous cap.
+    MEDIA_PROCESSING_TIMEOUT_SEC: int = _int("MEDIA_PROCESSING_TIMEOUT_SEC", 2400)
     LLM_CALL_TIMEOUT_SEC: int       = _int("LLM_CALL_TIMEOUT_SEC", 60)
     RETRIEVAL_TIMEOUT: int          = _int("RETRIEVAL_TIMEOUT", 10)
     EMBEDDING_TIMEOUT: int          = _int("EMBEDDING_TIMEOUT", 5)
@@ -125,9 +132,14 @@ class Settings:
     INGESTION_WORKER_COUNT: int     = _int("INGESTION_WORKER_COUNT", 6)
 
     # LLM
-    LLM_MODEL_PATH: str      = _str("LLM_MODEL_PATH", "./.hf_cache/gguf/mistral-7b-instruct-v0.2.Q4_K_M.gguf")
-    LLM_MAX_TOKENS: int      = _int("LLM_MAX_TOKENS", 768)
-    CONTEXT_MAX_TOKENS: int  = _int("CONTEXT_MAX_TOKENS", 8192)
+    LLM_MODEL_PATH: str      = _str("LLM_MODEL_PATH", "./.hf_cache/gguf/Qwen2.5-14B-Instruct-Q4_K_M.gguf")
+    LLM_MAX_TOKENS: int      = _int("LLM_MAX_TOKENS", 1024)
+    CONTEXT_MAX_TOKENS: int  = _int("CONTEXT_MAX_TOKENS", 16384)
+    # "chatml" (Qwen2.5 family, current default) | "raw" (legacy Mistral plain-
+    # completion prompting). Applied once, in app/llm/gguf_model.py, right
+    # before the assembled prompt is sent to llama-server — no prompt-assembly
+    # call site (prompt_builder.py, reasoning_engine.py) needs to know about it.
+    LLM_PROMPT_FORMAT: str   = _str("LLM_PROMPT_FORMAT", "chatml")
     LLM_TEMPERATURE: float          = _float("LLM_TEMPERATURE", 0.2)
     LLM_TEMPERATURE_FACTUAL: float  = _float("LLM_TEMPERATURE_FACTUAL", 0.1)
     LLM_TEMPERATURE_GENERATIVE: float = _float("LLM_TEMPERATURE_GENERATIVE", 0.35)
@@ -194,7 +206,7 @@ class Settings:
     MODEL_PARALLEL_LOAD: bool        = _bool("MODEL_PARALLEL_LOAD", True)
     LLM_GPU_LAYERS_AUTO: bool        = _bool("LLM_GPU_LAYERS_AUTO", True)
     LLM_GPU_LAYERS_ALL: int          = _int("LLM_GPU_LAYERS_ALL", -1)
-    LLM_N_CTX: int                   = _int("LLM_N_CTX", 8192)
+    LLM_N_CTX: int                   = _int("LLM_N_CTX", 16384)
     EMBEDDER_HALF_PRECISION: bool    = _bool("EMBEDDER_HALF_PRECISION", _cuda_available())
     VISION_HALF_PRECISION: bool      = _bool("VISION_HALF_PRECISION", _cuda_available())
     WHISPER_COMPUTE_TYPE: str        = _str("WHISPER_COMPUTE_TYPE", _auto_whisper_compute())
@@ -223,8 +235,21 @@ class Settings:
     # under pressure). Exact numeric chart values come from the deterministic
     # digitizer in image_chunker.py regardless of model size.
     QWEN2_VL_MODEL: str              = _str("QWEN2_VL_MODEL", "Qwen/Qwen2-VL-7B-Instruct")
+    # Video frame captioning uses a smaller VLM than image chart digitisation: a
+    # 1-hour video ingest loads Whisper+pyannote+SigLIP+TrOCR+BGE simultaneously
+    # next to the resident llama-server, and the 7B INT8 captioner (~8GB) pushes
+    # total VRAM past the 24GB card → every later GPU alloc OOMs and the upload
+    # fails before reaching Qdrant. Frames are a chart + ticker (verbatim text
+    # already captured by TrOCR), so 2B is ample and frees ~6GB. Image keeps 7B.
+    VIDEO_QWEN2_VL_MODEL: str        = _str("VIDEO_QWEN2_VL_MODEL", "Qwen/Qwen2-VL-2B-Instruct")
     QWEN2_VL_LOAD_IN_8BIT: bool      = _bool("QWEN2_VL_LOAD_IN_8BIT", True)
     QWEN2_VL_MAX_TOKENS: int         = _int("QWEN2_VL_MAX_TOKENS", 400)
+    # Video frame captioning uses a tighter token budget than still-image
+    # captioning: an earnings webcast frame is a chart + ticker overlay, and
+    # verbatim on-screen text is captured by TrOCR, so the VLM only needs a
+    # short scene/number summary. The 400-token still-image budget made a 7B
+    # INT8 model spend ~80s/frame (unworkable at 20 frames for a 54-min call).
+    VIDEO_CAPTION_MAX_TOKENS: int    = _int("VIDEO_CAPTION_MAX_TOKENS", 180)
     # TrOCR — printed OCR for financial documents
     TROCR_MODEL: str                 = _str("TROCR_MODEL", "microsoft/trocr-large-printed")
     MAX_IMAGE_DIM: int               = _int("MAX_IMAGE_DIM", 1024)
@@ -503,6 +528,21 @@ class Settings:
     FFMPEG_PATH: str                         = _str("FFMPEG_PATH", "ffmpeg")
     FFMPEG_TIMEOUT_SEC: int                  = _int("FFMPEG_TIMEOUT_SEC", 120)
     SCENE_CHANGE_THRESHOLD: float            = _float("SCENE_CHANGE_THRESHOLD", 25.0)
+    # PySceneDetect AdaptiveDetector operates on a very different scale than the
+    # OpenCV mean-absdiff path (SCENE_CHANGE_THRESHOLD): its sane range is ~1.5-5
+    # (default 3.0). Reusing 25.0 here made a static earnings-chart webcast yield
+    # a single scene → one frame for the whole call. Separate, correctly-scaled.
+    VIDEO_SCENE_ADAPTIVE_THRESHOLD: float    = _float("VIDEO_SCENE_ADAPTIVE_THRESHOLD", 3.0)
+    # Guarantee timeline coverage: blend scene cuts with uniform interval samples
+    # so a near-static chart + persistent ticker still gets frames spread across
+    # the whole recording (needed to capture the ticker/chart at multiple points).
+    VIDEO_UNIFORM_TIMELINE_COVERAGE: bool    = _bool("VIDEO_UNIFORM_TIMELINE_COVERAGE", True)
+    # pHash near-duplicate hamming distance for frame dedup. The old literal 8
+    # collapsed a whole earnings webcast to one frame: a Benzinga chart+ticker
+    # layout is globally similar across time, so temporally-spread coverage
+    # frames sit within 8 bits of each other and were wrongly dropped. A tight
+    # value keeps only truly-identical frames out while preserving coverage.
+    VIDEO_FRAME_DEDUP_HAMMING: int           = _int("VIDEO_FRAME_DEDUP_HAMMING", 2)
     FRAME_DARKNESS_THRESHOLD: float          = _float("FRAME_DARKNESS_THRESHOLD", 10.0)
     VIDEO_DUPLICATE_FRAME_THRESHOLD: float   = _float("VIDEO_DUPLICATE_FRAME_THRESHOLD", 0.98)
     VIDEO_SUBTITLE_EXTRACTION: bool          = _bool("VIDEO_SUBTITLE_EXTRACTION", True)

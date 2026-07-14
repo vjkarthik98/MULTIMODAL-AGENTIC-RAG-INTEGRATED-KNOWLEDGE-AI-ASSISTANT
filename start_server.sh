@@ -139,17 +139,17 @@ python -c "import llama_cpp; print('[start_server] llama_cpp', llama_cpp.__versi
 # the LLM on the GPU (fast) while PyTorch owns CUDA in the main process.
 # GGUFModel proxies generate()/stream() to this server over HTTP.
 LLM_HOST="${LLM_SERVER_HOST:-127.0.0.1}"
-GGUF_PATH="${LLM_MODEL_PATH:-${SCRIPT_DIR}/.hf_cache/gguf/mistral-7b-instruct-v0.2.Q4_K_M.gguf}"
-LLM_CTX="${CONTEXT_MAX_TOKENS:-8192}"
+GGUF_PATH="${LLM_MODEL_PATH:-${SCRIPT_DIR}/.hf_cache/gguf/Qwen2.5-14B-Instruct-Q4_K_M.gguf}"
+LLM_CTX="${CONTEXT_MAX_TOKENS:-16384}"
 echo "[start_server] Launching llama-server on ${LLM_HOST}:${LLM_PORT} (n_gpu_layers=-1)..."
 # LATENCY FLAGS:
 #  --flash_attn true   : FlashAttention kernel (A10G/Ampere) — faster attention,
 #                        lower VRAM for the KV cache.
 #  --cache true        : prompt KV cache — reuses the shared RAG system-prompt
 #                        prefix across queries so repeat prompts process faster.
-#  --use_mlock false   : the server defaults mlock=True, which pins the 4.1GB
+#  --use_mlock false   : the server defaults mlock=True, which pins the ~9GB
 #                        GGUF in HOST RAM even though weights live on the GPU —
-#                        wasted RAM + swap pressure on this 15GB box. Off.
+#                        wasted RAM + swap pressure on this 15GB-RAM box. Off.
 #  --n_threads_batch   : all cores for prompt (batch) processing.
 nohup python -m llama_cpp.server \
     --model "${GGUF_PATH}" \

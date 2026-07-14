@@ -648,9 +648,19 @@ class IngestionPipeline:
                     self.process_file, file_path, session_id, user_id,
                     _job_cb=_job_cb,
                 )
+                # Audio/video need a much longer cap than documents — Whisper +
+                # diarization + frame captioning over an hour of media runs for
+                # many minutes. A too-short timeout fires mid-run, fails the job,
+                # and deletes the staging file out from under frame extraction.
+                _ext = Path(file_path).suffix.lstrip(".").lower()
+                _media_exts = {"mp4", "mov", "avi", "mkv", "webm",
+                               "mp3", "wav", "m4a", "flac", "aac", "ogg"}
+                _timeout = (settings.MEDIA_PROCESSING_TIMEOUT_SEC
+                            if _ext in _media_exts
+                            else settings.FILE_PROCESSING_TIMEOUT_SEC)
                 return await asyncio.wait_for(
                     loop.run_in_executor(get_gpu_ingest_executor(), fn),
-                    timeout=settings.FILE_PROCESSING_TIMEOUT_SEC,
+                    timeout=_timeout,
                 )
 
     # QUEUE WORKER — SECTION 4.6

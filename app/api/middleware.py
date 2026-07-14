@@ -35,6 +35,16 @@ _PUBLIC_PREFIXES = (
     "/favicon.ico",
 )
 
+# Liveness/probe endpoints hit by orchestrators, load balancers, and IDE port
+# forwarders (e.g. VS Code Remote-SSH probes every locally-listening port on a
+# short interval). They carry no diagnostic value and flood the access log, so
+# they are logged at DEBUG instead of INFO — the request is still handled and
+# still traced, just not surfaced at the default log level.
+_QUIET_PATHS = frozenset((
+    "/health",
+    "/metrics",
+))
+
 
 class AuthMiddleware(BaseHTTPMiddleware):
 
@@ -72,7 +82,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         latency_ms = round((time.perf_counter() - start) * 1000, 1)
         user_id = request.state.user.user_id if request.state.user else "anonymous"
 
-        logger.info(
+        _log = logger.debug if request.url.path in _QUIET_PATHS else logger.info
+        _log(
             event="http_request",
             method=request.method,
             path=request.url.path,

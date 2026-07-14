@@ -28,7 +28,7 @@ from pathlib import Path
 _project_root = Path(__file__).resolve().parents[3]
 _hf_home      = os.getenv("HF_HOME", str(_project_root / ".hf_cache"))
 _gguf_dir     = Path(_hf_home) / "gguf"
-_gguf_file    = "mistral-7b-instruct-v0.2.Q4_K_M.gguf"
+_gguf_file    = "Qwen2.5-14B-Instruct-Q4_K_M.gguf"
 
 os.environ["HF_HOME"]            = _hf_home
 os.environ["HF_HUB_CACHE"]       = _hf_home + "/hub"
@@ -71,8 +71,8 @@ MODELS: list[dict] = [
     # key "gguf" is injected into the run loop, not listed here
 ]
 
-GGUF_REPO = "TheBloke/Mistral-7B-Instruct-v0.2-GGUF"
-GGUF_SIZE_GB = 4.1
+GGUF_REPO = "bartowski/Qwen2.5-14B-Instruct-GGUF"
+GGUF_SIZE_GB = 9.0
 
 
 # ── cache detection ───────────────────────────────────────────────────────────
@@ -195,8 +195,26 @@ def _dl_gguf() -> None:
         cache_dir=str(Path(_hf_home) / "hub"),
         token=HF_TOKEN or None,
     )
+    if dest.is_symlink() and not dest.exists():
+        dest.unlink()  # dangling symlink from a previous interrupted run
     if not dest.exists():
-        shutil.copy2(cached, dest)
+        # Hardlink instead of copy — a GGUF is several GB, and this file
+        # already lives once in the hub blob store; copying it duplicates
+        # that on disk for no reason (bit us directly: a copy of a 9GB file
+        # ran the disk out of space mid-write). Same filesystem (.hf_cache),
+        # so a hardlink is free (zero extra bytes, instant).
+        # hf_hub_download() returns a path INSIDE snapshots/ that is itself a
+        # symlink to blobs/<hash> — os.link() on a symlink hard-links the
+        # symlink's inode (not its target), producing a second symlink whose
+        # relative target text is only valid from the original directory.
+        # Resolve to the real blob file first so the hardlink always points
+        # at actual file bytes. Falls back to a copy if hardlinking isn't
+        # possible (e.g. cross-device .hf_cache mount).
+        real_src = Path(cached).resolve()
+        try:
+            os.link(real_src, dest)
+        except OSError:
+            shutil.copy2(real_src, dest)
     size_gb = dest.stat().st_size / 1e9
     print(f"  Size on disk: {size_gb:.2f} GB")
 

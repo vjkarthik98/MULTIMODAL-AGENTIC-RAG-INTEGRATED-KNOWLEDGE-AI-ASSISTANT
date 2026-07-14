@@ -130,6 +130,26 @@ _FINANCIAL_STATEMENT: frozenset = frozenset({
     "share repurchase", "shareholders' equity", "shareholders equity",
     "cash flow from operations", "income tax charge", "provision for income tax",
 })
+# "...did these REPORTED results beat analyst estimates?" — this asks about the
+# figure a company just reported vs. a pre-existing estimate that management
+# states verbatim on the call itself (e.g. an earnings-call ticker overlay:
+# "Sales $102.466B Beats $102.171B Estimate"). It is document-grounded, not a
+# live market-data lookup — but "analyst"/"analysts" alone is in _WEB_WORDS
+# below, so without this override every such question force-routes to
+# hybrid/web before the earnings-call/media-reference rules ever run. Requires
+# a BEAT phrase *and* reported-results vocabulary together, so a genuinely
+# live/forward-looking ask ("current analyst consensus heading into FY2026",
+# no "beat" phrase present) still falls through to the is_web hard rule.
+_REPORTED_RESULTS_BEAT_PHRASES: frozenset = frozenset({
+    "beat analyst estimate", "beat analyst estimates", "beat the estimate",
+    "beat the estimates", "beat estimates", "beating analyst estimate",
+    "beating analyst estimates", "beat expectations", "beating expectations",
+    "exceeded estimates", "exceeded analyst estimates", "results beat",
+})
+_REPORTED_RESULTS_WORDS: frozenset = frozenset({
+    "revenue", "eps", "earnings per share", "results", "quarter", "reported",
+    "year-over-year", "year over year", "q1", "q2", "q3", "q4",
+})
 
 
 # NORMALIZE QUERY
@@ -233,6 +253,19 @@ class AgentRouter:
                 if signals.is_memory:
                     d = self._decision("memory", "memory_reference", 0.9, session_id)
                     _router_decisions.labels(action="memory", method="hard_rule").inc()
+                    self._log_decision(d, signals, start, session_id)
+                    return d
+
+                # HARD RULE: REPORTED RESULTS vs ESTIMATE — see
+                # _REPORTED_RESULTS_BEAT_PHRASES above. Must run BEFORE is_web:
+                # "analyst"/"analysts" alone is a _WEB_WORDS trigger, so without
+                # this "...did results beat analyst estimates?" would force
+                # hybrid/web before ever reaching a KB-grounded route.
+                _ql = query.lower()
+                if (any(p in _ql for p in _REPORTED_RESULTS_BEAT_PHRASES)
+                        and any(w in _ql for w in _REPORTED_RESULTS_WORDS)):
+                    d = self._decision("rag", "reported_results_beat_kb", 0.93, session_id)
+                    _router_decisions.labels(action="rag", method="hard_rule").inc()
                     self._log_decision(d, signals, start, session_id)
                     return d
 

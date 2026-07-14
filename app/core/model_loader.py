@@ -137,6 +137,10 @@ class ModelLoader:
         self._qwen2vl_model                      = None
         self._qwen2vl_processor                  = None
         self._qwen2vl_device:       Optional[str] = None
+        # Separate, smaller VLM for VIDEO frame captioning (see get_qwen2_vl_video).
+        self._qwen2vl_v_model                    = None
+        self._qwen2vl_v_processor                = None
+        self._qwen2vl_v_device:     Optional[str] = None
         self._trocr_model                        = None
         self._trocr_processor                    = None
         self._trocr_device:         Optional[str] = None
@@ -561,6 +565,58 @@ class ModelLoader:
             self._qwen2vl_device = decision.device
 
         return self._qwen2vl_processor, self._qwen2vl_model, self._qwen2vl_device
+
+    def get_qwen2_vl_video(self) -> Tuple:
+        """Smaller Qwen2-VL used for VIDEO frame captioning.
+
+        A one-hour earnings/webcast ingest must load Whisper + pyannote + SigLIP +
+        TrOCR + BGE at once, alongside the resident llama-server and query models.
+        The 7B INT8 captioner (~8 GB) pushes total VRAM past the 24 GB card and every
+        subsequent GPU allocation (diarization, Whisper cuBLAS, later captions) OOMs —
+        the upload fails and nothing reaches Qdrant. Video frames here are a stock
+        chart + a ticker overlay whose exact text is already captured verbatim by
+        TrOCR, so the VLM only needs a short scene summary — the 2B model is more than
+        enough and frees ~6 GB. Image modality keeps the 7B model (chart digitisation
+        needs the accuracy); this is a separate singleton so the two never conflict.
+        """
+        if self._qwen2vl_v_model:
+            return self._qwen2vl_v_processor, self._qwen2vl_v_model, self._qwen2vl_v_device
+
+        with self._lock:
+            if self._qwen2vl_v_model:
+                return self._qwen2vl_v_processor, self._qwen2vl_v_model, self._qwen2vl_v_device
+
+            # If the video captioner is configured to the same checkpoint as the
+            # image one, just reuse that singleton — no point loading it twice.
+            if settings.VIDEO_QWEN2_VL_MODEL == settings.QWEN2_VL_MODEL:
+                return self.get_qwen2_vl()
+
+            self._oom_guard()
+            decision = device_manager.decision_for("qwen2_vl")
+
+            def _load():
+                from transformers import Qwen2VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig  # local
+                processor = AutoProcessor.from_pretrained(
+                    settings.VIDEO_QWEN2_VL_MODEL, trust_remote_code=True
+                )
+                load_kwargs: dict = {"trust_remote_code": True}
+                if settings.QWEN2_VL_LOAD_IN_8BIT and decision.device == "cuda":
+                    load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+                    load_kwargs["torch_dtype"] = _torch_dtype("float16")
+                elif decision.device == "cuda":
+                    load_kwargs["torch_dtype"] = _torch_dtype("float16")
+                model = Qwen2VLForConditionalGeneration.from_pretrained(
+                    settings.VIDEO_QWEN2_VL_MODEL, **load_kwargs
+                )
+                if not settings.QWEN2_VL_LOAD_IN_8BIT:
+                    model.to(decision.device)
+                model.eval()
+                return processor, model
+
+            self._qwen2vl_v_processor, self._qwen2vl_v_model = self._safe_load(_load, "qwen2_vl_video")
+            self._qwen2vl_v_device = decision.device
+
+        return self._qwen2vl_v_processor, self._qwen2vl_v_model, self._qwen2vl_v_device
 
     # TROCR — PRINTED OCR FOR FINANCIAL DOCUMENTS
 

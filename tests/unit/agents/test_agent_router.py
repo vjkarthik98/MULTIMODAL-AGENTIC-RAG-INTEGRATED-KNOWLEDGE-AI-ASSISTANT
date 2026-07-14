@@ -315,6 +315,44 @@ class TestRouteHardRules:
         assert decision.action == "memory"
         assert decision.confidence == 0.9
 
+    def test_reported_results_beat_estimate_routes_to_rag(self):
+        # "analyst" alone is a _WEB_WORDS trigger, but "did these REPORTED
+        # results beat analyst estimates" is asking about a figure management
+        # states verbatim inside an ingested earnings-call video/transcript —
+        # must NOT force hybrid/web (regression: this used to mis-route).
+        decision = self.router.route(
+            "What was Apple's Q4 FY2025 revenue, EPS, and year-over-year "
+            "revenue growth, and did these results beat analyst estimates?",
+            session_id="s1",
+        )
+        assert decision.action == "rag"
+        assert decision.reason == "reported_results_beat_kb"
+
+    def test_live_analyst_consensus_still_routes_to_hybrid_web(self):
+        # A genuinely live/forward-looking analyst-consensus question (no
+        # "beat...estimate" phrase) must still route to hybrid/web — the new
+        # rule must not swallow legitimate web queries.
+        decision = self.router.route(
+            "How did AAPL stock react on October 30, 2025 after reporting "
+            "Q4 FY2025 earnings, and what is the current analyst consensus "
+            "heading into fiscal year 2026?",
+            session_id="s1",
+        )
+        assert decision.action == "hybrid"
+
+    def test_analyst_word_without_beat_phrase_still_routes_web(self):
+        # Bare "analyst" with no reported-results vocabulary and no beat
+        # phrase must still hit the original is_web hard rule.
+        decision = self.router.route("What do analysts think about this stock?", session_id="s1")
+        assert decision.action == "hybrid"
+        assert decision.reason == "web_market_signal"
+
+    def test_beat_phrase_without_results_vocab_does_not_force_rag(self):
+        # A beat phrase alone (no revenue/eps/results/quarter vocabulary)
+        # should not trigger the override — it's too weak a signal on its own.
+        decision = self.router.route("Did the team beat expectations at the game?", session_id="s1")
+        assert decision.reason != "reported_results_beat_kb"
+
     def test_decision_action_is_valid(self):
         decision = self.router.route("hello", session_id="s1")
         assert decision.action in ALLOWED_ACTIONS

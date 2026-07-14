@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { login as apiLogin } from '../api/client'
+import { useState, useRef } from 'react'
+import { login as apiLogin, verifyOtp } from '../api/client'
 
 export default function LoginModal({ onLogin, onClose, onForgotPassword }) {
   const [email, setEmail]       = useState('')
@@ -8,21 +8,74 @@ export default function LoginModal({ onLogin, onClose, onForgotPassword }) {
   const [loading, setLoading]   = useState(false)
   const [error, setError]       = useState('')
 
+  // OTP (MFA) step
+  const [otpStep, setOtpStep]   = useState(false)
+  const [otpToken, setOtpToken] = useState('')
+  const [otpCode, setOtpCode]   = useState(['', '', '', '', '', ''])
+  const otpRefs = useRef([])
+
   const handleGoogle = () => {
     window.location.href = '/auth/google'
   }
 
+  const setDigit = (idx, val) => {
+    const digit = val.replace(/\D/g, '').slice(-1)
+    const next = [...otpCode]
+    next[idx] = digit
+    setOtpCode(next)
+    if (digit && idx < 5) otpRefs.current[idx + 1]?.focus()
+  }
+  const onOtpKey = (e, idx) => {
+    if (e.key === 'Backspace' && !otpCode[idx] && idx > 0) otpRefs.current[idx - 1]?.focus()
+    if (e.key === 'ArrowLeft' && idx > 0) otpRefs.current[idx - 1]?.focus()
+    if (e.key === 'ArrowRight' && idx < 5) otpRefs.current[idx + 1]?.focus()
+  }
+  const onOtpPaste = (e) => {
+    const txt = (e.clipboardData.getData('text') || '').replace(/\D/g, '').slice(0, 6)
+    if (!txt) return
+    e.preventDefault()
+    const next = ['', '', '', '', '', '']
+    for (let i = 0; i < txt.length; i++) next[i] = txt[i]
+    setOtpCode(next)
+    otpRefs.current[Math.min(txt.length, 5)]?.focus()
+  }
+
   const handleSubmit = async (e) => {
     e.preventDefault()
+    setError('')
+
+    // Step 2 — verify the 6-digit code
+    if (otpStep) {
+      const code = otpCode.join('')
+      if (code.length !== 6) { setError('Enter all 6 digits'); return }
+      setLoading(true)
+      try {
+        const data = await verifyOtp(otpToken, code)
+        if (data.device_token) localStorage.setItem('magik_device_token', data.device_token)
+        onLogin({ token: data.access_token, refreshToken: data.refresh_token, email })
+      } catch (err) {
+        setError(err.message || 'Invalid or expired code')
+        setOtpCode(['', '', '', '', '', ''])
+        otpRefs.current[0]?.focus()
+      } finally {
+        setLoading(false)
+      }
+      return
+    }
+
+    // Step 1 — email + password
     if (!email || !password) return
     setLoading(true)
-    setError('')
     try {
       const data = await apiLogin(email, password)
       if (data.otp_required) {
-        setError('OTP verification required. Please sign in from the main login page.')
+        setOtpToken(data.otp_token)
+        setOtpStep(true)
+        setError('')
+        setTimeout(() => otpRefs.current[0]?.focus(), 100)
         return
       }
+      if (data.device_token) localStorage.setItem('magik_device_token', data.device_token)
       onLogin({ token: data.access_token, refreshToken: data.refresh_token, email })
     } catch (err) {
       setError(err.message || 'Invalid email or password')
@@ -43,8 +96,12 @@ export default function LoginModal({ onLogin, onClose, onForgotPassword }) {
         {/* Header */}
         <div className="flex items-center justify-between px-6 pt-6 pb-2">
           <div>
-            <h2 className="text-lg font-bold" style={{ color: 'var(--t-tx1)' }}>Welcome back</h2>
-            <p className="text-sm mt-0.5" style={{ color: 'var(--t-tx4)' }}>Sign in to your MAGIK account</p>
+            <h2 className="text-lg font-bold" style={{ color: 'var(--t-tx1)' }}>
+              {otpStep ? 'Verify it’s you' : 'Welcome back'}
+            </h2>
+            <p className="text-sm mt-0.5" style={{ color: 'var(--t-tx4)' }}>
+              {otpStep ? 'Enter the 6-digit code to finish signing in' : 'Sign in to your MAGIK account'}
+            </p>
           </div>
           <button
             onClick={onClose}
@@ -62,6 +119,57 @@ export default function LoginModal({ onLogin, onClose, onForgotPassword }) {
 
         {/* Body */}
         <div className="px-6 pb-6 pt-4 space-y-3">
+          {/* ── OTP (MFA) step ─────────────────────────────────────────── */}
+          {otpStep && (
+            <form onSubmit={handleSubmit} className="space-y-3">
+              <div className="flex justify-between gap-2" onPaste={onOtpPaste}>
+                {otpCode.map((d, i) => (
+                  <input
+                    key={i}
+                    ref={el => (otpRefs.current[i] = el)}
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={1}
+                    value={d}
+                    onChange={e => setDigit(i, e.target.value)}
+                    onKeyDown={e => onOtpKey(e, i)}
+                    className="w-11 h-12 text-center text-lg font-semibold rounded-xl outline-none transition-colors"
+                    style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx1)' }}
+                  />
+                ))}
+              </div>
+
+              {error && (
+                <p className="text-xs px-3 py-2 rounded-lg" style={{ color: '#ef4444', background: 'rgba(239,68,68,0.08)' }}>
+                  {error}
+                </p>
+              )}
+
+              <button
+                type="submit"
+                disabled={loading || otpCode.join('').length !== 6}
+                className="w-full rounded-xl py-3 text-sm font-semibold transition-colors disabled:opacity-50"
+                style={{ background: 'var(--t-accent)', color: 'white' }}
+              >
+                {loading ? 'Verifying…' : 'Verify & sign in'}
+              </button>
+
+              <div className="text-center">
+                <button
+                  type="button"
+                  onClick={() => { setOtpStep(false); setOtpCode(['', '', '', '', '', '']); setError('') }}
+                  className="text-xs underline hover:no-underline transition-colors"
+                  style={{ color: 'var(--t-tx5)' }}
+                >
+                  Back
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* ── Email / password step ──────────────────────────────────── */}
+          {!otpStep && (
+          <>
           {/* Google CTA */}
           <button
             type="button"
@@ -147,6 +255,8 @@ export default function LoginModal({ onLogin, onClose, onForgotPassword }) {
               </button>
             </div>
           </form>
+          </>
+          )}
         </div>
       </div>
     </div>

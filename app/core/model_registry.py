@@ -35,7 +35,7 @@ MODALITY_MODELS: Dict[str, Tuple[str, ...]] = {
     "excel":    ("text_embedder",),
     "image":    ("text_embedder", "blip", "qwen2_vl", "trocr", "siglip", "image_embedder", "siglip_text_embedder"),
     "audio":    ("text_embedder", "whisper", "diarizer", "ner"),
-    "video":    ("text_embedder", "qwen2_vl", "trocr", "siglip", "image_embedder",
+    "video":    ("text_embedder", "qwen2_vl_video", "trocr", "siglip", "image_embedder",
                  "siglip_text_embedder", "whisper", "diarizer", "ner"),
 }
 
@@ -166,7 +166,7 @@ class ModelRegistry:
     def _is_enabled(self, name: str) -> bool:
         # Vision models gated by ENABLE_VISION.
         # Audio/diarizer/ner gated by ENABLE_AUDIO.
-        if name in ("siglip", "blip", "qwen2_vl", "trocr",
+        if name in ("siglip", "blip", "qwen2_vl", "qwen2_vl_video", "trocr",
                     "image_embedder", "siglip_text_embedder"):
             return bool(settings.ENABLE_VISION)
         if name in ("whisper", "diarizer", "ner"):
@@ -183,6 +183,7 @@ class ModelRegistry:
             "siglip":               model_loader.get_siglip,
             "blip":                 model_loader.get_blip,
             "qwen2_vl":             model_loader.get_qwen2_vl,
+            "qwen2_vl_video":       model_loader.get_qwen2_vl_video,
             "trocr":                model_loader.get_trocr,
             "diarizer":             model_loader.get_diarizer,
             "ner":                  model_loader.get_ner,

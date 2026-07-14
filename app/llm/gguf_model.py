@@ -163,6 +163,13 @@ class _CircuitBreaker:
 
 
 # STOP TOKENS
+#
+# Superset across every model family this project has run: the Mistral tokens
+# ([INST]/[/INST]/<<SYS>>/</s>) and the ChatML tokens (<|im_end|>/<|im_start|>/
+# <|endoftext|>) both stay in the list regardless of LLM_PROMPT_FORMAT — a model
+# never spontaneously emits another family's control tokens, so the extras are
+# inert. This means switching LLM_MODEL_PATH/LLM_PROMPT_FORMAT never requires
+# touching this list again.
 
 _STOP_TOKENS = [
     "</s>",
@@ -172,6 +179,9 @@ _STOP_TOKENS = [
     "<</SYS>>",
     "###",
     "\n\n\n",
+    "<|im_end|>",
+    "<|im_start|>",
+    "<|endoftext|>",
 ]
 
 # ARTIFACT PREFIXES TO STRIP
@@ -182,6 +192,19 @@ _STRIP_PREFIXES = [
     "Assistant:",
     "ASSISTANT:",
 ]
+
+# CHAT TEMPLATE — every call site in this codebase (app/prompt/prompt_builder.py,
+# app/reasoning/reasoning_engine.py) assembles ONE plain-text instruction body
+# (system guidance + memory/context + query + output-format rules, all
+# concatenated). That body is model-family agnostic. The only thing that needs
+# to change when swapping LLM_MODEL_PATH to a different model family is the
+# turn markup wrapped around that body — handled centrally here, in
+# GGUFModel._format_for_model(), so no prompt-assembly code has to know or care
+# which model is currently loaded.
+_CHATML_SYSTEM_DEFAULT = (
+    "You are a precise financial research assistant. Follow the instructions "
+    "and answer using only the given context."
+)
 
 # PROMPT INJECTION PATTERNS — consolidated into app/guardrails/policies.yaml (Phase 26)
 
@@ -309,6 +332,22 @@ class GGUFModel:
         # Append finance safety guard (plan Phase 6.6)
         cleaned = cleaned + self._FINANCE_SAFETY_SUFFIX
         return cleaned
+
+    # CHAT TEMPLATE — applied LAST, after sanitize/truncate, so injection
+    # scanning and the token-budget truncator both operate on the real
+    # semantic content and never see (or accidentally truncate into) the
+    # turn-markup tokens.
+    def _format_for_model(self, prompt: str) -> str:
+        fmt = getattr(settings, "LLM_PROMPT_FORMAT", "raw")
+        if fmt == "chatml":
+            return (
+                "<|im_start|>system\n"
+                f"{_CHATML_SYSTEM_DEFAULT}<|im_end|>\n"
+                "<|im_start|>user\n"
+                f"{prompt}<|im_end|>\n"
+                "<|im_start|>assistant\n"
+            )
+        return prompt  # "raw" — legacy plain-completion prompting, unchanged
 
     # CLEAN OUTPUT
 
@@ -459,6 +498,7 @@ class GGUFModel:
         # This uses the model's own tokenizer to guarantee the prompt fits
         # within the context window and never triggers a SIGSEGV in llama.cpp.
         prompt = self._truncate_to_token_budget(prompt, max_tokens_)
+        prompt = self._format_for_model(prompt)
 
         # CIRCUIT BREAKER CHECK — SECTION 2.1
         if self._circuit.is_open:
@@ -607,6 +647,7 @@ class GGUFModel:
 
         _max_tok = max_tokens if max_tokens is not None else settings.LLM_MAX_TOKENS
         prompt = self._truncate_to_token_budget(prompt, _max_tok)
+        prompt = self._format_for_model(prompt)
 
         # CIRCUIT BREAKER CHECK
         if self._circuit.is_open:

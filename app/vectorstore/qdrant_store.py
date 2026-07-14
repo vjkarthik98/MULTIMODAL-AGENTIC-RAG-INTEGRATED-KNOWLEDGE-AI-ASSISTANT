@@ -497,8 +497,15 @@ class QdrantVectorStore:
         # VIDEO RICH METADATA — VideoChunker Phase 1.7/2.7/3.7 fields.
         # Mirrors the audio block above; accepts both timestamp naming conventions.
         if modality in ("video", "mp4"):
-            ts_start = s.get("start_timestamp") or s.get("timestamp_start")
-            ts_end   = s.get("end_timestamp")   or s.get("timestamp_end")
+            # Use explicit None checks (not `or`): a legitimate 0.0 start — the
+            # first chunk and the t=0 keyframe — is falsy and was being dropped,
+            # stripping the timestamp from the opening of the call entirely.
+            ts_start = s.get("start_timestamp")
+            if ts_start is None:
+                ts_start = s.get("timestamp_start")
+            ts_end = s.get("end_timestamp")
+            if ts_end is None:
+                ts_end = s.get("timestamp_end")
             if ts_start is not None:
                 payload["start_timestamp"] = float(ts_start)
                 payload["timestamp_start"] = float(ts_start)
@@ -554,6 +561,22 @@ class QdrantVectorStore:
             if s.get("slide_numbers_covered"):
                 payload["slide_numbers_covered"] = list(s["slide_numbers_covered"])[:20]
 
+            # Deterministic chunk hash (dedup / stable citation id) — parity with audio.
+            if s.get("chunk_hash_id"):
+                payload["chunk_hash_id"] = str(s["chunk_hash_id"])
+
+            # Per-frame (vision) locator fields — needed for FRAME citations
+            # (which keyframe an answer is grounded in) and to render the frame
+            # image in the UI. Only present on embedding_space="vision" docs.
+            if s.get("frame_timestamp") is not None:
+                payload["frame_timestamp"] = float(s["frame_timestamp"])
+            if s.get("asset_path"):
+                payload["asset_path"] = str(s["asset_path"])
+            if s.get("slide_number") is not None:
+                payload["slide_number"] = int(s["slide_number"])
+            if s.get("scene_change") is not None:
+                payload["scene_change"] = bool(s["scene_change"])
+
             # Frame captions — serialised (truncated) for display and re-rank
             frame_caps = s.get("frame_captions") or []
             if frame_caps:
@@ -580,9 +603,13 @@ class QdrantVectorStore:
                     for k, v in fe.items()
                 }
 
-            # Verbatim transcript for re-rank display
+            # Verbatim transcript for re-rank display / citation. Use the same
+            # cap as .text (QDRANT_TEXT_MAX_CHARS) — the old 1000 hard-cap chopped
+            # the tail off large speaker turns (a 247-word turn ≈ 1500 chars),
+            # dropping the exact figure sentence from the citation view even
+            # though .text still had it. Matches the audio block's cap.
             if s.get("transcript"):
-                payload["transcript"] = str(s["transcript"])[:1000]
+                payload["transcript"] = str(s["transcript"])[:settings.QDRANT_TEXT_MAX_CHARS]
 
         # XLSX DUAL EMBEDDING — store alt vector in payload so Phase 5 retrieval
         # can reconstruct it for structural table search without a named-vector
