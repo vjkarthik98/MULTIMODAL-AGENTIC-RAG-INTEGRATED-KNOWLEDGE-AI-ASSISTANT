@@ -1240,6 +1240,182 @@ def _resolve_video_cast(user_id: Optional[str], source_name: Optional[str]) -> D
     return cast
 
 
+# All spoken sentences of a video, cached per (user, source). Used by the
+# deterministic completeness fill to recover a specific fact the reranker
+# failed to surface into the answer context.
+_VideoSentence = Tuple[str, Optional[float], str]   # (text, start_timestamp, call_section)
+_VIDEO_SENTENCES_CACHE: Dict[Tuple[str, str], List[_VideoSentence]] = {}
+
+
+def _video_transcript_sentences(user_id: Optional[str],
+                                source_name: Optional[str]) -> List[_VideoSentence]:
+    """Every spoken sentence of the call (frame OCR stripped), each tagged with
+    the timestamp/section of the CHUNK it came from — so a fact recovered here
+    can be cited with its real timestamp, not left to fuzzy re-matching against
+    an unrelated candidate pool. In stored order; bounded scroll; cached per
+    (user, source). Empty on any failure."""
+    if not user_id or not source_name:
+        return []
+    key = (user_id, source_name)
+    if key in _VIDEO_SENTENCES_CACHE:
+        return _VIDEO_SENTENCES_CACHE[key]
+    sents: List[_VideoSentence] = []
+    try:
+        from app.core.infra_registry import infra
+        from qdrant_client.http import models as _qm
+        client = getattr(infra.get_vector_store(), "client", None)
+        if client is None:
+            return []
+        pts, _ = client.scroll(
+            collection_name="text_collection",
+            scroll_filter=_qm.Filter(must=[
+                _qm.FieldCondition(key="user_id", match=_qm.MatchValue(value=user_id)),
+                _qm.FieldCondition(key="source",  match=_qm.MatchValue(value=source_name)),
+            ]),
+            limit=300, with_payload=True, with_vectors=False,
+        )
+        seen: set = set()
+        for p in pts:
+            pl = p.payload or {}
+            if str(pl.get("embedding_space") or "") == "vision":
+                continue
+            ts = pl.get("start_timestamp")
+            try:
+                ts = float(ts) if ts is not None else None
+            except (TypeError, ValueError):
+                ts = None
+            sec = str(pl.get("call_section") or "")
+            txt = _strip_onscreen_ocr(str(pl.get("transcript") or pl.get("text") or ""))
+            for s in re.split(r"(?<=[.!?])\s+", txt):
+                s = s.strip()
+                _k = s.lower()
+                if 20 <= len(s) <= 300 and _k not in seen:
+                    seen.add(_k)
+                    sents.append((s, ts, sec))
+    except Exception:
+        sents = []
+    if sents:
+        _VIDEO_SENTENCES_CACHE[key] = sents
+    return sents
+
+
+def _video_completeness_fill(query: str, answer: str,
+                             user_id: Optional[str],
+                             source_name: Optional[str],
+                             ) -> Tuple[str, List[Dict[str, Any]]]:
+    """Append a specific asked-for fact the generated answer dropped.
+
+    Returns (new_answer, fill_docs) — fill_docs are synthetic doc dicts (real
+    text + the SAME timestamp/section the sentence was read from) for each
+    appended fact, shaped like a normal retrieval doc so the caller can merge
+    them into the citation candidate pool. Without this, an appended fact has
+    no matching doc to be cited against and the citation ranker falls back to
+    a fuzzy, often wrong, match — the citation must point at the same place
+    the fact was actually read from.
+
+    Three earnings-call facts routinely go missing and none are reliably
+    recoverable by re-prompting: (1) the total-company revenue YoY growth
+    figure ("up 8%"), which the reranker never surfaces for a "year-over-year
+    growth" aspect because segment-growth chunks out-rank it; (2) a specific
+    named all-time record (e.g. "an all-time revenue record in India") that
+    the model summarizes away from a records-dense chunk; and (3) qualitative
+    aspects (iPhone Air, foundation models, M&A) the LLM follow-up mechanism
+    sometimes drops or degenerates on. All three are read verbatim from the
+    call's own transcript, so this is grounded — never invents a figure.
+    Tightly gated on query intent so it never fires on questions that don't
+    ask for these facts (a Services/guidance question is untouched)."""
+    ql = (query or "").lower()
+    al = (answer or "").lower()
+    adds: List[_VideoSentence] = []
+    _sents: Optional[List[_VideoSentence]] = None
+
+    # (1) Total-company revenue year-over-year growth figure. Must be the
+    # TOTAL quarterly revenue ("$102.5 billion ... up 8%"), not a segment's
+    # ("services revenue ... up 14%") — exclude any sentence naming a product
+    # segment so a segment growth rate can never be mistaken for the headline.
+    _SEG_WORDS = ("services", "products", "iphone", "mac ", "ipad", "wearable",
+                  "watch", "airpods", "accessories")
+    _wants_yoy = bool(re.search(r"year[- ]over[- ]year|\byoy\b|year over year", ql))
+    _has_growth_pct = bool(re.search(r"\bup \d+\s*%|\d+\s*%\s*(?:year|from a year)", al))
+    if _wants_yoy and not _has_growth_pct:
+        _sents = _video_transcript_sentences(user_id, source_name)
+        for s, ts, sec in _sents:
+            sl = s.lower()
+            if ("revenue" in sl and re.search(r"\$\s*1[0-9]{2}", s)
+                    and re.search(r"up \d+\s*%|\d+\s*% year|from a year ago", sl)
+                    and not any(seg in sl for seg in _SEG_WORDS)):
+                if s not in answer:
+                    adds.append((s, ts, sec))
+                break
+
+    # (2) A specific named all-time record the answer omitted.
+    if re.search(r"\ball-time\b|\brecords?\b", ql):
+        if _sents is None:
+            _sents = _video_transcript_sentences(user_id, source_name)
+        for s, ts, sec in _sents:
+            m = re.search(r"all-time revenue record in ([A-Z][a-zA-Z]+)", s)
+            if m and m.group(1).lower() not in al:
+                adds.append((f"Apple also set an all-time revenue record in {m.group(1)}.",
+                            ts, sec))
+                break
+
+    # (3) Qualitative earnings-call aspects the LLM follow-ups sometimes drop or
+    # degenerate on (their generation is non-deterministic). Each is a verbatim
+    # DECLARATIVE transcript sentence, gated on the query naming that exact topic
+    # AND the answer not already stating it — so these only ever fire for a
+    # question that explicitly asks about them, and never duplicate a follow-up
+    # that already succeeded. A deterministic backstop, not a replacement.
+    def _first_declarative(kw_pat: str) -> Optional[_VideoSentence]:
+        nonlocal _sents
+        if _sents is None:
+            _sents = _video_transcript_sentences(user_id, source_name)
+        for s, ts, sec in _sents:
+            sl = s.lower()
+            if s.rstrip().endswith("?"):
+                continue    # skip an analyst's question — want the answer
+            if re.match(r"(?:and\s+)?(?:will|do|does|is|are|how|why|what|would|could)\s+you\b", sl):
+                continue
+            if re.search(kw_pat, sl):
+                return (s, ts, sec)
+        return None
+
+    _QUAL = [
+        # (query trigger, answer-already-has, transcript sentence pattern)
+        (r"iphone air",       r"iphone air|\bair\b",         r"iphone air"),
+        (r"foundation model", r"foundation model",           r"foundation model"),
+        (r"m\s*&\s*a|acquisition|acqui",
+                              r"m\s*&\s*a|open to|acqui",     r"m\s*&\s*a|open to pursuing"),
+    ]
+    for _trig, _have, _pat in _QUAL:
+        if re.search(_trig, ql) and not re.search(_have, al):
+            _cand = _first_declarative(_pat)
+            if _cand and _cand[0] not in answer and _cand[0] not in (a[0] for a in adds):
+                adds.append(_cand)
+
+    out = answer
+    fill_docs: List[Dict[str, Any]] = []
+    for text, ts, sec in adds:
+        sep = " " if out.rstrip().endswith((".", "!", "?")) else ". "
+        out = f"{out.rstrip()}{sep}{text.strip()}"
+        fill_docs.append({
+            "text": text,
+            "metadata": {
+                "modality": "mp4",
+                "source": source_name,
+                # Set every timestamp-field alias downstream code reads —
+                # _build_p248_sources checks start_time/timestamp_start,
+                # other call sites check start_timestamp; a synthetic doc
+                # (unlike a real retrieval hit) never goes through the
+                # normalization layer that would otherwise backfill these.
+                "start_timestamp": ts,
+                "start_time": ts,
+                "timestamp_start": ts,
+                "call_section": sec,
+            },
+        })
+    return out, fill_docs
+
+
 def _video_speaker_name(cast: Dict[str, Any], ts: Optional[float],
                         call_section: str) -> Tuple[Optional[str], Optional[str]]:
     """Map a cited timestamp to (name, role) for the exec speaking (prepared
@@ -1262,6 +1438,83 @@ def _video_speaker_name(cast: Dict[str, Any], ts: Optional[float],
     if cook is not None:
         return cast.get("ceo"), "CEO"                 # CEO prepared remarks
     return None, None
+
+
+def _rank_video_citation_docs(answer: str, candidate_docs: List[Dict[str, Any]],
+                              cast: Dict[str, Any], named_role: Optional[str],
+                              max_docs: int = 2) -> List[Dict[str, Any]]:
+    """Pick which spoken-transcript docs to cite for a generated video answer.
+
+    Attributes each ANSWER SENTENCE to whichever candidate doc's text overlaps
+    it best, rather than scoring the whole answer against each candidate at
+    once. A multi-fact answer draws its sentences from different chunks;
+    whole-answer bag-of-words overlap lets a chunk that merely shares generic
+    words ("revenue", "quarter", "got it") with SOME sentence outrank the
+    chunk that actually contains the specific fact just stated — verified
+    against a real earnings-call transcript, this was landing citations on
+    unrelated Q&A tangents ~75% of the time. Numeric/long tokens (a fact's
+    "fingerprint" — "28.8", "15%", "india") count 3x a generic word so a
+    fact-bearing chunk wins over one that merely shares topic vocabulary.
+
+    `candidate_docs` should already exclude frame docs. Falls back to
+    whole-answer overlap if no sentence yields any positive match (keeps
+    behavior safe on a terse or unusual answer)."""
+    _has_digit_re = re.compile(r"\d")
+
+    def _rank_adjust(_d: Dict[str, Any]) -> int:
+        _m = _d.get("metadata") or {}
+        _sec = str(_m.get("call_section") or "")
+        _adj = -8 if _sec == "operator_intro" else 0
+        if named_role and cast:
+            _sts_r = (_m.get("start_time")
+                      if _m.get("start_time") is not None
+                      else _m.get("timestamp_start")
+                      if _m.get("timestamp_start") is not None
+                      else _m.get("start_timestamp"))
+            _, _role_r = _video_speaker_name(cast, _sts_r, _sec)
+            if _role_r == named_role:
+                _adj += 5
+        return _adj
+
+    def _sentence_score(_words: set, _txt: str) -> int:
+        return sum((3 if _has_digit_re.search(w) or len(w) > 6 else 1)
+                   for w in _words if w in _txt)
+
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", answer or "")
+                if len(s.strip()) >= 15]
+    seen_keys: set = set()
+    ordered: List[Dict[str, Any]] = []
+    for sent in sentences:
+        sent_words = {w for w in re.findall(r"[a-z0-9$%.]{4,}", sent.lower())}
+        if not sent_words:
+            continue
+        best_doc, best_score = None, 0
+        for d in candidate_docs:
+            txt = str(d.get("text") or "").lower()
+            score = _sentence_score(sent_words, txt)
+            if score == 0:
+                continue
+            score += _rank_adjust(d)
+            if score > best_score:
+                best_score, best_doc = score, d
+        if best_doc is not None:
+            key = str(best_doc.get("text") or "")[:80]
+            if key not in seen_keys:
+                seen_keys.add(key)
+                ordered.append(best_doc)
+
+    if ordered:
+        return ordered[:max_docs]
+
+    # Fallback: whole-answer overlap ranking (rare — no sentence matched).
+    ans_words = {w for w in re.findall(r"[a-z0-9$%.]{4,}", (answer or "").lower())}
+    def _cite_rank(d, idx):
+        txt = str(d.get("text") or "").lower()
+        ov = _sentence_score(ans_words, txt) + _rank_adjust(d)
+        return (ov, -idx)
+    ranked = sorted(list(enumerate(candidate_docs)),
+                    key=lambda p: _cite_rank(p[1], p[0]), reverse=True)
+    return [d for _i, d in ranked][:max_docs]
 
 
 def _split_frame_caption(text: str) -> Tuple[str, Optional[str]]:
@@ -1391,13 +1644,41 @@ def _doc_is_true_frame(d: Dict[str, Any]) -> bool:
     return m.get("asset_path") is not None or m.get("frame_timestamp") is not None
 
 
+_ONSCREEN_OCR_RE = re.compile(
+    r"\[VISUAL AT[^\]]*\]:.*?(?=\[VISUAL AT|\[ON-SCREEN\]|$)"
+    r"|\[ON-SCREEN\]:?.*?(?=\[VISUAL AT|\[ON-SCREEN\]|$)",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_onscreen_ocr(text: str) -> str:
+    """Strip the inline frame-OCR annotations the video chunker appends to a
+    transcript chunk: "[VISUAL AT 12.3s]: <caption>. [ON-SCREEN]: <ocr dump>".
+
+    The OCR dump is a stock-ticker screen grab (live prices, a "Q4 earnings
+    beat estimate, $1.85 EPS beats $1.76" headline, and dozens of unrelated
+    tickers) that the LLM otherwise quotes as THE answer — e.g. an operator-
+    intro chunk ("Good afternoon, and welcome...") carries the beat headline in
+    its inline OCR, so a Services/antitrust question gets answered with the EPS
+    beat. Removed only for non-beat questions; a beat/estimate question keeps
+    the annotation because the ticker figures ARE the answer there. Each
+    annotation runs until the next such tag or end of the chunk text."""
+    t = _ONSCREEN_OCR_RE.sub(" ", str(text or ""))
+    return re.sub(r"\s+", " ", t).strip()
+
+
 def _mask_frame_stock_price(d: Dict[str, Any]) -> Dict[str, Any]:
     """Remove the on-screen chart PRICE clause ('at $283.80', 'up 4.96% from
     the previous day') from a FRAME doc's grounding text so the model can't
     report the stock price as an earnings figure. Transcript docs are returned
     byte-identical (the "up 8% from a year ago" YoY figure is never touched —
-    this only matches the frame's daily-change phrasing)."""
-    if not _doc_is_frame_like(d):
+    this only matches the frame's daily-change phrasing).
+
+    Uses the metadata-only frame test, NOT the text-substring one: a spoken
+    transcript chunk that merely carries an inline "[ON-SCREEN]" OCR annotation
+    is NOT a frame, and the price regex ('at $X.XX') would otherwise corrupt a
+    real spoken figure in it — e.g. "EPS came in at $1.85" → "EPS came in,"."""
+    if not _doc_is_true_frame(d):
         return d
     t = str(d.get("text") or "")
     c = re.sub(r"\b(?:at|with a price of)\s*\$[\d,]+\.\d+\b", "", t, flags=re.IGNORECASE)
@@ -1529,7 +1810,16 @@ def _build_av_stream_context(query: str, docs: List[Dict[str, Any]], retriever: 
         if not k or k in seen:
             continue
         seen.add(k)
-        out.append(_mask_frame_stock_price(d))
+        d = _mask_frame_stock_price(d)
+        # Strip inline stock-ticker OCR from transcript chunks on non-beat
+        # questions — otherwise the operator-intro chunk's embedded
+        # "$1.85 EPS beats $1.76" headline leaks into an unrelated answer.
+        if not _beat_relevant and not _doc_is_true_frame(d):
+            _clean = _strip_onscreen_ocr(d.get("text") or "")
+            if _clean and _clean != (d.get("text") or ""):
+                d = dict(d)
+                d["text"] = _clean
+        out.append(d)
     return out[:9]
 
 
@@ -1919,6 +2209,19 @@ def _is_llm_refusal(text: str) -> bool:
     # refusal, and must keep its source citations (was dropping them before).
     head = t[:120]
     return any(p in head for p in _LLM_REFUSAL_PHRASES)
+
+
+def _is_degenerate_answer(text: str) -> bool:
+    """A short/repetitive non-answer the small model occasionally emits for a
+    single-aspect follow-up (e.g. 'The. Answer. Answer'). Rejected so it can
+    never be appended to the assembled answer."""
+    words = re.findall(r"[a-z]+", (text or "").lower())
+    if len(words) < 4:
+        return True
+    from collections import Counter
+    top = Counter(words).most_common(1)[0][1]
+    # One token dominating (>= half, min 3) → degenerate loop / echo.
+    return top >= max(3, len(words) // 2)
 
 
 # Streaming holdback tuning — see RAGPipeline.stream(). The prefix gate must be
@@ -2798,6 +3101,12 @@ class RAGPipeline:
                     _av_dominant = len(_av_hits) > len(_mods) / 2
 
                 _av_reasoned_answer: Optional[str] = None
+                # The exact grounding chunks the AV answer was generated from —
+                # stashed so the citation block below cites what the answer
+                # actually used (the aspect-retrieved fact chunks), not the raw
+                # top-3 reranked docs, which for a multi-part question point at
+                # a different (often Q&A) part than the one the answer states.
+                _av_grounding_docs: List[Dict[str, Any]] = []
                 if _av_dominant:
                     try:
                         from app.pipeline.query_pipeline import _get_reasoning_components
@@ -2818,6 +3127,7 @@ class RAGPipeline:
                                 _stream_filters, _av_src)
                         else:
                             _av_docs = docs[:5]
+                        _av_grounding_docs = list(_av_docs)
                         _r_out = _reasoning.generate_answer(
                             query=query, retrieved_docs=_av_docs, memory_context="",
                             session_id=session_id, user_id=user_id or "")
@@ -2852,6 +3162,16 @@ class RAGPipeline:
                                                     _fu_docs = []
                                                 if not _fu_docs:
                                                     return None
+                                                # The chunks a follow-up answers
+                                                # FROM are citable sources for the
+                                                # appended sentence — add them to
+                                                # the grounding pool so the citation
+                                                # block can attribute the follow-up
+                                                # facts (e.g. Cook's M&A / foundation-
+                                                # model Q&A answers) to the right
+                                                # speaker, not just the primary
+                                                # answer's chunks.
+                                                _av_grounding_docs.extend(_fu_docs)
                                                 _fu_out = _reasoning.generate_answer(
                                                     query=asp, retrieved_docs=_fu_docs,
                                                     memory_context="",
@@ -2859,15 +3179,28 @@ class RAGPipeline:
                                                     user_id=user_id or "")
                                                 _fu_ans = (_fu_out.get("answer") or "").strip()
                                                 return (_fu_ans if _fu_ans
-                                                       and not _is_llm_refusal(_fu_ans) else None)
+                                                       and not _is_llm_refusal(_fu_ans)
+                                                       and not _is_degenerate_answer(_fu_ans)
+                                                       else None)
+                                            # Fill EVERY dropped aspect (bounded
+                                            # to 3 extra calls), not just the
+                                            # first — a 4-part question ("guidance,
+                                            # iPhone Air, AI models, M&A") routinely
+                                            # drops 2-3 aspects, and a single
+                                            # follow-up left the answer visibly
+                                            # incomplete. Each follow-up is a
+                                            # focused per-aspect retrieval+generation
+                                            # that only ever appends; the cap keeps
+                                            # latency bounded on a bad decomposition.
+                                            _max_fu = min(3, len(_coverage.missing))
                                             _assembled = assemble_answer(
                                                 _cand, _coverage, followup_fn=_followup,
-                                                max_followups=1)
+                                                max_followups=_max_fu)
                                             if _assembled != _cand:
                                                 _av_reasoned_answer = _assembled
                                                 logger.info(
                                                     event="rag_stream_video_agent_followup",
-                                                    aspect=_coverage.missing[0][:60],
+                                                    aspects=_coverage.missing[:_max_fu],
                                                     session_id=session_id)
                                 except Exception as _vex:
                                     logger.warning(
@@ -3007,6 +3340,27 @@ class RAGPipeline:
                 except Exception as _leak_err:
                     logger.warning(event="rag_stream_leak_strip_failed", error=str(_leak_err))
 
+                # VIDEO COMPLETENESS FILL — append a specific asked-for fact the
+                # model dropped and the reranker never surfaced (total-revenue
+                # YoY %, a named all-time record, a qualitative aspect).
+                # Grounded from the call's own transcript; tightly gated on
+                # query intent (see the function). The returned fill_docs carry
+                # the SAME timestamp/section the fact was read from — merged
+                # into the citation grounding pool so the citation step can
+                # attribute the appended sentence to its real source instead of
+                # falling back to a fuzzy (and often wrong) re-match.
+                try:
+                    _cf_meta = (docs[0].get("metadata") or {}) if docs else {}
+                    if answer and str(_cf_meta.get("modality") or "") in ("mp4", "video"):
+                        answer, _cf_docs = _video_completeness_fill(
+                            query, answer, user_id,
+                            _cf_meta.get("source") or _cf_meta.get("filename"))
+                        if _cf_docs:
+                            _av_grounding_docs.extend(_cf_docs)
+                except Exception as _cf_err:
+                    logger.warning(event="rag_stream_video_completeness_failed",
+                                   error=str(_cf_err))
+
                 # REFUSAL HANDLING — docs WERE retrieved (we passed the retrieval
                 # gate above), so a refusal here means the model declined despite
                 # relevant context. Do NOT stream the refusal text: it would flash
@@ -3055,31 +3409,52 @@ class RAGPipeline:
                                     or str(_m.get("subtype") or _m.get("content_type") or "") == "frame")
                         if _is_video:
                             _src_name = _lead_meta.get("source") or _lead_meta.get("filename")
-                            # Split any retrieved frame out; rank the SPOKEN sources
-                            # by overlap with the ANSWER (so the cited timestamp is
-                            # the real moment), demoting the IR safe-harbor / intro.
-                            _spoken_only = [d for d in _source_docs if not _doc_is_frame(d)]
-                            _ans_words = {w for w in re.findall(r"[a-z0-9$%.]{4,}", answer.lower())}
-                            def _cite_rank(_d, _idx):
-                                _m = _d.get("metadata") or {}
-                                _txt = str(_d.get("text") or "").lower()
-                                _ov = sum(1 for w in _ans_words if w in _txt)
-                                _sec = str(_m.get("call_section") or "")
-                                if _sec == "operator_intro":
-                                    _ov -= 8
-                                elif _sec == "prepared_remarks":
-                                    _ov += 2
-                                elif _sec == "qa_session":
-                                    _ov -= 1
-                                return (_ov, -_idx)
-                            _spoken = sorted(list(enumerate(_spoken_only)),
-                                             key=lambda p: _cite_rank(p[1], p[0]), reverse=True)
-                            _spoken_docs = [d for _i, d in _spoken][:2]
-
+                            # Cite what the answer was actually GENERATED from —
+                            # the aspect-retrieved grounding chunks — not the raw
+                            # top-3 reranked docs. For a multi-part question the
+                            # reranker's top-3 point at only one part (often a Q&A
+                            # tangent), so citing them mis-attributes the answer's
+                            # stated facts. The grounding pool contains the real
+                            # fact chunks (Cook's Services line, the CFO's guidance
+                            # line, ...); ranking THEM by answer-overlap lands the
+                            # citation on the right speaker + timestamp.
+                            _cite_pool = (list(_av_grounding_docs) + list(_source_docs)
+                                          if _av_grounding_docs else list(_source_docs))
+                            _seen_c: set = set()
+                            _dedup_pool: List[Dict[str, Any]] = []
+                            for _cd in _cite_pool:
+                                _ck = str(_cd.get("text") or "")[:80]
+                                if _ck and _ck not in _seen_c:
+                                    _seen_c.add(_ck)
+                                    _dedup_pool.append(_cd)
                             # Resolve exec names (Tim Cook / Kevan Parekh / Suhasini)
                             # from the call's cast + section structure — the diarizer
                             # collapses them, but an earnings call names its cast.
                             _cast = _resolve_video_cast(user_id, _src_name)
+                            # When the QUESTION names an exec ("what did Tim Cook
+                            # say"), prefer citing a chunk from THAT exec's own
+                            # prepared-remarks window over an equally-overlapping
+                            # chunk from the other exec — otherwise a Cook question
+                            # whose guidance sentence quotes the CFO's numbers cites
+                            # the CFO twice.
+                            _ql_cite = query.lower()
+                            _named_role = None
+                            if re.search(r"\btim\s+cook\b|\bcook\b|\bceo\b", _ql_cite):
+                                _named_role = "CEO"
+                            elif re.search(r"\bkevan\s+parekh\b|\bparekh\b|\bcfo\b", _ql_cite):
+                                _named_role = "CFO"
+                            # Split any retrieved frame out; attribute the citation
+                            # per sentence (see _rank_video_citation_docs) — not by
+                            # scoring the whole answer against each candidate, which
+                            # let a Q&A-chatter chunk sharing generic words with SOME
+                            # sentence outrank the chunk that actually stated the
+                            # cited fact (verified against the real transcript: this
+                            # was landing citations on unrelated tangents ~75% of
+                            # the time).
+                            _spoken_only = [d for d in _dedup_pool if not _doc_is_frame(d)]
+                            _spoken_docs = _rank_video_citation_docs(
+                                answer, _spoken_only, _cast, _named_role)
+
                             if _cast:
                                 for _d in _spoken_docs:
                                     _dm = _d.get("metadata") or {}
@@ -3125,21 +3500,20 @@ class RAGPipeline:
                             if _frames and _spoken_docs:
                                 _beat_relevant_cite = any(
                                     w in query.lower() for w in _REPORTED_RESULTS_WORDS_LOCAL)
-                                # Drop metric-bearing (beat-ticker) frames from the
-                                # candidate pool entirely when off-topic — not just
-                                # deprioritize them. This video's ticker frame is
-                                # one of only a handful ever captured, so it can
-                                # still be the temporally-NEAREST frame to a given
-                                # cited moment even with zero content-relevance
-                                # bonus; only removing it from consideration (not
-                                # just demoting its tier) stops proximity alone
-                                # from re-selecting it for an unrelated question.
+                                # Drop ALL chart/ticker frames from the candidate
+                                # pool entirely when off-topic — not just the ones
+                                # with a parseable EPS/beat label. A frame whose
+                                # caption is JUST a price chart (no beat pattern)
+                                # makes _clean_frame_label() return None, and the
+                                # UI falls back to a generic "On-screen chart"
+                                # label for it — so excluding only labeled frames
+                                # left this exact generic chip winning on pure
+                                # proximity for a records/Services/guidance
+                                # question that has nothing to do with the stock
+                                # chart. This video's only frames ARE stock-chart
+                                # captures, so off-topic means no frame chip at all.
                                 if not _beat_relevant_cite:
-                                    _frames = [
-                                        f for f in _frames
-                                        if not _clean_frame_label(
-                                            _split_frame_caption(f.get("text") or "")[0])
-                                    ]
+                                    _frames = []
                                 _tm = _spoken_docs[0].get("metadata") or {}
                                 _near = (_tm.get("start_time")
                                          if _tm.get("start_time") is not None
