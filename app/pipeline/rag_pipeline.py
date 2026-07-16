@@ -498,14 +498,16 @@ def _fig_key(match_str: str) -> Optional[str]:
 
 
 def _attach_page_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
-    """Deterministically attach Perplexity-style [p.N] anchors to each sentence.
+    """Deterministically attach Perplexity-style [p.N] anchors as a single
+    footer line at the end of the answer (not after every sentence).
 
     The small GGUF model will not place citations itself (Cit:0 in the
     benchmark), so we do it post-hoc: extract the distinctive financial figures
     in each sentence, match them back to the source chunk(s) that contain them,
-    and append the source page(s) before the sentence's terminal punctuation.
-    Synthetic aggregate docs (metadata.synthetic=True) are skipped so figures get
-    attributed to their true source page, not the aggregate's nominal page.
+    and collect the source page(s) used anywhere in the answer into one
+    deduplicated "Sources: [p.N] ..." line. Synthetic aggregate docs
+    (metadata.synthetic=True) are skipped so figures get attributed to their
+    true source page, not the aggregate's nominal page.
     """
     if not answer or not docs:
         return answer
@@ -532,7 +534,8 @@ def _attach_page_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
         return answer
 
     sentences = _split_sentences(answer)
-    rebuilt: List[str] = []
+    cited_pages: List[int] = []
+    cited_seen: set = set()
     for s in sentences:
         st = s.strip()
         if not st:
@@ -543,7 +546,6 @@ def _attach_page_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
             if k:
                 keys.add(k)
         if not keys:
-            rebuilt.append(st)
             continue
         # Score each page by how many of the sentence's figures it contains.
         # Real (non-synthetic) source pages take priority; only fall back to a
@@ -561,19 +563,34 @@ def _attach_page_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
                 if c:
                     hits[pg] = max(hits.get(pg, 0), c)
         if not hits:
-            rebuilt.append(st)
             continue
-        # Top pages by coverage (max 2), displayed in ascending page order.
+        # Top pages by coverage (max 2) contribute to the footer set.
         top = sorted(hits.items(), key=lambda kv: (-kv[1], kv[0]))[:2]
-        pages = sorted(p for p, _ in top)
-        cite = " " + "".join(f"[p.{p}]" for p in pages)
-        m = re.search(r'[.!?]+\s*$', st)
-        if m:
-            st = st[:m.start()] + cite + st[m.start():]
-        else:
-            st = st + cite
-        rebuilt.append(st)
-    return " ".join(rebuilt)
+        for p, _c in top:
+            if p not in cited_seen:
+                cited_seen.add(p)
+                cited_pages.append(p)
+
+    if not cited_pages:
+        # No sentence's figures matched a chunk verbatim (number-format drift,
+        # or the supporting figure lives in a chunk that fell outside this
+        # query's retrieved window) — fall back to the top retrieved page(s)
+        # in doc order (already relevance-sorted by the caller) rather than
+        # showing no citation at all.
+        fallback_src = page_texts or synth_page_texts
+        for pg, _txt in fallback_src:
+            if pg not in cited_seen:
+                cited_seen.add(pg)
+                cited_pages.append(pg)
+            if len(cited_pages) >= 2:
+                break
+    if not cited_pages:
+        return answer
+    # Ascending page order, capped so a very long multi-page answer still
+    # renders a readable footer rather than a wall of chips.
+    pages = sorted(cited_pages)[:8]
+    footer = "Sources: " + " ".join(f"[p.{p}]" for p in pages)
+    return f"{answer}\n\n{footer}"
 
 
 _SECTION_ID_NUMERIC_RE = re.compile(r'^\d+(?:\.\d+)*$')
@@ -3082,34 +3099,60 @@ class RAGPipeline:
                     except Exception as _cmp_err:
                         logger.warning(event="rag_stream_txt_compare_failed", error=str(_cmp_err))
 
-                # AUDIO/VIDEO ANSWER GENERATION — route through the SAME reasoning
-                # engine the (benchmark-validated) non-streaming query_pipeline
-                # uses, instead of the single-shot raw llm.stream below. On the
-                # small GGUF model, single-shot generation over a spoken-word
-                # transcript is unstable: it drifts into invented "Q:/A:" echoes,
-                # answers a neighbouring fact, or hallucinates a figure — and it
-                # diverges from the validated path. reasoning_engine.generate_
-                # answer is deterministic, grounded, and numeric-faithfulness-
-                # guarded. Its buffered answer is streamed through the identical
-                # clean-up/citation path below. Scoped to AV-dominant results
-                # only — documents keep the existing single-shot path.
-                _av_dominant = False
-                if docs:
-                    _mods = [str((d.get("metadata") or {}).get("modality") or "").lower()
-                             for d in docs[:5]]
-                    _av_hits = [m for m in _mods if m in ("audio", "mp3", "video", "mp4")]
-                    _av_dominant = len(_av_hits) > len(_mods) / 2
+                # SELF-VERIFYING ANSWER GENERATION (Phase 32) — route through
+                # VerificationLoop instead of the single-shot raw llm.stream
+                # below. On the small GGUF model, single-shot generation is
+                # unstable: it drifts into invented "Q:/A:" echoes, answers a
+                # neighbouring fact, or hallucinates a figure. VerificationLoop
+                # wraps the SAME reasoning_engine.generate_answer() the
+                # (benchmark-validated) non-streaming query_pipeline uses,
+                # scores groundedness/citation/completeness, and retries with
+                # a different retrieval strategy on FAIL. Its buffered answer
+                # streams through the identical clean-up/citation path below.
+                # Gated per-modality via settings.AGENT_VERIFY_MODALITIES so
+                # this is a config revert, not a code revert, if the added
+                # latency proves unacceptable for a given modality under load
+                # (architect review, docs/Phase_32_Agentic_Answer_Verification.md §6).
+                #
+                # Variable names below are kept as `_av_*` (this block used to
+                # be audio/video-only) to avoid touching ~10 downstream
+                # citation-pool reference sites; they now mean "verification
+                # ran for this query," for any modality in AGENT_VERIFY_MODALITIES.
+                #
+                # _mod0 normalization: video_chunker.py deliberately tags
+                # frame/vision-collection chunks modality="mp4" while
+                # transcript/text-collection chunks from the SAME file are
+                # tagged "video" (by design — the dual text/vision collection
+                # split; same for audio/"mp3"). The top-1 reranked doc can be
+                # either. Confirmed via live smoke test (Phase 32): without
+                # normalizing here, verification silently never fires
+                # whenever the top doc happens to be a frame/vision chunk.
+                from app.verification import normalize_modality as _norm_mod
+                _mod0_norm = _norm_mod(_mod0)
+                _av_dominant = bool(docs) and settings.AGENT_VERIFY_ENABLED and (
+                    _mod0_norm in settings.AGENT_VERIFY_MODALITIES
+                )
 
                 _av_reasoned_answer: Optional[str] = None
-                # The exact grounding chunks the AV answer was generated from —
-                # stashed so the citation block below cites what the answer
-                # actually used (the aspect-retrieved fact chunks), not the raw
-                # top-3 reranked docs, which for a multi-part question point at
-                # a different (often Q&A) part than the one the answer states.
+                # The exact grounding chunks the verified answer was generated
+                # from — stashed so the citation block below cites what the
+                # answer actually used (the aspect-retrieved fact chunks), not
+                # the raw top-3 reranked docs, which for a multi-part question
+                # point at a different (often Q&A) part than the one the
+                # answer states. NOTE: reflects the BASELINE attempt's docs;
+                # if VerificationLoop retried with an expanded/rewritten
+                # doc pool, this citation-widening pool is not updated to
+                # match — a known, low-blast-radius limitation (the retry's
+                # own CitationVerifier already checked the real final docs
+                # for the PASS/FAIL decision; this pool only widens citation
+                # *display* candidates, it isn't a correctness gate).
                 _av_grounding_docs: List[Dict[str, Any]] = []
                 if _av_dominant:
                     try:
                         from app.pipeline.query_pipeline import _get_reasoning_components
+                        from app.verification import VerificationLoop
+                        from app.core.response import build_sources
+
                         _reasoning, _ = _get_reasoning_components(self._get_llm())
                         # Focused context: the model drifts and mixes facts when
                         # fed ~20 broadly-relevant transcript chunks. Base is the
@@ -3118,94 +3161,34 @@ class RAGPipeline:
                         # transcript chunk for each, add one beat-ticker frame,
                         # and mask frame stock-prices (which the model otherwise
                         # reads as earnings). Additive over docs[:5].
-                        _top_mod = str(((docs[:1] or [{}])[0].get("metadata") or {}).get("modality") or "")
-                        if _top_mod in ("mp4", "video"):
+                        if _mod0_norm == "video":
                             _av_src = (((docs[:1] or [{}])[0].get("metadata") or {}).get("source")
                                        or ((docs[:1] or [{}])[0].get("metadata") or {}).get("filename"))
-                            _av_docs = _build_av_stream_context(
+                            _verify_docs = _build_av_stream_context(
                                 query, docs, retriever, session_id, user_id,
                                 _stream_filters, _av_src)
                         else:
-                            _av_docs = docs[:5]
-                        _av_grounding_docs = list(_av_docs)
-                        _r_out = _reasoning.generate_answer(
-                            query=query, retrieved_docs=_av_docs, memory_context="",
-                            session_id=session_id, user_id=user_id or "")
-                        _cand = (_r_out.get("answer") or "").strip()
+                            _verify_docs = docs[:5]
+
+                        _av_grounding_docs = list(_verify_docs)
+                        _verify_sources = build_sources(_verify_docs)
+                        _cand, _verify_report = VerificationLoop().run(
+                            query=query, session_id=session_id, user_id=user_id,
+                            retriever=retriever, reasoning_engine=_reasoning,
+                            initial_docs=_verify_docs, initial_sources=_verify_sources,
+                            llm=self._get_llm(), modality_hint=_mod0_norm,
+                            filters=_stream_filters, memory_context="",
+                        )
+                        logger.info(
+                            event="rag_stream_verification_result",
+                            verified=_verify_report.verified,
+                            attempts=len(_verify_report.attempts),
+                            overall_confidence=_verify_report.scores.overall,
+                            total_duration_ms=_verify_report.total_duration_ms,
+                            modality=_mod0, session_id=session_id,
+                        )
                         if _cand:
                             _av_reasoned_answer = _cand
-                            # PHASE C — VERIFY + ASSEMBLE: for a genuinely
-                            # multi-part question (same >=3-aspect gate as the
-                            # context builder above), check whether the primary
-                            # answer actually covers every aspect asked; if one
-                            # is visibly missing, run ONE bounded follow-up
-                            # generation on just that aspect and append it.
-                            # Deliberately not per-aspect answer synthesis (see
-                            # module docstring) — this only ever appends to an
-                            # already-generated, already-safe primary answer.
-                            if _top_mod in ("mp4", "video"):
-                                try:
-                                    from app.agents.video_answer_agent import (
-                                        verify_aspect_coverage, assemble_answer,
-                                    )
-                                    _aspects_chk = _split_query_aspects(query)
-                                    if len(_aspects_chk) >= 3:
-                                        _coverage = verify_aspect_coverage(_cand, _aspects_chk)
-                                        if _coverage.missing:
-                                            def _followup(asp: str) -> Optional[str]:
-                                                try:
-                                                    _fu_raw = retriever.search(
-                                                        query=asp, session_id=session_id, top_k=4,
-                                                        user_id=user_id, filters=_stream_filters)
-                                                    _fu_docs = _dedup_docs(_normalize_docs(_fu_raw))[:4]
-                                                except Exception:
-                                                    _fu_docs = []
-                                                if not _fu_docs:
-                                                    return None
-                                                # The chunks a follow-up answers
-                                                # FROM are citable sources for the
-                                                # appended sentence — add them to
-                                                # the grounding pool so the citation
-                                                # block can attribute the follow-up
-                                                # facts (e.g. Cook's M&A / foundation-
-                                                # model Q&A answers) to the right
-                                                # speaker, not just the primary
-                                                # answer's chunks.
-                                                _av_grounding_docs.extend(_fu_docs)
-                                                _fu_out = _reasoning.generate_answer(
-                                                    query=asp, retrieved_docs=_fu_docs,
-                                                    memory_context="",
-                                                    session_id=session_id + "|followup",
-                                                    user_id=user_id or "")
-                                                _fu_ans = (_fu_out.get("answer") or "").strip()
-                                                return (_fu_ans if _fu_ans
-                                                       and not _is_llm_refusal(_fu_ans)
-                                                       and not _is_degenerate_answer(_fu_ans)
-                                                       else None)
-                                            # Fill EVERY dropped aspect (bounded
-                                            # to 3 extra calls), not just the
-                                            # first — a 4-part question ("guidance,
-                                            # iPhone Air, AI models, M&A") routinely
-                                            # drops 2-3 aspects, and a single
-                                            # follow-up left the answer visibly
-                                            # incomplete. Each follow-up is a
-                                            # focused per-aspect retrieval+generation
-                                            # that only ever appends; the cap keeps
-                                            # latency bounded on a bad decomposition.
-                                            _max_fu = min(3, len(_coverage.missing))
-                                            _assembled = assemble_answer(
-                                                _cand, _coverage, followup_fn=_followup,
-                                                max_followups=_max_fu)
-                                            if _assembled != _cand:
-                                                _av_reasoned_answer = _assembled
-                                                logger.info(
-                                                    event="rag_stream_video_agent_followup",
-                                                    aspects=_coverage.missing[:_max_fu],
-                                                    session_id=session_id)
-                                except Exception as _vex:
-                                    logger.warning(
-                                        event="rag_stream_video_agent_verify_failed",
-                                        error=str(_vex), session_id=session_id)
                     except Exception as _rex:
                         logger.warning(event="rag_stream_av_reasoning_failed",
                                        error=str(_rex), session_id=session_id)
@@ -3581,10 +3564,12 @@ class RAGPipeline:
                     except Exception as _ec_err:
                         logger.warning(event="rag_stream_txt_compare_append_failed", error=str(_ec_err))
 
-                # PERPLEXITY-STYLE [p.N] ANCHORS — deterministically attach a page
-                # citation to each sentence by tracing its figures to the source
-                # chunk. Runs on the clean prose (after strip_inline_citations) so
-                # the only brackets left are the trustworthy page anchors.
+                # PERPLEXITY-STYLE [p.N] ANCHORS — deterministically trace each
+                # sentence's figures to their source chunk and collect the pages
+                # into a single trailing "Sources: [p.N] ..." line, rather than
+                # citing after every sentence. Runs on the clean prose (after
+                # strip_inline_citations) so the only brackets left are the
+                # trustworthy page anchors.
                 try:
                     _before_cite = answer
                     answer = _attach_page_citations(answer, docs)

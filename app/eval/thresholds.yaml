@@ -139,3 +139,23 @@ latency:
   p50_sec:
     max: 20.0
     why: "Median should be well below ceiling — degradation signal before p95 breaches"
+
+# Phase 32 — Agentic Answer Verification (docs/Phase_32_Agentic_Answer_Verification.md).
+# No gate yet: these metrics require a baseline run of the verification loop
+# itself (python -m app.eval.run --suite all, once VerificationLoop is wired
+# into the runners) before a regression threshold can be set. Informational
+# only until then — same pattern as the video/audio metrics above before
+# their first baseline.
+verification:
+  grounding_success_rate:
+    why: "Fraction of answers with zero unsupported claims/numbers (GroundednessChecker). No baseline yet."
+  citation_accuracy_v2:
+    why: "Fraction of answers with zero bad citations (CitationVerifier, chunk-content-aware — not the lexical [filename] check above). No baseline yet."
+  retry_success_rate:
+    why: "Fraction of retried queries that eventually PASS. No baseline yet."
+  avg_retry_count:
+    why: "Mean verification retries per query — cost signal for the accuracy/latency tradeoff. No baseline yet."
+  verification_latency_p50:
+    why: "Median verification loop duration (retrieval+generate+verify, all attempts). No baseline yet."
+  verification_latency_p95:
+    why: "Tail verification loop duration — bounded by AGENT_VERIFY_TIMEOUT_SEC=30s. No baseline yet."

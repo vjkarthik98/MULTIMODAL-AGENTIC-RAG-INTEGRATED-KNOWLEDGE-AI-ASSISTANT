@@ -38,8 +38,17 @@ const DOCX_FOOTER_RE = /\n*Sources?:\s*((?:\[\d+(?:\.\d+)*[^\]\n]*\](?:,\s*)?)+)
 const DOCX_HEADING_RE = /\[(\d+(?:\.\d+)*[^\]\n]*)\]/g
 const DOCX_INLINE_SECTION_RE = /\s*\[(\d+(?:\.\d+)+)[^\]\n]*\]/g
 
+// PDF page-citation footer (rag_pipeline._attach_page_citations): a single
+// trailing "Sources: [p.22] [p.23] ..." line, deduped ascending pages. Pulled
+// out of the prose the same way as the DOCX footer above (and for the same
+// reason: dedupText's sentence-rejoin in ChatPage.jsx collapses the "\n\n"
+// before it to a single space, so leaving it inline would run it into the
+// last sentence instead of reading as a distinct footer).
+const PDF_FOOTER_RE = /\n*Sources?:\s*((?:\[p\.\d+\]\s*)+)\s*$/i
+const PDF_PAGE_RE = /\[p\.(\d+)\]/g
+
 function parseInlineCitations(content) {
-  if (!content) return { cleanContent: content, inlineSources: [], docxSections: [] }
+  if (!content) return { cleanContent: content, inlineSources: [], docxSections: [], pdfPages: [] }
   const found = []
   let clean = content.replace(CITATION_RE, (_, name, page) => {
     const src = { source: name }
@@ -71,6 +80,22 @@ function parseInlineCitations(content) {
     return ''
   })
 
+  // Pull the PDF page-citation footer out of the text entirely, deduped, in
+  // first-seen (ascending page) order — rendered once at the end via
+  // PdfCitations rather than left inline, same treatment as DOCX above.
+  const pdfPages = []
+  const pdfFooterMatch = clean.match(PDF_FOOTER_RE)
+  if (pdfFooterMatch) {
+    const seenPages = new Set()
+    let pm
+    PDF_PAGE_RE.lastIndex = 0
+    while ((pm = PDF_PAGE_RE.exec(pdfFooterMatch[1])) !== null) {
+      const p = pm[1]
+      if (!seenPages.has(p)) { seenPages.add(p); pdfPages.push(p) }
+    }
+    clean = clean.slice(0, pdfFooterMatch.index)
+  }
+
   // Strip mangled cite tags, bare numeric citations, and leftover PII tags so
   // no citation/placeholder marker remains in the response text — all sources
   // live only in the chips below.
@@ -84,14 +109,15 @@ function parseInlineCitations(content) {
   // Tidy whitespace left where markers were removed: " ." → "." and
   // collapse any double spaces, then trim the trailing edge.
   clean = clean.replace(/\s+([.,;!?])/g, '$1').replace(/[ \t]{2,}/g, ' ').trimEnd()
-  return { cleanContent: clean, inlineSources: found, docxSections }
+  return { cleanContent: clean, inlineSources: found, docxSections, pdfPages }
 }
 
-// PDF page citation, e.g. "[p.38]" (rag_pipeline._attach_page_citations). This
-// is the only inline citation kept mid-prose — DOCX's "[4.1]" markers are
-// extracted out entirely by parseInlineCitations and rendered once at the end
-// of the answer instead (DocxCitations), so CITE_TOKEN_RE only ever needs to
-// match the page-number shape here.
+// PDF page citation, e.g. "[p.38]" (rag_pipeline._attach_page_citations). The
+// backend only ever emits these inside the trailing "Sources: [p.N] ..."
+// footer, which parseInlineCitations extracts out entirely (same treatment as
+// DOCX's "[4.1]" markers) and renders once at the end via PdfCitations below —
+// CITE_TOKEN_RE/injectPageCites stay as a safety net for any older cached
+// message that still has a bare "[p.N]" left mid-prose.
 const CITE_TOKEN_RE = /\[p\.(\d+)\]/g
 
 function CitePill({ page }) {
@@ -127,6 +153,15 @@ function DocxCitations({ sections }) {
   return (
     <div className="mt-1 text-[15px] leading-relaxed">
       {sections.map((label, i) => <SectionCitePill key={i} label={label} />)}
+    </div>
+  )
+}
+
+function PdfCitations({ pages }) {
+  if (!pages || pages.length === 0) return null
+  return (
+    <div className="mt-1 text-[15px] leading-relaxed">
+      {pages.map((p, i) => <CitePill key={i} page={p} />)}
     </div>
   )
 }
@@ -560,7 +595,7 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
   }
 
   // Parse inline citations from LLM content and merge with structured sources, deduped
-  const { cleanContent, inlineSources, docxSections } = parseInlineCitations(message.content)
+  const { cleanContent, inlineSources, docxSections, pdfPages } = parseInlineCitations(message.content)
   const allSources = deduplicateSources(message.sources, inlineSources)
 
   const handleCopy = async () => {
@@ -705,6 +740,7 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
                 <>
                   <XlsxCitations sources={allSources} />
                   <DocxCitations sections={docxSections} />
+                  <PdfCitations pages={pdfPages} />
                   <ImageCitations sources={allSources} />
                   {/* Raw (un-deduped) sources: audio/video citations need the
                       frame source, which shares the video's filename and would

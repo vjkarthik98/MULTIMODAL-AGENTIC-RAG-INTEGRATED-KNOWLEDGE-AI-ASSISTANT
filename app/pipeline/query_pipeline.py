@@ -1218,14 +1218,53 @@ def query_pipeline(
                     "sources_used": len(final_docs) + len(_hybrid_web_docs),
                 }
             else:
-                output = reasoning.generate_answer(
+                # PHASE 32 — self-verifying answer loop (docs/Phase_32_
+                # Agentic_Answer_Verification.md). Replaces the direct
+                # reasoning.generate_answer() call: the baseline attempt
+                # verifies against final_docs/canonical_sources already
+                # retrieved above (no duplicate retrieval), and only retries
+                # 1-4 re-query if verification FAILs. A hard baseline failure
+                # (LLM unavailable, OOM) re-raises into the except block
+                # below unchanged, so the GGUF fallback chain still fires
+                # exactly as it did before this loop existed.
+                from app.verification import VerificationLoop
+
+                _modality_hint = str(
+                    ((final_docs[:1] or [{}])[0].get("metadata") or {}).get("modality") or ""
+                ).lower()
+                _verify_loop = VerificationLoop()
+                _verified_answer, _verify_report = _verify_loop.run(
                     query=query,
-                    retrieved_docs=final_docs,
-                    memory_context=memory_context,
                     session_id=session_id,
-                    sources=canonical_sources,
                     user_id=user_id,
+                    retriever=hybrid,
+                    reasoning_engine=reasoning,
+                    initial_docs=final_docs,
+                    initial_sources=canonical_sources,
+                    llm=llm,
+                    modality_hint=_modality_hint,
+                    filters=retrieval_filters,
+                    memory_context=memory_context,
                 )
+                logger.info(
+                    event="query_pipeline_verification_result",
+                    verified=_verify_report.verified,
+                    attempts=len(_verify_report.attempts),
+                    overall_confidence=_verify_report.scores.overall,
+                    total_duration_ms=_verify_report.total_duration_ms,
+                    session_id=session_id,
+                )
+                # `sources` mirrors generate_answer()'s own citation-filtered
+                # semantics (empty for a refusal, cited-only otherwise) — NOT
+                # the raw final_docs/canonical_sources candidate pool, or
+                # citation transparency regresses to "show everything retrieved."
+                output = {
+                    "answer":       _verified_answer or "No answer generated.",
+                    "confidence":   max(_verify_report.scores.overall / 100.0, 0.0),
+                    "sources":      _verify_report.cited_sources,
+                    "sources_used": len(_verify_report.cited_sources),
+                    "verification": _verify_report.to_dict(),
+                }
             reasoning_latency = round(time.time() - t_reason, 3)
             _record_llm_latency("gguf_mistral", reasoning_latency)
         except Exception as e:
@@ -1388,8 +1427,9 @@ def query_pipeline(
             logger.warning(event="query_pipeline_completeness_failed", error=str(_sc_err), session_id=session_id)
 
         # PERPLEXITY-STYLE [p.N] ANCHORS — same as the streaming path, so the
-        # non-streaming / meta answer carries inline page references that match
-        # the UI. Pages come from the real retrieved chunks (synthetic docs skipped).
+        # non-streaming / meta answer carries a single trailing "Sources: [p.N]"
+        # line that matches the UI. Pages come from the real retrieved chunks
+        # (synthetic docs skipped).
         try:
             from app.pipeline.rag_pipeline import (
                 _attach_page_citations, _attach_section_citations,

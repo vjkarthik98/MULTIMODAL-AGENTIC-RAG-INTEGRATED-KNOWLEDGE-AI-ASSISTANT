@@ -521,6 +521,20 @@ class Settings:
     AGENT_MAX_ITERATIONS: int            = _int("AGENT_MAX_ITERATIONS", 20)
     AGENT_PARALLEL_TOOLS: bool           = _bool("AGENT_PARALLEL_TOOLS", True)
 
+    # AGENT — ANSWER VERIFICATION LOOP (Phase 32)
+    AGENT_VERIFY_ENABLED: bool           = _bool("AGENT_VERIFY_ENABLED", True)
+    AGENT_VERIFY_RETRIEVAL_MIN: float    = _float("AGENT_VERIFY_RETRIEVAL_MIN", 90.0)
+    AGENT_VERIFY_GROUNDING_MIN: float    = _float("AGENT_VERIFY_GROUNDING_MIN", 90.0)
+    AGENT_VERIFY_CITATION_MIN: float     = _float("AGENT_VERIFY_CITATION_MIN", 95.0)
+    AGENT_VERIFY_OVERALL_MIN: float      = _float("AGENT_VERIFY_OVERALL_MIN", 90.0)
+    AGENT_VERIFY_MAX_RETRIES: int        = _int("AGENT_VERIFY_MAX_RETRIES", 3)
+    AGENT_VERIFY_TIMEOUT_SEC: float      = _float("AGENT_VERIFY_TIMEOUT_SEC", 30.0)
+    AGENT_VERIFY_MIN_IMPROVEMENT_PCT: float = _float("AGENT_VERIFY_MIN_IMPROVEMENT_PCT", 2.0)
+    AGENT_VERIFY_MODALITIES: List[str]   = _list(
+        "AGENT_VERIFY_MODALITIES",
+        ["txt", "pdf", "docx", "xlsx", "image", "audio", "video"],
+    )
+
     # VIDEO
     VIDEO_FRAME_INTERVAL_SEC: int            = _int("VIDEO_FRAME_INTERVAL_SEC", 2)
     MAX_VIDEO_FRAMES: int                    = _int("MAX_VIDEO_FRAMES", 20)
@@ -780,6 +794,21 @@ class Settings:
 
         if self.AGENT_MAX_STEPS <= 0:
             errors.append(f"AGENT_MAX_STEPS must be > 0, got {self.AGENT_MAX_STEPS}")
+
+        if self.AGENT_VERIFY_MAX_RETRIES < 0:
+            errors.append(f"AGENT_VERIFY_MAX_RETRIES must be >= 0, got {self.AGENT_VERIFY_MAX_RETRIES}")
+
+        if self.AGENT_VERIFY_TIMEOUT_SEC <= 0:
+            errors.append(f"AGENT_VERIFY_TIMEOUT_SEC must be > 0, got {self.AGENT_VERIFY_TIMEOUT_SEC}")
+
+        for _name, _val in (
+            ("AGENT_VERIFY_RETRIEVAL_MIN", self.AGENT_VERIFY_RETRIEVAL_MIN),
+            ("AGENT_VERIFY_GROUNDING_MIN", self.AGENT_VERIFY_GROUNDING_MIN),
+            ("AGENT_VERIFY_CITATION_MIN", self.AGENT_VERIFY_CITATION_MIN),
+            ("AGENT_VERIFY_OVERALL_MIN", self.AGENT_VERIFY_OVERALL_MIN),
+        ):
+            if not (0.0 <= _val <= 100.0):
+                errors.append(f"{_name} must be within 0-100, got {_val}")
 
         fusion_sum = (
             self.FUSION_SCORE_WEIGHT

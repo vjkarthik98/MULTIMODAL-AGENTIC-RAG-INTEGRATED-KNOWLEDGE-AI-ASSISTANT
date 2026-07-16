@@ -559,15 +559,18 @@ class HybridRetriever:
         session_id: str,
         user_id: Optional[str] = None,
     ) -> List[Dict]:
-        """Query the vector_alt named vector (markdown table / numbers-only embeddings).
+        """Search the embedding_alt space (markdown table / numbers-only embeddings).
 
-        Falls back silently — not all collections have this named vector.
+        embedding_alt is stored as a payload field, not a Qdrant named vector
+        (see qdrant_store._payload's "XLSX DUAL EMBEDDING" note), so this is a
+        cosine search over that field rather than a native ANN query. Falls
+        back silently — most chunks (anything not xlsx-table or image-numeric)
+        carry no embedding_alt at all.
         """
         def _do():
-            return self.vector_store.search_text(
+            return self.vector_store.search_text_alt(
                 q_vec, candidate_k, session_id,
                 user_id=user_id,
-                vector_name="vector_alt",
             )
 
         try:
@@ -577,7 +580,6 @@ class HybridRetriever:
                 results = _do()
             return self._normalize_scores(results or [])
         except Exception:
-            # vector_alt may not exist for all modalities — silent fallback
             return []
 
     # VECTOR SEARCH — VISION SPACE
@@ -857,14 +859,28 @@ class HybridRetriever:
                 self._fuse(combined, vis_res, vis_weight, "vision")
 
             # DUAL-VECTOR ALT SEARCH — Phase 5.3
-            # For tabular and exact_numeric queries, also query the vector_alt space
-            # (markdown table embedding / numbers-only embedding). Take max of primary
-            # and alt scores so table chunks surface even if the query phrasing doesn't
-            # match the NL summary.
+            # For tabular and exact_numeric queries, also query the embedding_alt
+            # space (markdown table embedding / numbers-only embedding). Take max
+            # of primary and alt scores so table chunks surface even if the query
+            # phrasing doesn't match the NL summary.
+            #
+            # embedding_alt is a per-tenant, cross-FILE structural space (see
+            # QdrantVectorStore.search_text_alt) — a generic table like a country
+            # tax-rate lookup can score deceptively high on cosine similarity
+            # against an unrelated file's numeric query (shared vocabulary like
+            # "tax rate" without shared subject matter). Re-scoring a chunk BM25/
+            # dense ALREADY surfaced is safe (it only shifts ranking within a file
+            # the query is already grounded in); introducing a chunk alt-search
+            # found on its own is only safe if it belongs to a source file the
+            # primary retrievers also surfaced — otherwise one generic lookup
+            # table can hijack an unrelated document's citations.
             if q_type in ("tabular", "exact_numeric") and q_vec:
                 alt_res = self._vector_search_alt(q_vec, candidate_k, session_id, user_id)
                 if alt_res:
-                    # Merge: for docs already in combined take max score; new docs add.
+                    known_sources = {
+                        item.get("metadata", {}).get("source")
+                        for item in combined.values()
+                    }
                     for r in alt_res:
                         meta  = r.get("metadata", {})
                         key   = self._hash(r.get("text", ""), meta)
@@ -872,7 +888,7 @@ class HybridRetriever:
                         if key in combined:
                             combined[key]["score"] = max(combined[key]["score"], score)
                             combined[key]["sources"].add("dense_alt")
-                        else:
+                        elif meta.get("source") in known_sources:
                             combined[key] = {**r, "score": score, "sources": {"dense_alt"}}
 
             # CROSS-RETRIEVER AGREEMENT BOOST — documents that appear in both

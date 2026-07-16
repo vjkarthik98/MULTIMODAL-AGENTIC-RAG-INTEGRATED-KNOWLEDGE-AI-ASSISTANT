@@ -126,6 +126,21 @@ fi
 echo "[start_server] Ensuring all models are present..."
 bash app/bin/server/ensure_models.sh
 
+# ── HF HUB OFFLINE MODE ────────────────────────────────────────────────────
+# Set AFTER ensure_models.sh (which still needs the network to fetch
+# anything missing), BEFORE any Python model loading. Every from_pretrained()
+# call otherwise does a HEAD request to huggingface.co to check for a newer
+# revision even when the model is already fully cached in .hf_cache/ — if
+# HF Hub is slow/unreachable, huggingface_hub retries with backoff across
+# every auxiliary config file (config.json, processor_config.json,
+# preprocessor_config.json, adapter_config.json, ...) and can hang startup
+# for minutes instead of falling back to cache. Since this project is
+# 100% local/offline by design once models are cached, skip the network
+# check entirely. Override with HF_HUB_OFFLINE=0 to force an online check
+# (e.g. after adding a NEW model not yet in .hf_cache/).
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+
 # Reduce CUDA memory fragmentation — must be set before PyTorch imports.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 

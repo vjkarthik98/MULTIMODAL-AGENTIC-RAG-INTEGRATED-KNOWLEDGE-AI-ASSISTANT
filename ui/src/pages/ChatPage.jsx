@@ -262,11 +262,14 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
     // "Sources: [tag] description" cite block — but NOT a genuine DOCX section-
     // citation footer, which the backend deterministically appends in exactly
     // this shape (rag_pipeline._attach_section_citations: "Sources: [4.1 DCF
-    // Model Key Assumptions], [5.1.1 China Revenue...]"). This regex used to
-    // strip that footer outright (a real backend citation, not a leak) because
-    // it couldn't tell the two apart; a genuine section citation always starts
-    // with "digit(s).", so exempt that shape via negative lookahead.
-    .replace(/\n?Sources?\s*:\s*\[(?!\d+\.)[^\]]{1,80}\][^\n]*/gi, '')
+    // Model Key Assumptions], [5.1.1 China Revenue...]"), nor the genuine PDF
+    // page-citation footer (rag_pipeline._attach_page_citations: "Sources:
+    // [p.22] [p.23] ..."). This regex used to strip those footers outright
+    // (real backend citations, not a leak) because it couldn't tell them apart
+    // from a leaked cite block; a genuine section citation always starts with
+    // "digit(s).", a genuine page citation always starts with "p.", so exempt
+    // both shapes via negative lookahead.
+    .replace(/\n?Sources?\s*:\s*\[(?!\d+\.)(?!p\.\d+\])[^\]]{1,80}\][^\n]*/gi, '')
     .replace(/\n?\s*Sources?\s*:\s*$/im, '')                              // trailing bare "Sources:" the LLM appended
     .replace(/\n?Therefore,?\s+the\s+answer\s+is\s*:?\s*<text>[\s\S]*?<\/text>/gi, '')
     .replace(/\n?Therefore,?\s+the\s+answer\s+is\s*:?[^\n]*/gi, '')

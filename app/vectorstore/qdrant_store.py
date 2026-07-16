@@ -3,6 +3,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 from prometheus_client import Counter, Histogram, Gauge
@@ -1142,6 +1143,74 @@ class QdrantVectorStore:
             extra_filter=extra_filter,
             vector_name=vector_name,
         )
+
+    # PUBLIC SEARCH — TEXT COLLECTION, ALT (STRUCTURAL) EMBEDDING SPACE
+
+    def search_text_alt(
+        self,
+        query_vector: List[float],
+        limit: int = None,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        extra_filter: Optional["Filter"] = None,
+        candidate_pool: int = 300,
+    ) -> List[Dict[str, Any]]:
+        """Cosine search over the embedding_alt payload field.
+
+        embedding_alt (xlsx markdown-table repr, image numbers-only text — see
+        _payload()'s "XLSX DUAL EMBEDDING" note) is deliberately stored as a
+        plain payload float list, NOT a Qdrant named vector, to avoid a
+        collection migration. There is no payload index over it either (it's
+        a 1024-float array, not an indexable scalar), so this pulls a bounded
+        candidate pool scoped to the tenant (user_id IS indexed) and ranks by
+        cosine similarity in Python, skipping points with no embedding_alt —
+        correct for the small per-tenant volume of table/chart chunks this
+        targets.
+        """
+        if self.text_collection not in self._collection_cache:
+            return []
+        limit = limit or settings.RAG_TOP_K
+        try:
+            base_filter = self._build_filter(session_id, True, user_id)
+            conditions = list(base_filter.must) if base_filter else []
+            if extra_filter is not None:
+                conditions += list(extra_filter.must or [])
+            scroll_filter = Filter(must=conditions) if conditions else None
+            points, _ = self._retry(
+                self.client.scroll,
+                collection_name=self.text_collection,
+                scroll_filter=scroll_filter,
+                limit=candidate_pool,
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "qdrant_search_text_alt_failed",
+                collection=self.text_collection,
+                session_id=session_id,
+                error=str(exc),
+            )
+            return []
+
+        if not points:
+            return []
+
+        qv = np.asarray(query_vector, dtype=np.float32)
+        qnorm = float(np.linalg.norm(qv)) or 1e-9
+        scored: List[Dict[str, Any]] = []
+        for p in points:
+            alt = p.payload.get("embedding_alt")
+            if not alt:
+                continue
+            av = np.asarray(alt, dtype=np.float32)
+            anorm = float(np.linalg.norm(av)) or 1e-9
+            score = float(np.dot(qv, av) / (qnorm * anorm))
+            metadata = {k: v for k, v in p.payload.items() if k != "embedding_alt"}
+            scored.append({"text": p.payload.get("text"), "score": score, "metadata": metadata})
+
+        scored.sort(key=lambda r: r["score"], reverse=True)
+        return scored[:limit]
 
     # PUBLIC SEARCH — VISION COLLECTION
 

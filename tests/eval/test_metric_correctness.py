@@ -494,3 +494,73 @@ class TestTemplateLeak:
     def test_empty(self):
         m = template_leak_rate([])
         assert m.n == 0
+
+
+# ── Verification metrics (Phase 32) ──────────────────────────────────────────
+
+from app.eval.metrics.verification import compute_verification_metrics
+
+
+def _report(verified, unsupported=None, bad_cites=None, n_attempts=1, duration_ms=1000.0):
+    return {
+        "verified": verified,
+        "unsupported_claims": unsupported or [],
+        "bad_citations": bad_cites or [],
+        "attempts": [{} for _ in range(n_attempts)],
+        "total_duration_ms": duration_ms,
+    }
+
+
+class TestComputeVerificationMetrics:
+
+    def test_empty_reports_returns_nan_placeholders(self):
+        metrics = compute_verification_metrics([])
+        assert math.isnan(metrics["grounding_success_rate"].value)
+        assert metrics["grounding_success_rate"].n == 0
+
+    def test_all_grounded_and_cited(self):
+        reports = [_report(True), _report(True)]
+        metrics = compute_verification_metrics(reports)
+        assert metrics["grounding_success_rate"].value == pytest.approx(1.0)
+        assert metrics["citation_accuracy_v2"].value == pytest.approx(1.0)
+
+    def test_grounding_success_rate_counts_unsupported_claims(self):
+        reports = [_report(True), _report(False, unsupported=["fabricated: 999"])]
+        metrics = compute_verification_metrics(reports)
+        assert metrics["grounding_success_rate"].value == pytest.approx(0.5)
+
+    def test_citation_accuracy_counts_bad_citations(self):
+        reports = [_report(True), _report(False, bad_cites=["[wrong.pdf p.9]"])]
+        metrics = compute_verification_metrics(reports)
+        assert metrics["citation_accuracy_v2"].value == pytest.approx(0.5)
+
+    def test_retry_success_rate_only_counts_retried_queries(self):
+        reports = [
+            _report(True, n_attempts=1),   # no retry
+            _report(True, n_attempts=2),   # retried, passed
+            _report(False, n_attempts=4),  # retried, exhausted
+        ]
+        metrics = compute_verification_metrics(reports)
+        assert metrics["retry_success_rate"].n == 2  # only the 2 retried queries
+        assert metrics["retry_success_rate"].value == pytest.approx(0.5)
+
+    def test_retry_success_rate_nan_when_nothing_retried(self):
+        reports = [_report(True, n_attempts=1), _report(True, n_attempts=1)]
+        metrics = compute_verification_metrics(reports)
+        assert math.isnan(metrics["retry_success_rate"].value)
+
+    def test_avg_retry_count(self):
+        reports = [_report(True, n_attempts=1), _report(True, n_attempts=3)]
+        metrics = compute_verification_metrics(reports)
+        # (0 retries + 2 retries) / 2 queries = 1.0
+        assert metrics["avg_retry_count"].value == pytest.approx(1.0)
+
+    def test_latency_percentiles(self):
+        reports = [
+            _report(True, duration_ms=500.0),
+            _report(True, duration_ms=1000.0),
+            _report(True, duration_ms=9000.0),
+        ]
+        metrics = compute_verification_metrics(reports)
+        assert metrics["verification_latency_p50"].value == pytest.approx(1.0)
+        assert metrics["verification_latency_p95"].value == pytest.approx(9.0)
