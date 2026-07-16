@@ -2,40 +2,40 @@ dataset_version: 0.1.0
 created_at: '2026-05-25'
 gold_files:
   text_gold.jsonl:
-    sha256: ed64e270ce75d0800767aea5f3aee2251459c69348241bf88193b990b4a59639
-    triples_total: 21
-    triples_curated: 19
-    note: SEC 10-K/10-Q TXT + heliosphere/aquavolt/meridian benchmarks
+    sha256: c906532ca333dcb1bc3203ac94f3a5929d910e351b1c6b7938fd11fceb48f4fd
+    triples_total: 15
+    triples_curated: 14
+    note: FOMC Dec 2024 press conference transcript (fomc_dec2024.txt); 14 rag + 1 websearch-probe
   pdf_gold.jsonl:
-    sha256: 595f819013be85fd0af1390435664e07fb2e57fb0278aa49dc5bccbd2276135e
-    triples_total: 6
-    triples_curated: 5
-    note: SEC 10-K/10-Q PDFs
+    sha256: b527a6a072113765431d2e134654db7ba8729611baa1c51df94463f996ce5647
+    triples_total: 15
+    triples_curated: 14
+    note: Apple FY2024 10-K (apple_10k.pdf); 14 rag + 1 websearch-probe
   docx_gold.jsonl:
-    sha256: b8d9cf1a70fe1b7ad30f6d3de2ce61bfd9776425817df87ecd2cee4329171651
-    triples_total: 6
-    triples_curated: 5
-    note: Investor presentations
+    sha256: 43a69c1de68a662d4c7d3ad4e77cf36437ece340ef14f1adc01027fa923e0590
+    triples_total: 15
+    triples_curated: 14
+    note: Goldman Sachs-style Apple investor research report (apple_investment_research_report.docx); 14 rag + 1 websearch-probe
   xlsx_gold.jsonl:
-    sha256: cc587de584fc7187d699869cdd8a1f5db044288649361e5cdf23add25d25d702
-    triples_total: 4
-    triples_curated: 3
-    note: Financial statement tables
+    sha256: bbd981a5d0d7bfb4326478284dcc26261cdf55c9f52f663485f086c205443032
+    triples_total: 15
+    triples_curated: 14
+    note: Damodaran country risk premium workbook (ctryprem.xlsx); 14 rag + 1 websearch-probe
   image_gold.jsonl:
-    sha256: a8b03f425f94f841613e823618b8f601c90afbcedbbf52c1c0675bd1dd6e0d28
-    triples_total: 3
-    triples_curated: 2
-    note: Revenue charts, scanned 10-K covers
+    sha256: a9ab3f4d60388494957a9bc7e8e0b2e5a012ab96b3b592dc317d49f18397a269
+    triples_total: 15
+    triples_curated: 14
+    note: Apple 5-year cumulative total return chart, apple_10k.pdf p.19 (aapl-20240928_g2.jpg); 14 rag + 1 websearch-probe
   audio_gold.jsonl:
-    sha256: 2d14f61a24dc41fec91dc6c1dcc604a2a3540a8e2a252095d3ef5df3fbcc2630
-    triples_total: 3
-    triples_curated: 2
-    note: Earnings-call MP3 segments
+    sha256: bc149f6f22a164b48ffd3aff5be7fc273996b226ce76928d4bf1ddb3fe8ca16b
+    triples_total: 15
+    triples_curated: 14
+    note: FOMC Sept 18 2024 press conference audio (FOMC Press Conference September 18, 2024.mp3); 14 rag + 1 websearch-probe
   video_gold.jsonl:
-    sha256: 4860e024b2c79d498eba38bf27d05e72c2a8c35a6e2a43aac954aa3f8da5772d
-    triples_total: 3
-    triples_curated: 2
-    note: CNBC clips, IR earnings videos
+    sha256: 3dfc456a1ae351731c2e9b7c1e422f8c5f328a4fbafcddddc67bf01290005273
+    triples_total: 15
+    triples_curated: 14
+    note: Apple Q4 FY2025 earnings call recording (Q4 2025 Earnings Call.mp4); 14 rag + 1 websearch-probe
   routing_gold.jsonl:
     sha256: ''
     triples_total: 0
