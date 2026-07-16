@@ -1,9 +1,17 @@
 """Guest session management: lifecycle, atomic limit enforcement, data migration.
 
 Redis key schema:
-  guest:{guest_id}:queries  — INCR counter, TTL = GUEST_SESSION_TTL_HOURS * 3600
-  guest:{guest_id}:uploads  — INCR counter, same TTL
-  guest_create:{client_ip}  — abuse guard counter, TTL = 600 (10 min)
+  guest:{guest_id}:queries    — INCR counter, TTL = GUEST_SESSION_TTL_HOURS * 3600
+  guest:{guest_id}:uploads    — INCR counter, same TTL
+  guest_ip:{client_ip}:queries — INCR counter, aggregate across ALL guest_ids
+  guest_ip:{client_ip}:uploads — INCR counter, aggregate across ALL guest_ids,
+                                  same TTL. A per-guest_id counter alone is
+                                  trivially reset by opening a new tab/incognito
+                                  window (each mints a fresh guest_id via
+                                  POST /auth/guest with its own quota) — this
+                                  bounds TOTAL usage from one IP regardless of
+                                  how many guest sessions it creates.
+  guest_create:{client_ip}    — abuse guard counter, TTL = 600 (10 min)
 
 All Redis operations fail-open: a Redis outage must not break the app.
 """
@@ -33,6 +41,27 @@ redis.call('EXPIRE', key, ttl)
 return 1
 """
 
+# Lua: atomic DUAL check-then-increment — both the per-guest_id counter AND
+# the per-IP aggregate counter must be under their limit, or NEITHER is
+# incremented (no partial increment if one check fails).
+_LUA_DUAL_INCR_IF_UNDER = """
+local guest_key   = KEYS[1]
+local ip_key      = KEYS[2]
+local guest_limit = tonumber(ARGV[1])
+local guest_ttl   = tonumber(ARGV[2])
+local ip_limit    = tonumber(ARGV[3])
+local ip_ttl      = tonumber(ARGV[4])
+local guest_cur = tonumber(redis.call('GET', guest_key) or '0')
+if guest_cur >= guest_limit then return 0 end
+local ip_cur = tonumber(redis.call('GET', ip_key) or '0')
+if ip_cur >= ip_limit then return 0 end
+redis.call('INCR', guest_key)
+redis.call('EXPIRE', guest_key, guest_ttl)
+redis.call('INCR', ip_key)
+redis.call('EXPIRE', ip_key, ip_ttl)
+return 1
+"""
+
 
 def _redis():
     try:
@@ -58,6 +87,22 @@ def _eval_incr_if_under(r, key: str, limit: int, ttl: int):
     if _is_upstash(r):
         return r.eval(_LUA_INCR_IF_UNDER, keys=[key], args=[str(limit), str(ttl)])
     return r.eval(_LUA_INCR_IF_UNDER, 1, key, limit, ttl)
+
+
+def _eval_dual_incr_if_under(
+    r, guest_key: str, ip_key: str, guest_limit: int, guest_ttl: int,
+    ip_limit: int, ip_ttl: int,
+):
+    if _is_upstash(r):
+        return r.eval(
+            _LUA_DUAL_INCR_IF_UNDER,
+            keys=[guest_key, ip_key],
+            args=[str(guest_limit), str(guest_ttl), str(ip_limit), str(ip_ttl)],
+        )
+    return r.eval(
+        _LUA_DUAL_INCR_IF_UNDER, 2, guest_key, ip_key,
+        guest_limit, guest_ttl, ip_limit, ip_ttl,
+    )
 
 
 # ── Session lifecycle ─────────────────────────────────────────────────────────
@@ -109,8 +154,16 @@ def get_guest_limits(guest_id: str) -> Dict[str, int]:
 
 # ── Atomic limit enforcement (Lua — no TOCTOU race) ──────────────────────────
 
-def check_and_increment_queries(guest_id: str) -> bool:
+def check_and_increment_queries(guest_id: str, client_ip: Optional[str] = None) -> bool:
     """Atomically check and increment the query counter.
+
+    When client_ip is given, ALSO enforces the aggregate per-IP cap
+    (GUEST_IP_QUERY_LIMIT) in the same atomic check — a fresh guest_id from
+    a new tab/incognito window no longer resets the effective quota for that
+    visitor. Falls back to the per-guest_id-only check if client_ip is omitted
+    (callers should always pass it; see check_and_increment_uploads for the
+    same pattern).
+
     Returns True if the query is allowed, False if the limit is reached.
     Fails open on Redis outage so a Redis failure never blocks the app.
     """
@@ -118,17 +171,29 @@ def check_and_increment_queries(guest_id: str) -> bool:
     if r is None:
         return True
     try:
-        result = _eval_incr_if_under(
-            r, f"guest:{guest_id}:queries", settings.GUEST_QUERY_LIMIT, _TTL,
-        )
+        if client_ip:
+            result = _eval_dual_incr_if_under(
+                r,
+                f"guest:{guest_id}:queries", f"guest_ip:{client_ip}:queries",
+                settings.GUEST_QUERY_LIMIT, _TTL,
+                settings.GUEST_IP_QUERY_LIMIT, _TTL,
+            )
+        else:
+            result = _eval_incr_if_under(
+                r, f"guest:{guest_id}:queries", settings.GUEST_QUERY_LIMIT, _TTL,
+            )
         return bool(result)
     except Exception as exc:
         logger.warning(event="guest_query_limit_check_failed", error=str(exc))
         return True
 
 
-def check_and_increment_uploads(guest_id: str) -> bool:
+def check_and_increment_uploads(guest_id: str, client_ip: Optional[str] = None) -> bool:
     """Atomically check and increment the upload counter.
+
+    When client_ip is given, ALSO enforces the aggregate per-IP cap
+    (GUEST_IP_FILE_LIMIT) — see check_and_increment_queries for why.
+
     Returns True if the upload is allowed, False if the limit is reached.
     Fails open on Redis outage.
     """
@@ -136,6 +201,14 @@ def check_and_increment_uploads(guest_id: str) -> bool:
     if r is None:
         return True
     try:
+        if client_ip:
+            result = _eval_dual_incr_if_under(
+                r,
+                f"guest:{guest_id}:uploads", f"guest_ip:{client_ip}:uploads",
+                settings.GUEST_FILE_LIMIT, _TTL,
+                settings.GUEST_IP_FILE_LIMIT, _TTL,
+            )
+            return bool(result)
         result = _eval_incr_if_under(
             r, f"guest:{guest_id}:uploads", settings.GUEST_FILE_LIMIT, _TTL,
         )

@@ -203,6 +203,10 @@ class TestValidate:
         assert result.action == "rag"
 
     def test_valid_memory_not_overridden(self):
+        # A "memory" decision only survives _validate when it's backed by a
+        # genuine memory signal (is_memory=True) — see the override_memory_no_signal
+        # rule in AgentRouter._validate, which reroutes action="memory" without
+        # is_memory to "rag" (the small router model hallucinated the intent).
         decision = self._make_decision("memory")
         signals = {
             "is_recent": False,
@@ -211,6 +215,7 @@ class TestValidate:
             "is_greeting": False,
             "is_code": False,
             "is_math": False,
+            "is_memory": True,
             "token_count": 3,
         }
         result = self.router._validate(decision, signals, "s1")

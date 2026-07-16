@@ -1,3 +1,15 @@
+# NOT CURRENTLY WIRED IN — this module (Planner, ExecutionPlan multi-step
+# building, and the _limit()/AGENT_MAX_STEPS cap below) has no callers
+# anywhere in the live request path. AgentExecutor.run() in
+# app/agents/agent_controller.py performs a single classify+dispatch via
+# AgentRouter, not a multi-step ExecutionPlan loop, so AGENT_MAX_STEPS is
+# currently NOT enforced by anything at runtime — only AGENT_TIMEOUT_SEC and
+# the (now pre-capped, see agent_controller.py) AGENT_TOKEN_BUDGET are real.
+# Flagged during the 2026-07 security audit: CLAUDE.md documents an
+# agent_router -> planner -> tool_registry multi-step architecture that does
+# not match the live code. Wiring this in for genuine multi-step tool
+# chaining is a separate feature-scoped change; until then, do not treat
+# max_steps as an enforced bound anywhere else in the codebase or docs.
 import asyncio
 import time
 from typing import Any, Dict, List, Optional

@@ -251,29 +251,41 @@ class TestPayload:
 
 class TestBuildFilter:
 
-    def test_no_conditions_returns_none(self):
+    def test_no_user_id_raises(self):
+        # Tenant isolation is fail-closed: a missing user_id must never build
+        # an unscoped filter that would match every tenant's data.
         store = _make_store()
-        result = store._build_filter()
-        assert result is None
+        with pytest.raises(ValueError, match="TENANT_ISOLATION_VIOLATION"):
+            store._build_filter()
 
     def test_user_id_produces_filter(self):
         store  = _make_store()
         result = store._build_filter(user_id="user_1")
         assert result is not None
 
-    def test_session_id_does_not_produce_filter(self):
-        # session_id is a tracing field only — must NOT add a filter condition
-        # because documents are ingested with session_id="default" while queries
-        # arrive with per-request IDs, causing zero results if filtered.
+    def test_session_id_alone_without_user_id_raises(self):
+        # session_id is a tracing field only, never a substitute for user_id.
+        store = _make_store()
+        with pytest.raises(ValueError, match="TENANT_ISOLATION_VIOLATION"):
+            store._build_filter(session_id="sess_1")
+
+    def test_session_id_does_not_produce_filter_condition(self):
+        # session_id must NOT add a filter condition — documents are ingested
+        # with session_id="default" while queries arrive with per-request IDs,
+        # causing zero results if filtered. user_id is required regardless.
         store  = _make_store()
-        result = store._build_filter(session_id="sess_1")
-        assert result is None
+        result = store._build_filter(session_id="sess_1", user_id="user_1")
+        keys = [c.key for c in result.must]
+        assert "session_id" not in keys
+        assert "user_id" in keys
 
     def test_modality_filter_applied(self):
         store = _make_store()
         store.modality_filter = "image"
-        result = store._build_filter()
+        result = store._build_filter(user_id="user_1")
         assert result is not None
+        keys = [c.key for c in result.must]
+        assert "modality" in keys
 
     def test_combined_conditions(self):
         store  = _make_store()
@@ -284,7 +296,8 @@ class TestBuildFilter:
         assert "session_id" not in keys
         assert "user_id" in keys
 
-    def test_no_modality_filter_no_session_no_user_returns_none(self):
+    def test_no_user_id_no_session_raises(self):
         store = _make_store()
         store.modality_filter = None
-        assert store._build_filter(session_id=None, user_id=None) is None
+        with pytest.raises(ValueError, match="TENANT_ISOLATION_VIOLATION"):
+            store._build_filter(session_id=None, user_id=None)

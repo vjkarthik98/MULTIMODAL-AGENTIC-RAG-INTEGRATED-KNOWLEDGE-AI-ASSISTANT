@@ -197,7 +197,7 @@ class AgentExecutor:
             llm      = model_loader.get_llm()
             response = llm.generate(
                 f"Answer briefly and helpfully:\n{query}",
-                max_tokens=256,
+                max_tokens=min(256, settings.AGENT_TOKEN_BUDGET),
                 temperature=0.3,
                 session_id=session_id,
             )
@@ -301,7 +301,10 @@ class AgentController:
                 result        = self._execute_with_timeout(query, session_id)
                 agent_latency = round(time.time() - t_agent, 3)
 
-                # TOKEN BUDGET — third required bound alongside max_steps + timeout
+                # TOKEN BUDGET — the real cap is applied BEFORE generation: _direct()
+                # and _fallback() pass max_tokens=min(requested, AGENT_TOKEN_BUDGET)
+                # to the LLM call itself. This is a secondary audit/backstop that
+                # catches any path that reports usage without honoring the cap.
                 tokens_used = (
                     result.get("tokens_consumed", 0)
                     or result.get("total_tokens", 0)
@@ -480,9 +483,11 @@ class AgentController:
         try:
             llm      = model_loader.get_llm()
             prompt   = f"Answer clearly and concisely:\n{query}"
+            # Cap by AGENT_TOKEN_BUDGET so the budget is enforced BEFORE
+            # generation spends tokens, not just audited after the fact.
             response = llm.generate(
                 prompt,
-                max_tokens=settings.LLM_MAX_TOKENS,
+                max_tokens=min(settings.LLM_MAX_TOKENS, settings.AGENT_TOKEN_BUDGET),
                 temperature=0.2,
                 top_p=settings.LLM_TOP_P,
                 session_id=session_id,

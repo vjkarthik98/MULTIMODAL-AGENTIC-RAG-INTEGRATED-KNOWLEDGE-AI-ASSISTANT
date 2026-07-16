@@ -442,29 +442,68 @@ async def limit_concurrency(request: Request, call_next) -> Response:
 _rate_limit_store: Dict[str, Any] = {}
 
 
+from app.utils.net import resolve_client_ip as _resolve_client_ip
+
+
+def _rate_limit_key(prefix: str, client_ip: str, window: float) -> tuple[str, dict]:
+    now   = time.time()
+    key   = f"{prefix}:{client_ip}"
+    entry = _rate_limit_store.get(key, {"count": 0, "window_start": now})
+    if now - entry["window_start"] > window:
+        entry = {"count": 0, "window_start": now}
+    entry["count"] += 1
+    _rate_limit_store[key] = entry
+    return key, entry
+
+
+_AUTH_BRUTE_FORCE_PATHS = {
+    "/auth/login":            (60.0,   "auth_login"),
+    "/auth/login/form":       (60.0,   "auth_login"),
+    "/auth/register":         (3600.0, "auth_register"),
+    "/auth/verify-otp":       (60.0,   "auth_otp"),
+    "/auth/mfa/verify":       (60.0,   "auth_otp"),
+    "/auth/forgot-password":  (3600.0, "auth_register"),
+}
+
+
 @app.middleware("http")
 async def rate_limit(request: Request, call_next) -> Response:
+    client_ip = _resolve_client_ip(request)
+
+    # Dedicated, stricter, IP-keyed brute-force protection on auth endpoints —
+    # independent of RATE_LIMIT_RPM so it can't be disabled by turning off the
+    # general API rate limit, and tight enough to actually deter guessing.
+    auth_cfg = _AUTH_BRUTE_FORCE_PATHS.get(request.url.path)
+    if auth_cfg:
+        window, prefix = auth_cfg
+        limit = (
+            settings.AUTH_REGISTER_RATE_LIMIT_PER_HOUR
+            if prefix == "auth_register"
+            else settings.AUTH_LOGIN_RATE_LIMIT_PER_MIN
+        )
+        _, entry = _rate_limit_key(prefix, client_ip, window)
+        if entry["count"] > limit:
+            request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+            logger.warning(
+                event="auth_rate_limit_exceeded",
+                path=request.url.path,
+                client_ip=client_ip,
+                count=entry["count"],
+                limit=limit,
+            )
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "status":     "error",
+                    "message":    "Too many attempts — please wait before retrying",
+                    "request_id": request_id,
+                },
+            )
+
     if not settings.RATE_LIMIT_RPM:
         return await call_next(request)
 
-    forwarded_for = request.headers.get("X-Forwarded-For")
-    client_ip     = (
-        forwarded_for.split(",")[0].strip()
-        if forwarded_for
-        else (request.client.host if request.client else "unknown")
-    )
-
-    now    = time.time()
-    window = 60.0
-    key    = f"ratelimit:{client_ip}"
-
-    entry = _rate_limit_store.get(key, {"count": 0, "window_start": now})
-
-    if now - entry["window_start"] > window:
-        entry = {"count": 0, "window_start": now}
-
-    entry["count"] += 1
-    _rate_limit_store[key] = entry
+    _, entry = _rate_limit_key("ratelimit", client_ip, 60.0)
 
     if entry["count"] > settings.RATE_LIMIT_RPM:
         request_id = getattr(request.state, "request_id", str(uuid.uuid4()))

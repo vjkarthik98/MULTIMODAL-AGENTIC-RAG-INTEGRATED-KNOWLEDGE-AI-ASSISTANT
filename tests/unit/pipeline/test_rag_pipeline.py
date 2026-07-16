@@ -286,8 +286,10 @@ class TestBuildContext:
         assert ctx != ""
 
     def test_page_number_in_label(self):
+        # Label format is "page N" (not "p.N") — see the PDF accuracy phase
+        # fix that standardized citation labels to the full written form.
         ctx = _build_context([self._doc("text", page=5)], max_chars=10000)
-        assert "p.5" in ctx
+        assert "page 5" in ctx
 
     def test_section_id_in_label(self):
         doc = {

@@ -49,7 +49,10 @@ def _load_policy() -> None:
             ]
         ]
         _BLOCKED_SCHEMES = ["file", "ftp", "gopher", "dict", "ldap"]
-        _BLOCKED_HOSTNAMES = ["localhost", "169.254.169.254", "metadata.google.internal"]
+        _BLOCKED_HOSTNAMES = [
+            "localhost", "169.254.169.254", "metadata.google.internal",
+            "fd00:ec2::254",  # AWS EC2 IMDSv1/v2 IPv6 metadata endpoint
+        ]
     _INITIALIZED = True
 
 
@@ -61,31 +64,51 @@ def _ip_is_blocked(ip_str: str) -> bool:
         return False
 
 
+_DNS_RESOLVE_TIMEOUT_SEC = 2.0
+
+
 def _resolve_and_check(hostname: str) -> bool:
     """Resolve hostname to IPs and check each against blocked CIDRs.
 
     Guards against DNS rebinding: a hostname that resolves to a private IP
     is blocked even if the hostname itself looks innocent.
+
+    Bounded with a short timeout so a slow/unresponsive DNS server can't be
+    used to stall the calling request — the timeout is applied via a
+    dedicated thread rather than socket.setdefaulttimeout() so it doesn't
+    leak into concurrent, unrelated socket calls on other threads.
     """
+    import concurrent.futures
+
+    def _lookup() -> list:
+        return socket.getaddrinfo(hostname, None)
+
     try:
-        results = socket.getaddrinfo(hostname, None)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            results = ex.submit(_lookup).result(timeout=_DNS_RESOLVE_TIMEOUT_SEC)
         for result in results:
             ip_str = result[4][0]
             if _ip_is_blocked(ip_str):
                 return True
+    except concurrent.futures.TimeoutError:
+        logger.warning("ssrf_dns_resolve_timeout", hostname=hostname)
     except (socket.gaierror, OSError):
         pass
     return False
 
 
-def is_ssrf_risk(url: str, resolve_dns: bool = False) -> bool:
+def is_ssrf_risk(url: str, resolve_dns: bool = True) -> bool:
     """Return True if the URL poses an SSRF risk.
 
     Args:
         url:         The URL to check.
-        resolve_dns: If True, resolve the hostname and check the resulting IPs.
-                     Set False in hot paths (web search query validation) where
-                     latency matters. Set True for user-supplied URLs.
+        resolve_dns: If True (default), resolve the hostname and check the
+                     resulting IPs — closes the DNS-rebinding gap where an
+                     attacker-controlled hostname resolves to a private/
+                     metadata IP. Bounded by _DNS_RESOLVE_TIMEOUT_SEC so it
+                     cannot be used to stall a request. Callers on a very
+                     hot, high-QPS path may pass False to skip the lookup,
+                     but every current call site keeps the safe default.
     """
     _load_policy()
     if not url:
@@ -144,7 +167,7 @@ def is_ssrf_risk(url: str, resolve_dns: bool = False) -> bool:
 def assert_not_ssrf(
     url: str,
     correlation_id: str = "",
-    resolve_dns: bool = False,
+    resolve_dns: bool = True,
 ) -> None:
     """Raise GuardrailBlocked if the URL is an SSRF risk."""
     if is_ssrf_risk(url, resolve_dns=resolve_dns):

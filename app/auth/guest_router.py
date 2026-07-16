@@ -209,8 +209,4 @@ def _revoke_guest_jwt(token: str) -> None:
         pass
 
 
-def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+from app.utils.net import resolve_client_ip as _client_ip

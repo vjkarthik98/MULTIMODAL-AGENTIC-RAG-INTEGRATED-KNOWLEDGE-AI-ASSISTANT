@@ -743,6 +743,18 @@ class QdrantVectorStore:
         if not documents:
             return
 
+        if not user_id:
+            # Fall back to per-document structure.user_id (set earlier in the
+            # ingestion pipeline) — but refuse to store a document that has
+            # no resolvable owner. An unscoped point is unreachable by any
+            # tenant-filtered read, yet still visible to unfiltered scrolls.
+            if not any((getattr(d, "structure", {}) or {}).get("user_id") for d in documents):
+                logger.error(
+                    "qdrant_insert_missing_user_id",
+                    error="insert_documents called without user_id and no document carries one in structure",
+                )
+                raise ValueError("TENANT_ISOLATION_VIOLATION: user_id is required to store documents in Qdrant")
+
         with tracer.start_as_current_span("qdrant_insert") as span:
             span.set_attribute("docs.input", len(documents))
 
@@ -982,18 +994,18 @@ class QdrantVectorStore:
         exclude_deleted: bool = True,
         user_id: Optional[str] = None,
     ) -> Optional[Filter]:
-        conditions = []
+        # user_id isolation is the primary tenant boundary — fail closed.
+        # A missing user_id must never silently widen a search to all tenants.
+        if not user_id:
+            logger.error(
+                "qdrant_build_filter_missing_user_id",
+                error="_build_filter called without user_id — refusing to build an unscoped filter",
+            )
+            raise ValueError("TENANT_ISOLATION_VIOLATION: user_id is required to search or filter Qdrant")
 
-        # user_id isolation is the primary tenant boundary
-        if user_id:
-            conditions.append(
-                FieldCondition(key="user_id", match=MatchValue(value=user_id))
-            )
-        else:
-            logger.warning(
-                "qdrant_build_filter_no_user_id",
-                warning="_build_filter called without user_id — unscoped filter will match all tenants",
-            )
+        conditions = [
+            FieldCondition(key="user_id", match=MatchValue(value=user_id))
+        ]
 
         # session_id is a correlation/tracing field stored in the payload; it is
         # NOT used as a retrieval filter. Documents are ingested with session_id

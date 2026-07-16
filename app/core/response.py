@@ -924,10 +924,17 @@ def strip_inline_citations(text: str) -> str:
     cleaned = re.sub(r'\s*\[\d+(?:\s*,\s*\d+)*\]', '', text)
     cleaned = _STRUCT_MARKER_RE.sub('', cleaned)
     cleaned = _SPEAKER_CITATION_RE.sub('', cleaned)
-    cleaned = _strip_txt_citation_dump(cleaned)
     cleaned = _FILENAME_CITATION_RE.sub('', cleaned)
     cleaned = _STEM_CITATION_RE.sub('', cleaned)
     cleaned = _SECTION_CITATION_RE.sub('', cleaned)
+    # _strip_txt_citation_dump's angle-URL backstop is a coarse, aggressive
+    # catch-all for a fabricated trailing bibliography citation — it must run
+    # LAST, after the precise bracket strippers above, so a PII-scrubbed
+    # "<URL>" placeholder trapped inside an otherwise-clean stem/filename
+    # citation (e.g. "[aapl_def14a_<URL>cx]") is removed as that citation
+    # first, rather than tripping the backstop and truncating everything
+    # after it in the sentence.
+    cleaned = _strip_txt_citation_dump(cleaned)
     # Collapse whitespace and repair punctuation spacing left by removals.
     cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)
     cleaned = re.sub(r'\s+([,.;:!?])', r'\1', cleaned)

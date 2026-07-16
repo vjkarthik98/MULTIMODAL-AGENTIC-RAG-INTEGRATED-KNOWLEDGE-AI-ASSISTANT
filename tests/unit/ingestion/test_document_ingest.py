@@ -38,9 +38,13 @@ class TestTableToText:
         assert "col2" in result
 
     def test_empty_row_skipped(self):
+        # _table_to_text also drops rows with no digit/$/% (non-financial
+        # prose fragments pdfplumber sometimes misreads as table rows) —
+        # use a row with financial content so this test isolates the
+        # empty-row-skipping behavior it's meant to cover.
         from app.ingestion.pdf_ingest import _table_to_text
-        result = _table_to_text([["", "", ""], ["a", "b", "c"]])
-        assert "a" in result
+        result = _table_to_text([["", "", ""], ["Revenue", "$100", "5%"]])
+        assert "Revenue" in result
 
     def test_multirow_table_has_newlines(self):
         from app.ingestion.pdf_ingest import _table_to_text

@@ -226,10 +226,10 @@ class RedisMemory:
         return m if m in _VALID_MODALITIES else "text"
 
     def _key(self, session_id: str, user_id: Optional[str] = None) -> str:
-        if user_id:
-            return f"{self.prefix}:{user_id}:{session_id}:history"
-        logger.warning(event="redis_key_unscoped", msg="user_id is None — key not tenant-scoped", session_id=session_id)
-        return f"{self.prefix}:{session_id}:history"
+        if not user_id:
+            logger.error(event="redis_key_missing_user_id", msg="user_id is required — refusing an unscoped key", session_id=session_id)
+            raise ValueError("TENANT_ISOLATION_VIOLATION: user_id is required to build a Redis memory key")
+        return f"{self.prefix}:{user_id}:{session_id}:history"
 
     def _hash_msg(self, msg: Dict) -> str:
         base = f"{msg.get('role')}|{str(msg.get('content', ''))[:200]}"
@@ -284,7 +284,10 @@ class RedisMemory:
             return
 
         content = content[:settings.MAX_PROMPT_CHARS]
-        key = self._key(session_id, user_id)
+        try:
+            key = self._key(session_id, user_id)
+        except ValueError:
+            return
 
         message: Dict[str, Any] = {
             "role": self._role(role),
@@ -337,7 +340,10 @@ class RedisMemory:
     def get_history(self, session_id: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         if not self._enabled:
             return []
-        key = self._key(session_id, user_id)
+        try:
+            key = self._key(session_id, user_id)
+        except ValueError:
+            return []
 
         if self._is_available():
             try:
@@ -373,7 +379,10 @@ class RedisMemory:
         if not self._enabled:
             return []
         k = k or settings.MEMORY_TOP_K
-        key = self._key(session_id, user_id)
+        try:
+            key = self._key(session_id, user_id)
+        except ValueError:
+            return []
 
         if self._is_available():
             try:
@@ -429,7 +438,10 @@ class RedisMemory:
     def get_memory_size(self, session_id: str, user_id: Optional[str] = None) -> int:
         if not self._enabled:
             return 0
-        key = self._key(session_id, user_id)
+        try:
+            key = self._key(session_id, user_id)
+        except ValueError:
+            return 0
 
         if self._is_available():
             try:
@@ -447,7 +459,10 @@ class RedisMemory:
     def clear_memory(self, session_id: str, user_id: Optional[str] = None) -> None:
         if not self._enabled:
             return
-        key = self._key(session_id, user_id)
+        try:
+            key = self._key(session_id, user_id)
+        except ValueError:
+            return
 
         if self._is_available():
             try:

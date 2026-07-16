@@ -300,15 +300,14 @@ class BaseBM25(ABC):
     def _index_file(self, user_id: Optional[str] = None) -> Path:
         from app.utils.paths import user_dir
         uid = user_id or self.user_id
-        if uid:
-            p = user_dir(uid) / "bm25_index"
-        else:
-            from app.core.config import settings as _s
-            p = (
-                Path(_s.BM25_INDEX_DIR)
-                if hasattr(_s, "BM25_INDEX_DIR")
-                else _s.DATA_DIR / "bm25_index"
+        if not uid:
+            logger.error(
+                "bm25_index_missing_user_id",
+                modality=self.modality,
+                error="_index_file called without user_id — refusing to use a shared, unscoped index path",
             )
+            raise ValueError("TENANT_ISOLATION_VIOLATION: user_id is required to locate a BM25 index")
+        p = user_dir(uid) / "bm25_index"
         p.mkdir(parents=True, exist_ok=True)
         return p / f"{self.modality}.pkl"
 
@@ -421,7 +420,11 @@ class BaseBM25(ABC):
     # ── Save / load ───────────────────────────────────────────────────────────
 
     def _save(self, user_id: Optional[str] = None) -> None:
-        path = self._index_file(user_id)
+        try:
+            path = self._index_file(user_id)
+        except ValueError as exc:
+            logger.error(event="bm25_save_failed", modality=self.modality, error=str(exc))
+            return
 
         def _do() -> None:
             payload = {
@@ -461,7 +464,11 @@ class BaseBM25(ABC):
         self.tokenized_corpus = []
         self.bm25             = None
 
-        path = self._index_file(user_id)
+        try:
+            path = self._index_file(user_id)
+        except ValueError as exc:
+            logger.error(event="bm25_load_failed", modality=self.modality, error=str(exc))
+            return
         if not path.exists():
             logger.info(event="bm25_no_index", modality=self.modality, path=str(path))
             return
@@ -731,7 +738,11 @@ class BaseBM25(ABC):
         self.tokenized_corpus = []
         self.bm25             = None
         self._index_loaded    = False
-        path = self._index_file(user_id)
+        try:
+            path = self._index_file(user_id)
+        except ValueError as exc:
+            logger.error(event="bm25_clear_failed", modality=self.modality, error=str(exc))
+            return
         if path.exists():
             try:
                 path.unlink()
@@ -741,7 +752,14 @@ class BaseBM25(ABC):
     # ── Health ────────────────────────────────────────────────────────────────
 
     def health_check(self, user_id: Optional[str] = None) -> Dict[str, Any]:
-        path = self._index_file(user_id)
+        try:
+            path = self._index_file(user_id)
+        except ValueError as exc:
+            return {
+                "modality": self.modality,
+                "ready":    False,
+                "error":    str(exc),
+            }
         return {
             "modality":    self.modality,
             "ready":       self.bm25 is not None,

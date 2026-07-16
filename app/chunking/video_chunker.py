@@ -20,7 +20,7 @@ import subprocess
 
 from PIL import Image as PILImage
 
-from app.chunking.audio_chunker import (
+from app.chunking.av_shared import (
     _assemble_chunks,
     _map_speaker_roles,
     _merge_fragmented_hosts,

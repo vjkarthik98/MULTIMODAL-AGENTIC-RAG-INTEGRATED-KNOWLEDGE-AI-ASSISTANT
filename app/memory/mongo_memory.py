@@ -311,6 +311,14 @@ class MongoMemory:
         if not self._enabled:
             return
 
+        if not user_id:
+            logger.error(
+                event="mongo_store_missing_user_id",
+                session_id=session_id,
+                error="store_message called without user_id — refusing to store an unscoped message",
+            )
+            return
+
         if not self._is_available():
             logger.warning(
                 event="mongo_store_skipped_unavailable",
@@ -386,6 +394,14 @@ class MongoMemory:
         if not session_id or not summary:
             return
 
+        if not user_id:
+            logger.error(
+                event="mongo_summary_store_missing_user_id",
+                session_id=session_id,
+                error="store_summary called without user_id — refusing to store an unscoped summary",
+            )
+            return
+
         if not self._enabled or not self._is_available():
             return
 
@@ -438,12 +454,18 @@ class MongoMemory:
         if not self._is_available():
             return []
 
+        if not user_id:
+            logger.error(
+                event="mongo_history_missing_user_id",
+                session_id=session_id,
+                error="get_recent_history called without user_id — refusing an unscoped query",
+            )
+            return []
+
         limit = min(limit or settings.MAX_HISTORY_MESSAGES, settings.MAX_HISTORY_MESSAGES)
 
         try:
-            query: Dict[str, Any] = {"session_id": session_id}
-            if user_id:
-                query["user_id"] = user_id
+            query: Dict[str, Any] = {"session_id": session_id, "user_id": user_id}
 
             if role_filter and role_filter in _VALID_ROLES:
                 query["role"] = role_filter
@@ -507,10 +529,16 @@ class MongoMemory:
         if not self._is_available():
             return ""
 
+        if not user_id:
+            logger.error(
+                event="mongo_summary_missing_user_id",
+                session_id=session_id,
+                error="get_latest_summary called without user_id — refusing an unscoped query",
+            )
+            return ""
+
         try:
-            _q: Dict[str, Any] = {"session_id": session_id}
-            if user_id:
-                _q["user_id"] = user_id
+            _q: Dict[str, Any] = {"session_id": session_id, "user_id": user_id}
 
             def _do():
                 return self.summaries.find_one(
@@ -541,10 +569,16 @@ class MongoMemory:
         if not self._is_available():
             return []
 
+        if not user_id:
+            logger.error(
+                event="mongo_summaries_missing_user_id",
+                session_id=session_id,
+                error="get_summaries called without user_id — refusing an unscoped query",
+            )
+            return []
+
         try:
-            _q: Dict[str, Any] = {"session_id": session_id}
-            if user_id:
-                _q["user_id"] = user_id
+            _q: Dict[str, Any] = {"session_id": session_id, "user_id": user_id}
 
             def _do():
                 return list(
@@ -573,10 +607,16 @@ class MongoMemory:
         if not self._is_available():
             return
 
+        if not user_id:
+            logger.error(
+                event="mongo_clear_missing_user_id",
+                session_id=session_id,
+                error="clear_memory called without user_id — refusing an unscoped delete",
+            )
+            return
+
         try:
-            _q: Dict[str, Any] = {"session_id": session_id}
-            if user_id:
-                _q["user_id"] = user_id
+            _q: Dict[str, Any] = {"session_id": session_id, "user_id": user_id}
 
             def _del_msgs():
                 return self.messages.delete_many(_q)
@@ -663,6 +703,13 @@ class MongoMemory:
         sources: Optional[list] = None,
     ) -> None:
         if not session_id or not query.strip() or not answer.strip():
+            return
+        if not user_id:
+            logger.error(
+                event="mongo_save_chat_turn_missing_user_id",
+                session_id=session_id,
+                error="save_chat_turn called without user_id — refusing to store an unscoped chat turn",
+            )
             return
         if not self._enabled or not self._is_available():
             return
@@ -785,6 +832,13 @@ class MongoMemory:
         If msg_id is provided it is stamped onto the message so the frontend ID
         and DB msg_id stay in sync for vote persistence."""
         if not session_id or not content or not self._is_available():
+            return False
+        if not user_id:
+            logger.error(
+                event="mongo_patch_missing_user_id",
+                session_id=session_id,
+                error="patch_last_assistant_message called without user_id — refusing an unscoped update",
+            )
             return False
         try:
             def _do():

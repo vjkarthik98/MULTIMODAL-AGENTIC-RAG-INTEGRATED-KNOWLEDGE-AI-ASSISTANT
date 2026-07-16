@@ -245,11 +245,7 @@ def _request_id() -> str:
     return str(uuid.uuid4())
 
 
-def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+from app.utils.net import resolve_client_ip as _client_ip
 
 
 def _check_disk_space(path: Path) -> None:
@@ -453,10 +449,12 @@ async def ingest_document(
 
     _rate_limit_check(request)
 
-    # Guest upload limit — enforced atomically in Redis (Lua script, no race condition)
+    # Guest upload limit — enforced atomically in Redis (Lua script, no race
+    # condition), scoped both per-guest-session AND aggregated per client IP
+    # so a fresh guest session from a new tab doesn't reset the effective quota.
     if current_user.role == UserRole.GUEST:
         from app.auth.guest_service import check_and_increment_uploads
-        allowed = await asyncio.to_thread(check_and_increment_uploads, user_id)
+        allowed = await asyncio.to_thread(check_and_increment_uploads, user_id, _client_ip(request))
         if not allowed:
             raise HTTPException(
                 status_code=429,
@@ -684,7 +682,9 @@ async def llm_generate(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        request_id = str(uuid.uuid4())
+        logger.error(event="llm_generate_failed", error=str(exc), request_id=request_id)
+        raise HTTPException(status_code=500, detail={"message": "Internal server error", "request_id": request_id})
 
 
 # HEALTH
@@ -702,20 +702,22 @@ def health_check() -> Dict[str, Any]:
 # INFRA HEALTH
 
 @router.get("/infra/health")
-def infra_health() -> Dict[str, Any]:
+def infra_health(current_user=Depends(get_current_user)) -> Dict[str, Any]:
     try:
         return {
             "status": "ok",
             "infra":  infra.health_check(),
         }
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        request_id = str(uuid.uuid4())
+        logger.error(event="infra_health_failed", error=str(exc), request_id=request_id)
+        raise HTTPException(status_code=500, detail={"message": "Internal server error", "request_id": request_id})
 
 
 # TOOLS LIST
 
 @router.get("/tools")
-def list_tools() -> Dict[str, Any]:
+def list_tools(current_user=Depends(get_current_user)) -> Dict[str, Any]:
     try:
         from app.agents.tool_registry import ToolRegistry
         registry = ToolRegistry()
@@ -724,8 +726,9 @@ def list_tools() -> Dict[str, Any]:
             "tools":  registry.list_tools(),
         }
     except Exception as exc:
-        logger.error(event="list_tools_failed", error=str(exc))
-        raise HTTPException(status_code=500, detail=str(exc))
+        request_id = str(uuid.uuid4())
+        logger.error(event="list_tools_failed", error=str(exc), request_id=request_id)
+        raise HTTPException(status_code=500, detail={"message": "Internal server error", "request_id": request_id})
 
 
 # QUERY
@@ -1021,10 +1024,12 @@ async def stream_query(
 
     _rate_limit_check(request)
 
-    # Guest query limit — atomic Lua check in Redis, fails open on Redis outage
+    # Guest query limit — atomic Lua check in Redis, fails open on Redis outage.
+    # Scoped both per-guest-session and aggregated per client IP so a fresh
+    # guest session from a new tab doesn't reset the effective quota.
     if current_user.role == UserRole.GUEST:
         from app.auth.guest_service import check_and_increment_queries
-        allowed = await asyncio.to_thread(check_and_increment_queries, current_user.user_id)
+        allowed = await asyncio.to_thread(check_and_increment_queries, current_user.user_id, _client_ip(request))
         if not allowed:
             async def _guest_limit_stream():
                 import json as _json
@@ -1411,10 +1416,11 @@ async def upload_file(
 
     _rate_limit_check(request)
 
-    # Guest upload limit — same atomic Lua check as /ingest
+    # Guest upload limit — same atomic Lua check as /ingest, aggregated per
+    # client IP too (see check_and_increment_uploads docstring).
     if current_user.role == UserRole.GUEST:
         from app.auth.guest_service import check_and_increment_uploads
-        allowed = await asyncio.to_thread(check_and_increment_uploads, user_id)
+        allowed = await asyncio.to_thread(check_and_increment_uploads, user_id, _client_ip(request))
         if not allowed:
             raise HTTPException(
                 status_code=429,
@@ -1808,7 +1814,7 @@ def metrics() -> Dict[str, Any]:
 # MODEL HEALTH
 
 @router.get("/models/health")
-def model_health() -> Dict[str, Any]:
+def model_health(current_user=Depends(get_current_user)) -> Dict[str, Any]:
     try:
         from app.core.model_loader import model_loader
         return {
@@ -1816,7 +1822,9 @@ def model_health() -> Dict[str, Any]:
             "models": model_loader.health_check(),
         }
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        request_id = str(uuid.uuid4())
+        logger.error(event="model_health_failed", error=str(exc), request_id=request_id)
+        raise HTTPException(status_code=500, detail={"message": "Internal server error", "request_id": request_id})
 
 
 

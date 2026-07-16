@@ -646,6 +646,12 @@ class Settings:
     GUEST_QUERY_LIMIT:        int = _int("GUEST_QUERY_LIMIT",        5)
     GUEST_FILE_LIMIT:         int = _int("GUEST_FILE_LIMIT",         2)
     GUEST_SESSION_TTL_HOURS:  int = _int("GUEST_SESSION_TTL_HOURS", 24)
+    # Aggregate per-IP caps — a per-guest_id counter alone is trivially reset by
+    # opening a new tab/incognito window (each mints a fresh guest_id with its
+    # own quota via POST /auth/guest). These bound TOTAL guest usage from one
+    # IP across ALL its guest sessions, same TTL window as a single session.
+    GUEST_IP_QUERY_LIMIT:     int = _int("GUEST_IP_QUERY_LIMIT",     20)
+    GUEST_IP_FILE_LIMIT:      int = _int("GUEST_IP_FILE_LIMIT",      8)
 
     # JWT AUTHENTICATION — Phase 27
     JWT_SECRET_KEY: str                  = _str("JWT_SECRET_KEY", "CHANGE_ME_IN_PRODUCTION")
@@ -679,6 +685,14 @@ class Settings:
     DATABASE_URL: str                      = _str("DATABASE_URL", "sqlite:///./data/rag_users.db")
     CORS_ORIGINS: List[str]                = _list("CORS_ORIGINS", ["*"])
     RATE_LIMIT_RPM: int                    = _int("RATE_LIMIT_RPM", 60)
+    # Comma-separated list of trusted reverse-proxy IPs (e.g. an internal ALB).
+    # X-Forwarded-For is ONLY trusted when the direct TCP peer is in this list —
+    # otherwise it's attacker-controlled and rate limiting keys on it would be
+    # trivially bypassable. Empty by default: no proxy is trusted, so the
+    # direct connection IP is always used.
+    TRUSTED_PROXY_IPS: List[str]           = _list("TRUSTED_PROXY_IPS", [])
+    AUTH_LOGIN_RATE_LIMIT_PER_MIN: int     = _int("AUTH_LOGIN_RATE_LIMIT_PER_MIN", 5)
+    AUTH_REGISTER_RATE_LIMIT_PER_HOUR: int = _int("AUTH_REGISTER_RATE_LIMIT_PER_HOUR", 3)
     PII_DETECTION_ENABLED: bool            = _bool("PII_DETECTION_ENABLED", False)
     PII_ENTITIES: List[str]                = _list("PII_ENTITIES", ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "US_SSN", "CREDIT_CARD"])
     PII_REDACTION_OPERATOR: str            = _str("PII_REDACTION_OPERATOR", "replace")

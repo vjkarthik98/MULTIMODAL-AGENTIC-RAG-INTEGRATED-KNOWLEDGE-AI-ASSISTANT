@@ -232,8 +232,17 @@ def scrub_pii(text: str, language: str = "en") -> tuple[str, bool]:
             )
         return scrubbed, was_scrubbed
     except Exception as e:
-        logger.warning("pii_scrub_failed", error=str(e))
-        return text, False
+        # Presidio (ML-based) scrubbing failed — fail CLOSED, not open: never
+        # ship the raw, unexamined answer. Fall back to the same regex-only
+        # scrubber used when Presidio is unavailable, so at minimum email/
+        # phone/SSN/credit-card patterns are still redacted.
+        logger.warning("pii_scrub_failed_falling_back_to_regex", error=str(e))
+        try:
+            scrubbed = _apply_extra_regex(text)
+            return scrubbed, scrubbed != text
+        except Exception as e2:
+            logger.error("pii_scrub_regex_fallback_failed", error=str(e2))
+            return text, False
 
 
 def has_pii(text: str, language: str = "en") -> bool:

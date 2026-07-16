@@ -38,6 +38,16 @@ _groundedness_threshold: float = 0.30
 _max_answer_chars: int = 16000
 _citation_validation: bool = True
 _refusal_templates: dict = {}
+
+# Last-resort PII pattern used only if app.guardrails.pii fails to import
+# entirely — covers the highest-severity categories (email, phone, SSN,
+# credit card) so a total module failure still doesn't ship raw PII.
+_EMERGENCY_PII_RE = re.compile(
+    r"[\w.+-]+@[\w-]+\.[\w.-]+"                          # email
+    r"|\b\d{3}-\d{2}-\d{4}\b"                             # US SSN
+    r"|\b(?:\d[ -]*?){13,16}\b"                           # credit card
+    r"|\b(?:\+?\d{1,2}[ -]?)?\(?\d{3}\)?[ -]?\d{3}[ -]?\d{4}\b"  # phone
+)
 _policy_loaded = False
 
 
@@ -191,30 +201,46 @@ def _get_detoxify():
     return _detoxify_model
 
 
-def _check_toxicity(answer: str) -> float:
-    """Simple heuristic toxicity check. Returns score 0–1.
+_HARMFUL_CONTENT_PATTERNS = [
+    r'\b(?:step[s]?\s+to\s+(?:make|build|create|synthesize)\s+(?:a\s+)?(?:bomb|weapon|explosive|poison|malware|virus))\b',
+    r'\b(?:how\s+to\s+(?:kill|murder|harm|hurt|torture)\s+(?:someone|a\s+person|people))\b',
+    r'\b(?:child\s+(?:abuse|exploitation|pornography|grooming))\b',
+]
 
-    Uses Detoxify if available; falls back to a keyword heuristic.
+
+def _check_toxicity(answer: str) -> float:
+    """Toxicity/harm score 0-1, combining two DIFFERENT threat categories:
+
+    1. Detoxify — trained on toxic/abusive COMMENT-style language (insults,
+       threats, hate speech). It does NOT reliably score calm, instructional
+       text about dangerous topics as toxic (e.g. "Steps to build a bomb:
+       step 1 is..." scores near 0 — there's no abusive tone for it to
+       detect), so it must not be the only signal.
+    2. A keyword/pattern heuristic for explicit harmful-instruction content
+       (weapons/explosives instructions, violence instructions, child safety
+       violations) — a different category Detoxify isn't designed to catch.
+
+    These are complementary, not a primary/fallback pair: run both whenever
+    possible and take the max, so an available Detoxify model can no longer
+    suppress the harmful-content heuristic's genuine hits.
     """
+    scores = []
+
     model = _get_detoxify()
     if model is not None:
         try:
             results = model.predict(answer)
-            return float(results.get("toxicity", 0.0))
+            scores.append(float(results.get("toxicity", 0.0)))
         except Exception as e:
             logger.warning("output_guard_detoxify_failed", error=str(e))
 
-    # Heuristic fallback — check for obvious harmful content patterns
-    _TOXIC_PATTERNS = [
-        r'\b(?:step[s]?\s+to\s+(?:make|build|create|synthesize)\s+(?:a\s+)?(?:bomb|weapon|explosive|poison|malware|virus))\b',
-        r'\b(?:how\s+to\s+(?:kill|murder|harm|hurt|torture)\s+(?:someone|a\s+person|people))\b',
-        r'\b(?:child\s+(?:abuse|exploitation|pornography|grooming))\b',
-    ]
     text_lower = answer.lower()
-    for pat in _TOXIC_PATTERNS:
+    for pat in _HARMFUL_CONTENT_PATTERNS:
         if re.search(pat, text_lower):
-            return 0.95
-    return 0.0
+            scores.append(0.95)
+            break
+
+    return max(scores) if scores else 0.0
 
 
 def _get_refusal(key: str) -> str:
@@ -322,7 +348,11 @@ def check(
                 session_id=session_id,
             )
 
-    # 5. PII egress scrub
+    # 5. PII egress scrub — fail CLOSED: scrub_pii() itself never raises for
+    # its own detection/anonymization failures (it falls back to a regex-only
+    # scrub internally). This except only catches a total import/module
+    # failure of app.guardrails.pii, in which case we still apply a minimal
+    # inline regex scrub rather than shipping the raw answer.
     pii_scrubbed = False
     try:
         from app.guardrails.pii import scrub_pii
@@ -330,7 +360,12 @@ def check(
         if pii_scrubbed:
             record_scrub("pii", surface)
     except Exception as e:
-        logger.warning("output_guard_pii_scrub_failed", error=str(e))
+        logger.error("output_guard_pii_scrub_module_failed", error=str(e))
+        _fallback_scrubbed = _EMERGENCY_PII_RE.sub("<REDACTED>", answer)
+        if _fallback_scrubbed != answer:
+            answer = _fallback_scrubbed
+            pii_scrubbed = True
+            record_scrub("pii", surface)
 
     # 6. Toxicity check (hard block if over threshold)
     toxicity_score = _check_toxicity(answer)
