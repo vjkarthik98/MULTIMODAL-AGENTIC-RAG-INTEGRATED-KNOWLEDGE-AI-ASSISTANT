@@ -272,7 +272,12 @@ class AudioChunker(BaseChunker):
 
                     full_transcript = " ".join(w["word"] for w in words)
                     role_map = _map_speaker_roles(diarization, words)
-                    raw_chunks = _assemble_chunks(words, diarization, role_map)
+                    # Audio-only finer chunking (video keeps av_shared defaults).
+                    raw_chunks = _assemble_chunks(
+                        words, diarization, role_map,
+                        min_words=settings.AUDIO_CHUNK_MIN_WORDS,
+                        max_words=settings.AUDIO_CHUNK_MAX_WORDS,
+                    )
 
                     # Document-level earnings-call detection — checked once per extract.
                     _ft_lower = full_transcript.lower()

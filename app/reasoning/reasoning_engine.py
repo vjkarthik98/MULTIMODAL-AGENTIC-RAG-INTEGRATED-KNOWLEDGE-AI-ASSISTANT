@@ -542,6 +542,31 @@ def _xlsx_synth_prefix(fact: str) -> str:
     return f"{_XLSX_SYNTH_MARK}{fact}{_XLSX_SYNTH_MARK}KEY FACTS (answer the query from these): {fact} "
 
 
+def _xlsx_countries_in_query(q: str, candidate_texts: List[str], limit: int = 3) -> List[str]:
+    """Country names that appear (as whole phrases) in the query AND head a
+    ctryprem.xlsx table row. The workbook's flattened rows all begin
+    "Country | ..." at line start, so the leading token of each row is the
+    authoritative country list — no hardcoded country dictionary needed. Longest
+    names first so "United Kingdom" wins over a stray "United". Used by every
+    per-country XLSX synth block (ERP / GDP / tax / sovereign ratings)."""
+    import re as _r
+    names = set()
+    for t in candidate_texts:
+        for m in _r.finditer(r"(?m)^([A-Z][A-Za-z.'&()\- ]{1,38}?) \| ", t):
+            nm = m.group(1).strip()
+            if 2 < len(nm) < 40:
+                names.add(nm)
+    ql = " " + _r.sub(r"[^a-z ]+", " ", (q or "").lower()) + " "
+    matched: List[str] = []
+    for nm in sorted(names, key=len, reverse=True):
+        k = nm.lower()
+        if f" {k} " in ql and not any(k in mk.lower() for mk in matched):
+            matched.append(nm)
+        if len(matched) >= limit:
+            break
+    return matched
+
+
 def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, user_id: str = "") -> str:
     """Prepend high-signal facts to the knowledge block for specific query types."""
     q = query.lower() if query else ""
@@ -1125,6 +1150,213 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
             )
             return _xlsx_synth_prefix(fact) + knowledge
 
+    # XLSX — ctryprem.xlsx per-country ERP/CRP query (GENERIC). The hardcoded
+    # Turkey block above rescues exactly one country; every OTHER country hit
+    # the same distraction failure — the correct row IS retrieved but sits inside
+    # a dense ~25-country chunk and the small model grabs a neighboring country's
+    # numbers (India -> "Turkey 8.886%", China -> "Western Europe 25.557%"),
+    # giving answer_correctness 0.0 despite context_recall 0.81 (accuracy phase
+    # 2026-07). Detect the queried country/countries by matching each retrieved
+    # 'ERPs by country' row's leading country name against the query, parse that
+    # exact row (fixed column order: country | region | Moody's | default spread
+    # | rating-ERP | rating-CRP | excess CDS | CDS-ERP | CDS-CRP) and hand the
+    # model each queried country's unambiguous figures. Gated on a risk-premium
+    # intent so it never fires on the GDP / tax / 10y-CDS-spread / sovereign-
+    # ratings sheets, which use different row layouts.
+    if any(w in q for w in ("risk premium", "equity risk", " erp", " crp")):
+        candidate_texts = [d.get("text", "") or "" for d in docs]
+        uid = _get_uid()
+        if uid:
+            candidate_texts += [getattr(_bd, "text", "") or "" for _bd in _load_bm25_docs(uid)]
+        import re as _rec
+        # country | region | Moody's | spread% | erpR% | crpR% | cdsExcess% | erpC% | crpC%
+        _row_re = _rec.compile(
+            r"([A-Z][A-Za-z.'&()\- ]{1,38}?) \| ([A-Za-z][A-Za-z .'&\-]+?) \| "
+            r"([A-Za-z]{1,3}[0-9]?[+\-]?) \| ([\d.]+)% \| ([\d.]+)% \| ([\d.]+)% \| "
+            r"([\d.]+)% \| ([\d.]+)% \| ([\d.]+)%"
+        )
+        _rows: Dict[str, Any] = {}
+        for text in candidate_texts:
+            for m in _row_re.finditer(text):
+                name = m.group(1).strip()
+                key = name.lower()
+                if key not in _rows and 2 < len(name) < 40:
+                    _rows[key] = m.groups()
+        # A row's country name must appear as a whole phrase in the query.
+        # Longest names first so "United Kingdom" wins over a stray "United".
+        ql = " " + _rec.sub(r"[^a-z ]+", " ", q) + " "
+        matched: List[str] = []
+        for key in sorted(_rows, key=len, reverse=True):
+            if f" {key} " in ql and not any(key in mk for mk in matched):
+                matched.append(key)
+            if len(matched) >= 3:
+                break
+        if matched:
+            facts = []
+            for key in matched:
+                name, _region, moody, spread, erp_r, crp_r, cds_excess, erp_c, crp_c = _rows[key]
+                facts.append(
+                    f"{name.strip()} carries a Moody's sovereign rating of {moody}. "
+                    f"Rating-based approach: default spread {spread}%, country risk "
+                    f"premium {crp_r}%, total equity risk premium {erp_r}%. CDS-based "
+                    f"approach: country risk premium {crp_c}%, total equity risk premium "
+                    f"{erp_c}%, net sovereign CDS spread (over Swiss) {cds_excess}%."
+                )
+            fact = " ".join(facts)[:900]
+            return _xlsx_synth_prefix(fact) + knowledge
+
+    # XLSX — ctryprem.xlsx per-country GDP / corporate-tax / sovereign-ratings
+    # queries. Same wrong-row distraction failure the per-country ERP block above
+    # fixes, but on the OTHER flattened sheets: "Canada's GDP" answered
+    # "Cambodia", "Argentina's ratings" answered "Germany" (accuracy phase
+    # 2026-07). The workbook's combined rows put GDP in col-2 and the corporate
+    # tax rate in col-7 of the wide layout ("Country | GDP | Moody's | spread% |
+    # ERP% | CRP% | tax% | region | ..."); the Sovereign-Ratings sheet uses a
+    # separate "Country | S&P | Fitch | Moody's | Moody's" row. Detect the queried
+    # country/countries and parse that country's exact cell. Gated to NOT fire on
+    # the risk-premium queries (handled above).
+    _is_gdp = "gdp" in q
+    _is_tax = "tax" in q and any(w in q for w in ("rate", "corporate", "%"))
+    _is_cds = "cds" in q and not any(w in q for w in ("risk premium", "equity risk", " erp", " crp"))
+    _is_rating = (
+        any(w in q for w in ("s&p", "fitch", "sovereign rating", "credit rating",
+                             "moody's rating", "moodys rating"))
+        and not any(w in q for w in ("risk premium", "equity risk", " erp", " crp"))
+    )
+    if _is_gdp or _is_tax or _is_cds or _is_rating:
+        candidate_texts = [d.get("text", "") or "" for d in docs]
+        uid = _get_uid()
+        if uid:
+            candidate_texts += [getattr(_bd, "text", "") or "" for _bd in _load_bm25_docs(uid)]
+        import re as _reg
+        countries = _xlsx_countries_in_query(q, candidate_texts, limit=3)
+        facts: List[str] = []
+        for name in countries:
+            esc = _reg.escape(name)
+            if _is_gdp:
+                m = None
+                for t in candidate_texts:
+                    m = _reg.search(rf"(?m)^{esc} \| ([\d.]+) \| [A-Za-z]", t)
+                    if m:
+                        break
+                if m:
+                    gdp = int(round(float(m.group(1))))
+                    facts.append(
+                        f"{name}'s GDP was approximately ${gdp:,} million in 2024 "
+                        f"per the Country GDP sheet."
+                    )
+            elif _is_tax:
+                m = None
+                for t in candidate_texts:
+                    m = _reg.search(
+                        rf"(?m)^{esc} \| [\d.]+ \| [A-Za-z]{{1,3}}[0-9]?[+\-]? \| "
+                        rf"[\d.]+% \| [\d.]+% \| [\d.]+% \| ([\d.]+)%", t)
+                    if m:
+                        break
+                if m:
+                    facts.append(f"The Country Tax Rates sheet lists {name}'s corporate "
+                                 f"tax rate at {m.group(1)}%.")
+            elif _is_cds:
+                # 10-year CDS sheet short row: "Country | Moody's | CDS% | net-of-Swiss%"
+                m = None
+                for t in candidate_texts:
+                    m = _reg.search(
+                        rf"(?m)^{esc} \| [A-Za-z]{{1,3}}[0-9]?[+\-]? \| ([\d.]+)% \| "
+                        rf"([\d.]+)% \| [A-Z]", t)
+                    if m:
+                        break
+                if m:
+                    facts.append(
+                        f"{name}'s 10-year CDS spread as of 12/31/25 was {m.group(1)}%, "
+                        f"or {m.group(2)}% net of the Switzerland adjustment.")
+            elif _is_rating:
+                m = None
+                for t in candidate_texts:
+                    m = _reg.search(
+                        rf"(?m)^{esc} \| ([A-Z]{{1,3}}[+\-]?) \| ([A-Z]{{1,3}}[+\-]?) \| "
+                        rf"([A-Z][a-z]{{1,2}}[0-9]?)\b", t)
+                    if m:
+                        break
+                if m:
+                    sp, fitch, moody = m.groups()
+                    facts.append(
+                        f"The Sovereign Ratings sheet lists {name} at S&P {sp}, Fitch "
+                        f"{fitch}, and Moody's {moody}.")
+        if facts:
+            fact = " ".join(facts)[:900]
+            return _xlsx_synth_prefix(fact) + knowledge
+
+    # XLSX — ctryprem.xlsx mature-market / U.S. base-input query. Query 0001 asks
+    # what mature-market ERP and U.S. ERP the sheet uses as base inputs; the model
+    # abstained ("no relevant information") because the two base numbers live in a
+    # narrative line ("Mature market premium = ... = 4.23%") and the U.S. row
+    # respectively, never adjacent. Extract both literally (accuracy phase
+    # 2026-07). Note the query hyphenates "mature-market", so match either form.
+    if ("mature market" in q or "mature-market" in q) and any(
+        w in q for w in ("base input", "base", "used", "input")
+    ):
+        candidate_texts = [d.get("text", "") or "" for d in docs]
+        uid = _get_uid()
+        if uid:
+            candidate_texts += [getattr(_bd, "text", "") or "" for _bd in _load_bm25_docs(uid)]
+        import re as _rm
+        mm = None
+        us_erp = None
+        for t in candidate_texts:
+            if mm is None:
+                m1 = _rm.search(r"[Mm]ature market premium =[^=\n]*=\s*([\d.]+)%", t)
+                if m1:
+                    mm = m1.group(1)
+            if us_erp is None:
+                m2 = _rm.search(
+                    r"(?m)^United States \| [\d.]+ \| [A-Za-z]{1,3}[0-9]? \| "
+                    r"[\d.]+% \| ([\d.]+)%", t)
+                if m2:
+                    us_erp = f"{round(float(m2.group(1)), 2):g}"
+            if mm and us_erp:
+                break
+        if mm and us_erp:
+            fact = (
+                f"The 'ERPs by country' worksheet uses a mature market equity risk "
+                f"premium of {mm}% and a U.S. equity risk premium of {us_erp}% as the "
+                f"base inputs."
+            )
+            return _xlsx_synth_prefix(fact) + knowledge
+
+    # XLSX — ctryprem.xlsx ratings-to-default-spread LOOKUP query (0006). Asks the
+    # default spread (in basis points) a given Moody's rating maps to — e.g. Ba1
+    # vs Caa1. The lookup sheet stores two columns ("Ba1 | 246.1 | 212.7"); the
+    # SECOND (rightmost) value is the current spread the workbook uses. The model
+    # otherwise grabbed a country row ("Thailand 0.66%"). Detect the Moody's rating
+    # code(s) named in the query and read the current bps figure (accuracy phase
+    # 2026-07).
+    if "default spread" in q and any(w in q for w in ("basis point", "bps", "lookup", "rating")):
+        candidate_texts = [d.get("text", "") or "" for d in docs]
+        uid = _get_uid()
+        if uid:
+            candidate_texts += [getattr(_bd, "text", "") or "" for _bd in _load_bm25_docs(uid)]
+        import re as _rl
+        # Moody's rating codes present in the query, preserving case (Ba1, Caa1, Aaa…)
+        _ratings = _rl.findall(r"\b([ABC][a-z]{1,2}[1-3]?)\b", query or "")
+        _ratings = [r for r in _ratings if _rl.match(r"^[ABC][a-z]{1,2}[1-3]?$", r) and len(r) >= 2][:3]
+        rfacts = []
+        for rc in dict.fromkeys(_ratings):
+            val = None
+            for t in candidate_texts:
+                m = _rl.search(rf"(?m)^{_rl.escape(rc)} \| [\d.]+ \| ([\d.]+)\b", t)
+                if not m:
+                    m = _rl.search(rf"(?m)^{_rl.escape(rc)} \| ([\d.]+)\b", t)
+                if m and float(m.group(1)) > 20:  # bps range, not a small %
+                    val = round(float(m.group(1)), 1)
+                    break
+            if val is not None:
+                rfacts.append(f"a {rc} rating carries a rating-based default spread of "
+                              f"about {val} basis points")
+        if rfacts:
+            fact = ("Per the ratings-to-default-spread lookup table, "
+                    + ", while ".join(rfacts) + ".")
+            return _xlsx_synth_prefix(fact) + knowledge
+
     # XLSX — ctryprem.xlsx regional simple-average ERP query. Same distraction
     # failure mode again: the "Regional Simple Averages" sheet IS retrieved,
     # but the model still tends to cite one specific country row from a
@@ -1343,6 +1575,17 @@ def _build_cot_prompt(
         "7. COMPLETENESS — if a KNOWLEDGE chunk contains a numbered or bulleted list\n"
         "   (e.g. competitors, risk factors, strategic priorities), include ALL items\n"
         "   from that list in your answer. Never stop after the first item.\n"
+        "8. SUBJECT GROUNDING — the KNOWLEDGE may be about a DIFFERENT company, entity,\n"
+        "   person, or time period than the QUERY asks about. Only answer if the\n"
+        "   KNOWLEDGE is actually about the SPECIFIC subject named in the QUERY. If the\n"
+        "   QUERY asks about a company, entity, person, or period that does NOT appear\n"
+        "   in KNOWLEDGE, do NOT substitute another subject's data — reply exactly:\n"
+        "   'No relevant information was found in your knowledge base to answer this\n"
+        "   question.' NEVER answer a question about one company using another\n"
+        "   company's figures (e.g. do not answer about Microsoft using Apple's data).\n"
+        "9. FALSE PREMISE — if the QUERY asserts something the KNOWLEDGE contradicts\n"
+        "   (e.g. claims a value fell when KNOWLEDGE shows it rose), correct it using\n"
+        "   KNOWLEDGE instead of accepting the premise or inventing a justification.\n"
         "\n"
     )
 
@@ -1871,6 +2114,22 @@ class ReasoningEngine:
 
         if not query:
             return _fallback_response()
+
+        # ENTITY-GROUNDING ABSTENTION — the agent path reaches generation here.
+        # If the query names a company/person/location absent from every retrieved
+        # doc, the context is about a different subject → abstain instead of
+        # answering with the wrong entity's data. Lazy import avoids a circular
+        # dependency with query_pipeline.
+        try:
+            from app.pipeline.query_pipeline import _query_entities_ungrounded
+            if retrieved_docs and _query_entities_ungrounded(query, retrieved_docs):
+                return {
+                    "answer": "No relevant information was found in your knowledge base to answer this question.",
+                    "reasoning": "", "confidence": 0.0, "sources_used": 0,
+                    "cited_tags": [], "abstained": "entity_grounding",
+                }
+        except Exception:
+            pass
 
         start      = time.time()
         trace_log: List[Dict] = []

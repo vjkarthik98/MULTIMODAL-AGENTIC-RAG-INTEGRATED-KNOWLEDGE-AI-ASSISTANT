@@ -41,7 +41,7 @@ Examples:
     parser.add_argument(
         "--suite",
         required=True,
-        choices=["retrieval", "generation", "hallucination", "ocr", "audio",
+        choices=["retrieval", "generation", "hallucination", "behavioral", "ocr", "audio",
                  "video", "routing", "e2e", "multimodal", "regression", "full"],
         help="Eval suite to run",
     )
@@ -61,6 +61,12 @@ Examples:
         help="Override eval user_id (default: EVAL_USER_ID env var or eval_default)",
     )
     parser.add_argument(
+        "--modality",
+        default=None,
+        choices=["txt", "pdf", "docx", "xlsx", "image", "audio", "video"],
+        help="Evaluate ONLY this modality (retrieval/generation/behavioral suites).",
+    )
+    parser.add_argument(
         "--no-report",
         action="store_true",
         help="Skip writing rag_report files",
@@ -77,6 +83,10 @@ Examples:
 
     if args.user_id:
         cfg.user_id = args.user_id
+
+    if args.modality:
+        cfg.modality = args.modality
+        print(f"[MODALITY FILTER] evaluating only: {args.modality}")
 
     if args.baseline:
         cfg._baseline_path = Path(args.baseline)  # regression runner picks this up

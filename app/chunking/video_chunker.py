@@ -364,7 +364,12 @@ class VideoChunker(BaseChunker):
                     # names to word timestamps) — passing the joined string here
                     # crashed ingestion whenever diarization returned segments.
                     role_map        = _map_speaker_roles(diarization, words)
-                    audio_chunks    = _assemble_chunks(words, diarization, role_map)
+                    # Video-only finer transcript chunking (vision frames separate).
+                    audio_chunks    = _assemble_chunks(
+                        words, diarization, role_map,
+                        min_words=settings.VIDEO_CHUNK_MIN_WORDS,
+                        max_words=settings.VIDEO_CHUNK_MAX_WORDS,
+                    )
 
                     # Detect earnings call from full transcript
                     _ft_lower = full_transcript.lower()

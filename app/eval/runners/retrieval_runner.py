@@ -41,11 +41,33 @@ def run_retrieval_suite(cfg: EvalConfig) -> SuiteResult:
         result.breached["retriever_init"] = str(e)
         return result
 
-    # Load gold rows from all text-based modalities (not just txt)
+    # NOTE — this suite measures the FUSION component of retrieval only
+    # (BM25 + dense + RRF). It deliberately does NOT apply the cross-encoder
+    # reranker, because Reranker.rerank() cannot be cleanly isolated for a
+    # retrieval metric: (1) it truncates to RERANK_MAX_INPUT before scoring, so
+    # fusion-deep chunks are cut; (2) its sigmoid calibration/filter/dedup and
+    # query_pipeline's post-rerank boosts (temporal, section, financial-table)
+    # reorder results such that a standalone rerank() here scored WORSE than
+    # fusion (verified: recall@10 0.71→0.36). Faithfully mirroring it = re-running
+    # query_pipeline. The END-TO-END reranked retrieval quality is therefore read
+    # from the generation suite's deterministic `context_recall` (reference facts
+    # recoverable from the ACTUAL post-rerank context) — 0.94 for PDF.
+    reranker = None  # fusion-component metric by design
+
+    # Load gold rows from all text-based modalities (or a single one if filtered)
+    _mods = [cfg.modality] if getattr(cfg, "modality", None) else _RETRIEVAL_MODALITIES
     gold_rows: List[Dict[str, Any]] = []
-    for mod in _RETRIEVAL_MODALITIES:
+    for mod in _mods:
         try:
-            gold_rows.extend(load_gold(mod, gold_dir=cfg.gold_dir))
+            for r in load_gold(mod, gold_dir=cfg.gold_dir):
+                # Exclude behavioral rows: refusal rows have no retrieval ground
+                # truth, and adversarial rows carry injection text that pollutes
+                # the query embedding — both distort pure retrieval metrics.
+                if r.get("question_type") in ("refusal", "adversarial"):
+                    continue
+                if not r.get("relevant_chunk_ids"):
+                    continue
+                gold_rows.append(r)
         except FileNotFoundError:
             pass  # skip missing gold files
 

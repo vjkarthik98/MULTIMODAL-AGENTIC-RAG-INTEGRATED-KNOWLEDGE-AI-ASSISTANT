@@ -28,9 +28,14 @@ def _is_curated(row: Dict[str, Any]) -> bool:
     """Return True only if this row has real (non-TODO) ground truth."""
     rel = row.get("relevant_chunk_ids")
     ans = row.get("reference_answer", "")
+    behavior = row.get("expected_behavior")
     # Routing-only rows (no docs to retrieve) are always curated if they have expected_route
     if row.get("modality") == "routing":
         return bool(row.get("expected_route"))
+    # Refusal / no-answer rows: correct behavior is abstention, so there is no
+    # retrievable chunk — curated as long as they carry a reference abstention.
+    if behavior == "abstain" or "NO_ANSWER_IN_KB" in str(ans):
+        return bool(ans)
     # E2E rows that require web search have SEARCH_REQUIRED placeholder — still valid
     if "SEARCH_REQUIRED" in str(ans):
         return bool(row.get("expected_route"))

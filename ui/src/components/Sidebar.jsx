@@ -178,6 +178,7 @@ export default function Sidebar({
   const renameInputRef                     = useRef(null)
   const [uploadingFiles, setUploadingFiles] = useState(new Set())
   const [uploadProgress, setUploadProgress] = useState({}) // filename → 0-100 (smoothed, displayed)
+  const [uploadStage, setUploadStage] = useState({})     // filename → real backend job.status
   const uploadTargets = useRef({})       // filename → real stage target the bar eases toward
   const uploadControllers = useRef({}) // filename → AbortController
   const [uploadError, setUploadError]     = useState('')
@@ -532,6 +533,20 @@ export default function Sidebar({
   // queued(2%) → extracting(20%) → chunking(50%) → embedding(80%) → done(100%)
   const _STAGE_PROGRESS = { queued: 2, extracting: 20, chunking: 50, embedding: 80, done: 100, error: 0 }
 
+  // Real backend stage → user-facing label. Once the server has a job.status
+  // at all, that's what's actually happening — never keep saying "Uploading"
+  // (the file bytes already arrived; the server returns job_id almost
+  // instantly). Without this the bar sat at "Uploading 95%" for as long as a
+  // slow first-use model load or long transcription took, which reads as a
+  // stuck/broken upload when it's really normal backend processing.
+  const _STAGE_LABEL = {
+    queued:     'Queued',
+    extracting: 'Extracting',
+    chunking:   'Chunking',
+    embedding:  'Embedding',
+    done:       'Processing',
+  }
+
   const _pollJobStatus = async (token, jobId, filename) => {
     const INTERVAL = 1000, MAX_POLLS = 1800  // poll every 1s; up to 30 min (covers large video files)
     for (let i = 0; i < MAX_POLLS; i++) {
@@ -545,6 +560,9 @@ export default function Sidebar({
         const pct = Math.max(stagePct, realPct)
         // Set the TARGET; the animator eases the displayed value toward it.
         uploadTargets.current[filename] = Math.max(uploadTargets.current[filename] || 0, pct)
+        if (job.status && job.status !== 'error') {
+          setUploadStage(prev => (prev[filename] === job.status ? prev : { ...prev, [filename]: job.status }))
+        }
         if (job.status === 'done') return { ok: true, chunks: job.chunks_done }
         if (job.status === 'error') return { ok: false, error: job.error || 'Processing failed' }
       } catch (_) { /* network blip — keep polling */ }
@@ -613,6 +631,7 @@ export default function Sidebar({
       }
       setUploadingFiles(prev => { const s = new Set(prev); s.delete(file.name); return s })
       setUploadProgress(prev => { const p = { ...prev }; delete p[file.name]; return p })
+      setUploadStage(prev => { const s = { ...prev }; delete s[file.name]; return s })
       delete uploadTargets.current[file.name]
     }
     if (errors.length) setUploadError(errors.join('; '))
@@ -995,7 +1014,9 @@ export default function Sidebar({
                   <p className="text-sm font-medium truncate" style={{ color: 'var(--t-tx2)' }}>{name}</p>
                   <p className="text-[11px] mt-0.5 flex items-center gap-1.5" style={{ color: 'var(--t-tx5)' }}>
                     <CircularProgress pct={pct} />
-                    {pct < 100 ? `Uploading ${pct}%` : 'Processing…'}
+                    {pct >= 100
+                      ? 'Processing…'
+                      : `${_STAGE_LABEL[uploadStage[name]] || 'Uploading'} ${pct}%`}
                   </p>
                 </div>
                 <span className={`${b.bg} text-white text-[10px] font-bold px-1.5 py-0.5 rounded flex-shrink-0`}>

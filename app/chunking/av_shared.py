@@ -379,14 +379,21 @@ def _assemble_chunks(
     words: List[Dict],
     diarization: List[Tuple[float, float, str]],
     role_map: Dict[str, Tuple[Optional[str], Optional[str]]],
+    min_words: int = _MIN_WORDS,
+    max_words: int = _MAX_WORDS,
 ) -> List[Dict]:
     """Group words into speaker-aware, topic-bounded chunks with 1-sentence overlap.
 
-    Hard boundaries: speaker change (≥ MIN_WORDS buffered), topic transition phrase,
-                     exceeding MAX_WORDS.
+    Hard boundaries: speaker change (≥ min_words buffered), topic transition phrase,
+                     exceeding max_words.
     Soft boundary: nearest sentence end to the target word count.
     Overlap: last sentence of the previous chunk is prepended to each new chunk so
              a financial statement split across a boundary remains retrievable.
+
+    `min_words`/`max_words` default to the module constants (75/225) so existing
+    callers — notably the VIDEO chunker — are unchanged. The AUDIO chunker passes
+    finer sizes so a specific spoken fact lands in a focused, retrievable chunk
+    instead of being buried in a ~1.5-minute block of generic prose.
     """
     if not words:
         return []
@@ -428,9 +435,9 @@ def _assemble_chunks(
         word_end = w["end"]
         current_speaker = speaker_at(word_start)
 
-        over_max = len(buf_words) >= _MAX_WORDS
-        speaker_changed = current_speaker != buf_speaker and len(buf_words) >= _MIN_WORDS
-        topic_hit = bool(_TOPIC_TRANSITIONS.search(word_text)) and len(buf_words) >= _MIN_WORDS
+        over_max = len(buf_words) >= max_words
+        speaker_changed = current_speaker != buf_speaker and len(buf_words) >= min_words
+        topic_hit = bool(_TOPIC_TRANSITIONS.search(word_text)) and len(buf_words) >= min_words
 
         if over_max or speaker_changed or topic_hit:
             if buf_words:

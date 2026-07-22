@@ -552,3 +552,269 @@ The format follows Keep a Changelog and Semantic Versioning.
   stored hash array; replay attacks blocked
 - AUTH_ENABLED=false dev bypass preserved for local development and eval
   runs — never ships in production config
+
+# [v0.25.0] — Per-Modality Architecture Rebuild, Model Upgrade & Full Evaluation Harness
+
+This is the largest release so far. The project moved from a handful of
+shared, monolithic files per layer to a strict per-modality architecture,
+the resident model stack was upgraded end to end, and — for the first time —
+every one of the seven modalities (txt, pdf, docx, xlsx, image, audio,
+video) was measured against a real gold dataset with a purpose-built judge
+model, diagnosed, fixed, and re-measured until the numbers actually moved.
+
+### Features
+
+**Architecture — per-modality rebuild**
+
+- Replaced the old shared `chunker.py` (one 224-line file handling every
+  modality's chunking with branching logic) with `base_chunker.py` plus
+  one dedicated chunker per modality — `txt_chunker.py`, `pdf_chunker.py`,
+  `docx_chunker.py`, `xlsx_chunker.py`, `image_chunker.py`,
+  `audio_chunker.py`, `video_chunker.py` — so a bug or tuning change in one
+  modality can never silently affect another
+- Same split for embeddings: `text_embedder.py` (737 lines),
+  `clip_text_embedder.py` (612 lines) and `multimodal_embedder.py`
+  (655 lines) — three overlapping do-everything files — were retired in
+  favour of `base_embedder.py` (shared BGE-large singleton, cache,
+  finance-number normalization) and seven thin per-modality embedders
+- BM25 given the identical treatment: `base_bm25.py` (shared tokenizer,
+  circuit breaker, save/load) plus one `{modality}_bm25.py` per modality,
+  replacing a single general-purpose retriever file
+- Ingestion follows the same 4-file-per-modality pattern
+  (`{modality}_ingest.py` → chunk → embed → bm25), all reachable only
+  through the public dispatch layer (`app/chunking/__init__.py`,
+  `app/embeddings/__init__.py`, `app/ingestion/router.py`) — nothing in
+  the pipeline imports a per-modality file directly any more
+- Shared audio/video transcript logic (Whisper word timing, pyannote
+  diarization, speaker-turn assembly, filler-word stripping) consolidated
+  into a new `av_shared.py` instead of being duplicated between the audio
+  and video chunkers
+- Deleted `app/agents/video_answer_agent.py` (a video-only, one-off
+  verification hack) and replaced it with a proper generic package,
+  `app/verification/` — `groundedness_checker.py`, `citation_verifier.py`,
+  `completeness_verifier.py`, `confidence_scorer.py`,
+  `retrieval_evaluator.py`, `retry_controller.py`, `stopping_criteria.py`,
+  `verification_loop.py` — a self-verifying answer loop that works the
+  same way for every modality, not just video
+- Removed dead `app/bin/ops/*` one-off scripts (`init_qdrant.py`,
+  `migrate_qdrant_dim.py`, `purge_session.py`, `rebuild_bm25_index.py`)
+  and folded their still-needed behaviour into `app/bin/models/` and
+  `app/bin/server/`
+- Brand-new `app/eval/` package — `datasets/gold/` (per-modality gold
+  files), `judges/`, `metrics/`, `runners/`, `tracking/`, `reports/`,
+  `baselines/`, `benchmark_queries/`, `scripts/` — the project had no
+  structured evaluation harness before this release
+
+**Model upgrade**
+
+- Swapped the resident LLM from Mistral-7B-Instruct to
+  **Qwen2.5-14B-Instruct (Q4_K_M GGUF)** — still run as a separate
+  `llama.cpp` process on its own CUDA context (never in-process with
+  PyTorch), now on a larger GPU with 48GB VRAM instead of the original
+  24GB A10G
+- Added a dedicated evaluation judge, **Prometheus-2-7B v2.0 (Q8_0
+  GGUF, ~7.7GB)** — a model purpose-built to be an LLM evaluator, not a
+  repurposed instruct model, replacing the earlier Ragas + gguf-Mistral /
+  cross-encoder / lexical judge stack that had capped faithfulness scores
+  at 0.29–0.54 regardless of actual answer quality
+- Replaced BLIP-1 image captioning (caption text was silently reused as
+  the VLM prompt — a long-standing bug) with **Qwen2-VL** as the primary
+  vision-language model: 7B for image charts, a lighter 2B variant for
+  video frame captioning to keep 1-hour video ingests inside VRAM budget
+- Added a deterministic OpenCV chart digitizer for financial line charts
+  (`_digitize_line_chart` in `image_chunker.py`) — axis-label OCR
+  calibrates pixel→dollar and pixel→date mappings, a dash-signature
+  tracer follows each series' line through the chart, so exact chart
+  values are pulled from pixel geometry instead of asking a vision model
+  to read them off an image
+- `app/bin/models/download_all_models.py` — one script that fetches and
+  verifies the entire ~20GB model set in one pass, replacing manual
+  per-model download steps
+
+**Full evaluation harness (new)**
+
+- Rebuilt the gold dataset from scratch to an industry-standard shape:
+  one gold file per modality, every row carrying a `reference_answer`,
+  ground-truth `relevant_chunk_ids`, and per-modality citation ground
+  truth (page/section for docs, sheet+row for spreadsheets, timestamp for
+  audio, timestamp+frame for video)
+- Added dedicated refusal rows (question the KB genuinely cannot
+  answer), adversarial rows (prompt injection + false-premise
+  correction), and a websearch-required row to every modality's gold set
+- Removed multi-hop query rows entirely at the user's direction — the
+  live agent does a single classify-and-dispatch, not iterative
+  multi-step tool chaining, so multi-hop questions were testing a
+  capability the system was never designed to have
+- `python -m app.eval.run --suite {retrieval,generation,behavioral,full}
+  --modality {txt,pdf,docx,xlsx,image,audio,video}` — retrieval metrics
+  (recall@k, MRR, nDCG, hit_rate) need no LLM; generation metrics
+  (answer_correctness, answer_relevancy, faithfulness via Prometheus;
+  context_recall, finance_fidelity, citation_accuracy deterministic);
+  behavioral metrics (refusal_accuracy, adversarial_pass)
+- Deterministic `finance_fidelity` and `context_recall` metrics that
+  check numeric agreement and fact recoverability directly against
+  source text, giving a trustworthy signal independent of any LLM judge
+
+**Retrieval intelligence**
+
+- Meeting/event-scoped retrieval — when a query names a dated meeting or
+  earnings call the source's own filename encodes (e.g. "September 2024
+  FOMC" or "Q4 2025 earnings call"), primary retrieval is scoped to that
+  one source before ranking, so a same-topic different-period document in
+  the same knowledge base (a December FOMC transcript, a prior-year 10-K)
+  can no longer answer a question with the wrong period's numbers
+  entirely
+- Per-call cross-encoder budget — the reranker can now be handed the
+  full scoped candidate set for a single-source query instead of the
+  usual fusion-capped top-N, so a fact whose chunk opens with unrelated
+  text (a legal disclaimer, a generic intro sentence) still gets read and
+  ranked correctly by the cross-encoder instead of never reaching it
+- Finer, modality-specific audio/video transcript chunking (tunable via
+  `AUDIO_CHUNK_MIN/MAX_WORDS` and `VIDEO_CHUNK_MIN/MAX_WORDS`, both
+  defaulting to the same values the shared chunker always used, so
+  nothing else changed) — a specific spoken fact now lands in its own
+  focused, retrievable chunk instead of buried inside a long,
+  topic-mixed block
+
+**UI — full frontend rewrite (Gradio retired, React shipped)**
+
+- Retired the original Gradio chat interface entirely (`ui/gradio_app.py`
+  and `ui/theme.py`, ~1,000 and ~700 lines) and replaced it with a
+  ground-up React + Vite + Tailwind single-page app — the UI is no longer
+  a Python-templated Gradio Blocks layout, it's a real frontend with its
+  own build pipeline, calling the FastAPI backend exclusively over HTTP
+  (no `app/` imports from the UI, matching the project's own layering
+  rule)
+- Full page set: `ChatPage`, `LoginPage`, `ForgotPasswordPage`,
+  `ResetPasswordPage`, `TranscriptViewer` — plus a component library
+  (`MessageBubble`, `Sidebar`, `SettingsModal`, `ConversionModal`,
+  `GuestBanner`, `LoginModal`, `Toast`, `TypingIndicator`,
+  `ErrorBoundary`) and a `useIsMobile` hook driving a dedicated mobile
+  action menu
+- Dark/light theme, animated sidebar, streaming message rendering with
+  syntax-highlighted code blocks and full GitHub-Flavored-Markdown table
+  support, keyboard shortcuts, a three-dot per-message action menu, and
+  file-type badge coloring in the knowledge-base list
+- Finance-specific components: `FinanceTable` (Markdown financial-table
+  renderer), `MediaTimestampChip` (clickable audio/video timestamps that
+  seek playback), `EarningsCallBrowser` (call-section navigator),
+  `KnowledgeBasePanel` (file list, upload, delete), numeric verification
+  badges and source citation chips on message bubbles — the last of
+  these was specifically re-verified against real answers across TXT,
+  PDF, and DOCX after citation-display bugs were found
+- Upload UX rebuilt — progress ring, cancel-in-flight, and duplicate-file
+  detection all fixed and working together; the earlier standalone
+  upload progress bar was removed once the ring replaced it
+- Login page redesign — Google OAuth button, email/password flow, and
+  account creation, first shipped on the Gradio UI and then carried
+  forward faithfully into the React rewrite
+- Persistent login across page reloads and a logout that actually
+  revokes the token server-side (the old logout was UI-only)
+- Guest session usage limits (rate-limited per IP, query and file caps)
+  so anonymous trial access can't be used to run the system unbounded,
+  plus a `GuestBanner`/`ConversionModal` prompting guests to create a
+  real account
+- Web-search source indicator in the chat UI
+
+### Improved
+
+**Per-modality accuracy — every modality diagnosed and re-measured**
+
+- **TXT** — strong out of the gate: retrieval hit_rate 1.00,
+  finance_fidelity 0.875, context_recall 0.77
+- **PDF** — a candidate-pool floor fix (never fewer than 50 candidates
+  reach the reranker) recovered cross-document queries; finance_fidelity
+  0.929
+- **DOCX** — fixed a structural-embedding-lane bug where a large,
+  unrelated spreadsheet was hijacking the top of completely unrelated
+  queries (a "gross margin" question was answering from a country
+  risk-premium file); this one fix alone took DOCX retrieval hit_rate
+  0.79 → 1.00 and also lifted TXT and XLSX; a second fix removed a
+  false-positive NER tag that mistook the acronym "DCF" for a company
+  name and wrongly abstained on valid questions
+- **XLSX** — retrieval hit_rate 0.29 → 0.64 from the same structural-lane
+  fix; generation was the real story: answer_correctness went from
+  **0.000 to 0.786** by adding generic per-country and per-sheet fact
+  extractors (equity risk premium, GDP, tax rate, sovereign rating, CDS
+  spread, rating-lookup tables) that parse the exact queried row directly
+  out of the dense multi-country table chunks the small model was
+  otherwise reading the wrong row from
+- **Image** — chart Q&A answer_correctness 0.289 → 0.857 by rewriting the
+  chart-answer synthesizer to handle specific-date reads, distinctive
+  per-series matching (previously "Index" alone matched every series in
+  the chart), title extraction, and an unsupported-metric abstention
+  guard, backed by a vision-store fetch fallback so the digitized chart
+  data reaches the synthesizer even when the reranker buries the chart
+  chunk below text chunks
+- **Audio** — diagnosed and fixed a two-transcript contamination bug
+  where a September Fed press-conference question was silently answered
+  with a December transcript's numbers because the denser document
+  out-ranked the correct one; meeting-scoped retrieval took
+  answer_correctness 0.196 → 0.375; finer re-chunking on top of that
+  more than doubled retrieval quality (MRR 0.19 → 0.40, hit_rate 0.79 →
+  0.86)
+- **Video** — same two fixes applied to the earnings-call recording:
+  answer_correctness 0.071 → 0.411 from call-scoped retrieval, then
+  retrieval hit_rate 0.43 → 0.93 and faithfulness roughly doubled from
+  finer transcript re-chunking; on-screen financial-chart reads (EPS,
+  stock price) now answer correctly from the vision-frame captions
+
+**Latency & performance**
+
+- Lazy model loading — heavy models load on first real use instead of at
+  startup, cutting cold-start time
+- Uvicorn startup, file upload, and streaming-response latency all
+  reduced; time-to-first-token improved by skipping redundant
+  tokenization on the hot path
+- `llama-server` tuned with flash-attention and prompt KV-cache flags so
+  repeated RAG system-prompt prefixes reuse cached compute
+- Traced the real villain behind slow uploads to synchronous calls on the
+  Upstash-hosted Redis (≈200ms per call) rather than the code doing the
+  uploading — split to a local Redis cache for the hot path plus a
+  short-lived in-process auth cache
+- Ingestion NLP/PII extraction and BM25 search performance improved
+  across the board
+
+**Agent & reasoning**
+
+- Retired the video-only verification hack in favour of the shared,
+  generic `app/verification/` self-verifying answer loop described above
+- Added an entity subject-dominance abstention gate — the agent now
+  checks whether the query's actual subject (company, person) is
+  genuinely present in the retrieved context before answering, instead
+  of answering from a superficially similar chunk about a different
+  entity; refusal_accuracy rose from 0.024 to 0.155 project-wide
+
+### Fixed
+
+- Video ingestion crashed outright whenever diarization returned any
+  speaker segments (a string was passed where `_map_speaker_roles`
+  expected a structured mapping) — video had never actually worked
+  end-to-end with diarization before this release
+- XLSX generation was answering with a plausible-looking but wrong
+  country's numbers for nearly every per-country question (two different
+  countries both got answered as "Turkey") — root-caused to the model
+  losing track of which row it was reading in a dense, 25-country table
+  chunk
+- Image chart Q&A returned empty answers or the wrong chart title for
+  several question types because the chunk holding the actual digitized
+  chart values was routinely outranked by unrelated text chunks and
+  never reached the synthesizer
+- A same-topic, different-period document sharing a knowledge base with
+  the correct source (a prior-year 10-K, a different month's earnings
+  call) could silently answer a question with the wrong period's numbers
+  instead of the source actually being asked about
+- BLIP-1's caption output was being reused verbatim as the next model's
+  prompt, corrupting downstream vision-language generation
+- Corrected a corrupted source data file (`apple_10k.pdf`) that had been
+  silently feeding bad text into ingestion
+- Message upvote/downvote state was lost on page reload — votes now
+  persist server-side instead of living only in frontend component state
+- Knowledge-base file upload could be duplicated by a slow network retry
+  and left half-deleted files behind on cancel — upload dedup and delete
+  are now atomic
+- Source citation chips and section headers were showing stale or
+  missing data for some TXT/PDF/DOCX answers — re-verified end-to-end
+  after the fix
+- A summarization trigger bug and a PII/prompt-corruption issue surfaced
+  through the chat UI were both fixed at the API layer feeding it

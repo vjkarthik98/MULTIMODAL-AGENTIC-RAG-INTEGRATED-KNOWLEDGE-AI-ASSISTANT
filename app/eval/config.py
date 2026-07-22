@@ -22,7 +22,7 @@ RAW_CORPUS_DIR: Path = _settings.PROJECT_ROOT / "data" / "raw" / "finance"
 
 EVAL_USER_ID: str = os.getenv("EVAL_USER_ID", _settings.PROJECT_ROOT and "eval_default") or "eval_default"
 EVAL_SESSION_PREFIX: str = "eval"
-EVAL_JUDGE_MODEL: str = os.getenv("EVAL_JUDGE_MODEL", "gguf_mistral")
+EVAL_JUDGE_MODEL: str = os.getenv("EVAL_JUDGE_MODEL", "prometheus_2_7b")
 EVAL_JUDGE_TEMPERATURE: float = float(os.getenv("EVAL_JUDGE_TEMPERATURE", "0.1"))
 EVAL_FAIL_ON_MISSING_JUDGE: bool = os.getenv("EVAL_FAIL_ON_MISSING_JUDGE", "false").lower() == "true"
 
@@ -30,6 +30,7 @@ EVAL_FAIL_ON_MISSING_JUDGE: bool = os.getenv("EVAL_FAIL_ON_MISSING_JUDGE", "fals
 SUITE_NAMES: List[str] = [
     "retrieval",
     "generation",
+    "behavioral",
     "ocr",
     "audio",
     "video",
@@ -95,6 +96,9 @@ class EvalConfig:
     manifest_path: Path = field(default=MANIFEST_PATH)
     raw_corpus_dir: Path = field(default=RAW_CORPUS_DIR)
     weaken: WeakenSpec = field(default_factory=WeakenSpec)
+    # Optional single-modality filter (txt|pdf|docx|xlsx|image|audio|video).
+    # When set, retrieval/generation/behavioral suites evaluate ONLY this modality.
+    modality: Optional[str] = None
 
     def ensure_dirs(self) -> None:
         for p in (self.gold_dir, self.reports_dir, self.baselines_dir):

@@ -8,7 +8,7 @@ __pycache__/
 
 # Data — never commit corpus files, user uploads, or indexes
 data/
-
+docs/
 
 
 # Distribution / packaging
@@ -251,6 +251,6 @@ dist-ssr/
 .claude
 .vscode
 scripts/
-
+.cuda_compat
 
 

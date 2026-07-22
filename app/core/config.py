@@ -68,7 +68,7 @@ class Settings:
 
     # CORE APPLICATION
     APP_NAME: str        = _str("APP_NAME", "Multimodal Agentic RAG Integrated Knowledge AI Assistant")
-    APP_VERSION: str     = _str("APP_VERSION", "0.24.0")
+    APP_VERSION: str     = _str("APP_VERSION", "0.25.0")
     APP_DESCRIPTION: str = _str("APP_DESCRIPTION", "Production Multimodal Agentic RAG Integrated AI System")
     ENV: str             = _str("ENV", "development")
     DEBUG: bool          = _bool("DEBUG", False)
@@ -267,6 +267,16 @@ class Settings:
     AUDIO_SNR_THRESHOLD_DB: float   = _float("AUDIO_SNR_THRESHOLD_DB", 10.0)
     AUDIO_SILENCE_GAP_MS: int       = _int("AUDIO_SILENCE_GAP_MS", 200)
     AUDIO_CHUNK_DURATION_SEC: int   = _int("AUDIO_CHUNK_DURATION_SEC", 1800)
+    # Fine-grained audio chunking (audio-only; video keeps the av_shared defaults
+    # of 75/225). Smaller chunks put a specific spoken fact in a focused,
+    # retrievable segment instead of a ~1.5-min block of generic prose.
+    AUDIO_CHUNK_MIN_WORDS: int      = _int("AUDIO_CHUNK_MIN_WORDS", 45)
+    AUDIO_CHUNK_MAX_WORDS: int      = _int("AUDIO_CHUNK_MAX_WORDS", 130)
+    # Fine-grained VIDEO transcript chunking (video-only; the 20 vision-frame
+    # chunks are separate and unaffected). Same sweet spot as audio — isolates a
+    # spoken fact ("$102.5 billion in revenue") from the coarse disclaimer block.
+    VIDEO_CHUNK_MIN_WORDS: int      = _int("VIDEO_CHUNK_MIN_WORDS", 45)
+    VIDEO_CHUNK_MAX_WORDS: int      = _int("VIDEO_CHUNK_MAX_WORDS", 130)
     DIARIZATION_ENABLED: bool       = _bool("DIARIZATION_ENABLED", False)
     AUDIO_DIARIZATION_ENABLED: bool = _bool("AUDIO_DIARIZATION_ENABLED", False)
     # Pyannote speaker diarization (requires HF_TOKEN + model access approval)
@@ -897,7 +907,7 @@ class TestSettings:
 
     def test_defaults_are_valid(self):
         s = Settings()
-        assert s.APP_VERSION == "1.0.0"
+        assert s.APP_VERSION == "0.25.0"
         assert s.TEXT_EMBEDDING_DIM == 1024
         assert s.VISION_EMBEDDING_DIM > 0
         assert s.CHUNK_OVERLAP < s.CHUNK_SIZE

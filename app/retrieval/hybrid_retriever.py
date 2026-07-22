@@ -657,7 +657,11 @@ class HybridRetriever:
         start = time.time()
         query = self._normalize_query(query)
         top_k = top_k or settings.DEFAULT_TOP_K
-        candidate_k = min(top_k * self.candidate_multiplier, 50)
+        # Give the reranker a deep candidate pool even for small top_k. Previously
+        # `top_k * multiplier` capped at 50 meant top_k=10 fetched only 30 candidates,
+        # so chunks the reranker would rank highly (but that sit deep in fusion order)
+        # never entered its view. Floor of 50 recovers those; cap 80 bounds latency.
+        candidate_k = min(max(top_k * self.candidate_multiplier, 50), 80)
 
         # When the caller has already scoped to explicit source files, keyword-
         # based modality detection must not override that intent.  A query like
@@ -877,9 +881,20 @@ class HybridRetriever:
             if q_type in ("tabular", "exact_numeric") and q_vec:
                 alt_res = self._vector_search_alt(q_vec, candidate_k, session_id, user_id)
                 if alt_res:
-                    known_sources = {
-                        item.get("metadata", {}).get("source")
-                        for item in combined.values()
+                    # Only inject an alt-only chunk if its source was ranked
+                    # PROMINENTLY by the primary retrievers — not merely present
+                    # somewhere in the deep candidate pool. A big generic lookup
+                    # table (e.g. ctryprem.xlsx, 149 chunks) otherwise sneaks a few
+                    # low-rank chunks into the pool, passes a "known source" check,
+                    # then its strong structural-embedding score hijacks the top of
+                    # an unrelated query (observed: "Apple's gross margin" returning
+                    # only country-risk-spreadsheet chunks). Prominence = top-12 by
+                    # primary fused score.
+                    _prom = heapq.nlargest(
+                        min(12, len(combined)), combined.values(), key=lambda x: x["score"]
+                    )
+                    prominent_sources = {
+                        i.get("metadata", {}).get("source") for i in _prom
                     }
                     for r in alt_res:
                         meta  = r.get("metadata", {})
@@ -888,7 +903,7 @@ class HybridRetriever:
                         if key in combined:
                             combined[key]["score"] = max(combined[key]["score"], score)
                             combined[key]["sources"].add("dense_alt")
-                        elif meta.get("source") in known_sources:
+                        elif meta.get("source") in prominent_sources:
                             combined[key] = {**r, "score": score, "sources": {"dense_alt"}}
 
             # CROSS-RETRIEVER AGREEMENT BOOST — documents that appear in both

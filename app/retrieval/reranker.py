@@ -522,19 +522,25 @@ class Reranker:
         documents: List[Dict],
         top_k: Optional[int] = None,
         session_id: str = "",
+        max_inputs: Optional[int] = None,
     ) -> List[Dict]:
         if not query or not documents:
             return []
 
         start = time.time()
         top_k = top_k or self.top_k
+        # Per-call cross-encoder budget. Defaults to self.max_inputs (unchanged
+        # for every existing caller); a caller can widen it — e.g. a single-
+        # meeting scoped audio query, where the specific fact chunk ranks below
+        # the usual cap in dense/fusion but the cross-encoder pins it once seen.
+        eff_max = max_inputs or self.max_inputs
         query = self._normalize_query(query)
 
         input_count = len(documents)
 
         try:
             # PRE-FILTER: remove empty/too-short docs
-            docs = self._filter(documents)[:self.max_inputs]
+            docs = self._filter(documents)[:eff_max]
             filtered_count = len(docs)
 
             if not docs:
@@ -548,7 +554,7 @@ class Reranker:
             # DEDUP BEFORE INFERENCE: remove exact duplicates so cross-encoder
             # slots are not wasted on identical chunks retrieved by both BM25
             # and the dense vector retriever.
-            docs = self._dedup(docs, self.max_inputs)
+            docs = self._dedup(docs, eff_max)
 
             # BUILD PAIRS
             pairs, valid_docs = self._build_pairs(query, docs)

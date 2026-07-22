@@ -1,22 +1,23 @@
 # RAG Eval Report — Phase 25
 
-**Generated:** 2026-05-28T14:01:37Z  
-**Git SHA:** 4668745  
+**Generated:** 2026-07-19T15:21:07Z  
+**Git SHA:** 5e28e55  
 
 ## Suite: `generation`
 
-Duration: 890.1s
+Duration: 932.2s
 
 | Metric | Value | n | Notes |
 |--------|-------|---|-------|
-| `answer_relevancy` | 0.5454 | 21 | judge=gguf_mistral |
-| `citation_accuracy` | 1.0000 | 9 | judge=heuristic |
-| `context_precision` | 0.8373 | 21 | judge=gguf_mistral |
-| `context_recall` | 0.9667 | 21 | judge=gguf_mistral |
-| `faithfulness` | 0.2905 | 21 | judge=gguf_mistral |
-| `generation_p50_sec` | 0.0343 | 21 | min=0.03s max=21.10s |
-| `generation_p95_sec` | 20.3570 | 21 |  |
-| `generation_p99_sec` | 20.9533 | 21 |  |
-| `hallucination_rate` | 0.6667 | 21 | flagged=14/21 | examples:   'What was Apple's total net sale |
-| `template_leak_rate` | 0.0000 | 21 | leaky=0/21 |
+| `answer_correctness` | 0.3274 | 42 | judge=prometheus_2_7b |
+| `answer_relevancy` | 0.3452 | 42 | judge=prometheus_2_7b |
+| `citation_accuracy` | 1.0000 | 15 | judge=heuristic |
+| `context_recall` | 0.0655 | 42 | judge=prometheus_2_7b |
+| `faithfulness` | 0.3988 | 42 | judge=prometheus_2_7b |
+| `finance_fidelity` | 0.8794 | 42 | avg over 42 queries (strict 0.5% tol, no scale bridging) |
+| `generation_p50_sec` | 11.2928 | 42 | min=0.48s max=23.44s |
+| `generation_p95_sec` | 19.4658 | 42 |  |
+| `generation_p99_sec` | 21.9195 | 42 |  |
+| `hallucination_rate` | 0.7619 | 42 | flagged=32/42 | examples:   'By how much did the FOMC lower  |
+| `template_leak_rate` | 0.0000 | 42 | leaky=0/42 |
 

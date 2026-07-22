@@ -69,6 +69,48 @@ def citation_accuracy_single(
     return valid_citations / len(cited)
 
 
+def citation_locator_accuracy(eval_rows: List[Dict]) -> Optional[MetricResult]:
+    """Per-modality citation correctness: does a retrieved source match the row's
+    expected_citation {source, locator_type, locator}? Scores source match + the
+    modality-appropriate locator (page/sheet/timestamp/image_title). Rows whose
+    expected locator is None (not yet filled) are skipped, not counted as wrong.
+    """
+    scored = []
+    for row in eval_rows:
+        exp = row.get("expected_citation") or {}
+        lt = exp.get("locator_type")
+        if lt in (None, "none", "web"):
+            continue  # nothing to cite (refusal / websearch)
+        exp_src = exp.get("source")
+        exp_loc = exp.get("locator")
+        sources = row.get("retrieved_docs") or []
+        if not sources:
+            continue
+        # source match: any retrieved source basename equals expected source
+        src_ok = exp_src is not None and any(
+            (s.get("source") or "").split("/")[-1] == str(exp_src).split("/")[-1]
+            for s in sources if isinstance(s, dict))
+        # locator match (only if we have a filled expected locator)
+        loc_ok = True
+        if exp_loc is not None:
+            key = {"page": "page_number", "sheet": "sheet_name", "image_title": "image_title"}.get(lt)
+            if lt in ("timestamp", "timestamp+frame", "frame"):
+                loc_ok = any(
+                    abs(float(s.get("start_time") or s.get("timestamp_start") or -1e9) - float(exp_loc)) <= 15.0
+                    for s in sources if isinstance(s, dict) and (s.get("start_time") or s.get("timestamp_start")) is not None)
+            elif key:
+                loc_ok = any(str(s.get(key)) == str(exp_loc) for s in sources if isinstance(s, dict))
+        scored.append(1.0 if (src_ok and loc_ok) else 0.0)
+    if not scored:
+        return None
+    return MetricResult(
+        name="citation_locator_accuracy",
+        value=round(sum(scored) / len(scored), 4),
+        n=len(scored),
+        notes="source + per-modality locator match vs expected_citation",
+    )
+
+
 def template_leak_rate(answers: List[str]) -> MetricResult:
     """Fraction of answers containing prompt-template artifacts (P1-7 detection)."""
     if not answers:
@@ -136,6 +178,127 @@ def compute_generation_metrics_lexical(
         "citation_accuracy": _mean(cit_accs, "citation_accuracy", n),
         "template_leak_rate": template_leak_rate(answers_for_leak),
     }
+
+
+# specific facts = numbers with >=2 digits, decimals, or percentages — reliable to match
+_CR_SPECIFIC = re.compile(r"\d[\d,]*\.?\d*\s?%?|\d+\.\d+")
+
+
+def _deterministic_context_recall(reference: str, contexts: List[str]) -> Optional[float]:
+    """Fraction of the reference answer's specific facts (numbers/percentages) that
+    appear in the retrieved context. Replaces the mis-framed Prometheus context_recall
+    (which graded the raw context as an 'answer'). None when unmeasurable."""
+    if not reference or not contexts:
+        return None
+    facts = [f.strip() for f in _CR_SPECIFIC.findall(reference)
+             if any(ch.isdigit() for ch in f) and len(f.strip()) >= 2]
+    facts = [f for f in facts if len(re.sub(r"\D", "", f)) >= 2]  # >=2 digits → specific
+    if not facts:
+        return None
+    ctx = " ".join(contexts)
+    ctx_nc = ctx.replace(",", "")
+
+    def _present(f: str) -> bool:
+        if f in ctx or f.replace(",", "") in ctx_nc:
+            return True
+        # numeric core: strip %/commas so "46.2%" matches "46.2 percent", and
+        # "391,035" matches "391035" — the digit content is what must be recoverable
+        core = f.rstrip("%").replace(",", "").strip()
+        return bool(core) and core in ctx_nc
+
+    hits = sum(1 for f in facts if _present(f))
+    return round(hits / len(facts), 4)
+
+
+def compute_generation_metrics_prometheus(
+    eval_rows: List[Dict],
+) -> Dict[str, MetricResult]:
+    """Compute generation metrics with the Prometheus-2-7B purpose-built judge.
+
+    Prometheus scores each row 1-5 against a per-metric rubric (native Direct
+    Assessment contract); scores are normalized to 0..1. Rows the judge cannot
+    parse are skipped, not counted as 0, so a parser miss never fakes a regression.
+    """
+    from app.eval.judges import prometheus_judge
+
+    # context_recall is computed DETERMINISTICALLY (see _deterministic_context_recall):
+    # the Prometheus framing graded the raw context-wall as an "answer", scoring ~0
+    # even when the reference facts were present. faithfulness/relevancy/correctness
+    # stay on Prometheus (verified deterministic + discriminating on clean inputs).
+    metric_names = ["faithfulness", "answer_relevancy", "answer_correctness"]
+    buckets: Dict[str, List[float]] = {m: [] for m in metric_names}
+    recall_vals: List[float] = []
+
+    for row in eval_rows:
+        answer = row.get("answer") or ""
+        query = row.get("query") or ""
+        contexts = _extract_context_texts(row.get("contexts") or [])
+        reference = row.get("reference_answer") or ""
+        graded_row = {
+            "query": query,
+            "answer": answer,
+            "contexts": contexts,
+            "reference_answer": reference,
+        }
+        for m in metric_names:
+            # faithfulness needs context; the reference-based metrics need a reference.
+            if m == "faithfulness" and not (answer and contexts):
+                continue
+            if m == "answer_correctness" and not (reference and reference not in ("TODO", "")):
+                continue
+            if m == "answer_relevancy" and not (answer and query):
+                continue
+            try:
+                val = prometheus_judge.grade_metric(m, graded_row)
+            except Exception:
+                val = None
+            if val is not None:
+                buckets[m].append(val)
+
+        # deterministic context_recall: fraction of the reference's specific facts
+        # (numbers/percentages) recoverable from the retrieved context.
+        cr = _deterministic_context_recall(reference, contexts)
+        if cr is not None:
+            recall_vals.append(cr)
+
+    if recall_vals:
+        buckets["context_recall"] = recall_vals
+    metric_names = metric_names + ["context_recall"]
+
+    metrics_out: Dict[str, MetricResult] = {}
+    for m in metric_names:
+        vals = buckets[m]
+        if vals:
+            metrics_out[m] = MetricResult(
+                name=m,
+                value=round(sum(vals) / len(vals), 4),
+                n=len(vals),
+                notes=("deterministic (reference facts recoverable from context)"
+                       if m == "context_recall" else "judge=prometheus_2_7b"),
+            )
+
+    # Heuristic metrics Prometheus does not cover (kept identical to other paths).
+    answers = [r.get("answer") or "" for r in eval_rows]
+    metrics_out["template_leak_rate"] = template_leak_rate(answers)
+
+    cite_loc = citation_locator_accuracy(eval_rows)
+    if cite_loc is not None:
+        metrics_out["citation_locator_accuracy"] = cite_loc
+
+    cit_accs = []
+    for row in eval_rows:
+        ca = citation_accuracy_single(row.get("answer") or "", row.get("retrieved_docs") or [])
+        if not (isinstance(ca, float) and ca != ca):
+            cit_accs.append(ca)
+    if cit_accs:
+        metrics_out["citation_accuracy"] = MetricResult(
+            name="citation_accuracy",
+            value=sum(cit_accs) / len(cit_accs),
+            n=len(cit_accs),
+            notes="judge=heuristic",
+        )
+
+    return metrics_out
 
 
 async def compute_generation_metrics_ragas(
@@ -271,7 +434,29 @@ def compute_generation_metrics(
     eval_rows: List[Dict],
     prefer_ragas: bool = True,
 ) -> Dict[str, MetricResult]:
-    """Synchronous entry point. Uses Ragas if available, lexical fallback otherwise."""
+    """Synchronous entry point.
+
+    Judge selection follows EVAL_JUDGE_MODEL:
+      - "prometheus" / "prometheus_2_7b" → purpose-built Prometheus-2 judge
+      - anything else with prefer_ragas   → Ragas + phi3 judge (legacy path)
+      - lexical fallback if the chosen judge fails.
+    """
+    import os as _os
+
+    judge_model = _os.getenv("EVAL_JUDGE_MODEL", "gguf_mistral").lower()
+
+    if judge_model.startswith("prometheus"):
+        try:
+            from app.eval.judges import prometheus_judge
+            if prometheus_judge.is_available():
+                return compute_generation_metrics_prometheus(eval_rows)
+            print("[eval] Prometheus GGUF not found — falling back to lexical judge")
+        except Exception as exc:
+            print(f"[eval] Prometheus judge failed ({exc}) — falling back to lexical judge")
+        return compute_generation_metrics_lexical(
+            eval_rows, judge_label="lexical_fallback (prometheus_unavailable)"
+        )
+
     if prefer_ragas:
         try:
             import asyncio

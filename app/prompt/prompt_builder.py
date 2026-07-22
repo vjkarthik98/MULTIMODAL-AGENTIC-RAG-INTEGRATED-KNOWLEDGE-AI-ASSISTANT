@@ -48,6 +48,20 @@ _CTX_RATIO   = 0.75  # context share of the variable budget
 # "Sources:/Confidence:/Reasoning:/Answer:" labels and reasoning dumps the model
 # otherwise leaks — so the user-facing prose stays clean.
 _ANSWER_ONLY_RULE = (
+    "\nGROUNDING & ABSTENTION (check this FIRST, before anything else):\n"
+    "- The context may be about a DIFFERENT company, entity, person, time period, "
+    "or topic than the question asks about. Before answering, confirm the context "
+    "actually concerns the SPECIFIC subject named in the question.\n"
+    "- If the question asks about an entity, company, person, fiscal period, or "
+    "topic that does NOT appear in the context, do NOT substitute data from a "
+    "different subject. Answer with exactly this one sentence and nothing else: "
+    "\"No relevant information was found in your knowledge base to answer this "
+    "question.\"\n"
+    "- NEVER answer a question about one company, entity, or period using another "
+    "company's, entity's, or period's data (e.g. do not answer a question about "
+    "Microsoft using Apple's figures).\n"
+    "- If the question assumes a fact that the context contradicts (a false "
+    "premise), correct it using the context instead of accepting it.\n"
     "\nIMPORTANT ANSWER GUIDELINES:\n"
     "1. Reply with ONLY your answer as flowing prose paragraphs. "
     "Do NOT use numbered lists, bullet points, or section headings.\n"

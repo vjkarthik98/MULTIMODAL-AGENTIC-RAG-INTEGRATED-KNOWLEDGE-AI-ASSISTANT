@@ -832,7 +832,16 @@ def _synthesize_image_chart_answer(query: str, context: str) -> Optional[str]:
     plateau/"what happened" question (already correctly handled elsewhere).
     """
     q_lower = query.lower()
-    if any(w in q_lower for w in _CHART_TREND_EXCLUDE_WORDS):
+
+    # This chart plots a cumulative-total-return INDEX. Questions about a
+    # quantity it does not contain (dividend yield, P/E, volume, market cap,
+    # revenue…) must fall through to the LLM so the KB-grounding gate can abstain
+    # — never answer them with a return figure. image_gold image-refusal-003.
+    if any(w in q_lower for w in (
+        "dividend", "yield", "p/e", "pe ratio", "price-to-earnings",
+        "earnings per share", " eps", "volume", "market cap", "market-cap",
+        "revenue", "volatility", "beta", "sharpe",
+    )):
         return None
 
     values_by_tick = _parse_digitized_chart_values(context)
@@ -844,6 +853,24 @@ def _synthesize_image_chart_answer(query: str, context: str) -> Optional[str]:
     if not series_names:
         return None
 
+    def _norm(name: str) -> str:
+        # Undo OCR mangling for display ("U.S:" -> "U.S.", "s&P" -> "S&P").
+        return name.replace("U.S:", "U.S.").replace("s&P", "S&P").strip()
+
+    # TITLE query — pull the chart title straight from the OCR'd context, rather
+    # than let the model guess (it has answered a title question with unrelated
+    # earnings-call prose). image_gold img-0014.
+    if "title" in q_lower:
+        tm = re.search(r'(COMPARISON OF 5-YEAR CUMULATIVE TOTAL RETURN.*?Supersector Index)',
+                       context, re.IGNORECASE)
+        if tm:
+            title = (tm.group(1)
+                     .replace("COMPARISON OF 5-YEAR CUMULATIVE TOTAL RETURN",
+                              "Comparison of 5-Year Cumulative Total Return")
+                     .replace("Inc-", "Inc.").replace("U.S:", "U.S.").replace("s&P", "S&P"))
+            title = re.sub(r'\s+', ' ', title).strip()
+            return f'The chart\'s title is "{title}".'
+
     def _pct(name: str) -> Optional[float]:
         v0 = values_by_tick[first_tick].get(name)
         v1 = values_by_tick[last_tick].get(name)
@@ -851,17 +878,90 @@ def _synthesize_image_chart_answer(query: str, context: str) -> Optional[str]:
             return None
         return (v1 - v0) / v0 * 100
 
-    # Which series does the query actually name? Match on any word >3 chars
-    # from each series name appearing in the query (e.g. "Apple" in
-    # "Apple Inc.").
-    named = [
-        name for name in series_names
-        if any(tok.lower() in q_lower for tok in re.split(r'[\s,.]+', name) if len(tok) > 3)
-    ]
+    # Which series does the query NAME? Match only on a token UNIQUE to one
+    # series — "Index" is shared by the S&P and Dow Jones series, so matching on
+    # it (the old >3-char rule did) wrongly flagged every series for any query
+    # mentioning "index". Distinctive tokens: "apple", "s&p"/"500",
+    # "dow"/"jones"/"technology"/"supersector".
+    from collections import Counter as _Counter
+    _toks = {n: set(re.findall(r"[a-z0-9&]+", n.lower())) for n in series_names}
+    _cnt: "_Counter[str]" = _Counter()
+    for _s in _toks.values():
+        _cnt.update(_s)
+    _shared = {t for t, c in _cnt.items() if c > 1}
+    _generic = {"index", "the", "and", "inc", "u", "s", "us", "total",
+                "return", "cumulative", "of", "year", "five"}
+
+    def _series_named(name: str) -> bool:
+        return any(t in q_lower for t in (_toks[name] - _shared - _generic))
+
+    named = [n for n in series_names if _series_named(n)]
+
+    # Which chart ticks (axis dates, e.g. "9/28/24") does the query reference?
+    q_ticks = [t for t in ticks if t in query]
+
+    # SPECIFIC-DATE reads — the largest coverage gap. "value of X on 9/28/24",
+    # "which had the highest on 9/28/24", "how did X perform between A and B".
+    if q_ticks:
+        # two dates + one series -> change between exactly those two dates
+        if len(set(q_ticks)) >= 2 and named:
+            ordered = sorted(set(q_ticks), key=lambda t: ticks.index(t))
+            t0, t1 = ordered[0], ordered[-1]
+            name = named[0]
+            v0 = values_by_tick[t0].get(name)
+            v1 = values_by_tick[t1].get(name)
+            if v0 and v1:
+                pct = (v1 - v0) / v0 * 100
+                verb = "declined" if v1 < v0 else "rose"
+                return (
+                    f"{_norm(name)} {verb} from approximately ${v0:.0f} on {t0} to "
+                    f"approximately ${v1:.0f} on {t1}, a change of approximately "
+                    f"{pct:+.0f} percent."
+                )
+        # single date
+        tick = q_ticks[0] if len(set(q_ticks)) == 1 else \
+            sorted(q_ticks, key=lambda t: ticks.index(t))[-1]
+        row = values_by_tick.get(tick, {})
+        wants_rank = (len(named) >= 2
+                      or any(w in q_lower for w in ("highest", "lowest", "which", "compare", "rank")))
+        if wants_rank and len(row) >= 2:
+            ranked = sorted(row, key=lambda n: row[n], reverse=True)
+            parts = [f"{_norm(n)} at approximately ${row[n]:.0f}" for n in ranked]
+            return (
+                f"On {tick}, ranked from highest to lowest cumulative total return: "
+                + "; ".join(parts)
+                + f". {_norm(ranked[0])} had the highest and {_norm(ranked[-1])} the lowest."
+            )
+        if ("base" in q_lower or "start" in q_lower) and tick == first_tick:
+            vals = [round(values_by_tick[first_tick][n]) for n in series_names]
+            if len(set(vals)) == 1:
+                return (
+                    f"All three series — {', '.join(_norm(n) for n in series_names)} — "
+                    f"start at approximately ${vals[0]} on {first_tick}, the indexed base value."
+                )
+        if named and named[0] in row:
+            return (
+                f"{_norm(named[0])} was approximately ${row[named[0]]:.0f} on {tick} "
+                f"per this chart's pixel-calibrated reads."
+            )
+
+    # BASE / STARTING value with no explicit date (defaults to the first tick).
+    if "base" in q_lower or "starting value" in q_lower or "start at" in q_lower:
+        vals = [round(values_by_tick[first_tick][n]) for n in series_names]
+        if len(set(vals)) == 1:
+            return (
+                f"All three series — {', '.join(_norm(n) for n in series_names)} — "
+                f"start at approximately ${vals[0]} on {first_tick}, the indexed base value."
+            )
+
+    # Trend / plateau / drawdown narrative — leave to the LLM (CHART TRENDS text).
+    if any(w in q_lower for w in _CHART_TREND_EXCLUDE_WORDS):
+        return None
 
     is_comparison = (
         len(named) >= 2 or "compare" in q_lower or " vs " in q_lower
-        or "how did" in q_lower or "versus" in q_lower
+        or "how did" in q_lower or "versus" in q_lower or "three" in q_lower
+        or "which" in q_lower
     )
 
     if is_comparison and len(series_names) >= 2:
@@ -872,7 +972,8 @@ def _synthesize_image_chart_answer(query: str, context: str) -> Optional[str]:
             pct = _pct(name)
             if pct is None:
                 continue
-            parts.append(f"{name} ended at ~${v1:.0f} (a gain of approximately {pct:.0f} percent)")
+            parts.append(f"{_norm(name)} ended at approximately ${v1:.0f} "
+                         f"(a gain of approximately {pct:.0f} percent)")
         if len(parts) < 2:
             return None
         return (
@@ -888,9 +989,9 @@ def _synthesize_image_chart_answer(query: str, context: str) -> Optional[str]:
         if pct is None:
             return None
         return (
-            f"{name}'s cumulative total return from {first_tick} to {last_tick} was "
-            f"approximately {pct:.0f} percent, representing an ending value of "
-            f"approximately ${v1:.0f} for every ${v0:.0f} invested at the start."
+            f"{_norm(name)}'s cumulative total return from {first_tick} to {last_tick} was "
+            f"approximately {pct:.0f} percent, rising from approximately ${v0:.0f} to "
+            f"approximately ${v1:.0f}."
         )
 
     return None

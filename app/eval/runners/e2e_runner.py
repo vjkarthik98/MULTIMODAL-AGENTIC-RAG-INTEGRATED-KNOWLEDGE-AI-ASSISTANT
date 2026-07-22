@@ -130,17 +130,22 @@ def run_e2e_suite(cfg: EvalConfig) -> SuiteResult:
     routing_results: List[Dict[str, Any]] = []
     latencies: List[float] = []
 
+    import os as _os
+    _access_token = _os.getenv("EVAL_ACCESS_TOKEN", "")
+    _headers = {"Authorization": f"Bearer {_access_token}"} if _access_token else {}
+
     for row in rows:
         query = row["query"]
         payload = {
             "query": query,
             "session_id": f"{cfg.session_prefix}_e2e_{row['id']}",
             "user_id": cfg.user_id,
+            "no_cache": True,
         }
 
         q_start = time.time()
         try:
-            resp = requests.post(f"{base_url}/rag/query", json=payload, timeout=120)
+            resp = requests.post(f"{base_url}/rag/query", json=payload, headers=_headers, timeout=120)
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:

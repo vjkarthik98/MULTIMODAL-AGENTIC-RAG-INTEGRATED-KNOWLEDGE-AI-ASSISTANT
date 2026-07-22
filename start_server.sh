@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# One-shot startup: ensure ALL models exist on nvme, then start uvicorn.
-# /opt/dlami/nvme is ephemeral — wiped on every instance stop/start.
+# One-shot startup: ensure ALL models exist, then start uvicorn.
+# Models live in .hf_cache/ on the persistent root EBS volume (survives instance
+# stop/start). /opt/dlami/nvme is ephemeral local NVMe, used only for swap below.
 # This script re-downloads anything missing before uvicorn loads them.
 #
 # Usage:

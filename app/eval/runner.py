@@ -102,6 +102,10 @@ class EvalRunner:
             from app.eval.runners.e2e_runner import run_e2e_suite
             return run_e2e_suite(self.cfg)
 
+        elif suite == "behavioral":
+            from app.eval.runners.behavioral_runner import run_behavioral_suite
+            return run_behavioral_suite(self.cfg)
+
         elif suite == "multimodal":
             from app.eval.runners.multimodal_runner import run_multimodal_suite
             return run_multimodal_suite(self.cfg)
@@ -113,7 +117,7 @@ class EvalRunner:
         elif suite == "full":
             # Full runs all core suites — multimodal and regression are added too
             combined = SuiteResult(suite="full")
-            sub_suites = ["retrieval", "generation", "routing", "e2e",
+            sub_suites = ["retrieval", "generation", "behavioral", "routing", "e2e",
                           "ocr", "audio", "video", "regression"]
             for s in sub_suites:
                 try:
@@ -140,14 +144,18 @@ class EvalRunner:
 
     @staticmethod
     def _valid_suites() -> List[str]:
-        return ["retrieval", "generation", "hallucination", "ocr", "audio", "video",
-                "routing", "e2e", "multimodal", "regression", "full"]
+        return ["retrieval", "generation", "hallucination", "behavioral", "ocr", "audio",
+                "video", "routing", "e2e", "multimodal", "regression", "full"]
 
     def check_thresholds(self, results: Dict[str, SuiteResult]) -> int:
         """Check all metrics against thresholds.yaml. Returns 0=pass, 1=breach, 2=error."""
         thresholds = self._load_thresholds()
         if not thresholds:
             print("[WARN] thresholds.yaml not found or empty — skipping threshold check")
+            return 0
+        if thresholds.get("gate_enabled") is False:
+            print("[GATE] gate_enabled: false — thresholds are informational only "
+                  "(pending baseline v4). Skipping gate. Exit code 0.")
             return 0
 
         breaches: List[str] = []

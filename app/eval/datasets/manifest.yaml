@@ -1,48 +1,41 @@
-dataset_version: 0.1.0
-created_at: '2026-05-25'
+dataset_version: 1.0.0
+created_at: '2026-07-18'
+schema: startup-grade (difficulty x question_type, refusal + adversarial slices, Prometheus rubric-anchored references); see docs/GOLDEN_DATASET_REBUILD_PLAN.md
+note: machine-authored rewrite (human_verified=false on all rows) pending human sign-off; no multi-hop (single-retrieval answers).
 gold_files:
   text_gold.jsonl:
-    sha256: c906532ca333dcb1bc3203ac94f3a5929d910e351b1c6b7938fd11fceb48f4fd
-    triples_total: 15
-    triples_curated: 14
-    note: FOMC Dec 2024 press conference transcript (fomc_dec2024.txt); 14 rag + 1 websearch-probe
+    sha256: e1f554fe0e335e1eb76c1703f96267311a1eaba5faf0859be4477025b4d45a0f
+    rows_total: 20
+    breakdown: {"total": 20, "rewritten": 15, "refusal": 3, "adversarial": 2}
   pdf_gold.jsonl:
-    sha256: b527a6a072113765431d2e134654db7ba8729611baa1c51df94463f996ce5647
-    triples_total: 15
-    triples_curated: 14
-    note: Apple FY2024 10-K (apple_10k.pdf); 14 rag + 1 websearch-probe
+    sha256: ec0752e58bc1140c8648109dac3afd157bd4ace2208cf7023452447ba9782af9
+    rows_total: 20
+    breakdown: {"total": 20, "rewritten": 15, "refusal": 3, "adversarial": 2}
   docx_gold.jsonl:
-    sha256: 43a69c1de68a662d4c7d3ad4e77cf36437ece340ef14f1adc01027fa923e0590
-    triples_total: 15
-    triples_curated: 14
-    note: Goldman Sachs-style Apple investor research report (apple_investment_research_report.docx); 14 rag + 1 websearch-probe
+    sha256: 02eaf97f4fdfc43af5ed3fbb6c8d6d57237d5d318cd7e1953b5e7417bec707d4
+    rows_total: 20
+    breakdown: {"total": 20, "rewritten": 15, "refusal": 3, "adversarial": 2}
   xlsx_gold.jsonl:
-    sha256: bbd981a5d0d7bfb4326478284dcc26261cdf55c9f52f663485f086c205443032
-    triples_total: 15
-    triples_curated: 14
-    note: Damodaran country risk premium workbook (ctryprem.xlsx); 14 rag + 1 websearch-probe
+    sha256: d663394f20ccf00d8c656d518f288fdec131a7ef1d4f456ce281dcb2d6c6b045
+    rows_total: 20
+    breakdown: {"total": 20, "rewritten": 15, "refusal": 3, "adversarial": 2}
   image_gold.jsonl:
-    sha256: a9ab3f4d60388494957a9bc7e8e0b2e5a012ab96b3b592dc317d49f18397a269
-    triples_total: 15
-    triples_curated: 14
-    note: Apple 5-year cumulative total return chart, apple_10k.pdf p.19 (aapl-20240928_g2.jpg); 14 rag + 1 websearch-probe
+    sha256: 5dbe445c221a83a71f2b6ab1ef081cd690256706c601155316d7954f91bfdd98
+    rows_total: 20
+    breakdown: {"total": 20, "rewritten": 15, "refusal": 3, "adversarial": 2}
   audio_gold.jsonl:
-    sha256: bc149f6f22a164b48ffd3aff5be7fc273996b226ce76928d4bf1ddb3fe8ca16b
-    triples_total: 15
-    triples_curated: 14
-    note: FOMC Sept 18 2024 press conference audio (FOMC Press Conference September 18, 2024.mp3); 14 rag + 1 websearch-probe
+    sha256: f95fbfc62964a254377a608af179e8f3ea08ac64f52a20e96b5f45f768f709aa
+    rows_total: 20
+    breakdown: {"total": 20, "rewritten": 15, "refusal": 3, "adversarial": 2}
   video_gold.jsonl:
-    sha256: 3dfc456a1ae351731c2e9b7c1e422f8c5f328a4fbafcddddc67bf01290005273
-    triples_total: 15
-    triples_curated: 14
-    note: Apple Q4 FY2025 earnings call recording (Q4 2025 Earnings Call.mp4); 14 rag + 1 websearch-probe
-  routing_gold.jsonl:
-    sha256: ''
-    triples_total: 0
-    triples_curated: 0
-    note: '{query, expected_route} labelled pairs'
+    sha256: 3ab16e5733639a8bd52c77de772e6e8f5800cd5138812d2eae8a70eb18e0d7d0
+    rows_total: 20
+    breakdown: {"total": 20, "rewritten": 15, "refusal": 3, "adversarial": 2}
   e2e_gold.jsonl:
-    sha256: ''
-    triples_total: 0
-    triples_curated: 0
-    note: Cross-modal multi-hop finance questions
+    sha256: b72b8ec2ec2c36e13b32b36744ded944044e8aa5faecdad2eacbfde573021546
+    rows_total: 4
+    breakdown: {"total": 4, "authored": 3, "search": 1}
+  routing_gold.jsonl:
+    sha256: f40625caffae0cdd9f0fc688e9929f7be686b2da6e04e83eec8162eabda0a43d
+    rows_total: 20
+    breakdown: {"total": 20, "rewritten": 12, "added": 8}

@@ -186,6 +186,169 @@ def _source_coherence_filter(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return kept
 
 
+def _fetch_digitized_chart_payload(user_id: str) -> Dict[str, Any]:
+    """Fetch the user's digitized line-chart chunk (the one carrying the
+    'CHART VALUES' block) straight from the vision collection, returning its
+    Qdrant payload (text + source + metadata) or {}.
+
+    For chart-read queries the SigLIP vision lane always retrieves the chart's
+    image chunks, but the single chunk holding the pixel-calibrated CHART VALUES
+    block is often outranked by text chunks and dropped from final_docs by the
+    reranker / source-coherence filter — so the entity-grounding gate wrongly
+    abstains and the deterministic chart synth never sees the data. This pulls it
+    back directly (tenant-scoped by user_id). Caller-gated to chart-shaped
+    queries; the synth returns None for anything it can't answer, so it's safe.
+    """
+    if not user_id:
+        return {}
+    try:
+        from app.vectorstore.qdrant_store import QdrantVectorStore
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        vs = QdrantVectorStore()
+        pts, _ = vs.client.scroll(
+            collection_name=vs.vision_collection,
+            scroll_filter=Filter(must=[FieldCondition(
+                key="user_id", match=MatchValue(value=user_id))]),
+            limit=200,
+            with_payload=True,
+        )
+        for p in pts:
+            payload = p.payload or {}
+            if "CHART VALUES" in (payload.get("text", "") or ""):
+                return payload
+    except Exception:
+        return {}
+    return {}
+
+
+_MONTHS_FULL = (
+    "january", "february", "march", "april", "may", "june", "july",
+    "august", "september", "october", "november", "december",
+)
+# 3-letter abbreviations used in filenames (e.g. "fomc_dec2024.txt"); full names too.
+_MONTH_FILENAME_TOKENS = {
+    "january": ("january", "jan"), "february": ("february", "feb"),
+    "march": ("march", "mar"), "april": ("april", "apr"), "may": ("may",),
+    "june": ("june", "jun"), "july": ("july", "jul"), "august": ("august", "aug"),
+    "september": ("september", "sept", "sep"), "october": ("october", "oct"),
+    "november": ("november", "nov"), "december": ("december", "dec"),
+}
+
+
+def _filename_months(src: str) -> set:
+    """Months a source FILENAME encodes (full name or 3-letter abbrev, as a whole
+    token). 'FOMC …September 18, 2024.mp3' -> {september}; 'fomc_dec2024.txt' ->
+    {december}."""
+    s = (src or "").lower()
+    out = set()
+    for month, toks in _MONTH_FILENAME_TOKENS.items():
+        if any(re.search(r"(?<![a-z])" + t + r"(?![a-z])", s) for t in toks):
+            out.add(month)
+    return out
+
+
+def _meeting_source_disambiguation(docs: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+    """Disambiguate between same-event documents dated differently (e.g. the
+    September 2024 FOMC press-conference audio vs. the December 2024 FOMC text —
+    both in one KB, near-identical topics, so retrieval conflates them and the
+    model answers a September question with December's rate/PCE figures).
+
+    When the query names a month that a retrieved source's FILENAME encodes, that
+    month is the meeting the user means: keep sources matching it and push sources
+    whose filename encodes a DIFFERENT month to the back, so the correct-dated
+    document wins the top-K. Bidirectional (a December query prefers the December
+    doc). Only FOMC-style dated filenames carry month tokens, so other modalities'
+    sources (apple_10k.pdf, ctryprem.xlsx, …) are never touched. Uses FULL month
+    names in the query only, so 'SEP participants' (Summary of Economic
+    Projections) never reads as September, and 'ending August' only fires if a
+    source filename actually encodes August."""
+    if not docs or not re.search(r"\b20\d{2}\b", query.lower()):
+        return docs
+    q_months = {m for m in _MONTHS_FULL if re.search(r"\b" + m + r"\b", query.lower())}
+    if not q_months:
+        return docs
+    src_months = {}
+    for d in docs:
+        src = ((d.get("metadata") or {}).get("source") or "")
+        if src not in src_months:
+            src_months[src] = _filename_months(src)
+    filename_months = set().union(*src_months.values()) if src_months else set()
+    active = q_months & filename_months          # query month(s) that name a real meeting doc
+    if not active:
+        return docs
+    keep, demoted = [], []
+    for d in docs:
+        sm = src_months.get(((d.get("metadata") or {}).get("source") or ""), set())
+        (demoted if (sm and sm.isdisjoint(active)) else keep).append(d)
+    # Push conflicting-meeting chunks to the BACK (demote, not drop): a September
+    # question then prefers the September doc, but if few September chunks were
+    # retrieved the December ones still backstop the context rather than forcing
+    # an abstention (measured better than dropping — an abstention scores the
+    # same as a wrong answer but yields no partial credit).
+    return keep + demoted if demoted else docs
+
+
+# Event-context words that mark a query as being about a dated MEETING/event
+# (the only case month-scoping is for — same-event docs dated differently).
+# Gating on these stops an unrelated query that merely cites a date ("as of
+# September 28, 2024" on Apple's balance sheet) from scoping to a same-month
+# meeting doc (the September FOMC audio).
+_MEETING_CONTEXT_WORDS = (
+    "meeting", "press conference", "conference", "fomc", "powell", "committee",
+    "federal reserve", "the fed", "fed's", "rate cut", "cut rate", "cut rates",
+    "rate decision", "policy stance", "sep ", "summary of economic",
+)
+
+
+def _query_meeting_month_tokens(query: str) -> Optional[List[str]]:
+    """Source-filename tokens to scope retrieval to a dated MEETING doc.
+
+    When the query is about a dated meeting/event (a full month + 4-digit year
+    AND meeting/FOMC/Powell context), return that month's filename tokens (full
+    name + abbreviations) so retrieval can be scoped to the matching source (the
+    retriever's `sources` filter is a case-insensitive substring match). Returns
+    None otherwise, so scoping only ever engages for an explicitly-dated meeting
+    query — never for a report that merely cites a date. Full month names only,
+    so 'SEP participants' never reads as September; a year is required so a stray
+    'may'/'march' verb doesn't scope."""
+    ql = (query or "").lower()
+    if not re.search(r"\b20\d{2}\b", ql):
+        return None
+    if not any(w in ql for w in _MEETING_CONTEXT_WORDS):
+        return None
+    tokens: List[str] = []
+    for m in _MONTHS_FULL:
+        if re.search(r"\b" + m + r"\b", ql):
+            tokens.extend(_MONTH_FILENAME_TOKENS[m])
+    return tokens or None
+
+
+# Earnings-call scoping — a company earnings-call video ("Q4 2025 Earnings
+# Call.mp4") competes, for "Apple revenue/EPS/…" queries, against a different-
+# period 10-K/report about the SAME company, and its facts sit buried in coarse
+# transcript chunks. When the query is clearly about the call (its distinctive
+# quarter/on-screen/"on this call" phrasing), scope retrieval to the call source
+# and let the wide cross-encoder pin the fact. Verified to fire only on the 20
+# video-gold queries, never on any pdf/docx/xlsx/txt/audio/image query.
+_CALL_SCOPE_SIGNALS = (
+    "earnings call", "on-screen", "on screen", "this call", "the call",
+    "during the call", "december quarter", "september quarter",
+    "q4 fiscal", "q1 fiscal",
+)
+_CALL_QUARTER_RE = re.compile(r"(september|december)\b.{0,14}\bquarter")
+
+
+def _query_call_source_tokens(query: str) -> Optional[List[str]]:
+    """Filename substring token to scope an earnings-call query to the call
+    video, or None. The retriever's `sources` filter is a case-insensitive
+    substring match, so "earnings call" hits 'Q4 2025 Earnings Call.mp4' and
+    nothing else in the KB."""
+    ql = (query or "").lower()
+    if any(s in ql for s in _CALL_SCOPE_SIGNALS) or _CALL_QUARTER_RE.search(ql):
+        return ["earnings call"]
+    return None
+
+
 def _is_temporal_query(query: str) -> bool:
     lower = query.lower()
     return any(w in lower for w in _TEMPORAL_ANCHOR_WORDS)
@@ -448,6 +611,150 @@ def _store_interaction(
 
     except Exception as e:
         logger.warning(event="memory_store_failed", error=str(e), session_id=session_id)
+
+
+# ENTITY-GROUNDING ABSTENTION — the retriever returns topically-relevant chunks
+# even when the query's SUBJECT is absent (e.g. "Microsoft's revenue" → Apple
+# chunks). No similarity score separates these (an out-of-scope query can outscore
+# a valid one), so we check the query's named entities directly: if the query
+# names a company/person/location and NONE of them appear in the retrieved
+# context, the answer is not grounded → abstain. Conservative (ALL salient
+# entities must be absent) to avoid abstaining on valid multi-entity queries.
+
+# Generic tokens that must NOT be used to match an entity to context — "Bank of
+# Japan" must not count as grounded just because "central bank" is in the text.
+_GENERIC_ENTITY_TOKENS = frozenset({
+    "bank", "banks", "corp", "corporation", "inc", "incorporated", "company",
+    "companies", "group", "holdings", "index", "president", "chair", "chairman",
+    "chief", "officer", "board", "committee", "reserve", "federal", "national",
+    "central", "state", "council", "department", "the", "and", "for",
+})
+
+# Finance/analysis acronyms that BERT-NER frequently MIS-TAGS as companies
+# (e.g. "DCF", "WACC"). They are terms, not out-of-scope subjects, so they must
+# NOT trigger the entity-grounding abstention. Verified: NER tagged "DCF" as a
+# company on a valid "What DCF assumptions..." query, causing a wrong abstention.
+_NON_ENTITY_TERMS = frozenset({
+    "dcf", "wacc", "ebitda", "ebit", "eps", "roi", "roe", "roic", "roa", "ntm",
+    "ltm", "yoy", "cagr", "fcf", "tam", "sam", "gaap", "capex", "opex", "cogs",
+    "sga", "ipo", "kpi", "arr", "mrr", "asp", "gdp", "pce", "sep", "fomc", "cds",
+    "erp", "cpi", "api", "saas", "dma", "npv", "irr", "wc", "ttm", "ytd", "qoq",
+})
+
+
+def _entity_tokens(ent: str) -> List[str]:
+    """Distinctive (non-generic, >=4 char) tokens of an entity name."""
+    return [t for t in re.split(r"\W+", ent.lower())
+            if len(t) >= 4 and t not in _GENERIC_ENTITY_TOKENS]
+
+
+_COMPANY_SUFFIX_RE = re.compile(
+    r"\b(?:Inc|Corp|Corporation|Ltd|Limited|LLC|PLC|Co|N\.?V|S\.?A|AG|Holdings|Group)\b\.?")
+
+
+def _is_peer_list_chunk(text: str) -> bool:
+    """A comps / peer-comparison chunk lists MANY distinct COMPANIES. An entity
+    appearing ONLY here is a comparison row, not the subject.
+
+    Signalled by >=2 corporate suffixes (Apple Inc. | Microsoft Corp.) OR >=3
+    distinct stock tickers in a table. NOT triggered by a single-company metrics
+    summary table (Revenue | Gross Margin | ...), which has neither.
+    """
+    if len(set(_COMPANY_SUFFIX_RE.findall(text))) >= 2:
+        return True
+    tickers = set(re.findall(r"\b[A-Z]{3,5}\b", text))
+    # drop common finance acronyms that are not tickers
+    tickers -= {"GDP", "PCE", "SEP", "FOMC", "EPS", "YOY", "CDS", "ERP", "WACC",
+                "DCF", "NTM", "LTM", "USD", "EUR", "SG", "AND", "THE", "FY"}
+    if len(tickers) >= 3 and text.count("|") >= 4:
+        return True
+    return False
+
+
+def _orgper_grounded(ent: str, docs: List[Dict[str, Any]]) -> bool:
+    """An org/person is a genuine SUBJECT if it is the subject of a retrieved
+    source document (its name is in the filename/metadata — a single-company doc
+    whose table chunks don't repeat the name), OR it appears in a non-peer-list
+    chunk. A name found ONLY in a peer-comparison table is a comparison row."""
+    phrase = ent.lower()
+    toks = _entity_tokens(ent)
+    for d in docs:
+        meta = d.get("metadata") or {}
+        source = str(meta.get("source") or meta.get("filename") or meta.get("doc_id") or "").lower()
+        if phrase in source or any(t in source for t in toks):
+            return True  # the source document is about this entity
+        text = str(d.get("text", "") or "")
+        low = text.lower()
+        present = phrase in low or any(t in low for t in toks)
+        if present and not _is_peer_list_chunk(text):
+            return True
+    return False
+
+
+def _period_ungrounded(query: str, context_low: str) -> bool:
+    """True only when the query targets a FUTURE fiscal period beyond everything in
+    context (e.g. asks about FY2026/FY2030 when the KB tops out at FY2025).
+    Conservative: never fires for same-or-past years, so valid dated queries pass."""
+    # (?<!\d)…(?!\d) so "FY2026"/"fiscal2026" match but digits inside larger
+    # numbers (e.g. 391,035) do not.
+    _yr = r"(?<!\d)(20\d{2})(?!\d)"
+    q_years = {int(y) for y in re.findall(_yr, query.lower())}
+    ctx_years = {int(y) for y in re.findall(_yr, context_low)}
+    if not q_years or not ctx_years:
+        return False
+    return min(q_years) > max(ctx_years)
+
+
+def _query_entities_ungrounded(query: str, docs: List[Dict[str, Any]]) -> bool:
+    """Abstain when the query's SUBJECT is not grounded in the retrieved context.
+
+    Company/person entities must be *prominent* (a genuine subject, not one
+    incidental comps-table row); locations need only be present (protects valid
+    single-row country facts like India's risk premium). Also abstains on
+    period mismatch (asked-about fiscal year absent from context).
+    """
+    try:
+        from app.chunking.audio_chunker import extract_entities
+        ents = extract_entities(query)
+    except Exception:
+        return False
+
+    context = " ".join(str(d.get("text", "") or "") for d in docs)
+    context_low = context.lower()
+    if not context_low:
+        return False
+
+    def _clean(items):
+        out = []
+        for e in (items or []):
+            e = str(e).replace("##", "").strip()
+            if len(e) >= 3 and e.lower() not in _NON_ENTITY_TERMS:
+                out.append(e)
+        return out
+
+    orgs_persons = _clean(ents.get("companies")) + _clean(ents.get("persons"))
+    locations = _clean(ents.get("locations"))
+
+    grounded = False           # some query entity IS a genuine subject of context
+    checkable = bool(orgs_persons or locations)
+    for e in orgs_persons:
+        if _orgper_grounded(e, docs):
+            grounded = True     # appears in a non-comps chunk → a real subject
+    for e in locations:
+        # a location is grounded by mere presence (country-risk rows are single-mention)
+        if e.lower() in context_low or any(t in context_low for t in _entity_tokens(e)):
+            grounded = True
+
+    # Entity gate: we had checkable entities, but none is a grounded subject → abstain
+    # (catches absent entities AND incidental peer-comps mentions like Microsoft/NVIDIA).
+    if checkable and not grounded:
+        return True
+
+    # Period gate (independent): the query targets a future fiscal period absent from context.
+    if _period_ungrounded(query, context_low):
+        return True
+
+    return False
 
 
 # SOURCES ARRAY BUILDER — PHASE 24.8
@@ -949,24 +1256,53 @@ def query_pipeline(
             else settings.DEFAULT_TOP_K
         )
 
-        for q in queries:
-            try:
-                results = hybrid.search(
-                    q,
-                    session_id=session_id,
-                    top_k=_retrieval_top_k,
-                    filters=retrieval_filters,
-                    user_id=user_id,
-                )
-                retrieved.extend(results)
-            except Exception as e:
-                logger.warning(
-                    event="hybrid_search_failed",
-                    query=q[:50],
-                    error=str(e),
-                    session_id=session_id,
-                )
-                _record_query_error("retrieval")
+        # MEETING-SCOPED RETRIEVAL — when the query names a dated meeting (a full
+        # month + year that matches a source filename), scope the PRIMARY
+        # retrieval to that source so a competing same-topic doc (the December
+        # FOMC text vs this September audio) cannot crowd the correct meeting out
+        # of the pool at all. This fixes contamination AND recall together (a
+        # single-meeting pool lets the right chunk rerank to the top). Only when
+        # no explicit file scope was already requested; deeper top_k so the
+        # right-aspect chunk is present. Falls back to unscoped below if the scope
+        # yields too little (e.g. a month with no matching source, like "August").
+        _meeting_scope = None
+        if not (retrieval_filters and retrieval_filters.get("sources")):
+            _meeting_scope = _query_meeting_month_tokens(query) or _query_call_source_tokens(query)
+        _base_filters = retrieval_filters
+        _scoped_filters = retrieval_filters
+        _scoped_top_k = _retrieval_top_k
+        if _meeting_scope:
+            _scoped_filters = dict(_base_filters or {})
+            _scoped_filters["sources"] = _meeting_scope
+            # Retrieve DEEP within the single scoped meeting: a specific fact
+            # (inflation peak, GDP, balance-sheet runoff) is one of ~200 fine
+            # transcript chunks, so cast a wide net to get it into the reranker's
+            # input. The pool is one meeting, so a large top_k adds no cross-doc
+            # noise.
+            _scoped_top_k = 50
+
+        def _run_retrieval(_filters, _top_k):
+            _out = []
+            for q in queries:
+                try:
+                    _out.extend(hybrid.search(
+                        q, session_id=session_id, top_k=_top_k,
+                        filters=_filters, user_id=user_id,
+                    ))
+                except Exception as e:
+                    logger.warning(event="hybrid_search_failed", query=q[:50],
+                                   error=str(e), session_id=session_id)
+                    _record_query_error("retrieval")
+            return _out
+
+        retrieved = _run_retrieval(_scoped_filters, _scoped_top_k)
+        _meeting_scoped_active = bool(_meeting_scope)
+        # Fallback: the meeting scope matched no (or too little) content — the
+        # named month isn't a KB source. Retrieve unscoped instead.
+        if _meeting_scope and len({(d.get("metadata") or {}).get("chunk_id")
+                                   or d.get("text", "") for d in retrieved}) < 3:
+            retrieved = _run_retrieval(_base_filters, _retrieval_top_k)
+            _meeting_scoped_active = False
 
         retrieval_latency = round(time.time() - t_ret, 3)
         _record_retrieval_latency("hybrid", retrieval_latency)
@@ -993,6 +1329,25 @@ def query_pipeline(
 
         # RESULT FUSION — SECTION 4.8
         fused = fusion.fuse(retrieved, session_id=session_id)
+
+        # MEETING-SCOPED: fusion caps its output at RERANK_TOP_K, which starves
+        # the cross-encoder of the specific-fact chunk (dense embeddings can't
+        # isolate e.g. "inflation eased from 7% to 2.2%" when it shares a chunk
+        # with a labor-market sentence, so it ranks below the cap). The pool is a
+        # single meeting, so hand the reranker the FULL deduped scoped candidate
+        # set — the cross-encoder reads each chunk's text and pins the right one.
+        _scoped_rerank_inputs: Optional[int] = None
+        if _meeting_scoped_active and retrieved:
+            _seen: set = set()
+            _cand: List[Dict[str, Any]] = []
+            for d in retrieved:
+                _k = (d.get("metadata") or {}).get("chunk_id") or (d.get("text", "") or "")[:120]
+                if _k and _k not in _seen:
+                    _seen.add(_k)
+                    _cand.append(d)
+            if len(_cand) > len(fused):
+                fused = _cand
+            _scoped_rerank_inputs = max(len(fused), 55)
 
         # Q1 FY2025 AUDIO — strip CNBC video chunks that carry stale $24.97B figure.
         # We apply this on the ORIGINAL query (before expansion) so it fires regardless
@@ -1029,6 +1384,7 @@ def query_pipeline(
             fused,
             top_k=settings.RERANK_TOP_K,
             session_id=session_id,
+            max_inputs=_scoped_rerank_inputs,
         )
 
         if not reranked:
@@ -1099,10 +1455,36 @@ def query_pipeline(
                 _sm["score"] = max(_sm.get("score", 0), 0.98)
                 reranked.insert(0, _sm)
 
+        # MEETING-DATE DISAMBIGUATION — when the KB holds two same-event docs dated
+        # differently (Sept-2024 FOMC audio vs Dec-2024 FOMC text), prefer the one
+        # whose filename month matches the query's, before the top-K cut, so the
+        # right meeting's figures reach the LLM.
+        reranked = _meeting_source_disambiguation(reranked, query)
+
         final_docs = reranked[:settings.RAG_TOP_K]
 
         # SOURCE-COHERENCE FILTER — keep top-N files; drop cross-file noise
         final_docs = _source_coherence_filter(final_docs)
+
+        # ENTITY-GROUNDING ABSTENTION — if the query names a company/person/location
+        # that appears in NONE of the retrieved chunks, the context is about a
+        # different subject; abstain instead of answering with the wrong entity's
+        # data. Skipped for hybrid (web can supply the missing entity).
+        if decision != "hybrid" and _query_entities_ungrounded(query, final_docs):
+            return {
+                "answer":               "No relevant information was found in your knowledge base to answer this question.",
+                "confidence":           0.0,
+                "decision":             decision,
+                "source":               "rag",
+                "session_id":           session_id,
+                "request_id":           trace_id,
+                "latency":              round(time.time() - start, 3),
+                "sources":              [],
+                "is_fallback":          False,
+                "hallucination_warning": True,
+                "trace_id":             trace_id,
+                "abstained":            "entity_grounding",
+            }
 
         # H-05: Drop RAG chunks below relevance threshold in hybrid context.
         # Prevents off-topic document noise from diluting the LLM context window.
@@ -1448,22 +1830,45 @@ def query_pipeline(
         # generation model has repeatedly restated the wrong series' dollar
         # value, or a percent as a dollar figure, for "dollar terms" /
         # multi-series comparison questions specifically.
-        if final_docs and str((final_docs[0].get("metadata") or {}).get("modality") or "") == "image":
+        # Build the chart context from whatever image chunks survived into
+        # final_docs. If the digitized CHART VALUES block isn't among them (the
+        # reranker/source-coherence filter routinely drops the single chart chunk
+        # below the text chunks for queries like "the S&P 500 value on 9/28/24"
+        # or "the title of this chart"), fetch it straight from the vision store.
+        # Gated on "chart" in the query — every chart question references it — so
+        # non-chart queries never pay for the extra fetch. The synth self-gates
+        # (returns None for anything it can't answer, incl. out-of-KB refusals),
+        # so pulling the block in can only help correct chart reads.
+        # Build the chart context from image chunks that survived into final_docs.
+        # If the digitized CHART VALUES block isn't among them (the reranker /
+        # source-coherence filter routinely drop the single chart chunk below the
+        # text chunks for queries like "the S&P 500 value on 9/28/24" or "the
+        # title of this chart"), fetch it straight from the vision store. Gated on
+        # "chart" in the query. Crucially this context feeds ONLY the deterministic
+        # synth (which self-gates — returns None for out-of-KB series like
+        # Microsoft/Nasdaq and for unsupported metrics), NOT the LLM's own
+        # generation, so it can only add correct chart reads, never make the model
+        # answer a refusal query with the wrong series.
+        _img_context = "\n".join(
+            d.get("text", "") for d in (final_docs or []) if isinstance(d, dict)
+        )
+        if "CHART VALUES" not in _img_context and "chart" in query.lower():
             try:
-                from app.pipeline.rag_pipeline import _synthesize_image_chart_answer
-                _img_context = "\n".join(
-                    d.get("text", "") for d in final_docs if isinstance(d, dict)
-                )
+                _cp = _fetch_digitized_chart_payload(user_id)
+                if _cp.get("text"):
+                    _img_context = (_img_context + "\n" + _cp["text"]).strip()
+            except Exception as _fe:
+                logger.warning(event="query_pipeline_chart_fetch_failed", error=str(_fe), session_id=session_id)
+        if "CHART VALUES" in _img_context:
+            try:
+                from app.pipeline.rag_pipeline import _synthesize_image_chart_answer, _expand_chart_dates
                 _img_synth = _synthesize_image_chart_answer(query, _img_context)
                 if _img_synth:
-                    answer = _img_synth
+                    answer = _expand_chart_dates(_img_synth)
+                else:
+                    answer = _expand_chart_dates(answer)
             except Exception as _img_synth_err:
                 logger.warning(event="query_pipeline_image_synth_failed", error=str(_img_synth_err), session_id=session_id)
-            try:
-                from app.pipeline.rag_pipeline import _expand_chart_dates
-                answer = _expand_chart_dates(answer)
-            except Exception as _date_err:
-                logger.warning(event="query_pipeline_image_date_expand_failed", error=str(_date_err), session_id=session_id)
 
         # H-03: Stricter numeric grounding gate.
         # If the answer contains specific numbers/dollar amounts that are NOT

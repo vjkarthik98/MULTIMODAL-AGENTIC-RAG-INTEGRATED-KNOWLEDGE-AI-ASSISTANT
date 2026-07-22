@@ -42,8 +42,13 @@ def _query_via_server(
     session_id: str,
     user_id: str,
     access_token: Optional[str] = None,
+    no_cache: bool = True,
 ) -> Dict[str, Any]:
-    """Call /rag/query on the running server. Reuses server's GPU models."""
+    """Call /rag/query on the running server. Reuses server's GPU models.
+
+    no_cache defaults True: eval must measure the live model, never a stale
+    cached answer from a previous run (same session_id+query would hit cache).
+    """
     headers = {}
     if access_token:
         headers["Authorization"] = f"Bearer {access_token}"
@@ -52,6 +57,7 @@ def _query_via_server(
         "query": query,
         "session_id": session_id,
         "user_id": user_id,
+        "no_cache": no_cache,
     }
     with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
         resp = client.post(
@@ -74,19 +80,72 @@ def _query_via_pipeline(
 
 
 def _load_eval_rows(cfg: EvalConfig) -> List[Dict[str, Any]]:
-    """Load all text + PDF + docx gold rows that have real reference answers."""
+    """Load gold rows with real reference answers. Defaults to text/pdf/docx;
+    a --modality filter narrows to a single modality (any of the 7)."""
+    _mods = [cfg.modality] if getattr(cfg, "modality", None) else ["txt", "pdf", "docx"]
     gold = load_all_gold(
         gold_dir=cfg.gold_dir,
-        modalities=["txt", "pdf", "docx"],
+        modalities=_mods,
         include_todos=False,
     )
     rows = []
     for modality_rows in gold.values():
         for r in modality_rows:
             ref = r.get("reference_answer", "")
+            # Behavioral rows (refusal/adversarial) are scored with their own
+            # rubrics, not the standard faithfulness/relevancy/recall metrics —
+            # exclude them here so they never get mis-scored as normal answers.
+            if r.get("expected_behavior") == "abstain" or r.get("question_type") in ("refusal", "adversarial"):
+                continue
             if ref and ref not in ("TODO", "") and "SEARCH_REQUIRED" not in ref and "INJECTION_PROBE" not in ref:
                 rows.append(r)
     return rows
+
+
+import re as _re
+
+# The verification loop (app/verification/verification_loop.py) appends this hedge
+# to answers it can't fully auto-verify. It's a product warning, but graded as an
+# ANSWER it reads as uncertainty and unfairly drags faithfulness/correctness down
+# (verified: a correct answer scores 1.0 clean, 0.5 with the hedge). Strip it for
+# grading — we measure the answer's content, not the product's caution banner.
+_HEDGE_RE = _re.compile(
+    r"\s*This answer could not be fully verified against the source material\s*[—-]+\s*"
+    r"treat the figures? above with caution\.?", _re.IGNORECASE)
+
+
+def _strip_verification_hedge(answer: str) -> str:
+    return _HEDGE_RE.sub("", answer or "").strip()
+
+
+def _make_full_context_retriever():
+    """In-process HybridRetriever for grading context. The /rag/query API returns
+    source text truncated to 200 chars (query_pipeline._build_sources_array), which
+    starves the LLM judge — faithfulness/context_recall must be graded against the
+    FULL retrieved chunks. Returns None if retrieval infra can't load."""
+    try:
+        from app.core.infra_registry import infra
+        from app.core.model_loader import model_loader
+        from app.retrieval.hybrid_retriever import HybridRetriever
+        return HybridRetriever(
+            bm25=infra.get_bm25(),
+            vector_store=infra.get_vector_store(),
+            embedder=model_loader.get_embedder(),
+        )
+    except Exception as exc:
+        print(f"[eval] full-context retriever unavailable ({exc}); grading on API snippets")
+        return None
+
+
+def _full_contexts(retriever, query: str, user_id: str, session_id: str) -> List[str]:
+    """Full-text chunks for the query (untruncated), for faithful judge grading."""
+    if retriever is None:
+        return []
+    try:
+        docs = retriever.search(query=query, session_id=session_id, top_k=8, user_id=user_id)
+        return [str(d.get("text") or "") for d in docs if (d.get("text") or "").strip()]
+    except Exception:
+        return []
 
 
 def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
@@ -101,6 +160,7 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
     # Decide execution mode
     use_server = _server_available()
     access_token = os.getenv("EVAL_ACCESS_TOKEN", "")
+    full_ctx_retriever = _make_full_context_retriever()
 
     if use_server:
         print(f"[eval] Server reachable at {_SERVER_URL} — using HTTP mode (no GPU duplication)")
@@ -150,8 +210,12 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
         latencies.append(q_elapsed)
 
         answer = pipeline_result.get("answer") or pipeline_result.get("response") or ""
+        answer = _strip_verification_hedge(answer)
         sources = pipeline_result.get("sources") or []
-        context_texts = [s.get("text") or "" for s in sources if isinstance(s, dict)]
+        # Grade against FULL retrieved chunks, not the 200-char API source snippets.
+        context_texts = _full_contexts(full_ctx_retriever, query, cfg.user_id, session_id)
+        if not context_texts:  # fallback: truncated API sources
+            context_texts = [s.get("text") or "" for s in sources if isinstance(s, dict)]
 
         fidelity = compute_finance_fidelity(answer, context_texts)
         eval_rows.append({

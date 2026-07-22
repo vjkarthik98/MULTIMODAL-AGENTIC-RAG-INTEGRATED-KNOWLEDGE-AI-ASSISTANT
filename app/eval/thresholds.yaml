@@ -1,4 +1,26 @@
-# Phase 25 — Eval thresholds.
+# ─────────────────────────────────────────────────────────────────────────────
+# GATE STATUS (2026-07-18): DISABLED pending baseline v4.
+#
+# Both inputs to every baseline changed: (1) judge gguf_mistral → Prometheus-2-7B,
+# (2) gold set 14 rows → v1.0.0 (164 rows, new slices + citation ground truth).
+# The v3 numbers below are therefore STALE and kept only as historical reference.
+#
+# Procedure to re-enable the gate:
+#   1. Run un-gated:  EVAL_USER_ID=<owner> python -m app.eval.run --suite full
+#   2. Record the Prometheus/v1.0.0 numbers as baseline v4.
+#   3. Set each metric's min/max at baseline_v4 * 0.9 (safety-critical) / 0.95 (rest).
+#   4. Flip gate_enabled: true.
+#
+# New metrics to baseline in v4 (targets shown; no gate until measured):
+#   generation.answer_correctness   target ~0.75   (Prometheus rubric)
+#   generation.citation_locator_accuracy  target ~0.80 (per-modality page/sheet/ts/frame)
+#   behavioral.refusal_accuracy     target ~0.90   (abstains when answer not in KB)
+#   behavioral.adversarial_pass     target ~0.90   (ignores injection / corrects false premise)
+#   retrieval.precision_at_5 / recall_at_5  re-measure with distractors present
+gate_enabled: false
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Phase 25 — Eval thresholds (v3, RETIRED).
 #
 # Thresholds set from THIRD REAL BASELINE RUN (2026-05-26T06:11:45Z) at baseline * 0.95.
 # This run uses the real Ragas+GGUF Mistral judge (GPU, n_gpu_layers=-1).
