@@ -9,7 +9,7 @@ computed — no re-scoring) and rag_pipeline's query-aspect splitter.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List
+from typing import Any
 
 from app.verification.verification_schema import RetrievalEvalResult
 
@@ -21,10 +21,11 @@ _MIN_SCORE_FOR_RELEVANT = 0.15
 
 
 class RetrievalEvaluator:
-    def evaluate(self, query: str, docs: List[Dict[str, Any]]) -> RetrievalEvalResult:
+    def evaluate(self, query: str, docs: list[dict[str, Any]]) -> RetrievalEvalResult:
         if not docs:
             return RetrievalEvalResult(
-                score=0.0, insufficient_context=True,
+                score=0.0,
+                insufficient_context=True,
                 reason="no documents retrieved",
             )
 
@@ -58,12 +59,12 @@ class RetrievalEvaluator:
         )
 
     @staticmethod
-    def _score_of(doc: Dict[str, Any]) -> float:
+    def _score_of(doc: dict[str, Any]) -> float:
         val = doc.get("score")
         return float(val) if isinstance(val, (int, float)) else 0.0
 
     @staticmethod
-    def _aspect_coverage(query: str, docs: List[Dict[str, Any]]) -> float:
+    def _aspect_coverage(query: str, docs: list[dict[str, Any]]) -> float:
         try:
             from app.pipeline.rag_pipeline import _split_query_aspects
         except Exception:
@@ -82,12 +83,12 @@ class RetrievalEvaluator:
         return hits / len(aspects) if aspects else 1.0
 
     @staticmethod
-    def _has_conflicting_numbers(docs: List[Dict[str, Any]]) -> bool:
+    def _has_conflicting_numbers(docs: list[dict[str, Any]]) -> bool:
         """Cheap conflict signal: same labeled metric (e.g. 'net revenue')
         with materially different scaled values across top docs. False
         positives are acceptable here — this only nudges the score down and
         adds a reason string, it never blocks on its own."""
-        seen: Dict[str, set] = {}
+        seen: dict[str, set] = {}
         for d in docs[:5]:
             text = str(d.get("text", "") or "")
             for m in _NUM_WITH_CONTEXT_RE.finditer(text):

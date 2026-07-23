@@ -13,16 +13,16 @@ IMPORTANT: This script scaffolds CANDIDATES. Every row it outputs has:
 A human MUST review each TODO row, fill in the correct values from the source document,
 and remove the TODO before the eval harness will include the row in metrics.
 """
+
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import yaml
 
@@ -34,27 +34,27 @@ from app.eval.config import EVAL_USER_ID, GOLD_DIR, MANIFEST_PATH, RAW_CORPUS_DI
 
 _settings = get_settings()
 
-MODALITY_TO_GOLD: Dict[str, str] = {
-    "txt":   "text_gold.jsonl",
-    "pdf":   "pdf_gold.jsonl",
-    "docx":  "docx_gold.jsonl",
-    "xlsx":  "xlsx_gold.jsonl",
+MODALITY_TO_GOLD: dict[str, str] = {
+    "txt": "text_gold.jsonl",
+    "pdf": "pdf_gold.jsonl",
+    "docx": "docx_gold.jsonl",
+    "xlsx": "xlsx_gold.jsonl",
     "image": "image_gold.jsonl",
     "audio": "audio_gold.jsonl",
     "video": "video_gold.jsonl",
 }
 
-MODALITY_EXTS: Dict[str, List[str]] = {
-    "txt":   [".txt"],
-    "pdf":   [".pdf"],
-    "docx":  [".docx"],
-    "xlsx":  [".xlsx"],
+MODALITY_EXTS: dict[str, list[str]] = {
+    "txt": [".txt"],
+    "pdf": [".pdf"],
+    "docx": [".docx"],
+    "xlsx": [".xlsx"],
     "image": [".jpg", ".jpeg", ".png"],
     "audio": [".mp3", ".wav", ".m4a"],
     "video": [".mp4", ".mov", ".avi"],
 }
 
-QUESTION_TEMPLATES: Dict[str, List[str]] = {
+QUESTION_TEMPLATES: dict[str, list[str]] = {
     "txt": [
         "What was {company}'s total revenue in the most recent fiscal year?",
         "What were the key financial highlights reported?",
@@ -107,7 +107,7 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     rows = []
@@ -119,10 +119,12 @@ def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
-def _count_curated(rows: List[Dict[str, Any]]) -> int:
+def _count_curated(rows: list[dict[str, Any]]) -> int:
     return sum(
-        1 for r in rows
-        if r.get("relevant_chunk_ids") not in (["TODO_ingest_then_fill"], "TODO_ingest_then_fill", [], None)
+        1
+        for r in rows
+        if r.get("relevant_chunk_ids")
+        not in (["TODO_ingest_then_fill"], "TODO_ingest_then_fill", [], None)
         and r.get("reference_answer") not in ("TODO", None, "")
         and "SEARCH_REQUIRED" not in str(r.get("reference_answer", ""))
         and "INJECTION_PROBE" not in str(r.get("reference_answer", ""))
@@ -156,7 +158,7 @@ def scaffold_candidates(modality: str) -> None:
             row_id = f"{modality[:3]}-scaffold-{fpath.stem}-{i:02d}"
             if row_id in existing_ids:
                 continue
-            row: Dict[str, Any] = {
+            row: dict[str, Any] = {
                 "id": row_id,
                 "modality": modality,
                 "source_file": fpath.name,
@@ -218,12 +220,20 @@ def ingest_corpus() -> None:
 
 def validate_and_update_manifest() -> None:
     """Validate all gold JSONL files and update manifest.yaml SHA-256 entries."""
-    REQUIRED_FIELDS = ["id", "modality", "source_file", "query",
-                       "relevant_chunk_ids", "reference_answer",
-                       "expected_route", "added_by", "added_at"]
+    REQUIRED_FIELDS = [
+        "id",
+        "modality",
+        "source_file",
+        "query",
+        "relevant_chunk_ids",
+        "reference_answer",
+        "expected_route",
+        "added_by",
+        "added_at",
+    ]
     VALID_ROUTES = {"rag", "search", "memory", "direct", "hybrid"}
 
-    manifest: Dict[str, Any] = {}
+    manifest: dict[str, Any] = {}
     if MANIFEST_PATH.exists():
         with open(MANIFEST_PATH) as f:
             manifest = yaml.safe_load(f) or {}
@@ -278,12 +288,15 @@ def validate_and_update_manifest() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build gold evaluation dataset")
-    parser.add_argument("--modality", choices=["all"] + list(MODALITY_TO_GOLD.keys()),
-                        help="Scaffold candidates for this modality (or 'all')")
-    parser.add_argument("--ingest", action="store_true",
-                        help="Ingest raw corpus into eval user KB")
-    parser.add_argument("--validate", action="store_true",
-                        help="Validate gold files and update manifest")
+    parser.add_argument(
+        "--modality",
+        choices=["all"] + list(MODALITY_TO_GOLD.keys()),
+        help="Scaffold candidates for this modality (or 'all')",
+    )
+    parser.add_argument("--ingest", action="store_true", help="Ingest raw corpus into eval user KB")
+    parser.add_argument(
+        "--validate", action="store_true", help="Validate gold files and update manifest"
+    )
     args = parser.parse_args()
 
     if args.ingest:

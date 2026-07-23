@@ -3,14 +3,12 @@
 Replaces the ad-hoc string-prefix matching in web_search.py and
 api_routes.py with proper CIDR-based checking via Python stdlib ipaddress.
 """
+
 from __future__ import annotations
 
 import ipaddress
 import socket
-from typing import List, Optional
 from urllib.parse import urlparse
-
-import structlog
 
 from app.guardrails.exceptions import GuardrailBlocked
 from app.utils.logger import get_logger
@@ -18,9 +16,9 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # Populated from policies.yaml at module init via _load_policy()
-_BLOCKED_CIDRS: List[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
-_BLOCKED_SCHEMES: List[str] = []
-_BLOCKED_HOSTNAMES: List[str] = []
+_BLOCKED_CIDRS: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+_BLOCKED_SCHEMES: list[str] = []
+_BLOCKED_HOSTNAMES: list[str] = []
 _INITIALIZED = False
 
 
@@ -30,11 +28,11 @@ def _load_policy() -> None:
         return
     try:
         from app.guardrails._policy_loader import get_policy
+
         p = get_policy()
         ssrf_cfg = p.get("ssrf", {})
         _BLOCKED_CIDRS = [
-            ipaddress.ip_network(cidr, strict=False)
-            for cidr in ssrf_cfg.get("blocked_cidrs", [])
+            ipaddress.ip_network(cidr, strict=False) for cidr in ssrf_cfg.get("blocked_cidrs", [])
         ]
         _BLOCKED_SCHEMES = [s.lower() for s in ssrf_cfg.get("blocked_schemes", [])]
         _BLOCKED_HOSTNAMES = [h.lower() for h in ssrf_cfg.get("blocked_hostnames", [])]
@@ -44,13 +42,19 @@ def _load_policy() -> None:
         _BLOCKED_CIDRS = [
             ipaddress.ip_network(c, strict=False)
             for c in [
-                "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12",
-                "192.168.0.0/16", "169.254.0.0/16", "0.0.0.0/8",
+                "127.0.0.0/8",
+                "10.0.0.0/8",
+                "172.16.0.0/12",
+                "192.168.0.0/16",
+                "169.254.0.0/16",
+                "0.0.0.0/8",
             ]
         ]
         _BLOCKED_SCHEMES = ["file", "ftp", "gopher", "dict", "ldap"]
         _BLOCKED_HOSTNAMES = [
-            "localhost", "169.254.169.254", "metadata.google.internal",
+            "localhost",
+            "169.254.169.254",
+            "metadata.google.internal",
             "fd00:ec2::254",  # AWS EC2 IMDSv1/v2 IPv6 metadata endpoint
         ]
     _INITIALIZED = True
@@ -139,7 +143,9 @@ def is_ssrf_risk(url: str, resolve_dns: bool = True) -> bool:
                 try:
                     addr = ipaddress.ip_address(candidate)
                     if any(addr in net for net in _BLOCKED_CIDRS):
-                        logger.warning("ssrf_blocked_bare_ipv6", netloc=parsed.netloc, url=url[:120])
+                        logger.warning(
+                            "ssrf_blocked_bare_ipv6", netloc=parsed.netloc, url=url[:120]
+                        )
                         return True
                     break
                 except ValueError:
@@ -180,7 +186,7 @@ def assert_not_ssrf(
         )
 
 
-def get_blocked_domains_from_policy() -> Optional[List[str]]:
+def get_blocked_domains_from_policy() -> list[str] | None:
     """Return extra blocked domains from policy (for web_search blocklist)."""
     _load_policy()
     return _BLOCKED_HOSTNAMES

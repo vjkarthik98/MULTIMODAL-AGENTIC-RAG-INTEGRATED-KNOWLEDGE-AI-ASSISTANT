@@ -9,6 +9,7 @@ Tier 2 (optional): cosine similarity of query embedding vs pre-computed
 Upgrade hook: replace _semantic_check() with a call to a small open
 classifier (e.g. deepset/deberta-v3-base-injection) when available.
 """
+
 from __future__ import annotations
 
 import json
@@ -16,9 +17,7 @@ import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
 
-import structlog
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -27,25 +26,26 @@ logger = get_logger(__name__)
 # Result type
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class JailbreakResult:
     is_jailbreak: bool
-    confidence: float           # 0.0 = clean, 1.0 = certain jailbreak
-    matched_pattern: Optional[str]
-    tier: int                   # 1 = regex, 2 = semantic
-    degraded: bool = False      # True when Tier 2 fell back due to OOM
+    confidence: float  # 0.0 = clean, 1.0 = certain jailbreak
+    matched_pattern: str | None
+    tier: int  # 1 = regex, 2 = semantic
+    degraded: bool = False  # True when Tier 2 fell back due to OOM
 
 
 # ---------------------------------------------------------------------------
 # Module-level state
 # ---------------------------------------------------------------------------
 
-_regex_patterns: List[re.Pattern] = []
+_regex_patterns: list[re.Pattern] = []
 _semantic_threshold: float = 0.82
 _semantic_enabled: bool = True
 _cuda_oom_fallback: bool = True
-_corpus_embeddings: Optional[object] = None  # np.ndarray when loaded
-_corpus_texts: List[str] = []
+_corpus_embeddings: object | None = None  # np.ndarray when loaded
+_corpus_texts: list[str] = []
 _init_lock = threading.Lock()
 _initialized = False
 
@@ -54,6 +54,7 @@ def _load_config() -> None:
     global _semantic_threshold, _semantic_enabled, _cuda_oom_fallback
     try:
         from app.guardrails._policy_loader import get_policy
+
         cfg = get_policy().get("jailbreak", {})
         _semantic_threshold = float(cfg.get("semantic_similarity_threshold", 0.82))
         _semantic_enabled = bool(cfg.get("semantic_enabled", True))
@@ -62,17 +63,22 @@ def _load_config() -> None:
         logger.warning("jailbreak_config_load_failed", error=str(e))
 
 
-def _compile_injection_patterns() -> List[re.Pattern]:
+def _compile_injection_patterns() -> list[re.Pattern]:
     """Compile regex injection patterns from policies.yaml."""
     try:
         from app.guardrails._policy_loader import get_policy
+
         patterns = get_policy().get("injection", {}).get("regex_patterns", [])
         compiled = []
         for entry in patterns:
             try:
                 compiled.append(re.compile(entry["pattern"], re.IGNORECASE | re.DOTALL))
             except re.error as e:
-                logger.warning("jailbreak_pattern_compile_failed", pattern=entry.get("pattern", ""), error=str(e))
+                logger.warning(
+                    "jailbreak_pattern_compile_failed",
+                    pattern=entry.get("pattern", ""),
+                    error=str(e),
+                )
         return compiled
     except Exception as e:
         logger.warning("jailbreak_patterns_load_failed", error=str(e))
@@ -84,6 +90,7 @@ def _load_corpus_embeddings() -> None:
     global _corpus_embeddings, _corpus_texts
     try:
         from app.guardrails._policy_loader import get_policy
+
         cfg = get_policy().get("jailbreak", {})
         corpus_file = cfg.get("corpus_file", "adversarial/red_team_prompts.jsonl")
         jailbreak_tag = cfg.get("corpus_jailbreak_tag", "jailbreak")
@@ -94,7 +101,7 @@ def _load_corpus_embeddings() -> None:
             return
 
         texts = []
-        with open(corpus_path, "r", encoding="utf-8") as fh:
+        with open(corpus_path, encoding="utf-8") as fh:
             for line in fh:
                 try:
                     obj = json.loads(line.strip())
@@ -110,17 +117,17 @@ def _load_corpus_embeddings() -> None:
         # fresh TextEmbedder() here reloads the 0.6B SentenceTransformer onto
         # the GPU every call (4-9s), which is the dominant input-guard latency.
         from app.core.model_loader import model_loader
+
         embedder = model_loader.get_embedder()
         import numpy as np
+
         embeddings = embedder.embed_texts(texts)
         if embeddings is not None and len(embeddings) > 0:
             _corpus_texts = texts
             # Pre-normalize rows once at load — _semantic_check then only
             # normalizes the query vector instead of the whole corpus per call.
             corpus = np.array(embeddings)
-            _corpus_embeddings = corpus / (
-                np.linalg.norm(corpus, axis=1, keepdims=True) + 1e-8
-            )
+            _corpus_embeddings = corpus / (np.linalg.norm(corpus, axis=1, keepdims=True) + 1e-8)
             logger.info("jailbreak_corpus_loaded", n=len(texts))
     except Exception as e:
         logger.warning("jailbreak_corpus_load_failed", error=str(e))
@@ -145,7 +152,7 @@ def initialize() -> None:
         )
 
 
-def _regex_check(query: str) -> Optional[tuple[float, str]]:
+def _regex_check(query: str) -> tuple[float, str] | None:
     """Tier 1: regex check. Returns (confidence, matched_pattern) or None."""
     if not _regex_patterns:
         initialize()
@@ -156,7 +163,7 @@ def _regex_check(query: str) -> Optional[tuple[float, str]]:
     return None
 
 
-def _semantic_check(query: str) -> Optional[float]:
+def _semantic_check(query: str) -> float | None:
     """Tier 2: embedding similarity against jailbreak corpus.
 
     Returns cosine similarity score (0–1) or None if unavailable.
@@ -167,6 +174,7 @@ def _semantic_check(query: str) -> Optional[float]:
 
     try:
         import numpy as np
+
         # Cached singleton — see _load_corpus_embeddings(): a fresh TextEmbedder()
         # here would reload the embedding model to GPU on every query.
         from app.core.model_loader import model_loader

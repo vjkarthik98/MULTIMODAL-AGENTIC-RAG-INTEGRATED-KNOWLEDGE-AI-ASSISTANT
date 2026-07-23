@@ -1,24 +1,24 @@
 import math
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import numpy as np
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
-from prometheus_client import Counter, Histogram, Gauge
-from tenacity import retry, stop_after_attempt, wait_exponential
+from prometheus_client import Counter, Gauge, Histogram
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
     MatchValue,
-    PointStruct,
-    VectorParams,
     PayloadSchemaType,
+    PointStruct,
     UpdateStatus,
+    VectorParams,
 )
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -48,6 +48,7 @@ _search_errors = Counter(
     ["collection", "error_type"],
 )
 from app.core.metrics import circuit_breaker_state as _circuit_breaker_state
+
 _vectors_stored = Gauge(
     "qdrant_vectors_stored_total",
     "Total vectors stored per collection",
@@ -57,26 +58,27 @@ _vectors_stored = Gauge(
 
 # CIRCUIT BREAKER STATE
 
+
 class _CircuitBreaker:
 
     def __init__(self, name: str, fail_max: int = 5, reset_timeout: int = 60) -> None:
-        self.name          = name
-        self.fail_max      = fail_max
+        self.name = name
+        self.fail_max = fail_max
         self.reset_timeout = reset_timeout
-        self._failures     = 0
-        self._opened_at    = 0.0
-        self._open         = False
+        self._failures = 0
+        self._opened_at = 0.0
+        self._open = False
 
     def record_success(self) -> None:
-        self._failures  = 0
-        self._open      = False
+        self._failures = 0
+        self._open = False
         self._opened_at = 0.0
         _circuit_breaker_state.labels(service=self.name).set(0)
 
     def record_failure(self) -> None:
         self._failures += 1
         if self._failures >= self.fail_max:
-            self._open      = True
+            self._open = True
             self._opened_at = time.time()
             _circuit_breaker_state.labels(service=self.name).set(1)
             logger.warning(
@@ -89,7 +91,7 @@ class _CircuitBreaker:
         if self._open:
             if time.time() - self._opened_at >= self.reset_timeout:
                 # HALF-OPEN — ALLOW ONE PROBE
-                self._open  = False
+                self._open = False
                 self._failures = 0
                 _circuit_breaker_state.labels(service=self.name).set(0)
                 logger.info("circuit_breaker_half_open", service=self.name)
@@ -123,16 +125,16 @@ class QdrantVectorStore:
             )
         )
 
-        self.text_collection   = settings.TEXT_COLLECTION_NAME
+        self.text_collection = settings.TEXT_COLLECTION_NAME
         self.vision_collection = settings.VISION_COLLECTION_NAME
 
         self.batch_size = settings.QDRANT_BATCH_SIZE
-        self.max_docs   = settings.QDRANT_MAX_DOCS
-        self.text_dim   = settings.TEXT_EMBEDDING_DIM
+        self.max_docs = settings.QDRANT_MAX_DOCS
+        self.text_dim = settings.TEXT_EMBEDDING_DIM
         self.vision_dim = settings.VISION_EMBEDDING_DIM
 
-        self._collection_cache: set         = set()
-        self.modality_filter: Optional[str] = None
+        self._collection_cache: set = set()
+        self.modality_filter: str | None = None
 
         logger.info("qdrant_initialized")
         self._warm_cache()
@@ -166,7 +168,7 @@ class QdrantVectorStore:
             result = fn(*args, **kwargs)
             _cb.record_success()
             return result
-        except Exception as exc:
+        except Exception:
             _cb.record_failure()
             raise
 
@@ -174,10 +176,7 @@ class QdrantVectorStore:
 
     def _collection_exists(self, name: str) -> bool:
         try:
-            return any(
-                c.name == name
-                for c in self.client.get_collections().collections
-            )
+            return any(c.name == name for c in self.client.get_collections().collections)
         except Exception:
             return False
 
@@ -187,18 +186,18 @@ class QdrantVectorStore:
     # Adding a field here is enough — _ensure_collection runs on every startup
     # and is idempotent (skips already-existing indexes).
     _PAYLOAD_INDEXES = [
-        ("user_id",              PayloadSchemaType.KEYWORD),
-        ("session_id",           PayloadSchemaType.KEYWORD),
-        ("modality",             PayloadSchemaType.KEYWORD),
-        ("doc_id",               PayloadSchemaType.KEYWORD),
-        ("source",               PayloadSchemaType.KEYWORD),
-        ("language",             PayloadSchemaType.KEYWORD),
-        ("content_type",         PayloadSchemaType.KEYWORD),
-        ("embedding_space",      PayloadSchemaType.KEYWORD),
-        ("deleted_at",           PayloadSchemaType.KEYWORD),
-        ("checksum_sha256",      PayloadSchemaType.KEYWORD),
-        ("section_number",       PayloadSchemaType.INTEGER),
-        ("is_forward_looking",   PayloadSchemaType.BOOL),
+        ("user_id", PayloadSchemaType.KEYWORD),
+        ("session_id", PayloadSchemaType.KEYWORD),
+        ("modality", PayloadSchemaType.KEYWORD),
+        ("doc_id", PayloadSchemaType.KEYWORD),
+        ("source", PayloadSchemaType.KEYWORD),
+        ("language", PayloadSchemaType.KEYWORD),
+        ("content_type", PayloadSchemaType.KEYWORD),
+        ("embedding_space", PayloadSchemaType.KEYWORD),
+        ("deleted_at", PayloadSchemaType.KEYWORD),
+        ("checksum_sha256", PayloadSchemaType.KEYWORD),
+        ("section_number", PayloadSchemaType.INTEGER),
+        ("is_forward_looking", PayloadSchemaType.BOOL),
     ]
 
     def _ensure_payload_indexes(self, name: str) -> None:
@@ -266,7 +265,7 @@ class QdrantVectorStore:
 
     # EMBEDDING VALIDATION
 
-    def _valid_vector(self, emb: List[float], expected_dim: int) -> bool:
+    def _valid_vector(self, emb: list[float], expected_dim: int) -> bool:
         if not isinstance(emb, list):
             return False
         if len(emb) != expected_dim:
@@ -283,37 +282,37 @@ class QdrantVectorStore:
 
     # PAYLOAD BUILDER
 
-    def _payload(self, d: Any, user_id: Optional[str] = None) -> Dict[str, Any]:
+    def _payload(self, d: Any, user_id: str | None = None) -> dict[str, Any]:
         s = dict(getattr(d, "structure", {}) or {})
         modality = getattr(d, "modality", "text")
 
-        payload: Dict[str, Any] = {
-            "text":            str(getattr(d, "text", "") or "")[:settings.QDRANT_TEXT_MAX_CHARS],
-            "user_id":         user_id or s.get("user_id"),
-            "doc_id":          s.get("doc_id"),
-            "chunk_id":        getattr(d, "chunk_id", None),
-            "modality":        modality,
-            "subtype":         getattr(d, "subtype", None),
-            "content_type":    s.get("content_type"),
-            "session_id":      s.get("session_id"),
+        payload: dict[str, Any] = {
+            "text": str(getattr(d, "text", "") or "")[: settings.QDRANT_TEXT_MAX_CHARS],
+            "user_id": user_id or s.get("user_id"),
+            "doc_id": s.get("doc_id"),
+            "chunk_id": getattr(d, "chunk_id", None),
+            "modality": modality,
+            "subtype": getattr(d, "subtype", None),
+            "content_type": s.get("content_type"),
+            "session_id": s.get("session_id"),
             "embedding_space": s.get("embedding_space", "text"),
-            "source":          str(getattr(d, "source", "") or "")[:200],
-            "source_type":     getattr(d, "source_type", None),
-            "page":            getattr(d, "page", None),
-            "language":        s.get("language"),
-            "tags":            s.get("tags", []),
-            "parent_id":       s.get("parent_id"),
+            "source": str(getattr(d, "source", "") or "")[:200],
+            "source_type": getattr(d, "source_type", None),
+            "page": getattr(d, "page", None),
+            "language": s.get("language"),
+            "tags": s.get("tags", []),
+            "parent_id": s.get("parent_id"),
             "hierarchy_level": s.get("hierarchy_level"),
-            "checksum":        s.get("file_hash"),
-            "ingestion_time":  s.get("ingestion_time"),
-            "section_id":       s.get("section_id"),
-            "section_title":    s.get("section_title"),
-            "error_markers":    s.get("error_markers") or [],
-            "doc_version":      s.get("doc_version"),
-            "title_mismatch":   bool(s.get("title_mismatch", False)),
-            "section_number":   s.get("section_number"),
+            "checksum": s.get("file_hash"),
+            "ingestion_time": s.get("ingestion_time"),
+            "section_id": s.get("section_id"),
+            "section_title": s.get("section_title"),
+            "error_markers": s.get("error_markers") or [],
+            "doc_version": s.get("doc_version"),
+            "title_mismatch": bool(s.get("title_mismatch", False)),
+            "section_number": s.get("section_number"),
             "is_forward_looking": bool(s.get("is_forward_looking", False)),
-            "deleted_at":       None,
+            "deleted_at": None,
         }
 
         _source_type = getattr(d, "source_type", "") or ""
@@ -329,10 +328,25 @@ class QdrantVectorStore:
         # PDF RICH METADATA — from PdfChunker (modality="pdf")
         # Provides full Phase 1.2/2.2 metadata for finance-grade retrieval
         if modality == "pdf":
-            for _k in ("page_number", "page_range", "chunk_type", "section_hierarchy",
-                       "table_title", "column_headers", "fiscal_years", "row_range", "footnotes",
-                       "footnote_markers", "has_figure", "figure_path", "is_ocr",
-                       "caption", "ocr_text", "chunk_hash_id", "source_file"):
+            for _k in (
+                "page_number",
+                "page_range",
+                "chunk_type",
+                "section_hierarchy",
+                "table_title",
+                "column_headers",
+                "fiscal_years",
+                "row_range",
+                "footnotes",
+                "footnote_markers",
+                "has_figure",
+                "figure_path",
+                "is_ocr",
+                "caption",
+                "ocr_text",
+                "chunk_hash_id",
+                "source_file",
+            ):
                 _v = s.get(_k)
                 if _v is not None:
                     payload[_k] = _v
@@ -348,10 +362,22 @@ class QdrantVectorStore:
         # DOCX RICH METADATA — from DocxChunker (modality="docx")
         # Provides full Phase 1.3/2.3 metadata for heading-aware finance retrieval
         if modality == "docx":
-            for _k in ("heading", "heading_hierarchy", "heading_level", "chunk_type",
-                       "paragraph_index", "table_index", "column_headers", "row_range",
-                       "has_bold_terms", "has_italic_terms", "defined_terms",
-                       "clause_numbers", "chunk_hash_id", "source_file"):
+            for _k in (
+                "heading",
+                "heading_hierarchy",
+                "heading_level",
+                "chunk_type",
+                "paragraph_index",
+                "table_index",
+                "column_headers",
+                "row_range",
+                "has_bold_terms",
+                "has_italic_terms",
+                "defined_terms",
+                "clause_numbers",
+                "chunk_hash_id",
+                "source_file",
+            ):
                 _v = s.get(_k)
                 if _v is not None:
                     payload[_k] = _v
@@ -370,11 +396,24 @@ class QdrantVectorStore:
 
         # XLSX RICH METADATA — from XlsxChunker (modality="xlsx")
         if modality == "xlsx":
-            for _k in ("sheet_name", "sheet_index", "sheet_type", "chunk_type",
-                       "chunk_hash_id", "source_file", "table_region", "semantic_group",
-                       "unit_scale", "currency", "display_format", "is_hidden",
-                       "has_formulas_resolved", "named_ranges_in_chunk",
-                       "column_headers", "row_range"):
+            for _k in (
+                "sheet_name",
+                "sheet_index",
+                "sheet_type",
+                "chunk_type",
+                "chunk_hash_id",
+                "source_file",
+                "table_region",
+                "semantic_group",
+                "unit_scale",
+                "currency",
+                "display_format",
+                "is_hidden",
+                "has_formulas_resolved",
+                "named_ranges_in_chunk",
+                "column_headers",
+                "row_range",
+            ):
                 _v = s.get(_k)
                 if _v is not None:
                     payload[_k] = _v
@@ -418,13 +457,13 @@ class QdrantVectorStore:
         if modality in ("audio", "mp3"):
             # Timestamps — accept both naming conventions from old and new ingest paths
             ts_start = s.get("start_timestamp") or s.get("timestamp_start")
-            ts_end   = s.get("end_timestamp")   or s.get("timestamp_end")
+            ts_end = s.get("end_timestamp") or s.get("timestamp_end")
             if ts_start is not None:
                 payload["start_timestamp"] = float(ts_start)
-                payload["timestamp_start"] = float(ts_start)    # backward-compat alias
+                payload["timestamp_start"] = float(ts_start)  # backward-compat alias
             if ts_end is not None:
-                payload["end_timestamp"]   = float(ts_end)
-                payload["timestamp_end"]   = float(ts_end)      # backward-compat alias
+                payload["end_timestamp"] = float(ts_end)
+                payload["timestamp_end"] = float(ts_end)  # backward-compat alias
             if s.get("duration_seconds") is not None:
                 payload["duration_seconds"] = float(s["duration_seconds"])
 
@@ -432,7 +471,7 @@ class QdrantVectorStore:
             spk_label = s.get("speaker_label") or s.get("speaker")
             if spk_label:
                 payload["speaker_label"] = str(spk_label)
-                payload["speaker"]       = str(spk_label)       # backward-compat alias
+                payload["speaker"] = str(spk_label)  # backward-compat alias
             if s.get("speaker_name"):
                 payload["speaker_name"] = str(s["speaker_name"])
             if s.get("speaker_role"):
@@ -440,29 +479,29 @@ class QdrantVectorStore:
 
             # Earnings-call section and topic
             if s.get("call_section"):
-                payload["call_section"]  = str(s["call_section"])
+                payload["call_section"] = str(s["call_section"])
             if s.get("topic_section"):
                 payload["topic_section"] = str(s["topic_section"])
 
             # Chunk statistics
             if s.get("word_count") is not None:
-                payload["word_count"]  = int(s["word_count"])
+                payload["word_count"] = int(s["word_count"])
             if s.get("token_count") is not None:
                 payload["token_count"] = int(s["token_count"])
 
             # Q&A and earnings-call flags
             if s.get("is_question") is not None:
-                payload["is_question"]     = bool(s["is_question"])
+                payload["is_question"] = bool(s["is_question"])
             if s.get("is_answer") is not None:
-                payload["is_answer"]       = bool(s["is_answer"])
+                payload["is_answer"] = bool(s["is_answer"])
             if s.get("is_earnings_call") is not None:
                 payload["is_earnings_call"] = bool(s["is_earnings_call"])
 
             # Audio quality signals forwarded from ingestor
             if s.get("snr") is not None:
-                payload["snr"]               = float(s["snr"])
+                payload["snr"] = float(s["snr"])
             if s.get("snr_degraded") is not None:
-                payload["snr_degraded"]      = bool(s["snr_degraded"])
+                payload["snr_degraded"] = bool(s["snr_degraded"])
             if s.get("clipping_detected") is not None:
                 payload["clipping_detected"] = bool(s["clipping_detected"])
 
@@ -470,8 +509,7 @@ class QdrantVectorStore:
             fe = s.get("finance_entities")
             if fe and isinstance(fe, dict):
                 payload["finance_entities"] = {
-                    k: v[:10] if isinstance(v, list) else v
-                    for k, v in fe.items()
+                    k: v[:10] if isinstance(v, list) else v for k, v in fe.items()
                 }
 
             # Verbatim transcript stored alongside .text for re-rank display.
@@ -480,7 +518,7 @@ class QdrantVectorStore:
             # and were losing their tail (e.g. the exact rate figure sentence)
             # from the citation/context view even though .text kept it.
             if s.get("transcript"):
-                payload["transcript"] = str(s["transcript"])[:settings.QDRANT_TEXT_MAX_CHARS]
+                payload["transcript"] = str(s["transcript"])[: settings.QDRANT_TEXT_MAX_CHARS]
 
             # Deterministic chunk hash for dedup
             if s.get("chunk_hash_id"):
@@ -511,8 +549,8 @@ class QdrantVectorStore:
                 payload["start_timestamp"] = float(ts_start)
                 payload["timestamp_start"] = float(ts_start)
             if ts_end is not None:
-                payload["end_timestamp"]   = float(ts_end)
-                payload["timestamp_end"]   = float(ts_end)
+                payload["end_timestamp"] = float(ts_end)
+                payload["timestamp_end"] = float(ts_end)
             if s.get("duration_seconds") is not None:
                 payload["duration_seconds"] = float(s["duration_seconds"])
 
@@ -520,7 +558,7 @@ class QdrantVectorStore:
             spk_label = s.get("speaker_label") or s.get("speaker")
             if spk_label:
                 payload["speaker_label"] = str(spk_label)
-                payload["speaker"]       = str(spk_label)
+                payload["speaker"] = str(spk_label)
             if s.get("speaker_name"):
                 payload["speaker_name"] = str(s["speaker_name"])
             if s.get("speaker_role"):
@@ -528,29 +566,29 @@ class QdrantVectorStore:
 
             # Call section and topic
             if s.get("call_section"):
-                payload["call_section"]  = str(s["call_section"])
+                payload["call_section"] = str(s["call_section"])
             if s.get("topic_section"):
                 payload["topic_section"] = str(s["topic_section"])
 
             # Chunk statistics
             if s.get("word_count") is not None:
-                payload["word_count"]  = int(s["word_count"])
+                payload["word_count"] = int(s["word_count"])
             if s.get("token_count") is not None:
                 payload["token_count"] = int(s["token_count"])
 
             # Q&A and content flags
             if s.get("is_question") is not None:
-                payload["is_question"]     = bool(s["is_question"])
+                payload["is_question"] = bool(s["is_question"])
             if s.get("is_answer") is not None:
-                payload["is_answer"]       = bool(s["is_answer"])
+                payload["is_answer"] = bool(s["is_answer"])
             if s.get("is_earnings_call") is not None:
                 payload["is_earnings_call"] = bool(s["is_earnings_call"])
 
             # Audio quality signals (from video's audio track)
             if s.get("snr") is not None:
-                payload["snr"]               = float(s["snr"])
+                payload["snr"] = float(s["snr"])
             if s.get("snr_degraded") is not None:
-                payload["snr_degraded"]      = bool(s["snr_degraded"])
+                payload["snr_degraded"] = bool(s["snr_degraded"])
             if s.get("clipping_detected") is not None:
                 payload["clipping_detected"] = bool(s["clipping_detected"])
 
@@ -585,14 +623,16 @@ class QdrantVectorStore:
                 compact = []
                 for fc in frame_caps[:10]:
                     if isinstance(fc, dict):
-                        compact.append({
-                            "frame_timestamp": fc.get("frame_timestamp"),
-                            "frame_caption":   (fc.get("frame_caption") or "")[:200],
-                            "ocr_text":        (fc.get("ocr_text") or "")[:100],
-                            "slide_number":    fc.get("slide_number"),
-                            "scene_change":    fc.get("scene_change", False),
-                            "frame_path":      fc.get("frame_path", ""),
-                        })
+                        compact.append(
+                            {
+                                "frame_timestamp": fc.get("frame_timestamp"),
+                                "frame_caption": (fc.get("frame_caption") or "")[:200],
+                                "ocr_text": (fc.get("ocr_text") or "")[:100],
+                                "slide_number": fc.get("slide_number"),
+                                "scene_change": fc.get("scene_change", False),
+                                "frame_path": fc.get("frame_path", ""),
+                            }
+                        )
                 if compact:
                     payload["frame_captions"] = compact
 
@@ -600,8 +640,7 @@ class QdrantVectorStore:
             fe = s.get("finance_entities")
             if fe and isinstance(fe, dict):
                 payload["finance_entities"] = {
-                    k: v[:10] if isinstance(v, list) else v
-                    for k, v in fe.items()
+                    k: v[:10] if isinstance(v, list) else v for k, v in fe.items()
                 }
 
             # Verbatim transcript for re-rank display / citation. Use the same
@@ -610,7 +649,7 @@ class QdrantVectorStore:
             # dropping the exact figure sentence from the citation view even
             # though .text still had it. Matches the audio block's cap.
             if s.get("transcript"):
-                payload["transcript"] = str(s["transcript"])[:settings.QDRANT_TEXT_MAX_CHARS]
+                payload["transcript"] = str(s["transcript"])[: settings.QDRANT_TEXT_MAX_CHARS]
 
         # XLSX DUAL EMBEDDING — store alt vector in payload so Phase 5 retrieval
         # can reconstruct it for structural table search without a named-vector
@@ -621,13 +660,13 @@ class QdrantVectorStore:
 
         # VIDEO NAMED VECTORS — audio-only and visual-only BGE embeddings stored
         # in payload until Qdrant multi-vector migration runs.
-        emb_audio  = getattr(d, "embedding_audio", None)
+        emb_audio = getattr(d, "embedding_audio", None)
         emb_visual = getattr(d, "embedding_visual", None)
         if emb_audio and isinstance(emb_audio, list) and len(emb_audio) > 0:
-            payload["embedding_audio"]     = emb_audio
+            payload["embedding_audio"] = emb_audio
             payload["has_audio_embedding"] = True
         if emb_visual and isinstance(emb_visual, list) and len(emb_visual) > 0:
-            payload["embedding_visual"]     = emb_visual
+            payload["embedding_visual"] = emb_visual
             payload["has_visual_embedding"] = True
 
         # VISION QUALITY FIELDS — stored for image and video frame chunks so
@@ -667,7 +706,7 @@ class QdrantVectorStore:
 
             # Pixel dimensions after resize
             if s.get("image_width") is not None:
-                payload["image_width"]  = int(s["image_width"])
+                payload["image_width"] = int(s["image_width"])
                 payload["image_height"] = int(s.get("image_height", 0))
 
             # Caption text stored for display / hybrid re-rank
@@ -738,7 +777,9 @@ class QdrantVectorStore:
 
     # INSERT DOCUMENTS WITH IDEMPOTENT UPSERT
 
-    def insert_documents(self, documents: List[Any], session_id: str = "", user_id: Optional[str] = None) -> None:
+    def insert_documents(
+        self, documents: list[Any], session_id: str = "", user_id: str | None = None
+    ) -> None:
 
         if not documents:
             return
@@ -753,24 +794,26 @@ class QdrantVectorStore:
                     "qdrant_insert_missing_user_id",
                     error="insert_documents called without user_id and no document carries one in structure",
                 )
-                raise ValueError("TENANT_ISOLATION_VIOLATION: user_id is required to store documents in Qdrant")
+                raise ValueError(
+                    "TENANT_ISOLATION_VIOLATION: user_id is required to store documents in Qdrant"
+                )
 
         with tracer.start_as_current_span("qdrant_insert") as span:
             span.set_attribute("docs.input", len(documents))
 
-            start     = time.time()
-            documents = documents[:self.max_docs]
+            start = time.time()
+            documents = documents[: self.max_docs]
 
-            text_points:   List[PointStruct] = []
-            vision_points: List[PointStruct] = []
+            text_points: list[PointStruct] = []
+            vision_points: list[PointStruct] = []
             skipped = 0
 
             for d in documents:
-                emb   = getattr(d, "embedding", None)
-                s     = getattr(d, "structure", {}) or {}
+                emb = getattr(d, "embedding", None)
+                s = getattr(d, "structure", {}) or {}
                 space = s.get("embedding_space", "text")
 
-                doc_id   = s.get("doc_id", str(uuid.uuid4()))
+                doc_id = s.get("doc_id", str(uuid.uuid4()))
                 chunk_id = getattr(d, "chunk_id", 0)
                 point_id = self._vector_id(doc_id, chunk_id)
 
@@ -804,13 +847,13 @@ class QdrantVectorStore:
                         )
                     )
 
-            def _insert(collection_name: str, points: List[PointStruct]) -> None:
+            def _insert(collection_name: str, points: list[PointStruct]) -> None:
                 self._ensure_collection(
                     collection_name,
                     self.text_dim if collection_name == self.text_collection else self.vision_dim,
                 )
                 for i in range(0, len(points), self.batch_size):
-                    batch = points[i:i + self.batch_size]
+                    batch = points[i : i + self.batch_size]
                     result = self._retry(
                         self.client.upsert,
                         collection_name=collection_name,
@@ -831,7 +874,9 @@ class QdrantVectorStore:
 
                 if vision_points:
                     _insert(self.vision_collection, vision_points)
-                    _vectors_stored.labels(collection=self.vision_collection).inc(len(vision_points))
+                    _vectors_stored.labels(collection=self.vision_collection).inc(
+                        len(vision_points)
+                    )
 
             except Exception as exc:
                 _upsert_errors.labels(
@@ -842,8 +887,8 @@ class QdrantVectorStore:
                 span.record_exception(exc)
                 raise
 
-            total    = len(text_points) + len(vision_points)
-            latency  = round(time.time() - start, 2)
+            total = len(text_points) + len(vision_points)
+            latency = round(time.time() - start, 2)
             throughput = round(total / max(latency, 1e-6), 1)
 
             _upsert_duration.labels(collection=self.text_collection).observe(latency)
@@ -906,7 +951,9 @@ class QdrantVectorStore:
 
     # RE-INDEX — OVERWRITE ALL VECTORS FOR A FILE ON RE-INGESTION
 
-    def reindex_by_doc_id(self, doc_id: str, new_documents: List[Any], session_id: str = "") -> None:
+    def reindex_by_doc_id(
+        self, doc_id: str, new_documents: list[Any], session_id: str = ""
+    ) -> None:
         self.delete_by_doc_id(doc_id, session_id=session_id)
         self.insert_documents(new_documents, session_id=session_id)
         logger.info("qdrant_reindex_complete", doc_id=doc_id, session_id=session_id)
@@ -949,19 +996,15 @@ class QdrantVectorStore:
 
     # GDPR PURGE — DELETE ALL CHUNKS BY USER_ID OR SESSION_ID
 
-    def gdpr_purge(self, user_id: Optional[str] = None, session_id: Optional[str] = None) -> None:
+    def gdpr_purge(self, user_id: str | None = None, session_id: str | None = None) -> None:
         if not user_id and not session_id:
             raise ValueError("GDPR_PURGE_REQUIRES_USER_ID_OR_SESSION_ID")
 
         conditions = []
         if session_id:
-            conditions.append(
-                FieldCondition(key="session_id", match=MatchValue(value=session_id))
-            )
+            conditions.append(FieldCondition(key="session_id", match=MatchValue(value=session_id)))
         if user_id:
-            conditions.append(
-                FieldCondition(key="user_id", match=MatchValue(value=user_id))
-            )
+            conditions.append(FieldCondition(key="user_id", match=MatchValue(value=user_id)))
 
         purge_filter = Filter(must=conditions)
 
@@ -990,10 +1033,10 @@ class QdrantVectorStore:
 
     def _build_filter(
         self,
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
         exclude_deleted: bool = True,
-        user_id: Optional[str] = None,
-    ) -> Optional[Filter]:
+        user_id: str | None = None,
+    ) -> Filter | None:
         # user_id isolation is the primary tenant boundary — fail closed.
         # A missing user_id must never silently widen a search to all tenants.
         if not user_id:
@@ -1001,11 +1044,11 @@ class QdrantVectorStore:
                 "qdrant_build_filter_missing_user_id",
                 error="_build_filter called without user_id — refusing to build an unscoped filter",
             )
-            raise ValueError("TENANT_ISOLATION_VIOLATION: user_id is required to search or filter Qdrant")
+            raise ValueError(
+                "TENANT_ISOLATION_VIOLATION: user_id is required to search or filter Qdrant"
+            )
 
-        conditions = [
-            FieldCondition(key="user_id", match=MatchValue(value=user_id))
-        ]
+        conditions = [FieldCondition(key="user_id", match=MatchValue(value=user_id))]
 
         # session_id is a correlation/tracing field stored in the payload; it is
         # NOT used as a retrieval filter. Documents are ingested with session_id
@@ -1029,15 +1072,15 @@ class QdrantVectorStore:
     def _search(
         self,
         collection: str,
-        vector: List[float],
+        vector: list[float],
         limit: int,
-        session_id: Optional[str],
+        session_id: str | None,
         score_threshold: float = 0.0,
         exclude_deleted: bool = True,
-        user_id: Optional[str] = None,
+        user_id: str | None = None,
         extra_filter: Optional["Filter"] = None,
-        vector_name: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        vector_name: str | None = None,
+    ) -> list[dict[str, Any]]:
 
         if collection not in self._collection_cache:
             logger.warning(
@@ -1060,6 +1103,7 @@ class QdrantVectorStore:
                 if extra_filter is not None and base_filter is not None:
                     merged_must = list(base_filter.must or []) + list(extra_filter.must or [])
                     from qdrant_client.models import Filter as _Filter
+
                     query_filter = _Filter(must=merged_must) if merged_must else None
                 elif extra_filter is not None:
                     query_filter = extra_filter
@@ -1074,13 +1118,13 @@ class QdrantVectorStore:
                 )
                 if vector_name:
                     _qp_kwargs["using"] = vector_name
-                res    = self._retry(self.client.query_points, **_qp_kwargs)
+                res = self._retry(self.client.query_points, **_qp_kwargs)
                 points = getattr(res, "points", [])
 
                 results = [
                     {
-                        "text":     p.payload.get("text"),
-                        "score":    float(p.score),
+                        "text": p.payload.get("text"),
+                        "score": float(p.score),
                         "metadata": p.payload,
                     }
                     for p in points
@@ -1119,13 +1163,15 @@ class QdrantVectorStore:
                 # Logging it at ERROR every time drowns out genuine Qdrant
                 # problems in the logs.
                 _is_missing_named_vector = (
-                    vector_name is not None
-                    and "not existing vector name" in str(exc).lower()
+                    vector_name is not None and "not existing vector name" in str(exc).lower()
                 )
                 _log = logger.warning if _is_missing_named_vector else logger.error
                 _log(
-                    "qdrant_search_missing_named_vector" if _is_missing_named_vector
-                    else "qdrant_search_failed",
+                    (
+                        "qdrant_search_missing_named_vector"
+                        if _is_missing_named_vector
+                        else "qdrant_search_failed"
+                    ),
                     collection=collection,
                     vector_name=vector_name,
                     session_id=session_id,
@@ -1137,14 +1183,14 @@ class QdrantVectorStore:
 
     def search_text(
         self,
-        query_vector: List[float],
+        query_vector: list[float],
         limit: int = None,
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
         score_threshold: float = 0.0,
-        user_id: Optional[str] = None,
+        user_id: str | None = None,
         extra_filter=None,
-        vector_name: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        vector_name: str | None = None,
+    ) -> list[dict[str, Any]]:
         return self._search(
             self.text_collection,
             query_vector,
@@ -1160,13 +1206,13 @@ class QdrantVectorStore:
 
     def search_text_alt(
         self,
-        query_vector: List[float],
+        query_vector: list[float],
         limit: int = None,
-        session_id: Optional[str] = None,
-        user_id: Optional[str] = None,
+        session_id: str | None = None,
+        user_id: str | None = None,
         extra_filter: Optional["Filter"] = None,
         candidate_pool: int = 300,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Cosine search over the embedding_alt payload field.
 
         embedding_alt (xlsx markdown-table repr, image numbers-only text — see
@@ -1210,7 +1256,7 @@ class QdrantVectorStore:
 
         qv = np.asarray(query_vector, dtype=np.float32)
         qnorm = float(np.linalg.norm(qv)) or 1e-9
-        scored: List[Dict[str, Any]] = []
+        scored: list[dict[str, Any]] = []
         for p in points:
             alt = p.payload.get("embedding_alt")
             if not alt:
@@ -1228,12 +1274,12 @@ class QdrantVectorStore:
 
     def search_vision(
         self,
-        query_vector: List[float],
+        query_vector: list[float],
         limit: int = None,
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
         score_threshold: float = 0.0,
-        user_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         return self._search(
             self.vision_collection,
             query_vector,
@@ -1245,7 +1291,7 @@ class QdrantVectorStore:
 
     # MODALITY FILTER SETTER
 
-    def set_modality_filter(self, modality: Optional[str]) -> None:
+    def set_modality_filter(self, modality: str | None) -> None:
         self.modality_filter = modality
 
     # DELETE BY SESSION
@@ -1292,10 +1338,10 @@ class QdrantVectorStore:
         user_id: str = "",
         session_id: str = "",
         limit: int = 1,
-    ) -> List[Any]:
+    ) -> list[Any]:
         if not user_id:
             raise ValueError("search_by_payload requires a non-empty user_id for tenant isolation")
-        results: List[Any] = []
+        results: list[Any] = []
         for collection in (self.text_collection, self.vision_collection):
             if collection not in self._collection_cache:
                 continue
@@ -1336,16 +1382,16 @@ class QdrantVectorStore:
 
     # COLLECTION STATS
 
-    def collection_stats(self) -> Dict[str, Any]:
-        stats: Dict[str, Any] = {}
+    def collection_stats(self) -> dict[str, Any]:
+        stats: dict[str, Any] = {}
 
         for name in (self.text_collection, self.vision_collection):
             try:
-                info        = self.client.get_collection(name)
+                info = self.client.get_collection(name)
                 stats[name] = {
-                    "points_count":  info.points_count,
+                    "points_count": info.points_count,
                     "vectors_count": info.vectors_count,
-                    "status":        str(info.status),
+                    "status": str(info.status),
                 }
             except Exception as exc:
                 stats[name] = {"error": str(exc)}
@@ -1354,21 +1400,20 @@ class QdrantVectorStore:
 
     # HEALTH CHECK
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(self) -> dict[str, Any]:
         return {
-            "circuit_open":    _cb.is_open(),
+            "circuit_open": _cb.is_open(),
             "circuit_failures": _cb._failures,
-            "collections":     list(self._collection_cache),
-            "stats":           self.collection_stats(),
+            "collections": list(self._collection_cache),
+            "stats": self.collection_stats(),
         }
 
 
 def initialize_qdrant() -> None:
     """Explicit startup init — ensures both collections exist with correct dims."""
     from app.core.infra_registry import infra
+
     store = infra.get_vector_store()
     store._ensure_collection(settings.TEXT_COLLECTION_NAME, settings.TEXT_EMBEDDING_DIM)
     store._ensure_collection(settings.VISION_COLLECTION_NAME, settings.VISION_EMBEDDING_DIM)
     logger.info("qdrant_init_complete")
-
-

@@ -3,10 +3,11 @@
 Calls HybridRetriever.search() — the same code production runs.
 Scores recall@k, precision@k, MRR, nDCG, context_precision, hit_rate.
 """
+
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List
+from typing import Any
 
 from app.eval.config import EvalConfig
 from app.eval.datasets.gold_loader import load_gold
@@ -56,7 +57,7 @@ def run_retrieval_suite(cfg: EvalConfig) -> SuiteResult:
 
     # Load gold rows from all text-based modalities (or a single one if filtered)
     _mods = [cfg.modality] if getattr(cfg, "modality", None) else _RETRIEVAL_MODALITIES
-    gold_rows: List[Dict[str, Any]] = []
+    gold_rows: list[dict[str, Any]] = []
     for mod in _mods:
         try:
             for r in load_gold(mod, gold_dir=cfg.gold_dir):
@@ -78,8 +79,8 @@ def run_retrieval_suite(cfg: EvalConfig) -> SuiteResult:
         )
         return result
 
-    eval_results: List[Dict[str, Any]] = []
-    latencies: List[float] = []
+    eval_results: list[dict[str, Any]] = []
+    latencies: list[float] = []
 
     for row in gold_rows:
         query = row["query"]
@@ -115,14 +116,16 @@ def run_retrieval_suite(cfg: EvalConfig) -> SuiteResult:
             elif cid is not None:
                 retrieved_ids.append(str(cid))
 
-        eval_results.append({
-            "query": query,
-            "retrieved_ids": retrieved_ids,
-            "retrieved_docs": retrieved,
-            "relevant_ids": relevant_ids,
-            "row_id": row["id"],
-            "tags": row.get("tags", []),
-        })
+        eval_results.append(
+            {
+                "query": query,
+                "retrieved_ids": retrieved_ids,
+                "retrieved_docs": retrieved,
+                "relevant_ids": relevant_ids,
+                "row_id": row["id"],
+                "tags": row.get("tags", []),
+            }
+        )
 
     # Compute aggregated metrics
     metrics = aggregate_retrieval_metrics(eval_results, k5=5, k10=10)

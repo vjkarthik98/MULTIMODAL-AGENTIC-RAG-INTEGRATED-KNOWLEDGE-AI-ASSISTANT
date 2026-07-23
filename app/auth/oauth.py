@@ -10,15 +10,15 @@ Flow:
                                    → issue our own JWT pair
                                    → return TokenPair to client
 """
+
 from __future__ import annotations
 
 import os
 import secrets
-from typing import Optional
+from datetime import datetime, timezone
 from urllib.parse import urlencode
 
 import httpx
-from datetime import datetime, timezone
 
 from app.utils.logger import get_logger
 
@@ -26,14 +26,14 @@ logger = get_logger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-GOOGLE_CLIENT_ID: Optional[str]     = os.getenv("GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET: Optional[str] = os.getenv("GOOGLE_CLIENT_SECRET")
-OAUTH_REDIRECT_URI: str             = os.getenv(
+GOOGLE_CLIENT_ID: str | None = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET: str | None = os.getenv("GOOGLE_CLIENT_SECRET")
+OAUTH_REDIRECT_URI: str = os.getenv(
     "OAUTH_REDIRECT_URI",
     "http://localhost:8000/auth/callback/google",
 )
 
-GOOGLE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 
@@ -49,13 +49,16 @@ def google_oauth_enabled() -> bool:
 
 # ── Step 1 — Build the Google login URL ───────────────────────────────────────
 
+
 def build_google_auth_url() -> tuple[str, str]:
     """
     Build the URL to redirect the user to Google's consent screen.
     Returns (url, state) — state must be stored and verified on callback.
     """
     if not google_oauth_enabled():
-        raise RuntimeError("Google OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env")
+        raise RuntimeError(
+            "Google OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env"
+        )
 
     state = secrets.token_urlsafe(32)
 
@@ -65,13 +68,13 @@ def build_google_auth_url() -> tuple[str, str]:
     _STATE_STORE[state] = True
 
     params = {
-        "client_id":     GOOGLE_CLIENT_ID,
-        "redirect_uri":  OAUTH_REDIRECT_URI,
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": OAUTH_REDIRECT_URI,
         "response_type": "code",
-        "scope":         "openid email profile",
-        "state":         state,
-        "access_type":   "online",
-        "prompt":        "select_account",  # always show account picker
+        "scope": "openid email profile",
+        "state": state,
+        "access_type": "online",
+        "prompt": "select_account",  # always show account picker
     }
 
     url = f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
@@ -80,6 +83,7 @@ def build_google_auth_url() -> tuple[str, str]:
 
 
 # ── Step 2 — Exchange code for tokens ────────────────────────────────────────
+
 
 async def exchange_google_code(code: str, state: str) -> dict:
     """
@@ -95,11 +99,11 @@ async def exchange_google_code(code: str, state: str) -> dict:
         token_resp = await client.post(
             GOOGLE_TOKEN_URL,
             data={
-                "code":          code,
-                "client_id":     GOOGLE_CLIENT_ID,
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
                 "client_secret": GOOGLE_CLIENT_SECRET,
-                "redirect_uri":  OAUTH_REDIRECT_URI,
-                "grant_type":    "authorization_code",
+                "redirect_uri": OAUTH_REDIRECT_URI,
+                "grant_type": "authorization_code",
             },
         )
 
@@ -143,6 +147,7 @@ async def exchange_google_code(code: str, state: str) -> dict:
 
 # ── Step 3 — Get or create user ───────────────────────────────────────────────
 
+
 def get_or_create_oauth_user(email: str, provider: str):
     """
     Account-linking login (Option B):
@@ -153,8 +158,8 @@ def get_or_create_oauth_user(email: str, provider: str):
 
     Returns UserPublic.
     """
-    from app.auth.service import _get_mongo_collection, _doc_to_public
     from app.auth.models import UserInDB
+    from app.auth.service import _doc_to_public, _get_mongo_collection
 
     col = _get_mongo_collection()
     doc = col.find_one({"email": email})
@@ -169,8 +174,8 @@ def get_or_create_oauth_user(email: str, provider: str):
                 {"email": email},
                 {
                     "$addToSet": {"auth_providers": provider},
-                    "$unset":    {"oauth_only": ""},   # remove legacy flag
-                    "$set":      {"last_login": datetime.now(timezone.utc)},
+                    "$unset": {"oauth_only": ""},  # remove legacy flag
+                    "$set": {"last_login": datetime.now(timezone.utc)},
                 },
             )
             logger.info(

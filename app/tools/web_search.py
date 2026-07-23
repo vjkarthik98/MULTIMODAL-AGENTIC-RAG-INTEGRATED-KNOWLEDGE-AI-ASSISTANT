@@ -4,7 +4,7 @@ import hashlib
 import re as _re
 import time
 import unicodedata
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 import structlog
 from opentelemetry import trace
@@ -42,7 +42,7 @@ _api_duration = Histogram(
 _semaphore = asyncio.Semaphore(5)
 
 # LOW QUALITY DOMAIN BLOCKLIST
-_BLOCKED_DOMAINS: Set[str] = {
+_BLOCKED_DOMAINS: set[str] = {
     "pinterest.com",
     "quora.com",
     "reddit.com",
@@ -57,13 +57,13 @@ _BLOCKED_DOMAINS: Set[str] = {
 }
 
 # FINANCE DOMAIN SCORE BOOST (Phase 7)
-_FINANCE_BOOST_DOMAINS: Dict[str, float] = {
-    "sec.gov":       1.30,
-    "ft.com":        1.20,
-    "reuters.com":   1.20,
+_FINANCE_BOOST_DOMAINS: dict[str, float] = {
+    "sec.gov": 1.30,
+    "ft.com": 1.20,
+    "reuters.com": 1.20,
     "bloomberg.com": 1.20,
-    "wsj.com":       1.15,
-    "cnbc.com":      1.10,
+    "wsj.com": 1.15,
+    "cnbc.com": 1.10,
     "marketwatch.com": 1.10,
 }
 # Finance query detection for topic= param and freshness filter
@@ -80,7 +80,7 @@ def _is_finance_query(query: str) -> bool:
     return bool(_FINANCE_QUERY_RE.search(query))
 
 
-def _parse_date(date_str: str) -> Optional[datetime.date]:
+def _parse_date(date_str: str) -> datetime.date | None:
     for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"):
         try:
             return datetime.datetime.strptime(date_str[:19], fmt).date()
@@ -94,9 +94,10 @@ def _parse_date(date_str: str) -> Optional[datetime.date]:
 
 # NORMALIZE QUERY
 
+
 def _normalize(query: str) -> str:
     query = unicodedata.normalize("NFC", str(query or ""))
-    return " ".join(query.strip().split())[:settings.MAX_PROMPT_CHARS]
+    return " ".join(query.strip().split())[: settings.MAX_PROMPT_CHARS]
 
 
 # WEB ANSWER CLEANER — the small GGUF model sometimes narrates raw search
@@ -106,7 +107,7 @@ def _normalize(query: str) -> str:
 # referential "the article mentions" phrasing, leaving a clean factual answer.
 _WEB_NARRATION_RE = _re.compile(
     r"^\s*(?:and\s+)?here'?s what (?:we|i) (?:found|have)\b[.:]?\s*"
-    r"|^\s*the question\s*:?\s*[^?]*\?\s*"                # echoed "The question: ...?"
+    r"|^\s*the question\s*:?\s*[^?]*\?\s*"  # echoed "The question: ...?"
     r"|\bin this article,?\s*it is stated that\s*"
     r"|\bthe article (?:also )?(?:mentions|states|notes) that\s*"
     r"|\bit (?:also )?mentions that\s*"
@@ -117,7 +118,8 @@ _WEB_NARRATION_RE = _re.compile(
 )
 # "The answer, according to X, is" → "according to X, it is"  (keeps attribution).
 _WEB_ANSWER_REPHRASE_RE = _re.compile(
-    r'\bthe answer,?\s*according to\s+([^,]+?),?\s*is\b', _re.IGNORECASE,
+    r'\bthe answer,?\s*according to\s+([^,]+?),?\s*is\b',
+    _re.IGNORECASE,
 )
 _WEB_ANSWER_PLAIN_RE = _re.compile(r'\bthe answer\s+is\b', _re.IGNORECASE)
 # Runs of short pipe-separated metadata cells: "| 1:30 AM PST | Dec 28, 2025 |
@@ -137,7 +139,7 @@ def _clean_web_answer(text: str) -> str:
     if not text:
         return text
     out = text.strip()
-    out = _WEB_PIPE_META_RE.sub(" ", out)             # strip article metadata runs
+    out = _WEB_PIPE_META_RE.sub(" ", out)  # strip article metadata runs
     out = _WEB_ANSWER_REPHRASE_RE.sub(r'according to \1, it is', out)
     out = _WEB_ANSWER_PLAIN_RE.sub('it is', out)
     # Remove narration intros / self-references anywhere they appear (may chain).
@@ -148,16 +150,16 @@ def _clean_web_answer(text: str) -> str:
             break
         out = new
     out = _re.sub(r'^\s*answers?\s*:\s*', '', out, flags=_re.IGNORECASE)  # "Answer:" prefix
-    out = _re.sub(r'^\s*[:\-—|]\s*', '', out)          # leading stray punctuation
+    out = _re.sub(r'^\s*[:\-—|]\s*', '', out)  # leading stray punctuation
     out = _re.sub(r'\s{2,}', ' ', out).strip()
     # Re-capitalise the first letter of each sentence (clause removals can leave
     # a lowercase word exposed after a period).
-    out = _re.sub(r'(^|[.!?]\s+)([a-z])',
-                  lambda m: m.group(1) + m.group(2).upper(), out)
+    out = _re.sub(r'(^|[.!?]\s+)([a-z])', lambda m: m.group(1) + m.group(2).upper(), out)
     return out
 
 
 # SHA-256 HASH FOR DEDUP
+
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text[:300].encode("utf-8")).hexdigest()
@@ -186,7 +188,7 @@ def _recover_truncated_title(doc: str, truncated_head: str) -> str:
 
     idx = doc.lower().find(anchor, len(truncated_head))
     if idx != -1:
-        window = doc[idx: idx + 200]
+        window = doc[idx : idx + 200]
         stop = window.find(' ... ')
         if stop == -1:
             stop = window.find(' … ')
@@ -237,14 +239,17 @@ def _title_from_doc(doc: str) -> str:
 
 # SSRF GUARD — delegates to consolidated ssrf.py (Phase 26)
 
+
 def _is_ssrf_risk(url: str) -> bool:
     from app.guardrails.ssrf import is_ssrf_risk
+
     return is_ssrf_risk(url)
 
 
 # DOMAIN BLOCK CHECK
 
-def _is_blocked(url: Optional[str]) -> bool:
+
+def _is_blocked(url: str | None) -> bool:
     if not url:
         return False
     if _is_ssrf_risk(url):
@@ -255,18 +260,21 @@ def _is_blocked(url: Optional[str]) -> bool:
 
 # INJECTION SANITIZATION FOR SEARCH QUERIES
 
+
 def _sanitize_query(query: str) -> str:
     from app.guardrails.input_guard import sanitize as _guard_sanitize
+
     return _guard_sanitize(query, surface="web_search")
 
 
 # RESULT QUALITY SCORING
 
-def _quality_score(result: Dict, finance_query: bool = False) -> float:
-    score   = float(result.get("score", 0.5))
+
+def _quality_score(result: dict, finance_query: bool = False) -> float:
+    score = float(result.get("score", 0.5))
     content = str(result.get("content", "") or "")
-    title   = str(result.get("title", "") or "")
-    url     = str(result.get("url", "") or "")
+    title = str(result.get("title", "") or "")
+    url = str(result.get("url", "") or "")
 
     # LENGTH BONUS
     if len(content) > 500:
@@ -297,11 +305,12 @@ class WebSearchTool:
             raise ValueError("TAVILY_API_KEY_MISSING")
 
         from tavily import TavilyClient
+
         self.client = TavilyClient(api_key=settings.TAVILY_API_KEY)
 
-        self.max_results       = settings.WEB_MAX_RESULTS
-        self.max_docs          = settings.WEB_MAX_DOCS
-        self.max_doc_chars     = settings.WEB_DOC_MAX_CHARS
+        self.max_results = settings.WEB_MAX_RESULTS
+        self.max_docs = settings.WEB_MAX_DOCS
+        self.max_doc_chars = settings.WEB_DOC_MAX_CHARS
         self.max_context_chars = settings.WEB_CONTEXT_MAX_CHARS
 
         logger.info("web_search_tool_initialized")
@@ -313,7 +322,7 @@ class WebSearchTool:
         query: str,
         context: Any = None,
         session_id: str = "default",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
 
         start = time.time()
 
@@ -332,12 +341,12 @@ class WebSearchTool:
                     return self._empty()
 
                 # DETECT FINANCE QUERY FOR TOPIC PARAMETER + FRESHNESS FILTER
-                is_finance      = _is_finance_query(query)
-                has_year        = bool(_YEAR_RE.search(query))
+                is_finance = _is_finance_query(query)
+                has_year = bool(_YEAR_RE.search(query))
 
                 # TAVILY API CALL
-                t_api      = time.time()
-                raw        = self._search(query, session_id, is_finance=is_finance)
+                t_api = time.time()
+                raw = self._search(query, session_id, is_finance=is_finance)
                 api_latency = round(time.time() - t_api, 3)
 
                 _api_duration.observe(api_latency)
@@ -362,18 +371,18 @@ class WebSearchTool:
                     processed["_raw_docs"],
                     processed["_raw_sources"],
                 )
-                processed["documents"] = reranked_docs[:self.max_docs]
-                processed["sources"]   = reranked_sources[:self.max_docs]
+                processed["documents"] = reranked_docs[: self.max_docs]
+                processed["sources"] = reranked_sources[: self.max_docs]
                 # Article titles, aligned 1:1 with sources (docs are "Title: content").
-                processed["titles"]    = [_title_from_doc(d) for d in processed["documents"]]
+                processed["titles"] = [_title_from_doc(d) for d in processed["documents"]]
 
                 # LLM SUMMARIZATION
-                t_llm       = time.time()
-                answer      = self._summarize(query, processed["documents"], session_id)
+                t_llm = time.time()
+                answer = self._summarize(query, processed["documents"], session_id)
                 llm_latency = round(time.time() - t_llm, 3)
 
-                confidence  = self._confidence(processed)
-                latency     = round(time.time() - start, 3)
+                confidence = self._confidence(processed)
+                latency = round(time.time() - start, 3)
 
                 _search_duration.labels(status="success").observe(latency)
                 _search_results_count.observe(len(processed["documents"]))
@@ -392,21 +401,21 @@ class WebSearchTool:
                 )
 
                 return {
-                    "answer":    answer,
-                    "sources":   processed["sources"],
-                    "titles":    processed.get("titles", []),
+                    "answer": answer,
+                    "sources": processed["sources"],
+                    "titles": processed.get("titles", []),
                     "documents": processed["documents"],
                     "confidence": confidence,
                     "metadata": {
-                        "results_used":  len(processed["documents"]),
-                        "api_latency":   api_latency,
-                        "llm_latency":   llm_latency,
+                        "results_used": len(processed["documents"]),
+                        "api_latency": api_latency,
+                        "llm_latency": llm_latency,
                         "total_latency": latency,
                     },
                 }
 
             except Exception as exc:
-                latency    = round(time.time() - start, 3)
+                latency = round(time.time() - start, 3)
                 error_type = type(exc).__name__
 
                 _search_duration.labels(status="error").observe(latency)
@@ -430,9 +439,9 @@ class WebSearchTool:
         wait=wait_exponential(multiplier=1, min=1, max=4),
         reraise=True,
     )
-    def _search(self, query: str, session_id: str = "", is_finance: bool = False) -> Dict:
+    def _search(self, query: str, session_id: str = "", is_finance: bool = False) -> dict:
         try:
-            kwargs: Dict[str, Any] = dict(
+            kwargs: dict[str, Any] = dict(
                 query=query,
                 search_depth=settings.WEB_SEARCH_DEPTH,
                 max_results=self.max_results,
@@ -452,16 +461,16 @@ class WebSearchTool:
 
     def _process(
         self,
-        response: Dict,
+        response: dict,
         is_finance: bool = False,
         has_year: bool = False,
-    ) -> Dict[str, List]:
-        documents: List[str]  = []
-        sources:   List[str]  = []
-        seen:      set        = set()
+    ) -> dict[str, list]:
+        documents: list[str] = []
+        sources: list[str] = []
+        seen: set = set()
 
         results = response.get("results", [])
-        cutoff  = (datetime.date.today() - datetime.timedelta(days=_FRESHNESS_CUTOFF_DAYS))
+        cutoff = datetime.date.today() - datetime.timedelta(days=_FRESHNESS_CUTOFF_DAYS)
 
         # SORT BY QUALITY SCORE (with finance domain boost when applicable)
         results = sorted(
@@ -471,10 +480,10 @@ class WebSearchTool:
         )
 
         for r in results:
-            url        = r.get("url", "")
-            content    = str(r.get("content", "") or "").strip()
-            title      = str(r.get("title", "") or "").strip()
-            pub_date   = r.get("published_date") or r.get("published_at") or ""
+            url = r.get("url", "")
+            content = str(r.get("content", "") or "").strip()
+            title = str(r.get("title", "") or "").strip()
+            pub_date = r.get("published_date") or r.get("published_at") or ""
 
             # SSRF + BLOCKED DOMAIN GUARD
             if _is_blocked(url):
@@ -492,7 +501,7 @@ class WebSearchTool:
 
             # PREPEND TITLE FOR BETTER CONTEXT
             full_text = f"{title}: {content}" if title else content
-            text      = full_text[:self.max_doc_chars]
+            text = full_text[: self.max_doc_chars]
 
             h = _hash(text)
             if h in seen:
@@ -505,8 +514,8 @@ class WebSearchTool:
                 sources.append(url)
 
         return {
-            "documents": documents[:self.max_docs],
-            "sources":   list(dict.fromkeys(sources))[:self.max_docs],
+            "documents": documents[: self.max_docs],
+            "sources": list(dict.fromkeys(sources))[: self.max_docs],
             "_raw_docs": documents,  # kept for reranking
             "_raw_sources": list(dict.fromkeys(sources)),
         }
@@ -514,14 +523,15 @@ class WebSearchTool:
     def _rerank_web_docs(
         self,
         query: str,
-        documents: List[str],
-        sources: List[str],
-    ) -> tuple[List[str], List[str]]:
+        documents: list[str],
+        sources: list[str],
+    ) -> tuple[list[str], list[str]]:
         """Rerank web documents by relevance to the query using CrossEncoder."""
         if len(documents) <= 1:
             return documents, sources
         try:
             from app.core.model_loader import model_loader
+
             reranker = model_loader.get_reranker()
             if reranker is None:
                 return documents, sources
@@ -532,8 +542,8 @@ class WebSearchTool:
                 key=lambda x: x[0],
                 reverse=True,
             )
-            docs_out    = [r[1] for r in ranked][:self.max_docs]
-            sources_out = [r[2] for r in ranked if r[2]][:self.max_docs]
+            docs_out = [r[1] for r in ranked][: self.max_docs]
+            sources_out = [r[2] for r in ranked if r[2]][: self.max_docs]
             return docs_out, sources_out
         except Exception as exc:
             logger.warning("web_rerank_failed", error=str(exc))
@@ -544,11 +554,11 @@ class WebSearchTool:
     def _summarize(
         self,
         query: str,
-        docs: List[str],
+        docs: list[str],
         session_id: str = "default",
     ) -> str:
 
-        context = "\n\n".join(docs)[:self.max_context_chars]
+        context = "\n\n".join(docs)[: self.max_context_chars]
 
         instruction = (
             "You are a web research assistant. Using ONLY the web search results "
@@ -567,13 +577,13 @@ class WebSearchTool:
             "on available data'.\n\n"
         )
 
-        body    = f"WEB RESULTS:\n{context}\n\nQUERY:\n{query}\n\nAnswer:"
+        body = f"WEB RESULTS:\n{context}\n\nQUERY:\n{query}\n\nAnswer:"
         allowed = settings.MAX_PROMPT_CHARS - len(instruction) - 50
-        prompt  = instruction + body[:max(allowed, 0)]
+        prompt = instruction + body[: max(allowed, 0)]
 
         try:
-            llm      = model_loader.get_llm()
-            t_start  = time.time()
+            llm = model_loader.get_llm()
+            t_start = time.time()
 
             response = llm.generate(
                 prompt,
@@ -604,7 +614,7 @@ class WebSearchTool:
 
     # CONFIDENCE SCORING
 
-    def _confidence(self, processed: Dict) -> float:
+    def _confidence(self, processed: dict) -> float:
         n = len(processed.get("documents", []))
         if n >= 5:
             return 0.85
@@ -616,24 +626,24 @@ class WebSearchTool:
 
     # EMPTY RESPONSE
 
-    def _empty(self) -> Dict[str, Any]:
+    def _empty(self) -> dict[str, Any]:
         return {
-            "answer":    "No relevant results found.",
-            "sources":   [],
+            "answer": "No relevant results found.",
+            "sources": [],
             "documents": [],
             "confidence": 0.3,
-            "metadata":  {},
+            "metadata": {},
         }
 
     # ERROR RESPONSE
 
-    def _error(self, msg: str) -> Dict[str, Any]:
+    def _error(self, msg: str) -> dict[str, Any]:
         return {
-            "answer":    "Search failed.",
-            "sources":   [],
+            "answer": "Search failed.",
+            "sources": [],
             "documents": [],
             "confidence": 0.2,
-            "metadata":  {"error": msg},
+            "metadata": {"error": msg},
         }
 
     # ASYNC EXECUTE WRAPPER
@@ -643,11 +653,10 @@ class WebSearchTool:
         query: str,
         context: Any = None,
         session_id: str = "default",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
 
         async with _semaphore:
             return await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self.execute(query, context, session_id),
             )
-

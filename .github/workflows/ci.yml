@@ -1,0 +1,89 @@
+name: CI
+
+# Fast, hermetic checks — lint, types, unit tests. No models, no GPU, no
+# external services. This is the trust signal that gates every PR; the
+# RAG-quality gate lives in eval-gate.yml (needs real data/infra — see there).
+#
+# paths-ignore: a doc-only PR (README/CHANGELOG/*.md) can't affect lint,
+# types, or test results, so skip the run entirely rather than burning a
+# few minutes proving nothing changed. NOTE for whenever branch protection
+# gets configured (not yet, per docs/runbooks/ci-cd.md): if this job is set
+# as a "required" status check, a PR that ONLY touches an ignored path will
+# never get a check result and can get stuck permanently pending, not
+# auto-passed — see docs/runbooks/ci-cd.md for the fix (a companion
+# always-succeeds job with the same name, GitHub's documented workaround).
+on:
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint-type-test:
+    name: lint + typecheck + unit (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    # Defense in depth alongside pytest's own --timeout=120 per-test cap:
+    # this bounds the WHOLE job (a hung `pip install`, not just a hung
+    # test), so a stuck run fails within minutes instead of running until
+    # GitHub's default 6-hour ceiling.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
+    env:
+      ENV: test
+      AUTH_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # Runtime deps are needed for import-time collection (app/core/config.py
+      # etc. are plain `os.getenv(..., default)` — no required secrets — but
+      # the modules themselves still need fastapi/pydantic/etc. importable).
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e ".[dev]"
+
+      # ui/ is a Vite/React/JS project (no .py files) — Python lint scope is
+      # app/ only, matching pyproject.toml's own [tool.setuptools] package scope.
+      - name: ruff
+        run: ruff check app/
+
+      - name: black --check
+        run: black --check app/
+
+      - name: isort --check
+        run: isort --check app/
+
+      - name: mypy
+        run: mypy app/
+
+      - name: pytest -m unit
+        run: pytest tests/ -m unit -q --cov=app --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage
+        if: matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 14

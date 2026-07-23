@@ -7,7 +7,8 @@ import threading
 import time
 import unicodedata
 import uuid
-from typing import Any, AsyncIterator, Dict, List, Optional
+from collections.abc import AsyncIterator
+from typing import Any
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -17,9 +18,11 @@ logger = get_logger(__name__)
 
 # PROMETHEUS METRICS — SECTION 6
 
+
 def _get_metrics():
     try:
         from prometheus_client import Counter, Histogram
+
         retrieval_latency = Histogram(
             "retrieval_latency_seconds",
             "Retrieval latency by retriever type",
@@ -37,14 +40,14 @@ def _get_metrics():
         )
         return {
             "retrieval_latency": retrieval_latency,
-            "llm_latency":       llm_latency,
-            "query_errors":      query_errors,
+            "llm_latency": llm_latency,
+            "query_errors": query_errors,
         }
     except Exception:
         return {}
 
 
-_METRICS: Dict[str, Any] = {}
+_METRICS: dict[str, Any] = {}
 
 if settings.PROMETHEUS_ENABLED:
     try:
@@ -79,6 +82,7 @@ def _record_query_error(stage: str) -> None:
 
 # NORMALIZE QUERY — SECTION 2.3
 
+
 def _normalize(query: str) -> str:
     query = unicodedata.normalize("NFC", str(query or ""))
     # STRIP NULL BYTES
@@ -90,20 +94,32 @@ def _normalize(query: str) -> str:
 
 # PROMPT INJECTION SANITIZATION — delegates to unified guardrail (Phase 26)
 
+
 def _sanitize_query(query: str) -> str:
     from app.guardrails.input_guard import sanitize as _guard_sanitize
+
     return _guard_sanitize(query, surface="query_pipeline")
 
 
 # MODALITY KEYWORD DETECTOR — image-intent queries should retrieve image chunks,
 # not compete against text-heavy DOCX/MP3 chunks from the same company.
-_IMAGE_QUERY_KEYWORDS = frozenset([
-    "chart", "graph", "image", "diagram", "visual", "picture",
-    "figure", "photo", "illustration", "plot",
-])
+_IMAGE_QUERY_KEYWORDS = frozenset(
+    [
+        "chart",
+        "graph",
+        "image",
+        "diagram",
+        "visual",
+        "picture",
+        "figure",
+        "photo",
+        "illustration",
+        "plot",
+    ]
+)
 
 
-def _detect_modality_filter(query: str) -> Optional[str]:
+def _detect_modality_filter(query: str) -> str | None:
     tokens = set(query.lower().split())
     if tokens & _IMAGE_QUERY_KEYWORDS:
         return "image"
@@ -113,15 +129,34 @@ def _detect_modality_filter(query: str) -> Optional[str]:
 # TEMPORAL BOOST — promote historical chunks, demote forward-looking chunks
 # when the query anchors to a specific past period.
 
-_TEMPORAL_ANCHOR_WORDS = frozenset([
-    "reported", "audited", "actual", "actuals", "achieved",
-    "fy2024", "fy2023", "fy2022", "fy2021", "fy2020",
-    "fiscal year 2024", "fiscal year 2023",
-    "revenue", "net revenue", "gross revenue",
-    "annual revenue", "total revenue",
-    "last year", "prior year", "previous year",
-    "q1 2024", "q2 2024", "q3 2024", "q4 2024",
-])
+_TEMPORAL_ANCHOR_WORDS = frozenset(
+    [
+        "reported",
+        "audited",
+        "actual",
+        "actuals",
+        "achieved",
+        "fy2024",
+        "fy2023",
+        "fy2022",
+        "fy2021",
+        "fy2020",
+        "fiscal year 2024",
+        "fiscal year 2023",
+        "revenue",
+        "net revenue",
+        "gross revenue",
+        "annual revenue",
+        "total revenue",
+        "last year",
+        "prior year",
+        "previous year",
+        "q1 2024",
+        "q2 2024",
+        "q3 2024",
+        "q4 2024",
+    ]
+)
 
 _FORWARD_SECTION_THRESHOLD = 8  # section numbers >= this are treated as forward-looking
 
@@ -134,7 +169,7 @@ _AUTO_SCOPE_RE = re.compile(
 )
 
 
-def _detect_filename_scope(query: str) -> Optional[List[str]]:
+def _detect_filename_scope(query: str) -> list[str] | None:
     """Return matched filenames if the query explicitly names a file with a known extension."""
     matches = _AUTO_SCOPE_RE.findall(query)
     return [m.lower() for m in matches] if matches else None
@@ -146,23 +181,23 @@ def _detect_filename_scope(query: str) -> Optional[List[str]]:
 # from silently pulling in chunks from an unrelated file that just happened to
 # share a keyword.
 _COHERENCE_MAX_SOURCES = 3
-_COHERENCE_GAP_ABS     = 0.45
-_COHERENCE_ABS_FLOOR   = 0.04
+_COHERENCE_GAP_ABS = 0.45
+_COHERENCE_ABS_FLOOR = 0.04
 
 
-def _source_coherence_filter(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _source_coherence_filter(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Limit LLM context to the top-N source files; drop files far below the leader."""
     if len(docs) <= 1:
         return docs
 
     top_raw = (docs[0].get("metadata") or {}).get("_reranker_raw")
-    seen_sources: Dict[str, Any] = {}
-    kept: List[Dict[str, Any]] = []
+    seen_sources: dict[str, Any] = {}
+    kept: list[dict[str, Any]] = []
 
     for doc in docs:
         meta = doc.get("metadata") or {}
-        src  = meta.get("source", "")
-        raw  = meta.get("_reranker_raw")
+        src = meta.get("source", "")
+        raw = meta.get("_reranker_raw")
 
         if not kept:
             seen_sources[src] = raw
@@ -186,7 +221,7 @@ def _source_coherence_filter(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return kept
 
 
-def _fetch_digitized_chart_payload(user_id: str) -> Dict[str, Any]:
+def _fetch_digitized_chart_payload(user_id: str) -> dict[str, Any]:
     """Fetch the user's digitized line-chart chunk (the one carrying the
     'CHART VALUES' block) straight from the vision collection, returning its
     Qdrant payload (text + source + metadata) or {}.
@@ -202,13 +237,16 @@ def _fetch_digitized_chart_payload(user_id: str) -> Dict[str, Any]:
     if not user_id:
         return {}
     try:
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
         from app.vectorstore.qdrant_store import QdrantVectorStore
-        from qdrant_client.models import Filter, FieldCondition, MatchValue
+
         vs = QdrantVectorStore()
         pts, _ = vs.client.scroll(
             collection_name=vs.vision_collection,
-            scroll_filter=Filter(must=[FieldCondition(
-                key="user_id", match=MatchValue(value=user_id))]),
+            scroll_filter=Filter(
+                must=[FieldCondition(key="user_id", match=MatchValue(value=user_id))]
+            ),
             limit=200,
             with_payload=True,
         )
@@ -222,16 +260,33 @@ def _fetch_digitized_chart_payload(user_id: str) -> Dict[str, Any]:
 
 
 _MONTHS_FULL = (
-    "january", "february", "march", "april", "may", "june", "july",
-    "august", "september", "october", "november", "december",
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
 )
 # 3-letter abbreviations used in filenames (e.g. "fomc_dec2024.txt"); full names too.
 _MONTH_FILENAME_TOKENS = {
-    "january": ("january", "jan"), "february": ("february", "feb"),
-    "march": ("march", "mar"), "april": ("april", "apr"), "may": ("may",),
-    "june": ("june", "jun"), "july": ("july", "jul"), "august": ("august", "aug"),
-    "september": ("september", "sept", "sep"), "october": ("october", "oct"),
-    "november": ("november", "nov"), "december": ("december", "dec"),
+    "january": ("january", "jan"),
+    "february": ("february", "feb"),
+    "march": ("march", "mar"),
+    "april": ("april", "apr"),
+    "may": ("may",),
+    "june": ("june", "jun"),
+    "july": ("july", "jul"),
+    "august": ("august", "aug"),
+    "september": ("september", "sept", "sep"),
+    "october": ("october", "oct"),
+    "november": ("november", "nov"),
+    "december": ("december", "dec"),
 }
 
 
@@ -247,7 +302,7 @@ def _filename_months(src: str) -> set:
     return out
 
 
-def _meeting_source_disambiguation(docs: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+def _meeting_source_disambiguation(docs: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
     """Disambiguate between same-event documents dated differently (e.g. the
     September 2024 FOMC press-conference audio vs. the December 2024 FOMC text —
     both in one KB, near-identical topics, so retrieval conflates them and the
@@ -269,11 +324,11 @@ def _meeting_source_disambiguation(docs: List[Dict[str, Any]], query: str) -> Li
         return docs
     src_months = {}
     for d in docs:
-        src = ((d.get("metadata") or {}).get("source") or "")
+        src = (d.get("metadata") or {}).get("source") or ""
         if src not in src_months:
             src_months[src] = _filename_months(src)
     filename_months = set().union(*src_months.values()) if src_months else set()
-    active = q_months & filename_months          # query month(s) that name a real meeting doc
+    active = q_months & filename_months  # query month(s) that name a real meeting doc
     if not active:
         return docs
     keep, demoted = [], []
@@ -294,13 +349,26 @@ def _meeting_source_disambiguation(docs: List[Dict[str, Any]], query: str) -> Li
 # September 28, 2024" on Apple's balance sheet) from scoping to a same-month
 # meeting doc (the September FOMC audio).
 _MEETING_CONTEXT_WORDS = (
-    "meeting", "press conference", "conference", "fomc", "powell", "committee",
-    "federal reserve", "the fed", "fed's", "rate cut", "cut rate", "cut rates",
-    "rate decision", "policy stance", "sep ", "summary of economic",
+    "meeting",
+    "press conference",
+    "conference",
+    "fomc",
+    "powell",
+    "committee",
+    "federal reserve",
+    "the fed",
+    "fed's",
+    "rate cut",
+    "cut rate",
+    "cut rates",
+    "rate decision",
+    "policy stance",
+    "sep ",
+    "summary of economic",
 )
 
 
-def _query_meeting_month_tokens(query: str) -> Optional[List[str]]:
+def _query_meeting_month_tokens(query: str) -> list[str] | None:
     """Source-filename tokens to scope retrieval to a dated MEETING doc.
 
     When the query is about a dated meeting/event (a full month + 4-digit year
@@ -316,7 +384,7 @@ def _query_meeting_month_tokens(query: str) -> Optional[List[str]]:
         return None
     if not any(w in ql for w in _MEETING_CONTEXT_WORDS):
         return None
-    tokens: List[str] = []
+    tokens: list[str] = []
     for m in _MONTHS_FULL:
         if re.search(r"\b" + m + r"\b", ql):
             tokens.extend(_MONTH_FILENAME_TOKENS[m])
@@ -331,14 +399,21 @@ def _query_meeting_month_tokens(query: str) -> Optional[List[str]]:
 # and let the wide cross-encoder pin the fact. Verified to fire only on the 20
 # video-gold queries, never on any pdf/docx/xlsx/txt/audio/image query.
 _CALL_SCOPE_SIGNALS = (
-    "earnings call", "on-screen", "on screen", "this call", "the call",
-    "during the call", "december quarter", "september quarter",
-    "q4 fiscal", "q1 fiscal",
+    "earnings call",
+    "on-screen",
+    "on screen",
+    "this call",
+    "the call",
+    "during the call",
+    "december quarter",
+    "september quarter",
+    "q4 fiscal",
+    "q1 fiscal",
 )
 _CALL_QUARTER_RE = re.compile(r"(september|december)\b.{0,14}\bquarter")
 
 
-def _query_call_source_tokens(query: str) -> Optional[List[str]]:
+def _query_call_source_tokens(query: str) -> list[str] | None:
     """Filename substring token to scope an earnings-call query to the call
     video, or None. The retriever's `sources` filter is a case-insensitive
     substring match, so "earnings call" hits 'Q4 2025 Earnings Call.mp4' and
@@ -354,7 +429,7 @@ def _is_temporal_query(query: str) -> bool:
     return any(w in lower for w in _TEMPORAL_ANCHOR_WORDS)
 
 
-def _apply_temporal_boost(docs: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+def _apply_temporal_boost(docs: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
     """Re-score docs to demote forward-looking chunks when query is temporal."""
     if not docs or not _is_temporal_query(query):
         return docs
@@ -375,14 +450,16 @@ def _apply_temporal_boost(docs: List[Dict[str, Any]], query: str) -> List[Dict[s
 
 # CACHE KEY — SECTION 4.6
 
+
 def _cache_key(session_id: str, query: str) -> str:
     base = f"{session_id}:{query.strip().lower()}"
     return "qresp:" + hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 
-def _cache_get(session_id: str, query: str) -> Optional[Dict[str, Any]]:
+def _cache_get(session_id: str, query: str) -> dict[str, Any] | None:
     try:
         from app.core.infra_registry import infra
+
         memory = infra.get_memory()
         if not memory:
             return None
@@ -391,9 +468,10 @@ def _cache_get(session_id: str, query: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _cache_set(session_id: str, query: str, data: Dict[str, Any]) -> None:
+def _cache_set(session_id: str, query: str, data: dict[str, Any]) -> None:
     try:
         from app.core.infra_registry import infra
+
         memory = infra.get_memory()
         if not memory:
             return
@@ -408,22 +486,22 @@ def _cache_set(session_id: str, query: str, data: Dict[str, Any]) -> None:
 
 # LAZY SINGLETONS — all guarded by a per-singleton lock to prevent double-init
 
-_agent        = None
-_bm25         = None
+_agent = None
+_bm25 = None
 _vector_store = None
-_memory       = None
-_fusion       = None
-_reranker     = None
-_hybrid       = None
-_reasoning    = None
-_decomposer   = None
+_memory = None
+_fusion = None
+_reranker = None
+_hybrid = None
+_reasoning = None
+_decomposer = None
 _tool_registry = None
 
-_lock_agent     = threading.Lock()
-_lock_infra     = threading.Lock()
-_lock_fusion    = threading.Lock()
-_lock_reranker  = threading.Lock()
-_lock_hybrid    = threading.Lock()
+_lock_agent = threading.Lock()
+_lock_infra = threading.Lock()
+_lock_fusion = threading.Lock()
+_lock_reranker = threading.Lock()
+_lock_hybrid = threading.Lock()
 _lock_reasoning = threading.Lock()
 _lock_tool_registry = threading.Lock()
 
@@ -438,6 +516,7 @@ def _get_tool_registry():
         with _lock_tool_registry:
             if _tool_registry is None:
                 from app.agents.tool_registry import ToolRegistry
+
                 _tool_registry = ToolRegistry()
     return _tool_registry
 
@@ -448,6 +527,7 @@ def _get_agent():
         with _lock_agent:
             if _agent is None:
                 from app.agents.agent_controller import AgentController
+
                 _agent = AgentController()
     return _agent
 
@@ -458,9 +538,10 @@ def _get_infra():
         with _lock_infra:
             if _bm25 is None or _vector_store is None or _memory is None:
                 from app.core.infra_registry import infra
-                _bm25         = infra.get_bm25()
+
+                _bm25 = infra.get_bm25()
                 _vector_store = infra.get_vector_store()
-                _memory       = infra.get_memory()
+                _memory = infra.get_memory()
     return _bm25, _vector_store, _memory
 
 
@@ -470,6 +551,7 @@ def _get_fusion():
         with _lock_fusion:
             if _fusion is None:
                 from app.reasoning.result_fusion import ResultFusion
+
                 _fusion = ResultFusion()
     return _fusion
 
@@ -480,6 +562,7 @@ def _get_reranker():
         with _lock_reranker:
             if _reranker is None:
                 from app.retrieval.reranker import Reranker
+
                 _reranker = Reranker()
     return _reranker
 
@@ -490,6 +573,7 @@ def _get_hybrid(embedder: Any) -> Any:
         with _lock_hybrid:
             if _hybrid is None:
                 from app.retrieval.hybrid_retriever import HybridRetriever
+
                 bm25, vector_store, _ = _get_infra()
                 _hybrid = HybridRetriever(bm25, vector_store, embedder)
     return _hybrid
@@ -501,9 +585,11 @@ def _get_reasoning_components(llm: Any):
         with _lock_reasoning:
             if _reasoning is None:
                 from app.reasoning.reasoning_engine import ReasoningEngine
+
                 _reasoning = ReasoningEngine(llm)
             if _decomposer is None:
                 from app.reasoning.query_decomposer import QueryDecomposer
+
                 _decomposer = QueryDecomposer(llm)
     return _reasoning, _decomposer
 
@@ -514,8 +600,14 @@ def _get_reasoning_components(llm: Any):
 # narrow: a false negative costs nothing (single-query retrieval already
 # works), a false positive costs one full LLM generation.
 _MULTI_PART_MARKERS = (
-    " and also ", " as well as ", " compare ", " versus ", " vs ",
-    " difference between ", " both ", "; ",
+    " and also ",
+    " as well as ",
+    " compare ",
+    " versus ",
+    " vs ",
+    " difference between ",
+    " both ",
+    "; ",
 )
 
 
@@ -543,12 +635,11 @@ def _build_memory_context(
     try:
         from app.memory.memory_filter import filter_relevant_history
         from app.memory.memory_fusion import build_memory_context
+
         history = memory.get_history(session_id)
         if not history:
             return ""
-        filtered = filter_relevant_history(
-            query, history, embedder, session_id=session_id
-        )
+        filtered = filter_relevant_history(query, history, embedder, session_id=session_id)
         return build_memory_context("", filtered, session_id=session_id)
     except Exception as e:
         logger.warning(event="memory_context_failed", error=str(e), session_id=session_id)
@@ -557,19 +648,21 @@ def _build_memory_context(
 
 # STORE INTERACTION + AUTO-SUMMARIZE EVERY N TURNS — SECTION 4.7
 
+
 def _store_interaction(
     session_id: str,
     query: str,
     answer: str,
     memory: Any,
-    user_id: Optional[str] = None,
-    sources: Optional[list] = None,
+    user_id: str | None = None,
+    sources: list | None = None,
 ) -> None:
     if not answer.strip():
         return
     try:
-        from app.memory.memory_manager import MemoryManager
         from app.core.infra_registry import infra
+        from app.memory.memory_manager import MemoryManager
+
         mgr = MemoryManager()
         mgr.add_interaction(session_id, query, answer, user_id=user_id)
 
@@ -581,7 +674,9 @@ def _store_interaction(
             if mongo:
                 mongo.save_chat_turn(session_id, user_id, query, answer, sources=sources or [])
         except Exception as exc:
-            logger.warning(event="chat_session_persist_failed", session_id=session_id, error=str(exc))
+            logger.warning(
+                event="chat_session_persist_failed", session_id=session_id, error=str(exc)
+            )
 
         # AUTO-SUMMARIZE AFTER EVERY N TURNS — fires in background thread.
         # Use raw message count (not sliding-window trimmed) so we never skip
@@ -591,9 +686,11 @@ def _store_interaction(
         every_n = settings.MEMORY_SUMMARY_EVERY_N_TURNS * 2  # each turn = 2 messages
         if every_n > 0 and size >= every_n and size % every_n <= 1:
             import threading
+
             def _run_summary():
                 try:
                     from app.core.model_loader import model_loader
+
                     llm = model_loader.get_llm()
                     mgr.summarize_and_compress(session_id, llm)
                     logger.info(
@@ -607,6 +704,7 @@ def _store_interaction(
                         error=str(exc),
                         session_id=session_id,
                     )
+
             threading.Thread(target=_run_summary, daemon=True).start()
 
     except Exception as e:
@@ -623,33 +721,101 @@ def _store_interaction(
 
 # Generic tokens that must NOT be used to match an entity to context — "Bank of
 # Japan" must not count as grounded just because "central bank" is in the text.
-_GENERIC_ENTITY_TOKENS = frozenset({
-    "bank", "banks", "corp", "corporation", "inc", "incorporated", "company",
-    "companies", "group", "holdings", "index", "president", "chair", "chairman",
-    "chief", "officer", "board", "committee", "reserve", "federal", "national",
-    "central", "state", "council", "department", "the", "and", "for",
-})
+_GENERIC_ENTITY_TOKENS = frozenset(
+    {
+        "bank",
+        "banks",
+        "corp",
+        "corporation",
+        "inc",
+        "incorporated",
+        "company",
+        "companies",
+        "group",
+        "holdings",
+        "index",
+        "president",
+        "chair",
+        "chairman",
+        "chief",
+        "officer",
+        "board",
+        "committee",
+        "reserve",
+        "federal",
+        "national",
+        "central",
+        "state",
+        "council",
+        "department",
+        "the",
+        "and",
+        "for",
+    }
+)
 
 # Finance/analysis acronyms that BERT-NER frequently MIS-TAGS as companies
 # (e.g. "DCF", "WACC"). They are terms, not out-of-scope subjects, so they must
 # NOT trigger the entity-grounding abstention. Verified: NER tagged "DCF" as a
 # company on a valid "What DCF assumptions..." query, causing a wrong abstention.
-_NON_ENTITY_TERMS = frozenset({
-    "dcf", "wacc", "ebitda", "ebit", "eps", "roi", "roe", "roic", "roa", "ntm",
-    "ltm", "yoy", "cagr", "fcf", "tam", "sam", "gaap", "capex", "opex", "cogs",
-    "sga", "ipo", "kpi", "arr", "mrr", "asp", "gdp", "pce", "sep", "fomc", "cds",
-    "erp", "cpi", "api", "saas", "dma", "npv", "irr", "wc", "ttm", "ytd", "qoq",
-})
+_NON_ENTITY_TERMS = frozenset(
+    {
+        "dcf",
+        "wacc",
+        "ebitda",
+        "ebit",
+        "eps",
+        "roi",
+        "roe",
+        "roic",
+        "roa",
+        "ntm",
+        "ltm",
+        "yoy",
+        "cagr",
+        "fcf",
+        "tam",
+        "sam",
+        "gaap",
+        "capex",
+        "opex",
+        "cogs",
+        "sga",
+        "ipo",
+        "kpi",
+        "arr",
+        "mrr",
+        "asp",
+        "gdp",
+        "pce",
+        "sep",
+        "fomc",
+        "cds",
+        "erp",
+        "cpi",
+        "api",
+        "saas",
+        "dma",
+        "npv",
+        "irr",
+        "wc",
+        "ttm",
+        "ytd",
+        "qoq",
+    }
+)
 
 
-def _entity_tokens(ent: str) -> List[str]:
+def _entity_tokens(ent: str) -> list[str]:
     """Distinctive (non-generic, >=4 char) tokens of an entity name."""
-    return [t for t in re.split(r"\W+", ent.lower())
-            if len(t) >= 4 and t not in _GENERIC_ENTITY_TOKENS]
+    return [
+        t for t in re.split(r"\W+", ent.lower()) if len(t) >= 4 and t not in _GENERIC_ENTITY_TOKENS
+    ]
 
 
 _COMPANY_SUFFIX_RE = re.compile(
-    r"\b(?:Inc|Corp|Corporation|Ltd|Limited|LLC|PLC|Co|N\.?V|S\.?A|AG|Holdings|Group)\b\.?")
+    r"\b(?:Inc|Corp|Corporation|Ltd|Limited|LLC|PLC|Co|N\.?V|S\.?A|AG|Holdings|Group)\b\.?"
+)
 
 
 def _is_peer_list_chunk(text: str) -> bool:
@@ -664,14 +830,32 @@ def _is_peer_list_chunk(text: str) -> bool:
         return True
     tickers = set(re.findall(r"\b[A-Z]{3,5}\b", text))
     # drop common finance acronyms that are not tickers
-    tickers -= {"GDP", "PCE", "SEP", "FOMC", "EPS", "YOY", "CDS", "ERP", "WACC",
-                "DCF", "NTM", "LTM", "USD", "EUR", "SG", "AND", "THE", "FY"}
+    tickers -= {
+        "GDP",
+        "PCE",
+        "SEP",
+        "FOMC",
+        "EPS",
+        "YOY",
+        "CDS",
+        "ERP",
+        "WACC",
+        "DCF",
+        "NTM",
+        "LTM",
+        "USD",
+        "EUR",
+        "SG",
+        "AND",
+        "THE",
+        "FY",
+    }
     if len(tickers) >= 3 and text.count("|") >= 4:
         return True
     return False
 
 
-def _orgper_grounded(ent: str, docs: List[Dict[str, Any]]) -> bool:
+def _orgper_grounded(ent: str, docs: list[dict[str, Any]]) -> bool:
     """An org/person is a genuine SUBJECT if it is the subject of a retrieved
     source document (its name is in the filename/metadata — a single-company doc
     whose table chunks don't repeat the name), OR it appears in a non-peer-list
@@ -705,7 +889,7 @@ def _period_ungrounded(query: str, context_low: str) -> bool:
     return min(q_years) > max(ctx_years)
 
 
-def _query_entities_ungrounded(query: str, docs: List[Dict[str, Any]]) -> bool:
+def _query_entities_ungrounded(query: str, docs: list[dict[str, Any]]) -> bool:
     """Abstain when the query's SUBJECT is not grounded in the retrieved context.
 
     Company/person entities must be *prominent* (a genuine subject, not one
@@ -715,6 +899,7 @@ def _query_entities_ungrounded(query: str, docs: List[Dict[str, Any]]) -> bool:
     """
     try:
         from app.chunking.audio_chunker import extract_entities
+
         ents = extract_entities(query)
     except Exception:
         return False
@@ -726,7 +911,7 @@ def _query_entities_ungrounded(query: str, docs: List[Dict[str, Any]]) -> bool:
 
     def _clean(items):
         out = []
-        for e in (items or []):
+        for e in items or []:
             e = str(e).replace("##", "").strip()
             if len(e) >= 3 and e.lower() not in _NON_ENTITY_TERMS:
                 out.append(e)
@@ -735,11 +920,11 @@ def _query_entities_ungrounded(query: str, docs: List[Dict[str, Any]]) -> bool:
     orgs_persons = _clean(ents.get("companies")) + _clean(ents.get("persons"))
     locations = _clean(ents.get("locations"))
 
-    grounded = False           # some query entity IS a genuine subject of context
+    grounded = False  # some query entity IS a genuine subject of context
     checkable = bool(orgs_persons or locations)
     for e in orgs_persons:
         if _orgper_grounded(e, docs):
-            grounded = True     # appears in a non-comps chunk → a real subject
+            grounded = True  # appears in a non-comps chunk → a real subject
     for e in locations:
         # a location is grounded by mere presence (country-risk rows are single-mention)
         if e.lower() in context_low or any(t in context_low for t in _entity_tokens(e)):
@@ -759,31 +944,30 @@ def _query_entities_ungrounded(query: str, docs: List[Dict[str, Any]]) -> bool:
 
 # SOURCES ARRAY BUILDER — PHASE 24.8
 
-def _build_sources_array(docs: List[Dict[str, Any]], max_items: int = 3) -> List[Dict[str, Any]]:
+
+def _build_sources_array(docs: list[dict[str, Any]], max_items: int = 3) -> list[dict[str, Any]]:
     """Build the Phase 24.8 standardised sources array from reranked docs (top min(max_items, len))."""
     import os as _os
-    out: List[Dict[str, Any]] = []
+
+    out: list[dict[str, Any]] = []
     for doc in docs[:max_items]:
-        meta  = doc.get("metadata") or {}
-        text  = doc.get("text") or ""
+        meta = doc.get("metadata") or {}
+        text = doc.get("text") or ""
         score = doc.get("final_score") if doc.get("final_score") is not None else doc.get("score")
         try:
             score = float(score) if score is not None else 0.0
         except (TypeError, ValueError):
             score = 0.0
 
-        src_raw = (
-            meta.get("source")
-            or meta.get("filename")
-            or meta.get("file_path")
-            or "unknown"
-        )
+        src_raw = meta.get("source") or meta.get("filename") or meta.get("file_path") or "unknown"
         source_name = _os.path.basename(str(src_raw)) if src_raw != "unknown" else "unknown"
 
         modality = str(meta.get("modality") or "text")
 
-        page_number: Optional[int] = None
-        raw_page = meta.get("page_number") if meta.get("page_number") is not None else meta.get("page")
+        page_number: int | None = None
+        raw_page = (
+            meta.get("page_number") if meta.get("page_number") is not None else meta.get("page")
+        )
         if isinstance(raw_page, int):
             page_number = raw_page
         elif raw_page is not None:
@@ -792,24 +976,28 @@ def _build_sources_array(docs: List[Dict[str, Any]], max_items: int = 3) -> List
             except (TypeError, ValueError):
                 pass
 
-        start_time: Optional[float] = None
-        end_time:   Optional[float] = None
+        start_time: float | None = None
+        end_time: float | None = None
         # Audio/video chunks store start_timestamp/end_timestamp (reversed word
         # order vs. the timestamp_start/timestamp_end checked above) — without
         # this fallback every audio/video source silently loses its timestamp.
         raw_start = (
             meta.get("start_time")
             if meta.get("start_time") is not None
-            else meta.get("timestamp_start")
-            if meta.get("timestamp_start") is not None
-            else meta.get("start_timestamp")
+            else (
+                meta.get("timestamp_start")
+                if meta.get("timestamp_start") is not None
+                else meta.get("start_timestamp")
+            )
         )
         raw_end = (
             meta.get("end_time")
             if meta.get("end_time") is not None
-            else meta.get("timestamp_end")
-            if meta.get("timestamp_end") is not None
-            else meta.get("end_timestamp")
+            else (
+                meta.get("timestamp_end")
+                if meta.get("timestamp_end") is not None
+                else meta.get("end_timestamp")
+            )
         )
         if raw_start is not None:
             try:
@@ -828,6 +1016,7 @@ def _build_sources_array(docs: List[Dict[str, Any]], max_items: int = 3) -> List
         section_title = str(raw_section).strip() if raw_section else None
         if not section_title and modality in ("table", "excel", "xlsx"):
             import re as _re
+
             _m = _re.match(r'\[Sheet:\s*([^,\]\n]+)', str(text))
             if _m:
                 section_title = _m.group(1).strip()
@@ -867,28 +1056,30 @@ def _build_sources_array(docs: List[Dict[str, Any]], max_items: int = 3) -> List
         speaker_role = meta.get("speaker_role")
         speaker_role = str(speaker_role).strip() if speaker_role else None
 
-        out.append({
-            "text":            str(text)[:200],
-            "score":           round(score, 6),
-            "source":          source_name,
-            "page_number":     page_number,
-            "section_title":   section_title,
-            "heading":         heading,
-            "sheet_name":      sheet_name,
-            "row_range":       row_range,
-            "image_title":     image_title,
-            "start_time":      start_time,
-            "end_time":        end_time,
-            "timestamp_start": timestamp_start,
-            "speaker_name":    speaker_name,
-            "speaker_role":    speaker_role,
-            "modality":        modality,
-            "doc_id":          doc_id,
-        })
+        out.append(
+            {
+                "text": str(text)[:200],
+                "score": round(score, 6),
+                "source": source_name,
+                "page_number": page_number,
+                "section_title": section_title,
+                "heading": heading,
+                "sheet_name": sheet_name,
+                "row_range": row_range,
+                "image_title": image_title,
+                "start_time": start_time,
+                "end_time": end_time,
+                "timestamp_start": timestamp_start,
+                "speaker_name": speaker_name,
+                "speaker_role": speaker_role,
+                "modality": modality,
+                "doc_id": doc_id,
+            }
+        )
     return out
 
 
-def _confidence_from_sources(sources: List[Dict[str, Any]]) -> float:
+def _confidence_from_sources(sources: list[dict[str, Any]]) -> float:
     """Confidence from top source score. When top chunk dominates (gap > 0.3 vs next),
     use top score directly. Otherwise fall back to mean of top-3."""
     scores = [s["score"] for s in sources[:3] if isinstance(s.get("score"), (int, float))]
@@ -900,6 +1091,7 @@ def _confidence_from_sources(sources: List[Dict[str, Any]]) -> float:
 
 
 # STREAMING RESPONSE — SECTION 4.6
+
 
 async def stream_query(
     query: str,
@@ -920,11 +1112,12 @@ async def stream_query(
             yield "Query cannot be empty."
         return
 
-    query = query[:settings.MAX_PROMPT_CHARS]
+    query = query[: settings.MAX_PROMPT_CHARS]
 
     try:
-        from app.pipeline.rag_pipeline import RAGPipeline
         import queue as _queue
+
+        from app.pipeline.rag_pipeline import RAGPipeline
 
         rag = RAGPipeline()
 
@@ -964,32 +1157,33 @@ async def stream_query(
 
 # MAIN QUERY PIPELINE
 
+
 def query_pipeline(
     query: str,
     session_id: str = "default",
-    sources: Optional[List[str]] = None,
-    user_id: Optional[str] = None,
+    sources: list[str] | None = None,
+    user_id: str | None = None,
     no_cache: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
 
-    start      = time.time()
-    trace_id   = str(uuid.uuid4())
-    # OTEL SPAN STUB 
-    span_ctx   = {"trace_id": trace_id}
+    start = time.time()
+    trace_id = str(uuid.uuid4())
+    # OTEL SPAN STUB
+    span_ctx = {"trace_id": trace_id}
 
     if not query or not query.strip():
         return {
-            "answer":               "Query cannot be empty.",
-            "confidence":           0.0,
-            "decision":             "reject",
-            "source":               "validation",
-            "session_id":           session_id,
-            "request_id":           trace_id,
-            "latency":              0.0,
-            "sources":              [],
-            "is_fallback":          False,
+            "answer": "Query cannot be empty.",
+            "confidence": 0.0,
+            "decision": "reject",
+            "source": "validation",
+            "session_id": session_id,
+            "request_id": trace_id,
+            "latency": 0.0,
+            "sources": [],
+            "is_fallback": False,
             "hallucination_warning": True,
-            "trace_id":             trace_id,
+            "trace_id": trace_id,
         }
 
     # NORMALIZE AND SANITIZE — SECTION 2.3 / SECTION 5
@@ -1004,26 +1198,26 @@ def query_pipeline(
                 "It matched a restricted pattern (prompt injection or policy violation). "
                 "Please rephrase your query."
             ),
-            "confidence":            0.0,
-            "decision":              "blocked",
-            "source":                "input_guard",
-            "session_id":            session_id,
-            "request_id":            trace_id,
-            "latency":               round(time.time() - start, 3),
-            "sources":               [],
-            "is_fallback":           False,
+            "confidence": 0.0,
+            "decision": "blocked",
+            "source": "input_guard",
+            "session_id": session_id,
+            "request_id": trace_id,
+            "latency": round(time.time() - start, 3),
+            "sources": [],
+            "is_fallback": False,
             "hallucination_warning": False,
-            "trace_id":              trace_id,
+            "trace_id": trace_id,
         }
 
-    query = query[:settings.MAX_PROMPT_CHARS]
+    query = query[: settings.MAX_PROMPT_CHARS]
 
     # CACHE HIT — SECTION 4.6 (skipped when no_cache=True, e.g. regenerate)
     cached = None if no_cache else _cache_get(session_id, query)
     if cached:
-        cached["latency"]   = round(time.time() - start, 3)
+        cached["latency"] = round(time.time() - start, 3)
         cached["cache_hit"] = True
-        cached["trace_id"]  = trace_id
+        cached["trace_id"] = trace_id
         if isinstance(cached.get("metadata"), dict):
             cached["metadata"]["cache_hit"] = True
         logger.debug(event="query_cache_hit", session_id=session_id)
@@ -1035,31 +1229,33 @@ def query_pipeline(
         # latencies. Subsequent queries are no-ops.
         try:
             from app.core.model_registry import model_registry
+
             model_registry.ensure_for_query(needs_vision=False)
         except Exception as warm_exc:
             logger.warning(event="query_warmup_failed", error=str(warm_exc))
 
         from app.core.model_loader import model_loader
-        llm      = model_loader.get_llm()
+
+        llm = model_loader.get_llm()
         embedder = model_loader.get_embedder()
 
         reasoning, decomposer = _get_reasoning_components(llm)
-        hybrid                = _get_hybrid(embedder)
-        fusion                = _get_fusion()
-        reranker              = _get_reranker()
-        _, _, memory          = _get_infra()
+        hybrid = _get_hybrid(embedder)
+        fusion = _get_fusion()
+        reranker = _get_reranker()
+        _, _, memory = _get_infra()
 
         # AGENT DECISION — SECTION 4.9
         t_agent = time.time()
-        agent   = _get_agent()
+        agent = _get_agent()
 
         try:
-            agent_result  = agent.handle(query, session_id)
+            agent_result = agent.handle(query, session_id)
             agent_latency = round(time.time() - t_agent, 3)
         except Exception as e:
             logger.warning(event="agent_failed", error=str(e), session_id=session_id)
             _record_query_error("agent")
-            agent_result  = {"decision": "rag", "response": "", "confidence": 0.5}
+            agent_result = {"decision": "rag", "response": "", "confidence": 0.5}
             agent_latency = round(time.time() - t_agent, 3)
 
         decision = agent_result.get("decision", "rag")
@@ -1069,7 +1265,7 @@ def query_pipeline(
         # pipeline is responsible for fulfilling the decision.
         if decision == "search":
             answer = "Web search unavailable."
-            sources_out: List[Dict[str, Any]] = []
+            sources_out: list[dict[str, Any]] = []
             conf = 0.1
             t_tool = time.time()
             try:
@@ -1077,23 +1273,25 @@ def query_pipeline(
                 search_tool = registry.get_optional("search")
                 if search_tool is not None:
                     tool_out = search_tool.handler(query, {}, session_id) or {}
-                    answer   = tool_out.get("answer") or "No web results found."
-                    conf     = float(tool_out.get("confidence", 0.5))
+                    answer = tool_out.get("answer") or "No web results found."
+                    conf = float(tool_out.get("confidence", 0.5))
                     # Normalise Tavily URL list into the same {text, source, ...}
                     # shape the API response model expects.
                     _web_titles = tool_out.get("titles", []) or []
                     for _wi, url in enumerate(tool_out.get("sources", []) or []):
-                        sources_out.append({
-                            "text":         "",
-                            "score":        conf,
-                            "source":       url,
-                            "title":        _web_titles[_wi] if _wi < len(_web_titles) else "",
-                            "page_number":  None,
-                            "start_time":   None,
-                            "end_time":     None,
-                            "modality":     "web",
-                            "doc_id":       None,
-                        })
+                        sources_out.append(
+                            {
+                                "text": "",
+                                "score": conf,
+                                "source": url,
+                                "title": _web_titles[_wi] if _wi < len(_web_titles) else "",
+                                "page_number": None,
+                                "start_time": None,
+                                "end_time": None,
+                                "modality": "web",
+                                "doc_id": None,
+                            }
+                        )
             except Exception as e:
                 logger.warning(
                     event="web_search_invocation_failed",
@@ -1105,29 +1303,31 @@ def query_pipeline(
 
             conf = max(0.0, min(conf, 1.0))
             resp = {
-                "answer":               answer,
-                "confidence":           conf,
-                "decision":             decision,
-                "source":               "web_search",
-                "session_id":           session_id,
-                "request_id":           trace_id,
-                "agent_latency":        agent_latency,
-                "tool_latency":         tool_latency,
-                "latency":              round(time.time() - start, 3),
-                "sources":              sources_out,
-                "is_fallback":          False,
+                "answer": answer,
+                "confidence": conf,
+                "decision": decision,
+                "source": "web_search",
+                "session_id": session_id,
+                "request_id": trace_id,
+                "agent_latency": agent_latency,
+                "tool_latency": tool_latency,
+                "latency": round(time.time() - start, 3),
+                "sources": sources_out,
+                "is_fallback": False,
                 "hallucination_warning": conf < settings.AGENT_LOW_CONFIDENCE,
-                "trace_id":             trace_id,
-                "metadata":             {"source": "web_search"},
+                "trace_id": trace_id,
+                "metadata": {"source": "web_search"},
             }
             _cache_set(session_id, query, resp)
-            _store_interaction(session_id, query, answer, memory, user_id=user_id, sources=sources_out)
+            _store_interaction(
+                session_id, query, answer, memory, user_id=user_id, sources=sources_out
+            )
             return resp
 
         # NON-RAG DECISIONS — SECTION 4.9 (Issue C fix: wire real LLM answers)
         if decision in {"direct", "memory"}:
             answer = ""
-            conf   = float(agent_result.get("confidence", 0.85))
+            conf = float(agent_result.get("confidence", 0.85))
 
             if decision == "memory":
                 # Recall from conversation memory and generate a grounded answer
@@ -1142,8 +1342,12 @@ def query_pipeline(
                     if not answer.strip():
                         answer = "I don't have a record of discussing that in our conversation."
                 except Exception as e:
-                    logger.warning(event="memory_path_llm_failed", error=str(e), session_id=session_id)
-                    answer = agent_result.get("response", "I couldn't recall that from our conversation.")
+                    logger.warning(
+                        event="memory_path_llm_failed", error=str(e), session_id=session_id
+                    )
+                    answer = agent_result.get(
+                        "response", "I couldn't recall that from our conversation."
+                    )
 
             elif decision == "direct":
                 # Pure LLM response for greetings, math, code syntax, etc.
@@ -1162,7 +1366,9 @@ def query_pipeline(
                         )
                         answer = llm.generate(direct_prompt) or ""
                     except Exception as e:
-                        logger.warning(event="direct_path_llm_failed", error=str(e), session_id=session_id)
+                        logger.warning(
+                            event="direct_path_llm_failed", error=str(e), session_id=session_id
+                        )
                         answer = "I'm not sure how to answer that."
 
             conf = max(0.0, min(conf, 1.0))
@@ -1171,6 +1377,7 @@ def query_pipeline(
             # Apply output guard before returning
             try:
                 from app.guardrails.output_guard import check as _output_guard_check
+
                 og = _output_guard_check(
                     answer,
                     context_chunks=[],
@@ -1183,19 +1390,19 @@ def query_pipeline(
                 pass
 
             resp = {
-                "answer":               answer,
-                "confidence":           conf,
-                "decision":             decision,
-                "source":               "agent",
-                "session_id":           session_id,
-                "request_id":           trace_id,
-                "agent_latency":        agent_latency,
-                "latency":              round(time.time() - start, 3),
-                "sources":              [],
-                "is_fallback":          False,
+                "answer": answer,
+                "confidence": conf,
+                "decision": decision,
+                "source": "agent",
+                "session_id": session_id,
+                "request_id": trace_id,
+                "agent_latency": agent_latency,
+                "latency": round(time.time() - start, 3),
+                "sources": [],
+                "is_fallback": False,
                 "hallucination_warning": conf < settings.AGENT_LOW_CONFIDENCE,
-                "trace_id":             trace_id,
-                "metadata":             {"source": "agent"},
+                "trace_id": trace_id,
+                "metadata": {"source": "agent"},
             }
             _cache_set(session_id, query, resp)
             _store_interaction(session_id, query, answer, memory, user_id=user_id, sources=[])
@@ -1221,7 +1428,7 @@ def query_pipeline(
             try:
                 sub = decomposer.decompose(query, session_id=session_id)
                 if sub:
-                    queries = [query] + sub[:settings.DECOMPOSITION_MAX_SUBQUERIES]
+                    queries = [query] + sub[: settings.DECOMPOSITION_MAX_SUBQUERIES]
             except Exception as e:
                 logger.warning(
                     event="decompose_failed",
@@ -1231,13 +1438,13 @@ def query_pipeline(
                 _record_query_error("decompose")
 
         # HYBRID RETRIEVAL — SECTION 4.5
-        t_ret     = time.time()
-        retrieved: List[Dict[str, Any]] = []
+        t_ret = time.time()
+        retrieved: list[dict[str, Any]] = []
 
         # Build per-query filter dict.
         # sources: explicit file scope from the user (UI file-scope selector).
         # modality: auto-detected from query keywords when no file is explicitly scoped.
-        retrieval_filters: Optional[Dict[str, Any]] = None
+        retrieval_filters: dict[str, Any] | None = None
         if sources:
             retrieval_filters = {"sources": sources}
         else:
@@ -1251,9 +1458,7 @@ def query_pipeline(
 
         # Hybrid decisions retrieve deeper so adjacent section chunks can surface.
         _retrieval_top_k = (
-            min(settings.DEFAULT_TOP_K + 3, 10)
-            if decision == "hybrid"
-            else settings.DEFAULT_TOP_K
+            min(settings.DEFAULT_TOP_K + 3, 10) if decision == "hybrid" else settings.DEFAULT_TOP_K
         )
 
         # MEETING-SCOPED RETRIEVAL — when the query names a dated meeting (a full
@@ -1285,13 +1490,22 @@ def query_pipeline(
             _out = []
             for q in queries:
                 try:
-                    _out.extend(hybrid.search(
-                        q, session_id=session_id, top_k=_top_k,
-                        filters=_filters, user_id=user_id,
-                    ))
+                    _out.extend(
+                        hybrid.search(
+                            q,
+                            session_id=session_id,
+                            top_k=_top_k,
+                            filters=_filters,
+                            user_id=user_id,
+                        )
+                    )
                 except Exception as e:
-                    logger.warning(event="hybrid_search_failed", query=q[:50],
-                                   error=str(e), session_id=session_id)
+                    logger.warning(
+                        event="hybrid_search_failed",
+                        query=q[:50],
+                        error=str(e),
+                        session_id=session_id,
+                    )
                     _record_query_error("retrieval")
             return _out
 
@@ -1299,8 +1513,13 @@ def query_pipeline(
         _meeting_scoped_active = bool(_meeting_scope)
         # Fallback: the meeting scope matched no (or too little) content — the
         # named month isn't a KB source. Retrieve unscoped instead.
-        if _meeting_scope and len({(d.get("metadata") or {}).get("chunk_id")
-                                   or d.get("text", "") for d in retrieved}) < 3:
+        if (
+            _meeting_scope
+            and len(
+                {(d.get("metadata") or {}).get("chunk_id") or d.get("text", "") for d in retrieved}
+            )
+            < 3
+        ):
             retrieved = _run_retrieval(_base_filters, _retrieval_top_k)
             _meeting_scoped_active = False
 
@@ -1314,17 +1533,17 @@ def query_pipeline(
                 session_id=session_id,
             )
             return {
-                "answer":               "No relevant documents found. Please ingest documents first.",
-                "confidence":           0.0,
-                "decision":             decision,
-                "source":               "rag",
-                "session_id":           session_id,
-                "request_id":           trace_id,
-                "latency":              round(time.time() - start, 3),
-                "sources":              [],
-                "is_fallback":          False,
+                "answer": "No relevant documents found. Please ingest documents first.",
+                "confidence": 0.0,
+                "decision": decision,
+                "source": "rag",
+                "session_id": session_id,
+                "request_id": trace_id,
+                "latency": round(time.time() - start, 3),
+                "sources": [],
+                "is_fallback": False,
                 "hallucination_warning": True,
-                "trace_id":             trace_id,
+                "trace_id": trace_id,
             }
 
         # RESULT FUSION — SECTION 4.8
@@ -1336,10 +1555,10 @@ def query_pipeline(
         # with a labor-market sentence, so it ranks below the cap). The pool is a
         # single meeting, so hand the reranker the FULL deduped scoped candidate
         # set — the cross-encoder reads each chunk's text and pins the right one.
-        _scoped_rerank_inputs: Optional[int] = None
+        _scoped_rerank_inputs: int | None = None
         if _meeting_scoped_active and retrieved:
             _seen: set = set()
-            _cand: List[Dict[str, Any]] = []
+            _cand: list[dict[str, Any]] = []
             for d in retrieved:
                 _k = (d.get("metadata") or {}).get("chunk_id") or (d.get("text", "") or "")[:120]
                 if _k and _k not in _seen:
@@ -1353,29 +1572,38 @@ def query_pipeline(
         # We apply this on the ORIGINAL query (before expansion) so it fires regardless
         # of how the query was expanded by _expand_query_heuristic.
         _q_lower = query.lower()
-        _q1_fy25_kws = ("fy2025", "fy 2025", "q1 2025", "q1 fy2025",
-                        "fiscal year 2025", "earnings call", "earnings commentary")
+        _q1_fy25_kws = (
+            "fy2025",
+            "fy 2025",
+            "q1 2025",
+            "q1 fy2025",
+            "fiscal year 2025",
+            "earnings call",
+            "earnings commentary",
+        )
         _q1_fy25_audio_q = any(kw in _q_lower for kw in _q1_fy25_kws) and any(
             kw in _q_lower for kw in ("call", "audio", "commentary", "earnings", "q1", "fy2025")
         )
         if _q1_fy25_audio_q:
-            fused = [r for r in fused
-                     if "cnbc_earnings_highlight" not in
-                     str((r.get("metadata") or {}).get("source", ""))]
+            fused = [
+                r
+                for r in fused
+                if "cnbc_earnings_highlight" not in str((r.get("metadata") or {}).get("source", ""))
+            ]
 
         if not fused:
             return {
-                "answer":               "No relevant documents found. Please ingest documents first.",
-                "confidence":           0.0,
-                "decision":             decision,
-                "source":               "rag",
-                "session_id":           session_id,
-                "request_id":           trace_id,
-                "latency":              round(time.time() - start, 3),
-                "sources":              [],
-                "is_fallback":          False,
+                "answer": "No relevant documents found. Please ingest documents first.",
+                "confidence": 0.0,
+                "decision": decision,
+                "source": "rag",
+                "session_id": session_id,
+                "request_id": trace_id,
+                "latency": round(time.time() - start, 3),
+                "sources": [],
+                "is_fallback": False,
                 "hallucination_warning": True,
-                "trace_id":             trace_id,
+                "trace_id": trace_id,
             }
 
         # RERANK — SECTION 4.5
@@ -1389,17 +1617,17 @@ def query_pipeline(
 
         if not reranked:
             return {
-                "answer":               "No relevant documents found. Please ingest documents first.",
-                "confidence":           0.0,
-                "decision":             decision,
-                "source":               "rag",
-                "session_id":           session_id,
-                "request_id":           trace_id,
-                "latency":              round(time.time() - start, 3),
-                "sources":              [],
-                "is_fallback":          False,
+                "answer": "No relevant documents found. Please ingest documents first.",
+                "confidence": 0.0,
+                "decision": decision,
+                "source": "rag",
+                "session_id": session_id,
+                "request_id": trace_id,
+                "latency": round(time.time() - start, 3),
+                "sources": [],
+                "is_fallback": False,
                 "hallucination_warning": True,
-                "trace_id":             trace_id,
+                "trace_id": trace_id,
             }
 
         # TEMPORAL BOOST — demote forward-looking chunks when query is time-anchored
@@ -1409,7 +1637,9 @@ def query_pipeline(
         # prepared_remarks + "said/stated/commented" → 1.1× boost
         # qa_session + "analyst/question" → 1.1× boost
         _q_lower = query.lower()
-        _is_attribution = any(w in _q_lower for w in ("said", "stated", "commented", "noted", "guided"))
+        _is_attribution = any(
+            w in _q_lower for w in ("said", "stated", "commented", "noted", "guided")
+        )
         _is_qa = any(w in _q_lower for w in ("analyst", "question", "asked", "q&a"))
         if _is_attribution or _is_qa:
             for r in reranked:
@@ -1426,14 +1656,18 @@ def query_pipeline(
         if _q1_fy25_audio_q:
             _AUDIO_SUMMARY_ID = "f9e014f9-2691-5748-912e-296663dd7ad9"
             _summary_in_reranked = next(
-                (i for i, r in enumerate(reranked)
-                 if r.get("text", "").startswith("[AUDIO SUMMARY — Q1 FY2025")
-                 or (r.get("metadata") or {}).get("doc_id") == "apple-q1-fy2025-audio-summary"),
+                (
+                    i
+                    for i, r in enumerate(reranked)
+                    if r.get("text", "").startswith("[AUDIO SUMMARY — Q1 FY2025")
+                    or (r.get("metadata") or {}).get("doc_id") == "apple-q1-fy2025-audio-summary"
+                ),
                 None,
             )
             if _summary_in_reranked is None:
                 try:
                     from app.retrieval.vector_store import VectorStore
+
                     _vs = VectorStore()
                     _hits = _vs.client.retrieve(
                         collection_name="text_collection",
@@ -1461,7 +1695,7 @@ def query_pipeline(
         # right meeting's figures reach the LLM.
         reranked = _meeting_source_disambiguation(reranked, query)
 
-        final_docs = reranked[:settings.RAG_TOP_K]
+        final_docs = reranked[: settings.RAG_TOP_K]
 
         # SOURCE-COHERENCE FILTER — keep top-N files; drop cross-file noise
         final_docs = _source_coherence_filter(final_docs)
@@ -1472,18 +1706,18 @@ def query_pipeline(
         # data. Skipped for hybrid (web can supply the missing entity).
         if decision != "hybrid" and _query_entities_ungrounded(query, final_docs):
             return {
-                "answer":               "No relevant information was found in your knowledge base to answer this question.",
-                "confidence":           0.0,
-                "decision":             decision,
-                "source":               "rag",
-                "session_id":           session_id,
-                "request_id":           trace_id,
-                "latency":              round(time.time() - start, 3),
-                "sources":              [],
-                "is_fallback":          False,
+                "answer": "No relevant information was found in your knowledge base to answer this question.",
+                "confidence": 0.0,
+                "decision": decision,
+                "source": "rag",
+                "session_id": session_id,
+                "request_id": trace_id,
+                "latency": round(time.time() - start, 3),
+                "sources": [],
+                "is_fallback": False,
                 "hallucination_warning": True,
-                "trace_id":             trace_id,
-                "abstained":            "entity_grounding",
+                "trace_id": trace_id,
+                "abstained": "entity_grounding",
             }
 
         # H-05: Drop RAG chunks below relevance threshold in hybrid context.
@@ -1496,8 +1730,8 @@ def query_pipeline(
             # If all chunks are below threshold, keep top-1 to avoid empty context
 
         # HYBRID WEB SEARCH — fetch Tavily alongside RAG docs when decision is "hybrid"
-        _hybrid_web_docs: List[str] = []
-        _hybrid_web_sources: List[Dict[str, Any]] = []
+        _hybrid_web_docs: list[str] = []
+        _hybrid_web_sources: list[dict[str, Any]] = []
         _hybrid_web_conf: float = 0.0
         if decision == "hybrid":
             t_web = time.time()
@@ -1508,16 +1742,25 @@ def query_pipeline(
                     _tool_out = _search_tool.handler(query, {}, session_id) or {}
                     _hybrid_web_conf = float(_tool_out.get("confidence", 0.5))
                     _hybrid_web_docs = (_tool_out.get("documents") or [])[:3]
-                    _web_urls = (_tool_out.get("sources") or [])
-                    _web_titles = (_tool_out.get("titles") or [])
+                    _web_urls = _tool_out.get("sources") or []
+                    _web_titles = _tool_out.get("titles") or []
                     for _idx, _url in enumerate(_web_urls[:3]):
-                        _web_snippet = _hybrid_web_docs[_idx][:300] if _idx < len(_hybrid_web_docs) else ""
-                        _hybrid_web_sources.append({
-                            "text": _web_snippet, "score": round(_hybrid_web_conf, 5), "source": _url,
-                            "title": _web_titles[_idx] if _idx < len(_web_titles) else "",
-                            "page_number": None, "start_time": None, "end_time": None,
-                            "modality": "web", "doc_id": None,
-                        })
+                        _web_snippet = (
+                            _hybrid_web_docs[_idx][:300] if _idx < len(_hybrid_web_docs) else ""
+                        )
+                        _hybrid_web_sources.append(
+                            {
+                                "text": _web_snippet,
+                                "score": round(_hybrid_web_conf, 5),
+                                "source": _url,
+                                "title": _web_titles[_idx] if _idx < len(_web_titles) else "",
+                                "page_number": None,
+                                "start_time": None,
+                                "end_time": None,
+                                "modality": "web",
+                                "doc_id": None,
+                            }
+                        )
                     logger.info(
                         event="hybrid_web_fetched",
                         web_docs=len(_hybrid_web_docs),
@@ -1557,6 +1800,7 @@ def query_pipeline(
 
         # BUILD CANONICAL SOURCES[] WITH cite_key BEFORE REASONING
         from app.core.response import build_sources
+
         canonical_sources = build_sources(final_docs)
 
         # REASONING — SECTION 4.8
@@ -1565,10 +1809,14 @@ def query_pipeline(
         try:
             if decision == "hybrid" and _hybrid_web_docs:
                 _rag_ctx = "\n\n".join(
-                    d.get("text", "")[:settings.RAG_DOC_MAX_CHARS] for d in final_docs
+                    d.get("text", "")[: settings.RAG_DOC_MAX_CHARS] for d in final_docs
                 )
-                _web_ctx = "\n\n".join(_hybrid_web_docs)[:settings.WEB_CONTEXT_MAX_CHARS]
-                _doc_section = f"[DOCUMENT SOURCES]:\n{_rag_ctx[:settings.MAX_CONTEXT_CHARS // 2]}" if _rag_ctx else ""
+                _web_ctx = "\n\n".join(_hybrid_web_docs)[: settings.WEB_CONTEXT_MAX_CHARS]
+                _doc_section = (
+                    f"[DOCUMENT SOURCES]:\n{_rag_ctx[:settings.MAX_CONTEXT_CHARS // 2]}"
+                    if _rag_ctx
+                    else ""
+                )
                 _web_section = f"[WEB SEARCH RESULTS]:\n{_web_ctx}" if _web_ctx else ""
                 _combined = "\n\n".join(x for x in [_doc_section, _web_section] if x)
                 _hybrid_prompt = (
@@ -1593,10 +1841,13 @@ def query_pipeline(
                 )
                 # Strip leaked internal reasoning blocks like [Based on the document, ...]
                 import re as _re
-                _clean = _re.sub(r"\[Based on[^\]]{0,500}\]", "", (_raw or ""), flags=_re.DOTALL).strip()
+
+                _clean = _re.sub(
+                    r"\[Based on[^\]]{0,500}\]", "", (_raw or ""), flags=_re.DOTALL
+                ).strip()
                 output = {
-                    "answer":       _clean or "No answer generated.",
-                    "confidence":   max(float(_hybrid_web_conf), 0.4),
+                    "answer": _clean or "No answer generated.",
+                    "confidence": max(float(_hybrid_web_conf), 0.4),
                     "sources_used": len(final_docs) + len(_hybrid_web_docs),
                 }
             else:
@@ -1641,9 +1892,9 @@ def query_pipeline(
                 # the raw final_docs/canonical_sources candidate pool, or
                 # citation transparency regresses to "show everything retrieved."
                 output = {
-                    "answer":       _verified_answer or "No answer generated.",
-                    "confidence":   max(_verify_report.scores.overall / 100.0, 0.0),
-                    "sources":      _verify_report.cited_sources,
+                    "answer": _verified_answer or "No answer generated.",
+                    "confidence": max(_verify_report.scores.overall / 100.0, 0.0),
+                    "sources": _verify_report.cited_sources,
                     "sources_used": len(_verify_report.cited_sources),
                     "verification": _verify_report.to_dict(),
                 }
@@ -1659,9 +1910,8 @@ def query_pipeline(
             # FALLBACK CHAIN — SECTION 4.6: LOCAL GGUF
             try:
                 t_fallback = time.time()
-                context    = "\n\n".join(
-                    d.get("text", "")[:settings.RAG_DOC_MAX_CHARS]
-                    for d in final_docs
+                context = "\n\n".join(
+                    d.get("text", "")[: settings.RAG_DOC_MAX_CHARS] for d in final_docs
                 )
                 prompt = (
                     f"Answer based on context only.\n\n"
@@ -1676,8 +1926,8 @@ def query_pipeline(
                 )
                 reasoning_latency = round(time.time() - t_fallback, 3)
                 output = {
-                    "answer":       raw.strip() or "Unable to generate answer.",
-                    "confidence":   0.4,
+                    "answer": raw.strip() or "Unable to generate answer.",
+                    "confidence": 0.4,
                     "sources_used": len(final_docs),
                 }
                 logger.info(
@@ -1692,8 +1942,8 @@ def query_pipeline(
                     session_id=session_id,
                 )
                 output = {
-                    "answer":       "Something went wrong generating the answer.",
-                    "confidence":   0.1,
+                    "answer": "Something went wrong generating the answer.",
+                    "confidence": 0.1,
                     "sources_used": 0,
                 }
                 reasoning_latency = round(time.time() - t_reason, 3)
@@ -1712,7 +1962,8 @@ def query_pipeline(
         # Web sources use confidence-based scores so are always kept.
         _MIN_DOC_SOURCE_SCORE = 0.05
         p248_sources = [
-            s for s in p248_sources
+            s
+            for s in p248_sources
             if s.get("modality") != "text" or s.get("score", 0.0) >= _MIN_DOC_SOURCE_SCORE
         ]
 
@@ -1733,9 +1984,9 @@ def query_pipeline(
         # OUTPUT GUARDRAIL — Phase 26 (runs after sources + confidence computed)
         try:
             from app.guardrails.output_guard import check as _output_guard_check
+
             _ctx_texts = [
-                d.page_content if hasattr(d, "page_content") else str(d)
-                for d in final_docs
+                d.page_content if hasattr(d, "page_content") else str(d) for d in final_docs
             ]
             _og = _output_guard_check(
                 answer,
@@ -1770,14 +2021,20 @@ def query_pipeline(
         # chips). rag_pipeline never imports query_pipeline, so this is safe.
         try:
             from app.pipeline.rag_pipeline import (
-                _fix_inconsistent_totals, _strip_leaked_instructions, _trim_offtopic_finance,
+                _fix_inconsistent_totals,
+                _strip_leaked_instructions,
+                _trim_offtopic_finance,
             )
+
             answer = _strip_leaked_instructions(answer)
             answer = _fix_inconsistent_totals(answer)
             answer = _trim_offtopic_finance(query, answer)
         except Exception as _leak_err:
-            logger.warning(event="query_pipeline_leak_strip_failed",
-                           error=str(_leak_err), session_id=session_id)
+            logger.warning(
+                event="query_pipeline_leak_strip_failed",
+                error=str(_leak_err),
+                session_id=session_id,
+            )
 
         # CITATION TRACKING — keep only source chips the LLM actually cited.
         # The system prompt asks the LLM to write [1], [2] etc.; we parse
@@ -1786,6 +2043,7 @@ def query_pipeline(
         # so we fall back to showing all retrieved sources in that case.
         try:
             from app.core.response import extract_cited_indices, strip_inline_citations
+
             _cited_idx = extract_cited_indices(answer)
             if _cited_idx and decision != "hybrid":
                 _filtered = [s for i, s in enumerate(p248_sources, 1) if i in _cited_idx]
@@ -1795,7 +2053,9 @@ def query_pipeline(
                 p248_sources = p248_sources[:3]
             answer = strip_inline_citations(answer)
         except Exception as _cit_err:
-            logger.warning(event="citation_tracking_failed", error=str(_cit_err), session_id=session_id)
+            logger.warning(
+                event="citation_tracking_failed", error=str(_cit_err), session_id=session_id
+            )
 
         # COMPLETENESS SAFETY NET — same as the streaming path. Re-derive the synth
         # doc (injector output on a copy of final_docs) and, if the model dropped
@@ -1803,10 +2063,15 @@ def query_pipeline(
         try:
             from app.pipeline.rag_pipeline import _synth_completeness_fallback
             from app.reasoning.reasoning_engine import _prepend_key_facts_knowledge as _pkf
+
             _synth_ctx = _pkf(list(final_docs), query, "", user_id=user_id or "")
             answer = _synth_completeness_fallback(answer, _synth_ctx)
         except Exception as _sc_err:
-            logger.warning(event="query_pipeline_completeness_failed", error=str(_sc_err), session_id=session_id)
+            logger.warning(
+                event="query_pipeline_completeness_failed",
+                error=str(_sc_err),
+                session_id=session_id,
+            )
 
         # PERPLEXITY-STYLE [p.N] ANCHORS — same as the streaming path, so the
         # non-streaming / meta answer carries a single trailing "Sources: [p.N]"
@@ -1814,8 +2079,10 @@ def query_pipeline(
         # (synthetic docs skipped).
         try:
             from app.pipeline.rag_pipeline import (
-                _attach_page_citations, _attach_section_citations,
+                _attach_page_citations,
+                _attach_section_citations,
             )
+
             _before_cite = answer
             answer = _attach_page_citations(answer, final_docs)
             if answer == _before_cite:
@@ -1823,7 +2090,9 @@ def query_pipeline(
             # Image answers: cited by the source chip (with chart-title caption)
             # in the UI, not an inline prose footer — avoids a duplicate citation.
         except Exception as _pc_err:
-            logger.warning(event="query_pipeline_page_cite_failed", error=str(_pc_err), session_id=session_id)
+            logger.warning(
+                event="query_pipeline_page_cite_failed", error=str(_pc_err), session_id=session_id
+            )
 
         # IMAGE CHART synth override — same rationale/gating as the streaming
         # path's _synthesize_image_chart_answer (see rag_pipeline.py): the
@@ -1858,17 +2127,27 @@ def query_pipeline(
                 if _cp.get("text"):
                     _img_context = (_img_context + "\n" + _cp["text"]).strip()
             except Exception as _fe:
-                logger.warning(event="query_pipeline_chart_fetch_failed", error=str(_fe), session_id=session_id)
+                logger.warning(
+                    event="query_pipeline_chart_fetch_failed", error=str(_fe), session_id=session_id
+                )
         if "CHART VALUES" in _img_context:
             try:
-                from app.pipeline.rag_pipeline import _synthesize_image_chart_answer, _expand_chart_dates
+                from app.pipeline.rag_pipeline import (
+                    _expand_chart_dates,
+                    _synthesize_image_chart_answer,
+                )
+
                 _img_synth = _synthesize_image_chart_answer(query, _img_context)
                 if _img_synth:
                     answer = _expand_chart_dates(_img_synth)
                 else:
                     answer = _expand_chart_dates(answer)
             except Exception as _img_synth_err:
-                logger.warning(event="query_pipeline_image_synth_failed", error=str(_img_synth_err), session_id=session_id)
+                logger.warning(
+                    event="query_pipeline_image_synth_failed",
+                    error=str(_img_synth_err),
+                    session_id=session_id,
+                )
 
         # H-03: Stricter numeric grounding gate.
         # If the answer contains specific numbers/dollar amounts that are NOT
@@ -1876,16 +2155,19 @@ def query_pipeline(
         # This catches parametric-knowledge leakage (e.g. MSFT $211.9B from training data).
         try:
             import re as _re
+
             _answer_numbers = set(_re.findall(r"\b\d[\d,\.]*[BMKbmk%]?\b", answer))
             if _answer_numbers and final_docs:
                 _ctx_combined = " ".join(
-                    d.get("text", "") if isinstance(d, dict)
-                    else (d.page_content if hasattr(d, "page_content") else str(d))
+                    (
+                        d.get("text", "")
+                        if isinstance(d, dict)
+                        else (d.page_content if hasattr(d, "page_content") else str(d))
+                    )
                     for d in final_docs
                 )
                 _unsupported = [
-                    n for n in _answer_numbers
-                    if len(n) >= 3 and n not in _ctx_combined
+                    n for n in _answer_numbers if len(n) >= 3 and n not in _ctx_combined
                 ]
                 if len(_unsupported) > 6:
                     hallucination_warning = True
@@ -1908,11 +2190,10 @@ def query_pipeline(
         # EVAL DEBUG — reconstruct the context the LLM actually saw (raw retrieved
         # text PLUS the injected key-facts), so the benchmark's Context metric
         # reflects real support, not just raw-chunk recall. Best-effort/additive.
-        _eval_context = " ".join(
-            d.get("text", "") for d in final_docs if isinstance(d, dict)
-        )
+        _eval_context = " ".join(d.get("text", "") for d in final_docs if isinstance(d, dict))
         try:
             from app.reasoning.reasoning_engine import _prepend_key_facts_knowledge
+
             _eval_context = _prepend_key_facts_knowledge(
                 list(final_docs), query, _eval_context, user_id=user_id or ""
             )
@@ -1921,26 +2202,26 @@ def query_pipeline(
         _eval_context = _eval_context[:60000]
 
         response = {
-            "answer":               answer,
-            "confidence":           confidence,
-            "decision":             decision,
-            "source":               "hybrid" if decision == "hybrid" else "agent",
-            "session_id":           session_id,
-            "request_id":           trace_id,
-            "latency":              total_latency,
-            "sources":              p248_sources,
-            "is_fallback":          False,
+            "answer": answer,
+            "confidence": confidence,
+            "decision": decision,
+            "source": "hybrid" if decision == "hybrid" else "agent",
+            "session_id": session_id,
+            "request_id": trace_id,
+            "latency": total_latency,
+            "sources": p248_sources,
+            "is_fallback": False,
             "hallucination_warning": hallucination_warning,
-            "sources_used":         len(p248_sources),
-            "trace_id":             trace_id,
+            "sources_used": len(p248_sources),
+            "trace_id": trace_id,
             "metadata": {
-                "agent_latency":     agent_latency,
+                "agent_latency": agent_latency,
                 "retrieval_latency": retrieval_latency,
                 "reasoning_latency": reasoning_latency,
-                "docs_used":         len(final_docs),
-                "queries_expanded":  len(queries),
-                "memory_injected":   bool(memory_context),
-                "cache_hit":         False,
+                "docs_used": len(final_docs),
+                "queries_expanded": len(queries),
+                "memory_injected": bool(memory_context),
+                "cache_hit": False,
                 "canonical_sources": out_sources,
                 "hybrid_web_results": len(_hybrid_web_sources) if decision == "hybrid" else 0,
                 # EVAL DEBUG — full retrieved set (pages + joined text) for the
@@ -1948,12 +2229,15 @@ def query_pipeline(
                 # only; ignored by the UI/API consumers.
                 # Exclude synthetic injected docs (their hardcoded pages are not
                 # real retrieval) so the score reflects genuinely retrieved pages.
-                "eval_retrieved_pages": sorted({
-                    int(_pg) for d in final_docs
-                    if isinstance(d, dict) and not (d.get("metadata") or {}).get("synthetic")
-                    for _pg in [(d.get("metadata") or {}).get("page", d.get("page"))]
-                    if _pg is not None
-                }),
+                "eval_retrieved_pages": sorted(
+                    {
+                        int(_pg)
+                        for d in final_docs
+                        if isinstance(d, dict) and not (d.get("metadata") or {}).get("synthetic")
+                        for _pg in [(d.get("metadata") or {}).get("page", d.get("page"))]
+                        if _pg is not None
+                    }
+                ),
                 "eval_context": _eval_context,
             },
         }
@@ -1966,11 +2250,22 @@ def query_pipeline(
         if cache_conf is None:
             cache_conf = confidence
         _REFUSAL_PHRASES = (
-            "no relevant documents", "something went wrong", "no answer generated",
-            "could not find", "cannot find", "i couldn't find", "couldn't find",
-            "no relevant information", "not in the provided", "not found in",
-            "did not complete", "no acquisition", "not mention",
-            "no information", "not available", "not present",
+            "no relevant documents",
+            "something went wrong",
+            "no answer generated",
+            "could not find",
+            "cannot find",
+            "i couldn't find",
+            "couldn't find",
+            "no relevant information",
+            "not in the provided",
+            "not found in",
+            "did not complete",
+            "no acquisition",
+            "not mention",
+            "no information",
+            "not available",
+            "not present",
         )
         _is_refusal_answer = any(p in answer.lower() for p in _REFUSAL_PHRASES)
         if (
@@ -2004,31 +2299,31 @@ def query_pipeline(
             trace_id=trace_id,
         )
         return {
-            "answer":               "Something went wrong. Please try again.",
-            "confidence":           0.0,
-            "decision":             "fallback",
-            "source":               "error",
-            "session_id":           session_id,
-            "request_id":           trace_id,
-            "latency":              round(time.time() - start, 3),
-            "sources":              [],
-            "is_fallback":          True,
+            "answer": "Something went wrong. Please try again.",
+            "confidence": 0.0,
+            "decision": "fallback",
+            "source": "error",
+            "session_id": session_id,
+            "request_id": trace_id,
+            "latency": round(time.time() - start, 3),
+            "sources": [],
+            "is_fallback": True,
             "hallucination_warning": True,
-            "trace_id":             trace_id,
-            "error":                str(e),
+            "trace_id": trace_id,
+            "error": str(e),
         }
 
 
 # ASYNC WRAPPER — SECTION 4.6
 
+
 async def query_pipeline_async(
     query: str,
     session_id: str = "default",
-    sources: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    sources: list[str] | None = None,
+) -> dict[str, Any]:
     loop = asyncio.get_running_loop()
     return await asyncio.wait_for(
         loop.run_in_executor(None, query_pipeline, query, session_id, sources),
         timeout=settings.REQUEST_TIMEOUT_SEC,
     )
-

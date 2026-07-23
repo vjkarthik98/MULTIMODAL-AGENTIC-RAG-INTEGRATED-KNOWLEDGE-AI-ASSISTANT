@@ -1,13 +1,11 @@
 """Latency metrics: p50, p95, p99 from a list of observed latency samples."""
-from __future__ import annotations
 
-import math
-from typing import List
+from __future__ import annotations
 
 from app.eval.metrics.base import MetricResult
 
 
-def _pct(sorted_v: List[float], p: float) -> float:
+def _pct(sorted_v: list[float], p: float) -> float:
     """Interpolated p-th percentile from a pre-sorted list. O(1) — no sort."""
     if not sorted_v:
         return float("nan")
@@ -17,7 +15,7 @@ def _pct(sorted_v: List[float], p: float) -> float:
     return sorted_v[lo] * (1 - frac) + sorted_v[hi] * frac
 
 
-def latency_stats(samples_sec: List[float], prefix: str = "") -> dict:
+def latency_stats(samples_sec: list[float], prefix: str = "") -> dict:
     """Return p50/p95/p99 MetricResult dict from a list of latency samples (seconds)."""
     tag = f"{prefix}_" if prefix else ""
     if not samples_sec:

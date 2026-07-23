@@ -8,8 +8,6 @@ hardcoded (CLAUDE.md: no literals inlined, all via settings.*).
 
 from __future__ import annotations
 
-from typing import List, Tuple
-
 from app.core.config import settings
 from app.verification.verification_schema import (
     CitationCheckResult,
@@ -22,14 +20,21 @@ from app.verification.verification_schema import (
 
 
 class ConfidenceScorer:
-    def score(self, retrieval: RetrievalEvalResult, grounding: GroundednessResult,
-              citation: CitationCheckResult, completeness: CompletenessResult) -> ConfidenceScores:
+    def score(
+        self,
+        retrieval: RetrievalEvalResult,
+        grounding: GroundednessResult,
+        citation: CitationCheckResult,
+        completeness: CompletenessResult,
+    ) -> ConfidenceScores:
         # Overall is the weakest-link-weighted mean, not a plain average — a
         # single very-wrong dimension (e.g. a fabricated number) must not be
         # diluted by three fine ones, since finance numeric errors are a
         # CRITICAL-severity class on their own (engineering-standards.md §2).
-        completeness_score = 100.0 if completeness.is_complete else (
-            100.0 * len(completeness.covered) / max(len(completeness.aspects), 1)
+        completeness_score = (
+            100.0
+            if completeness.is_complete
+            else (100.0 * len(completeness.covered) / max(len(completeness.aspects), 1))
         )
         weakest = min(retrieval.score, grounding.score, citation.score, completeness_score)
         mean = (retrieval.score + grounding.score + citation.score + completeness_score) / 4.0
@@ -42,14 +47,23 @@ class ConfidenceScorer:
             overall=overall,
         )
 
-    def decide(self, scores: ConfidenceScores, grounding: GroundednessResult,
-               citation: CitationCheckResult, completeness: CompletenessResult) -> Tuple[VerifyDecision, str]:
-        reasons: List[str] = []
+    def decide(
+        self,
+        scores: ConfidenceScores,
+        grounding: GroundednessResult,
+        citation: CitationCheckResult,
+        completeness: CompletenessResult,
+    ) -> tuple[VerifyDecision, str]:
+        reasons: list[str] = []
 
         if scores.retrieval < settings.AGENT_VERIFY_RETRIEVAL_MIN:
-            reasons.append(f"retrieval {scores.retrieval:.1f} < {settings.AGENT_VERIFY_RETRIEVAL_MIN}")
+            reasons.append(
+                f"retrieval {scores.retrieval:.1f} < {settings.AGENT_VERIFY_RETRIEVAL_MIN}"
+            )
         if scores.grounding < settings.AGENT_VERIFY_GROUNDING_MIN:
-            reasons.append(f"grounding {scores.grounding:.1f} < {settings.AGENT_VERIFY_GROUNDING_MIN}")
+            reasons.append(
+                f"grounding {scores.grounding:.1f} < {settings.AGENT_VERIFY_GROUNDING_MIN}"
+            )
         if scores.citation < settings.AGENT_VERIFY_CITATION_MIN:
             reasons.append(f"citation {scores.citation:.1f} < {settings.AGENT_VERIFY_CITATION_MIN}")
         if scores.overall < settings.AGENT_VERIFY_OVERALL_MIN:

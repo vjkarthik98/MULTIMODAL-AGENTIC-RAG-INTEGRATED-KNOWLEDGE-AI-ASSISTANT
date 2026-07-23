@@ -1,8 +1,9 @@
 """xlsx_bm25.py — BM25 index for Excel/spreadsheet table chunks."""
+
 from __future__ import annotations
 
 import re
-from typing import Any, List
+from typing import Any
 
 from prometheus_client import Counter
 
@@ -12,19 +13,25 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 _SCALE_NUM_RE = re.compile(r'\b(\d[\d,]*\.?\d*)\s*(M|B|K|bn|mn|bln|mln)\b', re.IGNORECASE)
-_SCALE_MAP = {"m": ("million", 1e6), "mn": ("million", 1e6), "mln": ("million", 1e6),
-              "b": ("billion", 1e9), "bn": ("billion", 1e9), "bln": ("billion", 1e9),
-              "k": ("thousand", 1e3)}
+_SCALE_MAP = {
+    "m": ("million", 1e6),
+    "mn": ("million", 1e6),
+    "mln": ("million", 1e6),
+    "b": ("billion", 1e9),
+    "bn": ("billion", 1e9),
+    "bln": ("billion", 1e9),
+    "k": ("thousand", 1e3),
+}
 
 
 def _expand_scale(text: str) -> str:
     """Expand '4.3B' to '4.3 billion 4300 million' so cross-scale queries match."""
-    extra: List[str] = []
+    extra: list[str] = []
     for m in _SCALE_NUM_RE.finditer(text):
         raw_num = m.group(1).replace(",", "")
-        suffix  = m.group(2).lower()
+        suffix = m.group(2).lower()
         try:
-            val   = float(raw_num)
+            val = float(raw_num)
             label, factor = _SCALE_MAP.get(suffix, ("", 1))
             abs_val = val * factor
             extra.append(f"{val} {label}")
@@ -40,6 +47,7 @@ def _expand_scale(text: str) -> str:
     if extra:
         return text + " " + " ".join(extra)
     return text
+
 
 _BM25_INDEXED = Counter(
     "magik_xlsx_bm25_indexed_total",
@@ -71,7 +79,7 @@ class XlsxBM25(BaseBM25):
             s = getattr(doc, "structure", {}) or {}
             base_text = " ".join(self._base_text(doc))
             expanded_base = _expand_scale(base_text)
-            parts: List[str] = [expanded_base]
+            parts: list[str] = [expanded_base]
 
             # Sheet name prefix
             sheet = (
@@ -92,21 +100,21 @@ class XlsxBM25(BaseBM25):
                 parts.append(unit_scale)
 
             # Column headers amplified
-            col_headers: List[str] = s.get("column_headers") or []
+            col_headers: list[str] = s.get("column_headers") or []
             if col_headers:
                 header_text = " ".join(str(h) for h in col_headers[:8])
                 parts.append(header_text)
                 parts.append(header_text)  # ×2
 
             # Named range keys — key fix: chunker stores "named_ranges_in_chunk" (List)
-            named_range_keys: List[str] = s.get("named_ranges_in_chunk") or []
+            named_range_keys: list[str] = s.get("named_ranges_in_chunk") or []
             for name in named_range_keys[:10]:
                 readable = str(name).replace("_", " ")
                 parts.append(readable)
                 parts.append(readable)  # ×2 — assumption names are high-value retrieval tokens
 
             # Finance entities amplification
-            fin_entities: List[str] = s.get("finance_entities") or []
+            fin_entities: list[str] = s.get("finance_entities") or []
             if isinstance(fin_entities, list):
                 parts.extend(str(x) for x in fin_entities[:5])
 

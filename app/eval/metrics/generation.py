@@ -4,19 +4,19 @@ citation_accuracy, template_leak_rate.
 Uses Ragas with local GGUF judge when available, lexical fallback otherwise.
 Judge availability is recorded in metric notes so reports are never misleading.
 """
+
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.eval.metrics.base import MetricResult
-
 
 # Prompt-template artifact patterns (P1-7: template leakage)
 _TEMPLATE_LEAK_PATTERNS = [
     r"\[sic\]",
     r"Sources Used: \d+",
-    r"\{[a-zA-Z_]+\}",        # unfilled template variable
+    r"\{[a-zA-Z_]+\}",  # unfilled template variable
     r"<context>",
     r"</context>",
     r"<\|im_start\|>",
@@ -25,7 +25,7 @@ _TEMPLATE_LEAK_PATTERNS = [
 _TEMPLATE_LEAK_RE = re.compile("|".join(_TEMPLATE_LEAK_PATTERNS), re.IGNORECASE)
 
 
-def _extract_context_texts(contexts: List[Any]) -> List[str]:
+def _extract_context_texts(contexts: list[Any]) -> list[str]:
     """Normalize contexts to list of strings."""
     result = []
     for c in contexts:
@@ -38,7 +38,7 @@ def _extract_context_texts(contexts: List[Any]) -> List[str]:
 
 def citation_accuracy_single(
     answer: str,
-    retrieved_docs: List[Dict],
+    retrieved_docs: list[dict],
 ) -> float:
     """Fraction of [filename] citations in the answer that appear in retrieved_docs.
 
@@ -69,7 +69,7 @@ def citation_accuracy_single(
     return valid_citations / len(cited)
 
 
-def citation_locator_accuracy(eval_rows: List[Dict]) -> Optional[MetricResult]:
+def citation_locator_accuracy(eval_rows: list[dict]) -> MetricResult | None:
     """Per-modality citation correctness: does a retrieved source match the row's
     expected_citation {source, locator_type, locator}? Scores source match + the
     modality-appropriate locator (page/sheet/timestamp/image_title). Rows whose
@@ -89,17 +89,30 @@ def citation_locator_accuracy(eval_rows: List[Dict]) -> Optional[MetricResult]:
         # source match: any retrieved source basename equals expected source
         src_ok = exp_src is not None and any(
             (s.get("source") or "").split("/")[-1] == str(exp_src).split("/")[-1]
-            for s in sources if isinstance(s, dict))
+            for s in sources
+            if isinstance(s, dict)
+        )
         # locator match (only if we have a filled expected locator)
         loc_ok = True
         if exp_loc is not None:
-            key = {"page": "page_number", "sheet": "sheet_name", "image_title": "image_title"}.get(lt)
+            key = {"page": "page_number", "sheet": "sheet_name", "image_title": "image_title"}.get(
+                lt
+            )
             if lt in ("timestamp", "timestamp+frame", "frame"):
                 loc_ok = any(
-                    abs(float(s.get("start_time") or s.get("timestamp_start") or -1e9) - float(exp_loc)) <= 15.0
-                    for s in sources if isinstance(s, dict) and (s.get("start_time") or s.get("timestamp_start")) is not None)
+                    abs(
+                        float(s.get("start_time") or s.get("timestamp_start") or -1e9)
+                        - float(exp_loc)
+                    )
+                    <= 15.0
+                    for s in sources
+                    if isinstance(s, dict)
+                    and (s.get("start_time") or s.get("timestamp_start")) is not None
+                )
             elif key:
-                loc_ok = any(str(s.get(key)) == str(exp_loc) for s in sources if isinstance(s, dict))
+                loc_ok = any(
+                    str(s.get(key)) == str(exp_loc) for s in sources if isinstance(s, dict)
+                )
         scored.append(1.0 if (src_ok and loc_ok) else 0.0)
     if not scored:
         return None
@@ -111,7 +124,7 @@ def citation_locator_accuracy(eval_rows: List[Dict]) -> Optional[MetricResult]:
     )
 
 
-def template_leak_rate(answers: List[str]) -> MetricResult:
+def template_leak_rate(answers: list[str]) -> MetricResult:
     """Fraction of answers containing prompt-template artifacts (P1-7 detection)."""
     if not answers:
         return MetricResult.empty("template_leak_rate", "no answers")
@@ -125,9 +138,9 @@ def template_leak_rate(answers: List[str]) -> MetricResult:
 
 
 def compute_generation_metrics_lexical(
-    eval_rows: List[Dict],
+    eval_rows: list[dict],
     judge_label: str = "lexical_fallback",
-) -> Dict[str, MetricResult]:
+) -> dict[str, MetricResult]:
     """Compute generation metrics using lexical fallback (no LLM judge required).
 
     eval_rows: [{"query", "answer", "contexts": [...], "reference_answer", "retrieved_docs"}]
@@ -160,7 +173,7 @@ def compute_generation_metrics_lexical(
         if not (isinstance(ca, float) and ca != ca):  # skip nan
             cit_accs.append(ca)
 
-    def _mean(lst: List[float], name: str, n_total: int) -> MetricResult:
+    def _mean(lst: list[float], name: str, n_total: int) -> MetricResult:
         if not lst:
             return MetricResult.empty(name, "insufficient data")
         return MetricResult(
@@ -184,14 +197,17 @@ def compute_generation_metrics_lexical(
 _CR_SPECIFIC = re.compile(r"\d[\d,]*\.?\d*\s?%?|\d+\.\d+")
 
 
-def _deterministic_context_recall(reference: str, contexts: List[str]) -> Optional[float]:
+def _deterministic_context_recall(reference: str, contexts: list[str]) -> float | None:
     """Fraction of the reference answer's specific facts (numbers/percentages) that
     appear in the retrieved context. Replaces the mis-framed Prometheus context_recall
     (which graded the raw context as an 'answer'). None when unmeasurable."""
     if not reference or not contexts:
         return None
-    facts = [f.strip() for f in _CR_SPECIFIC.findall(reference)
-             if any(ch.isdigit() for ch in f) and len(f.strip()) >= 2]
+    facts = [
+        f.strip()
+        for f in _CR_SPECIFIC.findall(reference)
+        if any(ch.isdigit() for ch in f) and len(f.strip()) >= 2
+    ]
     facts = [f for f in facts if len(re.sub(r"\D", "", f)) >= 2]  # >=2 digits → specific
     if not facts:
         return None
@@ -211,8 +227,8 @@ def _deterministic_context_recall(reference: str, contexts: List[str]) -> Option
 
 
 def compute_generation_metrics_prometheus(
-    eval_rows: List[Dict],
-) -> Dict[str, MetricResult]:
+    eval_rows: list[dict],
+) -> dict[str, MetricResult]:
     """Compute generation metrics with the Prometheus-2-7B purpose-built judge.
 
     Prometheus scores each row 1-5 against a per-metric rubric (native Direct
@@ -226,8 +242,8 @@ def compute_generation_metrics_prometheus(
     # even when the reference facts were present. faithfulness/relevancy/correctness
     # stay on Prometheus (verified deterministic + discriminating on clean inputs).
     metric_names = ["faithfulness", "answer_relevancy", "answer_correctness"]
-    buckets: Dict[str, List[float]] = {m: [] for m in metric_names}
-    recall_vals: List[float] = []
+    buckets: dict[str, list[float]] = {m: [] for m in metric_names}
+    recall_vals: list[float] = []
 
     for row in eval_rows:
         answer = row.get("answer") or ""
@@ -265,7 +281,7 @@ def compute_generation_metrics_prometheus(
         buckets["context_recall"] = recall_vals
     metric_names = metric_names + ["context_recall"]
 
-    metrics_out: Dict[str, MetricResult] = {}
+    metrics_out: dict[str, MetricResult] = {}
     for m in metric_names:
         vals = buckets[m]
         if vals:
@@ -273,8 +289,11 @@ def compute_generation_metrics_prometheus(
                 name=m,
                 value=round(sum(vals) / len(vals), 4),
                 n=len(vals),
-                notes=("deterministic (reference facts recoverable from context)"
-                       if m == "context_recall" else "judge=prometheus_2_7b"),
+                notes=(
+                    "deterministic (reference facts recoverable from context)"
+                    if m == "context_recall"
+                    else "judge=prometheus_2_7b"
+                ),
             )
 
     # Heuristic metrics Prometheus does not cover (kept identical to other paths).
@@ -302,8 +321,8 @@ def compute_generation_metrics_prometheus(
 
 
 async def compute_generation_metrics_ragas(
-    eval_rows: List[Dict],
-) -> Dict[str, MetricResult]:
+    eval_rows: list[dict],
+) -> dict[str, MetricResult]:
     """Compute generation metrics using Ragas + local GGUF judge.
 
     Falls back to lexical judge if GGUF unavailable or Ragas fails.
@@ -311,16 +330,15 @@ async def compute_generation_metrics_ragas(
     try:
         from datasets import Dataset
         from ragas import evaluate
+        from ragas.embeddings import HuggingfaceEmbeddings
         from ragas.metrics import (
             answer_relevancy,
-            context_precision,
             context_recall,
-            faithfulness,
         )
-        from ragas.embeddings import HuggingfaceEmbeddings
         from ragas.run_config import RunConfig
-        from app.eval.judges.phi3_judge import get_judge
+
         from app.core.config import settings as app_settings
+        from app.eval.judges.phi3_judge import get_judge
 
         # Phi-3-mini-4k-instruct judge — dedicated eval judge, outputs strict JSON.
         # Loads ~2.3GB alongside Mistral 7B on GPU.
@@ -329,7 +347,7 @@ async def compute_generation_metrics_ragas(
         embeddings = HuggingfaceEmbeddings(model_name=app_settings.EMBEDDING_MODEL)
 
         # Build ragas-compatible dataset (use ground_truth, not deprecated ground_truths)
-        data: Dict[str, List] = {
+        data: dict[str, list] = {
             "question": [],
             "answer": [],
             "contexts": [],
@@ -353,7 +371,7 @@ async def compute_generation_metrics_ragas(
             run_config=RunConfig(max_workers=1, timeout=600),
         )
 
-        metrics_out: Dict[str, MetricResult] = {}
+        metrics_out: dict[str, MetricResult] = {}
         for key in ("answer_relevancy", "context_recall"):
             val = result.get(key)
             if val is not None:
@@ -366,15 +384,20 @@ async def compute_generation_metrics_ragas(
 
         # Faithfulness — direct Phi-3 NLI (skip Ragas decompose step which truncates)
         try:
-            from app.eval.judges.phi3_judge import _generate, _extract_json
-            import json as _json, re as _re
+            import json as _json
+            import re as _re
+
+            from app.eval.judges.phi3_judge import _extract_json, _generate
+
             faith_scores = []
             for row in eval_rows:
                 answer = row.get("answer") or ""
                 contexts = row.get("contexts") or []
                 ctx_text = " ".join(contexts)[:800] if contexts else ""
                 # Split answer into simple sentences
-                sentences = [s.strip() for s in _re.split(r'(?<=[.!?])\s+', answer) if len(s.strip()) > 10][:4]
+                sentences = [
+                    s.strip() for s in _re.split(r'(?<=[.!?])\s+', answer) if len(s.strip()) > 10
+                ][:4]
                 if not sentences or not ctx_text:
                     faith_scores.append(1.0)
                     continue
@@ -426,14 +449,16 @@ async def compute_generation_metrics_ragas(
 
     except Exception as exc:
         # Fall back to lexical judge, clearly labelled
-        fallback = compute_generation_metrics_lexical(eval_rows, judge_label=f"lexical_fallback (ragas_error: {exc})")
+        fallback = compute_generation_metrics_lexical(
+            eval_rows, judge_label=f"lexical_fallback (ragas_error: {exc})"
+        )
         return fallback
 
 
 def compute_generation_metrics(
-    eval_rows: List[Dict],
+    eval_rows: list[dict],
     prefer_ragas: bool = True,
-) -> Dict[str, MetricResult]:
+) -> dict[str, MetricResult]:
     """Synchronous entry point.
 
     Judge selection follows EVAL_JUDGE_MODEL:
@@ -448,6 +473,7 @@ def compute_generation_metrics(
     if judge_model.startswith("prometheus"):
         try:
             from app.eval.judges import prometheus_judge
+
             if prometheus_judge.is_available():
                 return compute_generation_metrics_prometheus(eval_rows)
             print("[eval] Prometheus GGUF not found — falling back to lexical judge")
@@ -460,11 +486,12 @@ def compute_generation_metrics(
     if prefer_ragas:
         try:
             import asyncio
+
             loop = asyncio.new_event_loop()
             metrics = loop.run_until_complete(compute_generation_metrics_ragas(eval_rows))
             loop.close()
             return metrics
-        except Exception as exc:
+        except Exception:
             pass  # fall through to lexical
 
     return compute_generation_metrics_lexical(eval_rows)

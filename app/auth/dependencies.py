@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
-
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 
@@ -17,6 +15,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login/form", auto_error=Fal
 
 def _build_user_from_payload(payload: dict) -> UserPublic:
     from datetime import datetime, timezone
+
     return UserPublic(
         user_id=payload["sub"],
         email=payload["email"],
@@ -26,7 +25,7 @@ def _build_user_from_payload(payload: dict) -> UserPublic:
     )
 
 
-async def get_current_user(token: Optional[str] = Depends(oauth2_scheme)) -> UserPublic:
+async def get_current_user(token: str | None = Depends(oauth2_scheme)) -> UserPublic:
     """
     FastAPI dependency — extracts and verifies the JWT bearer token.
     Returns the authenticated UserPublic. Raises HTTP 401 on failure.
@@ -37,6 +36,7 @@ async def get_current_user(token: Optional[str] = Depends(oauth2_scheme)) -> Use
     if not settings.AUTH_ENABLED:
         # Dev bypass: return the default dev user when auth is disabled
         from datetime import datetime, timezone
+
         return UserPublic(
             user_id=settings.DEFAULT_DEV_USER_ID,
             email="dev@local",
@@ -95,8 +95,8 @@ async def require_real_user(
 
 
 async def optional_current_user(
-    token: Optional[str] = Depends(oauth2_scheme),
-) -> Optional[UserPublic]:
+    token: str | None = Depends(oauth2_scheme),
+) -> UserPublic | None:
     """
     Like get_current_user but returns None instead of raising 401.
     Use on public endpoints that behave differently when authenticated.

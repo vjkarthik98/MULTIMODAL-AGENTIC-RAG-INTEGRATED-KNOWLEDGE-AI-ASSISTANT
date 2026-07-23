@@ -3,15 +3,15 @@ from __future__ import annotations
 # APP/MAIN.PY — MAGIK FINANCE RAG v0.25.0
 # FASTAPI APPLICATION ENTRY POINT — WIRES EVERYTHING TOGETHER
 # SECTION 4.6 — LIFESPAN, MIDDLEWARE, OTEL, PROMETHEUS, CORS, RATE LIMIT
-
 # ── HF CACHE MUST BE SET BEFORE ANY TRANSFORMERS/TORCH IMPORT ──────────────
 import os as _os
 from pathlib import Path as _Path
+
 _hf_home = _os.getenv("HF_HOME", str(_Path(__file__).parents[1] / ".hf_cache"))
-_os.environ["HF_HOME"]              = _hf_home
-_os.environ["TRANSFORMERS_CACHE"]   = _hf_home + "/hub"
-_os.environ["HF_DATASETS_CACHE"]    = _hf_home + "/datasets"
-_os.environ["HF_HUB_CACHE"]        = _hf_home + "/hub"
+_os.environ["HF_HOME"] = _hf_home
+_os.environ["TRANSFORMERS_CACHE"] = _hf_home + "/hub"
+_os.environ["HF_DATASETS_CACHE"] = _hf_home + "/datasets"
+_os.environ["HF_HUB_CACHE"] = _hf_home + "/hub"
 # ────────────────────────────────────────────────────────────────────────────
 
 import asyncio
@@ -23,7 +23,7 @@ import uuid
 # are diagnosable even when uvicorn swallows the output.
 faulthandler.enable()
 from contextlib import asynccontextmanager
-from typing import Any, Dict
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,13 +31,14 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from app.core.config import settings
-from app.utils.logger import get_logger, bind_request_context
+from app.utils.logger import bind_request_context, get_logger
 
 logger = get_logger(__name__)
 
 # Set CUDA TF32 + cuDNN benchmark flags before any model code runs
 try:
     from app.core.startup_optimizer import set_cuda_performance_flags
+
     set_cuda_performance_flags()
 except Exception:
     pass
@@ -48,11 +49,13 @@ semaphore = asyncio.Semaphore(settings.MAX_PARALLEL_REQUESTS)
 
 # PROMETHEUS SETUP — SECTION 6
 
+
 def _setup_prometheus() -> None:
     if not settings.PROMETHEUS_ENABLED:
         return
     try:
         from prometheus_client import start_http_server
+
         start_http_server(settings.PROMETHEUS_PORT)
         logger.info(
             event="prometheus_started",
@@ -63,6 +66,7 @@ def _setup_prometheus() -> None:
 
 
 # OPENTELEMETRY SETUP — SECTION 2.1
+
 
 def _setup_otel() -> None:
     if not settings.OTEL_ENABLED:
@@ -76,10 +80,10 @@ def _setup_otel() -> None:
         from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
 
         resource = Resource.create({"service.name": settings.OTEL_SERVICE_NAME})
-        sampler  = TraceIdRatioBased(settings.OTEL_SAMPLING_RATIO)
+        sampler = TraceIdRatioBased(settings.OTEL_SAMPLING_RATIO)
         provider = TracerProvider(resource=resource, sampler=sampler)
 
-        exporter  = OTLPSpanExporter(endpoint=settings.OTEL_EXPORTER_OTLP_ENDPOINT)
+        exporter = OTLPSpanExporter(endpoint=settings.OTEL_EXPORTER_OTLP_ENDPOINT)
         processor = BatchSpanProcessor(exporter)
         provider.add_span_processor(processor)
 
@@ -97,6 +101,7 @@ def _setup_otel() -> None:
 
 # QDRANT INIT — runs in background so it doesn't block Uvicorn ready signal
 
+
 async def _init_qdrant_async() -> None:
     try:
         loop = asyncio.get_running_loop()
@@ -108,6 +113,7 @@ async def _init_qdrant_async() -> None:
 
 def _init_qdrant_sync() -> None:
     from app.vectorstore.qdrant_store import initialize_qdrant
+
     initialize_qdrant()
 
 
@@ -115,9 +121,11 @@ def _init_qdrant_sync() -> None:
 # Qdrant/Redis/Mongo connections establish concurrently while the first request
 # is being served; circuit breakers handle any transient failures gracefully.
 
+
 async def _warmup_infra_background() -> None:
     try:
         from app.core.infra_registry import infra
+
         await infra.warmup()
         logger.info(event="infra_warmup_complete")
     except Exception as e:
@@ -129,6 +137,7 @@ async def _warmup_infra_background() -> None:
 # has zero cold-start penalty. Uses model_registry._ensure() which is
 # already thread-safe and parallel-load aware.
 
+
 async def _warmup_models_async() -> None:
     if not settings.WARMUP_AT_STARTUP:
         logger.info(
@@ -139,6 +148,7 @@ async def _warmup_models_async() -> None:
         return
     try:
         from app.core.startup_optimizer import preload_gpu_models
+
         # preload_gpu_models() runs guardrail warmup internally (before LLM)
         # to guarantee all PyTorch CUDA ops finish before llama.cpp CUBLAS init.
         await preload_gpu_models()
@@ -147,6 +157,7 @@ async def _warmup_models_async() -> None:
 
 
 # AUDIT LOG SETUP — SECTION 5
+
 
 def _setup_audit_log() -> None:
     try:
@@ -159,6 +170,7 @@ def _setup_audit_log() -> None:
 
 
 # TEMP DIR CLEANUP ON STARTUP — SECTION 5
+
 
 def _cleanup_temp_dirs() -> None:
     try:
@@ -194,6 +206,7 @@ def _cleanup_temp_dirs() -> None:
         # Clean up expired guest user directories (guest_* older than TTL + 1h)
         try:
             from app.auth.guest_service import cleanup_expired_guest_dirs
+
             removed = cleanup_expired_guest_dirs()
             if removed:
                 logger.info(event="guest_dirs_cleaned", removed=removed)
@@ -205,6 +218,7 @@ def _cleanup_temp_dirs() -> None:
 
 
 # LIFESPAN — SECTION 4.6
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -227,6 +241,7 @@ async def lifespan(app: FastAPI):
 
     # Auth config check — fail fast if AUTH_ENABLED=False in production
     from app.core.startup_validator import validate_auth_config, validate_model_manifest
+
     validate_auth_config()
 
     # Model manifest check — fail fast if required models are not cached
@@ -276,7 +291,7 @@ app = FastAPI(
     version=settings.APP_VERSION,
     description=settings.APP_DESCRIPTION,
     lifespan=lifespan,
-    docs_url="/docs"   if settings.ENV != "production" else None,
+    docs_url="/docs" if settings.ENV != "production" else None,
     redoc_url="/redoc" if settings.ENV != "production" else None,
     root_path=settings.ROOT_PATH,
 )
@@ -303,10 +318,12 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 # Populates request.state.user from the Bearer JWT on every request.
 
 from app.api.middleware import AuthMiddleware
+
 app.add_middleware(AuthMiddleware)
 
 
 # GLOBAL EXCEPTION HANDLER
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -322,8 +339,8 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
     return JSONResponse(
         status_code=500,
         content={
-            "status":     "error",
-            "message":    "Internal server error",
+            "status": "error",
+            "message": "Internal server error",
             "request_id": request_id,
         },
     )
@@ -331,10 +348,11 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 
 # REQUEST LOGGER + CORRELATION ID MIDDLEWARE — SECTION 2.1
 
+
 @app.middleware("http")
 async def request_logger(request: Request, call_next) -> Response:
 
-    start      = time.time()
+    start = time.time()
     request_id = request.headers.get(
         settings.CORRELATION_ID_HEADER,
         str(uuid.uuid4()),
@@ -346,7 +364,7 @@ async def request_logger(request: Request, call_next) -> Response:
 
     # CLIENT IP — PROXY AWARE
     forwarded_for = request.headers.get("X-Forwarded-For")
-    client_ip     = (
+    client_ip = (
         forwarded_for.split(",")[0].strip()
         if forwarded_for
         else (request.client.host if request.client else "unknown")
@@ -363,7 +381,7 @@ async def request_logger(request: Request, call_next) -> Response:
 
     try:
         response = await call_next(request)
-        latency  = round(time.time() - start, 3)
+        latency = round(time.time() - start, 3)
 
         path_str = str(request.url.path)
         # Skip noisy probe paths — /health is hit by load balancers, IDE probes,
@@ -372,13 +390,13 @@ async def request_logger(request: Request, call_next) -> Response:
         skip_log = path_str in _SKIP_LOG_PATHS
 
         log_kwargs = dict(
-            event=   "http_request",
-            id=      request_id,
-            method=  request.method,
-            path=    path_str,
-            status=  response.status_code,
-            latency= latency,
-            ip=      client_ip,
+            event="http_request",
+            id=request_id,
+            method=request.method,
+            path=path_str,
+            status=response.status_code,
+            latency=latency,
+            ip=client_ip,
         )
 
         if latency > settings.SLOW_REQUEST_THRESHOLD:
@@ -387,20 +405,21 @@ async def request_logger(request: Request, call_next) -> Response:
             logger.info(**log_kwargs)
 
         response.headers[settings.CORRELATION_ID_HEADER] = request_id
-        response.headers["X-Request-ID"]                 = request_id
+        response.headers["X-Request-ID"] = request_id
         return response
 
     except Exception as e:
         logger.error(
             event="request_failed",
-            id=    request_id,
-            path=  str(request.url.path),
-            error= str(e),
+            id=request_id,
+            path=str(request.url.path),
+            error=str(e),
         )
         raise
 
 
 # CONCURRENCY LIMIT + REQUEST TIMEOUT MIDDLEWARE — SECTION 2.1
+
 
 @app.middleware("http")
 async def limit_concurrency(request: Request, call_next) -> Response:
@@ -430,8 +449,8 @@ async def limit_concurrency(request: Request, call_next) -> Response:
         return JSONResponse(
             status_code=503,
             content={
-                "status":     "error",
-                "message":    "Server busy — please retry",
+                "status": "error",
+                "message": "Server busy — please retry",
                 "request_id": request_id,
             },
         )
@@ -439,15 +458,15 @@ async def limit_concurrency(request: Request, call_next) -> Response:
 
 # RATE LIMIT MIDDLEWARE — SECTION 5
 
-_rate_limit_store: Dict[str, Any] = {}
+_rate_limit_store: dict[str, Any] = {}
 
 
 from app.utils.net import resolve_client_ip as _resolve_client_ip
 
 
 def _rate_limit_key(prefix: str, client_ip: str, window: float) -> tuple[str, dict]:
-    now   = time.time()
-    key   = f"{prefix}:{client_ip}"
+    now = time.time()
+    key = f"{prefix}:{client_ip}"
     entry = _rate_limit_store.get(key, {"count": 0, "window_start": now})
     if now - entry["window_start"] > window:
         entry = {"count": 0, "window_start": now}
@@ -457,12 +476,12 @@ def _rate_limit_key(prefix: str, client_ip: str, window: float) -> tuple[str, di
 
 
 _AUTH_BRUTE_FORCE_PATHS = {
-    "/auth/login":            (60.0,   "auth_login"),
-    "/auth/login/form":       (60.0,   "auth_login"),
-    "/auth/register":         (3600.0, "auth_register"),
-    "/auth/verify-otp":       (60.0,   "auth_otp"),
-    "/auth/mfa/verify":       (60.0,   "auth_otp"),
-    "/auth/forgot-password":  (3600.0, "auth_register"),
+    "/auth/login": (60.0, "auth_login"),
+    "/auth/login/form": (60.0, "auth_login"),
+    "/auth/register": (3600.0, "auth_register"),
+    "/auth/verify-otp": (60.0, "auth_otp"),
+    "/auth/mfa/verify": (60.0, "auth_otp"),
+    "/auth/forgot-password": (3600.0, "auth_register"),
 }
 
 
@@ -494,8 +513,8 @@ async def rate_limit(request: Request, call_next) -> Response:
             return JSONResponse(
                 status_code=429,
                 content={
-                    "status":     "error",
-                    "message":    "Too many attempts — please wait before retrying",
+                    "status": "error",
+                    "message": "Too many attempts — please wait before retrying",
                     "request_id": request_id,
                 },
             )
@@ -516,8 +535,8 @@ async def rate_limit(request: Request, call_next) -> Response:
         return JSONResponse(
             status_code=429,
             content={
-                "status":     "error",
-                "message":    "Rate limit exceeded — please slow down",
+                "status": "error",
+                "message": "Rate limit exceeded — please slow down",
                 "request_id": request_id,
             },
         )
@@ -527,21 +546,25 @@ async def rate_limit(request: Request, call_next) -> Response:
 
 # AUDIT LOG WRITER — SECTION 5
 
+
 def _write_audit_log(
     request_id: str,
-    method:     str,
-    path:       str,
-    client_ip:  str,
+    method: str,
+    path: str,
+    client_ip: str,
 ) -> None:
     try:
         import json
-        entry = json.dumps({
-            "request_id": request_id,
-            "method":     method,
-            "path":       path,
-            "client_ip":  client_ip,
-            "timestamp":  time.time(),
-        })
+
+        entry = json.dumps(
+            {
+                "request_id": request_id,
+                "method": method,
+                "path": path,
+                "client_ip": client_ip,
+                "timestamp": time.time(),
+            }
+        )
         with open(settings.AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(entry + "\n")
     except Exception as e:
@@ -551,86 +574,94 @@ def _write_audit_log(
 # ROUTES
 
 from app.api.api_routes import router as rag_router
+
 app.include_router(rag_router, prefix="/rag", tags=["RAG"])
 
 from app.auth.router import router as auth_router
+
 app.include_router(auth_router)  # mounts at /auth (prefix defined in router.py)
 
 from app.auth.guest_router import router as guest_router
+
 app.include_router(guest_router)  # mounts at /auth/guest*
 
 from app.auth.admin_router import router as admin_router
+
 app.include_router(admin_router)  # mounts at /admin — requires role=admin JWT
 
 
 # ROOT
 
+
 @app.get("/", tags=["System"])
-def root() -> Dict[str, Any]:
+def root() -> dict[str, Any]:
     return {
         "message": settings.APP_NAME,
         "version": settings.APP_VERSION,
-        "env":     settings.ENV,
-        "status":  "running",
+        "env": settings.ENV,
+        "status": "running",
     }
 
 
 # HEALTH — SECTION 6
 
+
 @app.get("/health", tags=["System"])
-def health() -> Dict[str, Any]:
+def health() -> dict[str, Any]:
     return {
-        "status":  "ok",
+        "status": "ok",
         "service": settings.APP_NAME,
         "version": settings.APP_VERSION,
-        "env":     settings.ENV,
+        "env": settings.ENV,
     }
 
 
 # READINESS — SECTION 6
 
-@app.get("/ready", tags=["System"])
-def readiness() -> Dict[str, Any]:
-    try:
-        from app.core.model_loader import model_loader
-        from app.core.infra_registry import infra
 
-        models       = model_loader.health_check()
+@app.get("/ready", tags=["System"])
+def readiness() -> dict[str, Any]:
+    try:
+        from app.core.infra_registry import infra
+        from app.core.model_loader import model_loader
+
+        models = model_loader.health_check()
         infra_status = infra.health_check()
-        all_ready    = models.get("embedder", False)
+        all_ready = models.get("embedder", False)
 
         return {
             "status": "ready" if all_ready else "degraded",
             "models": models,
-            "infra":  infra_status,
+            "infra": infra_status,
         }
 
     except Exception as e:
         logger.error(event="readiness_failed", error=str(e))
         return {
             "status": "not_ready",
-            "error":  str(e),
+            "error": str(e),
         }
 
 
 # METRICS — SECTION 6
 
+
 @app.get("/metrics", tags=["System"])
-def metrics() -> Dict[str, Any]:
+def metrics() -> dict[str, Any]:
     if not settings.PROMETHEUS_ENABLED:
         return {
-            "status":  "disabled",
+            "status": "disabled",
             "message": "Set PROMETHEUS_ENABLED=true to enable metrics",
         }
 
     try:
-        from app.core.model_loader import model_loader
         from app.core.infra_registry import infra
+        from app.core.model_loader import model_loader
 
         return {
             "status": "ok",
             "models": model_loader.health_check(),
-            "infra":  infra.health_check(),
+            "infra": infra.health_check(),
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -638,13 +669,15 @@ def metrics() -> Dict[str, Any]:
 
 # INFRA HEALTH — SECTION 6
 
+
 @app.get("/infra/health", tags=["System"])
-def infra_health() -> Dict[str, Any]:
+def infra_health() -> dict[str, Any]:
     try:
         from app.core.infra_registry import infra
+
         return {
             "status": "ok",
-            "infra":  infra.health_check(),
+            "infra": infra.health_check(),
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -652,14 +685,16 @@ def infra_health() -> Dict[str, Any]:
 
 # TOOLS LIST — SECTION 4.9
 
+
 @app.get("/tools", tags=["Agents"])
-def list_tools() -> Dict[str, Any]:
+def list_tools() -> dict[str, Any]:
     try:
         from app.agents.tool_registry import ToolRegistry
+
         registry = ToolRegistry()
         return {
             "status": "ok",
-            "tools":  registry.list_tools(),
+            "tools": registry.list_tools(),
         }
     except Exception as e:
         return JSONResponse(

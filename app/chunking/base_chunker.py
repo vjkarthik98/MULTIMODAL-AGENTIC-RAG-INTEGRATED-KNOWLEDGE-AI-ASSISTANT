@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.chunking.finance_numbers import approx_tokens, protect, restore
 from app.core.config import settings
@@ -18,9 +18,15 @@ logger = get_logger(__name__)
 _FINANCE_SEPARATORS = [
     "\n\n\n",
     "\n\n",
-    "\nOPERATOR:", "\nCEO:", "\nCFO:", "\nANALYST:",
-    ". ", "? ", "! ", "; ",
-    ", ",    # last resort — protected finance numbers are safe from splitting
+    "\nOPERATOR:",
+    "\nCEO:",
+    "\nCFO:",
+    "\nANALYST:",
+    ". ",
+    "? ",
+    "! ",
+    "; ",
+    ", ",  # last resort — protected finance numbers are safe from splitting
 ]
 
 _HEADING_RE = re.compile(r"^(?:[A-Z][A-Z\s&,]{4,}|(?:\d+\.)+\s+.{3,}|#{1,3}\s+.{3,})$")
@@ -31,10 +37,9 @@ class BaseChunker(ABC):
     @abstractmethod
     def chunk(
         self,
-        extracts: List[RawExtract],
+        extracts: list[RawExtract],
         meta: UniversalMetadata,
-    ) -> List[IngestedDocument]:
-        ...
+    ) -> list[IngestedDocument]: ...
 
     # ── Guardrail ─────────────────────────────────────────────────────────────
 
@@ -42,6 +47,7 @@ class BaseChunker(ABC):
     def _sanitize(text: str, surface: str) -> str:
         try:
             from app.guardrails.input_guard import sanitize as _g
+
             return _g(text, surface=surface)
         except Exception:
             return text
@@ -49,7 +55,7 @@ class BaseChunker(ABC):
     # ── Finance-safe text splitting ───────────────────────────────────────────
 
     @staticmethod
-    def _split_text(text: str, target_tokens: Optional[int] = None) -> List[str]:
+    def _split_text(text: str, target_tokens: int | None = None) -> list[str]:
         target = target_tokens or settings.CHUNK_TARGET_TOKENS
         protected, mapping = protect(text)
         pieces = _recursive_split(protected, target)
@@ -62,18 +68,18 @@ class BaseChunker(ABC):
         *,
         text: str,
         modality: str,
-        subtype: Optional[str],
+        subtype: str | None,
         source: str,
-        page: Optional[int],
+        page: int | None,
         chunk_idx: int,
-        structure: Dict,
+        structure: dict,
         meta: UniversalMetadata,
         surface: str,
-    ) -> Optional[IngestedDocument]:
+    ) -> IngestedDocument | None:
         text = BaseChunker._sanitize(text, surface)
         if not text.strip():
             return None
-        struct: Dict = {
+        struct: dict = {
             "content_type": subtype or "unknown",
             "embedding_space": "text",
             "token_count": approx_tokens(text),
@@ -112,16 +118,18 @@ class BaseChunker(ABC):
 # ── Legacy chunk_documents helpers (moved from chunker.py) ───────────────────
 
 _ATOMIC_MODALITIES = {"image", "audio", "video", "table"}
-_ATOMIC_SUBTYPES   = {"structured", "caption", "speech", "heading", "frame", "table", "chart"}
+_ATOMIC_SUBTYPES = {"structured", "caption", "speech", "heading", "frame", "table", "chart"}
 
 
 def _is_atomic(doc: Any) -> bool:
     modality = (getattr(doc, "modality", "") or "").lower()
-    subtype  = (getattr(doc, "subtype",  "") or "").lower()
+    subtype = (getattr(doc, "subtype", "") or "").lower()
     return modality in _ATOMIC_MODALITIES or subtype in _ATOMIC_SUBTYPES
 
 
-def _clone_with_text(doc: Any, text: str, chunk_id: int, part_index: int, total_parts: int) -> Optional[Any]:
+def _clone_with_text(
+    doc: Any, text: str, chunk_id: int, part_index: int, total_parts: int
+) -> Any | None:
     """Clone an IngestedDocument-like object with new text, preserving all locator fields."""
     try:
         clone = doc.model_copy(deep=True)
@@ -151,11 +159,11 @@ def _legacy_approx_tokens(text: str) -> int:
     return int(len(text.split()) * 1.3)
 
 
-def _legacy_split_text(text: str, size: int, overlap: int) -> List[str]:
+def _legacy_split_text(text: str, size: int, overlap: int) -> list[str]:
     text = (text or "").strip()
     if len(text) <= size:
         return [text] if text else []
-    units: List[str] = []
+    units: list[str] = []
     for para in re.split(r"\n{2,}", text):
         para = para.strip()
         if not para:
@@ -166,7 +174,7 @@ def _legacy_split_text(text: str, size: int, overlap: int) -> List[str]:
                 units.append(sent)
     if not units:
         units = [text]
-    chunks: List[str] = []
+    chunks: list[str] = []
     cur = ""
     step = max(size - overlap, 1)
     for u in units:
@@ -175,7 +183,7 @@ def _legacy_split_text(text: str, size: int, overlap: int) -> List[str]:
             if overlap > 0 and len(cur) > overlap:
                 tail = cur[-overlap:]
                 sp = tail.find(" ")
-                cur = tail[sp + 1:] if sp != -1 else tail
+                cur = tail[sp + 1 :] if sp != -1 else tail
             else:
                 cur = ""
         if len(u) > size:
@@ -183,7 +191,7 @@ def _legacy_split_text(text: str, size: int, overlap: int) -> List[str]:
                 chunks.append(cur)
                 cur = ""
             for i in range(0, len(u), step):
-                chunks.append(u[i:i + size])
+                chunks.append(u[i : i + size])
             continue
         cur = (cur + " " + u).strip() if cur else u
     if cur.strip():
@@ -191,17 +199,17 @@ def _legacy_split_text(text: str, size: int, overlap: int) -> List[str]:
     return [c for c in chunks if c.strip()]
 
 
-def chunk_documents(docs: List[Any]) -> List[Any]:
+def chunk_documents(docs: list[Any]) -> list[Any]:
     """Legacy splitter: splits long prose into overlapping token windows.
     Kept for backward compatibility — new code uses chunk_raw_extracts()."""
     start = time.time()
-    output: List[Any] = []
+    output: list[Any] = []
     skipped = 0
     split_docs = 0
     total_tokens = 0
-    modality_breakdown: Dict[str, int] = {}
+    modality_breakdown: dict[str, int] = {}
 
-    size    = max(int(settings.CHUNK_SIZE),    256)
+    size = max(int(settings.CHUNK_SIZE), 256)
     overlap = max(min(int(settings.CHUNK_OVERLAP), size // 2), 0)
     max_chunks = max(int(settings.MAX_CHUNKS), 1)
     next_chunk_id = 0
@@ -259,7 +267,8 @@ def chunk_documents(docs: List[Any]) -> List[Any]:
 
 # ── Core recursive splitter ───────────────────────────────────────────────────
 
-def _recursive_split(text: str, target: int) -> List[str]:
+
+def _recursive_split(text: str, target: int) -> list[str]:
     if approx_tokens(text) <= target:
         return [text]
     for sep in _FINANCE_SEPARATORS:
@@ -273,9 +282,9 @@ def _recursive_split(text: str, target: int) -> List[str]:
     return _recursive_split(text[:cut], target) + _recursive_split(text[cut:], target)
 
 
-def _pack(parts: List[str], sep: str, target: int) -> List[str]:
+def _pack(parts: list[str], sep: str, target: int) -> list[str]:
     """Greedily accumulate parts into token-bounded windows."""
-    chunks: List[str] = []
+    chunks: list[str] = []
     buf = ""
     for p in parts:
         candidate = (buf + sep + p) if buf else p

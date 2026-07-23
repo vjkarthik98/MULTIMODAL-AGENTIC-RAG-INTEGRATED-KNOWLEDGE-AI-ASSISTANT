@@ -8,11 +8,12 @@ Falls back to direct pipeline import if EVAL_SERVER_URL is not reachable.
 Scores faithfulness, answer_relevancy, context_recall, citation_accuracy,
 template_leak_rate, and hallucination_rate.
 """
+
 from __future__ import annotations
 
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
@@ -41,9 +42,9 @@ def _query_via_server(
     query: str,
     session_id: str,
     user_id: str,
-    access_token: Optional[str] = None,
+    access_token: str | None = None,
     no_cache: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Call /rag/query on the running server. Reuses server's GPU models.
 
     no_cache defaults True: eval must measure the live model, never a stale
@@ -73,13 +74,14 @@ def _query_via_pipeline(
     query: str,
     session_id: str,
     user_id: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Fallback: call pipeline directly (loads models in-process)."""
     from app.pipeline.query_pipeline import query_pipeline
+
     return query_pipeline(query=query, session_id=session_id, user_id=user_id)
 
 
-def _load_eval_rows(cfg: EvalConfig) -> List[Dict[str, Any]]:
+def _load_eval_rows(cfg: EvalConfig) -> list[dict[str, Any]]:
     """Load gold rows with real reference answers. Defaults to text/pdf/docx;
     a --modality filter narrows to a single modality (any of the 7)."""
     _mods = [cfg.modality] if getattr(cfg, "modality", None) else ["txt", "pdf", "docx"]
@@ -95,9 +97,17 @@ def _load_eval_rows(cfg: EvalConfig) -> List[Dict[str, Any]]:
             # Behavioral rows (refusal/adversarial) are scored with their own
             # rubrics, not the standard faithfulness/relevancy/recall metrics —
             # exclude them here so they never get mis-scored as normal answers.
-            if r.get("expected_behavior") == "abstain" or r.get("question_type") in ("refusal", "adversarial"):
+            if r.get("expected_behavior") == "abstain" or r.get("question_type") in (
+                "refusal",
+                "adversarial",
+            ):
                 continue
-            if ref and ref not in ("TODO", "") and "SEARCH_REQUIRED" not in ref and "INJECTION_PROBE" not in ref:
+            if (
+                ref
+                and ref not in ("TODO", "")
+                and "SEARCH_REQUIRED" not in ref
+                and "INJECTION_PROBE" not in ref
+            ):
                 rows.append(r)
     return rows
 
@@ -111,7 +121,9 @@ import re as _re
 # grading — we measure the answer's content, not the product's caution banner.
 _HEDGE_RE = _re.compile(
     r"\s*This answer could not be fully verified against the source material\s*[—-]+\s*"
-    r"treat the figures? above with caution\.?", _re.IGNORECASE)
+    r"treat the figures? above with caution\.?",
+    _re.IGNORECASE,
+)
 
 
 def _strip_verification_hedge(answer: str) -> str:
@@ -127,6 +139,7 @@ def _make_full_context_retriever():
         from app.core.infra_registry import infra
         from app.core.model_loader import model_loader
         from app.retrieval.hybrid_retriever import HybridRetriever
+
         return HybridRetriever(
             bm25=infra.get_bm25(),
             vector_store=infra.get_vector_store(),
@@ -137,7 +150,7 @@ def _make_full_context_retriever():
         return None
 
 
-def _full_contexts(retriever, query: str, user_id: str, session_id: str) -> List[str]:
+def _full_contexts(retriever, query: str, user_id: str, session_id: str) -> list[str]:
     """Full-text chunks for the query (untruncated), for faithful judge grading."""
     if retriever is None:
         return []
@@ -165,7 +178,7 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
     if use_server:
         print(f"[eval] Server reachable at {_SERVER_URL} — using HTTP mode (no GPU duplication)")
     else:
-        print(f"[eval] Server not reachable — falling back to direct pipeline mode")
+        print("[eval] Server not reachable — falling back to direct pipeline mode")
         try:
             from app.pipeline.query_pipeline import query_pipeline  # noqa: F401
         except ImportError as e:
@@ -180,8 +193,8 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
         )
         return result
 
-    eval_rows: List[Dict[str, Any]] = []
-    latencies: List[float] = []
+    eval_rows: list[dict[str, Any]] = []
+    latencies: list[float] = []
 
     for row in gold_rows:
         query = row["query"]
@@ -218,16 +231,18 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
             context_texts = [s.get("text") or "" for s in sources if isinstance(s, dict)]
 
         fidelity = compute_finance_fidelity(answer, context_texts)
-        eval_rows.append({
-            "query": query,
-            "answer": answer,
-            "contexts": context_texts,
-            "reference_answer": row.get("reference_answer"),
-            "retrieved_docs": sources,
-            "finance_fidelity": fidelity,
-            "row_id": row["id"],
-            "tags": row.get("tags", []),
-        })
+        eval_rows.append(
+            {
+                "query": query,
+                "answer": answer,
+                "contexts": context_texts,
+                "reference_answer": row.get("reference_answer"),
+                "retrieved_docs": sources,
+                "finance_fidelity": fidelity,
+                "row_id": row["id"],
+                "tags": row.get("tags", []),
+            }
+        )
 
     if eval_rows:
         _prefer_ragas = os.environ.get("EVAL_PREFER_RAGAS", "true").lower() == "true"
@@ -241,13 +256,16 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
         fidelity_scores = [r["finance_fidelity"] for r in eval_rows if "finance_fidelity" in r]
         if fidelity_scores:
             from app.eval.metrics.base import MetricResult
+
             avg_fidelity = sum(fidelity_scores) / len(fidelity_scores)
-            result.add(MetricResult(
-                name="finance_fidelity",
-                value=avg_fidelity,
-                n=len(fidelity_scores),
-                notes=f"avg over {len(fidelity_scores)} queries (strict 0.5% tol, no scale bridging)",
-            ))
+            result.add(
+                MetricResult(
+                    name="finance_fidelity",
+                    value=avg_fidelity,
+                    n=len(fidelity_scores),
+                    notes=f"avg over {len(fidelity_scores)} queries (strict 0.5% tol, no scale bridging)",
+                )
+            )
 
     for m in latency_stats(latencies, prefix="generation").values():
         result.add(m)
@@ -260,7 +278,10 @@ def run_hallucination_suite(cfg: EvalConfig) -> SuiteResult:
     """Standalone hallucination suite — runs generation and focuses on ungrounded claims."""
     result = run_generation_suite(cfg)
     result.suite = "hallucination"
-    h_metrics = {k: v for k, v in result.metrics.items()
-                 if "halluc" in k or "template" in k or "citation" in k}
+    h_metrics = {
+        k: v
+        for k, v in result.metrics.items()
+        if "halluc" in k or "template" in k or "citation" in k
+    }
     result.metrics = h_metrics
     return result

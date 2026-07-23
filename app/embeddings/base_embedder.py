@@ -8,6 +8,7 @@ caching, batching, and validation logic lives here once.
 
 text_embedder.py (legacy pipeline path) is kept untouched alongside this.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -17,7 +18,7 @@ import re
 import time
 import unicodedata
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -31,36 +32,32 @@ logger = get_logger(__name__)
 # no import dependency on text_embedder (avoids circular risk).
 # ══════════════════════════════════════════════════════════════════════════════
 
-_SCALE_EXPAND: Dict[str, Tuple[float, str, str]] = {
-    "b":  (1e9,  "billion",  "million"),
-    "bn": (1e9,  "billion",  "million"),
-    "t":  (1e12, "trillion", "billion"),
+_SCALE_EXPAND: dict[str, tuple[float, str, str]] = {
+    "b": (1e9, "billion", "million"),
+    "bn": (1e9, "billion", "million"),
+    "t": (1e12, "trillion", "billion"),
     "tn": (1e12, "trillion", "billion"),
-    "m":  (1e6,  "million",  "billion"),
-    "mn": (1e6,  "million",  "billion"),
-    "k":  (1e3,  "thousand", "million"),
+    "m": (1e6, "million", "billion"),
+    "mn": (1e6, "million", "billion"),
+    "k": (1e3, "thousand", "million"),
 }
 
-_FIN_NUM_RE = re.compile(
-    r'([$€£¥₹]?)'
-    r'([\d,]+\.?\d*)'
-    r'\s*([BMKTbmkt]n?)\b'
-)
+_FIN_NUM_RE = re.compile(r'([$€£¥₹]?)' r'([\d,]+\.?\d*)' r'\s*([BMKTbmkt]n?)\b')
 _PCT_RE = re.compile(r'([\d.]+)\s*%')
 _BPS_RE = re.compile(r'([\d.]+)\s*bps\b', re.IGNORECASE)
 _QTR_RE = re.compile(r'\bQ([1-4])\s*(?:FY)?\s*(\d{2,4})\b', re.IGNORECASE)
-_HY_RE  = re.compile(r'\bH([12])\s+(\d{4})\b', re.IGNORECASE)
+_HY_RE = re.compile(r'\bH([12])\s+(\d{4})\b', re.IGNORECASE)
 
 _QTR_WORDS = {"1": "first", "2": "second", "3": "third", "4": "fourth"}
-_HY_WORDS  = {"1": "first", "2": "second"}
+_HY_WORDS = {"1": "first", "2": "second"}
 
 
 def normalize_finance_numbers(text: str) -> str:
     """Append expanded forms of finance numbers so scale variants match at query time."""
-    extras: List[str] = []
+    extras: list[str] = []
     for m in _FIN_NUM_RE.finditer(text):
         raw_num = m.group(2).replace(",", "")
-        suffix  = m.group(3).lower().rstrip("n")
+        suffix = m.group(3).lower().rstrip("n")
         if suffix not in _SCALE_EXPAND:
             continue
         try:
@@ -94,13 +91,14 @@ def normalize_finance_numbers(text: str) -> str:
 # SHARED UTILITIES
 # ══════════════════════════════════════════════════════════════════════════════
 
-def valid_embedding(emb: List[float], expected_dim: int) -> bool:
+
+def valid_embedding(emb: list[float], expected_dim: int) -> bool:
     if not isinstance(emb, list) or len(emb) != expected_dim:
         return False
     return not any(math.isnan(v) or math.isinf(v) for v in emb)
 
 
-def sanitize_text(text: str) -> Optional[str]:
+def sanitize_text(text: str) -> str | None:
     if not text:
         return None
     text = unicodedata.normalize("NFC", text.strip())
@@ -112,17 +110,19 @@ def sanitize_text(text: str) -> Optional[str]:
         return None
     try:
         from app.guardrails.input_guard import sanitize as _guard
+
         text = _guard(text, surface="embedder") or text
     except Exception:
         pass
     if len(text) > settings.MAX_PROMPT_CHARS:
-        text = text[:settings.MAX_PROMPT_CHARS]
+        text = text[: settings.MAX_PROMPT_CHARS]
     return text or None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # REDIS + LRU EMBEDDING CACHE
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class _EmbeddingCache:
     """Two-tier embedding cache: in-process dict + LOCAL Redis (~0.5ms/op).
@@ -134,7 +134,7 @@ class _EmbeddingCache:
     """
 
     def __init__(self) -> None:
-        self._local: Dict[str, List[float]] = {}
+        self._local: dict[str, list[float]] = {}
         self._cache = None
         self._cache_resolved = False
 
@@ -143,6 +143,7 @@ class _EmbeddingCache:
             return self._cache
         try:
             from app.core.infra_registry import infra
+
             self._cache = infra.get_cache()
         except Exception:
             self._cache = None
@@ -153,7 +154,7 @@ class _EmbeddingCache:
         raw = f"{model}:{dim}:{text[:500]}"
         return "emb:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-    def get(self, text: str, model: str, dim: int) -> Optional[List[float]]:
+    def get(self, text: str, model: str, dim: int) -> list[float] | None:
         key = self._key(text, model, dim)
         if key in self._local:
             return self._local[key]
@@ -170,7 +171,7 @@ class _EmbeddingCache:
                 pass
         return None
 
-    def set(self, text: str, model: str, dim: int, embedding: List[float]) -> None:
+    def set(self, text: str, model: str, dim: int, embedding: list[float]) -> None:
         key = self._key(text, model, dim)
         self._local[key] = embedding
         cache = self._get_cache()
@@ -188,6 +189,7 @@ _shared_cache = _EmbeddingCache()
 # BASE EMBEDDER
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 class BaseEmbedder(ABC):
     """Abstract base for all per-modality embedders.
 
@@ -199,6 +201,7 @@ class BaseEmbedder(ABC):
     def _get_model(self):
         """Lazy accessor for the shared TextEmbedder singleton."""
         from app.core.model_loader import model_loader
+
         return model_loader.get_embedder()
 
     # ── Abstract interface ──────────────────────────────────────────────────
@@ -220,9 +223,9 @@ class BaseEmbedder(ABC):
 
     def embed_documents(
         self,
-        docs: List[Any],
+        docs: list[Any],
         session_id: str = "default",
-    ) -> List[Any]:
+    ) -> list[Any]:
         """Embed a list of IngestedDocument objects.
 
         Sets doc.embedding on each successful doc. Returns list of docs that
@@ -234,21 +237,21 @@ class BaseEmbedder(ABC):
             raise ValueError("SESSION_ID_REQUIRED")
 
         embedder = self._get_model()
-        start    = time.time()
+        start = time.time()
 
-        texts:      List[str] = []
-        valid_docs: List[Any] = []
-        seen: Dict[str, bool] = {}
+        texts: list[str] = []
+        valid_docs: list[Any] = []
+        seen: dict[str, bool] = {}
 
         for doc in docs:
             try:
-                raw   = getattr(doc, "text", "") or ""
+                raw = getattr(doc, "text", "") or ""
                 clean = sanitize_text(raw)
                 if not clean:
                     continue
-                clean    = normalize_finance_numbers(clean)
+                clean = normalize_finance_numbers(clean)
                 enriched = self._build_embed_text(doc, clean)
-                enriched = enriched[:settings.MAX_PROMPT_CHARS]
+                enriched = enriched[: settings.MAX_PROMPT_CHARS]
                 h = hashlib.sha256(enriched.encode("utf-8")).hexdigest()
                 if h in seen:
                     continue
@@ -261,15 +264,15 @@ class BaseEmbedder(ABC):
         if not valid_docs:
             return []
 
-        cap        = settings.INGESTION_BATCH_SIZE * 10
-        texts      = texts[:cap]
+        cap = settings.INGESTION_BATCH_SIZE * 10
+        texts = texts[:cap]
         valid_docs = valid_docs[:cap]
 
-        results: List[Any] = []
+        results: list[Any] = []
 
         for i in range(0, len(texts), embedder.batch_size):
-            batch_texts = texts[i:i + embedder.batch_size]
-            batch_docs  = valid_docs[i:i + embedder.batch_size]
+            batch_texts = texts[i : i + embedder.batch_size]
+            batch_docs = valid_docs[i : i + embedder.batch_size]
             try:
                 embs = embedder._encode_with_retry(embedder.model, batch_texts)
                 for doc, emb, txt in zip(batch_docs, embs, batch_texts):
@@ -284,8 +287,10 @@ class BaseEmbedder(ABC):
                     results.append(doc)
             except Exception as exc:
                 logger.error(
-                    event="embed_batch_failed", batch_start=i,
-                    error=str(exc), session_id=session_id,
+                    event="embed_batch_failed",
+                    batch_start=i,
+                    error=str(exc),
+                    session_id=session_id,
                 )
 
         # ── FinBERT finance tone annotation ──────────────────────────────────
@@ -295,7 +300,7 @@ class BaseEmbedder(ABC):
         if getattr(settings, "FINBERT_ENABLED", False) and results:
             self._annotate_finbert_tone(results)
 
-        latency    = round(time.time() - start, 3)
+        latency = round(time.time() - start, 3)
         throughput = round(len(results) / max(latency, 1e-6), 1)
         logger.info(
             event="embed_documents_done",
@@ -308,7 +313,7 @@ class BaseEmbedder(ABC):
         )
         return results
 
-    def _annotate_finbert_tone(self, docs: List[Any]) -> None:
+    def _annotate_finbert_tone(self, docs: list[Any]) -> None:
         """Run FinBERT tone classification on embedded docs and store result in structure.
 
         Labels: 'positive' | 'negative' | 'neutral'
@@ -317,6 +322,7 @@ class BaseEmbedder(ABC):
         """
         try:
             from app.core.model_loader import model_loader
+
             finbert = model_loader.get_finbert()
             if finbert is None:
                 return
@@ -325,7 +331,7 @@ class BaseEmbedder(ABC):
 
         batch_size = getattr(settings, "FINBERT_BATCH_SIZE", 32)
         for i in range(0, len(docs), batch_size):
-            batch = docs[i:i + batch_size]
+            batch = docs[i : i + batch_size]
             texts = []
             for doc in batch:
                 t = getattr(doc, "text", "") or ""
@@ -334,13 +340,13 @@ class BaseEmbedder(ABC):
                 preds = finbert(texts, truncation=True, max_length=512)
                 for doc, pred in zip(batch, preds):
                     struct = dict(getattr(doc, "structure", {}) or {})
-                    struct["finance_tone"]       = pred["label"].lower()
+                    struct["finance_tone"] = pred["label"].lower()
                     struct["finance_tone_score"] = round(float(pred["score"]), 4)
                     doc.structure = struct
             except Exception as exc:
                 logger.debug(event="finbert_batch_skip", error=str(exc))
 
-    def embed_query(self, query: str, session_id: str = "default") -> List[float]:
+    def embed_query(self, query: str, session_id: str = "default") -> list[float]:
         """Embed a query string.
 
         Applies BGE_QUERY_INSTRUCTION from config as explicit prefix when the
@@ -350,8 +356,10 @@ class BaseEmbedder(ABC):
         embedder = self._get_model()
         # Only prepend if the model hasn't already registered a query prompt;
         # prevents double-prefixing for instruction-tuned models (Qwen3/E5).
-        if not (getattr(embedder, "_query_prompt_name", None) or
-                getattr(embedder, "_query_prompt_text", None)):
+        if not (
+            getattr(embedder, "_query_prompt_name", None)
+            or getattr(embedder, "_query_prompt_text", None)
+        ):
             instruction = getattr(settings, "BGE_QUERY_INSTRUCTION", "")
             if instruction:
                 query = instruction + query
@@ -365,10 +373,11 @@ class BaseEmbedder(ABC):
 # _build_embed_text() instead.
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def _modality_prefix(doc: Any) -> str:
-    m  = (getattr(doc, "modality", "") or "").lower()
-    st = (getattr(doc, "subtype",  "") or "").lower()
-    s  = getattr(doc, "structure", {}) or {}
+    m = (getattr(doc, "modality", "") or "").lower()
+    st = (getattr(doc, "subtype", "") or "").lower()
+    s = getattr(doc, "structure", {}) or {}
     if m == "table":
         return "Table: "
     if m == "image":
@@ -396,13 +405,13 @@ def _modality_prefix(doc: Any) -> str:
 
 def _enrich_doc(doc: Any, text: str) -> str:
     """Build context-enriched embedding input for a document (legacy shared path)."""
-    context: List[str] = []
+    context: list[str] = []
     src_type = (getattr(doc, "source_type", "") or "").lower()
     modality = (getattr(doc, "modality", "") or "").lower()
     s = getattr(doc, "structure", {}) or {}
 
     if getattr(doc, "source_type", None):
-        context.append(f"[{getattr(doc, 'source_type').upper()}]")
+        context.append(f"[{doc.source_type.upper()}]")
     if modality:
         context.append(f"[{modality.upper()}]")
     if getattr(doc, "page", None):
@@ -414,7 +423,7 @@ def _enrich_doc(doc: Any, text: str) -> str:
     if section_title and len(section_title) <= 120:
         context.append(f"[Section: {section_title}]")
 
-    sub_idx   = s.get("sub_chunk_index")
+    sub_idx = s.get("sub_chunk_index")
     sub_total = s.get("total_sub_chunks")
     if sub_idx is not None and sub_total and int(sub_total) > 1:
         context.append(f"[Part {int(sub_idx)+1}/{int(sub_total)}]")
@@ -460,7 +469,7 @@ def _enrich_doc(doc: Any, text: str) -> str:
         if ts_s is not None and ts_e is not None:
             header += f" [{float(ts_s):.0f}s-{float(ts_e):.0f}s]"
         entities = s.get("finance_entities") or {}
-        entity_tokens: List[str] = []
+        entity_tokens: list[str] = []
         if isinstance(entities, dict):
             for v in entities.values():
                 if isinstance(v, list):
@@ -481,7 +490,7 @@ def _enrich_doc(doc: Any, text: str) -> str:
         if image_type:
             text = f"{image_type.replace('_', ' ')}: {text}"
 
-    return (context_prefix + text).strip()[:settings.MAX_PROMPT_CHARS]
+    return (context_prefix + text).strip()[: settings.MAX_PROMPT_CHARS]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -489,6 +498,7 @@ def _enrich_doc(doc: Any, text: str) -> str:
 # Used by BaseEmbedder._get_model() and MultimodalEmbedder.
 # Moved from text_embedder.py (now deleted).
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TextEmbedder:
     """BGE-large-en-v1.5 (or configured model) SentenceTransformer wrapper.
@@ -500,15 +510,16 @@ class TextEmbedder:
 
     def __init__(self, model_name: str, batch_size: int, device: str) -> None:
         from sentence_transformers import SentenceTransformer
-        self.model_name   = model_name
-        self.batch_size   = batch_size
-        self.device       = device
+
+        self.model_name = model_name
+        self.batch_size = batch_size
+        self.device = device
         self.expected_dim = settings.TEXT_EMBEDDING_DIM
         self.max_text_len = settings.MAX_PROMPT_CHARS
         self.model = SentenceTransformer(model_name, device=device)
 
-        self._query_prompt_name: Optional[str] = None
-        self._query_prompt_text: Optional[str] = None
+        self._query_prompt_name: str | None = None
+        self._query_prompt_text: str | None = None
         _prompts = getattr(self.model, "prompts", {}) or {}
         if "query" in _prompts:
             self._query_prompt_name = "query"
@@ -527,8 +538,11 @@ class TextEmbedder:
             query_prompt_text=bool(self._query_prompt_text),
         )
 
-    def _encode_with_retry(self, model, texts: List[str], max_retries: int = 3) -> List[List[float]]:
+    def _encode_with_retry(
+        self, model, texts: list[str], max_retries: int = 3
+    ) -> list[list[float]]:
         import time as _time
+
         wait = 1.0
         for attempt in range(max_retries):
             try:
@@ -557,7 +571,7 @@ class TextEmbedder:
                 wait = min(wait * 2, 10.0)
         return []
 
-    def embed_text(self, text: str, session_id: str = "default") -> List[float]:
+    def embed_text(self, text: str, session_id: str = "default") -> list[float]:
         if not session_id:
             raise ValueError("SESSION_ID_REQUIRED")
         clean = sanitize_text(text)
@@ -574,6 +588,7 @@ class TextEmbedder:
             logger.debug(event="embed_cache_hit", session_id=session_id)
             return cached
         import time as _time
+
         t_start = _time.time()
         _kwargs: dict = dict(convert_to_numpy=True, normalize_embeddings=True)
         if self._query_prompt_name:
@@ -594,14 +609,14 @@ class TextEmbedder:
         )
         return emb
 
-    def embed_texts(self, texts: List[str], session_id: str = "default") -> List[List[float]]:
+    def embed_texts(self, texts: list[str], session_id: str = "default") -> list[list[float]]:
         if not texts:
             return []
-        results: List[List[float]] = []
+        results: list[list[float]] = []
         for i in range(0, len(texts), self.batch_size):
-            raw_batch = texts[i:i + self.batch_size]
-            clean_batch: List[str] = []
-            cached_results: List[Optional[List[float]]] = []
+            raw_batch = texts[i : i + self.batch_size]
+            clean_batch: list[str] = []
+            cached_results: list[list[float] | None] = []
             for t in raw_batch:
                 c = sanitize_text(t)
                 if not c:
@@ -616,7 +631,7 @@ class TextEmbedder:
                     cached_results.append(None)
                     clean_batch.append(c)
             to_encode = [(idx, t) for idx, t in enumerate(clean_batch) if t]
-            encoded: Dict[str, List[float]] = {}
+            encoded: dict[str, list[float]] = {}
             if to_encode:
                 indices, batch_texts = zip(*to_encode)
                 try:
@@ -624,9 +639,13 @@ class TextEmbedder:
                     for idx, emb in zip(indices, embs):
                         if valid_embedding(emb, self.expected_dim):
                             encoded[idx] = emb
-                            _shared_cache.set(clean_batch[idx], self.model_name, self.expected_dim, emb)
+                            _shared_cache.set(
+                                clean_batch[idx], self.model_name, self.expected_dim, emb
+                            )
                 except Exception as e:
-                    logger.error(event="embed_texts_batch_failed", error=str(e), session_id=session_id)
+                    logger.error(
+                        event="embed_texts_batch_failed", error=str(e), session_id=session_id
+                    )
             for idx, cached_emb in enumerate(cached_results):
                 if cached_emb is not None:
                     results.append(cached_emb)
@@ -634,23 +653,24 @@ class TextEmbedder:
                     results.append(encoded[idx])
         return results
 
-    def embed_documents(self, documents: List[Any], session_id: str = "default") -> List[Any]:
+    def embed_documents(self, documents: list[Any], session_id: str = "default") -> list[Any]:
         import time as _time
+
         if not session_id:
             raise ValueError("SESSION_ID_REQUIRED")
         if not documents:
             return []
-        start  = _time.time()
-        texts: List[str] = []
-        valid_docs: List[Any] = []
-        seen: Dict[str, bool] = {}
+        start = _time.time()
+        texts: list[str] = []
+        valid_docs: list[Any] = []
+        seen: dict[str, bool] = {}
         for doc in documents:
             try:
-                raw   = getattr(doc, "text", "") or ""
+                raw = getattr(doc, "text", "") or ""
                 clean = sanitize_text(raw)
                 if not clean:
                     continue
-                clean    = normalize_finance_numbers(clean)
+                clean = normalize_finance_numbers(clean)
                 enriched = _enrich_doc(doc, clean)
                 h = hashlib.sha256(enriched.encode("utf-8")).hexdigest()
                 if h in seen:
@@ -664,10 +684,10 @@ class TextEmbedder:
             return []
         cap = settings.INGESTION_BATCH_SIZE * 10
         texts, valid_docs = texts[:cap], valid_docs[:cap]
-        results: List[Any] = []
+        results: list[Any] = []
         for i in range(0, len(texts), self.batch_size):
-            batch_texts = texts[i:i + self.batch_size]
-            batch_docs  = valid_docs[i:i + self.batch_size]
+            batch_texts = texts[i : i + self.batch_size]
+            batch_docs = valid_docs[i : i + self.batch_size]
             try:
                 embs = self._encode_with_retry(self.model, batch_texts)
                 for doc, emb in zip(batch_docs, embs):
@@ -683,7 +703,9 @@ class TextEmbedder:
                         _shared_cache.set(text_for_cache, self.model_name, self.expected_dim, emb)
                     results.append(doc)
             except Exception as e:
-                logger.error(event="embed_batch_failed", batch_start=i, error=str(e), session_id=session_id)
+                logger.error(
+                    event="embed_batch_failed", batch_start=i, error=str(e), session_id=session_id
+                )
         total_latency = round(_time.time() - start, 3)
         logger.info(
             event="embed_documents_success",
@@ -695,34 +717,37 @@ class TextEmbedder:
         )
         return results
 
-    def embed_query(self, query: str, session_id: str = "default") -> List[float]:
+    def embed_query(self, query: str, session_id: str = "default") -> list[float]:
         return self.embed_text(query, session_id)
 
-    def embed_matryoshka(self, text: str, session_id: str = "default") -> Tuple[List[float], List[float]]:
-        full  = self.embed_text(text, session_id)
-        short = full[:settings.MATRYOSHKA_SHORT_DIM]
-        norm  = math.sqrt(sum(v * v for v in short)) + 1e-10
+    def embed_matryoshka(
+        self, text: str, session_id: str = "default"
+    ) -> tuple[list[float], list[float]]:
+        full = self.embed_text(text, session_id)
+        short = full[: settings.MATRYOSHKA_SHORT_DIM]
+        norm = math.sqrt(sum(v * v for v in short)) + 1e-10
         return [v / norm for v in short], full
 
-    def embed_sparse(self, text: str, vocab_size: int = 30000) -> Dict[str, float]:
+    def embed_sparse(self, text: str, vocab_size: int = 30000) -> dict[str, float]:
         import re as _re
+
         clean = sanitize_text(text)
         if not clean:
             return {}
         tokens = _re.findall(r"\b[a-z0-9]+\b", clean.lower())
-        tf: Dict[int, float] = {}
+        tf: dict[int, float] = {}
         for tok in tokens:
             idx = hash(tok) % vocab_size
             tf[idx] = tf.get(idx, 0.0) + 1.0
         total = sum(tf.values()) + 1e-10
         return {k: round(v / total, 6) for k, v in tf.items()}
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(self) -> dict[str, Any]:
         return {
-            "model":       self.model_name,
-            "device":      self.device,
-            "dim":         self.expected_dim,
-            "batch_size":  self.batch_size,
+            "model": self.model_name,
+            "device": self.device,
+            "dim": self.expected_dim,
+            "batch_size": self.batch_size,
             "cache_local": len(_shared_cache._local),
         }
 
@@ -739,11 +764,14 @@ from pathlib import Path as _Path
 class MultimodalEmbedderError(Exception):
     pass
 
+
 class NoValidDocumentsError(MultimodalEmbedderError):
     pass
 
+
 class EmbeddingDimensionError(MultimodalEmbedderError):
     pass
+
 
 class SessionIdRequiredError(MultimodalEmbedderError):
     pass
@@ -759,15 +787,15 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _modality_counts(docs: List[Any]) -> Dict[str, int]:
-    counts: Dict[str, int] = {}
+def _modality_counts(docs: list[Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
     for d in docs:
         m = getattr(d, "modality", "unknown")
         counts[m] = counts.get(m, 0) + 1
     return counts
 
 
-def _resolve_asset_path(doc: Any) -> Optional[str]:
+def _resolve_asset_path(doc: Any) -> str | None:
     structure = getattr(doc, "structure", {}) or {}
     for key in ("asset_path", "frame_path", "source_path"):
         path = structure.get(key)
@@ -780,7 +808,7 @@ def _resolve_asset_path(doc: Any) -> Optional[str]:
     return None
 
 
-def _route_documents(docs: List[Any]) -> Tuple[List[Any], List[Any]]:
+def _route_documents(docs: list[Any]) -> tuple[list[Any], list[Any]]:
     """Route documents to the text (BGE) or vision (SigLIP) embedder.
 
     Routing trusts the explicit ``structure["embedding_space"]`` set by the
@@ -792,8 +820,8 @@ def _route_documents(docs: List[Any]) -> Tuple[List[Any], List[Any]]:
 
     Legacy docs without an explicit embedding_space fall back to modality/subtype.
     """
-    text_docs:   List[Any] = []
-    vision_docs: List[Any] = []
+    text_docs: list[Any] = []
+    vision_docs: list[Any] = []
     for doc in docs:
         try:
             space = (getattr(doc, "structure", {}) or {}).get("embedding_space")
@@ -805,8 +833,12 @@ def _route_documents(docs: List[Any]) -> Tuple[List[Any], List[Any]]:
                 continue
             # ── Legacy fallback: no explicit embedding_space on the doc ──────────
             modality = getattr(doc, "modality", "")
-            subtype  = getattr(doc, "subtype",  "") or ""
-            if modality == "image" and subtype in ("caption", "image_frame") and _resolve_asset_path(doc):
+            subtype = getattr(doc, "subtype", "") or ""
+            if (
+                modality == "image"
+                and subtype in ("caption", "image_frame")
+                and _resolve_asset_path(doc)
+            ):
                 vision_docs.append(doc)
             elif modality == "video" and subtype == "frame":
                 vision_docs.append(doc)
@@ -825,11 +857,11 @@ class MultimodalEmbedder:
     """
 
     def __init__(self, text_embedder, image_embedder) -> None:
-        self.text_embedder  = text_embedder
+        self.text_embedder = text_embedder
         self.image_embedder = image_embedder
-        self.batch_size     = settings.EMBEDDING_BATCH_SIZE
-        self.max_docs       = settings.INGESTION_BATCH_SIZE * 10
-        self._text_model_name   = settings.EMBEDDING_MODEL
+        self.batch_size = settings.EMBEDDING_BATCH_SIZE
+        self.max_docs = settings.INGESTION_BATCH_SIZE * 10
+        self._text_model_name = settings.EMBEDDING_MODEL
         self._vision_model_name = settings.SIGLIP_MODEL
         logger.info(
             event="multimodal_embedder_initialized",
@@ -838,16 +870,17 @@ class MultimodalEmbedder:
             batch_size=self.batch_size,
         )
 
-    def embed_documents(self, documents: List[Any], session_id: str) -> Tuple[List[Any], List[Any]]:
+    def embed_documents(self, documents: list[Any], session_id: str) -> tuple[list[Any], list[Any]]:
         import time as _time
+
         if not session_id:
             raise SessionIdRequiredError("SESSION_ID_REQUIRED")
         if not documents:
             return [], []
         start = _time.time()
-        docs = documents[:self.max_docs]
-        seen_hashes: Dict[str, bool] = {}
-        unique_docs: List[Any] = []
+        docs = documents[: self.max_docs]
+        seen_hashes: dict[str, bool] = {}
+        unique_docs: list[Any] = []
         deduped_skipped = 0
         for doc in docs:
             h = _sha256_text(getattr(doc, "text", "") or "")
@@ -859,18 +892,22 @@ class MultimodalEmbedder:
         if not unique_docs:
             raise NoValidDocumentsError(f"ALL_DOCUMENTS_DEDUPED: {deduped_skipped} duplicates")
         text_docs, vision_docs = _route_documents(unique_docs)
-        embedded_text:   List[Any] = []
-        embedded_vision: List[Any] = []
+        embedded_text: list[Any] = []
+        embedded_vision: list[Any] = []
         if text_docs:
             try:
                 embedded_text = self._embed_text_batched(text_docs, session_id)
             except Exception as exc:
-                logger.error(event="multimodal_text_embed_failed", count=len(text_docs), error=str(exc))
+                logger.error(
+                    event="multimodal_text_embed_failed", count=len(text_docs), error=str(exc)
+                )
         if vision_docs:
             try:
                 embedded_vision = self._embed_vision_batched(vision_docs, session_id)
             except Exception as exc:
-                logger.error(event="multimodal_vision_embed_failed", count=len(vision_docs), error=str(exc))
+                logger.error(
+                    event="multimodal_vision_embed_failed", count=len(vision_docs), error=str(exc)
+                )
         logger.info(
             event="multimodal_embed_success",
             text_embedded=len(embedded_text),
@@ -881,11 +918,12 @@ class MultimodalEmbedder:
         )
         return embedded_text, embedded_vision
 
-    def _embed_text_batched(self, docs: List[Any], session_id: str) -> List[Any]:
+    def _embed_text_batched(self, docs: list[Any], session_id: str) -> list[Any]:
         import time as _time
-        results: List[Any] = []
+
+        results: list[Any] = []
         for i in range(0, len(docs), self.batch_size):
-            batch = docs[i:i + self.batch_size]
+            batch = docs[i : i + self.batch_size]
             try:
                 embedded = self.text_embedder.embed_documents(batch, session_id=session_id)
                 for doc in embedded:
@@ -895,22 +933,23 @@ class MultimodalEmbedder:
                     struct = dict(getattr(doc, "structure", {}) or {})
                     struct["embedding_space"] = "text"
                     struct["embedding_model"] = self._text_model_name
-                    struct["embedding_dim"]   = settings.TEXT_EMBEDDING_DIM
-                    struct["embedded_at"]     = _time.time()
+                    struct["embedding_dim"] = settings.TEXT_EMBEDDING_DIM
+                    struct["embedded_at"] = _time.time()
                     doc.structure = struct
                     results.append(doc)
             except Exception as exc:
                 logger.error(event="multimodal_text_batch_failed", batch_start=i, error=str(exc))
         return results
 
-    def _embed_vision_batched(self, docs: List[Any], session_id: str) -> List[Any]:
+    def _embed_vision_batched(self, docs: list[Any], session_id: str) -> list[Any]:
         import time as _time
-        results: List[Any] = []
-        seen_paths: Dict[str, bool] = {}
+
+        results: list[Any] = []
+        seen_paths: dict[str, bool] = {}
         for i in range(0, len(docs), self.batch_size):
-            batch      = docs[i:i + self.batch_size]
-            paths:     List[str] = []
-            valid_docs: List[Any] = []
+            batch = docs[i : i + self.batch_size]
+            paths: list[str] = []
+            valid_docs: list[Any] = []
             for doc in batch:
                 asset_path = _resolve_asset_path(doc)
                 if not asset_path:
@@ -926,15 +965,17 @@ class MultimodalEmbedder:
             try:
                 emb_results = self.image_embedder.embed_batch(paths, session_id=session_id)
                 for doc, emb_result in zip(valid_docs, emb_results):
-                    emb_list = emb_result.embedding if hasattr(emb_result, "embedding") else emb_result
+                    emb_list = (
+                        emb_result.embedding if hasattr(emb_result, "embedding") else emb_result
+                    )
                     if not _mm_valid_embedding(emb_list, settings.VISION_EMBEDDING_DIM):
                         continue
                     doc.embedding = emb_list
                     struct = dict(getattr(doc, "structure", {}) or {})
                     struct["embedding_space"] = "vision"
                     struct["embedding_model"] = self._vision_model_name
-                    struct["embedding_dim"]   = settings.VISION_EMBEDDING_DIM
-                    struct["embedded_at"]     = _time.time()
+                    struct["embedding_dim"] = settings.VISION_EMBEDDING_DIM
+                    struct["embedded_at"] = _time.time()
                     if hasattr(emb_result, "checksum_sha256"):
                         struct["asset_checksum_sha256"] = emb_result.checksum_sha256
                     doc.structure = struct
@@ -944,20 +985,24 @@ class MultimodalEmbedder:
         return results
 
     async def embed_documents_async(
-        self, documents: List[Any], session_id: str
-    ) -> Tuple[List[Any], List[Any]]:
+        self, documents: list[Any], session_id: str
+    ) -> tuple[list[Any], list[Any]]:
         loop = _asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.embed_documents(documents, session_id))
 
     def cross_modal_similarity(
-        self, query_text: str, image_embedding: List[float], session_id: str = "default"
+        self, query_text: str, image_embedding: list[float], session_id: str = "default"
     ) -> float:
         if not query_text or not image_embedding:
             return 0.0
         try:
             import numpy as np
+
             from app.core.model_loader import model_loader
-            clip_emb = model_loader.get_siglip_text_embedder().embed_query(query_text, session_id=session_id)
+
+            clip_emb = model_loader.get_siglip_text_embedder().embed_query(
+                query_text, session_id=session_id
+            )
             if not clip_emb or len(clip_emb) != len(image_embedding):
                 return 0.0
             a = np.array(clip_emb, dtype=float)
@@ -967,11 +1012,11 @@ class MultimodalEmbedder:
         except Exception:
             return 0.0
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(self) -> dict[str, Any]:
         return {
-            "text_embedder_ok":   self.text_embedder is not None,
+            "text_embedder_ok": self.text_embedder is not None,
             "vision_embedder_ok": self.image_embedder is not None,
-            "text_model":         self._text_model_name,
-            "vision_model":       self._vision_model_name,
-            "batch_size":         self.batch_size,
+            "text_model": self._text_model_name,
+            "vision_model": self._vision_model_name,
+            "batch_size": self.batch_size,
         }

@@ -2,9 +2,8 @@
 
 Measures Whisper transcript quality against gold transcripts from official earnings call sources.
 """
-from __future__ import annotations
 
-from typing import List, Optional
+from __future__ import annotations
 
 from app.eval.metrics.base import MetricResult
 
@@ -15,16 +14,18 @@ def compute_wer(hypothesis: str, reference: str) -> float:
         return float("nan")
     try:
         import jiwer
+
         return float(jiwer.wer(reference, hypothesis))
     except ImportError:
         # Fallback: simple word-level edit distance
         from app.eval.metrics.ocr_metrics import word_error_rate
+
         return word_error_rate(hypothesis, reference)
 
 
 def audio_wer_batch(
-    transcripts: List[str],
-    gold_transcripts: List[str],
+    transcripts: list[str],
+    gold_transcripts: list[str],
 ) -> MetricResult:
     """Compute mean WER over a batch of (transcript, gold) pairs."""
     if not transcripts or not gold_transcripts:

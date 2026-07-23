@@ -11,6 +11,7 @@ All keys are single-use where applicable (deleted after successful consume).
 Falls back gracefully when Redis is unavailable — callers receive a RuntimeError
 so the endpoint returns a 503 rather than silently doing nothing.
 """
+
 from __future__ import annotations
 
 import random
@@ -22,14 +23,15 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_OTP_PREFIX      = "otp:"
+_OTP_PREFIX = "otp:"
 _ATTEMPTS_PREFIX = "otp_attempts:"
-_LOCKED_PREFIX   = "otp_locked:"
-_RESET_PREFIX    = "reset:"
+_LOCKED_PREFIX = "otp_locked:"
+_RESET_PREFIX = "reset:"
 
 
 def _redis():
     from app.core.infra_registry import infra
+
     mem = infra.get_memory()
     if mem is None or mem.client is None:
         raise RuntimeError("Redis unavailable — cannot store OTP")
@@ -37,6 +39,7 @@ def _redis():
 
 
 # ── OTP ───────────────────────────────────────────────────────────────────────
+
 
 def generate_otp() -> str:
     """Return a cryptographically random 6-digit string."""
@@ -114,7 +117,7 @@ def delete_otp(user_id: str) -> None:
 # ── Trusted device tokens ────────────────────────────────────────────────────
 
 _DEVICE_PREFIX = "device:"
-_DEVICE_TTL    = 60 * 60 * 24 * 30  # 30 days
+_DEVICE_TTL = 60 * 60 * 24 * 30  # 30 days
 
 
 def store_device_token(token: str, user_id: str) -> None:
@@ -172,6 +175,7 @@ def revoke_device_tokens(user_id: str) -> None:
 
 
 # ── Password-reset tokens ─────────────────────────────────────────────────────
+
 
 def generate_reset_token() -> str:
     """Return a cryptographically random URL-safe 32-byte token (256 bits)."""

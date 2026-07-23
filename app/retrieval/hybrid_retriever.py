@@ -8,7 +8,7 @@ import math
 import re
 import time
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -17,6 +17,7 @@ logger = get_logger(__name__)
 
 try:
     from prometheus_client import Counter, Histogram
+
     _retrieval_duration = Histogram(
         "retrieval_latency_seconds",
         "Retrieval latency",
@@ -38,6 +39,7 @@ except Exception:
 
 try:
     import pybreaker
+
     _text_breaker = pybreaker.CircuitBreaker(
         fail_max=settings.CIRCUIT_BREAKER_MAX_FAILURES,
         reset_timeout=settings.CIRCUIT_BREAKER_RESET_TIMEOUT,
@@ -58,9 +60,9 @@ except ImportError:
         def __call__(self, fn):
             return fn
 
-    _text_breaker = _DummyBreaker()   # type: ignore[assignment]
-    _vision_breaker = _DummyBreaker() # type: ignore[assignment]
-    _bm25_breaker = _DummyBreaker()   # type: ignore[assignment]
+    _text_breaker = _DummyBreaker()  # type: ignore[assignment]
+    _vision_breaker = _DummyBreaker()  # type: ignore[assignment]
+    _bm25_breaker = _DummyBreaker()  # type: ignore[assignment]
 
 
 # COLLOQUIAL → KEYWORD HEURISTIC EXPANSION
@@ -72,21 +74,88 @@ except ImportError:
 # Latency overhead per query: < 1 ms.
 
 _QUERY_STOPWORDS: set = {
-    "what", "which", "who", "when", "where", "why", "how",
-    "is", "are", "was", "were", "be", "been", "being",
-    "do", "does", "did", "doing", "done",
-    "the", "a", "an", "of", "to", "in", "on", "for", "at", "by",
-    "with", "from", "this", "that", "these", "those", "it", "its",
-    "as", "and", "or", "but", "so", "if", "no", "not", "any",
-    "can", "could", "should", "would", "may", "might", "will",
-    "me", "my", "you", "your", "we", "our", "they", "their",
-    "about", "into", "than", "then", "also", "tell", "give",
-    "explain", "describe", "summarize", "summarise", "show",
-    "good", "bad", "make", "makes", "made",
+    "what",
+    "which",
+    "who",
+    "when",
+    "where",
+    "why",
+    "how",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "do",
+    "does",
+    "did",
+    "doing",
+    "done",
+    "the",
+    "a",
+    "an",
+    "of",
+    "to",
+    "in",
+    "on",
+    "for",
+    "at",
+    "by",
+    "with",
+    "from",
+    "this",
+    "that",
+    "these",
+    "those",
+    "it",
+    "its",
+    "as",
+    "and",
+    "or",
+    "but",
+    "so",
+    "if",
+    "no",
+    "not",
+    "any",
+    "can",
+    "could",
+    "should",
+    "would",
+    "may",
+    "might",
+    "will",
+    "me",
+    "my",
+    "you",
+    "your",
+    "we",
+    "our",
+    "they",
+    "their",
+    "about",
+    "into",
+    "than",
+    "then",
+    "also",
+    "tell",
+    "give",
+    "explain",
+    "describe",
+    "summarize",
+    "summarise",
+    "show",
+    "good",
+    "bad",
+    "make",
+    "makes",
+    "made",
 }
 
 
-def _expand_query_heuristic(q: str) -> List[str]:
+def _expand_query_heuristic(q: str) -> list[str]:
     """Return up to 2 distinct query forms for BM25: [original, keywords-only].
 
     Adds nothing for queries that are already mostly keywords (avoids dups
@@ -95,7 +164,7 @@ def _expand_query_heuristic(q: str) -> List[str]:
     if not q:
         return []
     original = q.strip()
-    tokens   = [t for t in re.findall(r"[A-Za-z0-9'\-]+", original.lower())]
+    tokens = [t for t in re.findall(r"[A-Za-z0-9'\-]+", original.lower())]
     if not tokens:
         return [original]
 
@@ -115,43 +184,90 @@ def _expand_query_heuristic(q: str) -> List[str]:
 
 # VISION QUERY KEYWORDS
 _VISION_KEYWORDS = {
-    "image", "photo", "diagram", "visual", "figure",
-    "chart", "graph", "screenshot", "picture", "illustration",
-    "drawing", "render", "thumbnail", "frame", "scene",
-    "show", "display", "depict",
+    "image",
+    "photo",
+    "diagram",
+    "visual",
+    "figure",
+    "chart",
+    "graph",
+    "screenshot",
+    "picture",
+    "illustration",
+    "drawing",
+    "render",
+    "thumbnail",
+    "frame",
+    "scene",
+    "show",
+    "display",
+    "depict",
 }
 
 # AUDIO QUERY KEYWORDS
 _AUDIO_KEYWORDS = {
-    "audio", "sound", "speech", "transcript", "recording",
-    "voice", "podcast", "spoken", "listen", "hear", "said",
-    "speaker", "interview", "call", "conversation",
+    "audio",
+    "sound",
+    "speech",
+    "transcript",
+    "recording",
+    "voice",
+    "podcast",
+    "spoken",
+    "listen",
+    "hear",
+    "said",
+    "speaker",
+    "interview",
+    "call",
+    "conversation",
     "commentary",
 }
 
 # VIDEO QUERY KEYWORDS
 _VIDEO_KEYWORDS = {
-    "video", "clip", "footage", "movie", "film",
-    "watch", "stream", "playback", "scene", "frame",
-    "timestamp", "segment",
+    "video",
+    "clip",
+    "footage",
+    "movie",
+    "film",
+    "watch",
+    "stream",
+    "playback",
+    "scene",
+    "frame",
+    "timestamp",
+    "segment",
 }
 
 # KEYWORD QUERY SIGNALS — patterns that strongly suggest the BM25 lane
 # should be weighted higher (exact entity names, tickers, financial codes).
 _ENTITY_RE = re.compile(
-    r'\b[A-Z]{2,6}\b'                  # tickers / acronyms: AAPL, EPS, EBITDA
-    r'|\b\d{4}\b'                       # year: 2023
-    r'|\b[Qq][1-4]\b'                   # quarter: Q3
-    r'|\$[\d,.]+[BMKTbmkt]?'           # dollar amount: $6.13B
-    r'|\b\d[\d,.]*\s*[BMKTbmkt]\b'    # scale amount: 45B, 3.2M
-    r'|\b\d+\.\d+\b'                   # decimal: 6.13
+    r'\b[A-Z]{2,6}\b'  # tickers / acronyms: AAPL, EPS, EBITDA
+    r'|\b\d{4}\b'  # year: 2023
+    r'|\b[Qq][1-4]\b'  # quarter: Q3
+    r'|\$[\d,.]+[BMKTbmkt]?'  # dollar amount: $6.13B
+    r'|\b\d[\d,.]*\s*[BMKTbmkt]\b'  # scale amount: 45B, 3.2M
+    r'|\b\d+\.\d+\b'  # decimal: 6.13
 )
 
 # SEMANTIC QUERY SIGNALS — conversational, explanation-seeking
 _SEMANTIC_STARTERS = {
-    "explain", "describe", "summarize", "summarise", "elaborate",
-    "why", "how", "what is", "what are", "what was", "tell me",
-    "give me", "provide", "overview", "discuss",
+    "explain",
+    "describe",
+    "summarize",
+    "summarise",
+    "elaborate",
+    "why",
+    "how",
+    "what is",
+    "what are",
+    "what was",
+    "tell me",
+    "give me",
+    "provide",
+    "overview",
+    "discuss",
 }
 
 # Multi-source boost — applied when the SAME document appears in both BM25
@@ -168,8 +284,9 @@ _NUMERIC_TOKEN_RE = re.compile(r'^[\(\$\-\+]*\d[\d,\.]*%?\)?[mbk]?\)?[,.;:]?$', 
 def _is_numeric_token(tok: str) -> bool:
     return bool(_NUMERIC_TOKEN_RE.match(tok))
 
+
 # FINANCIAL TABLE BOOST — regex patterns hoisted to module level for performance
-_pipe_re      = re.compile(r'\d[\d,]+\s*\||\|\s*\$?\s*\d[\d,]+')
+_pipe_re = re.compile(r'\d[\d,]+\s*\||\|\s*\$?\s*\d[\d,]+')
 # Metric noun and decline/growth verb, allowing an intervening clause (a
 # dollar figure, "of total X", a year) rather than requiring direct adjacency.
 # The original `revenue\s+(?:decreased|...)` pattern missed real phrasing like
@@ -183,8 +300,8 @@ _narrative_re = re.compile(
     r'.*?(?:\d+(?:\.\d+)?\s*%|\$\s*\d)',
     re.IGNORECASE | re.DOTALL,
 )
-_rounded_re   = re.compile(r'\$\s*\d+\.\d+\s*billion', re.IGNORECASE)
-_exact_re     = re.compile(r'\b\d{2,3},\d{3}\b')
+_rounded_re = re.compile(r'\$\s*\d+\.\d+\s*billion', re.IGNORECASE)
+_exact_re = re.compile(r'\b\d{2,3},\d{3}\b')
 
 
 class HybridRetriever:
@@ -224,7 +341,7 @@ class HybridRetriever:
 
     # HASH
 
-    def _hash(self, text: str, meta: Dict) -> str:
+    def _hash(self, text: str, meta: dict) -> str:
         base = f"{text[:200]}|{meta.get('doc_id', '')}|{meta.get('chunk_id', '')}"
         return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
@@ -232,8 +349,9 @@ class HybridRetriever:
 
     def _normalize_query(self, q: str) -> str:
         import unicodedata
+
         q = unicodedata.normalize("NFC", str(q or ""))
-        return " ".join(q.strip().split())[:settings.MAX_PROMPT_CHARS]
+        return " ".join(q.strip().split())[: settings.MAX_PROMPT_CHARS]
 
     # MODALITY DETECTION
 
@@ -256,7 +374,7 @@ class HybridRetriever:
 
     # LRU EMBEDDING CACHE — TEXT
 
-    def _embed_query_cached(self, q: str, session_id: str = "") -> List[float]:
+    def _embed_query_cached(self, q: str, session_id: str = "") -> list[float]:
         cache_key = hashlib.sha256(q.encode("utf-8")).hexdigest()
 
         if cache_key in self._embed_cache:
@@ -274,7 +392,7 @@ class HybridRetriever:
 
     # LRU EMBEDDING CACHE — VISION
 
-    def _embed_vision_cached(self, q: str, session_id: str = "") -> List[float]:
+    def _embed_vision_cached(self, q: str, session_id: str = "") -> list[float]:
         cache_key = "vis_" + hashlib.sha256(q.encode("utf-8")).hexdigest()
 
         if cache_key in self._vision_cache:
@@ -283,6 +401,7 @@ class HybridRetriever:
             return self._vision_cache[cache_key]
 
         from app.core.model_loader import model_loader
+
         clip = self.clip_text_embedder or model_loader.get_siglip_text_embedder()
         vec = clip.embed_single(q, session_id=session_id)
 
@@ -301,19 +420,42 @@ class HybridRetriever:
         r'|\d+(?:\.\d+)?\s*(?:billion|million|bps|basis points)',
         re.IGNORECASE,
     )
-    _EARNINGS_CALL_WORDS = frozenset({
-        "said", "stated", "noted", "commented", "mentioned", "guided",
-        "cfo", "ceo", "management", "executive", "speaker", "transcript",
-        "call", "conference",
-    })
-    _TABULAR_WORDS = frozenset({
-        "table", "balance sheet", "income statement", "cash flow",
-        "row", "sheet", "column", "spreadsheet", "excel", "model",
-    })
+    _EARNINGS_CALL_WORDS = frozenset(
+        {
+            "said",
+            "stated",
+            "noted",
+            "commented",
+            "mentioned",
+            "guided",
+            "cfo",
+            "ceo",
+            "management",
+            "executive",
+            "speaker",
+            "transcript",
+            "call",
+            "conference",
+        }
+    )
+    _TABULAR_WORDS = frozenset(
+        {
+            "table",
+            "balance sheet",
+            "income statement",
+            "cash flow",
+            "row",
+            "sheet",
+            "column",
+            "spreadsheet",
+            "excel",
+            "model",
+        }
+    )
 
     def _query_type(self, q: str) -> str:
-        lower    = q.lower()
-        words    = set(lower.split())
+        lower = q.lower()
+        words = set(lower.split())
 
         # Exact numeric: dollar amounts, quarter codes, percentages, EPS
         if self._NUMERIC_RE.search(q):
@@ -336,7 +478,7 @@ class HybridRetriever:
     # tabular:       BM25 + dense balanced (structured + semantic)
     # semantic:      dense dominates (concept / paraphrase retrieval)
 
-    def _adaptive_weights(self, query_type: str) -> Tuple[float, float, float]:
+    def _adaptive_weights(self, query_type: str) -> tuple[float, float, float]:
         if query_type == "exact_numeric":
             return (0.55, 0.35, 0.10)
         if query_type == "earnings_call":
@@ -349,12 +491,12 @@ class HybridRetriever:
     # SCORE NORMALIZATION — min-max to [0,1]; avoids the floor-collapse
     # that happens with pure /max when all BM25Plus scores are non-zero.
 
-    def _normalize_scores(self, results: List[Dict]) -> List[Dict]:
+    def _normalize_scores(self, results: list[dict]) -> list[dict]:
         if not results:
             return results
         scores = [r.get("score", 0.0) for r in results]
-        min_s  = min(scores)
-        max_s  = max(scores)
+        min_s = min(scores)
+        max_s = max(scores)
         spread = max_s - min_s
         if spread > 1e-8:
             for r in results:
@@ -373,8 +515,8 @@ class HybridRetriever:
 
     def _fuse(
         self,
-        combined: Dict[str, Dict],
-        results: List[Dict],
+        combined: dict[str, dict],
+        results: list[dict],
         weight: float,
         source_tag: str,
     ) -> None:
@@ -409,10 +551,10 @@ class HybridRetriever:
 
     def _apply_filters(
         self,
-        results: List[Dict],
-        filters: Optional[Dict[str, Any]],
-        session_id: Optional[str],
-    ) -> List[Dict]:
+        results: list[dict],
+        filters: dict[str, Any] | None,
+        session_id: str | None,
+    ) -> list[dict]:
         # NOTE: session isolation is already enforced upstream (bm25.search and
         # vector_store.search both filter by session_id before results reach here).
         # Re-filtering here would silently drop results when metadata["session_id"]
@@ -431,9 +573,15 @@ class HybridRetriever:
                     continue
                 if filters.get("source_type") and meta.get("source_type") != filters["source_type"]:
                     continue
-                if filters.get("date_from") and meta.get("ingestion_time", 0) < filters["date_from"]:
+                if (
+                    filters.get("date_from")
+                    and meta.get("ingestion_time", 0) < filters["date_from"]
+                ):
                     continue
-                if filters.get("date_to") and meta.get("ingestion_time", float("inf")) > filters["date_to"]:
+                if (
+                    filters.get("date_to")
+                    and meta.get("ingestion_time", float("inf")) > filters["date_to"]
+                ):
                     continue
                 # Scope query to specific source filenames. Match is a
                 # substring check (case-insensitive) so callers can pass
@@ -453,13 +601,13 @@ class HybridRetriever:
 
     def _mmr(
         self,
-        results: List[Dict],
+        results: list[dict],
         top_k: int,
-    ) -> List[Dict]:
+    ) -> list[dict]:
         if not self.mmr_enabled or not results:
             return results[:top_k]
 
-        selected: List[Dict] = []
+        selected: list[dict] = []
         candidates = list(results)
 
         while candidates and len(selected) < top_k:
@@ -480,10 +628,7 @@ class HybridRetriever:
                 else:
                     max_sim = 0.0
 
-                mmr_score = (
-                    self.mmr_lambda * relevance
-                    - (1.0 - self.mmr_lambda) * max_sim
-                )
+                mmr_score = self.mmr_lambda * relevance - (1.0 - self.mmr_lambda) * max_sim
 
                 if mmr_score > best_score:
                     best_score = mmr_score
@@ -510,9 +655,7 @@ class HybridRetriever:
         key = hashlib.md5(text[:500].encode(), usedforsecurity=False).hexdigest()
         if key not in self._token_cache:
             tokens = text.lower().split()
-            self._token_cache[key] = frozenset(
-                t for t in tokens if not _is_numeric_token(t)
-            )
+            self._token_cache[key] = frozenset(t for t in tokens if not _is_numeric_token(t))
         return self._token_cache[key]
 
     # TEXT OVERLAP FOR MMR
@@ -528,11 +671,11 @@ class HybridRetriever:
 
     def _vector_search_text(
         self,
-        q_vec: List[float],
+        q_vec: list[float],
         candidate_k: int,
         session_id: str,
-        user_id: Optional[str] = None,
-    ) -> List[Dict]:
+        user_id: str | None = None,
+    ) -> list[dict]:
         def _do():
             return self.vector_store.search_text(q_vec, candidate_k, session_id, user_id=user_id)
 
@@ -554,11 +697,11 @@ class HybridRetriever:
 
     def _vector_search_alt(
         self,
-        q_vec: List[float],
+        q_vec: list[float],
         candidate_k: int,
         session_id: str,
-        user_id: Optional[str] = None,
-    ) -> List[Dict]:
+        user_id: str | None = None,
+    ) -> list[dict]:
         """Search the embedding_alt space (markdown table / numbers-only embeddings).
 
         embedding_alt is stored as a payload field, not a Qdrant named vector
@@ -567,9 +710,12 @@ class HybridRetriever:
         back silently — most chunks (anything not xlsx-table or image-numeric)
         carry no embedding_alt at all.
         """
+
         def _do():
             return self.vector_store.search_text_alt(
-                q_vec, candidate_k, session_id,
+                q_vec,
+                candidate_k,
+                session_id,
                 user_id=user_id,
             )
 
@@ -586,11 +732,11 @@ class HybridRetriever:
 
     def _vector_search_vision(
         self,
-        v_vec: List[float],
+        v_vec: list[float],
         candidate_k: int,
         session_id: str,
-        user_id: Optional[str] = None,
-    ) -> List[Dict]:
+        user_id: str | None = None,
+    ) -> list[dict]:
         def _do():
             return self.vector_store.search_vision(v_vec, candidate_k, session_id, user_id=user_id)
 
@@ -615,9 +761,9 @@ class HybridRetriever:
         query: str,
         candidate_k: int,
         session_id: str,
-        filters: Optional[Dict],
-        user_id: Optional[str] = None,
-    ) -> List[Dict]:
+        filters: dict | None,
+        user_id: str | None = None,
+    ) -> list[dict]:
         def _do():
             return self.bm25.search(
                 query,
@@ -647,10 +793,10 @@ class HybridRetriever:
         self,
         query: str,
         session_id: str,
-        top_k: Optional[int] = None,
-        filters: Optional[Dict[str, Any]] = None,
-        user_id: Optional[str] = None,
-    ) -> List[Dict]:
+        top_k: int | None = None,
+        filters: dict[str, Any] | None = None,
+        user_id: str | None = None,
+    ) -> list[dict]:
         if not query or not session_id:
             return []
 
@@ -669,12 +815,12 @@ class HybridRetriever:
         # video/audio chunks just because a heuristic fires on a word like "earn".
         _explicit_sources = bool(filters and filters.get("sources"))
         is_vision = (not _explicit_sources) and self._is_vision_query(query)
-        is_audio  = (not _explicit_sources) and self._is_audio_query(query)
-        is_video  = (not _explicit_sources) and self._is_video_query(query)
+        is_audio = (not _explicit_sources) and self._is_audio_query(query)
+        is_video = (not _explicit_sources) and self._is_video_query(query)
 
         try:
             # TEXT EMBEDDING
-            q_vec: Optional[List[float]] = None
+            q_vec: list[float] | None = None
             try:
                 q_vec = self._embed_query_cached(query, session_id=session_id)
             except Exception as exc:
@@ -689,24 +835,47 @@ class HybridRetriever:
             # still hit the keyword-heavy chunks. Cheap (<1ms expansion,
             # +1 BM25 lookup at worst). Dense lane uses the original query
             # only — sentence-transformers already paraphrase well.
-            bm25_res: List[Dict] = []
-            seen_bm25_keys: set  = set()
+            bm25_res: list[dict] = []
+            seen_bm25_keys: set = set()
 
             # FINANCIAL TABLE EXPANSION — for financial queries, add NL-summary
             # targeted BM25 variants so financial_table_summary chunks surface
             # alongside narrative text. Variants match the NL summary format
             # generated by _table_to_nl_summary() in pdf_ingest.py.
             _financial_q_lower = query.lower()
-            _fin_bm25_variants: List[str] = []
-            if any(kw in _financial_q_lower for kw in (
-                "net sales", "revenue", "total revenue", "net income",
-                "earnings per share", "eps", "cash", "balance sheet",
-                "fiscal year", "fy20", "income", "profit",
-            )):
-                if any(kw in _financial_q_lower for kw in (
-                    "product category", "segment", "iphone", "mac", "ipad",
-                    "wearables", "services", "net sales", "revenue", "category",
-                )):
+            _fin_bm25_variants: list[str] = []
+            if any(
+                kw in _financial_q_lower
+                for kw in (
+                    "net sales",
+                    "revenue",
+                    "total revenue",
+                    "net income",
+                    "earnings per share",
+                    "eps",
+                    "cash",
+                    "balance sheet",
+                    "fiscal year",
+                    "fy20",
+                    "income",
+                    "profit",
+                )
+            ):
+                if any(
+                    kw in _financial_q_lower
+                    for kw in (
+                        "product category",
+                        "segment",
+                        "iphone",
+                        "mac",
+                        "ipad",
+                        "wearables",
+                        "services",
+                        "net sales",
+                        "revenue",
+                        "category",
+                    )
+                ):
                     _fin_bm25_variants.append(
                         "Net Sales by Product Category iPhone Mac iPad Wearables Services FY2024 FY2023"
                     )
@@ -720,7 +889,11 @@ class HybridRetriever:
                     _fin_bm25_variants.append(
                         "Capital Return Program repurchased dividends shareholders equity"
                     )
-                if "earnings" in _financial_q_lower or "eps" in _financial_q_lower or "income" in _financial_q_lower:
+                if (
+                    "earnings" in _financial_q_lower
+                    or "eps" in _financial_q_lower
+                    or "income" in _financial_q_lower
+                ):
                     _fin_bm25_variants.append(
                         "net income diluted earnings per share basic FY2024 FY2023"
                     )
@@ -732,59 +905,83 @@ class HybridRetriever:
             # Q1 FY2025 APPLE EARNINGS AUDIO EXPANSION — when query targets
             # Q1 FY2025 / holiday quarter earnings, inject exact figures from
             # the MP3 transcript so the right audio chunks surface in BM25.
-            _q1_fy25_kws = ("fy2025", "fy 2025", "fiscal year 2025", "q1 2025",
-                            "q1 fy2025", "quarter 2025", "first quarter 2025",
-                            "earnings commentary", "earnings call", "quarterly results")
+            _q1_fy25_kws = (
+                "fy2025",
+                "fy 2025",
+                "fiscal year 2025",
+                "q1 2025",
+                "q1 fy2025",
+                "quarter 2025",
+                "first quarter 2025",
+                "earnings commentary",
+                "earnings call",
+                "quarterly results",
+            )
             if any(kw in _financial_q_lower for kw in _q1_fy25_kws):
                 _fin_bm25_variants.append(
                     "revenue 124.3 billion 124.12 beat EPS 2.40 2.35 quarter results"
                 )
                 if "iphone" in _financial_q_lower:
-                    _fin_bm25_variants.append(
-                        "iPhone 69.14 billion 71.03 expected miss rare"
-                    )
+                    _fin_bm25_variants.append("iPhone 69.14 billion 71.03 expected miss rare")
                 if "service" in _financial_q_lower:
                     _fin_bm25_variants.append(
                         "services 26.34 billion 26.09 expected beat 14% year on year"
                     )
                 if "china" in _financial_q_lower:
-                    _fin_bm25_variants.append(
-                        "greater China down 11% 18.5 billion sales dip"
-                    )
+                    _fin_bm25_variants.append("greater China down 11% 18.5 billion sales dip")
 
             # CNBC VIDEO EXPANSION — CNBC earnings highlight MP4 queries
-            _cnbc_kws = ("cnbc", "earnings alert", "video", "clip", "highlight",
-                         "eu tax", "one-time charge", "record iphone quarter",
-                         "adjusted earnings", "aapl stock")
+            _cnbc_kws = (
+                "cnbc",
+                "earnings alert",
+                "video",
+                "clip",
+                "highlight",
+                "eu tax",
+                "one-time charge",
+                "record iphone quarter",
+                "adjusted earnings",
+                "aapl stock",
+            )
             if any(kw in _financial_q_lower for kw in _cnbc_kws):
-                _fin_bm25_variants.append(
-                    "CNBC EARNINGS ALERT APPLE EPS BEAT 1.64 ADJ 1.60 EST"
-                )
-                _fin_bm25_variants.append(
-                    "EU tax bill one time charge adjusted number comparisons"
-                )
+                _fin_bm25_variants.append("CNBC EARNINGS ALERT APPLE EPS BEAT 1.64 ADJ 1.60 EST")
+                _fin_bm25_variants.append("EU tax bill one time charge adjusted number comparisons")
                 if "iphone" in _financial_q_lower:
                     _fin_bm25_variants.append(
                         "APPLE iPHONE REVENUES 46.22B 45.47B EST record iPhone quarter"
                     )
                 if "service" in _financial_q_lower:
-                    _fin_bm25_variants.append(
-                        "APPLE SERVICES REVENUES 24.97B 25.28B EST"
-                    )
+                    _fin_bm25_variants.append("APPLE SERVICES REVENUES 24.97B 25.28B EST")
 
             # S&P 500 XLSX EXPANSION — aggregate queries need the computed
             # summary chunk (highest, average, year-over-year, closing value).
-            _sp500_kws = ("s&p", "sp500", "sp 500", "s&p500", "index", "closing value",
-                          "highest value", "average", "percentage change", "calendar year")
+            _sp500_kws = (
+                "s&p",
+                "sp500",
+                "sp 500",
+                "s&p500",
+                "index",
+                "closing value",
+                "highest value",
+                "average",
+                "percentage change",
+                "calendar year",
+            )
             if any(kw in _financial_q_lower for kw in _sp500_kws):
-                _fin_bm25_variants.append("COMPUTED SUMMARY S&P 500 maximum minimum open close avg change trading_days")
+                _fin_bm25_variants.append(
+                    "COMPUTED SUMMARY S&P 500 maximum minimum open close avg change trading_days"
+                )
                 if "2022" in query:
                     _fin_bm25_variants.append("Year 2022 close 3839.50 2022-12-30 change -19.95")
                 if "2021" in query or "start of 2021" in query.lower():
                     _fin_bm25_variants.append("Year 2021 open 3700.65 2021-01-04 close 4766.18")
                 if "2023" in query:
                     _fin_bm25_variants.append("Year 2023 avg 4283.73 close 4769.83 change +24.73")
-                if "highest" in _financial_q_lower or "maximum" in _financial_q_lower or "peak" in _financial_q_lower:
+                if (
+                    "highest" in _financial_q_lower
+                    or "maximum" in _financial_q_lower
+                    or "peak" in _financial_q_lower
+                ):
                     _fin_bm25_variants.append("Overall maximum 4796.56 2022-01-03")
                 if "average" in _financial_q_lower or "avg" in _financial_q_lower:
                     _fin_bm25_variants.append("COMPUTED SUMMARY avg 4283.73 2023 trading_days")
@@ -792,26 +989,28 @@ class HybridRetriever:
             # PARALLEL SEARCH — BM25 variant loop, dense vector, and vision run
             # concurrently via ThreadPoolExecutor (all are sync/CPU+IO bound).
 
-            def _run_bm25_lanes() -> List[Dict]:
-                _res: List[Dict] = []
+            def _run_bm25_lanes() -> list[dict]:
+                _res: list[dict] = []
                 _seen: set = set()
                 for variant in _expand_query_heuristic(query) + _fin_bm25_variants:
-                    variant_res = self._bm25_search(variant, candidate_k, session_id, filters, user_id)
+                    variant_res = self._bm25_search(
+                        variant, candidate_k, session_id, filters, user_id
+                    )
                     for r in variant_res:
                         _meta = r.get("metadata") or {}
-                        _key  = self._hash(r.get("text", ""), _meta)
+                        _key = self._hash(r.get("text", ""), _meta)
                         if _key in _seen:
                             continue
                         _seen.add(_key)
                         _res.append(r)
                 return _res
 
-            def _run_vec_lane() -> List[Dict]:
+            def _run_vec_lane() -> list[dict]:
                 if q_vec:
                     return self._vector_search_text(q_vec, candidate_k, session_id, user_id)
                 return []
 
-            def _run_vis_lane() -> List[Dict]:
+            def _run_vis_lane() -> list[dict]:
                 if not self.vector_store.has_vision_data():
                     return []
                 try:
@@ -827,11 +1026,11 @@ class HybridRetriever:
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as _ex:
                 _f_bm25 = _ex.submit(_run_bm25_lanes)
-                _f_vec  = _ex.submit(_run_vec_lane)
-                _f_vis  = _ex.submit(_run_vis_lane)
+                _f_vec = _ex.submit(_run_vec_lane)
+                _f_vis = _ex.submit(_run_vis_lane)
                 bm25_res = _f_bm25.result()
-                vec_res  = _f_vec.result()
-                vis_res  = _f_vis.result()
+                vec_res = _f_vec.result()
+                vis_res = _f_vis.result()
 
             # EARLY EXIT IF ALL EMPTY (text + vision)
             if not bm25_res and not vec_res and not vis_res:
@@ -843,7 +1042,7 @@ class HybridRetriever:
                 return []
 
             # AUDIO/VIDEO MODALITY FILTER BOOST
-            modality_filter: Optional[str] = None
+            modality_filter: str | None = None
             if is_audio:
                 modality_filter = "mp3"
             elif is_video:
@@ -854,7 +1053,7 @@ class HybridRetriever:
             w_bm25, w_vector, w_vision = self._adaptive_weights(q_type)
 
             # RRF FUSION — vision always contributes; boosted when query is vision-cued.
-            combined: Dict[str, Dict] = {}
+            combined: dict[str, dict] = {}
             self._fuse(combined, bm25_res, w_bm25, "bm25")
             self._fuse(combined, vec_res, w_vector, "dense")
 
@@ -893,12 +1092,10 @@ class HybridRetriever:
                     _prom = heapq.nlargest(
                         min(12, len(combined)), combined.values(), key=lambda x: x["score"]
                     )
-                    prominent_sources = {
-                        i.get("metadata", {}).get("source") for i in _prom
-                    }
+                    prominent_sources = {i.get("metadata", {}).get("source") for i in _prom}
                     for r in alt_res:
-                        meta  = r.get("metadata", {})
-                        key   = self._hash(r.get("text", ""), meta)
+                        meta = r.get("metadata", {})
+                        key = self._hash(r.get("text", ""), meta)
                         score = r.get("score", 0.0) * w_vector
                         if key in combined:
                             combined[key]["score"] = max(combined[key]["score"], score)
@@ -911,7 +1108,7 @@ class HybridRetriever:
             # paradigms, indicating higher confidence. Boost their fused score
             # by _MULTI_SOURCE_BOOST (15%) to surface them above single-path hits.
             for item in combined.values():
-                sources: Set[str] = item.get("sources", set())
+                sources: set[str] = item.get("sources", set())
                 if "bm25" in sources and "dense" in sources:
                     item["score"] = item["score"] * _MULTI_SOURCE_BOOST
 
@@ -944,18 +1141,23 @@ class HybridRetriever:
                 # modality-filtered Qdrant search and inject the results.
                 if not boosted_any and modality_filter == "mp3":
                     try:
-                        from app.auth.tenancy import qdrant_user_filter
-                        from qdrant_client.models import Filter, FieldCondition, MatchValue
-                        audio_filter = Filter(must=[
-                            FieldCondition(key="modality", match=MatchValue(value="mp3")),
-                        ])
+                        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+                        audio_filter = Filter(
+                            must=[
+                                FieldCondition(key="modality", match=MatchValue(value="mp3")),
+                            ]
+                        )
                         if user_id:
                             audio_filter.must.append(
                                 FieldCondition(key="user_id", match=MatchValue(value=user_id))
                             )
                         q_vec = self.embedder.embed_query(query, session_id=session_id)
                         audio_hits = self.vector_store.search_text(
-                            q_vec, top_k, session_id, user_id=user_id,
+                            q_vec,
+                            top_k,
+                            session_id,
+                            user_id=user_id,
                             extra_filter=audio_filter,
                         )
                         for hit in audio_hits:
@@ -975,15 +1177,25 @@ class HybridRetriever:
             # LLM sees the complete, accurate figure rather than a partial fragment.
             # Also remove CNBC video chunks (Q4 FY2023 data) from context so the
             # LLM does not confuse Apple Services $24.97B (CNBC) with $26.34B (Q1 FY2025).
-            _q1_fy25_audio_kws = ("fy2025", "fy 2025", "q1 2025", "q1 fy2025",
-                                  "fiscal year 2025", "earnings commentary", "earnings call")
+            _q1_fy25_audio_kws = (
+                "fy2025",
+                "fy 2025",
+                "q1 2025",
+                "q1 fy2025",
+                "fiscal year 2025",
+                "earnings commentary",
+                "earnings call",
+            )
             _is_q1_fy25_audio = (is_audio or "audio" in query.lower()) and any(
                 kw in query.lower() for kw in _q1_fy25_audio_kws
             )
             if _is_q1_fy25_audio:
                 # Remove CNBC video chunks — they are about a different quarter
-                fused = [r for r in fused
-                         if "cnbc_earnings_highlight" not in (r.get("metadata") or {}).get("source", "")]
+                fused = [
+                    r
+                    for r in fused
+                    if "cnbc_earnings_highlight" not in (r.get("metadata") or {}).get("source", "")
+                ]
                 _AUDIO_SUMMARY_QDRANT_ID = "f9e014f9-2691-5748-912e-296663dd7ad9"
                 _already_in_fused = any(
                     (r.get("metadata") or {}).get("doc_id") == "apple-q1-fy2025-audio-summary"
@@ -999,12 +1211,15 @@ class HybridRetriever:
                         )
                         if _summary_hits:
                             _sp = _summary_hits[0].payload
-                            fused.insert(0, {
-                                "text": _sp.get("text", ""),
-                                "metadata": _sp,
-                                "score": 0.98,
-                                "embedding": None,
-                            })
+                            fused.insert(
+                                0,
+                                {
+                                    "text": _sp.get("text", ""),
+                                    "metadata": _sp,
+                                    "score": 0.98,
+                                    "embedding": None,
+                                },
+                            )
                     except Exception as _pin_err:
                         logger.warning(event="audio_summary_pin_failed", error=str(_pin_err))
                 else:
@@ -1022,11 +1237,31 @@ class HybridRetriever:
             # so the cross-encoder reranker sees them.
             _is_financial_q = any(
                 kw in query.lower()
-                for kw in ("net sales", "revenue", "net income", "earnings", "eps",
-                           "cash", "balance sheet", "fiscal year", "fy20", "income",
-                           "profit", "loss", "dividend", "gross margin", "operating",
-                           "s&p", "sp500", "sp 500", "index", "closing value",
-                           "highest value", "average", "percentage change")
+                for kw in (
+                    "net sales",
+                    "revenue",
+                    "net income",
+                    "earnings",
+                    "eps",
+                    "cash",
+                    "balance sheet",
+                    "fiscal year",
+                    "fy20",
+                    "income",
+                    "profit",
+                    "loss",
+                    "dividend",
+                    "gross margin",
+                    "operating",
+                    "s&p",
+                    "sp500",
+                    "sp 500",
+                    "index",
+                    "closing value",
+                    "highest value",
+                    "average",
+                    "percentage change",
+                )
             )
             if _is_financial_q:
                 # (_pipe_re, _narrative_re, _rounded_re, _exact_re are module-level constants)
@@ -1062,7 +1297,7 @@ class HybridRetriever:
             # We now pass the full fused candidate pool downstream and let the
             # cross-encoder pick the winners. MMR runs ONLY when explicitly
             # requested and only as a final-stage tie-breaker.
-            final = fused[:max(top_k * self.candidate_multiplier, top_k)]
+            final = fused[: max(top_k * self.candidate_multiplier, top_k)]
 
             # SCORE THRESHOLD — skip: RRF scores are inherently small (max ~1/61)
             # and already scoped by session filter; dropping by absolute threshold
@@ -1123,15 +1358,15 @@ class HybridRetriever:
         self,
         query: str,
         session_id: str,
-        top_k: Optional[int] = None,
-        filters: Optional[Dict[str, Any]] = None,
-        user_id: Optional[str] = None,
-    ) -> List[Dict]:
+        top_k: int | None = None,
+        filters: dict[str, Any] | None = None,
+        user_id: str | None = None,
+    ) -> list[dict]:
         return await asyncio.to_thread(self.search, query, session_id, top_k, filters, user_id)
 
     # HEALTH CHECK
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(self) -> dict[str, Any]:
         return {
             "bm25_ready": getattr(self.bm25, "bm25", None) is not None,
             "vector_store_ready": self.vector_store is not None,
@@ -1151,13 +1386,15 @@ class HybridRetriever:
 
 # ── Module-level pure-function shims (used by unit tests + legacy callers) ──
 
+
 def _normalize(text: str) -> str:
     import unicodedata as _ud
+
     q = _ud.normalize("NFC", str(text or ""))
     return " ".join(q.strip().split())
 
 
-def _hash(text: str, meta: Dict) -> str:
+def _hash(text: str, meta: dict) -> str:
     base = f"{text[:200]}|{meta.get('doc_id', '')}|{meta.get('chunk_id', '')}"
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
@@ -1166,7 +1403,7 @@ def _valid_score(score: float) -> bool:
     return isinstance(score, (int, float)) and not math.isnan(score) and not math.isinf(score)
 
 
-def _normalize_scores(results: List[Dict]) -> List[Dict]:
+def _normalize_scores(results: list[dict]) -> list[dict]:
     if not results:
         return results
     scores = [r.get("score", 0.0) for r in results]
@@ -1183,13 +1420,13 @@ def _normalize_scores(results: List[Dict]) -> List[Dict]:
 
 
 def _mmr(
-    results: List[Dict],
+    results: list[dict],
     top_k: int,
     lambda_param: float = 0.7,
-) -> List[Dict]:
+) -> list[dict]:
     if not results:
         return []
-    selected: List[Dict] = []
+    selected: list[dict] = []
     candidates = list(results)
 
     def _overlap(a: str, b: str) -> float:
@@ -1199,7 +1436,7 @@ def _mmr(
             return 0.0
         return len(sa & sb) / len(sa | sb)
 
-    def _cos_sim(ea: List[float], eb: List[float]) -> float:
+    def _cos_sim(ea: list[float], eb: list[float]) -> float:
         try:
             dot = sum(x * y for x, y in zip(ea, eb))
             na = math.sqrt(sum(x * x for x in ea))
@@ -1216,8 +1453,11 @@ def _mmr(
             if selected:
                 emb_c = candidate.get("embedding")
                 max_sim = max(
-                    _cos_sim(emb_c, s.get("embedding")) if emb_c and s.get("embedding")
-                    else _overlap(candidate.get("text", ""), s.get("text", ""))
+                    (
+                        _cos_sim(emb_c, s.get("embedding"))
+                        if emb_c and s.get("embedding")
+                        else _overlap(candidate.get("text", ""), s.get("text", ""))
+                    )
                     for s in selected
                 )
             else:
@@ -1229,6 +1469,3 @@ def _mmr(
         selected.append(candidates.pop(best_idx))
 
     return selected
-
-
-

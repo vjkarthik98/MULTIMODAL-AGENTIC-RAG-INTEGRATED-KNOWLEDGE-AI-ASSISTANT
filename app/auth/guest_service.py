@@ -15,11 +15,12 @@ Redis key schema:
 
 All Redis operations fail-open: a Redis outage must not break the app.
 """
+
 from __future__ import annotations
 
 import shutil
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -66,6 +67,7 @@ return 1
 def _redis():
     try:
         from app.core.infra_registry import infra
+
         mem = infra.get_memory()
         if mem is not None and mem.client is not None:
             return mem.client
@@ -90,8 +92,13 @@ def _eval_incr_if_under(r, key: str, limit: int, ttl: int):
 
 
 def _eval_dual_incr_if_under(
-    r, guest_key: str, ip_key: str, guest_limit: int, guest_ttl: int,
-    ip_limit: int, ip_ttl: int,
+    r,
+    guest_key: str,
+    ip_key: str,
+    guest_limit: int,
+    guest_ttl: int,
+    ip_limit: int,
+    ip_ttl: int,
 ):
     if _is_upstash(r):
         return r.eval(
@@ -100,12 +107,19 @@ def _eval_dual_incr_if_under(
             args=[str(guest_limit), str(guest_ttl), str(ip_limit), str(ip_ttl)],
         )
     return r.eval(
-        _LUA_DUAL_INCR_IF_UNDER, 2, guest_key, ip_key,
-        guest_limit, guest_ttl, ip_limit, ip_ttl,
+        _LUA_DUAL_INCR_IF_UNDER,
+        2,
+        guest_key,
+        ip_key,
+        guest_limit,
+        guest_ttl,
+        ip_limit,
+        ip_ttl,
     )
 
 
 # ── Session lifecycle ─────────────────────────────────────────────────────────
+
 
 def create_guest_session() -> str:
     """Generate a guest_user_id and initialise Redis counters. Returns guest_user_id."""
@@ -132,7 +146,7 @@ def create_guest_session() -> str:
     return guest_id
 
 
-def get_guest_limits(guest_id: str) -> Dict[str, int]:
+def get_guest_limits(guest_id: str) -> dict[str, int]:
     """Return current usage counters and remaining allowances."""
     queries_used = uploads_used = 0
     r = _redis()
@@ -145,16 +159,17 @@ def get_guest_limits(guest_id: str) -> Dict[str, int]:
         except Exception:
             pass
     return {
-        "queries_used":  queries_used,
-        "uploads_used":  uploads_used,
-        "queries_left":  max(0, settings.GUEST_QUERY_LIMIT - queries_used),
-        "uploads_left":  max(0, settings.GUEST_FILE_LIMIT  - uploads_used),
+        "queries_used": queries_used,
+        "uploads_used": uploads_used,
+        "queries_left": max(0, settings.GUEST_QUERY_LIMIT - queries_used),
+        "uploads_left": max(0, settings.GUEST_FILE_LIMIT - uploads_used),
     }
 
 
 # ── Atomic limit enforcement (Lua — no TOCTOU race) ──────────────────────────
 
-def check_and_increment_queries(guest_id: str, client_ip: Optional[str] = None) -> bool:
+
+def check_and_increment_queries(guest_id: str, client_ip: str | None = None) -> bool:
     """Atomically check and increment the query counter.
 
     When client_ip is given, ALSO enforces the aggregate per-IP cap
@@ -174,13 +189,19 @@ def check_and_increment_queries(guest_id: str, client_ip: Optional[str] = None) 
         if client_ip:
             result = _eval_dual_incr_if_under(
                 r,
-                f"guest:{guest_id}:queries", f"guest_ip:{client_ip}:queries",
-                settings.GUEST_QUERY_LIMIT, _TTL,
-                settings.GUEST_IP_QUERY_LIMIT, _TTL,
+                f"guest:{guest_id}:queries",
+                f"guest_ip:{client_ip}:queries",
+                settings.GUEST_QUERY_LIMIT,
+                _TTL,
+                settings.GUEST_IP_QUERY_LIMIT,
+                _TTL,
             )
         else:
             result = _eval_incr_if_under(
-                r, f"guest:{guest_id}:queries", settings.GUEST_QUERY_LIMIT, _TTL,
+                r,
+                f"guest:{guest_id}:queries",
+                settings.GUEST_QUERY_LIMIT,
+                _TTL,
             )
         return bool(result)
     except Exception as exc:
@@ -188,7 +209,7 @@ def check_and_increment_queries(guest_id: str, client_ip: Optional[str] = None) 
         return True
 
 
-def check_and_increment_uploads(guest_id: str, client_ip: Optional[str] = None) -> bool:
+def check_and_increment_uploads(guest_id: str, client_ip: str | None = None) -> bool:
     """Atomically check and increment the upload counter.
 
     When client_ip is given, ALSO enforces the aggregate per-IP cap
@@ -204,13 +225,19 @@ def check_and_increment_uploads(guest_id: str, client_ip: Optional[str] = None) 
         if client_ip:
             result = _eval_dual_incr_if_under(
                 r,
-                f"guest:{guest_id}:uploads", f"guest_ip:{client_ip}:uploads",
-                settings.GUEST_FILE_LIMIT, _TTL,
-                settings.GUEST_IP_FILE_LIMIT, _TTL,
+                f"guest:{guest_id}:uploads",
+                f"guest_ip:{client_ip}:uploads",
+                settings.GUEST_FILE_LIMIT,
+                _TTL,
+                settings.GUEST_IP_FILE_LIMIT,
+                _TTL,
             )
             return bool(result)
         result = _eval_incr_if_under(
-            r, f"guest:{guest_id}:uploads", settings.GUEST_FILE_LIMIT, _TTL,
+            r,
+            f"guest:{guest_id}:uploads",
+            settings.GUEST_FILE_LIMIT,
+            _TTL,
         )
         return bool(result)
     except Exception as exc:
@@ -236,7 +263,8 @@ def check_guest_create_rate(client_ip: str) -> bool:
 
 # ── Data migration: guest → real user ────────────────────────────────────────
 
-def migrate_guest_to_user(guest_id: str, real_user_id: str) -> Dict[str, Any]:
+
+def migrate_guest_to_user(guest_id: str, real_user_id: str) -> dict[str, Any]:
     """Migrate all guest data to a real user_id after successful registration/OAuth.
 
     Runs in this exact order:
@@ -246,12 +274,13 @@ def migrate_guest_to_user(guest_id: str, real_user_id: str) -> Dict[str, Any]:
       3. Redis: delete guest counters
     Returns migration stats dict for audit logging.
     """
-    stats: Dict[str, Any] = {"qdrant_chunks": 0, "files_moved": 0, "errors": []}
+    stats: dict[str, Any] = {"qdrant_chunks": 0, "files_moved": 0, "errors": []}
 
     # Step 1: Qdrant payload migration
     try:
-        from app.core.infra_registry import infra
         from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        from app.core.infra_registry import infra
 
         vs = infra.get_vector_store()
         if vs and vs.client:
@@ -260,9 +289,9 @@ def migrate_guest_to_user(guest_id: str, real_user_id: str) -> Dict[str, Any]:
                 while True:
                     results, next_offset = vs.client.scroll(
                         collection_name=collection,
-                        scroll_filter=Filter(must=[
-                            FieldCondition(key="user_id", match=MatchValue(value=guest_id))
-                        ]),
+                        scroll_filter=Filter(
+                            must=[FieldCondition(key="user_id", match=MatchValue(value=guest_id))]
+                        ),
                         limit=100,
                         offset=offset,
                         with_payload=False,
@@ -287,12 +316,12 @@ def migrate_guest_to_user(guest_id: str, real_user_id: str) -> Dict[str, Any]:
     # Step 2: Filesystem rename / merge
     try:
         guest_dir = DATA_ROOT / guest_id
-        real_dir  = DATA_ROOT / real_user_id
+        real_dir = DATA_ROOT / real_user_id
         if guest_dir.exists():
             if real_dir.exists():
                 # Real user dir already exists — merge knowledge_base files only
                 guest_kb = guest_dir / "knowledge_base"
-                real_kb  = real_dir  / "knowledge_base"
+                real_kb = real_dir / "knowledge_base"
                 real_kb.mkdir(exist_ok=True)
                 if guest_kb.exists():
                     for f in guest_kb.iterdir():
@@ -337,6 +366,7 @@ def cleanup_expired_guest_dirs() -> int:
     Returns count of directories removed.
     """
     import time
+
     cutoff_age = (settings.GUEST_SESSION_TTL_HOURS + 1) * 3600
     removed = 0
     try:

@@ -7,14 +7,15 @@ accuracy, latency, and hallucination rate. Requires the server to be running.
 If the server is not reachable, the suite records an infra error (exit code 2)
 rather than silently passing.
 """
+
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List
+from typing import Any
 
 from app.eval.config import EvalConfig
 from app.eval.datasets.gold_loader import load_all_gold
-from app.eval.metrics.base import MetricResult, SuiteResult
+from app.eval.metrics.base import SuiteResult
 from app.eval.metrics.generation import compute_generation_metrics
 from app.eval.metrics.hallucination import hallucination_rate
 from app.eval.metrics.latency import latency_stats
@@ -24,6 +25,7 @@ from app.eval.metrics.routing import route_accuracy
 
 def _build_base_url(cfg: EvalConfig) -> str:
     from app.core.config import get_settings
+
     s = get_settings()
     host = getattr(s, "HOST", "127.0.0.1")
     port = getattr(s, "PORT", 8000)
@@ -36,13 +38,14 @@ def _check_server(base_url: str) -> bool:
     """Return True if the server health endpoint responds."""
     try:
         import requests
+
         r = requests.get(f"{base_url}/rag/health", timeout=5)
         return r.status_code < 500
     except Exception:
         return False
 
 
-def _resolve_chunk_ids(sources: List[Dict]) -> List[str]:
+def _resolve_chunk_ids(sources: list[dict]) -> list[str]:
     """Build composite IDs (source::chunk_N) from API response sources.
 
     The /query API returns source filename and text but not chunk_id.
@@ -50,14 +53,16 @@ def _resolve_chunk_ids(sources: List[Dict]) -> List[str]:
     Falls back to source::chunk_0 if lookup fails.
     """
     try:
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
         from app.vectorstore.qdrant_store import QdrantVectorStore
-        from qdrant_client.models import Filter, FieldCondition, MatchValue
+
         qs = QdrantVectorStore()
         coll = qs.text_collection
     except Exception:
         return []
 
-    ids: List[str] = []
+    ids: list[str] = []
     for s in sources:
         if not isinstance(s, dict):
             continue
@@ -68,7 +73,9 @@ def _resolve_chunk_ids(sources: List[Dict]) -> List[str]:
         try:
             res = qs.client.scroll(
                 collection_name=coll,
-                scroll_filter=Filter(must=[FieldCondition(key="source", match=MatchValue(value=src))]),
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="source", match=MatchValue(value=src))]
+                ),
                 limit=50,
                 with_payload=True,
                 with_vectors=False,
@@ -114,7 +121,7 @@ def run_e2e_suite(cfg: EvalConfig) -> SuiteResult:
         modalities=None,  # all modalities
         include_todos=False,
     )
-    rows: List[Dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for modality_rows in gold.values():
         for r in modality_rows:
             ref = r.get("reference_answer", "")
@@ -125,12 +132,13 @@ def run_e2e_suite(cfg: EvalConfig) -> SuiteResult:
         result.breached["no_gold_data"] = "No curated gold rows with reference answers."
         return result
 
-    retrieval_results: List[Dict[str, Any]] = []
-    generation_rows: List[Dict[str, Any]] = []
-    routing_results: List[Dict[str, Any]] = []
-    latencies: List[float] = []
+    retrieval_results: list[dict[str, Any]] = []
+    generation_rows: list[dict[str, Any]] = []
+    routing_results: list[dict[str, Any]] = []
+    latencies: list[float] = []
 
     import os as _os
+
     _access_token = _os.getenv("EVAL_ACCESS_TOKEN", "")
     _headers = {"Authorization": f"Bearer {_access_token}"} if _access_token else {}
 
@@ -145,7 +153,9 @@ def run_e2e_suite(cfg: EvalConfig) -> SuiteResult:
 
         q_start = time.time()
         try:
-            resp = requests.post(f"{base_url}/rag/query", json=payload, headers=_headers, timeout=120)
+            resp = requests.post(
+                f"{base_url}/rag/query", json=payload, headers=_headers, timeout=120
+            )
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
@@ -169,34 +179,40 @@ def run_e2e_suite(cfg: EvalConfig) -> SuiteResult:
         if isinstance(relevant_ids, str):
             relevant_ids = [relevant_ids]
 
-        retrieval_results.append({
-            "query": query,
-            "retrieved_ids": retrieved_ids,
-            "retrieved_docs": sources,
-            "relevant_ids": relevant_ids,
-            "row_id": row["id"],
-            "tags": row.get("tags", []),
-        })
-        generation_rows.append({
-            "query": query,
-            "answer": answer,
-            "contexts": context_texts,
-            "reference_answer": row.get("reference_answer"),
-            "retrieved_docs": sources,
-            "row_id": row["id"],
-            "tags": row.get("tags", []),
-        })
+        retrieval_results.append(
+            {
+                "query": query,
+                "retrieved_ids": retrieved_ids,
+                "retrieved_docs": sources,
+                "relevant_ids": relevant_ids,
+                "row_id": row["id"],
+                "tags": row.get("tags", []),
+            }
+        )
+        generation_rows.append(
+            {
+                "query": query,
+                "answer": answer,
+                "contexts": context_texts,
+                "reference_answer": row.get("reference_answer"),
+                "retrieved_docs": sources,
+                "row_id": row["id"],
+                "tags": row.get("tags", []),
+            }
+        )
         web_sources = [s for s in sources if isinstance(s, dict) and s.get("type") == "web"]
-        routing_results.append({
-            "row_id": row["id"],
-            "query": query,
-            "actual_route": action,
-            "expected_route": row.get("expected_route", ""),
-            "sources": sources,
-            "web_sources": web_sources,
-            "web_source_count": len(web_sources),
-            "tags": row.get("tags", []),
-        })
+        routing_results.append(
+            {
+                "row_id": row["id"],
+                "query": query,
+                "actual_route": action,
+                "expected_route": row.get("expected_route", ""),
+                "sources": sources,
+                "web_sources": web_sources,
+                "web_source_count": len(web_sources),
+                "tags": row.get("tags", []),
+            }
+        )
 
     # Retrieval metrics
     if retrieval_results:

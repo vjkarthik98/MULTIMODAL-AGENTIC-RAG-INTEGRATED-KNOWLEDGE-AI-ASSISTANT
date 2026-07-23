@@ -16,8 +16,8 @@ os.environ.setdefault("EVAL_SKIP_LLM_WARMUP", "true")
 
 from app.eval.config import EvalConfig
 from app.eval.datasets.gold_loader import load_gold
-from app.eval.metrics.retrieval import aggregate_retrieval_metrics
 from app.eval.metrics.latency import latency_stats
+from app.eval.metrics.retrieval import aggregate_retrieval_metrics
 
 REPORT_FILE = ROOT / "app/eval/reports/rag_report.json"
 

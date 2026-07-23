@@ -11,10 +11,10 @@ Architecture note: Google OAuth conversion uses two calls:
 This keeps the existing OAuth callback unchanged and avoids complexity of
 passing state through the OAuth redirect round-trip.
 """
+
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -22,7 +22,6 @@ from pydantic import BaseModel, Field
 from app.auth.dependencies import get_current_user, require_real_user
 from app.auth.guest_service import (
     check_guest_create_rate,
-    cleanup_expired_guest_dirs,
     create_guest_session,
     get_guest_limits,
     migrate_guest_to_user,
@@ -37,6 +36,7 @@ router = APIRouter(prefix="/auth", tags=["guest"])
 
 
 # ── POST /auth/guest ──────────────────────────────────────────────────────────
+
 
 @router.post("/guest", status_code=201, response_model=GuestSessionResponse)
 async def create_guest(request: Request) -> GuestSessionResponse:
@@ -68,6 +68,7 @@ async def create_guest(request: Request) -> GuestSessionResponse:
 
 # ── GET /auth/guest/limits ────────────────────────────────────────────────────
 
+
 @router.get("/guest/limits")
 async def guest_limits(
     current_user: UserPublic = Depends(get_current_user),
@@ -84,6 +85,7 @@ async def guest_limits(
 
 
 # ── POST /auth/guest/convert (email/password path) ───────────────────────────
+
 
 @router.post("/guest/convert")
 async def convert_guest(req: GuestConvertRequest) -> dict:
@@ -146,6 +148,7 @@ async def convert_guest(req: GuestConvertRequest) -> dict:
 
 # ── POST /auth/guest/migrate (Google OAuth path) ─────────────────────────────
 
+
 class GuestMigrateRequest(BaseModel):
     guest_token: str = Field(..., min_length=10)
 
@@ -179,6 +182,7 @@ async def migrate_guest(
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _validate_guest_token(token: str) -> str:
     """Decode and validate a guest JWT. Returns guest_user_id."""
     try:
@@ -198,12 +202,15 @@ def _revoke_guest_jwt(token: str) -> None:
     """Add the guest token's JTI to the blacklist immediately."""
     try:
         from jose import jwt as _jwt
+
         from app.core.config import settings
+
         payload = _jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
         jti = payload.get("jti", "")
         exp = payload.get("exp", 0)
         if jti and exp:
             from app.auth.token_blacklist import revoke_token
+
             revoke_token(jti, exp)
     except Exception:
         pass

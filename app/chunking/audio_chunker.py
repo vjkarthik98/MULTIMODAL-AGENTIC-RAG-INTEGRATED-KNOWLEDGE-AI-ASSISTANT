@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import bisect
 import math
 import os
-import re
 import tempfile
-from collections import defaultdict
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+
+from prometheus_client import Counter
 
 from app.chunking.av_shared import (
     _assemble_chunks,
@@ -24,9 +23,6 @@ from app.chunking.finance_numbers import (
 from app.core.config import settings
 from app.ingestion.schema import IngestedDocument, RawExtract, UniversalMetadata
 from app.utils.logger import get_logger, modality_var
-
-import time
-from prometheus_client import Counter, Histogram
 
 logger = get_logger(__name__)
 
@@ -44,7 +40,8 @@ _CHUNK_ERRORS = Counter(
 # MODEL WRAPPERS  (merged from app/models/diarizer.py and ner_extractor.py)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def diarize(audio_path: str) -> List[Tuple[float, float, str]]:
+
+def diarize(audio_path: str) -> list[tuple[float, float, str]]:
     """Run pyannote speaker diarization. Returns (start, end, speaker) tuples.
 
     The pyannote/speaker-diarization-3.1 pipeline internally loads and runs
@@ -56,6 +53,7 @@ def diarize(audio_path: str) -> List[Tuple[float, float, str]]:
     """
     try:
         from app.core.model_loader import model_loader as loader
+
         pipeline = loader.get_diarizer()
     except Exception as exc:
         logger.warning(event="diarizer_unavailable", error=str(exc))
@@ -64,7 +62,7 @@ def diarize(audio_path: str) -> List[Tuple[float, float, str]]:
         raw = pipeline(audio_path)
         # pyannote ≥3.3 wraps result in DiarizeOutput; unwrap to Annotation.
         annotation = getattr(raw, "speaker_diarization", raw)
-        segments: List[Tuple[float, float, str]] = []
+        segments: list[tuple[float, float, str]] = []
         for turn, _, speaker in annotation.itertracks(yield_label=True):
             segments.append((turn.start, turn.end, speaker))
         return sorted(segments, key=lambda x: x[0])
@@ -76,13 +74,14 @@ def diarize(audio_path: str) -> List[Tuple[float, float, str]]:
 _ENTITY_KEYS = {"ORG": "companies", "PER": "persons", "LOC": "locations", "MISC": "misc"}
 
 
-def extract_entities(text: str) -> Dict[str, List[str]]:
+def extract_entities(text: str) -> dict[str, list[str]]:
     """Run dslim/bert-base-NER. Returns {companies, persons, locations, misc}."""
-    result: Dict[str, List[str]] = {v: [] for v in _ENTITY_KEYS.values()}
+    result: dict[str, list[str]] = {v: [] for v in _ENTITY_KEYS.values()}
     if not text.strip():
         return result
     try:
         from app.core.model_loader import model_loader as loader
+
         ner_pipeline = loader.get_ner()
     except Exception as exc:
         logger.warning(event="ner_unavailable", error=str(exc))
@@ -91,7 +90,7 @@ def extract_entities(text: str) -> Dict[str, List[str]]:
         seen: set = set()
         for ent in ner_pipeline(text[:2000]):
             label = ent.get("entity_group", "")
-            word  = ent.get("word", "").strip()
+            word = ent.get("word", "").strip()
             if not word or word in seen:
                 continue
             seen.add(word)
@@ -119,10 +118,11 @@ _WHISPER_INITIAL_PROMPT = (
 )
 
 
-def _run_whisper(wav_path: str) -> List[Dict]:
+def _run_whisper(wav_path: str) -> list[dict]:
     """Transcribe with faster_whisper; returns list of word dicts."""
     try:
         from app.core.model_loader import model_loader as loader
+
         model = loader.get_whisper()
         segments, _ = model.transcribe(
             wav_path,
@@ -139,18 +139,20 @@ def _run_whisper(wav_path: str) -> List[Dict]:
                     words.append({"word": w.word, "start": w.start, "end": w.end})
             else:
                 # Segment-level fallback when word_timestamps not available.
-                words.append({
-                    "word": seg.text,
-                    "start": seg.start,
-                    "end": seg.end,
-                })
+                words.append(
+                    {
+                        "word": seg.text,
+                        "start": seg.start,
+                        "end": seg.end,
+                    }
+                )
         return words
     except Exception as exc:
         logger.warning(event="whisper_failed", error=str(exc))
         return []
 
 
-def _transcribe_long_audio(wav_path: str, duration_sec: float) -> List[Dict]:
+def _transcribe_long_audio(wav_path: str, duration_sec: float) -> list[dict]:
     """Transcribe audio, splitting into AUDIO_CHUNK_DURATION_SEC segments first
     for anything longer than that.
 
@@ -174,11 +176,12 @@ def _transcribe_long_audio(wav_path: str, duration_sec: float) -> List[Dict]:
         return _run_whisper(wav_path)
 
     from pydub import AudioSegment
+
     audio = AudioSegment.from_wav(wav_path)
     chunk_sec = _TRANSCRIBE_SEGMENT_SEC
     n_segments = math.ceil(duration_sec / chunk_sec)
 
-    segment_paths: List[Tuple[str, float]] = []
+    segment_paths: list[tuple[str, float]] = []
     for i in range(n_segments):
         start_ms = int(i * chunk_sec * 1000)
         end_ms = int(min((i + 1) * chunk_sec, duration_sec) * 1000)
@@ -188,11 +191,11 @@ def _transcribe_long_audio(wav_path: str, duration_sec: float) -> List[Dict]:
         tmp.close()
         segment_paths.append((tmp.name, i * chunk_sec))
 
-    words: List[Dict] = []
+    words: list[dict] = []
     try:
         with ThreadPoolExecutor(max_workers=settings.AUDIO_TRANSCRIPTION_WORKERS) as pool:
             futures = {pool.submit(_run_whisper, p): off for p, off in segment_paths}
-            results: List[Tuple[float, List[Dict]]] = []
+            results: list[tuple[float, list[dict]]] = []
             for fut, off in futures.items():
                 try:
                     seg_words = fut.result()
@@ -201,7 +204,9 @@ def _transcribe_long_audio(wav_path: str, duration_sec: float) -> List[Dict]:
                         w["end"] += off
                     results.append((off, seg_words))
                 except Exception as exc:
-                    logger.warning(event="audio_segment_transcribe_failed", offset=off, error=str(exc))
+                    logger.warning(
+                        event="audio_segment_transcribe_failed", offset=off, error=str(exc)
+                    )
         results.sort(key=lambda r: r[0])
         for _, seg_words in results:
             words.extend(seg_words)
@@ -224,9 +229,9 @@ class AudioChunker(BaseChunker):
 
     def chunk(
         self,
-        extracts: List[RawExtract],
+        extracts: list[RawExtract],
         meta: UniversalMetadata,
-    ) -> List[IngestedDocument]:
+    ) -> list[IngestedDocument]:
         source = Path(meta.source_path).name or "unknown.mp3"
         surface = "audio_chunker"
         modality_var.set("audio")
@@ -236,7 +241,7 @@ class AudioChunker(BaseChunker):
             logger.warning(event="no_extracts_received", modality="audio", source=source)
             return []
         try:
-            docs: List[IngestedDocument] = []
+            docs: list[IngestedDocument] = []
 
             for ext in extracts:
                 if ext.extract_type != "audio_raw":
@@ -263,7 +268,7 @@ class AudioChunker(BaseChunker):
                     words = _transcribe_long_audio(wav_path, duration_sec)
 
                     # Diarization (optional — skipped if model unavailable).
-                    diarization: List[Tuple[float, float, str]] = []
+                    diarization: list[tuple[float, float, str]] = []
                     try:
                         diarization = diarize(wav_path)
                         diarization = _merge_fragmented_hosts(diarization)
@@ -274,17 +279,26 @@ class AudioChunker(BaseChunker):
                     role_map = _map_speaker_roles(diarization, words)
                     # Audio-only finer chunking (video keeps av_shared defaults).
                     raw_chunks = _assemble_chunks(
-                        words, diarization, role_map,
+                        words,
+                        diarization,
+                        role_map,
                         min_words=settings.AUDIO_CHUNK_MIN_WORDS,
                         max_words=settings.AUDIO_CHUNK_MAX_WORDS,
                     )
 
                     # Document-level earnings-call detection — checked once per extract.
                     _ft_lower = full_transcript.lower()
-                    is_earnings_call = any(kw in _ft_lower for kw in (
-                        "earnings call", "quarterly results", "conference call",
-                        "revenue", "earnings per share", "fiscal year",
-                    ))
+                    is_earnings_call = any(
+                        kw in _ft_lower
+                        for kw in (
+                            "earnings call",
+                            "quarterly results",
+                            "conference call",
+                            "revenue",
+                            "earnings per share",
+                            "fiscal year",
+                        )
+                    )
 
                     for chunk_idx, ch in enumerate(raw_chunks):
                         transcript = ch["transcript"]
@@ -292,7 +306,7 @@ class AudioChunker(BaseChunker):
                             continue
 
                         # NER entity extraction.
-                        ner_entities: Dict = {}
+                        ner_entities: dict = {}
                         try:
                             ner_entities = extract_entities(transcript)
                         except Exception:
@@ -315,29 +329,30 @@ class AudioChunker(BaseChunker):
                             source, f"audio_{ch['start']:.1f}", chunk_idx
                         )
                         structure = {
-                            "chunk_hash_id":    chunk_hash,
-                            "source_file":      source,
-                            "chunk_index":      chunk_idx,
-                            "start_timestamp":  round(ch["start"], 3),
-                            "end_timestamp":    round(ch["end"], 3),
+                            "chunk_hash_id": chunk_hash,
+                            "source_file": source,
+                            "chunk_index": chunk_idx,
+                            "start_timestamp": round(ch["start"], 3),
+                            "end_timestamp": round(ch["end"], 3),
                             "duration_seconds": round(duration, 3),
-                            "speaker_label":    ch["speaker"],
-                            "speaker_name":     speaker_display,
-                            "speaker_role":     speaker_role,
-                            "topic_section":    ch.get("topic_section"),
-                            "call_section":     call_section,
-                            "transcript":       transcript,
+                            "speaker_label": ch["speaker"],
+                            "speaker_name": speaker_display,
+                            "speaker_role": speaker_role,
+                            "topic_section": ch.get("topic_section"),
+                            "call_section": call_section,
+                            "transcript": transcript,
                             "finance_entities": {
                                 "regex": fin_entities,
                                 **ner_entities,
                             },
-                            "word_count":       word_count,
-                            "token_count":      token_count,
-                            "is_question":      transcript.rstrip().endswith("?"),
-                            "is_answer":        call_section == "qa_session" and not transcript.rstrip().endswith("?"),
+                            "word_count": word_count,
+                            "token_count": token_count,
+                            "is_question": transcript.rstrip().endswith("?"),
+                            "is_answer": call_section == "qa_session"
+                            and not transcript.rstrip().endswith("?"),
                             "is_earnings_call": is_earnings_call,
-                            "snr":              snr,
-                            "snr_degraded":     snr_degraded,
+                            "snr": snr,
+                            "snr_degraded": snr_degraded,
                             "clipping_detected": clipping_detected,
                         }
 

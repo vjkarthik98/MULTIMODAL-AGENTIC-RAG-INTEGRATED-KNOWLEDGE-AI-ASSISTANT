@@ -5,20 +5,31 @@ hallucination guard silently passing on wrong answers (single-chunk or answer-co
 
 This module MEASURES the gap — it does NOT fix the pipeline.
 """
+
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from app.eval.metrics.base import MetricResult
 
-
 # Scale words → multiplier. Covers the common financial-report conventions.
 _SCALE = {
-    "thousand": 1e3, "thousands": 1e3, "k": 1e3,
-    "million": 1e6, "millions": 1e6, "mn": 1e6, "m": 1e6,
-    "billion": 1e9, "billions": 1e9, "bn": 1e9, "b": 1e9,
-    "trillion": 1e12, "trillions": 1e12, "tn": 1e12, "t": 1e12,
+    "thousand": 1e3,
+    "thousands": 1e3,
+    "k": 1e3,
+    "million": 1e6,
+    "millions": 1e6,
+    "mn": 1e6,
+    "m": 1e6,
+    "billion": 1e9,
+    "billions": 1e9,
+    "bn": 1e9,
+    "b": 1e9,
+    "trillion": 1e12,
+    "trillions": 1e12,
+    "tn": 1e12,
+    "t": 1e12,
 }
 
 # A money/quantity token: optional $, a number with optional thousands commas and
@@ -45,9 +56,9 @@ class _Num:
         self.is_year, self.is_id, self.is_pct = is_year, is_id, is_pct
 
 
-def _parse_numbers(text: str) -> List[_Num]:
+def _parse_numbers(text: str) -> list[_Num]:
     """Parse quantity tokens into normalized magnitudes with metadata."""
-    out: List[_Num] = []
+    out: list[_Num] = []
     for m in _NUM_UNIT_RE.finditer(text or ""):
         int_part, frac_part, unit, pct = m.group(1), m.group(2), m.group(3), m.group(4)
         digits = (int_part + (frac_part or "")).replace(",", "")
@@ -63,8 +74,11 @@ def _parse_numbers(text: str) -> List[_Num]:
         int_digits = int_part.replace(",", "")
         # A bare 4-digit integer in [1900, 2099] with no unit/decimal/% is a year.
         is_year = (
-            not has_unit and not frac_part and not pct
-            and len(int_digits) == 4 and 1900 <= int(int_digits) <= 2099
+            not has_unit
+            and not frac_part
+            and not pct
+            and len(int_digits) == 4
+            and 1900 <= int(int_digits) <= 2099
         )
         # A bare integer with NO thousands separators, scale word, decimal or %
         # and >= 7 digits is an identifier (SEC accession/CIK, account/filing
@@ -73,8 +87,11 @@ def _parse_numbers(text: str) -> List[_Num]:
         # this never suppresses a genuine figure, and a bare id present in
         # context is still digit-matched anyway.
         is_id = (
-            not has_unit and not frac_part and not pct
-            and "," not in int_part and len(int_digits) >= 7
+            not has_unit
+            and not frac_part
+            and not pct
+            and "," not in int_part
+            and len(int_digits) >= 7
         )
         out.append(_Num(m.group(0).strip(), value, digits, has_unit, is_year, is_id, bool(pct)))
     return out
@@ -108,24 +125,21 @@ def _value_match_strict(a: float, b: float, tol: float = _FIDELITY_TOL) -> bool:
     return abs(a - b) / abs(b) <= tol
 
 
-def _extract_numbers(text: str) -> List[str]:
+def _extract_numbers(text: str) -> list[str]:
     """Backwards-compatible helper: raw quantity tokens (used by reference check)."""
     return [n.raw.lower() for n in _parse_numbers(text)]
 
 
-def _extract_finance_numbers(text: str) -> List[float]:
+def _extract_finance_numbers(text: str) -> list[float]:
     """Extract normalized finance number magnitudes from text.
 
     Skips bare years and long identifiers — only returns genuine quantitative
     claims (dollar amounts, percentages, counts with scale words).
     """
-    return [
-        n.value for n in _parse_numbers(text)
-        if not n.is_year and not n.is_id
-    ]
+    return [n.value for n in _parse_numbers(text) if not n.is_year and not n.is_id]
 
 
-def compute_finance_fidelity(answer: str, contexts: List[str]) -> float:
+def compute_finance_fidelity(answer: str, contexts: list[str]) -> float:
     """Fraction of finance numbers in the answer that appear verbatim in context.
 
     Uses strict magnitude matching (0.5% tolerance, no scale bridging) so that
@@ -145,13 +159,11 @@ def compute_finance_fidelity(answer: str, contexts: List[str]) -> float:
         return 1.0
     context_text = " ".join(contexts)
     context_nums = _extract_finance_numbers(context_text)
-    matched = sum(
-        1 for n in answer_nums if any(_value_match_strict(n, c) for c in context_nums)
-    )
+    matched = sum(1 for n in answer_nums if any(_value_match_strict(n, c) for c in context_nums))
     return matched / len(answer_nums)
 
 
-def _numbers_grounded(answer: str, context_texts: List[str]) -> Tuple[bool, List[str]]:
+def _numbers_grounded(answer: str, context_texts: list[str]) -> tuple[bool, list[str]]:
     """Return (all_grounded, ungrounded_numbers).
 
     A number in the answer is grounded when a context number matches it either
@@ -168,7 +180,7 @@ def _numbers_grounded(answer: str, context_texts: List[str]) -> Tuple[bool, List
     ctx_digits = [c.digits for c in ctx_numbers]
     ctx_values = [c.value for c in ctx_numbers]
 
-    ungrounded: List[str] = []
+    ungrounded: list[str] = []
     for n in ans_numbers:
         if n.is_year or n.is_id:
             continue
@@ -183,9 +195,9 @@ def _numbers_grounded(answer: str, context_texts: List[str]) -> Tuple[bool, List
 
 def hallucination_flag_single(
     answer: str,
-    contexts: List[str],
-    reference_answer: Optional[str] = None,
-) -> Dict[str, Any]:
+    contexts: list[str],
+    reference_answer: str | None = None,
+) -> dict[str, Any]:
     """Check a single answer for hallucination signals.
 
     Returns:
@@ -197,7 +209,7 @@ def hallucination_flag_single(
         }
     """
     reasons = []
-    ungrounded_numbers: List[str] = []
+    ungrounded_numbers: list[str] = []
     confidence = 0.0
 
     if not answer or not contexts:
@@ -245,7 +257,7 @@ def hallucination_flag_single(
     }
 
 
-def hallucination_rate(eval_rows: List[Dict]) -> MetricResult:
+def hallucination_rate(eval_rows: list[dict]) -> MetricResult:
     """Fraction of answers with at least one hallucination signal.
 
     eval_rows: [{"answer", "contexts", "reference_answer", "query"}]

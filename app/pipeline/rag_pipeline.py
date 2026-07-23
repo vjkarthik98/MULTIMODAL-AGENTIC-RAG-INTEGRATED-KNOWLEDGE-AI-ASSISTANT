@@ -6,7 +6,8 @@ import re
 import time
 import unicodedata
 import uuid
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Tuple
+from collections.abc import AsyncIterator, Iterator
+from typing import Any
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -16,9 +17,11 @@ logger = get_logger(__name__)
 
 # PROMETHEUS METRICS — SECTION 6
 
+
 def _get_metrics():
     try:
         from prometheus_client import Counter, Histogram
+
         rag_duration = Histogram(
             "rag_pipeline_duration_seconds",
             "RAG pipeline total duration",
@@ -40,16 +43,16 @@ def _get_metrics():
             ["retriever_type"],
         )
         return {
-            "rag_duration":       rag_duration,
-            "llm_latency":        llm_latency,
-            "rag_errors":         rag_errors,
-            "retrieval_latency":  retrieval_latency,
+            "rag_duration": rag_duration,
+            "llm_latency": llm_latency,
+            "rag_errors": rag_errors,
+            "retrieval_latency": retrieval_latency,
         }
     except Exception:
         return {}
 
 
-_METRICS: Dict[str, Any] = {}
+_METRICS: dict[str, Any] = {}
 
 if settings.PROMETHEUS_ENABLED:
     try:
@@ -92,7 +95,8 @@ def _record_retrieval(retriever_type: str, latency: float) -> None:
 
 # STREAM RERANKER SINGLETON — loaded once, shared across all streaming requests
 import threading as _threading
-_stream_reranker      = None
+
+_stream_reranker = None
 _stream_reranker_lock = _threading.Lock()
 
 
@@ -107,6 +111,7 @@ def _get_stream_reranker():
             return _stream_reranker
         try:
             from app.retrieval.reranker import Reranker
+
             _stream_reranker = Reranker()
         except Exception as _e:
             logger.warning(event="rag_stream_reranker_init_failed", error=str(_e))
@@ -114,6 +119,7 @@ def _get_stream_reranker():
 
 
 # NORMALIZE — SECTION 2.3
+
 
 def _normalize(query: str) -> str:
     query = unicodedata.normalize("NFC", str(query or ""))
@@ -124,8 +130,10 @@ def _normalize(query: str) -> str:
 
 # PROMPT INJECTION SANITIZATION — delegates to unified guardrail (Phase 26)
 
+
 def _sanitize(query: str) -> str:
     from app.guardrails.input_guard import sanitize as _guard_sanitize
+
     return _guard_sanitize(query, surface="rag_pipeline")
 
 
@@ -134,9 +142,7 @@ def _sanitize(query: str) -> str:
 # verbatim in the retrieved context chunks. This is deterministic and does not
 # depend on the LLM following prompt instructions about rounding.
 
-_ROUNDED_BILLIONS_RE = re.compile(
-    r'\$\s*(\d{1,4}(?:\.\d+)?)\s*billion', re.IGNORECASE
-)
+_ROUNDED_BILLIONS_RE = re.compile(r'\$\s*(\d{1,4}(?:\.\d+)?)\s*billion', re.IGNORECASE)
 _EXACT_MILLIONS_RE = re.compile(r'\b(\d{2,3},\d{3})\b')
 _CHUNK_TEXT_CITATION_RE = re.compile(
     r'\[\s*\d+\s*,\s*[\'"].*?[\'"]\s*\]',  # [2, 'chunk text'] → strip
@@ -167,10 +173,11 @@ def _fix_inconsistent_totals(answer: str) -> str:
         if total > 0 and abs(stated - total) / total <= 0.05 and abs(stated - total) > 0.001:
             return m.group(0).replace(f"{m.group(1)} billion", f"{total:g} billion", 1)
         return m.group(0)
+
     return _TOTAL_BREAKDOWN_RE.sub(_repl, answer)
 
 
-def _fix_financial_figures(answer: str, context_texts: List[str]) -> str:
+def _fix_financial_figures(answer: str, context_texts: list[str]) -> str:
     """
     Replace '$X.X billion' rounded figures with '$XXX,XXX million' exact figures
     from the retrieved context. Matching tolerance: within 0.5%.
@@ -193,7 +200,7 @@ def _fix_financial_figures(answer: str, context_texts: List[str]) -> str:
         rounded_val = float(raw)
         # Decimal precision the LLM actually used (e.g. "95.0" → 1, "391" → 0).
         _ndec = len(raw.split(".")[1]) if "." in raw else 0
-        best: Optional[str] = None
+        best: str | None = None
         best_diff = float("inf")
         for fig in exact_figs:
             fig_val = float(fig.replace(",", "")) / 1000.0  # millions → billions
@@ -263,9 +270,7 @@ _LEAK_SENTENCE_RE = re.compile(
 # A sentence is also DROPPED if it carries leaked placeholder tokens (the model
 # filled in a rule template) or is a raw pipe-table row dumped from context.
 _PLACEHOLDER_RE = re.compile(
-    r'\[(?:Product|Metric|Decline[^\]]*|BS_[AB]|[A-Z])\]'
-    r'|→\s*FY\s*20\d{2}'
-    r'|^\s*Row\s*:',
+    r'\[(?:Product|Metric|Decline[^\]]*|BS_[AB]|[A-Z])\]' r'|→\s*FY\s*20\d{2}' r'|^\s*Row\s*:',
     re.IGNORECASE,
 )
 
@@ -284,8 +289,8 @@ _VERBOSE_BRACKET_RE = re.compile(
 # Any sentence carrying a "Current ... Deferred" component pair is a dumped tax /
 # provision table row — the figures belong in the prose answer, not the table.
 _RAW_TABLE_ROW_RE = re.compile(
-    r'\bCurrent\b[^.]{0,60}\bDeferred\b'                     # "Current ... Deferred" pair
-    r'|^\s*Segment Breakdown\s*:'                            # "Segment Breakdown: Federal: ..."
+    r'\bCurrent\b[^.]{0,60}\bDeferred\b'  # "Current ... Deferred" pair
+    r'|^\s*Segment Breakdown\s*:'  # "Segment Breakdown: Federal: ..."
     # A sentence that STARTS with a tax/table component label followed immediately
     # by a number ("Total: $2,491 in FY2024...", "Deferred: $(3,080), $(49)...") is
     # a dumped table row. NOT matched: "Total: The provision was $29,749M..." — the
@@ -296,8 +301,7 @@ _RAW_TABLE_ROW_RE = re.compile(
 
 # Whole-line meta fields to delete (label AND value — we don't want them).
 _FRAGMENT_SCRUB_RE = re.compile(
-    r'\bKEY FACTS\b[^:]*:\s*'
-    r'|^\s*(?:Answer Tags|Confidence|Sources Used|Reasoning)\s*:.*$',
+    r'\bKEY FACTS\b[^:]*:\s*' r'|^\s*(?:Answer Tags|Confidence|Sources Used|Reasoning)\s*:.*$',
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -312,9 +316,7 @@ _TEMPLATE_LABEL_RE = re.compile(
 # "Answer:"/"Answers:" marker the model emits after its reasoning preamble.
 # Everything before the LAST such marker is reasoning scaffolding and discarded.
 _ANSWER_MARKER_RE = re.compile(
-    r'(?:^|[\s.;])answers?\s*:\s*'
-    r'|the answer would be\s*:\s*'
-    r'|the answer is\s*:\s*',
+    r'(?:^|[\s.;])answers?\s*:\s*' r'|the answer would be\s*:\s*' r'|the answer is\s*:\s*',
     re.IGNORECASE,
 )
 
@@ -335,8 +337,8 @@ _NOINFO_HEDGE_RE = re.compile(
 # Matches: "(Page 27)", "(page 27)", "(Pages 26-27)", trailing "apple_10k, Page 26"
 # and multi-ref blobs like "(page 38) Net Sales by Product Category (Page 38)".
 _INLINE_PAGE_REF_RE = re.compile(
-    r'\s*\(\s*pages?\s+\d+(?:\s*[-–]\s*\d+)?\s*\)'           # (Page 27) / (Pages 26-27)
-    r'|\s*\([^)]*,\s*[Pp]ages?\s+\d+[^)]*\)'                   # (apple_10k, Page 26)
+    r'\s*\(\s*pages?\s+\d+(?:\s*[-–]\s*\d+)?\s*\)'  # (Page 27) / (Pages 26-27)
+    r'|\s*\([^)]*,\s*[Pp]ages?\s+\d+[^)]*\)'  # (apple_10k, Page 26)
     r'|\s*\([^)]*[Pp]age\s+\d+[^)]*\)\s*[A-Z][A-Za-z\s]{5,}',  # (page 38) Section Title...
     re.IGNORECASE,
 )
@@ -347,16 +349,14 @@ _PAGE_PAREN_RE = re.compile(r'\s*\(\s*[Pp]ages?\s+\d+(?:\s*[-–]\s*\d+)?\s*\)',
 # Any square-bracket aside that talks about conflicting/differing figures or cites
 # raw page numbers is meta-commentary, not the answer — remove the whole bracket.
 _EDITORIAL_NOTE_RE = re.compile(
-    r'\s*\[[^\]]*?(?:conflicting|differ|discrepan|inconsist|'
-    r'\bpages?\s+\d+)[^\]]*\]',
+    r'\s*\[[^\]]*?(?:conflicting|differ|discrepan|inconsist|' r'\bpages?\s+\d+)[^\]]*\]',
     re.IGNORECASE,
 )
 # Bare in-prose page references ("page 50", "pages 26 and 27") that aren't part of
 # a [p.N] anchor — pages belong only in the [p.N] citation chips. Safe to strip
 # here because this runs BEFORE _attach_page_citations inserts the anchors.
 _BARE_PAGE_REF_RE = re.compile(
-    r'\s*\bon\s+pages?\s+\d+(?:\s+and\s+\d+)?'
-    r'|\s*\bpages?\s+\d+(?:\s+and\s+\d+)?',
+    r'\s*\bon\s+pages?\s+\d+(?:\s+and\s+\d+)?' r'|\s*\bpages?\s+\d+(?:\s+and\s+\d+)?',
     re.IGNORECASE,
 )
 # Bracketed ALL-CAPS directives the model echoes from system/safety rules
@@ -384,9 +384,7 @@ _DOC_FOOTER_RE = re.compile(
 # Echoed section-header "soup": a run of >=6 consecutive Title-Case words and
 # connectors (of/by/and/...) — the shape of concatenated section titles like
 # "Consolidated Statements of Operations Net Sales by Product Category ...".
-_LABEL_SOUP_RE = re.compile(
-    r'(?:\b(?:[A-Z][a-zA-Z]+|of|by|and|the|for|in|to|on)\b[ \t]*){6,}'
-)
+_LABEL_SOUP_RE = re.compile(r'(?:\b(?:[A-Z][a-zA-Z]+|of|by|and|the|for|in|to|on)\b[ \t]*){6,}')
 
 
 # Trailing SOURCE-DUMP: the model appends a run of "Section Title (Apple Inc.,
@@ -413,12 +411,27 @@ _SOURCE_BRACKET_RE = re.compile(
 # Abbreviations whose internal periods must NOT trigger a sentence split
 # ("Net sales in the U.S. market ..." is ONE sentence, not two).
 _ABBREVIATIONS = (
-    "U.S.A.", "U.S.", "U.K.", "E.U.", "Inc.", "Corp.", "Ltd.", "Co.",
-    "vs.", "e.g.", "i.e.", "No.", "Dr.", "Mr.", "Ms.", "St.", "approx.",
+    "U.S.A.",
+    "U.S.",
+    "U.K.",
+    "E.U.",
+    "Inc.",
+    "Corp.",
+    "Ltd.",
+    "Co.",
+    "vs.",
+    "e.g.",
+    "i.e.",
+    "No.",
+    "Dr.",
+    "Mr.",
+    "Ms.",
+    "St.",
+    "approx.",
 )
 
 
-def _split_sentences(text: str) -> List[str]:
+def _split_sentences(text: str) -> list[str]:
     """Split into sentences on . ! ? — but protect abbreviation periods first so
     "U.S.", "Inc.", "e.g." etc. don't cause spurious splits."""
     protected = text
@@ -433,20 +446,25 @@ def _cut_source_dump(text: str) -> str:
     text = _SOURCE_BRACKET_RE.sub('', text).rstrip()
     # 1b) Bare trailing "Sources: Apple Inc." / "References: ..." (no brackets) —
     #     cut from a sentence boundary to the end.
-    text = re.sub(r'([.!?])\s+(?:Sources?|References?)\s*:.*$', r'\1', text,
-                  flags=re.IGNORECASE | re.DOTALL).rstrip()
+    text = re.sub(
+        r'([.!?])\s+(?:Sources?|References?)\s*:.*$', r'\1', text, flags=re.IGNORECASE | re.DOTALL
+    ).rstrip()
     # 1c) Bare trailing editorial note ("Conflicting data: ...", "Note: ...") —
     #     often truncated mid-sentence. Cut from the sentence boundary to the end.
-    text = re.sub(r'([.!?])\s+(?:Conflicting data|Note|Disclaimer|Caveat)\s*:.*$',
-                  r'\1', text, flags=re.IGNORECASE | re.DOTALL).rstrip()
+    text = re.sub(
+        r'([.!?])\s+(?:Conflicting data|Note|Disclaimer|Caveat)\s*:.*$',
+        r'\1',
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).rstrip()
     # 2) Cut a trailing "Section Title (Apple Inc., Form 10-K, p. N) ..." dump.
     m = _SOURCE_CITATION_PAREN_RE.search(text)
     if not m:
         return text
-    head = text[:m.start()]
+    head = text[: m.start()]
     cut = max(head.rfind('. '), head.rfind('! '), head.rfind('? '))
     if cut >= 0:
-        return head[:cut + 1].rstrip()
+        return head[: cut + 1].rstrip()
     return head.rstrip()
 
 
@@ -457,13 +475,16 @@ def _strip_label_soup(text: str) -> str:
     Product Category" four times). Legitimate long proper nouns ("European Union
     State Aid Decision") have no repeated word, so they are preserved.
     """
+
     def _repl(m: re.Match) -> str:
         run = m.group(0)
         caps = [w for w in run.split() if w[:1].isupper()]
         if len(caps) >= 4 and (len(caps) - len(set(caps))) >= 1:
             return ' '
         return run
+
     return _LABEL_SOUP_RE.sub(_repl, text)
+
 
 # PERPLEXITY-STYLE [p.N] CITATION ANCHORS
 # Distinctive financial figures we can reliably trace back to a single source
@@ -471,33 +492,33 @@ def _strip_label_soup(text: str) -> str:
 # amounts stay as-is; integer scale amounts keep their scale word ("110 billion",
 # not bare "110" which is too common); percentages and $-decimals keep the number.
 _TRACE_FIG_RE = re.compile(
-    r'\d{1,3}(?:,\d{3})+(?:\.\d+)?'          # comma amounts: 201,183 / 29,749
-    r'|\d+\.\d+\s*%'                          # decimal percent: 37.2%
-    r'|\d+(?:\.\d+)?\s*(?:billion|million)'   # scale amounts: 118.254 billion, 110 billion
-    r'|\$\s?\d+\.\d{2}\b',                    # money decimal: $0.25, $0.24
+    r'\d{1,3}(?:,\d{3})+(?:\.\d+)?'  # comma amounts: 201,183 / 29,749
+    r'|\d+\.\d+\s*%'  # decimal percent: 37.2%
+    r'|\d+(?:\.\d+)?\s*(?:billion|million)'  # scale amounts: 118.254 billion, 110 billion
+    r'|\$\s?\d+\.\d{2}\b',  # money decimal: $0.25, $0.24
     re.IGNORECASE,
 )
 
 
-def _fig_key(match_str: str) -> Optional[str]:
+def _fig_key(match_str: str) -> str | None:
     """Reduce a matched figure to a specific string to search for in chunk text."""
     ms = match_str.strip()
-    m = re.search(r'\d{1,3}(?:,\d{3})+(?:\.\d+)?', ms)     # comma amount (most specific)
+    m = re.search(r'\d{1,3}(?:,\d{3})+(?:\.\d+)?', ms)  # comma amount (most specific)
     if m:
         return m.group(0)
     m = re.search(r'(\d+(?:\.\d+)?)\s*(billion|million)', ms, re.IGNORECASE)  # keep scale word
     if m:
         return f"{m.group(1)} {m.group(2).lower()}"
-    m = re.search(r'(\d+\.\d+)\s*%', ms)                    # percent → number
+    m = re.search(r'(\d+\.\d+)\s*%', ms)  # percent → number
     if m:
         return m.group(1)
-    m = re.search(r'(\d+\.\d{2})\b', ms)                    # money decimal (dividend)
+    m = re.search(r'(\d+\.\d{2})\b', ms)  # money decimal (dividend)
     if m:
         return m.group(1)
     return None
 
 
-def _attach_page_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
+def _attach_page_citations(answer: str, docs: list[dict[str, Any]]) -> str:
     """Deterministically attach Perplexity-style [p.N] anchors as a single
     footer line at the end of the answer (not after every sentence).
 
@@ -512,8 +533,8 @@ def _attach_page_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
     if not answer or not docs:
         return answer
 
-    page_texts: List[tuple] = []
-    synth_page_texts: List[tuple] = []
+    page_texts: list[tuple] = []
+    synth_page_texts: list[tuple] = []
     for d in docs:
         meta = (d.get("metadata") or {}) if isinstance(d, dict) else {}
         pg = meta.get("page")
@@ -534,7 +555,7 @@ def _attach_page_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
         return answer
 
     sentences = _split_sentences(answer)
-    cited_pages: List[int] = []
+    cited_pages: list[int] = []
     cited_seen: set = set()
     for s in sentences:
         st = s.strip()
@@ -552,7 +573,7 @@ def _attach_page_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
         # synthetic aggregate doc's nominal page when no real chunk carries the
         # figure (e.g. a hardcoded-but-verified fact whose source page fell
         # outside this query's retrieved window) — better than no citation.
-        hits: Dict[int, int] = {}
+        hits: dict[int, int] = {}
         for pg, txt in page_texts:
             c = sum(1 for k in keys if k in txt)
             if c:
@@ -596,7 +617,7 @@ def _attach_page_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
 _SECTION_ID_NUMERIC_RE = re.compile(r'^\d+(?:\.\d+)*$')
 
 
-def _attach_section_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
+def _attach_section_citations(answer: str, docs: list[dict[str, Any]]) -> str:
     """Perplexity-style section citations for DOCX answers.
 
     DOCX chunks never carry a page number, so _attach_page_citations no-ops on
@@ -620,7 +641,7 @@ def _attach_section_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
         return answer
 
     # (section_id, full_heading, chunk_text) for each DOCX chunk in context.
-    sections: List[tuple] = []
+    sections: list[tuple] = []
     for d in docs:
         meta = (d.get("metadata") or {}) if isinstance(d, dict) else {}
         if str(meta.get("modality") or "") != "docx":
@@ -646,8 +667,8 @@ def _attach_section_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
         return bool(re.match(r'^\d+\.', heading))
 
     sentences = _split_sentences(answer)
-    rebuilt: List[str] = []
-    cited: List[tuple] = []       # ordered unique (sid, heading) actually used
+    rebuilt: list[str] = []
+    cited: list[tuple] = []  # ordered unique (sid, heading) actually used
     cited_seen: set = set()
 
     for s in sentences:
@@ -664,7 +685,7 @@ def _attach_section_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
             continue
         # Score each section by how many of the sentence's figures its text
         # contains; prefer a dotted section (clean inline label) on ties.
-        scored: List[tuple] = []
+        scored: list[tuple] = []
         for sid, heading, txt in sections:
             c = sum(1 for k in keys if k in txt)
             if c:
@@ -683,7 +704,7 @@ def _attach_section_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
         if _dotted(sid):
             m = re.search(r'[.!?]+\s*$', st)
             cite = f" [{sid}]"
-            st = (st[:m.start()] + cite + st[m.start():]) if m else (st + cite)
+            st = (st[: m.start()] + cite + st[m.start() :]) if m else (st + cite)
         rebuilt.append(st)
 
     body = " ".join(rebuilt)
@@ -692,8 +713,9 @@ def _attach_section_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
 
     # Footer: dotted sections first (sorted by number), then any other heading
     # that still starts with "N." so the UI can colour it. Capped at 4.
-    dotted = sorted((c for c in cited if _dotted(c[0])),
-                    key=lambda c: [int(p) for p in c[0].split(".")])
+    dotted = sorted(
+        (c for c in cited if _dotted(c[0])), key=lambda c: [int(p) for p in c[0].split(".")]
+    )
     other = [c for c in cited if not _dotted(c[0]) and _footer_ok(c[1])]
     footer_headings = [h for _sid, h in (dotted + other)][:4]
     if not footer_headings:
@@ -702,7 +724,7 @@ def _attach_section_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
     return f"{body}\n\n{footer}"
 
 
-def _attach_image_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
+def _attach_image_citations(answer: str, docs: list[dict[str, Any]]) -> str:
     """Footer citation for image/chart answers.
 
     Image chunks carry no page or section number, so both _attach_page_citations
@@ -718,7 +740,7 @@ def _attach_image_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
     if not answer or not docs:
         return answer
     seen: set = set()
-    cites: List[str] = []
+    cites: list[str] = []
     for d in docs:
         meta = (d.get("metadata") or {}) if isinstance(d, dict) else {}
         if str(meta.get("modality") or "") != "image":
@@ -757,21 +779,38 @@ def _attach_image_citations(answer: str, docs: List[Dict[str, Any]]) -> str:
 # phrasing, which the LLM + the CHART TRENDS narrative already answer
 # correctly (verified) — this override must never make a working answer
 # worse.
-_CHART_VALUES_BLOCK_RE = re.compile(
-    r'CHART VALUES[^\n]*:\n((?:  [^\n]+\n?)+)'
-)
+_CHART_VALUES_BLOCK_RE = re.compile(r'CHART VALUES[^\n]*:\n((?:  [^\n]+\n?)+)')
 _CHART_VALUE_ROW_RE = re.compile(r'^\s*(\S+):\s*(.+)$')
 _CHART_VALUE_ITEM_RE = re.compile(r'([^=,]+?)=~?\$([\d,]+)')
 _CHART_TREND_EXCLUDE_WORDS = (
-    "plateau", "consolidation", "drawdown", "declin", "happened between",
-    "when did", "what happened", "dip", "trough", "peak",
+    "plateau",
+    "consolidation",
+    "drawdown",
+    "declin",
+    "happened between",
+    "when did",
+    "what happened",
+    "dip",
+    "trough",
+    "peak",
 )
 
 
 _MDY_TICK_RE = re.compile(r'\b(\d{1,2})/(\d{1,2})/(\d{2})\b')
 _MONTH_NAMES = (
-    "", "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
+    "",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
 )
 
 
@@ -786,16 +825,18 @@ def _expand_chart_dates(text: str) -> str:
     once here — on the final answer text, right before it's shown — fixes
     display for both paths without needing to re-ingest already-stored chunks.
     """
-    def _sub(m: "re.Match[str]") -> str:
+
+    def _sub(m: re.Match[str]) -> str:
         month, day, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
         if not (1 <= month <= 12 and 1 <= day <= 31):
             return m.group(0)
         year = 2000 + yy if yy < 70 else 1900 + yy
         return f"{_MONTH_NAMES[month]} {day}, {year}"
+
     return _MDY_TICK_RE.sub(_sub, text)
 
 
-def _parse_digitized_chart_values(context: str) -> Dict[str, Dict[str, float]]:
+def _parse_digitized_chart_values(context: str) -> dict[str, dict[str, float]]:
     """Parse the 'CHART VALUES' block _format_digitized_chart wrote into the
     chunk text back into {tick: {series_name: value}}. Pure text parsing —
     no new Qdrant payload field needed; works off the same text already in
@@ -805,13 +846,13 @@ def _parse_digitized_chart_values(context: str) -> Dict[str, Dict[str, float]]:
     m = _CHART_VALUES_BLOCK_RE.search(context)
     if not m:
         return {}
-    values_by_tick: Dict[str, Dict[str, float]] = {}
+    values_by_tick: dict[str, dict[str, float]] = {}
     for line in m.group(1).splitlines():
         rm = _CHART_VALUE_ROW_RE.match(line)
         if not rm:
             continue
         tick, rest = rm.groups()
-        row: Dict[str, float] = {}
+        row: dict[str, float] = {}
         for im in _CHART_VALUE_ITEM_RE.finditer(rest):
             name, val = im.groups()
             try:
@@ -823,7 +864,7 @@ def _parse_digitized_chart_values(context: str) -> Dict[str, Dict[str, float]]:
     return values_by_tick
 
 
-def _synthesize_image_chart_answer(query: str, context: str) -> Optional[str]:
+def _synthesize_image_chart_answer(query: str, context: str) -> str | None:
     """Deterministically build the answer for a chart-value or multi-series
     comparison question directly from digitized data, bypassing free-form
     generation for exactly the question types it has repeatedly gotten wrong.
@@ -837,11 +878,25 @@ def _synthesize_image_chart_answer(query: str, context: str) -> Optional[str]:
     # quantity it does not contain (dividend yield, P/E, volume, market cap,
     # revenue…) must fall through to the LLM so the KB-grounding gate can abstain
     # — never answer them with a return figure. image_gold image-refusal-003.
-    if any(w in q_lower for w in (
-        "dividend", "yield", "p/e", "pe ratio", "price-to-earnings",
-        "earnings per share", " eps", "volume", "market cap", "market-cap",
-        "revenue", "volatility", "beta", "sharpe",
-    )):
+    if any(
+        w in q_lower
+        for w in (
+            "dividend",
+            "yield",
+            "p/e",
+            "pe ratio",
+            "price-to-earnings",
+            "earnings per share",
+            " eps",
+            "volume",
+            "market cap",
+            "market-cap",
+            "revenue",
+            "volatility",
+            "beta",
+            "sharpe",
+        )
+    ):
         return None
 
     values_by_tick = _parse_digitized_chart_values(context)
@@ -861,17 +916,26 @@ def _synthesize_image_chart_answer(query: str, context: str) -> Optional[str]:
     # than let the model guess (it has answered a title question with unrelated
     # earnings-call prose). image_gold img-0014.
     if "title" in q_lower:
-        tm = re.search(r'(COMPARISON OF 5-YEAR CUMULATIVE TOTAL RETURN.*?Supersector Index)',
-                       context, re.IGNORECASE)
+        tm = re.search(
+            r'(COMPARISON OF 5-YEAR CUMULATIVE TOTAL RETURN.*?Supersector Index)',
+            context,
+            re.IGNORECASE,
+        )
         if tm:
-            title = (tm.group(1)
-                     .replace("COMPARISON OF 5-YEAR CUMULATIVE TOTAL RETURN",
-                              "Comparison of 5-Year Cumulative Total Return")
-                     .replace("Inc-", "Inc.").replace("U.S:", "U.S.").replace("s&P", "S&P"))
+            title = (
+                tm.group(1)
+                .replace(
+                    "COMPARISON OF 5-YEAR CUMULATIVE TOTAL RETURN",
+                    "Comparison of 5-Year Cumulative Total Return",
+                )
+                .replace("Inc-", "Inc.")
+                .replace("U.S:", "U.S.")
+                .replace("s&P", "S&P")
+            )
             title = re.sub(r'\s+', ' ', title).strip()
             return f'The chart\'s title is "{title}".'
 
-    def _pct(name: str) -> Optional[float]:
+    def _pct(name: str) -> float | None:
         v0 = values_by_tick[first_tick].get(name)
         v1 = values_by_tick[last_tick].get(name)
         if not v0:
@@ -884,13 +948,27 @@ def _synthesize_image_chart_answer(query: str, context: str) -> Optional[str]:
     # mentioning "index". Distinctive tokens: "apple", "s&p"/"500",
     # "dow"/"jones"/"technology"/"supersector".
     from collections import Counter as _Counter
+
     _toks = {n: set(re.findall(r"[a-z0-9&]+", n.lower())) for n in series_names}
-    _cnt: "_Counter[str]" = _Counter()
+    _cnt: _Counter[str] = _Counter()
     for _s in _toks.values():
         _cnt.update(_s)
     _shared = {t for t, c in _cnt.items() if c > 1}
-    _generic = {"index", "the", "and", "inc", "u", "s", "us", "total",
-                "return", "cumulative", "of", "year", "five"}
+    _generic = {
+        "index",
+        "the",
+        "and",
+        "inc",
+        "u",
+        "s",
+        "us",
+        "total",
+        "return",
+        "cumulative",
+        "of",
+        "year",
+        "five",
+    }
 
     def _series_named(name: str) -> bool:
         return any(t in q_lower for t in (_toks[name] - _shared - _generic))
@@ -919,11 +997,15 @@ def _synthesize_image_chart_answer(query: str, context: str) -> Optional[str]:
                     f"{pct:+.0f} percent."
                 )
         # single date
-        tick = q_ticks[0] if len(set(q_ticks)) == 1 else \
-            sorted(q_ticks, key=lambda t: ticks.index(t))[-1]
+        tick = (
+            q_ticks[0]
+            if len(set(q_ticks)) == 1
+            else sorted(q_ticks, key=lambda t: ticks.index(t))[-1]
+        )
         row = values_by_tick.get(tick, {})
-        wants_rank = (len(named) >= 2
-                      or any(w in q_lower for w in ("highest", "lowest", "which", "compare", "rank")))
+        wants_rank = len(named) >= 2 or any(
+            w in q_lower for w in ("highest", "lowest", "which", "compare", "rank")
+        )
         if wants_rank and len(row) >= 2:
             ranked = sorted(row, key=lambda n: row[n], reverse=True)
             parts = [f"{_norm(n)} at approximately ${row[n]:.0f}" for n in ranked]
@@ -959,8 +1041,12 @@ def _synthesize_image_chart_answer(query: str, context: str) -> Optional[str]:
         return None
 
     is_comparison = (
-        len(named) >= 2 or "compare" in q_lower or " vs " in q_lower
-        or "how did" in q_lower or "versus" in q_lower or "three" in q_lower
+        len(named) >= 2
+        or "compare" in q_lower
+        or " vs " in q_lower
+        or "how did" in q_lower
+        or "versus" in q_lower
+        or "three" in q_lower
         or "which" in q_lower
     )
 
@@ -972,13 +1058,16 @@ def _synthesize_image_chart_answer(query: str, context: str) -> Optional[str]:
             pct = _pct(name)
             if pct is None:
                 continue
-            parts.append(f"{_norm(name)} ended at approximately ${v1:.0f} "
-                         f"(a gain of approximately {pct:.0f} percent)")
+            parts.append(
+                f"{_norm(name)} ended at approximately ${v1:.0f} "
+                f"(a gain of approximately {pct:.0f} percent)"
+            )
         if len(parts) < 2:
             return None
         return (
             f"Comparing the {len(parts)} series from {first_tick} to {last_tick}: "
-            + "; ".join(parts) + "."
+            + "; ".join(parts)
+            + "."
         )
 
     if named:
@@ -1001,9 +1090,18 @@ def _synthesize_image_chart_answer(query: str, context: str) -> Optional[str]:
 # "net sales by PRODUCT CATEGORY" answer. Plain lowercase substrings (a regex \b
 # after "u.s." fails because the char after the trailing "." is not a word char).
 _GEO_MARKERS = (
-    "by region", "by geograph", "geographic", "united states", "u.s.",
-    "americas", "greater china", "china", "europe", "japan",
-    "rest of asia", "other countries",
+    "by region",
+    "by geograph",
+    "geographic",
+    "united states",
+    "u.s.",
+    "americas",
+    "greater china",
+    "china",
+    "europe",
+    "japan",
+    "rest of asia",
+    "other countries",
 )
 
 
@@ -1028,7 +1126,7 @@ def _synth_answer_override(answer: str, context: str) -> str:
     ctx = context.lstrip()
     if not ctx.startswith(_SYNTH_DOC_PREFIX):
         return answer
-    synth = ctx.split("\n\n", 1)[0][len(_SYNTH_DOC_PREFIX):].strip()
+    synth = ctx.split("\n\n", 1)[0][len(_SYNTH_DOC_PREFIX) :].strip()
     # Drop the leading header up to the LAST " — "/": " within the first ~90 chars
     # (greedy) so a two-part header like "EU State Aid Decision — Tax Impact
     # Summary:" is fully removed, leaving only the facts.
@@ -1052,26 +1150,36 @@ def _trim_offtopic_finance(query: str, answer: str) -> str:
     if not answer:
         return answer
     q = (query or "").lower()
-    is_category = ("product categor" in q or "by product" in q) and \
-                  "region" not in q and "geograph" not in q
+    is_category = (
+        ("product categor" in q or "by product" in q) and "region" not in q and "geograph" not in q
+    )
     is_gross_margin = "gross margin" in q and "operating income" not in q
-    is_capital_return = ("return to shareholders" in q or "repurchases and dividends" in q
-                         or "capital return" in q)
+    is_capital_return = (
+        "return to shareholders" in q or "repurchases and dividends" in q or "capital return" in q
+    )
     if not (is_category or is_gross_margin or is_capital_return):
         return answer
 
     # Item-5 "Issuer Purchases of Equity Securities" table detail — off-topic for a
     # capital-return question, and where the model tends to drift/hallucinate.
     _repurchase_table_markers = (
-        "shareholders of record", "average price", "open market and privately",
-        "privately negotiated", "per share for an", "shares for an average",
-        "utilized $", "under its share repurchase", "under the share repurchase",
-        "during the third quarter", "during the fourth quarter",
-        "during the first quarter", "during the second quarter",
+        "shareholders of record",
+        "average price",
+        "open market and privately",
+        "privately negotiated",
+        "per share for an",
+        "shares for an average",
+        "utilized $",
+        "under its share repurchase",
+        "under the share repurchase",
+        "during the third quarter",
+        "during the fourth quarter",
+        "during the first quarter",
+        "during the second quarter",
     )
 
     sentences = _split_sentences(answer)
-    kept: List[str] = []
+    kept: list[str] = []
     for i, s in enumerate(sentences):
         st = s.strip()
         if not st:
@@ -1079,15 +1187,20 @@ def _trim_offtopic_finance(query: str, answer: str) -> str:
         if i > 0:
             sl = st.lower()
             # Category query → drop region/geography net-sales drift.
-            if is_category and any(g in sl for g in _GEO_MARKERS) and \
-               ("$" in st or "million" in sl or "market" in sl):
+            if (
+                is_category
+                and any(g in sl for g in _GEO_MARKERS)
+                and ("$" in st or "million" in sl or "market" in sl)
+            ):
                 continue
             # Gross-margin query → drop sentences that drift into operating income
             # or per-segment net sales / deferred revenue — but ONLY when the
             # sentence does NOT itself state a gross margin (so the margin answer,
             # which often references net sales as the denominator, is preserved).
-            if is_gross_margin and "gross margin" not in sl and (
-                "operating income" in sl or "net sales" in sl or "deferred revenue" in sl
+            if (
+                is_gross_margin
+                and "gross margin" not in sl
+                and ("operating income" in sl or "net sales" in sl or "deferred revenue" in sl)
             ):
                 continue
             # Capital-return query → drop the Item-5 repurchase-table detail drift.
@@ -1112,22 +1225,22 @@ def _strip_leaked_instructions(answer: str) -> str:
         return answer
 
     text = answer.strip()
-    text = _cut_source_dump(text)                      # trailing "Title (Apple Inc., Form 10-K, p.N)" dump
-    text = _DOC_FOOTER_RE.sub('', text)                # "Apple Inc. 2024 Form 10-K" tail
-    text = _strip_label_soup(text)                     # repeated section-title dumps
-    text = _VERBOSE_BRACKET_RE.sub('', text)           # invented [Source: ...]
-    text = _EDITORIAL_NOTE_RE.sub('', text)            # "[Conflicting data: ... page 50 ...]"
-    text = _BRACKET_DIRECTIVE_RE.sub('', text)         # "[SAFETY: ...]" / "[Unverified: ...]"
-    text = _FRAGMENT_SCRUB_RE.sub('', text)            # KEY FACTS:/meta-label lines
-    text = _TEMPLATE_LABEL_RE.sub('', text)            # Entity A:/Comparison:/...
-    text = _INLINE_PAGE_REF_RE.sub('', text)           # (page 38) Section Title blobs
-    text = _PAGE_PAREN_RE.sub('', text)                # any remaining (Page N) refs
-    text = _BARE_PAGE_REF_RE.sub('', text)             # raw "page 50" / "pages 26 and 27"
+    text = _cut_source_dump(text)  # trailing "Title (Apple Inc., Form 10-K, p.N)" dump
+    text = _DOC_FOOTER_RE.sub('', text)  # "Apple Inc. 2024 Form 10-K" tail
+    text = _strip_label_soup(text)  # repeated section-title dumps
+    text = _VERBOSE_BRACKET_RE.sub('', text)  # invented [Source: ...]
+    text = _EDITORIAL_NOTE_RE.sub('', text)  # "[Conflicting data: ... page 50 ...]"
+    text = _BRACKET_DIRECTIVE_RE.sub('', text)  # "[SAFETY: ...]" / "[Unverified: ...]"
+    text = _FRAGMENT_SCRUB_RE.sub('', text)  # KEY FACTS:/meta-label lines
+    text = _TEMPLATE_LABEL_RE.sub('', text)  # Entity A:/Comparison:/...
+    text = _INLINE_PAGE_REF_RE.sub('', text)  # (page 38) Section Title blobs
+    text = _PAGE_PAREN_RE.sub('', text)  # any remaining (Page N) refs
+    text = _BARE_PAGE_REF_RE.sub('', text)  # raw "page 50" / "pages 26 and 27"
 
     # Keep only what follows the final "Answer:" / "the answer would be:" marker.
     markers = list(_ANSWER_MARKER_RE.finditer(text))
     if markers:
-        text = text[markers[-1].end():].strip()
+        text = text[markers[-1].end() :].strip()
 
     # If model wrapped its answer in double-quotes after a reasoning preamble
     # (e.g. 'the answer would be: "The earnings call..."'), unwrap the quotes.
@@ -1135,15 +1248,15 @@ def _strip_leaked_instructions(answer: str) -> str:
         end_q = text.find('"', 1)
         if end_q != -1:
             inner = text[1:end_q].strip()
-            tail  = text[end_q + 1:].strip()
-            text  = (inner + " " + tail).strip() if tail else inner
+            tail = text[end_q + 1 :].strip()
+            text = (inner + " " + tail).strip() if tail else inner
 
-    text = re.sub(r'^\s*[:\-—]\s*', '', text)          # leading bare colon/dash
+    text = re.sub(r'^\s*[:\-—]\s*', '', text)  # leading bare colon/dash
 
     sentences = _split_sentences(text)
-    kept: List[str] = []
-    _seen_keys: set = set()                             # exact-sentence de-dup
-    _seen_nums: set = set()                             # figures already stated
+    kept: list[str] = []
+    _seen_keys: set = set()  # exact-sentence de-dup
+    _seen_nums: set = set()  # figures already stated
     for s in sentences:
         st = s.strip()
         if not st:
@@ -1152,11 +1265,11 @@ def _strip_leaked_instructions(answer: str) -> str:
             continue
         if _PLACEHOLDER_RE.search(st):
             continue
-        if _WARN_MARKER in st:                          # numeric-guard hallucination flag
+        if _WARN_MARKER in st:  # numeric-guard hallucination flag
             continue
-        if st.count('|') >= 3:                          # raw pipe-table row dump
+        if st.count('|') >= 3:  # raw pipe-table row dump
             continue
-        if _RAW_TABLE_ROW_RE.search(st):                # raw "Federal: Current:... Deferred:..." dump
+        if _RAW_TABLE_ROW_RE.search(st):  # raw "Federal: Current:... Deferred:..." dump
             continue
         # EXACT DE-DUP — drop a verbatim repeat (normalized key).
         _key = re.sub(r'[^a-z0-9]+', '', st.lower())
@@ -1175,7 +1288,9 @@ def _strip_leaked_instructions(answer: str) -> str:
         # "The provision was ...") when real prose follows the label.
         st = re.sub(
             r'^\s*(?:Total|Federal|State|Foreign|Domestic|Segment Breakdown)\s*:\s*'
-            r'(?=[A-Z][a-z])', '', st,
+            r'(?=[A-Z][a-z])',
+            '',
+            st,
         )
         kept.append(st)
 
@@ -1189,12 +1304,17 @@ def _strip_leaked_instructions(answer: str) -> str:
     result = re.sub(r'^\s*[:\-—]\s*', '', result)
     # Trailing meta-label artifact the model leaves with empty values
     # ("... May 2023. Sources:,,," or "... FY2023. Tags:").
-    result = re.sub(r'\s*\b(?:Sources?|Tags?|Source)\s*:\s*[,;\s]*$', '', result,
-                    flags=re.IGNORECASE).strip()
+    result = re.sub(
+        r'\s*\b(?:Sources?|Tags?|Source)\s*:\s*[,;\s]*$', '', result, flags=re.IGNORECASE
+    ).strip()
     # Drop a dangling leading connector left behind when a reasoning sentence
     # before it was removed (e.g. "Therefore, Mac had..." → "Mac had...").
-    result = re.sub(r'^(?:therefore|thus|so|hence|then|in conclusion|'
-                    r'as a result)\s*,?\s*', '', result, flags=re.IGNORECASE)
+    result = re.sub(
+        r'^(?:therefore|thus|so|hence|then|in conclusion|' r'as a result)\s*,?\s*',
+        '',
+        result,
+        flags=re.IGNORECASE,
+    )
     result = (result[:1].upper() + result[1:]) if result else result
     result = re.sub(r'\s{2,}', ' ', result).strip()
 
@@ -1214,30 +1334,35 @@ def _strip_leaked_instructions(answer: str) -> str:
 
 # HASH FOR DEDUP
 
-def _hash(text: str, meta: Dict[str, Any]) -> str:
+
+def _hash(text: str, meta: dict[str, Any]) -> str:
     base = f"{text[:100]}|{meta.get('doc_id')}|{meta.get('chunk_id')}"
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 
 # DOCUMENT NORMALIZATION
 
-def _normalize_docs(docs: List[Any]) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
+
+def _normalize_docs(docs: list[Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     for d in docs:
         if isinstance(d, dict):
             out.append(d)
         elif isinstance(d, tuple):
-            out.append({
-                "text":     d[0] if len(d) > 0 else "",
-                "score":    d[1] if len(d) > 1 else 0.0,
-                "metadata": d[2] if len(d) > 2 else {},
-            })
+            out.append(
+                {
+                    "text": d[0] if len(d) > 0 else "",
+                    "score": d[1] if len(d) > 1 else 0.0,
+                    "metadata": d[2] if len(d) > 2 else {},
+                }
+            )
     return out
 
 
 # PHASE 24.8 — STANDARDISED SOURCES ARRAY
 
-def _fetch_video_frame_docs(user_id: Optional[str], source_name: Optional[str]) -> List[Dict[str, Any]]:
+
+def _fetch_video_frame_docs(user_id: str | None, source_name: str | None) -> list[dict[str, Any]]:
     """Load a video's frame (vision) docs from vision_collection.
 
     Video answers are multimodal: the spoken content is cited by speaker +
@@ -1250,9 +1375,11 @@ def _fetch_video_frame_docs(user_id: Optional[str], source_name: Optional[str]) 
     if not user_id:
         return []
     try:
-        from app.core.infra_registry import infra
         from qdrant_client.http import models as _qm
-        store  = infra.get_vector_store()
+
+        from app.core.infra_registry import infra
+
+        store = infra.get_vector_store()
         client = getattr(store, "client", None)
         if client is None:
             return []
@@ -1262,14 +1389,19 @@ def _fetch_video_frame_docs(user_id: Optional[str], source_name: Optional[str]) 
         pts, _ = client.scroll(
             collection_name="vision_collection",
             scroll_filter=_qm.Filter(must=must),
-            limit=64, with_payload=True, with_vectors=False,
+            limit=64,
+            with_payload=True,
+            with_vectors=False,
         )
-        frames: List[Dict[str, Any]] = []
+        frames: list[dict[str, Any]] = []
         for p in pts:
             pl = dict(p.payload or {})
             frames.append({"text": pl.get("text", ""), "score": 0.0, "metadata": pl})
-        frames.sort(key=lambda d: (d["metadata"].get("frame_timestamp")
-                                   or d["metadata"].get("start_timestamp") or 0.0))
+        frames.sort(
+            key=lambda d: (
+                d["metadata"].get("frame_timestamp") or d["metadata"].get("start_timestamp") or 0.0
+            )
+        )
         return frames
     except Exception:
         return []
@@ -1277,16 +1409,16 @@ def _fetch_video_frame_docs(user_id: Optional[str], source_name: Optional[str]) 
 
 # Cast/section map per (user, source) — an earnings-call structure is
 # deterministic, so we resolve exec names once and reuse. Small, bounded.
-_VIDEO_CAST_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
+_VIDEO_CAST_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 # A person's name: capitalized words with lowercase bodies — stops at a period,
 # comma, or lowercase word, so "Kevan Parekh. After that" → "Kevan Parekh".
-_NAME_RE   = r"([A-Z][a-z'’-]+(?:\s+[A-Z][a-z'’-]+){1,2})"
+_NAME_RE = r"([A-Z][a-z'’-]+(?:\s+[A-Z][a-z'’-]+){1,2})"
 _IR_INTRO_RE = re.compile(r"my name is\s+" + _NAME_RE, re.IGNORECASE)
-_CEO_RE      = re.compile(r"\bCEO\s+" + _NAME_RE)
-_CFO_RE      = re.compile(r"\bCFO\s+" + _NAME_RE)
+_CEO_RE = re.compile(r"\bCEO\s+" + _NAME_RE)
+_CFO_RE = re.compile(r"\bCFO\s+" + _NAME_RE)
 
 
-def _resolve_video_cast(user_id: Optional[str], source_name: Optional[str]) -> Dict[str, Any]:
+def _resolve_video_cast(user_id: str | None, source_name: str | None) -> dict[str, Any]:
     """Resolve an earnings video's cast + prepared-remarks section boundaries.
 
     The diarizer collapses the execs into a single "host" label, so per-turn
@@ -1302,20 +1434,26 @@ def _resolve_video_cast(user_id: Optional[str], source_name: Optional[str]) -> D
     key = (user_id, source_name)
     if key in _VIDEO_CAST_CACHE:
         return _VIDEO_CAST_CACHE[key]
-    cast: Dict[str, Any] = {}
+    cast: dict[str, Any] = {}
     try:
-        from app.core.infra_registry import infra
         from qdrant_client.http import models as _qm
+
+        from app.core.infra_registry import infra
+
         client = getattr(infra.get_vector_store(), "client", None)
         if client is None:
             return {}
         pts, _ = client.scroll(
             collection_name="text_collection",
-            scroll_filter=_qm.Filter(must=[
-                _qm.FieldCondition(key="user_id", match=_qm.MatchValue(value=user_id)),
-                _qm.FieldCondition(key="source",  match=_qm.MatchValue(value=source_name)),
-            ]),
-            limit=300, with_payload=True, with_vectors=False,
+            scroll_filter=_qm.Filter(
+                must=[
+                    _qm.FieldCondition(key="user_id", match=_qm.MatchValue(value=user_id)),
+                    _qm.FieldCondition(key="source", match=_qm.MatchValue(value=source_name)),
+                ]
+            ),
+            limit=300,
+            with_payload=True,
+            with_vectors=False,
         )
         rows = []
         for p in pts:
@@ -1325,35 +1463,48 @@ def _resolve_video_cast(user_id: Optional[str], source_name: Optional[str]) -> D
             ts = pl.get("start_timestamp")
             if ts is None:
                 ts = pl.get("timestamp_start") or 0.0
-            rows.append((float(ts), str(pl.get("transcript") or pl.get("text") or ""),
-                         str(pl.get("call_section") or "")))
+            rows.append(
+                (
+                    float(ts),
+                    str(pl.get("transcript") or pl.get("text") or ""),
+                    str(pl.get("call_section") or ""),
+                )
+            )
         rows.sort(key=lambda r: r[0])
         if not rows:
             return {}
         head = " ".join(r[1] for r in rows[:4])
+
         def _grab(rx):
             m = rx.search(head)
             return " ".join(w.capitalize() for w in m.group(1).split()) if m else None
-        cast["ir"]  = _grab(_IR_INTRO_RE)
+
+        cast["ir"] = _grab(_IR_INTRO_RE)
         cast["ceo"] = _grab(_CEO_RE)
         cast["cfo"] = _grab(_CFO_RE)
         cook_start = parekh_start = qa_start = None
         for ts, txt, sec in rows:
             tl = txt.lower()
-            if cook_start is None and ("thank you, suhasini" in tl or "thanks, suhasini" in tl
-                                       or "proud to report" in tl):
+            if cook_start is None and (
+                "thank you, suhasini" in tl or "thanks, suhasini" in tl or "proud to report" in tl
+            ):
                 cook_start = ts
             if parekh_start is None and re.search(r"thank(?:s| you),?\s+tim\b", tl):
                 parekh_start = ts
-            if qa_start is None and (sec == "qa_session" or "first question" in tl
-                                     or "floor is now open" in tl):
+            if qa_start is None and (
+                sec == "qa_session" or "first question" in tl or "floor is now open" in tl
+            ):
                 qa_start = ts
-        cast["cook_start"], cast["parekh_start"], cast["qa_start"] = cook_start, parekh_start, qa_start
+        cast["cook_start"], cast["parekh_start"], cast["qa_start"] = (
+            cook_start,
+            parekh_start,
+            qa_start,
+        )
         if not (cast.get("ceo") or cast.get("cfo") or cast.get("ir")):
             cast = {}
     except Exception:
         cast = {}
-    if cast:                       # don't cache a transient empty result
+    if cast:  # don't cache a transient empty result
         _VIDEO_CAST_CACHE[key] = cast
     return cast
 
@@ -1361,12 +1512,13 @@ def _resolve_video_cast(user_id: Optional[str], source_name: Optional[str]) -> D
 # All spoken sentences of a video, cached per (user, source). Used by the
 # deterministic completeness fill to recover a specific fact the reranker
 # failed to surface into the answer context.
-_VideoSentence = Tuple[str, Optional[float], str]   # (text, start_timestamp, call_section)
-_VIDEO_SENTENCES_CACHE: Dict[Tuple[str, str], List[_VideoSentence]] = {}
+_VideoSentence = tuple[str, float | None, str]  # (text, start_timestamp, call_section)
+_VIDEO_SENTENCES_CACHE: dict[tuple[str, str], list[_VideoSentence]] = {}
 
 
-def _video_transcript_sentences(user_id: Optional[str],
-                                source_name: Optional[str]) -> List[_VideoSentence]:
+def _video_transcript_sentences(
+    user_id: str | None, source_name: str | None
+) -> list[_VideoSentence]:
     """Every spoken sentence of the call (frame OCR stripped), each tagged with
     the timestamp/section of the CHUNK it came from — so a fact recovered here
     can be cited with its real timestamp, not left to fuzzy re-matching against
@@ -1377,20 +1529,26 @@ def _video_transcript_sentences(user_id: Optional[str],
     key = (user_id, source_name)
     if key in _VIDEO_SENTENCES_CACHE:
         return _VIDEO_SENTENCES_CACHE[key]
-    sents: List[_VideoSentence] = []
+    sents: list[_VideoSentence] = []
     try:
-        from app.core.infra_registry import infra
         from qdrant_client.http import models as _qm
+
+        from app.core.infra_registry import infra
+
         client = getattr(infra.get_vector_store(), "client", None)
         if client is None:
             return []
         pts, _ = client.scroll(
             collection_name="text_collection",
-            scroll_filter=_qm.Filter(must=[
-                _qm.FieldCondition(key="user_id", match=_qm.MatchValue(value=user_id)),
-                _qm.FieldCondition(key="source",  match=_qm.MatchValue(value=source_name)),
-            ]),
-            limit=300, with_payload=True, with_vectors=False,
+            scroll_filter=_qm.Filter(
+                must=[
+                    _qm.FieldCondition(key="user_id", match=_qm.MatchValue(value=user_id)),
+                    _qm.FieldCondition(key="source", match=_qm.MatchValue(value=source_name)),
+                ]
+            ),
+            limit=300,
+            with_payload=True,
+            with_vectors=False,
         )
         seen: set = set()
         for p in pts:
@@ -1417,10 +1575,12 @@ def _video_transcript_sentences(user_id: Optional[str],
     return sents
 
 
-def _video_completeness_fill(query: str, answer: str,
-                             user_id: Optional[str],
-                             source_name: Optional[str],
-                             ) -> Tuple[str, List[Dict[str, Any]]]:
+def _video_completeness_fill(
+    query: str,
+    answer: str,
+    user_id: str | None,
+    source_name: str | None,
+) -> tuple[str, list[dict[str, Any]]]:
     """Append a specific asked-for fact the generated answer dropped.
 
     Returns (new_answer, fill_docs) — fill_docs are synthetic doc dicts (real
@@ -1444,24 +1604,36 @@ def _video_completeness_fill(query: str, answer: str,
     ask for these facts (a Services/guidance question is untouched)."""
     ql = (query or "").lower()
     al = (answer or "").lower()
-    adds: List[_VideoSentence] = []
-    _sents: Optional[List[_VideoSentence]] = None
+    adds: list[_VideoSentence] = []
+    _sents: list[_VideoSentence] | None = None
 
     # (1) Total-company revenue year-over-year growth figure. Must be the
     # TOTAL quarterly revenue ("$102.5 billion ... up 8%"), not a segment's
     # ("services revenue ... up 14%") — exclude any sentence naming a product
     # segment so a segment growth rate can never be mistaken for the headline.
-    _SEG_WORDS = ("services", "products", "iphone", "mac ", "ipad", "wearable",
-                  "watch", "airpods", "accessories")
+    _SEG_WORDS = (
+        "services",
+        "products",
+        "iphone",
+        "mac ",
+        "ipad",
+        "wearable",
+        "watch",
+        "airpods",
+        "accessories",
+    )
     _wants_yoy = bool(re.search(r"year[- ]over[- ]year|\byoy\b|year over year", ql))
     _has_growth_pct = bool(re.search(r"\bup \d+\s*%|\d+\s*%\s*(?:year|from a year)", al))
     if _wants_yoy and not _has_growth_pct:
         _sents = _video_transcript_sentences(user_id, source_name)
         for s, ts, sec in _sents:
             sl = s.lower()
-            if ("revenue" in sl and re.search(r"\$\s*1[0-9]{2}", s)
-                    and re.search(r"up \d+\s*%|\d+\s*% year|from a year ago", sl)
-                    and not any(seg in sl for seg in _SEG_WORDS)):
+            if (
+                "revenue" in sl
+                and re.search(r"\$\s*1[0-9]{2}", s)
+                and re.search(r"up \d+\s*%|\d+\s*% year|from a year ago", sl)
+                and not any(seg in sl for seg in _SEG_WORDS)
+            ):
                 if s not in answer:
                     adds.append((s, ts, sec))
                 break
@@ -1473,8 +1645,9 @@ def _video_completeness_fill(query: str, answer: str,
         for s, ts, sec in _sents:
             m = re.search(r"all-time revenue record in ([A-Z][a-zA-Z]+)", s)
             if m and m.group(1).lower() not in al:
-                adds.append((f"Apple also set an all-time revenue record in {m.group(1)}.",
-                            ts, sec))
+                adds.append(
+                    (f"Apple also set an all-time revenue record in {m.group(1)}.", ts, sec)
+                )
                 break
 
     # (3) Qualitative earnings-call aspects the LLM follow-ups sometimes drop or
@@ -1483,14 +1656,14 @@ def _video_completeness_fill(query: str, answer: str,
     # AND the answer not already stating it — so these only ever fire for a
     # question that explicitly asks about them, and never duplicate a follow-up
     # that already succeeded. A deterministic backstop, not a replacement.
-    def _first_declarative(kw_pat: str) -> Optional[_VideoSentence]:
+    def _first_declarative(kw_pat: str) -> _VideoSentence | None:
         nonlocal _sents
         if _sents is None:
             _sents = _video_transcript_sentences(user_id, source_name)
         for s, ts, sec in _sents:
             sl = s.lower()
             if s.rstrip().endswith("?"):
-                continue    # skip an analyst's question — want the answer
+                continue  # skip an analyst's question — want the answer
             if re.match(r"(?:and\s+)?(?:will|do|does|is|are|how|why|what|would|could)\s+you\b", sl):
                 continue
             if re.search(kw_pat, sl):
@@ -1499,10 +1672,9 @@ def _video_completeness_fill(query: str, answer: str,
 
     _QUAL = [
         # (query trigger, answer-already-has, transcript sentence pattern)
-        (r"iphone air",       r"iphone air|\bair\b",         r"iphone air"),
-        (r"foundation model", r"foundation model",           r"foundation model"),
-        (r"m\s*&\s*a|acquisition|acqui",
-                              r"m\s*&\s*a|open to|acqui",     r"m\s*&\s*a|open to pursuing"),
+        (r"iphone air", r"iphone air|\bair\b", r"iphone air"),
+        (r"foundation model", r"foundation model", r"foundation model"),
+        (r"m\s*&\s*a|acquisition|acqui", r"m\s*&\s*a|open to|acqui", r"m\s*&\s*a|open to pursuing"),
     ]
     for _trig, _have, _pat in _QUAL:
         if re.search(_trig, ql) and not re.search(_have, al):
@@ -1511,31 +1683,34 @@ def _video_completeness_fill(query: str, answer: str,
                 adds.append(_cand)
 
     out = answer
-    fill_docs: List[Dict[str, Any]] = []
+    fill_docs: list[dict[str, Any]] = []
     for text, ts, sec in adds:
         sep = " " if out.rstrip().endswith((".", "!", "?")) else ". "
         out = f"{out.rstrip()}{sep}{text.strip()}"
-        fill_docs.append({
-            "text": text,
-            "metadata": {
-                "modality": "mp4",
-                "source": source_name,
-                # Set every timestamp-field alias downstream code reads —
-                # _build_p248_sources checks start_time/timestamp_start,
-                # other call sites check start_timestamp; a synthetic doc
-                # (unlike a real retrieval hit) never goes through the
-                # normalization layer that would otherwise backfill these.
-                "start_timestamp": ts,
-                "start_time": ts,
-                "timestamp_start": ts,
-                "call_section": sec,
-            },
-        })
+        fill_docs.append(
+            {
+                "text": text,
+                "metadata": {
+                    "modality": "mp4",
+                    "source": source_name,
+                    # Set every timestamp-field alias downstream code reads —
+                    # _build_p248_sources checks start_time/timestamp_start,
+                    # other call sites check start_timestamp; a synthetic doc
+                    # (unlike a real retrieval hit) never goes through the
+                    # normalization layer that would otherwise backfill these.
+                    "start_timestamp": ts,
+                    "start_time": ts,
+                    "timestamp_start": ts,
+                    "call_section": sec,
+                },
+            }
+        )
     return out, fill_docs
 
 
-def _video_speaker_name(cast: Dict[str, Any], ts: Optional[float],
-                        call_section: str) -> Tuple[Optional[str], Optional[str]]:
+def _video_speaker_name(
+    cast: dict[str, Any], ts: float | None, call_section: str
+) -> tuple[str | None, str | None]:
     """Map a cited timestamp to (name, role) for the exec speaking (prepared
     remarks only). Returns (None, None) for Q&A or when unresolved."""
     if not cast or ts is None:
@@ -1546,21 +1721,25 @@ def _video_speaker_name(cast: Dict[str, Any], ts: Optional[float],
         return None, None
     qa = cast.get("qa_start")
     if call_section == "qa_session" or (qa is not None and ts >= qa):
-        return None, None   # Q&A — leave to role/analyst attribution
+        return None, None  # Q&A — leave to role/analyst attribution
     cook = cast.get("cook_start")
     parekh = cast.get("parekh_start")
     if cook is not None and ts < cook:
-        return cast.get("ir"), "Investor Relations"   # IR intro / safe harbour
+        return cast.get("ir"), "Investor Relations"  # IR intro / safe harbour
     if parekh is not None and ts >= parekh:
-        return cast.get("cfo"), "CFO"                 # CFO prepared remarks
+        return cast.get("cfo"), "CFO"  # CFO prepared remarks
     if cook is not None:
-        return cast.get("ceo"), "CEO"                 # CEO prepared remarks
+        return cast.get("ceo"), "CEO"  # CEO prepared remarks
     return None, None
 
 
-def _rank_video_citation_docs(answer: str, candidate_docs: List[Dict[str, Any]],
-                              cast: Dict[str, Any], named_role: Optional[str],
-                              max_docs: int = 2) -> List[Dict[str, Any]]:
+def _rank_video_citation_docs(
+    answer: str,
+    candidate_docs: list[dict[str, Any]],
+    cast: dict[str, Any],
+    named_role: str | None,
+    max_docs: int = 2,
+) -> list[dict[str, Any]]:
     """Pick which spoken-transcript docs to cite for a generated video answer.
 
     Attributes each ANSWER SENTENCE to whichever candidate doc's text overlaps
@@ -1579,29 +1758,33 @@ def _rank_video_citation_docs(answer: str, candidate_docs: List[Dict[str, Any]],
     behavior safe on a terse or unusual answer)."""
     _has_digit_re = re.compile(r"\d")
 
-    def _rank_adjust(_d: Dict[str, Any]) -> int:
+    def _rank_adjust(_d: dict[str, Any]) -> int:
         _m = _d.get("metadata") or {}
         _sec = str(_m.get("call_section") or "")
         _adj = -8 if _sec == "operator_intro" else 0
         if named_role and cast:
-            _sts_r = (_m.get("start_time")
-                      if _m.get("start_time") is not None
-                      else _m.get("timestamp_start")
-                      if _m.get("timestamp_start") is not None
-                      else _m.get("start_timestamp"))
+            _sts_r = (
+                _m.get("start_time")
+                if _m.get("start_time") is not None
+                else (
+                    _m.get("timestamp_start")
+                    if _m.get("timestamp_start") is not None
+                    else _m.get("start_timestamp")
+                )
+            )
             _, _role_r = _video_speaker_name(cast, _sts_r, _sec)
             if _role_r == named_role:
                 _adj += 5
         return _adj
 
     def _sentence_score(_words: set, _txt: str) -> int:
-        return sum((3 if _has_digit_re.search(w) or len(w) > 6 else 1)
-                   for w in _words if w in _txt)
+        return sum((3 if _has_digit_re.search(w) or len(w) > 6 else 1) for w in _words if w in _txt)
 
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", answer or "")
-                if len(s.strip()) >= 15]
+    sentences = [
+        s.strip() for s in re.split(r"(?<=[.!?])\s+", answer or "") if len(s.strip()) >= 15
+    ]
     seen_keys: set = set()
-    ordered: List[Dict[str, Any]] = []
+    ordered: list[dict[str, Any]] = []
     for sent in sentences:
         sent_words = {w for w in re.findall(r"[a-z0-9$%.]{4,}", sent.lower())}
         if not sent_words:
@@ -1626,16 +1809,19 @@ def _rank_video_citation_docs(answer: str, candidate_docs: List[Dict[str, Any]],
 
     # Fallback: whole-answer overlap ranking (rare — no sentence matched).
     ans_words = {w for w in re.findall(r"[a-z0-9$%.]{4,}", (answer or "").lower())}
+
     def _cite_rank(d, idx):
         txt = str(d.get("text") or "").lower()
         ov = _sentence_score(ans_words, txt) + _rank_adjust(d)
         return (ov, -idx)
-    ranked = sorted(list(enumerate(candidate_docs)),
-                    key=lambda p: _cite_rank(p[1], p[0]), reverse=True)
+
+    ranked = sorted(
+        list(enumerate(candidate_docs)), key=lambda p: _cite_rank(p[1], p[0]), reverse=True
+    )
     return [d for _i, d in ranked][:max_docs]
 
 
-def _split_frame_caption(text: str) -> Tuple[str, Optional[str]]:
+def _split_frame_caption(text: str) -> tuple[str, str | None]:
     """Split a frame doc's stored text into (VLM caption, on-screen OCR text)."""
     t = str(text or "")
     if "[ON-SCREEN]" in t:
@@ -1644,7 +1830,7 @@ def _split_frame_caption(text: str) -> Tuple[str, Optional[str]]:
     return t.strip(), None
 
 
-def _clean_frame_label(caption: str) -> Optional[str]:
+def _clean_frame_label(caption: str) -> str | None:
     """Distil a frame caption into a short, citation-grade label.
 
     The stored caption is a verbose VLM description ("AAPL, Apple Inc. at
@@ -1655,17 +1841,32 @@ def _clean_frame_label(caption: str) -> Optional[str]:
     a price chart, so the UI can fall back to a generic "On-screen chart" label.
     """
     c = str(caption or "")
-    parts: List[str] = []
+    parts: list[str] = []
     # EPS: "EPS $1.85 Beats $1.76", "$1.85 EPS beats $1.76", or the comma form
     # "$1.85 EPS, $1.76 estimate".
-    m = (re.search(r"EPS\s*\$?([\d.]+)\s*beats?\s*(?:the\s*)?(?:estimate\s*(?:of\s*)?)?\$?([\d.]+)", c, re.I)
-         or re.search(r"\$?([\d.]+)\s*EPS\s*beats?\s*(?:the\s*)?(?:estimate\s*(?:of\s*)?)?\$?([\d.]+)", c, re.I)
-         or re.search(r"\$([\d.]+)\s*EPS\s*,?\s*\$?([\d.]+)\s*(?:estimate|est)", c, re.I))
+    m = (
+        re.search(
+            r"EPS\s*\$?([\d.]+)\s*beats?\s*(?:the\s*)?(?:estimate\s*(?:of\s*)?)?\$?([\d.]+)",
+            c,
+            re.I,
+        )
+        or re.search(
+            r"\$?([\d.]+)\s*EPS\s*beats?\s*(?:the\s*)?(?:estimate\s*(?:of\s*)?)?\$?([\d.]+)",
+            c,
+            re.I,
+        )
+        or re.search(r"\$([\d.]+)\s*EPS\s*,?\s*\$?([\d.]+)\s*(?:estimate|est)", c, re.I)
+    )
     if m:
         parts.append(f"EPS ${m.group(1)} beats ${m.group(2)}")
     # Sales/revenue: "Sales $102.466B Beats $102.171B" or "$102.466B revenue, $102.171B estimate".
-    m2 = (re.search(r"(?:sales|revenue)\s*\$?([\d.]+\s*B)\s*beats?\s*(?:the\s*)?(?:estimate\s*(?:of\s*)?)?\$?([\d.]+\s*B)", c, re.I)
-          or re.search(r"\$([\d.]+\s*B)\s*(?:revenue|sales)\s*,?\s*\$?([\d.]+\s*B)\s*(?:estimate|est)", c, re.I))
+    m2 = re.search(
+        r"(?:sales|revenue)\s*\$?([\d.]+\s*B)\s*beats?\s*(?:the\s*)?(?:estimate\s*(?:of\s*)?)?\$?([\d.]+\s*B)",
+        c,
+        re.I,
+    ) or re.search(
+        r"\$([\d.]+\s*B)\s*(?:revenue|sales)\s*,?\s*\$?([\d.]+\s*B)\s*(?:estimate|est)", c, re.I
+    )
     if m2:
         parts.append(f"Sales ${m2.group(1).replace(' ', '')} beats ${m2.group(2).replace(' ', '')}")
     if parts:
@@ -1686,13 +1887,51 @@ def _clean_frame_label(caption: str) -> Optional[str]:
 # was too fragile for any context change to be net-safe. Qwen2.5-14B is a
 # materially stronger instruction-follower; re-enabling this under the new
 # model is the intended next step, not a redo of a failed idea.
-_ASPECT_STOP = frozenset((
-    "what", "when", "which", "were", "with", "that", "this", "your", "about",
-    "did", "does", "the", "and", "for", "was", "are", "how", "why", "who",
-    "apple", "call", "quarter", "these", "they", "their", "from", "into", "said",
-    "say", "says", "during", "regarding", "whether", "tell", "company", "results",
-    "reported", "report", "also", "year", "over",
-))
+_ASPECT_STOP = frozenset(
+    (
+        "what",
+        "when",
+        "which",
+        "were",
+        "with",
+        "that",
+        "this",
+        "your",
+        "about",
+        "did",
+        "does",
+        "the",
+        "and",
+        "for",
+        "was",
+        "are",
+        "how",
+        "why",
+        "who",
+        "apple",
+        "call",
+        "quarter",
+        "these",
+        "they",
+        "their",
+        "from",
+        "into",
+        "said",
+        "say",
+        "says",
+        "during",
+        "regarding",
+        "whether",
+        "tell",
+        "company",
+        "results",
+        "reported",
+        "report",
+        "also",
+        "year",
+        "over",
+    )
+)
 
 # Vocabulary that means a question is actually about the reported figures the
 # beat-ticker frame conveys (EPS/revenue vs. analyst ESTIMATE) — used to gate
@@ -1703,12 +1942,18 @@ _ASPECT_STOP = frozenset((
 # "revenue"/"eps" — those appear in nearly every finance question (Q32's
 # Services revenue, Q33's FY revenue, ...) and would pull the QUARTERLY
 # actuals-vs-estimate ticker into questions that have nothing to do with it.
-_REPORTED_RESULTS_WORDS_LOCAL = frozenset((
-    "beat", "beating", "beats", "estimate", "estimates",
-))
+_REPORTED_RESULTS_WORDS_LOCAL = frozenset(
+    (
+        "beat",
+        "beating",
+        "beats",
+        "estimate",
+        "estimates",
+    )
+)
 
 
-def _split_query_aspects(query: str, max_aspects: int = 5) -> List[str]:
+def _split_query_aspects(query: str, max_aspects: int = 5) -> list[str]:
     """Split a multi-part question into its aspect phrases (on commas / 'and' /
     semicolons / sub-clauses). Keeps phrases with enough content to be a
     meaningful retrieval target on their own.
@@ -1722,17 +1967,18 @@ def _split_query_aspects(query: str, max_aspects: int = 5) -> List[str]:
     on its own.
     """
     parts = re.split(r"\s*(?:,|\band\b|;|\?)\s*", query, flags=re.IGNORECASE)
-    out: List[str] = []
+    out: list[str] = []
     for p in parts:
         p = p.strip()
-        content = [w for w in re.findall(r"[a-z0-9&]+", p.lower())
-                   if len(w) > 2 and w not in _ASPECT_STOP]
+        content = [
+            w for w in re.findall(r"[a-z0-9&]+", p.lower()) if len(w) > 2 and w not in _ASPECT_STOP
+        ]
         if len(content) >= 1:
             out.append(p)
     return out[:max_aspects]
 
 
-def _doc_is_frame_like(d: Dict[str, Any]) -> bool:
+def _doc_is_frame_like(d: dict[str, Any]) -> bool:
     m = d.get("metadata") or {}
     if str(m.get("embedding_space") or "") == "vision":
         return True
@@ -1743,7 +1989,7 @@ def _doc_is_frame_like(d: Dict[str, Any]) -> bool:
     return "[ON-SCREEN]" in str(d.get("text") or "")
 
 
-def _doc_is_true_frame(d: Dict[str, Any]) -> bool:
+def _doc_is_true_frame(d: dict[str, Any]) -> bool:
     """Metadata-only frame check — is this doc ITSELF a separate frame/vision
     record (not a spoken-transcript doc). Unlike _doc_is_frame_like(), this
     has no text-substring fallback: a transcript chunk can legitimately embed
@@ -1785,7 +2031,7 @@ def _strip_onscreen_ocr(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
-def _mask_frame_stock_price(d: Dict[str, Any]) -> Dict[str, Any]:
+def _mask_frame_stock_price(d: dict[str, Any]) -> dict[str, Any]:
     """Remove the on-screen chart PRICE clause ('at $283.80', 'up 4.96% from
     the previous day') from a FRAME doc's grounding text so the model can't
     report the stock price as an earnings figure. Transcript docs are returned
@@ -1800,8 +2046,12 @@ def _mask_frame_stock_price(d: Dict[str, Any]) -> Dict[str, Any]:
         return d
     t = str(d.get("text") or "")
     c = re.sub(r"\b(?:at|with a price of)\s*\$[\d,]+\.\d+\b", "", t, flags=re.IGNORECASE)
-    c = re.sub(r",?\s*\bup\s+[\d.]+%\s*from\s+(?:the\s+)?previous\s+(?:day|close)[^,.;\n]*",
-               "", c, flags=re.IGNORECASE)
+    c = re.sub(
+        r",?\s*\bup\s+[\d.]+%\s*from\s+(?:the\s+)?previous\s+(?:day|close)[^,.;\n]*",
+        "",
+        c,
+        flags=re.IGNORECASE,
+    )
     if c == t:
         return d
     nd = dict(d)
@@ -1809,9 +2059,15 @@ def _mask_frame_stock_price(d: Dict[str, Any]) -> Dict[str, Any]:
     return nd
 
 
-def _build_av_stream_context(query: str, docs: List[Dict[str, Any]], retriever: Any,
-                             session_id: str, user_id: Optional[str], filters: Any,
-                             source_name: Optional[str]) -> List[Dict[str, Any]]:
+def _build_av_stream_context(
+    query: str,
+    docs: list[dict[str, Any]],
+    retriever: Any,
+    session_id: str,
+    user_id: str | None,
+    filters: Any,
+    source_name: str | None,
+) -> list[dict[str, Any]]:
     """Grounding context for the streaming AV answer.
 
     QUERY DECOMPOSITION: a multi-part earnings question ("guidance, iPhone Air,
@@ -1860,35 +2116,38 @@ def _build_av_stream_context(query: str, docs: List[Dict[str, Any]], retriever: 
     # source but answers the wrong person. When the query names an exec,
     # prefer candidates that fall inside that exec's own resolved speaking
     # window over equally-ranked candidates from the other exec's window.
-    _named_speaker: Optional[str] = None
+    _named_speaker: str | None = None
     if re.search(r"\btim\s+cook\b|\bcook\b|\bceo\b", _ql):
         _named_speaker = "ceo"
     elif re.search(r"\bkevan\s+parekh\b|\bparekh\b|\bcfo\b", _ql):
         _named_speaker = "cfo"
-    _speaker_cast = (_resolve_video_cast(user_id, source_name)
-                     if _named_speaker else {})
+    _speaker_cast = _resolve_video_cast(user_id, source_name) if _named_speaker else {}
 
-    def _in_named_speaker_window(d: Dict[str, Any]) -> bool:
+    def _in_named_speaker_window(d: dict[str, Any]) -> bool:
         if not _named_speaker or not _speaker_cast:
-            return True   # no preference — don't reorder
+            return True  # no preference — don't reorder
         m = d.get("metadata") or {}
         ts = m.get("start_timestamp")
         if ts is None:
-            return True   # unknown timestamp — neutral, don't demote
+            return True  # unknown timestamp — neutral, don't demote
         try:
             ts = float(ts)
         except (TypeError, ValueError):
             return True
-        cook_start   = _speaker_cast.get("cook_start")
+        cook_start = _speaker_cast.get("cook_start")
         parekh_start = _speaker_cast.get("parekh_start")
-        qa_start     = _speaker_cast.get("qa_start")
+        qa_start = _speaker_cast.get("qa_start")
         if _named_speaker == "ceo":
-            return (cook_start is not None and ts >= cook_start
-                    and (parekh_start is None or ts < parekh_start))
-        return (parekh_start is not None and ts >= parekh_start
-                and (qa_start is None or ts < qa_start))
+            return (
+                cook_start is not None
+                and ts >= cook_start
+                and (parekh_start is None or ts < parekh_start)
+            )
+        return (
+            parekh_start is not None and ts >= parekh_start and (qa_start is None or ts < qa_start)
+        )
 
-    aspect_docs: List[Dict[str, Any]] = []
+    aspect_docs: list[dict[str, Any]] = []
     try:
         aspects = _split_query_aspects(query)
         if len(aspects) >= 2:
@@ -1899,8 +2158,9 @@ def _build_av_stream_context(query: str, docs: List[Dict[str, Any]], retriever: 
                     # narrow top_k occasionally misses the one chunk that
                     # actually answers this aspect. A wider candidate pool
                     # makes the aspect fallback robust to that jitter.
-                    _raw = retriever.search(query=asp, session_id=session_id,
-                                            top_k=4, user_id=user_id, filters=filters)
+                    _raw = retriever.search(
+                        query=asp, session_id=session_id, top_k=4, user_id=user_id, filters=filters
+                    )
                     _ad = _dedup_docs(_normalize_docs(_raw))
                     if _named_speaker and _speaker_cast:
                         _ad.sort(key=lambda d: 0 if _in_named_speaker_window(d) else 1)
@@ -1908,7 +2168,7 @@ def _build_av_stream_context(query: str, docs: List[Dict[str, Any]], retriever: 
                     _ad = []
                 for d in _ad[:4]:
                     if _doc_is_true_frame(d):
-                        continue            # transcript only for grounding
+                        continue  # transcript only for grounding
                     aspect_docs.append(d)
     except Exception:
         aspect_docs = []
@@ -1922,7 +2182,7 @@ def _build_av_stream_context(query: str, docs: List[Dict[str, Any]], retriever: 
                 break
     pool = base + aspect_docs + ([beat_frame] if beat_frame else [])
     seen: set = set()
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for d in pool:
         k = str(d.get("text") or "")[:80]
         if not k or k in seen:
@@ -1941,13 +2201,15 @@ def _build_av_stream_context(query: str, docs: List[Dict[str, Any]], retriever: 
     return out[:9]
 
 
-def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3,
-                        user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def _build_p248_sources(
+    docs: list[dict[str, Any]], max_items: int = 3, user_id: str | None = None
+) -> list[dict[str, Any]]:
     import os as _os
-    out: List[Dict[str, Any]] = []
+
+    out: list[dict[str, Any]] = []
     for doc in docs[:max_items]:
-        meta  = doc.get("metadata") or {}
-        text  = doc.get("text") or ""
+        meta = doc.get("metadata") or {}
+        text = doc.get("text") or ""
         score = doc.get("final_score") if doc.get("final_score") is not None else doc.get("score")
         try:
             score = float(score) if score is not None else 0.0
@@ -1964,13 +2226,14 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3,
         # document files WITH useful section headers, so map them to a file-type
         # modality so the header shows. (.txt stays "text" → filename-only.)
         _ext = source_name.rsplit(".", 1)[-1].lower() if "." in source_name else ""
-        _FILE_MODALITY = {"docx": "word", "doc": "word", "rtf": "word",
-                          "odt": "word", "pdf": "pdf"}
+        _FILE_MODALITY = {"docx": "word", "doc": "word", "rtf": "word", "odt": "word", "pdf": "pdf"}
         if modality == "text" and _ext in _FILE_MODALITY:
             modality = _FILE_MODALITY[_ext]
 
-        page_number: Optional[int] = None
-        raw_page = meta.get("page_number") if meta.get("page_number") is not None else meta.get("page")
+        page_number: int | None = None
+        raw_page = (
+            meta.get("page_number") if meta.get("page_number") is not None else meta.get("page")
+        )
         if isinstance(raw_page, int):
             page_number = raw_page
         elif raw_page is not None:
@@ -1979,8 +2242,8 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3,
             except (TypeError, ValueError):
                 pass
 
-        start_time: Optional[float] = None
-        end_time:   Optional[float] = None
+        start_time: float | None = None
+        end_time: float | None = None
         for sk, tk in (("start_time", "timestamp_start"), ("end_time", "timestamp_end")):
             raw = meta.get(sk) if meta.get(sk) is not None else meta.get(tk)
             if raw is not None:
@@ -2001,12 +2264,15 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3,
         # Fix OCR year-range substitutions stored at ingest time (e.g. "ta"/"t0" → "to")
         if section_title:
             section_title = re.sub(
-                r'(\d{4})\s+(?:ta|t0)\s+(\d{4})', r'\1 to \2',
-                section_title, flags=re.IGNORECASE,
+                r'(\d{4})\s+(?:ta|t0)\s+(\d{4})',
+                r'\1 to \2',
+                section_title,
+                flags=re.IGNORECASE,
             )
 
         if not section_title and modality in ("table", "excel"):
             import re as _re
+
             _m = _re.match(r'\[Sheet:\s*([^,\]\n]+)', str(text))
             if _m:
                 section_title = _m.group(1).strip()
@@ -2021,8 +2287,8 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3,
             section_title = None
 
         # Phase 6.3 rich citation fields — flow directly from chunk structure
-        sheet_name   = meta.get("sheet_name")
-        heading      = meta.get("heading") or meta.get("heading_hierarchy")
+        sheet_name = meta.get("sheet_name")
+        heading = meta.get("heading") or meta.get("heading_hierarchy")
         speaker_role = meta.get("speaker_role")
         speaker_name = meta.get("speaker_name") or meta.get("speaker_label")
         # Never surface a raw diarization label ("SPEAKER_10") as the speaker on
@@ -2043,7 +2309,8 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3,
                     r"\b(?:from|with)\s+(?:the\s+)?(?:MarketWatch|New\s+York\s+Times|"
                     r"Wall\s+Street\s+Journal|Reuters|Bloomberg|CNBC|Associated\s+Press|"
                     r"Financial\s+Times|Politico|Washington\s+Post|Economist|Axios|Semafor)\b",
-                    str(text), re.IGNORECASE,
+                    str(text),
+                    re.IGNORECASE,
                 )
             )
             speaker_name = "Reporter" if _is_reporter_turn else None
@@ -2070,21 +2337,21 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3,
                 _ts_fb = float(_raw_ts_fb) if _raw_ts_fb is not None else None
             if _qa_fb is not None and _ts_fb is not None and _ts_fb >= _qa_fb:
                 speaker_name = "Analyst"
-        row_range    = meta.get("row_range")
-        chunk_type   = meta.get("chunk_type") or meta.get("content_type")
+        row_range = meta.get("row_range")
+        chunk_type = meta.get("chunk_type") or meta.get("content_type")
         call_section = meta.get("call_section") or meta.get("topic_section")
-        image_title  = meta.get("image_title")
+        image_title = meta.get("image_title")
         slide_numbers = meta.get("slide_numbers_covered")
 
         # VIDEO FRAME (vision) citation — a captioned keyframe. Carries the
         # on-screen caption + OCR + the frame's own timestamp so the client can
         # render a distinct "visual" citation next to the spoken (transcript)
         # ones. Detected by embedding_space="vision" or subtype/type "frame".
-        frame_timestamp: Optional[float] = None
-        frame_caption:   Optional[str]   = None
-        frame_label:     Optional[str]   = None
-        on_screen_text:  Optional[str]   = None
-        asset_path:      Optional[str]   = None
+        frame_timestamp: float | None = None
+        frame_caption: str | None = None
+        frame_label: str | None = None
+        on_screen_text: str | None = None
+        asset_path: str | None = None
         _is_frame = (
             str(meta.get("embedding_space") or "") == "vision"
             or str(meta.get("subtype") or meta.get("content_type") or chunk_type or "") == "frame"
@@ -2093,8 +2360,11 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3,
             chunk_type = "frame"
             _ft = meta.get("frame_timestamp")
             if _ft is None:
-                _ft = meta.get("start_timestamp") if meta.get("start_timestamp") is not None \
+                _ft = (
+                    meta.get("start_timestamp")
+                    if meta.get("start_timestamp") is not None
                     else meta.get("timestamp_start")
+                )
             if _ft is not None:
                 try:
                     frame_timestamp = float(_ft)
@@ -2130,46 +2400,49 @@ def _build_p248_sources(docs: List[Dict[str, Any]], max_items: int = 3,
         else:
             snippet = snippet_raw
 
-        out.append({
-            "filename":       source_name,
-            "source":         source_name,
-            "modality":       modality,
-            "page":           page_number,
-            "page_number":    page_number,
-            "section_title":  section_title,
-            "sheet_name":     sheet_name,
-            "heading":        heading,
-            "timestamp_start": start_time,
-            "timestamp_end":  end_time,
-            "start_time":     start_time,
-            "end_time":       end_time,
-            "speaker_role":   speaker_role,
-            "speaker_name":   speaker_name,
-            "call_section":   call_section,
-            "row_range":      row_range,
-            "chunk_type":     chunk_type,
-            "image_title":    image_title,
-            "slide_numbers":  slide_numbers,
-            # Video-frame (visual) citation fields — None on non-frame sources.
-            "is_frame":         _is_frame,
-            "frame_timestamp":  frame_timestamp,
-            "frame_label":      frame_label,
-            "frame_caption":    frame_caption,
-            "on_screen_text":   on_screen_text,
-            "asset_path":       asset_path,
-            "snippet":        snippet,
-            "text":           snippet,
-            "score":          round(score, 6),
-            "doc_id":         str(meta.get("doc_id") or meta.get("chunk_id") or ""),
-        })
+        out.append(
+            {
+                "filename": source_name,
+                "source": source_name,
+                "modality": modality,
+                "page": page_number,
+                "page_number": page_number,
+                "section_title": section_title,
+                "sheet_name": sheet_name,
+                "heading": heading,
+                "timestamp_start": start_time,
+                "timestamp_end": end_time,
+                "start_time": start_time,
+                "end_time": end_time,
+                "speaker_role": speaker_role,
+                "speaker_name": speaker_name,
+                "call_section": call_section,
+                "row_range": row_range,
+                "chunk_type": chunk_type,
+                "image_title": image_title,
+                "slide_numbers": slide_numbers,
+                # Video-frame (visual) citation fields — None on non-frame sources.
+                "is_frame": _is_frame,
+                "frame_timestamp": frame_timestamp,
+                "frame_label": frame_label,
+                "frame_caption": frame_caption,
+                "on_screen_text": on_screen_text,
+                "asset_path": asset_path,
+                "snippet": snippet,
+                "text": snippet,
+                "score": round(score, 6),
+                "doc_id": str(meta.get("doc_id") or meta.get("chunk_id") or ""),
+            }
+        )
     return out
 
 
 # DEDUP DOCS
 
-def _dedup_docs(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    seen:   set                = set()
-    unique: List[Dict[str, Any]] = []
+
+def _dedup_docs(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set = set()
+    unique: list[dict[str, Any]] = []
     for d in docs:
         h = _hash(d.get("text", ""), d.get("metadata", {}))
         if h in seen:
@@ -2188,25 +2461,25 @@ _AUTO_SCOPE_RE_STREAM = re.compile(
 )
 
 _COHERENCE_MAX_SOURCES_STREAM = 3
-_COHERENCE_GAP_ABS_STREAM     = 0.45
-_COHERENCE_ABS_FLOOR_STREAM   = 0.04
+_COHERENCE_GAP_ABS_STREAM = 0.45
+_COHERENCE_ABS_FLOOR_STREAM = 0.04
 
 
-def _detect_filename_scope_stream(query: str) -> Optional[List[str]]:
+def _detect_filename_scope_stream(query: str) -> list[str] | None:
     matches = _AUTO_SCOPE_RE_STREAM.findall(query)
     return [m.lower() for m in matches] if matches else None
 
 
-def _source_coherence_filter_stream(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _source_coherence_filter_stream(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if len(docs) <= 1:
         return docs
     top_raw = (docs[0].get("metadata") or {}).get("_reranker_raw")
-    seen_sources: Dict[str, Any] = {}
-    kept: List[Dict[str, Any]] = []
+    seen_sources: dict[str, Any] = {}
+    kept: list[dict[str, Any]] = []
     for doc in docs:
         meta = doc.get("metadata") or {}
-        src  = meta.get("source", "")
-        raw  = meta.get("_reranker_raw")
+        src = meta.get("source", "")
+        raw = meta.get("_reranker_raw")
         if not kept:
             seen_sources[src] = raw
             kept.append(doc)
@@ -2216,7 +2489,11 @@ def _source_coherence_filter_stream(docs: List[Dict[str, Any]]) -> List[Dict[str
         if src not in seen_sources:
             if len(seen_sources) >= _COHERENCE_MAX_SOURCES_STREAM:
                 continue
-            if top_raw is not None and raw is not None and raw < top_raw - _COHERENCE_GAP_ABS_STREAM:
+            if (
+                top_raw is not None
+                and raw is not None
+                and raw < top_raw - _COHERENCE_GAP_ABS_STREAM
+            ):
                 continue
             seen_sources[src] = raw
         kept.append(doc)
@@ -2236,22 +2513,23 @@ def _source_coherence_filter_stream(docs: List[Dict[str, Any]]) -> List[Dict[str
 #   [1] rag_test_corpus.txt — DOC-001 (Transformer Architecture)
 #   [2] rag_test_corpus.txt — DOC-002
 
+
 def _build_context(
-    docs: List[Dict[str, Any]],
+    docs: list[dict[str, Any]],
     max_chars: int,
 ) -> str:
-    parts: List[str] = []
-    total: int       = 0
+    parts: list[str] = []
+    total: int = 0
 
     for idx, d in enumerate(docs, start=1):
-        text          = d.get("text", "").strip()
-        meta          = d.get("metadata", {}) or {}
-        source        = meta.get("source") or ""
-        section_id    = meta.get("section_id")
+        text = d.get("text", "").strip()
+        meta = d.get("metadata", {}) or {}
+        source = meta.get("source") or ""
+        section_id = meta.get("section_id")
         # section_title intentionally NOT read into the label (see label block below).
-        page          = meta.get("page")
+        page = meta.get("page")
         error_markers = meta.get("error_markers") or []
-        doc_version   = meta.get("doc_version")
+        doc_version = meta.get("doc_version")
 
         if not text:
             continue
@@ -2263,7 +2541,7 @@ def _build_context(
         # those titles verbatim into a trailing "label dump" (e.g. "Net Sales by
         # Product Category Consolidated Statements of Operations ..."). Keep only
         # the page / section_id locator.
-        label_parts: List[str] = []
+        label_parts: list[str] = []
         if source and page is None:
             label_parts.append(str(source))
         if section_id:
@@ -2274,7 +2552,7 @@ def _build_context(
             label_parts.append(f"version={doc_version}")
 
         provenance = " — ".join(label_parts) if label_parts else "unknown"
-        label      = f"[{idx}] ({provenance})"
+        label = f"[{idx}] ({provenance})"
 
         # When the chunk carries in-corpus self-flags (e.g. "intentional
         # error", "does not exist", "WRONG LABEL"), surface them on a
@@ -2284,7 +2562,7 @@ def _build_context(
             joined = "; ".join(str(m) for m in error_markers[:4])
             label = f"{label}\n⚠ ERROR_MARKERS={joined}"
 
-        chunk = f"{label} {text}"[:settings.RAG_DOC_MAX_CHARS]
+        chunk = f"{label} {text}"[: settings.RAG_DOC_MAX_CHARS]
 
         if total + len(chunk) > max_chars:
             break
@@ -2300,19 +2578,30 @@ def _build_context(
 # prompt is flattened to a single line. Prepending a "KEY FACT" line surfaces
 # the most relevant sentence right after "CONTEXT:" where the LLM reads first.
 
-_MA_QUERY_KEYWORDS  = frozenset(["acquisition", "merger", "acquired", "deal", "takeover", "purchased"])
-_MA_CHUNK_KEYWORDS  = frozenset(["acquired", "acquisition", "merger", "assumed", "fdic", "purchase"])
+_MA_QUERY_KEYWORDS = frozenset(
+    ["acquisition", "merger", "acquired", "deal", "takeover", "purchased"]
+)
+_MA_CHUNK_KEYWORDS = frozenset(["acquired", "acquisition", "merger", "assumed", "fdic", "purchase"])
 
 # Phrases that mark an LLM refusal (model declined to answer despite context).
 # Used by the streaming path: a refusal here is suppressed and the accurate
 # meta-path answer is streamed instead, so the user never sees the flash.
 _LLM_REFUSAL_PHRASES = (
     "could not find this in the provided sources",
-    "could not find", "cannot find", "couldn't find",
-    "no relevant information", "not in the provided", "not found in",
-    "not mentioned in", "not provided in", "is not available",
-    "i don't know", "i do not know", "no information about",
+    "could not find",
+    "cannot find",
+    "couldn't find",
+    "no relevant information",
+    "not in the provided",
+    "not found in",
+    "not mentioned in",
+    "not provided in",
+    "is not available",
+    "i don't know",
+    "i do not know",
+    "no information about",
 )
+
 
 def _is_llm_refusal(text: str) -> bool:
     if not text or not text.strip():
@@ -2337,6 +2626,7 @@ def _is_degenerate_answer(text: str) -> bool:
     if len(words) < 4:
         return True
     from collections import Counter
+
     top = Counter(words).most_common(1)[0][1]
     # One token dominating (>= half, min 3) → degenerate loop / echo.
     return top >= max(3, len(words) // 2)
@@ -2347,7 +2637,7 @@ def _is_degenerate_answer(text: str) -> bool:
 # must exceed the longest PII entity (emails/SSNs/phones contain no spaces, so
 # an in-progress entity always sits inside the unflushed tail).
 _STREAM_PREFIX_GATE = settings.STREAM_PREFIX_GATE_CHARS
-_STREAM_HOLDBACK    = settings.STREAM_HOLDBACK_CHARS
+_STREAM_HOLDBACK = settings.STREAM_HOLDBACK_CHARS
 
 
 # SANDWICH REORDER — Liu et al. "Lost in the Middle" (2023):
@@ -2360,26 +2650,27 @@ _STREAM_HOLDBACK    = settings.STREAM_HOLDBACK_CHARS
 # Input:  docs sorted descending by reranker score (docs[0] is best).
 # Output: [best, 3rd, 4th, …, 2nd-best]  (sandwich around the middle filler).
 
-def _sandwich_reorder(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+
+def _sandwich_reorder(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if len(docs) <= 2:
         return docs
-    best   = docs[0]
+    best = docs[0]
     second = docs[1]
-    middle = docs[2:]   # already sorted descending — middle filler
+    middle = docs[2:]  # already sorted descending — middle filler
     return [best] + middle + [second]
 
 
-def _doc_key(d: Dict[str, Any]) -> str:
+def _doc_key(d: dict[str, Any]) -> str:
     """Stable identity for a retrieved doc — chunk hash if present, else text."""
     meta = d.get("metadata") or {}
     return str(meta.get("chunk_hash_id") or meta.get("chunk_id") or (d.get("text") or "")[:80])
 
 
 def _focus_docx_context(
-    reranked: List[Dict[str, Any]],
-    hybrid_top: List[Dict[str, Any]],
+    reranked: list[dict[str, Any]],
+    hybrid_top: list[dict[str, Any]],
     max_chunks: int = 5,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Trim a DOCX answer's context to a small, high-signal set.
 
     Keeps: the reranker's confident chunks (those above a score cliff relative
@@ -2396,10 +2687,10 @@ def _focus_docx_context(
     top_score = max((d.get("score", 0.0) or 0.0) for d in reranked)
     cutoff = max(top_score * 0.25, 0.05)
 
-    kept: List[Dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
     seen: set = set()
 
-    def _add(d: Dict[str, Any]) -> None:
+    def _add(d: dict[str, Any]) -> None:
         k = _doc_key(d)
         if k not in seen:
             seen.add(k)
@@ -2442,7 +2733,7 @@ _TXT_COMPARISON_SENT_RE = re.compile(
 
 
 def _prepend_txt_comparison_facts(
-    docs: List[Dict[str, Any]],
+    docs: list[dict[str, Any]],
     query: str,
     context: str,
 ) -> str:
@@ -2453,10 +2744,10 @@ def _prepend_txt_comparison_facts(
     sentence is present."""
     if not query or not docs or not _TXT_COMPARISON_QUERY_RE.search(query):
         return context
-    facts: List[str] = []
+    facts: list[str] = []
     seen: set = set()
     for doc in docs[:5]:
-        text = (doc.get("text", "") or "")
+        text = doc.get("text", "") or ""
         for sent in _split_sentences(text):
             s = sent.strip()
             if len(s) < 20 or s in seen:
@@ -2468,14 +2759,15 @@ def _prepend_txt_comparison_facts(
             break
     if not facts:
         return context
-    header = "KEY COMPARISON FACTS (state these explicitly in your answer):\n" + \
-             "\n".join(f"- {f}" for f in facts[:3])
+    header = "KEY COMPARISON FACTS (state these explicitly in your answer):\n" + "\n".join(
+        f"- {f}" for f in facts[:3]
+    )
     return header + "\n\n" + context
 
 
 def _ensure_txt_comparison_in_answer(
     answer: str,
-    docs: List[Dict[str, Any]],
+    docs: list[dict[str, Any]],
     query: str,
 ) -> str:
     """Guarantee a TXT comparison answer actually states the comparison the
@@ -2490,11 +2782,21 @@ def _ensure_txt_comparison_in_answer(
         return answer
     ans_low = answer.lower()
     # Already states a comparison? (any of these signal words present)
-    if any(kw in ans_low for kw in (
-        "compared to", "higher than", "lower than", "than in september",
-        "than in the previous", "up from", "down from", "versus",
-        "compared with", "than september",
-    )):
+    if any(
+        kw in ans_low
+        for kw in (
+            "compared to",
+            "higher than",
+            "lower than",
+            "than in september",
+            "than in the previous",
+            "up from",
+            "down from",
+            "versus",
+            "compared with",
+            "than september",
+        )
+    ):
         return answer
     # Find the best verbatim comparison sentence from context.
     for doc in docs[:5]:
@@ -2511,7 +2813,7 @@ def _ensure_txt_comparison_in_answer(
 
 def _strip_unsupported_txt_numbers(
     answer: str,
-    docs: List[Dict[str, Any]],
+    docs: list[dict[str, Any]],
     query: str,
 ) -> str:
     """Remove any sentence in a TXT answer that contains a number not
@@ -2524,7 +2826,7 @@ def _strip_unsupported_txt_numbers(
     if not answer:
         return answer
     try:
-        from app.reasoning.reasoning_engine import _unsupported_numbers, _NUM_RE
+        from app.reasoning.reasoning_engine import _NUM_RE, _unsupported_numbers
     except Exception:
         return answer
 
@@ -2596,12 +2898,17 @@ def _clean_txt_answer(answer: str, max_sentences: int = 4) -> str:
 def _adaptive_temperature(query: str) -> float:
     """Derive the generation temperature from the query type (factual vs generative)."""
     try:
-        from app.prompt.prompt_builder import get_generation_temperature, _detect_query_type  # noqa: PLC0415
+        from app.prompt.prompt_builder import (  # noqa: PLC0415
+            _detect_query_type,
+            get_generation_temperature,
+        )
+
         return get_generation_temperature(_detect_query_type(query))
     except Exception:
         return settings.LLM_TEMPERATURE
 
-def _prepend_key_facts(docs: List[Dict[str, Any]], query: str, context: str) -> str:
+
+def _prepend_key_facts(docs: list[dict[str, Any]], query: str, context: str) -> str:
     """If the query is about an M&A event, extract the most relevant sentences
     from the top chunks and prepend them so they land first in the flat prompt."""
     if not query or not docs:
@@ -2630,8 +2937,9 @@ def _prepend_key_facts(docs: List[Dict[str, Any]], query: str, context: str) -> 
 
 # COMPOSE CONTEXT + HISTORY
 
+
 def _compose(history: str, context: str) -> str:
-    parts: List[str] = []
+    parts: list[str] = []
     if history:
         parts.append(history)
     if context:
@@ -2641,17 +2949,18 @@ def _compose(history: str, context: str) -> str:
 
 # FORMAT HISTORY — SECTION 4.7
 
+
 def _format_history(
-    history: List[Dict[str, Any]],
+    history: list[dict[str, Any]],
     max_chars: int,
 ) -> str:
-    out:   List[str] = []
-    total: int       = 0
+    out: list[str] = []
+    total: int = 0
 
     for msg in reversed(history):
-        role    = msg.get("role", "user").upper()
+        role = msg.get("role", "user").upper()
         content = msg.get("content", "").strip()
-        line    = f"{role}: {content}"
+        line = f"{role}: {content}"
         if total + len(line) > max_chars:
             break
         out.append(line)
@@ -2662,24 +2971,24 @@ def _format_history(
 
 # SOURCES EXTRACTOR
 
-def _extract_sources(docs: List[Dict[str, Any]]) -> List[str]:
-    return list({
-        d.get("metadata", {}).get("source")
-        for d in docs
-        if d.get("metadata", {}).get("source")
-    })
+
+def _extract_sources(docs: list[dict[str, Any]]) -> list[str]:
+    return list(
+        {d.get("metadata", {}).get("source") for d in docs if d.get("metadata", {}).get("source")}
+    )
 
 
 # RAG PIPELINE CLASS
 
+
 class RAGPipeline:
 
     def __init__(self) -> None:
-        self._retriever     = None
+        self._retriever = None
         self._prompt_builder = None
-        self._llm           = None
-        self._memory_mgr    = None
-        self._mongo         = None
+        self._llm = None
+        self._memory_mgr = None
+        self._mongo = None
 
     # LAZY INIT — AVOID CIRCULAR IMPORTS
     #
@@ -2696,10 +3005,10 @@ class RAGPipeline:
             from app.core.model_loader import model_loader
             from app.retrieval.hybrid_retriever import HybridRetriever
 
-            bm25         = infra.get_bm25()
+            bm25 = infra.get_bm25()
             vector_store = infra.get_vector_store()
-            embedder     = model_loader.get_embedder()
-            clip_embed   = None
+            embedder = model_loader.get_embedder()
+            clip_embed = None
             if settings.ENABLE_VISION:
                 try:
                     clip_embed = model_loader.get_siglip_text_embedder()
@@ -2717,6 +3026,7 @@ class RAGPipeline:
     def _get_prompt_builder(self):
         if self._prompt_builder is None:
             from app.prompt.prompt_builder import PromptBuilder
+
             self._prompt_builder = PromptBuilder()
         return self._prompt_builder
 
@@ -2724,6 +3034,7 @@ class RAGPipeline:
         if self._llm is None:
             try:
                 from app.core.model_loader import model_loader
+
                 self._llm = model_loader.get_llm()
             except Exception as e:
                 logger.warning(event="llm_unavailable", error=str(e))
@@ -2733,6 +3044,7 @@ class RAGPipeline:
     def _get_memory_manager(self):
         if self._memory_mgr is None:
             from app.memory.memory_manager import MemoryManager
+
             self._memory_mgr = MemoryManager()
         return self._memory_mgr
 
@@ -2740,6 +3052,7 @@ class RAGPipeline:
         if self._mongo is None:
             try:
                 from app.core.infra_registry import infra
+
                 self._mongo = infra.get_mongo()
             except Exception:
                 self._mongo = None
@@ -2781,12 +3094,15 @@ class RAGPipeline:
             if not llm:
                 return "I don't know based on available data."
             prompt = f"Answer clearly and concisely:\n{query}"
-            return llm.generate(
-                prompt,
-                max_tokens=settings.LLM_MAX_TOKENS,
-                temperature=0.2,
-                session_id=session_id,
-            ) or "I don't know based on available data."
+            return (
+                llm.generate(
+                    prompt,
+                    max_tokens=settings.LLM_MAX_TOKENS,
+                    temperature=0.2,
+                    session_id=session_id,
+                )
+                or "I don't know based on available data."
+            )
         except Exception as e:
             logger.error(
                 event="rag_fallback_failed",
@@ -2797,13 +3113,13 @@ class RAGPipeline:
 
     # EMPTY RESPONSE — no docs retrieved, do NOT call LLM
 
-    def _empty(self, start: float) -> Dict[str, Any]:
+    def _empty(self, start: float) -> dict[str, Any]:
         return {
-            "answer":     "No relevant documents found. Please ingest documents first.",
+            "answer": "No relevant documents found. Please ingest documents first.",
             "confidence": 0.0,
-            "sources":    [],
-            "latency":    round(time.time() - start, 2),
-            "metadata":   {"docs": 0},
+            "sources": [],
+            "latency": round(time.time() - start, 2),
+            "metadata": {"docs": 0},
         }
 
     # MAIN RUN — SECTION 4.6
@@ -2812,10 +3128,10 @@ class RAGPipeline:
         self,
         query: str,
         session_id: str = "default",
-        user_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
 
-        start    = time.time()
+        start = time.time()
         trace_id = str(uuid.uuid4())
 
         if not query or not query.strip():
@@ -2834,17 +3150,17 @@ class RAGPipeline:
                     "Please rephrase your query."
                 ),
                 "decision": "blocked",
-                "source":   "input_guard",
+                "source": "input_guard",
                 "trace_id": trace_id,
             }
 
-        query = query[:settings.MAX_PROMPT_CHARS]
+        query = query[: settings.MAX_PROMPT_CHARS]
 
         try:
             # MEMORY HISTORY — SECTION 4.7
             t_mem = time.time()
             try:
-                mgr     = self._get_memory_manager()
+                mgr = self._get_memory_manager()
                 history = mgr.get_history(session_id)
             except Exception as e:
                 logger.warning(event="rag_memory_fetch_failed", error=str(e))
@@ -2860,7 +3176,7 @@ class RAGPipeline:
             t_ret = time.time()
             try:
                 retriever = self._get_retriever()
-                raw_docs  = retriever.search(
+                raw_docs = retriever.search(
                     query=query,
                     session_id=session_id,
                     top_k=settings.DEFAULT_TOP_K,
@@ -2886,11 +3202,12 @@ class RAGPipeline:
             docs = _normalize_docs(raw_docs)
             docs = _dedup_docs(docs)
             docs = sorted(docs, key=lambda d: d.get("score", 0.0), reverse=True)
-            docs = docs[:settings.RAG_TOP_K]
+            docs = docs[: settings.RAG_TOP_K]
             docs = _sandwich_reorder(docs)
 
             # CONTEXT ASSEMBLY
             from app.core.response import build_sources
+
             canonical_sources = build_sources(docs)
             for i, s in enumerate(canonical_sources, start=1):
                 s["index"] = i
@@ -2900,13 +3217,13 @@ class RAGPipeline:
             p248_sources = _build_p248_sources(docs, user_id=user_id)
             sources = p248_sources
             full_context = _compose(history_text, context)
-            full_context = full_context[:settings.MAX_PROMPT_CHARS]
+            full_context = full_context[: settings.MAX_PROMPT_CHARS]
 
             # PROMPT BUILD — SECTION 4.9
             t_prompt = time.time()
             try:
                 builder = self._get_prompt_builder()
-                prompt  = builder.build_prompt(
+                prompt = builder.build_prompt(
                     query=query,
                     context=full_context,
                     session_id=session_id,
@@ -2923,14 +3240,17 @@ class RAGPipeline:
             # PII PROMPT STRIP — Phase 26 P1: scrub PII from prompt before LLM sees it
             try:
                 from app.guardrails.pii import strip_pii_from_prompt
+
                 prompt, _pii_stripped = strip_pii_from_prompt(prompt)
                 if _pii_stripped:
-                    logger.info(event="rag_pipeline_pii_stripped_from_prompt", session_id=session_id)
+                    logger.info(
+                        event="rag_pipeline_pii_stripped_from_prompt", session_id=session_id
+                    )
             except Exception as _pii_err:
                 logger.warning(event="rag_pipeline_pii_prompt_strip_failed", error=str(_pii_err))
 
             # LLM GENERATE — SECTION 4.6 FALLBACK CHAIN
-            t_llm  = time.time()
+            t_llm = time.time()
             answer = ""
 
             try:
@@ -2966,6 +3286,7 @@ class RAGPipeline:
             ctx_texts = [d.page_content if hasattr(d, "page_content") else str(d) for d in docs]
             try:
                 from app.guardrails.output_guard import check as _output_guard_check
+
                 _og = _output_guard_check(
                     answer,
                     context_chunks=ctx_texts,
@@ -2975,7 +3296,9 @@ class RAGPipeline:
                 )
                 answer = _og.text
                 if _og.hallucination_warning:
-                    logger.warning(event="rag_pipeline_hallucination_flagged", session_id=session_id)
+                    logger.warning(
+                        event="rag_pipeline_hallucination_flagged", session_id=session_id
+                    )
                 if _og.fabricated_citations:
                     logger.warning(
                         event="rag_pipeline_fabricated_citations_removed",
@@ -2983,18 +3306,27 @@ class RAGPipeline:
                         session_id=session_id,
                     )
             except Exception as _og_err:
-                logger.warning(event="rag_pipeline_output_guard_failed", error=str(_og_err), session_id=session_id)
+                logger.warning(
+                    event="rag_pipeline_output_guard_failed",
+                    error=str(_og_err),
+                    session_id=session_id,
+                )
 
             # LEAKED-INSTRUCTION STRIPPER — remove echoed prompt rules / reasoning
             # preambles the small GGUF model sometimes emits before the answer.
             try:
                 answer = _strip_leaked_instructions(answer)
             except Exception as _leak_err:
-                logger.warning(event="rag_pipeline_leak_strip_failed", error=str(_leak_err), session_id=session_id)
+                logger.warning(
+                    event="rag_pipeline_leak_strip_failed",
+                    error=str(_leak_err),
+                    session_id=session_id,
+                )
 
             # CITATION TRACKING — filter sources to cited [n] indices, then strip them.
             try:
                 from app.core.response import extract_cited_indices, strip_inline_citations
+
                 _cited_idx = extract_cited_indices(answer)
                 if _cited_idx:
                     _filtered = [s for i, s in enumerate(sources, 1) if i in _cited_idx]
@@ -3004,7 +3336,11 @@ class RAGPipeline:
                     sources = sources[:3]
                 answer = strip_inline_citations(answer)
             except Exception as _cit_err:
-                logger.warning(event="rag_pipeline_citation_tracking_failed", error=str(_cit_err), session_id=session_id)
+                logger.warning(
+                    event="rag_pipeline_citation_tracking_failed",
+                    error=str(_cit_err),
+                    session_id=session_id,
+                )
 
             total_latency = round(time.time() - start, 2)
 
@@ -3020,21 +3356,23 @@ class RAGPipeline:
 
             # Phase 24.8 — confidence + hallucination_warning
             _scores = [s["score"] for s in sources[:3] if isinstance(s.get("score"), (int, float))]
-            confidence = round(max(0.0, min(sum(_scores) / len(_scores) if _scores else 0.0, 1.0)), 6)
+            confidence = round(
+                max(0.0, min(sum(_scores) / len(_scores) if _scores else 0.0, 1.0)), 6
+            )
             hallucination_warning = confidence < settings.AGENT_LOW_CONFIDENCE
 
             return {
-                "answer":               answer,
-                "sources":              sources,
-                "confidence":           confidence,
+                "answer": answer,
+                "sources": sources,
+                "confidence": confidence,
                 "hallucination_warning": hallucination_warning,
-                "latency":              total_latency,
-                "trace_id":             trace_id,
+                "latency": total_latency,
+                "trace_id": trace_id,
                 "metadata": {
-                    "docs":              len(docs),
+                    "docs": len(docs),
                     "retrieval_latency": retrieval_latency,
-                    "llm_latency":       llm_latency,
-                    "memory_turns":      len(history),
+                    "llm_latency": llm_latency,
+                    "memory_turns": len(history),
                 },
             }
 
@@ -3047,11 +3385,11 @@ class RAGPipeline:
                 trace_id=trace_id,
             )
             return {
-                "answer":   "Something went wrong. Please try again.",
-                "sources":  [],
-                "latency":  round(time.time() - start, 2),
+                "answer": "Something went wrong. Please try again.",
+                "sources": [],
+                "latency": round(time.time() - start, 2),
                 "trace_id": trace_id,
-                "error":    str(e),
+                "error": str(e),
             }
 
     # STREAM — SECTION 4.6 SSE / WEBSOCKET TOKEN STREAMING
@@ -3060,24 +3398,24 @@ class RAGPipeline:
         self,
         query: str,
         session_id: str = "default",
-        user_id: Optional[str] = None,
-        sources: Optional[List[str]] = None,
+        user_id: str | None = None,
+        sources: list[str] | None = None,
     ) -> Iterator[str]:
 
         query = _normalize(query)
         query = _sanitize(query)
-        query = query[:settings.MAX_PROMPT_CHARS]
+        query = query[: settings.MAX_PROMPT_CHARS]
 
         def _generator() -> Iterator[str]:
             try:
                 retriever = self._get_retriever()
-                _auto_scope    = _detect_filename_scope_stream(query) if not sources else None
+                _auto_scope = _detect_filename_scope_stream(query) if not sources else None
                 _stream_filters = (
-                    {"sources": sources}    if sources
-                    else {"sources": _auto_scope} if _auto_scope
-                    else None
+                    {"sources": sources}
+                    if sources
+                    else {"sources": _auto_scope} if _auto_scope else None
                 )
-                raw_docs  = retriever.search(
+                raw_docs = retriever.search(
                     query=query,
                     session_id=session_id,
                     top_k=settings.DEFAULT_TOP_K,
@@ -3085,8 +3423,8 @@ class RAGPipeline:
                     filters=_stream_filters,
                 )
 
-                docs    = _normalize_docs(raw_docs)
-                docs    = _dedup_docs(docs)
+                docs = _normalize_docs(raw_docs)
+                docs = _dedup_docs(docs)
 
                 # RETRIEVAL GATE — the genuine "no documents" case is decided
                 # HERE, deterministically. The retriever already applies
@@ -3122,16 +3460,24 @@ class RAGPipeline:
                 try:
                     _rer = _get_stream_reranker()
                     if _rer is not None:
-                        _reranked = _rer.rerank(query, docs, top_k=settings.RAG_TOP_K, session_id=session_id)
+                        _reranked = _rer.rerank(
+                            query, docs, top_k=settings.RAG_TOP_K, session_id=session_id
+                        )
                         if _reranked:
                             docs = _source_coherence_filter_stream(_reranked)
                         else:
-                            docs = sorted(docs, key=lambda d: d.get("score", 0.0), reverse=True)[:settings.RAG_TOP_K]
+                            docs = sorted(docs, key=lambda d: d.get("score", 0.0), reverse=True)[
+                                : settings.RAG_TOP_K
+                            ]
                     else:
-                        docs = sorted(docs, key=lambda d: d.get("score", 0.0), reverse=True)[:settings.RAG_TOP_K]
+                        docs = sorted(docs, key=lambda d: d.get("score", 0.0), reverse=True)[
+                            : settings.RAG_TOP_K
+                        ]
                 except Exception as _re_err:
                     logger.warning(event="rag_stream_rerank_failed", error=str(_re_err))
-                    docs = sorted(docs, key=lambda d: d.get("score", 0.0), reverse=True)[:settings.RAG_TOP_K]
+                    docs = sorted(docs, key=lambda d: d.get("score", 0.0), reverse=True)[
+                        : settings.RAG_TOP_K
+                    ]
 
                 # DOCX FOCUS: feeding a small 7B model 10-19 chunks makes it drift
                 # (dump unrelated tables, or give a lazy partial answer). Whole
@@ -3153,7 +3499,10 @@ class RAGPipeline:
                 # specific fact asked for. _focus_docx_context is a generic
                 # score-cliff-union-hybrid-top-3 utility despite its name;
                 # reused as-is, unmodified. PDF and other modalities untouched.
-                if docs and str((docs[0].get("metadata") or {}).get("modality") or "") in ("text", "txt"):
+                if docs and str((docs[0].get("metadata") or {}).get("modality") or "") in (
+                    "text",
+                    "txt",
+                ):
                     docs = _focus_docx_context(docs, _hybrid_top, max_chunks=4)
 
                 docs = _sandwich_reorder(docs)
@@ -3179,8 +3528,10 @@ class RAGPipeline:
                 _xlsx_synth_fact_stream = None
                 try:
                     from app.reasoning.reasoning_engine import (
-                        _prepend_key_facts_knowledge, _XLSX_SYNTH_MARK,
+                        _XLSX_SYNTH_MARK,
+                        _prepend_key_facts_knowledge,
                     )
+
                     context = _prepend_key_facts_knowledge(
                         docs, query, context, user_id=user_id or ""
                     )
@@ -3229,12 +3580,15 @@ class RAGPipeline:
                 # normalizing here, verification silently never fires
                 # whenever the top doc happens to be a frame/vision chunk.
                 from app.verification import normalize_modality as _norm_mod
+
                 _mod0_norm = _norm_mod(_mod0)
-                _av_dominant = bool(docs) and settings.AGENT_VERIFY_ENABLED and (
-                    _mod0_norm in settings.AGENT_VERIFY_MODALITIES
+                _av_dominant = (
+                    bool(docs)
+                    and settings.AGENT_VERIFY_ENABLED
+                    and (_mod0_norm in settings.AGENT_VERIFY_MODALITIES)
                 )
 
-                _av_reasoned_answer: Optional[str] = None
+                _av_reasoned_answer: str | None = None
                 # The exact grounding chunks the verified answer was generated
                 # from — stashed so the citation block below cites what the
                 # answer actually used (the aspect-retrieved fact chunks), not
@@ -3247,12 +3601,12 @@ class RAGPipeline:
                 # own CitationVerifier already checked the real final docs
                 # for the PASS/FAIL decision; this pool only widens citation
                 # *display* candidates, it isn't a correctness gate).
-                _av_grounding_docs: List[Dict[str, Any]] = []
+                _av_grounding_docs: list[dict[str, Any]] = []
                 if _av_dominant:
                     try:
+                        from app.core.response import build_sources
                         from app.pipeline.query_pipeline import _get_reasoning_components
                         from app.verification import VerificationLoop
-                        from app.core.response import build_sources
 
                         _reasoning, _ = _get_reasoning_components(self._get_llm())
                         # Focused context: the model drifts and mixes facts when
@@ -3263,22 +3617,35 @@ class RAGPipeline:
                         # and mask frame stock-prices (which the model otherwise
                         # reads as earnings). Additive over docs[:5].
                         if _mod0_norm == "video":
-                            _av_src = (((docs[:1] or [{}])[0].get("metadata") or {}).get("source")
-                                       or ((docs[:1] or [{}])[0].get("metadata") or {}).get("filename"))
+                            _av_src = ((docs[:1] or [{}])[0].get("metadata") or {}).get(
+                                "source"
+                            ) or ((docs[:1] or [{}])[0].get("metadata") or {}).get("filename")
                             _verify_docs = _build_av_stream_context(
-                                query, docs, retriever, session_id, user_id,
-                                _stream_filters, _av_src)
+                                query,
+                                docs,
+                                retriever,
+                                session_id,
+                                user_id,
+                                _stream_filters,
+                                _av_src,
+                            )
                         else:
                             _verify_docs = docs[:5]
 
                         _av_grounding_docs = list(_verify_docs)
                         _verify_sources = build_sources(_verify_docs)
                         _cand, _verify_report = VerificationLoop().run(
-                            query=query, session_id=session_id, user_id=user_id,
-                            retriever=retriever, reasoning_engine=_reasoning,
-                            initial_docs=_verify_docs, initial_sources=_verify_sources,
-                            llm=self._get_llm(), modality_hint=_mod0_norm,
-                            filters=_stream_filters, memory_context="",
+                            query=query,
+                            session_id=session_id,
+                            user_id=user_id,
+                            retriever=retriever,
+                            reasoning_engine=_reasoning,
+                            initial_docs=_verify_docs,
+                            initial_sources=_verify_sources,
+                            llm=self._get_llm(),
+                            modality_hint=_mod0_norm,
+                            filters=_stream_filters,
+                            memory_context="",
                         )
                         logger.info(
                             event="rag_stream_verification_result",
@@ -3286,16 +3653,20 @@ class RAGPipeline:
                             attempts=len(_verify_report.attempts),
                             overall_confidence=_verify_report.scores.overall,
                             total_duration_ms=_verify_report.total_duration_ms,
-                            modality=_mod0, session_id=session_id,
+                            modality=_mod0,
+                            session_id=session_id,
                         )
                         if _cand:
                             _av_reasoned_answer = _cand
                     except Exception as _rex:
-                        logger.warning(event="rag_stream_av_reasoning_failed",
-                                       error=str(_rex), session_id=session_id)
+                        logger.warning(
+                            event="rag_stream_av_reasoning_failed",
+                            error=str(_rex),
+                            session_id=session_id,
+                        )
 
                 builder = self._get_prompt_builder()
-                prompt  = builder.build_prompt(
+                prompt = builder.build_prompt(
                     query=query,
                     context=context,
                     session_id=session_id,
@@ -3304,13 +3675,14 @@ class RAGPipeline:
                 # PII PROMPT STRIP — same as non-streaming path (Phase 26 P1)
                 try:
                     from app.guardrails.pii import strip_pii_from_prompt as _spfp
+
                     prompt, _pii_stripped = _spfp(prompt)
                     if _pii_stripped:
-                        logger.info(event="rag_stream_pii_stripped_from_prompt",
-                                    session_id=session_id)
+                        logger.info(
+                            event="rag_stream_pii_stripped_from_prompt", session_id=session_id
+                        )
                 except Exception as _pii_err:
-                    logger.warning(event="rag_stream_pii_prompt_strip_failed",
-                                   error=str(_pii_err))
+                    logger.warning(event="rag_stream_pii_prompt_strip_failed", error=str(_pii_err))
 
                 llm = self._get_llm()
                 if not llm:
@@ -3330,7 +3702,7 @@ class RAGPipeline:
                 #   client and persistence always end on the guarded version.
                 from app.guardrails.pii import scrub_pii as _scrub_pii_seg
 
-                collected_tokens: List[str] = []
+                collected_tokens: list[str] = []
                 hold = ""
                 refusal_mode = False
                 prefix_checked = False
@@ -3393,15 +3765,30 @@ class RAGPipeline:
                 # cross-segment PII) cannot run mid-stream; their canonical result
                 # is delivered via the REPLACE sentinel after the token stream.
                 answer = "".join(collected_tokens).strip()
-                _ctx: List[str] = [
-                    d.get("text", "") if isinstance(d, dict)
-                    else (d.page_content if hasattr(d, "page_content") else "")
+                _ctx: list[str] = [
+                    (
+                        d.get("text", "")
+                        if isinstance(d, dict)
+                        else (d.page_content if hasattr(d, "page_content") else "")
+                    )
                     for d in docs
                 ]
                 try:
                     from app.guardrails.output_guard import check as _og_check
-                    _sources = [{"filename": d.get("metadata", {}).get("source", "") if isinstance(d, dict) else ""} for d in docs]
-                    _og = _og_check(answer, context_chunks=_ctx, sources=_sources, session_id=session_id)
+
+                    _sources = [
+                        {
+                            "filename": (
+                                d.get("metadata", {}).get("source", "")
+                                if isinstance(d, dict)
+                                else ""
+                            )
+                        }
+                        for d in docs
+                    ]
+                    _og = _og_check(
+                        answer, context_chunks=_ctx, sources=_sources, session_id=session_id
+                    )
                     answer = _og.text
                 except Exception as _og_err:
                     logger.warning(event="rag_stream_output_guard_failed", error=str(_og_err))
@@ -3440,13 +3827,15 @@ class RAGPipeline:
                     _cf_meta = (docs[0].get("metadata") or {}) if docs else {}
                     if answer and str(_cf_meta.get("modality") or "") in ("mp4", "video"):
                         answer, _cf_docs = _video_completeness_fill(
-                            query, answer, user_id,
-                            _cf_meta.get("source") or _cf_meta.get("filename"))
+                            query,
+                            answer,
+                            user_id,
+                            _cf_meta.get("source") or _cf_meta.get("filename"),
+                        )
                         if _cf_docs:
                             _av_grounding_docs.extend(_cf_docs)
                 except Exception as _cf_err:
-                    logger.warning(event="rag_stream_video_completeness_failed",
-                                   error=str(_cf_err))
+                    logger.warning(event="rag_stream_video_completeness_failed", error=str(_cf_err))
 
                 # REFUSAL HANDLING — docs WERE retrieved (we passed the retrieval
                 # gate above), so a refusal here means the model declined despite
@@ -3464,6 +3853,7 @@ class RAGPipeline:
                 # CITATION TRACKING — parse [n] indices, filter source chips, then strip.
                 try:
                     from app.core.response import extract_cited_indices, strip_inline_citations
+
                     _cited_idx = extract_cited_indices(answer)
                     if _cited_idx:
                         _cited_docs = [d for i, d in enumerate(docs, 1) if i in _cited_idx]
@@ -3490,10 +3880,14 @@ class RAGPipeline:
                     if _source_docs:
                         _lead_meta = _source_docs[0].get("metadata") or {}
                         _is_video = str(_lead_meta.get("modality") or "") in ("mp4", "video")
+
                         def _doc_is_frame(_d):
                             _m = _d.get("metadata") or {}
-                            return (str(_m.get("embedding_space") or "") == "vision"
-                                    or str(_m.get("subtype") or _m.get("content_type") or "") == "frame")
+                            return (
+                                str(_m.get("embedding_space") or "") == "vision"
+                                or str(_m.get("subtype") or _m.get("content_type") or "") == "frame"
+                            )
+
                         if _is_video:
                             _src_name = _lead_meta.get("source") or _lead_meta.get("filename")
                             # Cite what the answer was actually GENERATED from —
@@ -3505,10 +3899,13 @@ class RAGPipeline:
                             # fact chunks (Cook's Services line, the CFO's guidance
                             # line, ...); ranking THEM by answer-overlap lands the
                             # citation on the right speaker + timestamp.
-                            _cite_pool = (list(_av_grounding_docs) + list(_source_docs)
-                                          if _av_grounding_docs else list(_source_docs))
+                            _cite_pool = (
+                                list(_av_grounding_docs) + list(_source_docs)
+                                if _av_grounding_docs
+                                else list(_source_docs)
+                            )
                             _seen_c: set = set()
-                            _dedup_pool: List[Dict[str, Any]] = []
+                            _dedup_pool: list[dict[str, Any]] = []
                             for _cd in _cite_pool:
                                 _ck = str(_cd.get("text") or "")[:80]
                                 if _ck and _ck not in _seen_c:
@@ -3540,7 +3937,8 @@ class RAGPipeline:
                             # the time).
                             _spoken_only = [d for d in _dedup_pool if not _doc_is_frame(d)]
                             _spoken_docs = _rank_video_citation_docs(
-                                answer, _spoken_only, _cast, _named_role)
+                                answer, _spoken_only, _cast, _named_role
+                            )
 
                             if _cast:
                                 for _d in _spoken_docs:
@@ -3550,13 +3948,18 @@ class RAGPipeline:
                                     # not a raw diarization label ("SPEAKER_01").
                                     if _exist and not re.match(r"^SPEAKER_\d+$", _exist):
                                         continue
-                                    _sts = (_dm.get("start_time")
-                                            if _dm.get("start_time") is not None
-                                            else _dm.get("timestamp_start")
+                                    _sts = (
+                                        _dm.get("start_time")
+                                        if _dm.get("start_time") is not None
+                                        else (
+                                            _dm.get("timestamp_start")
                                             if _dm.get("timestamp_start") is not None
-                                            else _dm.get("start_timestamp"))
+                                            else _dm.get("start_timestamp")
+                                        )
+                                    )
                                     _nm, _rl = _video_speaker_name(
-                                        _cast, _sts, str(_dm.get("call_section") or ""))
+                                        _cast, _sts, str(_dm.get("call_section") or "")
+                                    )
                                     if _nm:
                                         _dm = dict(_dm)
                                         _dm["speaker_name"] = _nm
@@ -3586,7 +3989,8 @@ class RAGPipeline:
                             _best_frame = None
                             if _frames and _spoken_docs:
                                 _beat_relevant_cite = any(
-                                    w in query.lower() for w in _REPORTED_RESULTS_WORDS_LOCAL)
+                                    w in query.lower() for w in _REPORTED_RESULTS_WORDS_LOCAL
+                                )
                                 # Drop ALL chart/ticker frames from the candidate
                                 # pool entirely when off-topic — not just the ones
                                 # with a parseable EPS/beat label. A frame whose
@@ -3602,20 +4006,29 @@ class RAGPipeline:
                                 if not _beat_relevant_cite:
                                     _frames = []
                                 _tm = _spoken_docs[0].get("metadata") or {}
-                                _near = (_tm.get("start_time")
-                                         if _tm.get("start_time") is not None
-                                         else _tm.get("timestamp_start")
-                                         if _tm.get("timestamp_start") is not None
-                                         else _tm.get("start_timestamp"))
+                                _near = (
+                                    _tm.get("start_time")
+                                    if _tm.get("start_time") is not None
+                                    else (
+                                        _tm.get("timestamp_start")
+                                        if _tm.get("timestamp_start") is not None
+                                        else _tm.get("start_timestamp")
+                                    )
+                                )
                                 _near = float(_near) if _near is not None else 0.0
                                 _FRAME_WIN = 90.0
+
                                 def _frame_key(_f):
                                     _cap, _ = _split_frame_caption(_f.get("text") or "")
-                                    _has_metric = (_beat_relevant_cite
-                                                  and _clean_frame_label(_cap) is not None)
+                                    _has_metric = (
+                                        _beat_relevant_cite and _clean_frame_label(_cap) is not None
+                                    )
                                     _fm = _f.get("metadata") or {}
-                                    _fts = (_fm.get("frame_timestamp")
-                                            or _fm.get("start_timestamp") or 0.0)
+                                    _fts = (
+                                        _fm.get("frame_timestamp")
+                                        or _fm.get("start_timestamp")
+                                        or 0.0
+                                    )
                                     _dist = abs(float(_fts) - _near)
                                     if _has_metric and _dist <= _FRAME_WIN:
                                         _tier = 0
@@ -3626,6 +4039,7 @@ class RAGPipeline:
                                     else:
                                         _tier = 3
                                     return (_tier, _dist)
+
                                 if _frames:
                                     _candidate = min(_frames, key=_frame_key)
                                     if _frame_key(_candidate)[0] < 3:
@@ -3647,15 +4061,22 @@ class RAGPipeline:
                 # unsupported number — every grounded sentence is untouched.
                 # Reuses reasoning_engine's already-proven verification
                 # function; does not alter its behavior or any other caller.
-                if docs and str((docs[0].get("metadata") or {}).get("modality") or "") in ("text", "txt"):
+                if docs and str((docs[0].get("metadata") or {}).get("modality") or "") in (
+                    "text",
+                    "txt",
+                ):
                     try:
                         answer = _strip_unsupported_txt_numbers(answer, docs, query)
                     except Exception as _num_err:
-                        logger.warning(event="rag_stream_txt_numeric_guard_failed", error=str(_num_err))
+                        logger.warning(
+                            event="rag_stream_txt_numeric_guard_failed", error=str(_num_err)
+                        )
                     try:
                         answer = _trim_txt_redundant_closer(answer)
                     except Exception as _rc_err:
-                        logger.warning(event="rag_stream_txt_closer_trim_failed", error=str(_rc_err))
+                        logger.warning(
+                            event="rag_stream_txt_closer_trim_failed", error=str(_rc_err)
+                        )
                     try:
                         answer = _clean_txt_answer(answer, max_sentences=4)
                     except Exception as _ct_err:
@@ -3666,7 +4087,9 @@ class RAGPipeline:
                     try:
                         answer = _ensure_txt_comparison_in_answer(answer, docs, query)
                     except Exception as _ec_err:
-                        logger.warning(event="rag_stream_txt_compare_append_failed", error=str(_ec_err))
+                        logger.warning(
+                            event="rag_stream_txt_compare_append_failed", error=str(_ec_err)
+                        )
 
                 # PERPLEXITY-STYLE [p.N] ANCHORS — deterministically trace each
                 # sentence's figures to their source chunk and collect the pages
@@ -3715,11 +4138,15 @@ class RAGPipeline:
                         if _img_synth:
                             answer = _img_synth
                     except Exception as _img_synth_err:
-                        logger.warning(event="rag_stream_image_synth_failed", error=str(_img_synth_err))
+                        logger.warning(
+                            event="rag_stream_image_synth_failed", error=str(_img_synth_err)
+                        )
                     try:
                         answer = _expand_chart_dates(answer)
                     except Exception as _date_err:
-                        logger.warning(event="rag_stream_image_date_expand_failed", error=str(_date_err))
+                        logger.warning(
+                            event="rag_stream_image_date_expand_failed", error=str(_date_err)
+                        )
 
                 # STREAM THE CLEAN ANSWER progressively — gives the client a
                 # typing effect without ever exposing the raw leaked preamble.
@@ -3747,8 +4174,10 @@ class RAGPipeline:
                 # Emit sources so the client can display them immediately.
                 try:
                     import json as _json
-                    _p248 = _build_p248_sources(_source_docs, max_items=max(3, len(_source_docs)),
-                                                user_id=user_id)
+
+                    _p248 = _build_p248_sources(
+                        _source_docs, max_items=max(3, len(_source_docs)), user_id=user_id
+                    )
                     yield "\x00SOURCES\x00" + _json.dumps(_p248)
                 except Exception:
                     pass
@@ -3772,7 +4201,7 @@ class RAGPipeline:
         session_id: str = "default",
     ) -> AsyncIterator[str]:
         loop = asyncio.get_event_loop()
-        gen  = await loop.run_in_executor(None, self.stream, query, session_id)
+        gen = await loop.run_in_executor(None, self.stream, query, session_id)
 
         for token in gen:
             yield token
@@ -3783,11 +4212,9 @@ class RAGPipeline:
         self,
         query: str,
         session_id: str = "default",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         loop = asyncio.get_event_loop()
         return await asyncio.wait_for(
             loop.run_in_executor(None, self.run, query, session_id),
             timeout=settings.REQUEST_TIMEOUT_SEC,
         )
-
-

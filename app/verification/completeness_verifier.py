@@ -19,26 +19,65 @@ edits, the primary answer.
 from __future__ import annotations
 
 import re
-from typing import Callable, List, Optional
+from collections.abc import Callable
 
 from app.verification.verification_schema import CompletenessResult
 
-_STOPWORDS = frozenset({
-    "what", "when", "which", "were", "with", "that", "this", "your", "about",
-    "did", "does", "the", "and", "for", "was", "are", "how", "why", "who",
-    "call", "quarter", "these", "they", "their", "from", "into", "said",
-    "say", "says", "during", "regarding", "whether", "tell", "company", "results",
-    "reported", "report", "also", "year", "over",
-})
+_STOPWORDS = frozenset(
+    {
+        "what",
+        "when",
+        "which",
+        "were",
+        "with",
+        "that",
+        "this",
+        "your",
+        "about",
+        "did",
+        "does",
+        "the",
+        "and",
+        "for",
+        "was",
+        "are",
+        "how",
+        "why",
+        "who",
+        "call",
+        "quarter",
+        "these",
+        "they",
+        "their",
+        "from",
+        "into",
+        "said",
+        "say",
+        "says",
+        "during",
+        "regarding",
+        "whether",
+        "tell",
+        "company",
+        "results",
+        "reported",
+        "report",
+        "also",
+        "year",
+        "over",
+    }
+)
 
 
 def _aspect_keywords(aspect: str) -> set:
-    return {w for w in re.findall(r"[a-z0-9&]+", aspect.lower())
-            if len(w) > 2 and w not in _STOPWORDS}
+    return {
+        w for w in re.findall(r"[a-z0-9&]+", aspect.lower()) if len(w) > 2 and w not in _STOPWORDS
+    }
 
 
-def verify_aspect_coverage(answer: str, aspects: List[str],
-                            min_overlap: float = 0.34) -> CompletenessResult:
+def verify_aspect_coverage(
+    answer: str, aspects: list[str], min_overlap: float = 0.34
+) -> CompletenessResult:
     """For each aspect phrase, check whether its distinguishing keywords
     actually appear in the generated answer. An aspect counts as "covered"
     once at least `min_overlap` of its content keywords show up. Pure
@@ -58,9 +97,12 @@ def verify_aspect_coverage(answer: str, aspects: List[str],
     return result
 
 
-def assemble_answer(primary_answer: str, coverage: CompletenessResult,
-                     followup_fn: Optional[Callable[[str], Optional[str]]] = None,
-                     max_followups: int = 3) -> str:
+def assemble_answer(
+    primary_answer: str,
+    coverage: CompletenessResult,
+    followup_fn: Callable[[str], str | None] | None = None,
+    max_followups: int = 3,
+) -> str:
     """If VERIFY found aspects the primary answer dropped, ask `followup_fn`
     (a single-aspect generation call, injected by the caller) for a short
     addendum on each missing aspect (bounded by `max_followups`) and append
@@ -89,7 +131,7 @@ class CompletenessVerifier:
         self.min_overlap = min_overlap
         self.max_followups = max_followups
 
-    def check(self, answer: str, aspects: List[str], query: str = "") -> CompletenessResult:
+    def check(self, answer: str, aspects: list[str], query: str = "") -> CompletenessResult:
         # A single-aspect (or zero-aspect) question still needs a check: the
         # multi-aspect keyword-overlap heuristic reused here as-is, treating
         # the whole ORIGINAL QUERY as the one aspect. Auto-passing here
@@ -105,7 +147,12 @@ class CompletenessVerifier:
             return verify_aspect_coverage(answer, [query], min_overlap=self.min_overlap)
         return verify_aspect_coverage(answer, aspects, min_overlap=self.min_overlap)
 
-    def fill_gaps(self, primary_answer: str, coverage: CompletenessResult,
-                  followup_fn: Optional[Callable[[str], Optional[str]]]) -> str:
-        return assemble_answer(primary_answer, coverage, followup_fn=followup_fn,
-                                max_followups=self.max_followups)
+    def fill_gaps(
+        self,
+        primary_answer: str,
+        coverage: CompletenessResult,
+        followup_fn: Callable[[str], str | None] | None,
+    ) -> str:
+        return assemble_answer(
+            primary_answer, coverage, followup_fn=followup_fn, max_followups=self.max_followups
+        )

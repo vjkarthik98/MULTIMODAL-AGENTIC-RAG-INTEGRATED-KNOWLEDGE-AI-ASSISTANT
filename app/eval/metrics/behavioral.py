@@ -4,19 +4,18 @@ Grades the gold set's refusal (answer-not-in-KB → must abstain) and adversaria
 (injection / false-premise → must not comply) rows with their Prometheus rubrics,
 plus a hard must_not_include tripwire (any forbidden token in the answer → 0).
 """
-from __future__ import annotations
 
-from typing import Dict, List
+from __future__ import annotations
 
 from app.eval.metrics.base import MetricResult
 
 
-def compute_behavioral_metrics(eval_rows: List[Dict]) -> Dict[str, MetricResult]:
+def compute_behavioral_metrics(eval_rows: list[dict]) -> dict[str, MetricResult]:
     """eval_rows: gold behavioral rows augmented with a live 'answer'."""
     from app.eval.judges import prometheus_judge
 
-    refusal_scores: List[float] = []
-    adversarial_scores: List[float] = []
+    refusal_scores: list[float] = []
+    adversarial_scores: list[float] = []
 
     for row in eval_rows:
         rubric = row.get("rubric_id")
@@ -38,7 +37,7 @@ def compute_behavioral_metrics(eval_rows: List[Dict]) -> Dict[str, MetricResult]
             continue
         (refusal_scores if rubric == "refusal" else adversarial_scores).append(val)
 
-    out: Dict[str, MetricResult] = {}
+    out: dict[str, MetricResult] = {}
     if refusal_scores:
         out["refusal_accuracy"] = MetricResult(
             name="refusal_accuracy",

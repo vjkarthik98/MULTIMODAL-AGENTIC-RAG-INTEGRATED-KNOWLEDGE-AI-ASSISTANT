@@ -24,8 +24,9 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from typing import Any, Dict, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from typing import Any
 
 import structlog
 from opentelemetry import trace
@@ -34,7 +35,6 @@ from prometheus_client import Counter, Gauge, Histogram
 from tenacity import (
     retry,
     retry_if_exception,
-    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
@@ -47,6 +47,7 @@ def _is_retryable_load_error(exc: BaseException) -> bool:
     if isinstance(exc, RuntimeError):
         return "interpreter shutdown" not in str(exc) and "shutdown" not in str(exc).lower()
     return False
+
 
 from app.core.config import settings
 from app.core.device_manager import device_manager
@@ -81,7 +82,7 @@ _embedding_latency = Histogram(
 
 # SEMAPHORE — lazy init to avoid missing event loop at import time
 
-_load_semaphore: Optional[asyncio.Semaphore] = None
+_load_semaphore: asyncio.Semaphore | None = None
 _load_semaphore_lock = threading.Lock()
 
 
@@ -96,8 +97,10 @@ def _get_load_semaphore() -> asyncio.Semaphore:
 
 # LAZY TORCH IMPORT — only the loaders that need it pay this cost.
 
+
 def _torch():
     import torch
+
     return torch
 
 
@@ -121,32 +124,32 @@ class ModelLoader:
             thread_name_prefix="model_loader",
         )
 
-        self._llm:                  Optional[Any] = None
-        self._text_embedder:        Optional[Any] = None
-        self._siglip_text_embedder: Optional[Any] = None
-        self._image_embedder:       Optional[Any] = None
-        self._multimodal:           Optional[Any] = None
-        self._whisper:              Optional[Any] = None
-        self._reranker:             Optional[Any] = None
-        self._siglip_model                       = None
-        self._siglip_processor                   = None
-        self._siglip_device:        Optional[str] = None
-        self._blip_model                         = None
-        self._blip_processor                     = None
-        self._blip_device:          Optional[str] = None
-        self._qwen2vl_model                      = None
-        self._qwen2vl_processor                  = None
-        self._qwen2vl_device:       Optional[str] = None
+        self._llm: Any | None = None
+        self._text_embedder: Any | None = None
+        self._siglip_text_embedder: Any | None = None
+        self._image_embedder: Any | None = None
+        self._multimodal: Any | None = None
+        self._whisper: Any | None = None
+        self._reranker: Any | None = None
+        self._siglip_model = None
+        self._siglip_processor = None
+        self._siglip_device: str | None = None
+        self._blip_model = None
+        self._blip_processor = None
+        self._blip_device: str | None = None
+        self._qwen2vl_model = None
+        self._qwen2vl_processor = None
+        self._qwen2vl_device: str | None = None
         # Separate, smaller VLM for VIDEO frame captioning (see get_qwen2_vl_video).
-        self._qwen2vl_v_model                    = None
-        self._qwen2vl_v_processor                = None
-        self._qwen2vl_v_device:     Optional[str] = None
-        self._trocr_model                        = None
-        self._trocr_processor                    = None
-        self._trocr_device:         Optional[str] = None
-        self._diarizer:             Optional[Any] = None
-        self._ner:                  Optional[Any] = None
-        self._finbert:              Optional[Any] = None
+        self._qwen2vl_v_model = None
+        self._qwen2vl_v_processor = None
+        self._qwen2vl_v_device: str | None = None
+        self._trocr_model = None
+        self._trocr_processor = None
+        self._trocr_device: str | None = None
+        self._diarizer: Any | None = None
+        self._ner: Any | None = None
+        self._finbert: Any | None = None
 
         self._initialized = False
 
@@ -171,9 +174,11 @@ class ModelLoader:
     def _oom_guard() -> None:
         """Release CUDA memory and run GC before loading the next model."""
         import gc
+
         gc.collect()
         try:
             import torch
+
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
@@ -188,18 +193,17 @@ class ModelLoader:
         retry=retry_if_exception(_is_retryable_load_error),
         reraise=True,
     )
-    def _safe_load(self, load_fn, name: str, device: Optional[str] = None) -> Any:
-        start  = time.time()
+    def _safe_load(self, load_fn, name: str, device: str | None = None) -> Any:
+        start = time.time()
         future = self._executor.submit(load_fn)
 
         # Use the provided device hint; fall back to device_manager only for
         # known MODEL_NAMES — unknown aliases (image_embedder, siglip_text_embedder)
         # are not in MODEL_NAMES so device_for() would wrongly return "cpu".
         from app.core.device_manager import MODEL_NAMES
+
         resolved_device = device or (
-            device_manager.device_for(name.lower())
-            if name.lower() in MODEL_NAMES
-            else "unknown"
+            device_manager.device_for(name.lower()) if name.lower() in MODEL_NAMES else "unknown"
         )
 
         with tracer.start_as_current_span(f"load_model_{name}") as span:
@@ -207,7 +211,7 @@ class ModelLoader:
             span.set_attribute("device", resolved_device)
 
             try:
-                obj     = future.result(timeout=settings.MODEL_TIMEOUT_SEC)
+                obj = future.result(timeout=settings.MODEL_TIMEOUT_SEC)
                 latency = round(time.time() - start, 2)
 
                 _model_load_duration.labels(model=name).observe(latency)
@@ -270,9 +274,7 @@ class ModelLoader:
         if self._initialized:
             return
         async with _get_load_semaphore():
-            await asyncio.get_running_loop().run_in_executor(
-                self._executor, self.warmup
-            )
+            await asyncio.get_running_loop().run_in_executor(self._executor, self.warmup)
 
     # LLM — GGUF MODEL
 
@@ -291,6 +293,7 @@ class ModelLoader:
 
             def _load_llm():
                 from app.llm.gguf_model import GGUFModel  # local import (loads llama_cpp)
+
                 return GGUFModel(
                     settings.LLM_MODEL_PATH,
                     n_gpu_layers=n_gpu_layers,
@@ -314,6 +317,7 @@ class ModelLoader:
 
             def _load():
                 from app.embeddings.base_embedder import TextEmbedder  # local
+
                 emb = TextEmbedder(
                     model_name=settings.EMBEDDING_MODEL,
                     batch_size=settings.EMBEDDING_BATCH_SIZE,
@@ -346,7 +350,7 @@ class ModelLoader:
 
     # SIGLIP MODEL + PROCESSOR
 
-    def get_siglip(self) -> Tuple:
+    def get_siglip(self) -> tuple:
         if self._siglip_model:
             return self._siglip_processor, self._siglip_model, self._siglip_device
 
@@ -358,6 +362,7 @@ class ModelLoader:
 
             def _load():
                 from transformers import SiglipModel, SiglipProcessor  # local
+
                 kwargs = {}
                 if decision.device == "cuda" and decision.dtype == "float16":
                     kwargs["torch_dtype"] = _torch_dtype("float16")
@@ -373,7 +378,7 @@ class ModelLoader:
         return self._siglip_processor, self._siglip_model, self._siglip_device
 
     # Backward-compat alias — callers that spelled it get_clip() still work.
-    def get_clip(self) -> Tuple:
+    def get_clip(self) -> tuple:
         return self.get_siglip()
 
     # IMAGE EMBEDDER — SIGLIP VISUAL
@@ -390,6 +395,7 @@ class ModelLoader:
 
             def _load():
                 from app.embeddings.image_embedder import ImageEmbedder  # local
+
                 return ImageEmbedder(model, processor, device)
 
             self._image_embedder = self._safe_load(_load, "image_embedder", device=device)
@@ -410,9 +416,12 @@ class ModelLoader:
 
             def _load():
                 from app.embeddings.image_embedder import ClipTextEmbedder  # local
+
                 return ClipTextEmbedder(processor, model, device)
 
-            self._siglip_text_embedder = self._safe_load(_load, "siglip_text_embedder", device=device)
+            self._siglip_text_embedder = self._safe_load(
+                _load, "siglip_text_embedder", device=device
+            )
 
         return self._siglip_text_embedder
 
@@ -431,6 +440,7 @@ class ModelLoader:
                 return self._multimodal
 
             from app.embeddings.base_embedder import MultimodalEmbedder  # local
+
             self._multimodal = MultimodalEmbedder(
                 self.get_embedder(),
                 self.get_image_embedder(),
@@ -448,12 +458,13 @@ class ModelLoader:
             if self._whisper:
                 return self._whisper
 
-            decision     = device_manager.decision_for("whisper")
-            device       = decision.device if decision.device != "mps" else "cpu"
+            decision = device_manager.decision_for("whisper")
+            device = decision.device if decision.device != "mps" else "cpu"
             compute_type = decision.dtype or ("float16" if device == "cuda" else "int8")
 
             def _load():
                 from faster_whisper import WhisperModel  # local
+
                 return WhisperModel(
                     settings.WHISPER_MODEL,
                     device=device,
@@ -466,7 +477,7 @@ class ModelLoader:
 
     # BLIP — IMAGE CAPTIONING
 
-    def get_blip(self) -> Tuple:
+    def get_blip(self) -> tuple:
         if self._blip_model:
             return self._blip_processor, self._blip_model, self._blip_device
 
@@ -481,13 +492,12 @@ class ModelLoader:
                     BlipForConditionalGeneration,
                     BlipProcessor,
                 )
+
                 processor = BlipProcessor.from_pretrained(settings.BLIP_MODEL)
                 kwargs = {}
                 if decision.device == "cuda" and decision.dtype == "float16":
                     kwargs["torch_dtype"] = _torch_dtype("float16")
-                model = BlipForConditionalGeneration.from_pretrained(
-                    settings.BLIP_MODEL, **kwargs
-                )
+                model = BlipForConditionalGeneration.from_pretrained(settings.BLIP_MODEL, **kwargs)
                 model.to(decision.device)
                 model.eval()
                 return processor, model
@@ -511,6 +521,7 @@ class ModelLoader:
 
             def _load():
                 from sentence_transformers import CrossEncoder  # local
+
                 ce = CrossEncoder(
                     settings.RERANKER_MODEL,
                     device=decision.device,
@@ -529,7 +540,7 @@ class ModelLoader:
 
     # QWEN2-VL — VIDEO FRAME + FINANCIAL CHART CAPTIONING (2B INT8, ~2.2 GB)
 
-    def get_qwen2_vl(self) -> Tuple:
+    def get_qwen2_vl(self) -> tuple:
         if self._qwen2vl_model:
             return self._qwen2vl_processor, self._qwen2vl_model, self._qwen2vl_device
 
@@ -541,7 +552,12 @@ class ModelLoader:
             decision = device_manager.decision_for("qwen2_vl")
 
             def _load():
-                from transformers import Qwen2VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig  # local
+                from transformers import (  # local
+                    AutoProcessor,
+                    BitsAndBytesConfig,
+                    Qwen2VLForConditionalGeneration,
+                )
+
                 processor = AutoProcessor.from_pretrained(
                     settings.QWEN2_VL_MODEL, trust_remote_code=True
                 )
@@ -566,7 +582,7 @@ class ModelLoader:
 
         return self._qwen2vl_processor, self._qwen2vl_model, self._qwen2vl_device
 
-    def get_qwen2_vl_video(self) -> Tuple:
+    def get_qwen2_vl_video(self) -> tuple:
         """Smaller Qwen2-VL used for VIDEO frame captioning.
 
         A one-hour earnings/webcast ingest must load Whisper + pyannote + SigLIP +
@@ -595,7 +611,12 @@ class ModelLoader:
             decision = device_manager.decision_for("qwen2_vl")
 
             def _load():
-                from transformers import Qwen2VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig  # local
+                from transformers import (  # local
+                    AutoProcessor,
+                    BitsAndBytesConfig,
+                    Qwen2VLForConditionalGeneration,
+                )
+
                 processor = AutoProcessor.from_pretrained(
                     settings.VIDEO_QWEN2_VL_MODEL, trust_remote_code=True
                 )
@@ -613,14 +634,16 @@ class ModelLoader:
                 model.eval()
                 return processor, model
 
-            self._qwen2vl_v_processor, self._qwen2vl_v_model = self._safe_load(_load, "qwen2_vl_video")
+            self._qwen2vl_v_processor, self._qwen2vl_v_model = self._safe_load(
+                _load, "qwen2_vl_video"
+            )
             self._qwen2vl_v_device = decision.device
 
         return self._qwen2vl_v_processor, self._qwen2vl_v_model, self._qwen2vl_v_device
 
     # TROCR — PRINTED OCR FOR FINANCIAL DOCUMENTS
 
-    def get_trocr(self) -> Tuple:
+    def get_trocr(self) -> tuple:
         if self._trocr_model:
             return self._trocr_processor, self._trocr_model, self._trocr_device
 
@@ -637,6 +660,7 @@ class ModelLoader:
                 from transformers.models.trocr.modeling_trocr import (
                     TrOCRSinusoidalPositionalEmbedding,
                 )
+
                 processor = TrOCRProcessor.from_pretrained(settings.TROCR_MODEL)
                 # Suppress the two known benign weight mismatches:
                 #   MISSING encoder.pooler.* — VisionEncoderDecoderModel allocates a
@@ -672,9 +696,7 @@ class ModelLoader:
                 for _m in model.modules():
                     if isinstance(_m, TrOCRSinusoidalPositionalEmbedding):
                         _w = getattr(_m, "weights", None)
-                        if _w is not None and (
-                            getattr(_w, "is_meta", False) or _w.device != _dev
-                        ):
+                        if _w is not None and (getattr(_w, "is_meta", False) or _w.device != _dev):
                             _real = _m.get_embedding(
                                 int(_w.shape[0]), int(_w.shape[1]), _m.padding_idx
                             )
@@ -710,9 +732,11 @@ class ModelLoader:
                 # .list_audio_backends() from the public API; patch them back
                 # with soundfile-based shims before pyannote.audio is imported.
                 from app.utils.torchaudio_compat import patch_torchaudio
+
                 patch_torchaudio()
-                from pyannote.audio import Pipeline  # local
                 import torch
+                from pyannote.audio import Pipeline  # local
+
                 pipeline = Pipeline.from_pretrained(
                     settings.DIARIZATION_MODEL,
                     use_auth_token=settings.HF_TOKEN,
@@ -742,6 +766,7 @@ class ModelLoader:
             def _load():
                 import transformers as _tf
                 from transformers import pipeline as hf_pipeline  # local
+
                 # Suppress UNEXPECTED bert.pooler.* — BertForTokenClassification drops
                 # the pooler from its architecture, but the dslim checkpoint (derived
                 # from full BERT base) still contains those weights in the file.
@@ -776,10 +801,11 @@ class ModelLoader:
 
             def _load():
                 from transformers import (
-                    BertTokenizer,
                     BertForSequenceClassification,
-                    pipeline as hf_pipeline,
+                    BertTokenizer,
                 )
+                from transformers import pipeline as hf_pipeline
+
                 # yiyanghkust/finbert-tone config.json lacks `model_type`;
                 # explicitly using BERT classes bypasses auto-detection failure.
                 tokenizer = BertTokenizer.from_pretrained(settings.FINBERT_MODEL)
@@ -799,36 +825,36 @@ class ModelLoader:
 
     # HEALTH CHECK
 
-    def health_check(self) -> Dict[str, Any]:
-        health: Dict[str, Any] = {
-            "llm":                  self._llm is not None,
-            "embedder":             self._text_embedder is not None,
-            "siglip":               self._siglip_model is not None,
-            "siglip_text":          self._siglip_text_embedder is not None,
-            "image_embedder":       self._image_embedder is not None,
-            "multimodal":           self._multimodal is not None,
-            "whisper":              self._whisper is not None,
-            "blip":                 self._blip_model is not None,
-            "qwen2_vl":             self._qwen2vl_model is not None,
-            "trocr":                self._trocr_model is not None,
-            "diarizer":             self._diarizer is not None,
-            "ner":                  self._ner is not None,
-            "finbert":              self._finbert is not None,
-            "reranker":             self._reranker is not None,
-            "device":               device_manager.device_for("llm"),
-            "profile":              device_manager.profile,
-            "vram_total_gb":        device_manager.vram_total_gb,
-            "initialized":          self._initialized,
-            "devices":              device_manager.snapshot(),
+    def health_check(self) -> dict[str, Any]:
+        health: dict[str, Any] = {
+            "llm": self._llm is not None,
+            "embedder": self._text_embedder is not None,
+            "siglip": self._siglip_model is not None,
+            "siglip_text": self._siglip_text_embedder is not None,
+            "image_embedder": self._image_embedder is not None,
+            "multimodal": self._multimodal is not None,
+            "whisper": self._whisper is not None,
+            "blip": self._blip_model is not None,
+            "qwen2_vl": self._qwen2vl_model is not None,
+            "trocr": self._trocr_model is not None,
+            "diarizer": self._diarizer is not None,
+            "ner": self._ner is not None,
+            "finbert": self._finbert is not None,
+            "reranker": self._reranker is not None,
+            "device": device_manager.device_for("llm"),
+            "profile": device_manager.profile,
+            "vram_total_gb": device_manager.vram_total_gb,
+            "initialized": self._initialized,
+            "devices": device_manager.snapshot(),
         }
         if device_manager.cuda_available:
             try:
                 torch = _torch()
-                reserved  = torch.cuda.memory_reserved(0)  / (1024 ** 3)
-                allocated = torch.cuda.memory_allocated(0) / (1024 ** 3)
-                health["vram_reserved_gb"]  = round(reserved,  2)
+                reserved = torch.cuda.memory_reserved(0) / (1024**3)
+                allocated = torch.cuda.memory_allocated(0) / (1024**3)
+                health["vram_reserved_gb"] = round(reserved, 2)
                 health["vram_allocated_gb"] = round(allocated, 2)
-                health["vram_free_gb"]      = round(device_manager.vram_total_gb - reserved, 2)
+                health["vram_free_gb"] = round(device_manager.vram_total_gb - reserved, 2)
             except Exception:
                 pass
         return health
@@ -837,33 +863,43 @@ class ModelLoader:
 
     def reset(self) -> None:
         with self._lock:
-            self._llm                  = None
-            self._text_embedder        = None
+            self._llm = None
+            self._text_embedder = None
             self._siglip_text_embedder = None
-            self._image_embedder       = None
-            self._multimodal           = None
-            self._whisper              = None
-            self._reranker             = None
-            self._siglip_model         = None
-            self._siglip_processor     = None
-            self._siglip_device        = None
-            self._blip_model           = None
-            self._blip_processor       = None
-            self._blip_device          = None
-            self._qwen2vl_model        = None
-            self._qwen2vl_processor    = None
-            self._qwen2vl_device       = None
-            self._trocr_model          = None
-            self._trocr_processor      = None
-            self._trocr_device         = None
-            self._diarizer             = None
-            self._ner                  = None
-            self._initialized          = False
+            self._image_embedder = None
+            self._multimodal = None
+            self._whisper = None
+            self._reranker = None
+            self._siglip_model = None
+            self._siglip_processor = None
+            self._siglip_device = None
+            self._blip_model = None
+            self._blip_processor = None
+            self._blip_device = None
+            self._qwen2vl_model = None
+            self._qwen2vl_processor = None
+            self._qwen2vl_device = None
+            self._trocr_model = None
+            self._trocr_processor = None
+            self._trocr_device = None
+            self._diarizer = None
+            self._ner = None
+            self._initialized = False
 
             for name in (
-                "LLM", "TextEmbedder", "SigLIP", "SigLIPText",
-                "ImageEmbedder", "MultimodalEmbedder", "Whisper",
-                "BLIP", "qwen2_vl", "trocr", "diarizer", "ner", "Reranker",
+                "LLM",
+                "TextEmbedder",
+                "SigLIP",
+                "SigLIPText",
+                "ImageEmbedder",
+                "MultimodalEmbedder",
+                "Whisper",
+                "BLIP",
+                "qwen2_vl",
+                "trocr",
+                "diarizer",
+                "ner",
+                "Reranker",
             ):
                 _model_loaded.labels(model=name).set(0)
 

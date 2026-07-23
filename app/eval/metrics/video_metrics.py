@@ -3,14 +3,12 @@
 frame_caption_recall: fraction of gold key-frames with a matching caption (BLEU-1 ≥ τ).
 caption_repetition_rate: detects P1-9 BLIP caption repetition loops.
 """
+
 from __future__ import annotations
 
 import re
-from collections import Counter
-from typing import List, Optional
 
 from app.eval.metrics.base import MetricResult
-
 
 _BLEU1_THRESHOLD = 0.40  # BLEU-1 precision to consider caption a "match"
 
@@ -42,8 +40,8 @@ def _has_repetition_loop(text: str, max_repeat: int = 3) -> bool:
 
 
 def frame_caption_recall(
-    generated_captions: List[str],
-    gold_captions: List[str],
+    generated_captions: list[str],
+    gold_captions: list[str],
     threshold: float = _BLEU1_THRESHOLD,
 ) -> MetricResult:
     """Fraction of gold captions that have a matching generated caption (BLEU-1 ≥ threshold)."""
@@ -51,16 +49,14 @@ def frame_caption_recall(
         return MetricResult.empty("frame_caption_recall", "no gold captions")
 
     valid_pairs = [
-        (g, r) for g, r in zip(generated_captions, gold_captions)
+        (g, r)
+        for g, r in zip(generated_captions, gold_captions)
         if r and r not in ("TODO_fill_after_processing", "TODO")
     ]
     if not valid_pairs:
         return MetricResult.empty("frame_caption_recall", "all gold captions are TODO")
 
-    matches = sum(
-        1 for gen, ref in valid_pairs
-        if _bleu1_precision(gen, ref) >= threshold
-    )
+    matches = sum(1 for gen, ref in valid_pairs if _bleu1_precision(gen, ref) >= threshold)
     return MetricResult(
         name="frame_caption_recall",
         value=matches / len(valid_pairs),
@@ -69,7 +65,7 @@ def frame_caption_recall(
     )
 
 
-def caption_repetition_rate(captions: List[str]) -> MetricResult:
+def caption_repetition_rate(captions: list[str]) -> MetricResult:
     """Fraction of captions with a repetition loop (P1-9 BLIP bug detection)."""
     if not captions:
         return MetricResult.empty("caption_repetition_rate", "no captions")

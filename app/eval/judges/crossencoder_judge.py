@@ -9,6 +9,7 @@ Ragas metric → expected JSON output:
   answer_relevancy       → {"question":"..","noncommittal":0|1}
   context_precision      → {"reason":"..","verdict":"1"|"0"}
 """
+
 from __future__ import annotations
 
 import json
@@ -21,22 +22,26 @@ from langchain_core.prompt_values import PromptValue
 try:
     from ragas.llms.base import BaseRagasLLM
     from ragas.run_config import RunConfig
+
     RAGAS_AVAILABLE = True
 except ImportError:
     RAGAS_AVAILABLE = False
     BaseRagasLLM = object  # type: ignore
-    RunConfig = object     # type: ignore
+    RunConfig = object  # type: ignore
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _get_reranker():
     from app.core.model_loader import model_loader
+
     return model_loader.get_reranker()
 
 
 def _sigmoid(x: float) -> float:
     import math
+
     try:
         return 1.0 / (1.0 + math.exp(-float(x)))
     except (OverflowError, ValueError):
@@ -78,6 +83,7 @@ def _extract_list_field(text: str, field: str) -> list[str]:
 
 # ── Metric-specific scorers ───────────────────────────────────────────────────
 
+
 def _nli_statements(prompt_text: str) -> str:
     """
     Faithfulness NLI pass.
@@ -89,9 +95,14 @@ def _nli_statements(prompt_text: str) -> str:
 
     if not statements:
         # Try to parse from plain text
-        lines = [l.strip().strip("-").strip() for l in prompt_text.split("\n")
-                 if len(l.strip()) > 15 and not l.strip().startswith("{")
-                 and "task" not in l.lower() and "context" not in l.lower()[:10]]
+        lines = [
+            l.strip().strip("-").strip()
+            for l in prompt_text.split("\n")
+            if len(l.strip()) > 15
+            and not l.strip().startswith("{")
+            and "task" not in l.lower()
+            and "context" not in l.lower()[:10]
+        ]
         statements = lines[:6]
 
     if not context:
@@ -106,11 +117,13 @@ def _nli_statements(prompt_text: str) -> str:
     results = []
     for stmt, score in zip(statements, scores):
         verdict = 1 if score > 0.45 else 0
-        results.append({
-            "statement": stmt,
-            "reason": f"Semantic similarity to context: {score:.3f}",
-            "verdict": verdict,
-        })
+        results.append(
+            {
+                "statement": stmt,
+                "reason": f"Semantic similarity to context: {score:.3f}",
+                "verdict": verdict,
+            }
+        )
     return json.dumps(results)
 
 
@@ -121,7 +134,9 @@ def _decompose_statements(prompt_text: str) -> str:
     Output: [{"sentence_index":0,"simpler_statements":["..."]}]
     """
     # Extract sentences from the prompt
-    sentences_match = re.search(r'sentences["\s:]+(.+?)(?:analysis|$)', prompt_text, re.DOTALL | re.IGNORECASE)
+    sentences_match = re.search(
+        r'sentences["\s:]+(.+?)(?:analysis|$)', prompt_text, re.DOTALL | re.IGNORECASE
+    )
     if sentences_match:
         raw = sentences_match.group(1)
         # Parse "0:sentence text" format
@@ -129,10 +144,12 @@ def _decompose_statements(prompt_text: str) -> str:
         results = []
         for idx, sentence in indexed:
             sentence = sentence.strip()
-            results.append({
-                "sentence_index": int(idx),
-                "simpler_statements": [sentence] if sentence else [],
-            })
+            results.append(
+                {
+                    "sentence_index": int(idx),
+                    "simpler_statements": [sentence] if sentence else [],
+                }
+            )
         if results:
             return json.dumps(results)
 
@@ -143,10 +160,11 @@ def _decompose_statements(prompt_text: str) -> str:
 
     sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', answer) if len(s.strip()) > 5]
     results = [
-        {"sentence_index": i, "simpler_statements": [s]}
-        for i, s in enumerate(sentences[:5])
+        {"sentence_index": i, "simpler_statements": [s]} for i, s in enumerate(sentences[:5])
     ]
-    return json.dumps(results if results else [{"sentence_index": 0, "simpler_statements": [answer[:100]]}])
+    return json.dumps(
+        results if results else [{"sentence_index": 0, "simpler_statements": [answer[:100]]}]
+    )
 
 
 def _answer_relevancy(prompt_text: str) -> str:
@@ -163,9 +181,16 @@ def _answer_relevancy(prompt_text: str) -> str:
 
     # Detect noncommittal answers
     noncommittal_phrases = [
-        "i don't know", "i'm not sure", "i cannot", "no information",
-        "not found in", "unable to", "i do not have", "no relevant",
-        "cannot find", "not available",
+        "i don't know",
+        "i'm not sure",
+        "i cannot",
+        "no information",
+        "not found in",
+        "unable to",
+        "i do not have",
+        "no relevant",
+        "cannot find",
+        "not available",
     ]
     is_noncommittal = any(p in answer.lower() for p in noncommittal_phrases)
 
@@ -180,10 +205,12 @@ def _answer_relevancy(prompt_text: str) -> str:
     q = re.sub(r'[.!?]+$', '', answer[:80]).strip()
     question = q + "?" if q else "What is described?"
 
-    return json.dumps({
-        "question": question,
-        "noncommittal": 1 if is_noncommittal else 0,
-    })
+    return json.dumps(
+        {
+            "question": question,
+            "noncommittal": 1 if is_noncommittal else 0,
+        }
+    )
 
 
 def _context_precision(prompt_text: str) -> str:
@@ -193,8 +220,8 @@ def _context_precision(prompt_text: str) -> str:
     Output: {"reason":"..","verdict":"1"|"0"}
     """
     question = _extract_field(prompt_text, "question")
-    answer   = _extract_field(prompt_text, "answer")
-    context  = _extract_field(prompt_text, "context")
+    answer = _extract_field(prompt_text, "answer")
+    context = _extract_field(prompt_text, "context")
 
     if not context:
         context = prompt_text[:400]
@@ -206,13 +233,16 @@ def _context_precision(prompt_text: str) -> str:
     score = scores[0]
 
     verdict = "1" if score > 0.35 else "0"
-    return json.dumps({
-        "reason": f"Context relevance score: {score:.3f}",
-        "verdict": verdict,
-    })
+    return json.dumps(
+        {
+            "reason": f"Context relevance score: {score:.3f}",
+            "verdict": verdict,
+        }
+    )
 
 
 # ── Prompt type detector ──────────────────────────────────────────────────────
+
 
 def _detect_and_score(prompt_text: str) -> str:
     """Detect which Ragas metric is being scored and return correct JSON."""
@@ -246,6 +276,7 @@ def _detect_and_score(prompt_text: str) -> str:
 
 # ── Ragas-compatible judge class ──────────────────────────────────────────────
 
+
 class CrossEncoderJudge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: ignore
     """
     Ragas-compatible judge using CrossEncoder on GPU.
@@ -253,7 +284,7 @@ class CrossEncoderJudge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: i
     No external API. No extra GPU memory.
     """
 
-    def __init__(self, run_config: t.Optional[t.Any] = None):
+    def __init__(self, run_config: t.Any | None = None):
         if RAGAS_AVAILABLE:
             cfg = run_config or RunConfig(max_workers=1, timeout=120)
             super().__init__(run_config=cfg)
@@ -262,27 +293,26 @@ class CrossEncoderJudge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: i
         self,
         prompt: PromptValue,
         n: int = 1,
-        temperature: t.Optional[float] = None,
-        stop: t.Optional[t.List[str]] = None,
+        temperature: float | None = None,
+        stop: list[str] | None = None,
         callbacks: t.Any = None,
     ) -> LLMResult:
         text = prompt.to_string() if hasattr(prompt, "to_string") else str(prompt)
-        out  = _detect_and_score(text)
+        out = _detect_and_score(text)
         return LLMResult(generations=[[Generation(text=out)] for _ in range(n)])
 
     async def agenerate_text(
         self,
         prompt: PromptValue,
         n: int = 1,
-        temperature: t.Optional[float] = None,
-        stop: t.Optional[t.List[str]] = None,
+        temperature: float | None = None,
+        stop: list[str] | None = None,
         callbacks: t.Any = None,
     ) -> LLMResult:
         import asyncio
+
         text = prompt.to_string() if hasattr(prompt, "to_string") else str(prompt)
-        out  = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: _detect_and_score(text)
-        )
+        out = await asyncio.get_event_loop().run_in_executor(None, lambda: _detect_and_score(text))
         return LLMResult(generations=[[Generation(text=out)] for _ in range(n)])
 
     def set_run_config(self, run_config: t.Any) -> None:
@@ -290,7 +320,7 @@ class CrossEncoderJudge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: i
             super().set_run_config(run_config)
 
 
-def get_judge() -> "CrossEncoderJudge":
+def get_judge() -> CrossEncoderJudge:
     if not RAGAS_AVAILABLE:
         raise ImportError("ragas is not installed")
     return CrossEncoderJudge()

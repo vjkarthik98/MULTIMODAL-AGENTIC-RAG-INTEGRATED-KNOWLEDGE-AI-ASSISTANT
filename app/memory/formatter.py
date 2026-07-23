@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import time
 import unicodedata
-from typing import Dict, List, Optional, Any
+from typing import Any
 
 import structlog
 from opentelemetry import trace
@@ -32,6 +32,7 @@ _semaphore = asyncio.Semaphore(5)
 
 # NORMALIZE TEXT
 
+
 def _clean(text: str) -> str:
     text = unicodedata.normalize("NFC", str(text or ""))
     return " ".join(text.strip().split())
@@ -39,22 +40,25 @@ def _clean(text: str) -> str:
 
 # TRUNCATE
 
+
 def _truncate(text: str, limit: int) -> str:
     if not text:
         return ""
-    return text[:max(limit, 0)]
+    return text[: max(limit, 0)]
 
 
 # SHA-256 HASH FOR DEDUP
 
-def _hash(msg: Dict) -> str:
+
+def _hash(msg: dict) -> str:
     base = f"{msg.get('role')}|{str(msg.get('content'))[:200]}"
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 
 # RELATIVE TIME LABEL
 
-def _relative_time(ts: Any) -> Optional[str]:
+
+def _relative_time(ts: Any) -> str | None:
     try:
         age = time.time() - float(ts)
         if age < 60:
@@ -70,19 +74,30 @@ def _relative_time(ts: Any) -> Optional[str]:
 
 # PII SCRUB — STRIP SENSITIVE CONTENT BEFORE FORMATTING FOR PROMPT
 
+
 def _scrub_pii(text: str) -> str:
     if not settings.PII_DETECTION_ENABLED:
         return text
     try:
         from presidio_analyzer import AnalyzerEngine
         from presidio_anonymizer import AnonymizerEngine
-        entities   = getattr(settings, "PII_ENTITIES", [
-            "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER",
-            "US_SSN", "CREDIT_CARD", "LOCATION", "IP_ADDRESS",
-        ])
-        analyzer   = AnalyzerEngine()
+
+        entities = getattr(
+            settings,
+            "PII_ENTITIES",
+            [
+                "PERSON",
+                "EMAIL_ADDRESS",
+                "PHONE_NUMBER",
+                "US_SSN",
+                "CREDIT_CARD",
+                "LOCATION",
+                "IP_ADDRESS",
+            ],
+        )
+        analyzer = AnalyzerEngine()
         anonymizer = AnonymizerEngine()
-        results    = analyzer.analyze(text=text, entities=entities, language="en")
+        results = analyzer.analyze(text=text, entities=entities, language="en")
         if results:
             text = anonymizer.anonymize(text=text, analyzer_results=results).text
     except ImportError:
@@ -94,7 +109,8 @@ def _scrub_pii(text: str) -> str:
 
 # FORMAT SINGLE MESSAGE
 
-def _format_message(msg: Dict, per_msg_limit: int, scrub: bool = False) -> str:
+
+def _format_message(msg: dict, per_msg_limit: int, scrub: bool = False) -> str:
     try:
         role = str(msg.get("role", "user")).lower()
         if role not in {"user", "assistant", "system"}:
@@ -108,9 +124,9 @@ def _format_message(msg: Dict, per_msg_limit: int, scrub: bool = False) -> str:
         if scrub:
             content = _scrub_pii(content)
 
-        modality  = msg.get("modality", "text")
-        ts        = msg.get("timestamp")
-        language  = msg.get("language")
+        modality = msg.get("modality", "text")
+        ts = msg.get("timestamp")
+        language = msg.get("language")
         importance = msg.get("importance", 0.5)
 
         meta = f"[{role.upper()}]"
@@ -139,9 +155,10 @@ def _format_message(msg: Dict, per_msg_limit: int, scrub: bool = False) -> str:
 
 # DEDUP BY CONTENT HASH
 
-def _dedup(messages: List[Dict]) -> List[Dict]:
-    seen: set        = set()
-    out:  List[Dict] = []
+
+def _dedup(messages: list[dict]) -> list[dict]:
+    seen: set = set()
+    out: list[dict] = []
     for m in messages:
         try:
             h = _hash(m)
@@ -156,19 +173,22 @@ def _dedup(messages: List[Dict]) -> List[Dict]:
 
 # IMPORTANCE SORT — HIGHER IMPORTANCE FLOATS TO TOP
 
-def _sort_by_importance(messages: List[Dict]) -> List[Dict]:
-    def _imp(m: Dict) -> float:
+
+def _sort_by_importance(messages: list[dict]) -> list[dict]:
+    def _imp(m: dict) -> float:
         try:
             return float(m.get("importance", 0.5))
         except Exception:
             return 0.5
+
     return sorted(messages, key=_imp, reverse=True)
 
 
 # GROUP MESSAGES BY MODALITY FOR STRUCTURED OUTPUT
 
-def _group_by_modality(messages: List[Dict]) -> Dict[str, List[Dict]]:
-    groups: Dict[str, List[Dict]] = {}
+
+def _group_by_modality(messages: list[dict]) -> dict[str, list[dict]]:
+    groups: dict[str, list[dict]] = {}
     for m in messages:
         mod = m.get("modality", "text")
         if mod not in groups:
@@ -179,9 +199,10 @@ def _group_by_modality(messages: List[Dict]) -> Dict[str, List[Dict]]:
 
 # MAIN SYNC FORMAT HISTORY
 
+
 def format_history(
-    history: List[Dict],
-    max_messages: Optional[int] = None,
+    history: list[dict],
+    max_messages: int | None = None,
     include_system: bool = True,
     session_id: str = "default",
     scrub_pii: bool = True,
@@ -191,7 +212,7 @@ def format_history(
     if not history:
         return ""
 
-    start        = time.time()
+    start = time.time()
     max_messages = max_messages or settings.MAX_HISTORY_MESSAGES
 
     with tracer.start_as_current_span("format_history") as span:
@@ -207,8 +228,8 @@ def format_history(
 
             history = _dedup(history)
 
-            system_msgs: List[Dict] = []
-            normal_msgs: List[Dict] = []
+            system_msgs: list[dict] = []
+            normal_msgs: list[dict] = []
 
             for msg in history:
                 if not isinstance(msg, dict):
@@ -222,12 +243,12 @@ def format_history(
             normal_msgs = normal_msgs[-max_messages:]
             normal_msgs = _sort_by_importance(normal_msgs)
 
-            parts: List[str] = ["[CONVERSATION MEMORY]"]
+            parts: list[str] = ["[CONVERSATION MEMORY]"]
 
             # SYSTEM MESSAGES
             if include_system and system_msgs:
                 parts.append("\n[SYSTEM]")
-                for m in system_msgs[-settings.MAX_SYSTEM_MESSAGES:]:
+                for m in system_msgs[-settings.MAX_SYSTEM_MESSAGES :]:
                     fm = _format_message(m, per_msg_limit, scrub=scrub_pii)
                     if fm:
                         parts.append(fm)
@@ -253,12 +274,8 @@ def format_history(
 
             # SAFE TRUNCATION WITH HEAD + TAIL PRESERVATION
             if len(result) > settings.MAX_PROMPT_CHARS:
-                split  = int(settings.MAX_PROMPT_CHARS * 0.7)
-                result = (
-                    result[:split] +
-                    "\n...\n" +
-                    result[-(settings.MAX_PROMPT_CHARS - split):]
-                )
+                split = int(settings.MAX_PROMPT_CHARS * 0.7)
+                result = result[:split] + "\n...\n" + result[-(settings.MAX_PROMPT_CHARS - split) :]
                 logger.warning(
                     "formatter_truncated",
                     session_id=session_id,
@@ -286,7 +303,7 @@ def format_history(
             return result
 
         except Exception as exc:
-            latency    = round(time.time() - start, 3)
+            latency = round(time.time() - start, 3)
             error_type = type(exc).__name__
 
             _format_duration.labels(status="error").observe(latency)
@@ -306,9 +323,10 @@ def format_history(
 
 # ASYNC WRAPPER
 
+
 async def format_history_async(
-    history: List[Dict],
-    max_messages: Optional[int] = None,
+    history: list[dict],
+    max_messages: int | None = None,
     include_system: bool = True,
     session_id: str = "default",
     scrub_pii: bool = True,
@@ -327,5 +345,3 @@ async def format_history_async(
                 group_by_modality,
             ),
         )
-
-

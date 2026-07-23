@@ -12,7 +12,6 @@
 # max_steps as an enforced bound anywhere else in the codebase or docs.
 import asyncio
 import time
-from typing import Any, Dict, List, Optional
 
 import structlog
 from opentelemetry import trace
@@ -20,12 +19,12 @@ from opentelemetry.trace import Status, StatusCode
 from prometheus_client import Counter, Histogram
 
 from app.agents.agent_schema import (
+    COST_HIGH,
+    COST_LOW,
+    COST_MEDIUM,
     AgentDecision,
     ExecutionPlan,
     ExecutionStep,
-    COST_LOW,
-    COST_MEDIUM,
-    COST_HIGH,
 )
 from app.core.config import settings
 
@@ -53,23 +52,23 @@ _plan_steps_count = Histogram(
 _semaphore = asyncio.Semaphore(5)
 
 # STEP COST MAP
-_STEP_COSTS: Dict[str, str] = {
-    "reason":    COST_HIGH,
-    "rag":       COST_MEDIUM,
-    "search":    COST_HIGH,
-    "memory":    COST_LOW,
+_STEP_COSTS: dict[str, str] = {
+    "reason": COST_HIGH,
+    "rag": COST_MEDIUM,
+    "search": COST_HIGH,
+    "memory": COST_LOW,
     "decompose": COST_MEDIUM,
-    "fusion":    COST_MEDIUM,
+    "fusion": COST_MEDIUM,
 }
 
 # DEPENDENCY MAP — WHICH STEPS REQUIRE PRIOR STEPS
-_STEP_DEPENDENCIES: Dict[str, List[str]] = {
-    "reason":   ["rag", "search", "memory", "fusion"],
-    "fusion":   ["rag", "decompose"],
+_STEP_DEPENDENCIES: dict[str, list[str]] = {
+    "reason": ["rag", "search", "memory", "fusion"],
+    "fusion": ["rag", "decompose"],
     "decompose": [],
-    "rag":      [],
-    "search":   [],
-    "memory":   [],
+    "rag": [],
+    "search": [],
+    "memory": [],
 }
 
 
@@ -87,7 +86,7 @@ class Planner:
         if not decision or not getattr(decision, "action", None):
             return self._fallback("invalid_decision", session_id)
 
-        action  = decision.action.strip().lower()
+        action = decision.action.strip().lower()
         signals = decision.signals or {}
 
         start = time.time()
@@ -151,7 +150,7 @@ class Planner:
                 return plan
 
             except Exception as exc:
-                latency    = round(time.time() - start, 3)
+                latency = round(time.time() - start, 3)
                 error_type = type(exc).__name__
 
                 _plan_duration.labels(action=action, status="error").observe(latency)
@@ -171,14 +170,12 @@ class Planner:
 
     # DIRECT PLAN — SIMPLE LLM ANSWER WITHOUT RETRIEVAL
 
-    def _direct(self, signals: Dict) -> ExecutionPlan:
+    def _direct(self, signals: dict) -> ExecutionPlan:
         is_code = signals.get("is_code", False)
         is_math = signals.get("is_math", False)
 
         description = (
-            "Code reasoning"   if is_code else
-            "Math reasoning"   if is_math else
-            "Direct reasoning"
+            "Code reasoning" if is_code else "Math reasoning" if is_math else "Direct reasoning"
         )
 
         return ExecutionPlan(
@@ -191,7 +188,7 @@ class Planner:
                 )
             ],
             trace={
-                "type":    "direct",
+                "type": "direct",
                 "is_code": is_code,
                 "is_math": is_math,
             },
@@ -199,11 +196,11 @@ class Planner:
 
     # SEARCH PLAN — WEB SEARCH THEN REASON
 
-    def _search(self, signals: Dict) -> ExecutionPlan:
-        is_complex  = signals.get("is_complex", False)
+    def _search(self, signals: dict) -> ExecutionPlan:
+        is_complex = signals.get("is_complex", False)
         is_reasoning = signals.get("is_reasoning", False)
 
-        steps: List[ExecutionStep] = [
+        steps: list[ExecutionStep] = [
             ExecutionStep(
                 tool="search",
                 description="External web retrieval",
@@ -236,7 +233,7 @@ class Planner:
         return ExecutionPlan(
             steps=steps,
             trace={
-                "type":       "search",
+                "type": "search",
                 "is_complex": is_complex,
                 "is_reasoning": is_reasoning,
             },
@@ -244,10 +241,10 @@ class Planner:
 
     # MEMORY PLAN — RECALL PREVIOUS CONVERSATION THEN REASON
 
-    def _memory(self, signals: Dict) -> ExecutionPlan:
-        is_complex  = signals.get("is_complex", False)
+    def _memory(self, signals: dict) -> ExecutionPlan:
+        is_complex = signals.get("is_complex", False)
 
-        steps: List[ExecutionStep] = [
+        steps: list[ExecutionStep] = [
             ExecutionStep(
                 tool="memory",
                 description="Fetch relevant session memory",
@@ -279,20 +276,20 @@ class Planner:
         return ExecutionPlan(
             steps=steps,
             trace={
-                "type":       "memory",
+                "type": "memory",
                 "is_complex": is_complex,
             },
         )
 
     # RAG PLAN — RETRIEVE THEN REASON
 
-    def _rag(self, signals: Dict) -> ExecutionPlan:
-        steps: List[ExecutionStep] = []
+    def _rag(self, signals: dict) -> ExecutionPlan:
+        steps: list[ExecutionStep] = []
 
-        is_complex     = signals.get("is_complex",          False)
-        is_reasoning   = signals.get("is_reasoning",        False)
-        is_multimodal  = signals.get("has_multimodal_hint", False)
-        multi_question = signals.get("multi_question",      False)
+        is_complex = signals.get("is_complex", False)
+        is_reasoning = signals.get("is_reasoning", False)
+        is_multimodal = signals.get("has_multimodal_hint", False)
+        multi_question = signals.get("multi_question", False)
 
         # DECOMPOSE FOR COMPLEX OR MULTI-HOP QUERIES
         if is_complex or is_reasoning or multi_question:
@@ -337,24 +334,24 @@ class Planner:
         return ExecutionPlan(
             steps=self._optimize(steps),
             trace={
-                "type":           "rag",
-                "complex":        is_complex,
-                "reasoning":      is_reasoning,
-                "multimodal":     is_multimodal,
+                "type": "rag",
+                "complex": is_complex,
+                "reasoning": is_reasoning,
+                "multimodal": is_multimodal,
                 "multi_question": multi_question,
             },
         )
 
     # HYBRID PLAN — MEMORY + RAG + SEARCH COMBINED
 
-    def _hybrid(self, signals: Dict) -> ExecutionPlan:
-        steps: List[ExecutionStep] = []
+    def _hybrid(self, signals: dict) -> ExecutionPlan:
+        steps: list[ExecutionStep] = []
 
-        is_complex     = signals.get("is_complex",          False)
-        is_reasoning   = signals.get("is_reasoning",        False)
-        is_multimodal  = signals.get("has_multimodal_hint", False)
-        is_recent      = signals.get("is_recent",           False)
-        multi_question = signals.get("multi_question",      False)
+        is_complex = signals.get("is_complex", False)
+        is_reasoning = signals.get("is_reasoning", False)
+        is_multimodal = signals.get("has_multimodal_hint", False)
+        is_recent = signals.get("is_recent", False)
+        multi_question = signals.get("multi_question", False)
 
         # ALWAYS FETCH MEMORY FIRST IN HYBRID
         steps.append(
@@ -418,20 +415,20 @@ class Planner:
         return ExecutionPlan(
             steps=self._optimize(steps),
             trace={
-                "type":           "hybrid",
-                "complex":        is_complex,
-                "reasoning":      is_reasoning,
-                "multimodal":     is_multimodal,
-                "is_recent":      is_recent,
+                "type": "hybrid",
+                "complex": is_complex,
+                "reasoning": is_reasoning,
+                "multimodal": is_multimodal,
+                "is_recent": is_recent,
                 "multi_question": multi_question,
             },
         )
 
     # OPTIMIZE — DEDUP STEPS AND APPLY DEPENDENCY ORDERING
 
-    def _optimize(self, steps: List[ExecutionStep]) -> List[ExecutionStep]:
-        seen:    set                   = set()
-        ordered: List[ExecutionStep]   = []
+    def _optimize(self, steps: list[ExecutionStep]) -> list[ExecutionStep]:
+        seen: set = set()
+        ordered: list[ExecutionStep] = []
 
         for s in steps:
             if s.tool not in seen:
@@ -447,15 +444,15 @@ class Planner:
 
     def _order_by_dependencies(
         self,
-        steps: List[ExecutionStep],
-    ) -> List[ExecutionStep]:
+        steps: list[ExecutionStep],
+    ) -> list[ExecutionStep]:
         """
         TOPOLOGICAL SORT — STEPS THAT DEPEND ON OTHERS
         ARE PLACED AFTER THEIR DEPENDENCIES.
         """
         tool_names = {s.tool for s in steps}
-        ordered:   List[ExecutionStep] = []
-        placed:    set                 = set()
+        ordered: list[ExecutionStep] = []
+        placed: set = set()
 
         def _place(step: ExecutionStep) -> None:
             if step.tool in placed:
@@ -475,7 +472,7 @@ class Planner:
 
     # LIMIT — CAP STEPS AT MAX_STEPS
 
-    def _limit(self, steps: List[ExecutionStep]) -> List[ExecutionStep]:
+    def _limit(self, steps: list[ExecutionStep]) -> list[ExecutionStep]:
         max_steps = settings.AGENT_MAX_STEPS
 
         if len(steps) > max_steps:
@@ -490,45 +487,88 @@ class Planner:
 
     # FINANCE PLAN ARCHETYPES (Phase 7)
 
-    def _finance_earnings_analysis(self, signals: Dict) -> ExecutionPlan:
+    def _finance_earnings_analysis(self, signals: dict) -> ExecutionPlan:
         """Archetype: earnings_analysis — audio transcript + PDF + reason."""
         return ExecutionPlan(
-            steps=self._optimize([
-                ExecutionStep(tool="rag",    description="Retrieve audio/transcript chunks (earnings call)", cost=COST_MEDIUM),
-                ExecutionStep(tool="rag",    description="Retrieve PDF supplemental (earnings release/10-Q)", cost=COST_MEDIUM),
-                ExecutionStep(tool="fusion", description="Merge audio and document results", optional=True, cost=COST_MEDIUM),
-                ExecutionStep(tool="reason", description="Speaker-attributed earnings analysis", cost=COST_HIGH),
-            ]),
+            steps=self._optimize(
+                [
+                    ExecutionStep(
+                        tool="rag",
+                        description="Retrieve audio/transcript chunks (earnings call)",
+                        cost=COST_MEDIUM,
+                    ),
+                    ExecutionStep(
+                        tool="rag",
+                        description="Retrieve PDF supplemental (earnings release/10-Q)",
+                        cost=COST_MEDIUM,
+                    ),
+                    ExecutionStep(
+                        tool="fusion",
+                        description="Merge audio and document results",
+                        optional=True,
+                        cost=COST_MEDIUM,
+                    ),
+                    ExecutionStep(
+                        tool="reason",
+                        description="Speaker-attributed earnings analysis",
+                        cost=COST_HIGH,
+                    ),
+                ]
+            ),
             trace={"type": "finance_earnings_analysis"},
         )
 
-    def _finance_regulatory(self, signals: Dict) -> ExecutionPlan:
+    def _finance_regulatory(self, signals: dict) -> ExecutionPlan:
         """Archetype: regulatory_filing — PDF/DOCX KB + reason."""
         return ExecutionPlan(
-            steps=self._optimize([
-                ExecutionStep(tool="rag",    description="Retrieve regulatory filing from KB (PDF/DOCX)", cost=COST_MEDIUM),
-                ExecutionStep(tool="reason", description="Regulatory filing analysis", cost=COST_HIGH),
-            ]),
+            steps=self._optimize(
+                [
+                    ExecutionStep(
+                        tool="rag",
+                        description="Retrieve regulatory filing from KB (PDF/DOCX)",
+                        cost=COST_MEDIUM,
+                    ),
+                    ExecutionStep(
+                        tool="reason", description="Regulatory filing analysis", cost=COST_HIGH
+                    ),
+                ]
+            ),
             trace={"type": "finance_regulatory"},
         )
 
-    def _finance_model(self, signals: Dict) -> ExecutionPlan:
+    def _finance_model(self, signals: dict) -> ExecutionPlan:
         """Archetype: financial_model — table/assumptions chunks + reason."""
         return ExecutionPlan(
-            steps=self._optimize([
-                ExecutionStep(tool="rag",    description="Retrieve table and assumption chunks", cost=COST_MEDIUM),
-                ExecutionStep(tool="reason", description="Financial model analysis", cost=COST_HIGH),
-            ]),
+            steps=self._optimize(
+                [
+                    ExecutionStep(
+                        tool="rag",
+                        description="Retrieve table and assumption chunks",
+                        cost=COST_MEDIUM,
+                    ),
+                    ExecutionStep(
+                        tool="reason", description="Financial model analysis", cost=COST_HIGH
+                    ),
+                ]
+            ),
             trace={"type": "finance_financial_model"},
         )
 
-    def _finance_market_data(self, signals: Dict) -> ExecutionPlan:
+    def _finance_market_data(self, signals: dict) -> ExecutionPlan:
         """Archetype: market_data — live web search + reason."""
         return ExecutionPlan(
-            steps=self._optimize([
-                ExecutionStep(tool="search", description="Retrieve live market data (finance topic)", cost=COST_HIGH),
-                ExecutionStep(tool="reason", description="Market data synthesis", cost=COST_HIGH),
-            ]),
+            steps=self._optimize(
+                [
+                    ExecutionStep(
+                        tool="search",
+                        description="Retrieve live market data (finance topic)",
+                        cost=COST_HIGH,
+                    ),
+                    ExecutionStep(
+                        tool="reason", description="Market data synthesis", cost=COST_HIGH
+                    ),
+                ]
+            ),
             trace={"type": "finance_market_data"},
         )
 
@@ -570,5 +610,3 @@ class Planner:
                 None,
                 lambda: self.create_plan(decision, query, session_id),
             )
-
-

@@ -3,18 +3,18 @@
 Measures whether AgentController.handle() returns the expected decision.action.
 Also tracks the P1-4 probe: when decision=hybrid, web sources MUST be present.
 """
+
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any
 
 from app.eval.metrics.base import MetricResult
-
 
 VALID_ROUTES = {"rag", "search", "memory", "direct", "hybrid"}
 
 
-def route_accuracy(results: List[Dict[str, Any]]) -> MetricResult:
+def route_accuracy(results: list[dict[str, Any]]) -> MetricResult:
     """Fraction of queries where decision.action == expected_route.
 
     results: [{"expected_route": str, "actual_route": str, "query": str}]
@@ -22,10 +22,7 @@ def route_accuracy(results: List[Dict[str, Any]]) -> MetricResult:
     if not results:
         return MetricResult.empty("route_accuracy", "no routing results")
 
-    correct = sum(
-        1 for r in results
-        if r.get("actual_route") == r.get("expected_route")
-    )
+    correct = sum(1 for r in results if r.get("actual_route") == r.get("expected_route"))
     value = correct / len(results)
     wrong = [
         f"  '{r.get('query', '')[:50]}' expected={r.get('expected_route')} got={r.get('actual_route')}"
@@ -38,9 +35,9 @@ def route_accuracy(results: List[Dict[str, Any]]) -> MetricResult:
     return MetricResult(name="route_accuracy", value=value, n=len(results), notes=notes)
 
 
-def confusion_matrix(results: List[Dict[str, Any]]) -> Dict[str, Dict[str, int]]:
+def confusion_matrix(results: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
     """Returns {expected_route: {actual_route: count}} dict."""
-    matrix: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    matrix: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for r in results:
         exp = r.get("expected_route", "unknown")
         act = r.get("actual_route", "unknown")
@@ -48,7 +45,7 @@ def confusion_matrix(results: List[Dict[str, Any]]) -> Dict[str, Dict[str, int]]
     return {k: dict(v) for k, v in matrix.items()}
 
 
-def hybrid_with_web_rate(results: List[Dict[str, Any]]) -> MetricResult:
+def hybrid_with_web_rate(results: list[dict[str, Any]]) -> MetricResult:
     """Fraction of hybrid-route results that actually contain web sources.
 
     Catches P1-4: system labels decision=hybrid but returns zero web results.
@@ -62,6 +59,10 @@ def hybrid_with_web_rate(results: List[Dict[str, Any]]) -> MetricResult:
     value = with_web / len(hybrid_results)
     notes = f"hybrid_with_web={with_web}/{len(hybrid_results)}"
     if with_web < len(hybrid_results):
-        missing = [r.get("query", "")[:50] for r in hybrid_results if r.get("web_source_count", 0) == 0]
+        missing = [
+            r.get("query", "")[:50] for r in hybrid_results if r.get("web_source_count", 0) == 0
+        ]
         notes += f" | P1-4 misses: {missing[:3]}"
-    return MetricResult(name="hybrid_with_web_rate", value=value, n=len(hybrid_results), notes=notes)
+    return MetricResult(
+        name="hybrid_with_web_rate", value=value, n=len(hybrid_results), notes=notes
+    )

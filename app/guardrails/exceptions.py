@@ -4,6 +4,7 @@ GuardrailBlocked is raised by InputGuard or OutputGuard whenever a
 request or response violates policy. The caller (API layer or pipeline)
 catches it and converts it to the appropriate HTTP / response shape.
 """
+
 from __future__ import annotations
 
 

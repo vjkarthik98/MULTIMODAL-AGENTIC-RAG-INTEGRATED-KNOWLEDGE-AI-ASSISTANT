@@ -5,7 +5,7 @@ import hashlib
 import time
 import unicodedata
 from collections import deque
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -13,11 +13,13 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-# PROMETHEUS METRICS 
+# PROMETHEUS METRICS
+
 
 def _get_metrics():
     try:
-        from prometheus_client import Counter, Histogram, Gauge
+        from prometheus_client import Counter, Gauge, Histogram
+
         memory_ops = Counter(
             "memory_operations_total",
             "Memory operations by type and store",
@@ -33,15 +35,15 @@ def _get_metrics():
             "Number of messages in memory per session",
         )
         return {
-            "memory_ops":     memory_ops,
+            "memory_ops": memory_ops,
             "memory_latency": memory_latency,
-            "memory_size":    memory_size,
+            "memory_size": memory_size,
         }
     except Exception:
         return {}
 
 
-_METRICS: Dict[str, Any] = {}
+_METRICS: dict[str, Any] = {}
 
 if settings.PROMETHEUS_ENABLED:
     try:
@@ -76,6 +78,7 @@ def _set_memory_size(size: int) -> None:
 
 # NORMALIZE TEXT — SECTION 2.3
 
+
 def _normalize(text: str) -> str:
     text = unicodedata.normalize("NFC", str(text or ""))
     text = text.replace("\x00", "")
@@ -85,12 +88,14 @@ def _normalize(text: str) -> str:
 
 # MESSAGE HASH FOR DEDUP — SECTION 2.2
 
-def _hash_msg(msg: Dict[str, Any]) -> str:
+
+def _hash_msg(msg: dict[str, Any]) -> str:
     base = f"{msg.get('role')}|{str(msg.get('content', ''))[:200]}"
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 
 # CONTENT VALIDATOR
+
 
 def _valid_content(content: str) -> bool:
     return isinstance(content, str) and len(content.strip()) > 2
@@ -98,9 +103,10 @@ def _valid_content(content: str) -> bool:
 
 # DEDUP MESSAGES
 
-def _dedup(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    seen: set                  = set()
-    out:  List[Dict[str, Any]] = []
+
+def _dedup(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set = set()
+    out: list[dict[str, Any]] = []
     for msg in history:
         try:
             h = _hash_msg(msg)
@@ -117,13 +123,14 @@ def _dedup(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # deque.appendleft() keeps chronological order in a single O(n) pass,
 # eliminating the second list(reversed(...)) allocation of the prior version.
 
-def _apply_sliding_window(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+
+def _apply_sliding_window(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     max_tokens = settings.SLIDING_WINDOW_MAX_TOKENS
-    total      = 0
+    total = 0
     window: deque = deque()
 
     for msg in reversed(history):
-        content   = str(msg.get("content", ""))
+        content = str(msg.get("content", ""))
         token_est = max(1, len(content) // 4)
         if total + token_est > max_tokens:
             break
@@ -135,18 +142,20 @@ def _apply_sliding_window(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
 # MEMORY MANAGER CLASS
 
+
 class MemoryManager:
 
     def __init__(
         self,
-        redis_memory:  Optional[Any] = None,
-        mongo_memory:  Optional[Any] = None,
+        redis_memory: Any | None = None,
+        mongo_memory: Any | None = None,
     ) -> None:
 
         # LAZY RESOLUTION FROM INFRA REGISTRY
         if redis_memory is None:
             try:
                 from app.core.infra_registry import infra
+
                 redis_memory = infra.get_memory()
             except Exception as e:
                 logger.warning(event="redis_memory_init_failed", error=str(e))
@@ -155,6 +164,7 @@ class MemoryManager:
         if mongo_memory is None:
             try:
                 from app.core.infra_registry import infra
+
                 mongo_memory = infra.get_mongo()
             except Exception as e:
                 logger.warning(event="mongo_memory_init_failed", error=str(e))
@@ -162,19 +172,19 @@ class MemoryManager:
 
         self.redis_memory = redis_memory
         self.mongo_memory = mongo_memory
-        self._semaphore   = asyncio.Semaphore(settings.ASYNC_SEMAPHORE_WORKERS)
+        self._semaphore = asyncio.Semaphore(settings.ASYNC_SEMAPHORE_WORKERS)
 
     # ADD MESSAGE — SECTION 4.7
 
     def add_message(
         self,
-        session_id:  str,
-        role:        str,
-        content:     str,
-        modality:    str   = "text",
-        importance:  float = 1.0,
-        embedding:   Optional[List[float]] = None,
-        user_id:     Optional[str] = None,
+        session_id: str,
+        role: str,
+        content: str,
+        modality: str = "text",
+        importance: float = 1.0,
+        embedding: list[float] | None = None,
+        user_id: str | None = None,
     ) -> None:
 
         if not session_id:
@@ -185,19 +195,19 @@ class MemoryManager:
         if not _valid_content(content):
             return
 
-        content    = content[:settings.MAX_PROMPT_CHARS]
+        content = content[: settings.MAX_PROMPT_CHARS]
         importance = max(0.0, min(float(importance), 1.0))
-        role       = role.lower().strip()
+        role = role.lower().strip()
         if role not in {"user", "assistant", "system"}:
             role = "user"
 
-        message: Dict[str, Any] = {
-            "role":       role,
-            "content":    content,
-            "timestamp":  time.time(),
-            "modality":   modality,
+        message: dict[str, Any] = {
+            "role": role,
+            "content": content,
+            "timestamp": time.time(),
+            "modality": modality,
             "importance": importance,
-            "user_id":    user_id or None,
+            "user_id": user_id or None,
         }
 
         if embedding is not None and isinstance(embedding, list):
@@ -236,10 +246,10 @@ class MemoryManager:
     def add_interaction(
         self,
         session_id: str,
-        query:      str,
-        response:   str,
-        modality:   str = "text",
-        user_id:    Optional[str] = None,
+        query: str,
+        response: str,
+        modality: str = "text",
+        user_id: str | None = None,
     ) -> None:
         try:
             self.add_message(
@@ -268,10 +278,10 @@ class MemoryManager:
     async def add_interaction_async(
         self,
         session_id: str,
-        query:      str,
-        response:   str,
-        modality:   str = "text",
-        user_id:    Optional[str] = None,
+        query: str,
+        response: str,
+        modality: str = "text",
+        user_id: str | None = None,
     ) -> None:
         async with self._semaphore:
             await asyncio.get_running_loop().run_in_executor(
@@ -284,15 +294,15 @@ class MemoryManager:
     def get_history(
         self,
         session_id: str,
-        limit:      Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
 
-        limit   = limit or settings.MAX_HISTORY_MESSAGES
+        limit = limit or settings.MAX_HISTORY_MESSAGES
         t_start = time.time()
 
         try:
-            history: List[Dict[str, Any]] = []
-            source  = "empty"
+            history: list[dict[str, Any]] = []
+            source = "empty"
 
             # REDIS PRIMARY — SECTION 4.7
             if self.redis_memory:
@@ -300,7 +310,7 @@ class MemoryManager:
                     data = self.redis_memory.get(session_id)
                     if isinstance(data, list) and data:
                         history = data
-                        source  = "redis"
+                        source = "redis"
                         _record_op("get_history", "redis")
                 except Exception as e:
                     logger.warning(
@@ -316,13 +326,13 @@ class MemoryManager:
                     if isinstance(mongo_data, list) and mongo_data:
                         if not history:
                             history = mongo_data
-                            source  = "mongo"
+                            source = "mongo"
                             _record_op("get_history", "mongo")
                         else:
                             # MERGE + DEDUP — SECTION 4.7
                             combined = history + mongo_data
-                            history  = _dedup(combined)
-                            source   = "merged"
+                            history = _dedup(combined)
+                            source = "merged"
                             _record_op("get_history", "merged")
                 except Exception as e:
                     logger.warning(
@@ -368,8 +378,8 @@ class MemoryManager:
     async def get_history_async(
         self,
         session_id: str,
-        limit:      Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
         async with self._semaphore:
             return await asyncio.get_running_loop().run_in_executor(
                 None,
@@ -379,7 +389,7 @@ class MemoryManager:
     # CLEAR SESSION — SECTION 4.7
 
     def clear(self, session_id: str) -> None:
-        cleared: List[str] = []
+        cleared: list[str] = []
         t_start = time.time()
 
         try:
@@ -410,13 +420,13 @@ class MemoryManager:
 
     # GDPR PURGE — SECTION 4.7 / SECTION 5
 
-    def gdpr_purge(self, user_id: str) -> Dict[str, Any]:
-        purged: Dict[str, Any] = {
-            "user_id":      user_id,
-            "redis":        False,
-            "mongo":        False,
-            "errors":       [],
-            "purged_at":    time.time(),
+    def gdpr_purge(self, user_id: str) -> dict[str, Any]:
+        purged: dict[str, Any] = {
+            "user_id": user_id,
+            "redis": False,
+            "mongo": False,
+            "errors": [],
+            "purged_at": time.time(),
         }
 
         logger.info(event="gdpr_purge_start", user_id=user_id)
@@ -427,7 +437,7 @@ class MemoryManager:
                 self.redis_memory.delete(user_id)
                 # ALSO PURGE session-specific keys
                 if hasattr(self.redis_memory, "client") and self.redis_memory.client:
-                    prefix  = f"{settings.REDIS_KEY_PREFIX}:{user_id}"
+                    prefix = f"{settings.REDIS_KEY_PREFIX}:{user_id}"
                     try:
                         keys = self.redis_memory.client.keys(f"{prefix}*")
                         if keys:
@@ -470,7 +480,7 @@ class MemoryManager:
 
     # ASYNC GDPR PURGE — SECTION 4.7
 
-    async def gdpr_purge_async(self, user_id: str) -> Dict[str, Any]:
+    async def gdpr_purge_async(self, user_id: str) -> dict[str, Any]:
         async with self._semaphore:
             return await asyncio.get_running_loop().run_in_executor(
                 None,
@@ -482,10 +492,11 @@ class MemoryManager:
     def summarize_and_compress(
         self,
         session_id: str,
-        llm:        Any,
-    ) -> Optional[str]:
+        llm: Any,
+    ) -> str | None:
         try:
             from app.memory.summarizer import summarize_conversation
+
             history = self.get_history(session_id)
             if not history:
                 return None
@@ -518,22 +529,22 @@ class MemoryManager:
     def get_last_k(
         self,
         session_id: str,
-        k:          int,
-    ) -> List[Dict[str, Any]]:
+        k: int,
+    ) -> list[dict[str, Any]]:
         history = self.get_history(session_id, limit=k)
         return history[-k:] if history else []
 
     # GET CONTEXT AS STRING — SECTION 4.7
     # Always returns a string (may be empty). Never raises.
 
-    def get_context(self, session_id: str, limit: Optional[int] = None) -> str:
+    def get_context(self, session_id: str, limit: int | None = None) -> str:
         try:
             history = self.get_history(session_id, limit=limit)
             if not history:
                 return ""
-            parts: List[str] = []
+            parts: list[str] = []
             for msg in history:
-                role    = msg.get("role", "user").capitalize()
+                role = msg.get("role", "user").capitalize()
                 content = str(msg.get("content", "")).strip()
                 if content:
                     parts.append(f"{role}: {content}")
@@ -548,9 +559,9 @@ class MemoryManager:
     def store_turn(
         self,
         session_id: str,
-        query:      str,
-        response:   str,
-        modality:   str = "text",
+        query: str,
+        response: str,
+        modality: str = "text",
     ) -> None:
         try:
             self.add_interaction(session_id, query, response, modality=modality)
@@ -579,9 +590,9 @@ class MemoryManager:
 
     # HEALTH CHECK — SECTION 4.7
 
-    def health_check(self) -> Dict[str, Any]:
-        redis_health: Dict[str, Any] = {}
-        mongo_health: Dict[str, Any] = {}
+    def health_check(self) -> dict[str, Any]:
+        redis_health: dict[str, Any] = {}
+        mongo_health: dict[str, Any] = {}
 
         if self.redis_memory and hasattr(self.redis_memory, "health_check"):
             try:
@@ -598,7 +609,6 @@ class MemoryManager:
         return {
             "redis_available": self.redis_memory is not None,
             "mongo_available": self.mongo_memory is not None,
-            "redis_health":    redis_health,
-            "mongo_health":    mongo_health,
+            "redis_health": redis_health,
+            "mongo_health": mongo_health,
         }
-

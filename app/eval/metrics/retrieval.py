@@ -3,15 +3,15 @@
 All functions are pure — they take lists of IDs and return MetricResult.
 They never call the pipeline; the runner calls the pipeline and passes results here.
 """
+
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Set
 
 from app.eval.metrics.base import MetricResult
 
 
-def _relevant_set(relevant_chunk_ids: object) -> Set[str]:
+def _relevant_set(relevant_chunk_ids: object) -> set[str]:
     """Normalise the various gold-set shapes for relevant_chunk_ids."""
     if not relevant_chunk_ids:
         return set()
@@ -23,8 +23,8 @@ def _relevant_set(relevant_chunk_ids: object) -> Set[str]:
 
 
 def recall_at_k(
-    retrieved_ids: List[str],
-    relevant_ids: List[str],
+    retrieved_ids: list[str],
+    relevant_ids: list[str],
     k: int = 5,
 ) -> MetricResult:
     """Fraction of relevant documents retrieved in top-k."""
@@ -43,8 +43,8 @@ def recall_at_k(
 
 
 def precision_at_k(
-    retrieved_ids: List[str],
-    relevant_ids: List[str],
+    retrieved_ids: list[str],
+    relevant_ids: list[str],
     k: int = 5,
 ) -> MetricResult:
     """Fraction of top-k retrieved documents that are relevant."""
@@ -65,8 +65,8 @@ def precision_at_k(
 
 
 def mrr(
-    retrieved_ids: List[str],
-    relevant_ids: List[str],
+    retrieved_ids: list[str],
+    relevant_ids: list[str],
 ) -> MetricResult:
     """Mean Reciprocal Rank — 1/(rank of first relevant hit), 0 if none."""
     rel = _relevant_set(relevant_ids)
@@ -80,12 +80,14 @@ def mrr(
                 n=len(retrieved_ids),
                 notes=f"first hit at rank {i}",
             )
-    return MetricResult(name="mrr", value=0.0, n=len(retrieved_ids), notes="no hit in retrieved set")
+    return MetricResult(
+        name="mrr", value=0.0, n=len(retrieved_ids), notes="no hit in retrieved set"
+    )
 
 
 def ndcg_at_k(
-    retrieved_ids: List[str],
-    relevant_ids: List[str],
+    retrieved_ids: list[str],
+    relevant_ids: list[str],
     k: int = 10,
 ) -> MetricResult:
     """Normalised Discounted Cumulative Gain at k (binary relevance)."""
@@ -93,12 +95,8 @@ def ndcg_at_k(
     if not rel:
         return MetricResult.empty("ndcg_at_k", "no relevant_chunk_ids (TODO)")
 
-    def _dcg(ids: List[str]) -> float:
-        return sum(
-            1.0 / math.log2(i + 2)
-            for i, rid in enumerate(ids[:k])
-            if rid in rel
-        )
+    def _dcg(ids: list[str]) -> float:
+        return sum(1.0 / math.log2(i + 2) for i, rid in enumerate(ids[:k]) if rid in rel)
 
     dcg = _dcg(retrieved_ids)
     # Ideal: relevant docs in top positions
@@ -114,8 +112,8 @@ def ndcg_at_k(
 
 
 def context_precision(
-    retrieved_docs: List[Dict],
-    relevant_ids: List[str],
+    retrieved_docs: list[dict],
+    relevant_ids: list[str],
 ) -> MetricResult:
     """Fraction of retrieved chunks that overlap with any relevant chunk ID.
 
@@ -127,7 +125,7 @@ def context_precision(
     if not retrieved_docs:
         return MetricResult(name="context_precision", value=0.0, n=0, notes="no docs returned")
 
-    def _get_id(doc: Dict) -> Optional[str]:
+    def _get_id(doc: dict) -> str | None:
         meta = doc.get("metadata") or {}
         source = meta.get("source", "")
         cid = meta.get("chunk_id")
@@ -147,8 +145,8 @@ def context_precision(
 
 
 def hit_rate(
-    retrieved_ids: List[str],
-    relevant_ids: List[str],
+    retrieved_ids: list[str],
+    relevant_ids: list[str],
 ) -> MetricResult:
     """Binary: 1 if any relevant document was retrieved, 0 otherwise."""
     rel = _relevant_set(relevant_ids)
@@ -164,10 +162,10 @@ def hit_rate(
 
 
 def aggregate_retrieval_metrics(
-    results: List[Dict],
+    results: list[dict],
     k5: int = 5,
     k10: int = 10,
-) -> Dict[str, MetricResult]:
+) -> dict[str, MetricResult]:
     """Aggregate retrieval metrics over a list of {retrieved_ids, relevant_ids} dicts.
 
     results: [{"retrieved_ids": [...], "relevant_ids": [...], "query": "..."}]
@@ -199,7 +197,7 @@ def aggregate_retrieval_metrics(
         if h.n > 0:
             hits.append(h.value)
 
-    def _mean(lst: List[float], name: str) -> MetricResult:
+    def _mean(lst: list[float], name: str) -> MetricResult:
         if not lst:
             return MetricResult.empty(name, "all queries had TODO relevant_chunk_ids")
         return MetricResult(name=name, value=sum(lst) / len(lst), n=len(lst))

@@ -6,10 +6,11 @@ Route decision is extracted from the pipeline response's 'decision' field.
 Measures route_accuracy, confusion matrix, and the P1-4 hybrid probe
 (hybrid route must show actual web sources, not be labelled-only).
 """
+
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List
+from typing import Any
 
 from app.eval.config import EvalConfig
 from app.eval.datasets.gold_loader import load_gold
@@ -41,7 +42,7 @@ def run_routing_suite(cfg: EvalConfig) -> SuiteResult:
         result.duration_sec = time.time() - t0
         return result
 
-    routing_results: List[Dict[str, Any]] = []
+    routing_results: list[dict[str, Any]] = []
 
     for row in gold_rows:
         query = row["query"]
@@ -68,22 +69,23 @@ def run_routing_suite(cfg: EvalConfig) -> SuiteResult:
         sources = response.get("sources") or []
         # Pipeline sets modality="web" on web sources; also check type="web" for compatibility
         web_sources = [
-            s for s in sources
-            if isinstance(s, dict) and (
-                s.get("modality") == "web" or s.get("type") == "web"
-            )
+            s
+            for s in sources
+            if isinstance(s, dict) and (s.get("modality") == "web" or s.get("type") == "web")
         ]
 
-        routing_results.append({
-            "row_id": row["id"],
-            "query": query,
-            "actual_route": action,
-            "expected_route": expected_route,
-            "sources": sources,
-            "web_sources": web_sources,
-            "web_source_count": len(web_sources),
-            "tags": row.get("tags", []),
-        })
+        routing_results.append(
+            {
+                "row_id": row["id"],
+                "query": query,
+                "actual_route": action,
+                "expected_route": expected_route,
+                "sources": sources,
+                "web_sources": web_sources,
+                "web_source_count": len(web_sources),
+                "tags": row.get("tags", []),
+            }
+        )
 
     if not routing_results:
         result.add(MetricResult.empty("route_accuracy", "no successful routing evaluations"))
@@ -101,12 +103,14 @@ def run_routing_suite(cfg: EvalConfig) -> SuiteResult:
     cm = confusion_matrix(routing_results)
     for label, counts in cm.items():
         for pred, cnt in counts.items():
-            result.add(MetricResult(
-                name=f"route_cm_{label}_as_{pred}",
-                value=float(cnt),
-                n=len(routing_results),
-                notes="confusion matrix cell",
-            ))
+            result.add(
+                MetricResult(
+                    name=f"route_cm_{label}_as_{pred}",
+                    value=float(cnt),
+                    n=len(routing_results),
+                    notes="confusion matrix cell",
+                )
+            )
 
     result.duration_sec = time.time() - t0
     return result

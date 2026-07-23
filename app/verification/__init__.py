@@ -28,10 +28,10 @@ __all__ = ["VerificationLoop", "verify", "VerificationReport", "normalize_modali
 
 def verify(
     query: str,
-    docs: List[Dict[str, Any]],
+    docs: list[dict[str, Any]],
     answer: str,
-    sources: Optional[List[Dict[str, Any]]] = None,
-    modality: Optional[str] = None,
+    sources: list[dict[str, Any]] | None = None,
+    modality: str | None = None,
 ) -> VerificationReport:
     """Score an already-generated answer once — no retrieval, no retries.
 
@@ -58,9 +58,8 @@ def verify(
     return VerificationReport(
         verified=decision == "PASS",
         scores=scores,
-        unsupported_claims=grounding_res.unsupported_claims + [
-            f"unsupported number: {n}" for n in grounding_res.unsupported_numbers
-        ],
+        unsupported_claims=grounding_res.unsupported_claims
+        + [f"unsupported number: {n}" for n in grounding_res.unsupported_numbers],
         bad_citations=citation_res.bad_citations,
         missing_aspects=completeness_res.missing,
         degraded=decision != "PASS",

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import os
 import urllib.parse
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
@@ -11,12 +10,24 @@ from fastapi.security import OAuth2PasswordRequestForm
 
 from app.auth.dependencies import get_current_user
 from app.auth.jwt_handler import issue_tokens, refresh_access_token, verify_token
-from app.auth.models import (
-    LoginRequest, LogoutRequest, OTPVerifyRequest, ForgotPasswordRequest,
-    ResetPasswordRequest, RefreshRequest, RegisterRequest, TokenPair, UserPublic,
-)
 from app.auth.mfa import MFAService, _issue_mfa_token
-from app.auth.oauth import build_google_auth_url, exchange_google_code, get_or_create_oauth_user, google_oauth_enabled
+from app.auth.models import (
+    ForgotPasswordRequest,
+    LoginRequest,
+    LogoutRequest,
+    OTPVerifyRequest,
+    RefreshRequest,
+    RegisterRequest,
+    ResetPasswordRequest,
+    TokenPair,
+    UserPublic,
+)
+from app.auth.oauth import (
+    build_google_auth_url,
+    exchange_google_code,
+    get_or_create_oauth_user,
+    google_oauth_enabled,
+)
 from app.auth.service import AuthService
 from app.auth.token_blacklist import revoke_all_user_tokens, revoke_token
 from app.core.config import settings
@@ -24,11 +35,12 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
-_svc  = AuthService()
-_mfa  = MFAService()
+_svc = AuthService()
+_mfa = MFAService()
 
 
 # ── Register ──────────────────────────────────────────────────────────────────
+
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register(req: RegisterRequest):
@@ -38,8 +50,8 @@ async def register(req: RegisterRequest):
     call /auth/verify-otp to activate the account and receive full tokens.
     If OTP sending fails, the account is deleted so the user can retry cleanly.
     """
-    from app.auth.otp_store import generate_otp, store_otp
     from app.auth.email_service import send_otp_email
+    from app.auth.otp_store import generate_otp, store_otp
 
     try:
         user = await asyncio.to_thread(_svc.register, req)
@@ -68,6 +80,7 @@ async def register(req: RegisterRequest):
 
 # ── Login (JSON body) ─────────────────────────────────────────────────────────
 
+
 @router.post("/login")
 async def login(req: LoginRequest):
     """
@@ -85,8 +98,8 @@ async def login(req: LoginRequest):
         )
 
     # Check for a trusted device token — skip OTP if valid
-    from app.auth.otp_store import generate_otp, store_otp, verify_device_token
     from app.auth.email_service import send_otp_email
+    from app.auth.otp_store import generate_otp, store_otp, verify_device_token
 
     if req.device_token:
         try:
@@ -117,25 +130,29 @@ async def login(req: LoginRequest):
 
 # ── Verify email OTP ──────────────────────────────────────────────────────────
 
+
 @router.post("/verify-otp")
 async def verify_otp(req: OTPVerifyRequest):
     """
     Step 2 of login: submit the 6-digit OTP received by email.
     Returns a full JWT access + refresh token pair on success.
     """
-    from jose import JWTError, jwt as jose_jwt
+    from jose import JWTError
+    from jose import jwt as jose_jwt
+
     from app.auth.otp_store import verify_otp as _verify_otp
 
     # Decode the otp_token to get user_id (reuses the mfa_challenge token)
     try:
         payload = jose_jwt.decode(
-            req.otp_token, settings.JWT_SECRET_KEY,
+            req.otp_token,
+            settings.JWT_SECRET_KEY,
             algorithms=[settings.JWT_ALGORITHM],
         )
         if payload.get("type") != "mfa_challenge":
             raise ValueError("Invalid OTP token type")
         user_id = payload["sub"]
-    except (JWTError, KeyError, ValueError) as exc:
+    except (JWTError, KeyError, ValueError):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="OTP session expired. Please sign in again.",
@@ -163,6 +180,7 @@ async def verify_otp(req: OTPVerifyRequest):
 
     # Issue a trusted-device token so this browser skips OTP on future logins
     from app.auth.otp_store import generate_reset_token, store_device_token
+
     device_token = generate_reset_token()  # reuse same 32-byte random generator
     try:
         await asyncio.to_thread(store_device_token, device_token, user_id)
@@ -175,6 +193,7 @@ async def verify_otp(req: OTPVerifyRequest):
 
 
 # ── Login (OAuth2 form — enables /docs "Authorize" button) ───────────────────
+
 
 @router.post("/login/form", response_model=TokenPair, include_in_schema=False)
 async def login_form(form: OAuth2PasswordRequestForm = Depends()) -> TokenPair:
@@ -195,6 +214,7 @@ async def login_form(form: OAuth2PasswordRequestForm = Depends()) -> TokenPair:
 
 # ── Refresh ───────────────────────────────────────────────────────────────────
 
+
 @router.post("/refresh", response_model=TokenPair)
 async def refresh(req: RefreshRequest) -> TokenPair:
     """Exchange a valid refresh token for a new access + refresh token pair."""
@@ -211,6 +231,7 @@ async def refresh(req: RefreshRequest) -> TokenPair:
 
 # ── Current user profile ──────────────────────────────────────────────────────
 
+
 @router.get("/me", response_model=UserPublic)
 async def me(current_user: UserPublic = Depends(get_current_user)) -> UserPublic:
     """Return the currently authenticated user's profile."""
@@ -218,6 +239,7 @@ async def me(current_user: UserPublic = Depends(get_current_user)) -> UserPublic
 
 
 # ── Google OAuth2 ─────────────────────────────────────────────────────────────
+
 
 @router.get("/google", summary="Sign in with Google")
 async def google_login() -> RedirectResponse:
@@ -296,6 +318,7 @@ async def google_callback(
 
 # ── Forgot password ───────────────────────────────────────────────────────────
 
+
 @router.post("/forgot-password", status_code=status.HTTP_200_OK)
 async def forgot_password(req: ForgotPasswordRequest) -> dict:
     """
@@ -303,8 +326,8 @@ async def forgot_password(req: ForgotPasswordRequest) -> dict:
     Always returns 200 regardless of whether the email exists — prevents
     user enumeration attacks.
     """
-    from app.auth.otp_store import generate_reset_token, store_reset_token
     from app.auth.email_service import send_password_reset_email
+    from app.auth.otp_store import generate_reset_token, store_reset_token
 
     user = _svc.get_by_email(req.email)
     if user:
@@ -323,6 +346,7 @@ async def forgot_password(req: ForgotPasswordRequest) -> dict:
 
 
 # ── Reset password (consume the emailed token) ────────────────────────────────
+
 
 @router.post("/reset-password", status_code=status.HTTP_200_OK)
 async def reset_password(req: ResetPasswordRequest) -> dict:
@@ -347,6 +371,7 @@ async def reset_password(req: ResetPasswordRequest) -> dict:
     # Revoke trusted devices so all remembered browsers must re-verify after a reset
     try:
         from app.auth.otp_store import revoke_device_tokens
+
         await asyncio.to_thread(revoke_device_tokens, user_id)
     except Exception:
         pass
@@ -356,10 +381,11 @@ async def reset_password(req: ResetPasswordRequest) -> dict:
 
 # ── Logout (revoke current token) ────────────────────────────────────────────
 
+
 @router.post("/logout", status_code=status.HTTP_200_OK)
 async def logout(
     request: Request,
-    body: Optional[LogoutRequest] = None,
+    body: LogoutRequest | None = None,
     current_user: UserPublic = Depends(get_current_user),
 ) -> dict:
     """Revoke the current access token — and the refresh token, if surrendered —
@@ -375,7 +401,7 @@ async def logout(
             if jti:
                 revoke_token(jti, exp)
         except ValueError:
-            pass   # already invalid — no-op
+            pass  # already invalid — no-op
 
     if body and body.refresh_token:
         try:
@@ -385,13 +411,14 @@ async def logout(
             if r_jti:
                 revoke_token(r_jti, r_exp)
         except ValueError:
-            pass   # already invalid — no-op
+            pass  # already invalid — no-op
 
     logger.info(event="user_logged_out", user_id=current_user.user_id)
     return {"status": "ok", "message": "Logged out successfully"}
 
 
 # ── Logout-all (revoke ALL tokens via generation bump) ────────────────────────
+
 
 @router.post("/logout-all", status_code=status.HTTP_200_OK)
 async def logout_all(
@@ -405,12 +432,13 @@ async def logout_all(
 
 # ── Password change ───────────────────────────────────────────────────────────
 
-from pydantic import BaseModel as _BM, Field as _F
+from pydantic import BaseModel as _BM
+from pydantic import Field as _F
 
 
 class PasswordChangeRequest(_BM):
     current_password: str = _F(..., min_length=1, max_length=128)
-    new_password:     str = _F(..., min_length=8, max_length=128)
+    new_password: str = _F(..., min_length=8, max_length=128)
 
 
 @router.post("/password", status_code=status.HTTP_200_OK)
@@ -440,13 +468,14 @@ async def change_password(
 
 # ── MFA — Enrol ───────────────────────────────────────────────────────────────
 
+
 class MFACodeRequest(_BM):
     code: str = _F(..., min_length=6, max_length=10)
 
 
 class MFAVerifyLoginRequest(_BM):
     mfa_token: str = _F(..., min_length=10)
-    code:      str = _F(..., min_length=6, max_length=10)
+    code: str = _F(..., min_length=6, max_length=10)
 
 
 @router.post("/mfa/enroll", status_code=status.HTTP_200_OK)
@@ -532,6 +561,7 @@ async def mfa_status(
 
 # ── GDPR self-delete ──────────────────────────────────────────────────────────
 
+
 @router.delete("/me", status_code=status.HTTP_200_OK)
 async def delete_me(
     request: Request,
@@ -544,6 +574,7 @@ async def delete_me(
     and the user's directory on disk (uploaded files, processed documents, images).
     """
     import shutil
+
     from app.utils.paths import DATA_ROOT
 
     user_id = current_user.user_id
@@ -574,6 +605,7 @@ async def delete_me(
         logger.warning(event="gdpr_redis_session_purge_failed", user_id=user_id, error=str(exc))
     try:
         from app.auth.otp_store import delete_otp_keys, revoke_device_tokens
+
         await asyncio.to_thread(delete_otp_keys, user_id)
         await asyncio.to_thread(revoke_device_tokens, user_id)
     except Exception as exc:

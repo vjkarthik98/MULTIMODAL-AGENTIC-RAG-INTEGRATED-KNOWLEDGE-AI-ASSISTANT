@@ -9,12 +9,11 @@ Usage (call before any pyannote import):
     from app.utils.torchaudio_compat import patch_torchaudio
     patch_torchaudio()
 """
+
 from __future__ import annotations
 
 import dataclasses
-import struct
 import wave
-from typing import List, Tuple
 
 import torch
 
@@ -32,6 +31,7 @@ def _info(path: str, backend: str = None) -> _AudioMetaData:
     """Drop-in for torchaudio.info() using soundfile → wave fallback."""
     try:
         import soundfile as sf
+
         i = sf.info(str(path))
         return _AudioMetaData(
             sample_rate=i.samplerate,
@@ -56,9 +56,10 @@ def _load(
     normalize: bool = True,
     channels_first: bool = True,
     backend: str = None,
-) -> Tuple[torch.Tensor, int]:
+) -> tuple[torch.Tensor, int]:
     """Drop-in for torchaudio.load() using soundfile."""
     import soundfile as sf
+
     data, sr = sf.read(
         str(path),
         frames=num_frames if num_frames != -1 else -1,
@@ -75,11 +76,12 @@ def _load(
     return waveform, sr
 
 
-def _list_audio_backends() -> List[str]:
+def _list_audio_backends() -> list[str]:
     """Drop-in for torchaudio.list_audio_backends()."""
     backends = []
     try:
         import soundfile  # noqa: F401
+
         backends.append("soundfile")
     except ImportError:
         pass
@@ -124,6 +126,7 @@ def _patch_hf_hub_download() -> None:
     """
     try:
         import huggingface_hub
+
         _orig = huggingface_hub.hf_hub_download
         if getattr(_orig, "_use_auth_token_patched", False):
             return
@@ -139,6 +142,7 @@ def _patch_hf_hub_download() -> None:
         # Also patch the symbol re-exported inside pyannote if already imported
         try:
             import pyannote.audio.core.pipeline as _pap
+
             if hasattr(_pap, "hf_hub_download"):
                 _pap.hf_hub_download = _patched
         except Exception:
@@ -159,20 +163,22 @@ def _patch_torch_safe_globals() -> None:
     try:
         import torch
         import torch.torch_version
+
         safe: list = [torch.torch_version.TorchVersion]
 
         _PYANNOTE_GLOBALS = [
-            ("pyannote.audio.core.task",       "Specifications"),
-            ("pyannote.audio.core.task",       "Problem"),
-            ("pyannote.audio.core.task",       "Scale"),
-            ("pyannote.core",                  "Segment"),
-            ("pyannote.core.segment",          "Segment"),
-            ("pyannote.core.annotation",       "Annotation"),
-            ("pyannote.core.timeline",         "Timeline"),
-            ("pyannote.core.feature",          "SlidingWindowFeature"),
-            ("pyannote.core",                  "SlidingWindow"),
+            ("pyannote.audio.core.task", "Specifications"),
+            ("pyannote.audio.core.task", "Problem"),
+            ("pyannote.audio.core.task", "Scale"),
+            ("pyannote.core", "Segment"),
+            ("pyannote.core.segment", "Segment"),
+            ("pyannote.core.annotation", "Annotation"),
+            ("pyannote.core.timeline", "Timeline"),
+            ("pyannote.core.feature", "SlidingWindowFeature"),
+            ("pyannote.core", "SlidingWindow"),
         ]
         import importlib
+
         for mod_path, cls_name in _PYANNOTE_GLOBALS:
             try:
                 mod = importlib.import_module(mod_path)
@@ -202,27 +208,28 @@ def _patch_torch_load_for_pyannote() -> None:
     """
     try:
         import torch
+
         _orig = torch.load
         if getattr(_orig, "_pyannote_compat_patched", False):
             return
 
         import inspect
 
-        def _patched(f, map_location=None, pickle_module=None,
-                     *, weights_only=None, mmap=None, **kw):
+        def _patched(
+            f, map_location=None, pickle_module=None, *, weights_only=None, mmap=None, **kw
+        ):
             if weights_only is None:
                 # Only pay the stack-inspection cost when the flag wasn't set.
                 try:
                     frame_names = " ".join(
-                        fr.filename for fr in inspect.stack(context=0)
-                        if fr.filename
+                        fr.filename for fr in inspect.stack(context=0) if fr.filename
                     )
                     if "pyannote" in frame_names or "lightning" in frame_names:
                         weights_only = False
                     else:
-                        weights_only = True   # keep new PyTorch 2.6 default
+                        weights_only = True  # keep new PyTorch 2.6 default
                 except Exception:
-                    weights_only = False      # safe fallback
+                    weights_only = False  # safe fallback
 
             call_kw: dict = dict(kw)
             if map_location is not None:
@@ -242,6 +249,7 @@ def _patch_torch_load_for_pyannote() -> None:
 def _load_is_broken(torchaudio_module) -> bool:
     """Detect if torchaudio.load is the broken torchcodec stub."""
     import inspect
+
     try:
         src = inspect.getsource(torchaudio_module.load)
         return "torchcodec" in src or "TorchCodec" in src

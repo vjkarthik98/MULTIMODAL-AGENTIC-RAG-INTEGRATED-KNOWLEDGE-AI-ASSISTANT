@@ -5,7 +5,7 @@ import re
 import threading
 import time
 import unicodedata
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import structlog
 from opentelemetry import trace
@@ -40,7 +40,7 @@ _llm_call_duration = Histogram(
 )
 
 # SEMAPHORE — lazy init to avoid missing event loop at import time
-_semaphore: Optional[asyncio.Semaphore] = None
+_semaphore: asyncio.Semaphore | None = None
 _semaphore_lock = threading.Lock()
 
 
@@ -52,20 +52,23 @@ def _get_semaphore() -> asyncio.Semaphore:
                 _semaphore = asyncio.Semaphore(5)
     return _semaphore
 
+
 # REASONING STEP TYPES
-STEP_RETRIEVE  = "retrieve"
-STEP_REASON    = "reason"
-STEP_VERIFY    = "verify"
+STEP_RETRIEVE = "retrieve"
+STEP_REASON = "reason"
+STEP_VERIFY = "verify"
 STEP_SYNTHESIZE = "synthesize"
 
 
 # SHA-256 HASH FOR DEDUP
+
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 # NORMALIZE TEXT
+
 
 def _normalize(text: str) -> str:
     text = unicodedata.normalize("NFC", str(text or ""))
@@ -88,15 +91,15 @@ def _strip_cite_tags(text: str) -> str:
     return _CITE_TAG_STRIP_RE.sub(" ", text)
 
 
-def _extract_cite_tags(text: str, valid: List[str]) -> List[str]:
+def _extract_cite_tags(text: str, valid: list[str]) -> list[str]:
     """Return the cite_keys from `valid` that actually appear as substrings of `text`.
     Closed-set: a tag the LLM invented (not in `valid`) cannot pass."""
     if not text or not valid:
         return []
-    out: List[str] = []
+    out: list[str] = []
     seen: set = set()
     # Preserve order in which keys first appear in the answer.
-    spans: List[Tuple[int, str]] = []
+    spans: list[tuple[int, str]] = []
     for key in valid:
         if not key or key in seen:
             continue
@@ -114,11 +117,12 @@ def _extract_cite_tags(text: str, valid: List[str]) -> List[str]:
 # CROSS-CHECKS ANSWER AGAINST RETRIEVED CHUNKS
 # FLAGS CLAIMS NOT SUPPORTED BY ANY CHUNK
 
+
 def _hallucination_guard(
     answer: str,
-    docs: List[Dict],
+    docs: list[dict],
     threshold: float = None,
-) -> Tuple[bool, float]:
+) -> tuple[bool, float]:
     """
     RETURNS (IS_HALLUCINATED, SUPPORT_SCORE).
     SUPPORT_SCORE = FRACTION OF ANSWER SENTENCES SUPPORTED BY DOCS.
@@ -137,11 +141,7 @@ def _hallucination_guard(
     cleaned = _strip_cite_tags(answer)
 
     # COLLECT ALL DOC TEXT
-    all_doc_text = " ".join(
-        str(d.get("text", "") or "").lower()
-        for d in docs
-        if d.get("text")
-    )
+    all_doc_text = " ".join(str(d.get("text", "") or "").lower() for d in docs if d.get("text"))
 
     if not all_doc_text.strip():
         return False, 1.0
@@ -170,7 +170,7 @@ def _hallucination_guard(
         if hits / max(len(words), 1) >= per_sentence_thr:
             supported += 1
 
-    support_score  = supported / max(len(sentences), 1)
+    support_score = supported / max(len(sentences), 1)
     is_hallucinated = support_score < thr
 
     return is_hallucinated, round(support_score, 3)
@@ -185,7 +185,7 @@ def _hallucination_guard(
 _NUM_RE = re.compile(r"\d+(?:[.,]\d+)*%?")
 
 
-def _extract_numbers(text: str) -> List[str]:
+def _extract_numbers(text: str) -> list[str]:
     if not text:
         return []
     return [m.group(0) for m in _NUM_RE.finditer(text)]
@@ -213,7 +213,7 @@ def _number_in_context(num: str, context: str) -> bool:
         parts = num.split('.')
         if len(parts) == 2 and parts[1].isdigit() and parts[0].isdigit():
             # e.g. "57.53" → try "57,530", "5753", "57530"
-            scaled = parts[0] + parts[1]           # "5753"
+            scaled = parts[0] + parts[1]  # "5753"
             if scaled in context or scaled.replace('', ',') in context:
                 return True
             scaled_padded = parts[0] + parts[1].ljust(3, '0')  # "57530"
@@ -229,9 +229,9 @@ def _number_in_context(num: str, context: str) -> bool:
 
 def _unsupported_numbers(
     answer: str,
-    docs: List[Dict],
+    docs: list[dict],
     query: str = "",
-) -> List[str]:
+) -> list[str]:
     """Return numeric tokens in `answer` that do NOT appear in any doc.
 
     Numbers excluded from the guard (they are not financial claims):
@@ -246,7 +246,7 @@ def _unsupported_numbers(
     context = " ".join(str(d.get("text", "") or "") for d in docs)
     query_nums = set(_extract_numbers(query)) if query else set()
 
-    unsupported: List[str] = []
+    unsupported: list[str] = []
     seen: set = set()
     for n in nums:
         if n in seen:
@@ -276,10 +276,19 @@ def _unsupported_numbers(
 # and unit mismatches, then annotates unverified numbers inline.
 
 _SCALE_FACTORS: dict = {
-    "billion": 1e9, "billions": 1e9, "bn": 1e9,
-    "million":  1e6, "millions":  1e6, "mn": 1e6, "m": 1e6,
-    "thousand": 1e3, "thousands": 1e3, "k": 1e3,
-    "trillion": 1e12, "trillions": 1e12, "tn": 1e12,
+    "billion": 1e9,
+    "billions": 1e9,
+    "bn": 1e9,
+    "million": 1e6,
+    "millions": 1e6,
+    "mn": 1e6,
+    "m": 1e6,
+    "thousand": 1e3,
+    "thousands": 1e3,
+    "k": 1e3,
+    "trillion": 1e12,
+    "trillions": 1e12,
+    "tn": 1e12,
 }
 _SCALE_NUM_RE = re.compile(
     r'([$€£¥₹]?)\s*([\d,]+\.?\d*)\s*'
@@ -302,9 +311,9 @@ def _to_base_units(num_str: str, scale_str: str) -> float:
 
 def _verify_numeric_citations(
     answer: str,
-    docs: List[Dict],
+    docs: list[dict],
     query: str = "",
-) -> List[Dict]:
+) -> list[dict]:
     """Return verification results for each significant number in the answer.
 
     Each result: {"number": str, "grounded": bool, "confidence": float, "issue": str}
@@ -319,9 +328,9 @@ def _verify_numeric_citations(
 
     context_full = " ".join(str(d.get("text", "") or "") for d in docs)
     context_lower = context_full.lower()
-    query_nums    = set(_extract_numbers(query)) if query else set()
-    results       = []
-    seen          = set()
+    query_nums = set(_extract_numbers(query)) if query else set()
+    results = []
+    seen = set()
 
     for m in _SCALE_NUM_RE.finditer(answer):
         currency, num_str, scale = m.group(1), m.group(2), m.group(3)
@@ -334,20 +343,20 @@ def _verify_numeric_citations(
         if base_answer == 0:
             continue
 
-        issue      = ""
-        grounded   = False
+        issue = ""
+        grounded = False
         confidence = 0.0
 
         # 1. Exact token match
         if token.lower() in context_lower or num_str in context_full:
-            grounded   = True
+            grounded = True
             confidence = 1.0
         else:
             # 2. Scale-normalised cross-match: look for the same base value
             for cm in _SCALE_NUM_RE.finditer(context_full):
                 base_ctx = _to_base_units(cm.group(2), cm.group(3))
                 if base_ctx > 0 and abs(base_answer - base_ctx) / base_ctx < 0.01:
-                    grounded   = True
+                    grounded = True
                     confidence = 0.85
                     if cm.group(3).lower() != scale.lower():
                         issue = "unit_mismatch"
@@ -355,29 +364,34 @@ def _verify_numeric_citations(
 
             # 3. Sign check: context says loss but number appears positive
             if not grounded:
-                surrounding = context_lower[max(0, context_lower.find(num_str) - 60):
-                                            context_lower.find(num_str) + 60]
-                ans_surrounding = answer.lower()[max(0, answer.lower().find(token) - 60):
-                                                 answer.lower().find(token) + 60]
-                if (any(w in surrounding for w in _LOSS_WORDS) and
-                        not any(w in ans_surrounding for w in _LOSS_WORDS)):
-                    issue      = "sign_error"
+                surrounding = context_lower[
+                    max(0, context_lower.find(num_str) - 60) : context_lower.find(num_str) + 60
+                ]
+                ans_surrounding = answer.lower()[
+                    max(0, answer.lower().find(token) - 60) : answer.lower().find(token) + 60
+                ]
+                if any(w in surrounding for w in _LOSS_WORDS) and not any(
+                    w in ans_surrounding for w in _LOSS_WORDS
+                ):
+                    issue = "sign_error"
                     confidence = 0.3
                 else:
-                    issue      = "not_found"
+                    issue = "not_found"
                     confidence = 0.0
 
-        results.append({
-            "number":     token,
-            "grounded":   grounded,
-            "confidence": confidence,
-            "issue":      issue,
-        })
+        results.append(
+            {
+                "number": token,
+                "grounded": grounded,
+                "confidence": confidence,
+                "issue": issue,
+            }
+        )
 
     return results
 
 
-def _apply_numeric_annotations(answer: str, verification_results: List[Dict]) -> str:
+def _apply_numeric_annotations(answer: str, verification_results: list[dict]) -> str:
     """Append inline ⚠ [Unverified: N] markers for ungrounded numbers with confidence < 0.8."""
     for vr in verification_results:
         if not vr.get("grounded") and vr.get("confidence", 0) < 0.8:
@@ -390,11 +404,13 @@ def _apply_numeric_annotations(answer: str, verification_results: List[Dict]) ->
 
 # PII SCRUB ANSWER BEFORE RETURNING
 
+
 def _scrub_answer_pii(text: str) -> str:
     if not settings.PII_DETECTION_ENABLED:
         return text
     try:
         from app.guardrails.pii import _get_engines
+
         analyzer, anonymizer = _get_engines()
         if analyzer is None or anonymizer is None:
             return text
@@ -415,18 +431,28 @@ def _scrub_answer_pii(text: str) -> str:
         # Use a narrow entity list — URL and PERSON cause false positives on
         # financial-document answers (filename TLDs, product names, tickers).
         safe_entities = [
-            "EMAIL_ADDRESS", "PHONE_NUMBER", "US_SSN",
-            "CREDIT_CARD", "IBAN_CODE", "IP_ADDRESS",
-            "US_BANK_NUMBER", "US_PASSPORT",
+            "EMAIL_ADDRESS",
+            "PHONE_NUMBER",
+            "US_SSN",
+            "CREDIT_CARD",
+            "IBAN_CODE",
+            "IP_ADDRESS",
+            "US_BANK_NUMBER",
+            "US_PASSPORT",
         ]
-        results = analyzer.analyze(text=protected, entities=safe_entities, language="en",
-                                   score_threshold=0.6)
+        results = analyzer.analyze(
+            text=protected, entities=safe_entities, language="en", score_threshold=0.6
+        )
         if results:
             from presidio_anonymizer.entities import OperatorConfig
-            operators = {e: OperatorConfig("replace", {"new_value": f"<{e}>"})
-                         for e in safe_entities}
+
+            operators = {
+                e: OperatorConfig("replace", {"new_value": f"<{e}>"}) for e in safe_entities
+            }
             protected = anonymizer.anonymize(
-                text=protected, analyzer_results=results, operators=operators,
+                text=protected,
+                analyzer_results=results,
+                operators=operators,
             ).text
 
         # Restore citation tags
@@ -443,21 +469,22 @@ def _scrub_answer_pii(text: str) -> str:
 
 # KNOWLEDGE PREPARATION FROM RETRIEVED DOCS
 
+
 def _prepare_knowledge(
-    docs:     List[Dict],
-    max_docs: int                            = None,
-    max_chars: int                           = None,
-    sources:  Optional[List[Dict[str, Any]]] = None,
+    docs: list[dict],
+    max_docs: int = None,
+    max_chars: int = None,
+    sources: list[dict[str, Any]] | None = None,
 ) -> str:
     if not docs:
         return ""
 
-    max_docs  = max_docs  or settings.RAG_TOP_K
+    max_docs = max_docs or settings.RAG_TOP_K
     max_chars = max_chars or settings.RAG_DOC_MAX_CHARS
 
     # If canonical sources[] were built upstream, use their cite_keys for stable tags.
     # Map by (doc_id, chunk_id) and fall back to source+page-derived key.
-    cite_by_key: Dict[Tuple[Optional[str], Optional[str]], str] = {}
+    cite_by_key: dict[tuple[str | None, str | None], str] = {}
     if sources:
         for s in sources:
             k = (s.get("doc_id"), s.get("chunk_id"))
@@ -465,8 +492,8 @@ def _prepare_knowledge(
             if ck:
                 cite_by_key[k] = ck
 
-    seen:  set        = set()
-    parts: List[str]  = []
+    seen: set = set()
+    parts: list[str] = []
 
     # Presidio PII placeholders (e.g. <PERSON>, <LOCATION>) may have been
     # injected during ingestion when the entity list included those types.
@@ -496,7 +523,7 @@ def _prepare_knowledge(
         seen.add(h)
 
         meta = d.get("metadata", {}) or {}
-        doc_id   = meta.get("doc_id")
+        doc_id = meta.get("doc_id")
         chunk_id = meta.get("chunk_id")
 
         cite_key = cite_by_key.get((doc_id, chunk_id))
@@ -504,6 +531,7 @@ def _prepare_knowledge(
             # Build a key inline as a fallback. Match build_sources() format.
             try:
                 from app.core.response import _make_cite_key
+
                 cite_key = _make_cite_key(
                     source=meta.get("source") or "unknown",
                     page=meta.get("page") if isinstance(meta.get("page"), int) else None,
@@ -542,7 +570,7 @@ def _xlsx_synth_prefix(fact: str) -> str:
     return f"{_XLSX_SYNTH_MARK}{fact}{_XLSX_SYNTH_MARK}KEY FACTS (answer the query from these): {fact} "
 
 
-def _xlsx_countries_in_query(q: str, candidate_texts: List[str], limit: int = 3) -> List[str]:
+def _xlsx_countries_in_query(q: str, candidate_texts: list[str], limit: int = 3) -> list[str]:
     """Country names that appear (as whole phrases) in the query AND head a
     ctryprem.xlsx table row. The workbook's flattened rows all begin
     "Country | ..." at line start, so the leading token of each row is the
@@ -550,6 +578,7 @@ def _xlsx_countries_in_query(q: str, candidate_texts: List[str], limit: int = 3)
     names first so "United Kingdom" wins over a stray "United". Used by every
     per-country XLSX synth block (ERP / GDP / tax / sovereign ratings)."""
     import re as _r
+
     names = set()
     for t in candidate_texts:
         for m in _r.finditer(r"(?m)^([A-Z][A-Za-z.'&()\- ]{1,38}?) \| ", t):
@@ -557,7 +586,7 @@ def _xlsx_countries_in_query(q: str, candidate_texts: List[str], limit: int = 3)
             if 2 < len(nm) < 40:
                 names.add(nm)
     ql = " " + _r.sub(r"[^a-z ]+", " ", (q or "").lower()) + " "
-    matched: List[str] = []
+    matched: list[str] = []
     for nm in sorted(names, key=len, reverse=True):
         k = nm.lower()
         if f" {k} " in ql and not any(k in mk.lower() for mk in matched):
@@ -567,7 +596,9 @@ def _xlsx_countries_in_query(q: str, candidate_texts: List[str], limit: int = 3)
     return matched
 
 
-def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, user_id: str = "") -> str:
+def _prepend_key_facts_knowledge(
+    docs: list[dict], query: str, knowledge: str, user_id: str = ""
+) -> str:
     """Prepend high-signal facts to the knowledge block for specific query types."""
     q = query.lower() if query else ""
 
@@ -583,7 +614,9 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
     def _load_bm25_docs(uid):
         try:
             import pickle as _pkl
+
             from app.utils.paths import user_bm25_path
+
             _bm25_path = user_bm25_path(uid)
             if not _bm25_path.exists():
                 return []
@@ -604,32 +637,72 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
     # facts): pure query-to-sentence extraction over the retrieved video chunks.
     _top_mods = [(d.get("metadata") or {}).get("modality") for d in docs[:5]]
     _vid_hits = [m for m in _top_mods if m in ("mp4", "video")]
-    if _top_mods and len(_vid_hits) > len(_top_mods) / 2:   # video-DOMINANT only
+    if _top_mods and len(_vid_hits) > len(_top_mods) / 2:  # video-DOMINANT only
         import re as _vre
-        _STOP = frozenset((
-            "what", "when", "which", "were", "with", "that", "this", "your", "about",
-            "did", "does", "the", "and", "for", "was", "are", "how", "why", "who",
-            "apple", "apples", "call", "quarter", "these", "they", "their", "from",
-            "into", "said", "say", "says", "during", "regarding", "whether",
-        ))
+
+        _STOP = frozenset(
+            (
+                "what",
+                "when",
+                "which",
+                "were",
+                "with",
+                "that",
+                "this",
+                "your",
+                "about",
+                "did",
+                "does",
+                "the",
+                "and",
+                "for",
+                "was",
+                "are",
+                "how",
+                "why",
+                "who",
+                "apple",
+                "apples",
+                "call",
+                "quarter",
+                "these",
+                "they",
+                "their",
+                "from",
+                "into",
+                "said",
+                "say",
+                "says",
+                "during",
+                "regarding",
+                "whether",
+            )
+        )
         _KEEP_SHORT = frozenset(("eps", "yoy", "m&a", "ai"))
-        _num_re = _vre.compile(r"[$%]|\bbillion\b|\bmillion\b|\bpercent\b|\bdouble[- ]digit\b|\brecord\b|\bbasis point|\bestimate|\bbeat")
+        _num_re = _vre.compile(
+            r"[$%]|\bbillion\b|\bmillion\b|\bpercent\b|\bdouble[- ]digit\b|\brecord\b|\bbasis point|\bestimate|\bbeat"
+        )
 
         def _wordset(text: str) -> set:
-            return {w for w in _vre.findall(r"[a-z][a-z'&]+", text.lower())
-                    if (len(w) > 3 or w in _KEEP_SHORT) and w not in _STOP}
+            return {
+                w
+                for w in _vre.findall(r"[a-z][a-z'&]+", text.lower())
+                if (len(w) > 3 or w in _KEEP_SHORT) and w not in _STOP
+            }
 
-        _sentences: List[str] = []
+        _sentences: list[str] = []
         for doc in docs[:6]:
             if (doc.get("metadata") or {}).get("modality") not in ("mp4", "video"):
                 continue
-            _text = _vre.sub(r"\[[^\]]*\]", " ", doc.get("text", "") or "")   # strip [VISUAL..]/[ON-SCREEN..] tags
+            _text = _vre.sub(
+                r"\[[^\]]*\]", " ", doc.get("text", "") or ""
+            )  # strip [VISUAL..]/[ON-SCREEN..] tags
             for _sent in _vre.split(r"(?<=[.!?])\s+", _text):
                 s = _sent.strip()
                 if 25 <= len(s) <= 320:
                     _sentences.append(s)
 
-        def _best_matches(qwords: set, limit: int) -> List[str]:
+        def _best_matches(qwords: set, limit: int) -> list[str]:
             _scored = []
             for s in _sentences:
                 sl = s.lower()
@@ -654,12 +727,13 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
         # dense its competitors are.
         try:
             from app.pipeline.rag_pipeline import _split_query_aspects as _sqa
+
             _aspects = _sqa(query) if query else []
         except Exception:
             _aspects = []
 
         _seen: set = set()
-        _facts: List[str] = []
+        _facts: list[str] = []
         if len(_aspects) >= 2:
             for asp in _aspects:
                 _aw = _wordset(asp)
@@ -685,12 +759,15 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
                 if len(_facts) >= 3:
                     break
         if _facts:
-            _prefix = ("KEY FACTS (answer the question using these exact figures and wording): "
-                       + " | ".join(_facts)[:600] + " ")
+            _prefix = (
+                "KEY FACTS (answer the question using these exact figures and wording): "
+                + " | ".join(_facts)[:600]
+                + " "
+            )
             return _prefix + knowledge
 
     # M&A prefix — facts about acquisitions/mergers
-    _MA_Q  = frozenset(["acquisition", "merger", "acquired", "deal", "takeover"])
+    _MA_Q = frozenset(["acquisition", "merger", "acquired", "deal", "takeover"])
     _MA_CK = frozenset(["acquired", "acquisition", "merger", "assumed", "fdic", "purchase"])
     if any(kw in q for kw in _MA_Q):
         facts = []
@@ -712,6 +789,7 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
     if any(kw in q for kw in _PROD_Q) and any(w in q for w in ("net sales", "sales", "revenue")):
         _PROD_NUMS = ("201,183", "29,984", "26,694", "37,005")
         import re as _re
+
         # Synthetic-chunk format: "- iPhone: FY2024 $201,183M, FY2023 $200,583M"
         _row_re = _re.compile(
             r'-\s*([\w][\w\s,/\(\)\-]*?):\s*FY2024\s+\$?([\d,]+)M?,\s*FY2023\s+\$?([\d,]+)M?',
@@ -722,7 +800,7 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
         # The raw PDF table chunk ("iPhone\n$\n201,183") does NOT parse with _row_re,
         # so we must prefer whichever candidate actually yields parsed rows rather
         # than greedily taking the first iPhone+Mac chunk (which may be the raw table).
-        _candidates = []   # list of (text, page)
+        _candidates = []  # list of (text, page)
         for doc in docs:
             text = doc.get("text", "") or ""
             tl = text.lower()
@@ -780,15 +858,34 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
             # Insert at the REAL source page of the parsed chunk (authoritative,
             # remap-safe) so the [p.N] anchor + retrieval reflect the true page.
             if _prod_page is not None:
-                docs.insert(0, {
-                    "text": _q1_text, "score": 0.95, "final_score": 0.95,
-                    "metadata": {"source": "apple_10k.pdf", "page": int(_prod_page), "modality": "pdf"},
-                })
+                docs.insert(
+                    0,
+                    {
+                        "text": _q1_text,
+                        "score": 0.95,
+                        "final_score": 0.95,
+                        "metadata": {
+                            "source": "apple_10k.pdf",
+                            "page": int(_prod_page),
+                            "modality": "pdf",
+                        },
+                    },
+                )
             else:
-                docs.insert(0, {
-                    "text": _q1_text, "score": 0.95, "final_score": 0.95,
-                    "metadata": {"source": "apple_10k.pdf", "page": 23, "modality": "pdf", "synthetic": True},
-                })
+                docs.insert(
+                    0,
+                    {
+                        "text": _q1_text,
+                        "score": 0.95,
+                        "final_score": 0.95,
+                        "metadata": {
+                            "source": "apple_10k.pdf",
+                            "page": 23,
+                            "modality": "pdf",
+                            "synthetic": True,
+                        },
+                    },
+                )
             return f"[apple_10k.pdf] {_q1_text}\n\n" + knowledge
 
     # Gross margin segment breakdown — build a compact combined prefix with dollars + percentages.
@@ -847,8 +944,8 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
                     nums = _re2.findall(r'\b(\d{2,3},\d{3})\b', text)
                     if len(nums) >= 8:
                         dollar_rows = {
-                            "Products":           (nums[0], nums[1]),
-                            "Services":           (nums[3], nums[4]),
+                            "Products": (nums[0], nums[1]),
+                            "Services": (nums[3], nums[4]),
                             "Total gross margin": (nums[6], nums[7]),
                         }
                         break
@@ -892,10 +989,20 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
                     )
             if _gm_sents:
                 _gm_text = "Gross Margin by Segment — " + " ".join(_gm_sents)
-                docs.insert(0, {
-                    "text": _gm_text, "score": 0.95, "final_score": 0.95,
-                    "metadata": {"source": "apple_10k.pdf", "page": 24, "modality": "pdf", "synthetic": True},
-                })
+                docs.insert(
+                    0,
+                    {
+                        "text": _gm_text,
+                        "score": 0.95,
+                        "final_score": 0.95,
+                        "metadata": {
+                            "source": "apple_10k.pdf",
+                            "page": 24,
+                            "modality": "pdf",
+                            "synthetic": True,
+                        },
+                    },
+                )
                 return f"[apple_10k.pdf] {_gm_text}\n\n" + knowledge
 
     # Capital return — prefix annual totals so LLM uses FY totals, not quarterly tables.
@@ -918,14 +1025,22 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
                 for _bd in _load_bm25_docs(uid):
                     _bt = getattr(_bd, "text", "") or ""
                     if "95.0" in _bt and "15.2" in _bt and "billion" in _bt.lower():
-                        docs.insert(0, {
-                            "text": _bt,
-                            "score": 0.6,
-                            "final_score": 0.6,
-                            # synthetic=True: hardcoded PDF-index page — excluded from
-                            # the [p.N] citation matcher (real chunks are authoritative).
-                            "metadata": {"source": "apple_10k.pdf", "page": 29, "modality": "pdf", "synthetic": True},
-                        })
+                        docs.insert(
+                            0,
+                            {
+                                "text": _bt,
+                                "score": 0.6,
+                                "final_score": 0.6,
+                                # synthetic=True: hardcoded PDF-index page — excluded from
+                                # the [p.N] citation matcher (real chunks are authoritative).
+                                "metadata": {
+                                    "source": "apple_10k.pdf",
+                                    "page": 29,
+                                    "modality": "pdf",
+                                    "synthetic": True,
+                                },
+                            },
+                        )
                         break
 
         # Find p.29 text containing both key sentences (program + annual totals).
@@ -972,9 +1087,9 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
                     _capex = "9,447"
             _q4_parts = [
                 "Total returned to shareholders in FY2024 was $110.2 billion.",
-                f"Common stock repurchases were $95.0 billion"
+                "Common stock repurchases were $95.0 billion"
                 + (f" (${_shares_val} million)." if _shares_val else "."),
-                f"Dividends and dividend equivalents paid were $15.2 billion"
+                "Dividends and dividend equivalents paid were $15.2 billion"
                 + (f" (${_divs_val} million)." if _divs_val else "."),
                 "The quarterly dividend was raised from $0.24 to $0.25 per share in May 2024.",
                 "A new share repurchase program of up to $110 billion was announced in May 2024.",
@@ -984,21 +1099,25 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
             # present) so the synth doc is fully complete for the fallback.
             _ocf = _ocf or "118,254"
             _capex = _capex or "9,447"
-            _q4_parts.append(
-                f"Operating cash flow was $118.254 billion (${_ocf} million)."
-            )
-            _q4_parts.append(
-                f"Capital expenditures were $9.447 billion (${_capex} million)."
-            )
+            _q4_parts.append(f"Operating cash flow was $118.254 billion (${_ocf} million).")
+            _q4_parts.append(f"Capital expenditures were $9.447 billion (${_capex} million).")
             _q4_text = "Capital Return in FY2024 — " + " ".join(_q4_parts)
-            docs.insert(0, {
-                "text": _q4_text,
-                "score": 0.95,
-                "final_score": 0.95,
-                # synthetic: aggregate across p.26/p.32/p.33 — real retrieved chunks
-                # supply the [p.N] anchors.
-                "metadata": {"source": "apple_10k.pdf", "page": 26, "modality": "pdf", "synthetic": True},
-            })
+            docs.insert(
+                0,
+                {
+                    "text": _q4_text,
+                    "score": 0.95,
+                    "final_score": 0.95,
+                    # synthetic: aggregate across p.26/p.32/p.33 — real retrieved chunks
+                    # supply the [p.N] anchors.
+                    "metadata": {
+                        "source": "apple_10k.pdf",
+                        "page": 26,
+                        "modality": "pdf",
+                        "synthetic": True,
+                    },
+                },
+            )
             return f"[apple_10k.pdf] {_q4_text}\n\n" + knowledge
 
     # EU State Aid / effective tax rate — build a self-sufficient summary doc.
@@ -1009,10 +1128,11 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
     _TAX_Q2 = frozenset(["eu state aid", "state aid", "effective tax rate", "tax provision"])
     if any(kw in q for kw in _TAX_Q2):
         import re as _re3
+
         uid = _get_uid()
 
         # Unified (text, page) corpus: retrieved docs first, then the BM25 index.
-        _corpus: List[tuple] = []
+        _corpus: list[tuple] = []
         for _doc in docs:
             _pg = (_doc.get("metadata") or {}).get("page")
             _corpus.append((_doc.get("text", "") or "", _pg))
@@ -1026,37 +1146,54 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
         _aid_re = _re3.compile(r'€\s*([\d.]+)\s*billion\s*or\s*\$\s*([\d.]+)\s*billion')
 
         _etr_part = _aid_part = _chg_part = _prov_part = ""
-        _aid_src = _etr_src = None   # (text, page) → surface as a real source chip
+        _aid_src = _etr_src = None  # (text, page) → surface as a real source chip
 
         for _txt, _pg in _corpus:
             if not _etr_part:
                 _m = _etr_re.search(_txt)
                 if _m:
-                    _etr_part = (f"The effective tax rate rose to {_m.group(1)}% in FY2024 "
-                                 f"from {_m.group(2)}% in FY2023.")
+                    _etr_part = (
+                        f"The effective tax rate rose to {_m.group(1)}% in FY2024 "
+                        f"from {_m.group(2)}% in FY2023."
+                    )
                     _etr_src = (_txt, _pg)
             if not _aid_part:
                 _m = _aid_re.search(_txt)
                 if _m:
-                    _aid_part = (f"Apple paid €{_m.group(1)} billion (${_m.group(2)} billion) to Ireland "
-                                 "under the EU State Aid Decision, held in escrow.")
+                    _aid_part = (
+                        f"Apple paid €{_m.group(1)} billion (${_m.group(2)} billion) to Ireland "
+                        "under the EU State Aid Decision, held in escrow."
+                    )
                     _aid_src = (_txt, _pg)
             if not _chg_part and "10,246" in _txt:
-                _chg_part = ("The FY2024 provision included a one-time income tax charge of "
-                             "$10.2 billion ($10,246 million) related to the State Aid Decision.")
+                _chg_part = (
+                    "The FY2024 provision included a one-time income tax charge of "
+                    "$10.2 billion ($10,246 million) related to the State Aid Decision."
+                )
             if not _prov_part and "29,749" in _txt and "16,741" in _txt:
-                _prov_part = ("The provision for income taxes was $29,749 million in FY2024, "
-                              "up from $16,741 million in FY2023.")
+                _prov_part = (
+                    "The provision for income taxes was $29,749 million in FY2024, "
+                    "up from $16,741 million in FY2023."
+                )
             if _etr_part and _aid_part and _chg_part and _prov_part:
                 break
 
         # Surface the real source pages (their TRUE page metadata) as top sources.
         for _src in (_aid_src, _etr_src):
             if _src and _src[1] is not None:
-                docs.insert(0, {
-                    "text": _src[0], "score": 0.6, "final_score": 0.6,
-                    "metadata": {"source": "apple_10k.pdf", "page": int(_src[1]), "modality": "pdf"},
-                })
+                docs.insert(
+                    0,
+                    {
+                        "text": _src[0],
+                        "score": 0.6,
+                        "final_score": 0.6,
+                        "metadata": {
+                            "source": "apple_10k.pdf",
+                            "page": int(_src[1]),
+                            "modality": "pdf",
+                        },
+                    },
+                )
 
         # Order: charge → ETR → escrow → provision. Provision is placed LAST
         # (mirrors the structure that previously scored Q3=90); leading with it
@@ -1064,19 +1201,22 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
         _synth_parts = [p for p in (_chg_part, _etr_part, _aid_part, _prov_part) if p]
         if _synth_parts:
             _synth_text = "EU State Aid Decision — Tax Impact Summary: " + " ".join(_synth_parts)
-            docs.insert(0, {
-                "text": _synth_text,
-                "score": 0.95,
-                "final_score": 0.95,
-                # synthetic=True: multi-page aggregate under a nominal page. The [p.N]
-                # citation matcher skips it so figures cite their true source page.
-                "metadata": {
-                    "source": "apple_10k.pdf",
-                    "page": (_etr_src[1] if _etr_src and _etr_src[1] is not None else 43),
-                    "modality": "pdf",
-                    "synthetic": True,
+            docs.insert(
+                0,
+                {
+                    "text": _synth_text,
+                    "score": 0.95,
+                    "final_score": 0.95,
+                    # synthetic=True: multi-page aggregate under a nominal page. The [p.N]
+                    # citation matcher skips it so figures cite their true source page.
+                    "metadata": {
+                        "source": "apple_10k.pdf",
+                        "page": (_etr_src[1] if _etr_src and _etr_src[1] is not None else 43),
+                        "modality": "pdf",
+                        "synthetic": True,
+                    },
                 },
-            })
+            )
             _synth_doc = f"[apple_10k.pdf] {_synth_text}\n\n"
             return _synth_doc + knowledge
 
@@ -1097,9 +1237,11 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
             tl = text.lower()
             if "mature market premium" in tl and "downgraded the us from aaa to aa1" in tl:
                 import re as _re3
+
                 m = _re3.search(
                     r"(On May 16, 2025.*?Mature market premium = [\d.]+%[^\n]*?= [\d.]+%)",
-                    text, _re3.DOTALL,
+                    text,
+                    _re3.DOTALL,
                 )
                 if m:
                     fact = m.group(1).replace("Country Risk Premiums: ", " ")
@@ -1124,6 +1266,7 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
         if uid:
             candidate_texts += [getattr(_bd, "text", "") or "" for _bd in _load_bm25_docs(uid)]
         import re as _re4
+
         row_m = None
         sp_rating = None
         for text in candidate_texts:
@@ -1169,13 +1312,14 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
         if uid:
             candidate_texts += [getattr(_bd, "text", "") or "" for _bd in _load_bm25_docs(uid)]
         import re as _rec
+
         # country | region | Moody's | spread% | erpR% | crpR% | cdsExcess% | erpC% | crpC%
         _row_re = _rec.compile(
             r"([A-Z][A-Za-z.'&()\- ]{1,38}?) \| ([A-Za-z][A-Za-z .'&\-]+?) \| "
             r"([A-Za-z]{1,3}[0-9]?[+\-]?) \| ([\d.]+)% \| ([\d.]+)% \| ([\d.]+)% \| "
             r"([\d.]+)% \| ([\d.]+)% \| ([\d.]+)%"
         )
-        _rows: Dict[str, Any] = {}
+        _rows: dict[str, Any] = {}
         for text in candidate_texts:
             for m in _row_re.finditer(text):
                 name = m.group(1).strip()
@@ -1185,7 +1329,7 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
         # A row's country name must appear as a whole phrase in the query.
         # Longest names first so "United Kingdom" wins over a stray "United".
         ql = " " + _rec.sub(r"[^a-z ]+", " ", q) + " "
-        matched: List[str] = []
+        matched: list[str] = []
         for key in sorted(_rows, key=len, reverse=True):
             if f" {key} " in ql and not any(key in mk for mk in matched):
                 matched.append(key)
@@ -1217,20 +1361,29 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
     # the risk-premium queries (handled above).
     _is_gdp = "gdp" in q
     _is_tax = "tax" in q and any(w in q for w in ("rate", "corporate", "%"))
-    _is_cds = "cds" in q and not any(w in q for w in ("risk premium", "equity risk", " erp", " crp"))
-    _is_rating = (
-        any(w in q for w in ("s&p", "fitch", "sovereign rating", "credit rating",
-                             "moody's rating", "moodys rating"))
-        and not any(w in q for w in ("risk premium", "equity risk", " erp", " crp"))
+    _is_cds = "cds" in q and not any(
+        w in q for w in ("risk premium", "equity risk", " erp", " crp")
     )
+    _is_rating = any(
+        w in q
+        for w in (
+            "s&p",
+            "fitch",
+            "sovereign rating",
+            "credit rating",
+            "moody's rating",
+            "moodys rating",
+        )
+    ) and not any(w in q for w in ("risk premium", "equity risk", " erp", " crp"))
     if _is_gdp or _is_tax or _is_cds or _is_rating:
         candidate_texts = [d.get("text", "") or "" for d in docs]
         uid = _get_uid()
         if uid:
             candidate_texts += [getattr(_bd, "text", "") or "" for _bd in _load_bm25_docs(uid)]
         import re as _reg
+
         countries = _xlsx_countries_in_query(q, candidate_texts, limit=3)
-        facts: List[str] = []
+        facts: list[str] = []
         for name in countries:
             esc = _reg.escape(name)
             if _is_gdp:
@@ -1250,38 +1403,48 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
                 for t in candidate_texts:
                     m = _reg.search(
                         rf"(?m)^{esc} \| [\d.]+ \| [A-Za-z]{{1,3}}[0-9]?[+\-]? \| "
-                        rf"[\d.]+% \| [\d.]+% \| [\d.]+% \| ([\d.]+)%", t)
+                        rf"[\d.]+% \| [\d.]+% \| [\d.]+% \| ([\d.]+)%",
+                        t,
+                    )
                     if m:
                         break
                 if m:
-                    facts.append(f"The Country Tax Rates sheet lists {name}'s corporate "
-                                 f"tax rate at {m.group(1)}%.")
+                    facts.append(
+                        f"The Country Tax Rates sheet lists {name}'s corporate "
+                        f"tax rate at {m.group(1)}%."
+                    )
             elif _is_cds:
                 # 10-year CDS sheet short row: "Country | Moody's | CDS% | net-of-Swiss%"
                 m = None
                 for t in candidate_texts:
                     m = _reg.search(
                         rf"(?m)^{esc} \| [A-Za-z]{{1,3}}[0-9]?[+\-]? \| ([\d.]+)% \| "
-                        rf"([\d.]+)% \| [A-Z]", t)
+                        rf"([\d.]+)% \| [A-Z]",
+                        t,
+                    )
                     if m:
                         break
                 if m:
                     facts.append(
                         f"{name}'s 10-year CDS spread as of 12/31/25 was {m.group(1)}%, "
-                        f"or {m.group(2)}% net of the Switzerland adjustment.")
+                        f"or {m.group(2)}% net of the Switzerland adjustment."
+                    )
             elif _is_rating:
                 m = None
                 for t in candidate_texts:
                     m = _reg.search(
                         rf"(?m)^{esc} \| ([A-Z]{{1,3}}[+\-]?) \| ([A-Z]{{1,3}}[+\-]?) \| "
-                        rf"([A-Z][a-z]{{1,2}}[0-9]?)\b", t)
+                        rf"([A-Z][a-z]{{1,2}}[0-9]?)\b",
+                        t,
+                    )
                     if m:
                         break
                 if m:
                     sp, fitch, moody = m.groups()
                     facts.append(
                         f"The Sovereign Ratings sheet lists {name} at S&P {sp}, Fitch "
-                        f"{fitch}, and Moody's {moody}.")
+                        f"{fitch}, and Moody's {moody}."
+                    )
         if facts:
             fact = " ".join(facts)[:900]
             return _xlsx_synth_prefix(fact) + knowledge
@@ -1300,6 +1463,7 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
         if uid:
             candidate_texts += [getattr(_bd, "text", "") or "" for _bd in _load_bm25_docs(uid)]
         import re as _rm
+
         mm = None
         us_erp = None
         for t in candidate_texts:
@@ -1310,7 +1474,9 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
             if us_erp is None:
                 m2 = _rm.search(
                     r"(?m)^United States \| [\d.]+ \| [A-Za-z]{1,3}[0-9]? \| "
-                    r"[\d.]+% \| ([\d.]+)%", t)
+                    r"[\d.]+% \| ([\d.]+)%",
+                    t,
+                )
                 if m2:
                     us_erp = f"{round(float(m2.group(1)), 2):g}"
             if mm and us_erp:
@@ -1336,9 +1502,12 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
         if uid:
             candidate_texts += [getattr(_bd, "text", "") or "" for _bd in _load_bm25_docs(uid)]
         import re as _rl
+
         # Moody's rating codes present in the query, preserving case (Ba1, Caa1, Aaa…)
         _ratings = _rl.findall(r"\b([ABC][a-z]{1,2}[1-3]?)\b", query or "")
-        _ratings = [r for r in _ratings if _rl.match(r"^[ABC][a-z]{1,2}[1-3]?$", r) and len(r) >= 2][:3]
+        _ratings = [
+            r for r in _ratings if _rl.match(r"^[ABC][a-z]{1,2}[1-3]?$", r) and len(r) >= 2
+        ][:3]
         rfacts = []
         for rc in dict.fromkeys(_ratings):
             val = None
@@ -1350,11 +1519,14 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
                     val = round(float(m.group(1)), 1)
                     break
             if val is not None:
-                rfacts.append(f"a {rc} rating carries a rating-based default spread of "
-                              f"about {val} basis points")
+                rfacts.append(
+                    f"a {rc} rating carries a rating-based default spread of "
+                    f"about {val} basis points"
+                )
         if rfacts:
-            fact = ("Per the ratings-to-default-spread lookup table, "
-                    + ", while ".join(rfacts) + ".")
+            fact = (
+                "Per the ratings-to-default-spread lookup table, " + ", while ".join(rfacts) + "."
+            )
             return _xlsx_synth_prefix(fact) + knowledge
 
     # XLSX — ctryprem.xlsx regional simple-average ERP query. Same distraction
@@ -1362,14 +1534,19 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
     # but the model still tends to cite one specific country row from a
     # neighboring chunk. Parse the named regions directly out of the retrieved
     # text (accuracy phase 2026-07).
-    if "region" in q and "average" in q and any(w in q for w in ("risk premium", "erp", "equity risk")):
+    if (
+        "region" in q
+        and "average" in q
+        and any(w in q for w in ("risk premium", "erp", "equity risk"))
+    ):
         candidate_texts = [d.get("text", "") or "" for d in docs]
         uid = _get_uid()
         if uid:
             candidate_texts += [getattr(_bd, "text", "") or "" for _bd in _load_bm25_docs(uid)]
         import re as _re5
+
         _regions = ["Africa", "Asia", "Western Europe", "North America", "Grand Total"]
-        found: Dict[str, Any] = {}
+        found: dict[str, Any] = {}
         for text in candidate_texts:
             for region in _regions:
                 if region in found:
@@ -1419,6 +1596,7 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
         if uid:
             candidate_texts += [getattr(_bd, "text", "") or "" for _bd in _load_bm25_docs(uid)]
         import re as _re2
+
         for text in candidate_texts:
             tl = text.lower()
             if "coefficient of variation" not in tl or "sovereign bond" not in tl:
@@ -1432,13 +1610,15 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
             idx = tl.find("the biggest change")
             if idx == -1:
                 continue
-            fact = _re2.sub(r"\s+", " ", text[idx:idx + 550]).strip()
+            fact = _re2.sub(r"\s+", " ", text[idx : idx + 550]).strip()
             # The resulting multiplier value lives on a different sheet (ERPs by
             # country) than this narrative — pull it in too so the answer is
             # numerically complete, not just qualitatively correct.
             mult_val = None
             for _t2 in candidate_texts:
-                m2 = _re2.search(r"multiplier to use on the default spread[^|\n]*\|\s*([\d.]+)", _t2)
+                m2 = _re2.search(
+                    r"multiplier to use on the default spread[^|\n]*\|\s*([\d.]+)", _t2
+                )
                 if m2:
                     mult_val = round(float(m2.group(1)), 4)
                     break
@@ -1454,17 +1634,20 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
             # final_docs/sources list, not the answer text — also reflects this
             # sheet's presence, not just the generated answer (accuracy phase
             # 2026-07).
-            docs.insert(0, {
-                "text": f"Sheet: Summary of Most Recent Update\n{fact}",
-                "score": 0.9,
-                "final_score": 0.9,
-                "metadata": {
-                    "source": "ctryprem.xlsx",
-                    "modality": "xlsx",
-                    "sheet_name": "Summary of Most Recent Update",
-                    "row_range": [1, 8],
+            docs.insert(
+                0,
+                {
+                    "text": f"Sheet: Summary of Most Recent Update\n{fact}",
+                    "score": 0.9,
+                    "final_score": 0.9,
+                    "metadata": {
+                        "source": "ctryprem.xlsx",
+                        "modality": "xlsx",
+                        "sheet_name": "Summary of Most Recent Update",
+                        "row_range": [1, 8],
+                    },
                 },
-            })
+            )
             return _xlsx_synth_prefix(fact) + knowledge
 
     return knowledge
@@ -1472,41 +1655,46 @@ def _prepend_key_facts_knowledge(docs: List[Dict], query: str, knowledge: str, u
 
 # MEMORY PREPARATION
 
+
 def _prepare_memory(memory: str) -> str:
     if not memory:
         return ""
     memory = _normalize(memory)
-    return memory[:settings.MEMORY_MAX_CONTEXT_CHARS]
+    return memory[: settings.MEMORY_MAX_CONTEXT_CHARS]
 
 
 # STEP-LEVEL TRACE RECORD
 
+
 def _record_step(
-    trace_log: List[Dict],
+    trace_log: list[dict],
     step_type: str,
     input_text: str,
     output_text: str,
     latency: float,
-    metadata: Optional[Dict] = None,
+    metadata: dict | None = None,
 ) -> None:
-    trace_log.append({
-        "step":      step_type,
-        "input":     input_text[:200],
-        "output":    output_text[:200],
-        "latency":   latency,
-        "metadata":  metadata or {},
-        "timestamp": time.time(),
-    })
+    trace_log.append(
+        {
+            "step": step_type,
+            "input": input_text[:200],
+            "output": output_text[:200],
+            "latency": latency,
+            "metadata": metadata or {},
+            "timestamp": time.time(),
+        }
+    )
 
 
 # CHAIN-OF-THOUGHT PROMPT BUILDER
+
 
 def _build_cot_prompt(
     query: str,
     knowledge: str,
     memory: str,
     query_type: str = "factual",
-    cite_keys: Optional[List[str]] = None,
+    cite_keys: list[str] | None = None,
 ) -> str:
 
     # NOTE: these instructions must NOT ask the model to show its reasoning or
@@ -1592,7 +1780,9 @@ def _build_cot_prompt(
     # CITATION RULES — make the LLM emit the exact bracket tags shown in KNOWLEDGE.
     tag_list = ""
     if cite_keys:
-        tag_list = "Available source tags (use ONLY these, verbatim): " + ", ".join(cite_keys[:12]) + "\n"
+        tag_list = (
+            "Available source tags (use ONLY these, verbatim): " + ", ".join(cite_keys[:12]) + "\n"
+        )
     citation_rules = (
         "CITATION RULES:\n"
         "- Write a full prose answer that directly addresses the QUERY using facts from KNOWLEDGE.\n"
@@ -1605,9 +1795,9 @@ def _build_cot_prompt(
         f"{tag_list}\n"
     )
 
-    memory_block    = f"MEMORY:\n{memory}\n\n"    if memory    else ""
+    memory_block = f"MEMORY:\n{memory}\n\n" if memory else ""
     knowledge_block = f"KNOWLEDGE:\n{knowledge}\n\n" if knowledge else ""
-    query_block     = f"QUERY:\n{query}\n\n"
+    query_block = f"QUERY:\n{query}\n\n"
 
     # Few-shot example: STRUCTURE ONLY, no numbers or named entities that could
     # leak into the answer. Mistral-7B Q4 has been observed copying numeric
@@ -1645,11 +1835,12 @@ def _build_cot_prompt(
 
 # REACT PROMPT BUILDER — FOR TOOL-AUGMENTED REASONING
 
+
 def _build_react_prompt(
     query: str,
     knowledge: str,
     memory: str,
-    step_history: List[Dict],
+    step_history: list[dict],
 ) -> str:
 
     history_text = ""
@@ -1668,10 +1859,10 @@ def _build_react_prompt(
         "- No hallucination\n\n"
     )
 
-    memory_block    = f"MEMORY:\n{memory}\n\n"    if memory    else ""
+    memory_block = f"MEMORY:\n{memory}\n\n" if memory else ""
     knowledge_block = f"KNOWLEDGE:\n{knowledge}\n\n" if knowledge else ""
-    history_block   = f"HISTORY:\n{history_text}\n" if history_text else ""
-    query_block     = f"QUERY:\n{query}\n\n"
+    history_block = f"HISTORY:\n{history_text}\n" if history_text else ""
+    query_block = f"QUERY:\n{query}\n\n"
 
     output_format = (
         "FORMAT:\n"
@@ -1683,36 +1874,32 @@ def _build_react_prompt(
     )
 
     return (
-        instruction
-        + memory_block
-        + knowledge_block
-        + history_block
-        + query_block
-        + output_format
+        instruction + memory_block + knowledge_block + history_block + query_block + output_format
     )
 
 
 # RESPONSE PARSER
 
+
 def _parse_response(
     text: str,
-    docs: List[Dict],
-    valid_cite_keys: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    docs: list[dict],
+    valid_cite_keys: list[str] | None = None,
+) -> dict[str, Any]:
 
     if not text:
         return _fallback_response()
 
     try:
-        answer:     str   = ""
+        answer: str = ""
         # `confidence` is `None` until the LLM actually emits a Confidence: line.
         # Downstream code uses this to distinguish "LLM said 0.5" from
         # "LLM omitted the field" so the pipeline can fall through to the
         # retrieval-derived confidence instead of a misleading hardcoded 0.5.
-        confidence: Optional[float] = None
-        sources:    int   = 0
-        reasoning:  str   = ""
-        tags_line:  str   = ""
+        confidence: float | None = None
+        sources: int = 0
+        reasoning: str = ""
+        tags_line: str = ""
 
         # NORMALIZE — strip leading bracket wrappers that Mistral emits in
         # several variants. All of these break the line-based prefix matcher
@@ -1723,19 +1910,22 @@ def _parse_response(
         # We match ANY of these and replace with the bare "<Key>:" form so the
         # downstream line-scanner can recognise the prefix correctly.
         norm_text = text
-        keys_for_norm = ("Answer Tags", "Sources Used", "Confidence",
-                         "Reasoning", "Answer")
+        keys_for_norm = ("Answer Tags", "Sources Used", "Confidence", "Reasoning", "Answer")
         for key in keys_for_norm:
             key_re = re.escape(key)
             # Variant 1: "[Key]:" or "[ Key ]:"
             norm_text = re.sub(
                 r"\[\s*" + key_re + r"\s*\]\s*:",
-                key + ":", norm_text, flags=re.IGNORECASE,
+                key + ":",
+                norm_text,
+                flags=re.IGNORECASE,
             )
             # Variant 2: "[Key:" (open bracket only — no matching ])
             norm_text = re.sub(
                 r"\[\s*" + key_re + r"\s*:",
-                key + ":", norm_text, flags=re.IGNORECASE,
+                key + ":",
+                norm_text,
+                flags=re.IGNORECASE,
             )
 
         # Insert newlines before each format key when they appear inline.
@@ -1745,14 +1935,19 @@ def _parse_response(
         for key in ("Answer Tags:", "Confidence:", "Sources Used:", "Reasoning:"):
             norm_text = re.sub(
                 r"\s+(?=\[?\s*" + re.escape(key) + r")",
-                "\n", norm_text, flags=re.IGNORECASE,
+                "\n",
+                norm_text,
+                flags=re.IGNORECASE,
             )
 
         answer_lines: list = []
         in_answer = False
 
         _FORMAT_KEYS = (
-            "confidence:", "sources used:", "reasoning:", "answer tags:",
+            "confidence:",
+            "sources used:",
+            "reasoning:",
+            "answer tags:",
         )
 
         for line in norm_text.split("\n"):
@@ -1820,22 +2015,23 @@ def _parse_response(
             # longer match wins — otherwise the regex would split at the first
             # "Answer" and leave " Tags:" stranded.
             keys = (
-                "Answer Tags", "Sources Used",
-                "Confidence", "Reasoning", "Answer",
+                "Answer Tags",
+                "Sources Used",
+                "Confidence",
+                "Reasoning",
+                "Answer",
             )
-            key_pattern = (
-                r"\s*\[?\s*(?:"
-                + "|".join(re.escape(k) for k in keys)
-                + r")\s*\]?\s*:"
-            )
+            key_pattern = r"\s*\[?\s*(?:" + "|".join(re.escape(k) for k in keys) + r")\s*\]?\s*:"
             m = re.search(key_pattern, answer, flags=re.IGNORECASE)
             if m and m.start() > 0:
-                answer = answer[:m.start()].strip()
+                answer = answer[: m.start()].strip()
             # Trim any dangling open bracket / trailing punctuation left over
             # from a partial format fragment that didn't match the pattern.
             answer = re.sub(r"\s*\[\s*$", "", answer).strip()
             # Strip "Source: <source number>" template leakage from some prompts
-            answer = re.sub(r"^\s*Source\s*:\s*<source[^>]*>\s*\n?", "", answer, flags=re.IGNORECASE)
+            answer = re.sub(
+                r"^\s*Source\s*:\s*<source[^>]*>\s*\n?", "", answer, flags=re.IGNORECASE
+            )
             answer = re.sub(r"\s*Source\s*:\s*$", "", answer, flags=re.IGNORECASE | re.MULTILINE)
             # Strip TXT section-marker artifacts like "( Item 1. Business. Overview)"
             # or "(Human capital)" that the LLM copies verbatim from chunk headers.
@@ -1905,10 +2101,7 @@ def _parse_response(
                     # No following clause — drop the broken phrase entirely.
                     answer = answer[:clause_start].rstrip().rstrip(",;:") or answer
                 else:
-                    answer = (
-                        answer[:clause_start]
-                        + answer[cut_start + clause_end_rel:]
-                    ).strip()
+                    answer = (answer[:clause_start] + answer[cut_start + clause_end_rel :]).strip()
                 # Capitalize first letter if we trimmed away the original opener.
                 if answer and answer[0].islower():
                     answer = answer[0].upper() + answer[1:]
@@ -1925,15 +2118,18 @@ def _parse_response(
             # "holds a market share of [tag] in [...] segment [tag]." with no
             # "but the document doesn't contain..." follow-up.
             REFUSAL_MARKERS = (
-                "does not contain", "do not contain",
-                "not mentioned", "not specified",
-                "is not provided", "are not provided",
-                "no information", "cannot find",
-                "i don't know", "i do not know",
+                "does not contain",
+                "do not contain",
+                "not mentioned",
+                "not specified",
+                "is not provided",
+                "are not provided",
+                "no information",
+                "cannot find",
+                "i don't know",
+                "i do not know",
             )
-            has_refusal = any(
-                m in (answer or "").lower() for m in REFUSAL_MARKERS
-            )
+            has_refusal = any(m in (answer or "").lower() for m in REFUSAL_MARKERS)
             still_broken = citation_in_slot.search(answer or "") is not None
             if still_broken and not has_refusal:
                 logger.warning(
@@ -1959,10 +2155,16 @@ def _parse_response(
             clean_lines = []
             for line in norm_text.split("\n"):
                 ll = line.lower().strip()
-                if any(ll.startswith(k) for k in (
-                    "confidence:", "sources used:", "reasoning:",
-                    "answer:", "answer tags:",
-                )):
+                if any(
+                    ll.startswith(k)
+                    for k in (
+                        "confidence:",
+                        "sources used:",
+                        "reasoning:",
+                        "answer:",
+                        "answer tags:",
+                    )
+                ):
                     break
                 clean_lines.append(line)
             answer = " ".join(clean_lines).strip() or text.strip()
@@ -1978,7 +2180,7 @@ def _parse_response(
                 confidence = max(0.0, min(confidence, 1.0))
 
         # CITATION EXTRACTION — inline tags + Answer Tags: line, validated.
-        cited_tags: List[str] = []
+        cited_tags: list[str] = []
         if valid_cite_keys:
             inline = _extract_cite_tags(answer, valid_cite_keys)
             cited_tags.extend(inline)
@@ -2001,11 +2203,11 @@ def _parse_response(
         sources = min(sources, max(len(docs), len(cited_tags)))
 
         return {
-            "answer":       answer,
-            "reasoning":    reasoning,
-            "confidence":   confidence,
+            "answer": answer,
+            "reasoning": reasoning,
+            "confidence": confidence,
             "sources_used": sources,
-            "cited_tags":   cited_tags,
+            "cited_tags": cited_tags,
         }
 
     except Exception:
@@ -2014,38 +2216,40 @@ def _parse_response(
 
 # FALLBACK RESPONSE
 
-def _fallback_response(text: str = "") -> Dict[str, Any]:
+
+def _fallback_response(text: str = "") -> dict[str, Any]:
     return {
         "answer": (
             text.strip()
             if text and len(text.strip()) >= 10
             else "I couldn't generate a reliable answer."
         ),
-        "reasoning":    "",
-        "confidence":   0.3,
+        "reasoning": "",
+        "confidence": 0.3,
         "sources_used": 0,
-        "cited_tags":   [],
+        "cited_tags": [],
     }
 
 
 # PROMPT TRUNCATION — PRESERVE HEADER AND QUERY, TRIM KNOWLEDGE
 
+
 def _truncate_prompt(prompt: str, max_chars: int) -> str:
     parts = prompt.split("KNOWLEDGE:")
     if len(parts) < 2:
         return prompt[:max_chars]
-    header  = parts[0]
-    body    = "KNOWLEDGE:" + parts[1]
+    header = parts[0]
+    body = "KNOWLEDGE:" + parts[1]
     allowed = max_chars - len(header) - 20
-    return header + body[:max(allowed, 0)]
+    return header + body[: max(allowed, 0)]
 
 
 class ReasoningEngine:
 
     def __init__(self, llm: Any) -> None:
-        self.llm              = llm
+        self.llm = llm
         self.max_prompt_chars = settings.MAX_PROMPT_CHARS
-        self.model_name       = getattr(settings, "PRIMARY_LLM_PROVIDER", "gguf")
+        self.model_name = getattr(settings, "PRIMARY_LLM_PROVIDER", "gguf")
 
     # LLM CALL WITH RETRY AND TIMEOUT
 
@@ -2058,9 +2262,9 @@ class ReasoningEngine:
         self,
         prompt: str,
         session_id: str,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         temperature: float = 0.0,
-    ) -> Optional[str]:
+    ) -> str | None:
 
         if len(prompt) > self.max_prompt_chars:
             prompt = _truncate_prompt(prompt, self.max_prompt_chars)
@@ -2102,15 +2306,15 @@ class ReasoningEngine:
     def generate_answer(
         self,
         query: str,
-        retrieved_docs: List[Dict],
+        retrieved_docs: list[dict],
         memory_context: str = "",
         session_id: str = "default",
         query_type: str = "factual",
         use_react: bool = False,
-        step_history: Optional[List[Dict]] = None,
-        sources: Optional[List[Dict[str, Any]]] = None,
+        step_history: list[dict] | None = None,
+        sources: list[dict[str, Any]] | None = None,
         user_id: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
 
         if not query:
             return _fallback_response()
@@ -2122,29 +2326,34 @@ class ReasoningEngine:
         # dependency with query_pipeline.
         try:
             from app.pipeline.query_pipeline import _query_entities_ungrounded
+
             if retrieved_docs and _query_entities_ungrounded(query, retrieved_docs):
                 return {
                     "answer": "No relevant information was found in your knowledge base to answer this question.",
-                    "reasoning": "", "confidence": 0.0, "sources_used": 0,
-                    "cited_tags": [], "abstained": "entity_grounding",
+                    "reasoning": "",
+                    "confidence": 0.0,
+                    "sources_used": 0,
+                    "cited_tags": [],
+                    "abstained": "entity_grounding",
                 }
         except Exception:
             pass
 
-        start      = time.time()
-        trace_log: List[Dict] = []
+        start = time.time()
+        trace_log: list[dict] = []
 
         # Build sources lazily here if pipeline didn't supply them (back-compat).
         if sources is None:
             try:
                 from app.core.response import build_sources
+
                 sources = build_sources(retrieved_docs)
             except Exception:
                 sources = []
 
-        cite_keys: List[str] = list(dict.fromkeys(
-            s.get("cite_key") for s in (sources or []) if s.get("cite_key")
-        ))
+        cite_keys: list[str] = list(
+            dict.fromkeys(s.get("cite_key") for s in (sources or []) if s.get("cite_key"))
+        )
 
         with tracer.start_as_current_span("reasoning_generate_answer") as span:
             span.set_attribute("query.length", len(query))
@@ -2154,9 +2363,11 @@ class ReasoningEngine:
             span.set_attribute("use_react", use_react)
 
             try:
-                query    = _normalize(query)
+                query = _normalize(query)
                 knowledge = _prepare_knowledge(retrieved_docs, sources=sources)
-                knowledge = _prepend_key_facts_knowledge(retrieved_docs, query, knowledge, user_id=user_id)
+                knowledge = _prepend_key_facts_knowledge(
+                    retrieved_docs, query, knowledge, user_id=user_id
+                )
 
                 # XLSX accuracy-phase synth override: strip the sentinel-wrapped
                 # copy of the fact (the LLM should never see the raw marker
@@ -2168,7 +2379,7 @@ class ReasoningEngine:
                     _xlsx_synth_fact = _fact
                     knowledge = _rest
 
-                memory   = _prepare_memory(memory_context)
+                memory = _prepare_memory(memory_context)
 
                 # RECORD RETRIEVE STEP
                 t_retrieve = time.time()
@@ -2242,8 +2453,7 @@ class ReasoningEngine:
                         session_id=session_id,
                     )
                     retry_prompt = (
-                        prompt
-                        + "\n\nIMPORTANT CORRECTION: Your previous answer contained "
+                        prompt + "\n\nIMPORTANT CORRECTION: Your previous answer contained "
                         f"the number(s) {', '.join(bad_nums)} which do NOT appear "
                         "anywhere in KNOWLEDGE. You MUST use only numbers that "
                         "appear verbatim in KNOWLEDGE. If KNOWLEDGE does not "
@@ -2253,14 +2463,20 @@ class ReasoningEngine:
                         "invent a substitute number.\n"
                     )
                     retry_response = self._call_llm(
-                        retry_prompt, session_id, temperature=0.0,
+                        retry_prompt,
+                        session_id,
+                        temperature=0.0,
                     )
                     if retry_response:
                         retry_parsed = _parse_response(
-                            retry_response, retrieved_docs, valid_cite_keys=cite_keys,
+                            retry_response,
+                            retrieved_docs,
+                            valid_cite_keys=cite_keys,
                         )
                         retry_bad = _unsupported_numbers(
-                            retry_parsed["answer"], retrieved_docs, query=query,
+                            retry_parsed["answer"],
+                            retrieved_docs,
+                            query=query,
                         )
                         if len(retry_bad) < len(bad_nums):
                             parsed = retry_parsed
@@ -2322,9 +2538,9 @@ class ReasoningEngine:
                     f"support={support_score}",
                     verify_latency,
                     {
-                        "hallucinated":  is_hallucinated,
+                        "hallucinated": is_hallucinated,
                         "support_score": support_score,
-                        "cited_tags":    len(cited_tags),
+                        "cited_tags": len(cited_tags),
                     },
                 )
 
@@ -2350,7 +2566,9 @@ class ReasoningEngine:
                 # SCALE-AWARE NUMERIC VERIFICATION — Phase 6.2
                 # Annotate unverified numbers inline and expose results to caller.
                 _verification_results = _verify_numeric_citations(
-                    parsed.get("answer", ""), retrieved_docs, query=query,
+                    parsed.get("answer", ""),
+                    retrieved_docs,
+                    query=query,
                 )
                 if _verification_results:
                     parsed["verification_results"] = _verification_results
@@ -2361,7 +2579,8 @@ class ReasoningEngine:
                     )
                     if _has_unverified and not parsed.get("hallucination_warning"):
                         parsed["answer"] = _apply_numeric_annotations(
-                            parsed["answer"], _verification_results,
+                            parsed["answer"],
+                            _verification_results,
                         )
 
                 # FILTERED SOURCES — subset of input sources that the LLM actually cited.
@@ -2404,9 +2623,7 @@ class ReasoningEngine:
                     parsed["hallucination_warning"] = True
                 elif cited_tags and sources:
                     cited_set = set(cited_tags)
-                    parsed["sources"] = [
-                        s for s in sources if s.get("cite_key") in cited_set
-                    ]
+                    parsed["sources"] = [s for s in sources if s.get("cite_key") in cited_set]
                 else:
                     # Fallback to top-3 retrieved sources so the UI always has citations.
                     parsed["sources"] = list((sources or [])[:3])
@@ -2468,7 +2685,7 @@ class ReasoningEngine:
                 return parsed
 
             except Exception as exc:
-                latency    = round(time.time() - start, 2)
+                latency = round(time.time() - start, 2)
                 error_type = type(exc).__name__
 
                 _reasoning_duration.labels(status="error").observe(latency)
@@ -2490,15 +2707,15 @@ class ReasoningEngine:
     async def generate_answer_async(
         self,
         query: str,
-        retrieved_docs: List[Dict],
+        retrieved_docs: list[dict],
         memory_context: str = "",
         session_id: str = "default",
         query_type: str = "factual",
         use_react: bool = False,
-        step_history: Optional[List[Dict]] = None,
-        sources: Optional[List[Dict[str, Any]]] = None,
+        step_history: list[dict] | None = None,
+        sources: list[dict[str, Any]] | None = None,
         user_id: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
 
         async with _get_semaphore():
             return await asyncio.get_running_loop().run_in_executor(
@@ -2515,4 +2732,3 @@ class ReasoningEngine:
                     user_id,
                 ),
             )
-

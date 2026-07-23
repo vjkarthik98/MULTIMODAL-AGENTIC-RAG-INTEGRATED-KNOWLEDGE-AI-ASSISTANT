@@ -4,10 +4,11 @@ Queries the live pipeline (server if reachable, else direct) for each behavioral
 gold row, then scores refusal_accuracy + adversarial_pass with Prometheus.
 Reuses generation_runner's query machinery so auth/fallback behaviour is identical.
 """
+
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List
+from typing import Any
 
 from app.eval.config import EvalConfig
 from app.eval.datasets.gold_loader import load_all_gold
@@ -23,7 +24,7 @@ from app.eval.runners.generation_runner import (
 _BEHAVIORAL_MODALITIES = ["txt", "pdf", "docx", "xlsx", "image", "audio", "video"]
 
 
-def _load_behavioral_rows(cfg: EvalConfig) -> List[Dict[str, Any]]:
+def _load_behavioral_rows(cfg: EvalConfig) -> list[dict[str, Any]]:
     _mods = [cfg.modality] if getattr(cfg, "modality", None) else _BEHAVIORAL_MODALITIES
     gold = load_all_gold(gold_dir=cfg.gold_dir, modalities=_mods)
     rows = []
@@ -47,8 +48,8 @@ def run_behavioral_suite(cfg: EvalConfig) -> SuiteResult:
         result.breached["no_behavioral_data"] = "No refusal/adversarial gold rows found."
         return result
 
-    eval_rows: List[Dict[str, Any]] = []
-    latencies: List[float] = []
+    eval_rows: list[dict[str, Any]] = []
+    latencies: list[float] = []
     _run_tag = int(time.time())  # unique per run → never collides with a cached prior run
     for row in gold_rows:
         session_id = f"{cfg.session_prefix}_beh_{_run_tag}_{row['id']}"

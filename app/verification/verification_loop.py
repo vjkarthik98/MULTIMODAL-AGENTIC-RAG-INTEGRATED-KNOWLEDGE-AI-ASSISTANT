@@ -23,7 +23,7 @@ its "budget" is AGENT_VERIFY_MAX_RETRIES).
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from prometheus_client import Counter, Histogram
 
@@ -57,7 +57,7 @@ logger = get_logger(__name__)
 _MODALITY_ALIASES = {"mp4": "video", "mp3": "audio"}
 
 
-def normalize_modality(modality: Optional[str]) -> str:
+def normalize_modality(modality: str | None) -> str:
     m = str(modality or "").lower()
     return _MODALITY_ALIASES.get(m, m)
 
@@ -68,17 +68,24 @@ _LIMITATION_NOTICE = (
 )
 
 _loop_total = Counter(
-    "magik_verification_loop_total", "Verification loop outcomes", ["decision"],
+    "magik_verification_loop_total",
+    "Verification loop outcomes",
+    ["decision"],
 )
 _retry_total = Counter(
-    "magik_verification_retry_total", "Verification retry attempts by strategy", ["strategy"],
+    "magik_verification_retry_total",
+    "Verification retry attempts by strategy",
+    ["strategy"],
 )
 _confidence_hist = Histogram(
-    "magik_verification_confidence", "Verification confidence scores", ["score_type"],
+    "magik_verification_confidence",
+    "Verification confidence scores",
+    ["score_type"],
     buckets=(0, 20, 40, 60, 75, 85, 90, 95, 100),
 )
 _duration_hist = Histogram(
-    "magik_verification_duration_seconds", "Verification loop total duration",
+    "magik_verification_duration_seconds",
+    "Verification loop total duration",
 )
 
 
@@ -95,24 +102,29 @@ class VerificationLoop:
         self,
         query: str,
         session_id: str,
-        user_id: Optional[str],
+        user_id: str | None,
         retriever: Any,
         reasoning_engine: Any,
-        initial_docs: List[Dict[str, Any]],
-        initial_sources: Optional[List[Dict[str, Any]]] = None,
+        initial_docs: list[dict[str, Any]],
+        initial_sources: list[dict[str, Any]] | None = None,
         llm: Any = None,
-        modality_hint: Optional[str] = None,
-        filters: Optional[Dict[str, Any]] = None,
+        modality_hint: str | None = None,
+        filters: dict[str, Any] | None = None,
         memory_context: str = "",
-    ) -> Tuple[str, VerificationReport]:
+    ) -> tuple[str, VerificationReport]:
 
         modality_hint = normalize_modality(modality_hint) if modality_hint else modality_hint
         if not settings.AGENT_VERIFY_ENABLED or (
             modality_hint and modality_hint not in settings.AGENT_VERIFY_MODALITIES
         ):
             return self._passthrough(
-                query, session_id, user_id, reasoning_engine,
-                initial_docs, initial_sources, memory_context,
+                query,
+                session_id,
+                user_id,
+                reasoning_engine,
+                initial_docs,
+                initial_sources,
+                memory_context,
             )
 
         start = time.time()
@@ -123,9 +135,9 @@ class VerificationLoop:
         sources = list(initial_sources or [])
         effective_query = query
 
-        attempts: List[RetryAttempt] = []
-        answers: List[str] = []
-        cited_sources_per_attempt: List[List[Dict[str, Any]]] = []
+        attempts: list[RetryAttempt] = []
+        answers: list[str] = []
+        cited_sources_per_attempt: list[list[dict[str, Any]]] = []
         grounding_results = []
         citation_results = []
         completeness_results = []
@@ -138,8 +150,14 @@ class VerificationLoop:
             if attempt_number > 0:
                 try:
                     docs, effective_query = retry_ctrl.execute(
-                        strategy, effective_query, session_id, user_id,
-                        retriever, llm, filters, docs,
+                        strategy,
+                        effective_query,
+                        session_id,
+                        user_id,
+                        retriever,
+                        llm,
+                        filters,
+                        docs,
                     )
                 except Exception:
                     # A retry's retrieval/merge step failing must not crash
@@ -150,7 +168,9 @@ class VerificationLoop:
                     # (e.g. a malformed doc breaking _dedup_docs/_normalize_docs).
                     logger.warning(
                         event="verification_retry_execute_failed",
-                        attempt_number=attempt_number, strategy=strategy, session_id=session_id,
+                        attempt_number=attempt_number,
+                        strategy=strategy,
+                        session_id=session_id,
                     )
                     break
                 sources = self._rebuild_sources(docs, fallback=sources)
@@ -158,8 +178,13 @@ class VerificationLoop:
 
             try:
                 answer, cited_sources = self._generate(
-                    reasoning_engine, effective_query, docs, memory_context,
-                    session_id, sources, user_id,
+                    reasoning_engine,
+                    effective_query,
+                    docs,
+                    memory_context,
+                    session_id,
+                    sources,
+                    user_id,
                 )
             except Exception:
                 if attempt_number == 0:
@@ -177,26 +202,40 @@ class VerificationLoop:
                 # (guaranteed non-empty: the baseline always produces one).
                 logger.warning(
                     event="verification_retry_generation_failed",
-                    attempt_number=attempt_number, strategy=strategy, session_id=session_id,
+                    attempt_number=attempt_number,
+                    strategy=strategy,
+                    session_id=session_id,
                 )
                 break
 
             retrieval_res = self.retrieval_evaluator.evaluate(effective_query, docs)
             grounding_res = self.groundedness_checker.check(answer, docs, query=effective_query)
             citation_res = self.citation_verifier.check(answer, docs, sources)
-            completeness_res = self.completeness_verifier.check(answer, aspects, query=effective_query)
+            completeness_res = self.completeness_verifier.check(
+                answer, aspects, query=effective_query
+            )
 
             scores = self.confidence_scorer.score(
-                retrieval_res, grounding_res, citation_res, completeness_res,
+                retrieval_res,
+                grounding_res,
+                citation_res,
+                completeness_res,
             )
             decision, reason = self.confidence_scorer.decide(
-                scores, grounding_res, citation_res, completeness_res,
+                scores,
+                grounding_res,
+                citation_res,
+                completeness_res,
             )
 
             duration_ms = round((time.time() - t0) * 1000, 1)
             attempt = RetryAttempt(
-                attempt_number=attempt_number, strategy=strategy, scores=scores,
-                decision=decision, reason=reason, duration_ms=duration_ms,
+                attempt_number=attempt_number,
+                strategy=strategy,
+                scores=scores,
+                decision=decision,
+                reason=reason,
+                duration_ms=duration_ms,
                 answer_preview=answer[:200],
             )
             attempts.append(attempt)
@@ -208,9 +247,13 @@ class VerificationLoop:
 
             logger.info(
                 event="verification_iteration",
-                attempt_number=attempt_number, strategy=strategy,
-                scores=scores.to_dict(), decision=decision, reason=reason,
-                duration_ms=duration_ms, session_id=session_id,
+                attempt_number=attempt_number,
+                strategy=strategy,
+                scores=scores.to_dict(),
+                decision=decision,
+                reason=reason,
+                duration_ms=duration_ms,
+                session_id=session_id,
             )
 
             should_stop, _stop_reason = self.stopping.should_stop(attempts, start)
@@ -236,9 +279,13 @@ class VerificationLoop:
         report = VerificationReport(
             verified=verified,
             scores=best.scores,
-            unsupported_claims=[] if verified else (
-                best_grounding.unsupported_claims
-                + [f"unsupported number: {n}" for n in best_grounding.unsupported_numbers]
+            unsupported_claims=(
+                []
+                if verified
+                else (
+                    best_grounding.unsupported_claims
+                    + [f"unsupported number: {n}" for n in best_grounding.unsupported_numbers]
+                )
             ),
             bad_citations=[] if verified else best_citation.bad_citations,
             missing_aspects=[] if verified else best_completeness.missing,
@@ -254,29 +301,40 @@ class VerificationLoop:
 
         self._record_metrics(verified, attempts, total_ms)
         logger.info(
-            event="verification_final", verified=verified, attempts=len(attempts),
-            total_duration_ms=total_ms, session_id=session_id,
+            event="verification_final",
+            verified=verified,
+            attempts=len(attempts),
+            total_duration_ms=total_ms,
+            session_id=session_id,
         )
 
         return final_answer, report
 
     # INTERNALS
 
-    def _passthrough(self, query, session_id, user_id, reasoning_engine,
-                      docs, sources, memory_context) -> Tuple[str, VerificationReport]:
+    def _passthrough(
+        self, query, session_id, user_id, reasoning_engine, docs, sources, memory_context
+    ) -> tuple[str, VerificationReport]:
         """Verification disabled globally or opted out for this modality."""
-        answer, cited_sources = self._generate(reasoning_engine, query, docs or [], memory_context,
-                                                 session_id, sources, user_id)
+        answer, cited_sources = self._generate(
+            reasoning_engine, query, docs or [], memory_context, session_id, sources, user_id
+        )
         scores = ConfidenceScores(retrieval=100.0, grounding=100.0, citation=100.0, overall=100.0)
-        report = VerificationReport(verified=True, scores=scores, degraded=False,
-                                     cited_sources=cited_sources)
+        report = VerificationReport(
+            verified=True, scores=scores, degraded=False, cited_sources=cited_sources
+        )
         return answer, report
 
     @staticmethod
-    def _generate(reasoning_engine: Any, query: str, docs: List[Dict[str, Any]],
-                   memory_context: str, session_id: str,
-                   sources: Optional[List[Dict[str, Any]]], user_id: Optional[str],
-                   ) -> Tuple[str, List[Dict[str, Any]]]:
+    def _generate(
+        reasoning_engine: Any,
+        query: str,
+        docs: list[dict[str, Any]],
+        memory_context: str,
+        session_id: str,
+        sources: list[dict[str, Any]] | None,
+        user_id: str | None,
+    ) -> tuple[str, list[dict[str, Any]]]:
         """Returns (answer, cited_sources). `cited_sources` is
         generate_answer()'s OWN citation-filtered subset (empty for a
         refusal, cited-only otherwise) — NOT the raw candidate pool passed
@@ -284,32 +342,39 @@ class VerificationLoop:
         `initial_sources`, or citation transparency silently regresses to
         "show everything retrieved" (caught in code review, Phase 32)."""
         out = reasoning_engine.generate_answer(
-            query=query, retrieved_docs=docs, memory_context=memory_context,
-            session_id=session_id, sources=sources or None, user_id=user_id or "",
+            query=query,
+            retrieved_docs=docs,
+            memory_context=memory_context,
+            session_id=session_id,
+            sources=sources or None,
+            user_id=user_id or "",
         )
         answer = (out.get("answer") or "").strip()
         cited = out.get("sources")
         return answer, (cited if isinstance(cited, list) else list(sources or []))
 
     @staticmethod
-    def _split_aspects(query: str) -> List[str]:
+    def _split_aspects(query: str) -> list[str]:
         try:
             from app.pipeline.rag_pipeline import _split_query_aspects
+
             return _split_query_aspects(query)
         except Exception:
             return []
 
     @staticmethod
-    def _rebuild_sources(docs: List[Dict[str, Any]],
-                          fallback: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _rebuild_sources(
+        docs: list[dict[str, Any]], fallback: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         try:
             from app.core.response import build_sources
+
             return build_sources(docs)
         except Exception:
             return fallback
 
     @staticmethod
-    def _record_metrics(verified: bool, attempts: List[RetryAttempt], total_ms: float) -> None:
+    def _record_metrics(verified: bool, attempts: list[RetryAttempt], total_ms: float) -> None:
         try:
             _loop_total.labels(decision="PASS" if verified else "FAIL").inc()
             _duration_hist.observe(total_ms / 1000.0)

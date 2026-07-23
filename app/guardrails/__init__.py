@@ -19,9 +19,14 @@ Public API:
 
     warm_up()  — call from server startup to pre-init Presidio + jailbreak corpus
 """
+
 from app.guardrails.exceptions import GuardrailBlocked
-from app.guardrails.input_guard import GuardedInput, check as _input_check, sanitize as _input_sanitize
-from app.guardrails.output_guard import GuardedOutput, check as _output_check, safe_refusal
+from app.guardrails.input_guard import GuardedInput
+from app.guardrails.input_guard import check as _input_check
+from app.guardrails.input_guard import sanitize as _input_sanitize
+from app.guardrails.output_guard import GuardedOutput
+from app.guardrails.output_guard import check as _output_check
+from app.guardrails.output_guard import safe_refusal
 
 
 class InputGuard:
@@ -34,7 +39,9 @@ class InputGuard:
         session_id: str = "",
         correlation_id: str = "",
     ) -> GuardedInput:
-        return _input_check(query, surface=surface, session_id=session_id, correlation_id=correlation_id)
+        return _input_check(
+            query, surface=surface, session_id=session_id, correlation_id=correlation_id
+        )
 
     @staticmethod
     def sanitize(
@@ -43,7 +50,9 @@ class InputGuard:
         session_id: str = "",
         correlation_id: str = "",
     ) -> str:
-        return _input_sanitize(text, surface=surface, session_id=session_id, correlation_id=correlation_id)
+        return _input_sanitize(
+            text, surface=surface, session_id=session_id, correlation_id=correlation_id
+        )
 
 
 class OutputGuard:
@@ -80,18 +89,21 @@ def warm_up() -> None:
     """
     try:
         from app.guardrails.pii import warm_up as pii_warmup
+
         pii_warmup()
     except Exception:
         pass
 
     try:
         from app.guardrails.jailbreak import initialize as jb_init
+
         jb_init()
     except Exception:
         pass
 
     try:
         from app.guardrails._policy_loader import get_policy
+
         get_policy()
     except Exception:
         pass

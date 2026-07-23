@@ -2,10 +2,10 @@
 
 Measures the P1-8 gap: poor OCR quality on dense rendered finance text.
 """
+
 from __future__ import annotations
 
 import re
-from typing import List, Optional
 
 from app.eval.metrics.base import MetricResult
 
@@ -67,8 +67,8 @@ def exact_match(hypothesis: str, reference: str) -> float:
 
 
 def ocr_metrics_batch(
-    hypotheses: List[str],
-    references: List[str],
+    hypotheses: list[str],
+    references: list[str],
 ) -> dict:
     """Compute CER, WER, exact_match over a batch of (hypothesis, reference) pairs.
 
@@ -96,7 +96,7 @@ def ocr_metrics_batch(
             wers.append(wer)
         exacts.append(em)
 
-    def _mean_result(vals: List[float], name: str) -> MetricResult:
+    def _mean_result(vals: list[float], name: str) -> MetricResult:
         if not vals:
             return MetricResult.empty(name, "no valid reference pairs")
         return MetricResult(name=name, value=sum(vals) / len(vals), n=len(vals))

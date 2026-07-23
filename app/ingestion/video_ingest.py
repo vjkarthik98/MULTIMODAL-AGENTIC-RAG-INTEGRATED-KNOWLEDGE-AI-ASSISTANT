@@ -13,10 +13,7 @@ import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
-import pytesseract
-from PIL import Image
+from typing import Any
 
 from app.core.config import settings
 from app.ingestion.schema import (
@@ -38,6 +35,7 @@ except ImportError:
 try:
     import imagehash
     from PIL import Image as _PILImage
+
     _IMAGEHASH_AVAILABLE = True
 except ImportError:
     _IMAGEHASH_AVAILABLE = False
@@ -45,6 +43,7 @@ except ImportError:
 try:
     from scenedetect import SceneManager, open_video
     from scenedetect.detectors import AdaptiveDetector
+
     _SCENEDETECT_AVAILABLE = True
 except ImportError:
     _SCENEDETECT_AVAILABLE = False
@@ -59,10 +58,16 @@ def _sanitize(text: str, surface: str, **log_kw) -> str:
     """Apply Phase-26 injection sanitization. Returns original on guardrail error."""
     try:
         from app.guardrails.input_guard import sanitize as _g
+
         clean = _g(text, surface=surface)
         if clean != text:
-            logger.warning("injection_sanitized", surface=surface,
-                           original_len=len(text), sanitized_len=len(clean), **log_kw)
+            logger.warning(
+                "injection_sanitized",
+                surface=surface,
+                original_len=len(text),
+                sanitized_len=len(clean),
+                **log_kw,
+            )
         return clean
     except Exception as exc:
         logger.warning("guardrail_skipped", surface=surface, error=str(exc))
@@ -73,10 +78,12 @@ def _scrub_pii(text: str, surface: str) -> str:
     """Apply Phase-26 PII scrubbing. Returns original on error."""
     try:
         from app.guardrails.pii import scrub_pii
+
         clean, changed = scrub_pii(text)
         if changed:
-            logger.warning("pii_scrubbed", surface=surface,
-                           original_len=len(text), scrubbed_len=len(clean))
+            logger.warning(
+                "pii_scrubbed", surface=surface, original_len=len(text), scrubbed_len=len(clean)
+            )
         return clean
     except Exception as exc:
         logger.warning("pii_scrub_skipped", surface=surface, error=str(exc))
@@ -86,29 +93,37 @@ def _scrub_pii(text: str, surface: str) -> str:
 # SUPPORTED FORMATS
 
 SUPPORTED_VIDEO_FORMATS = {
-    ".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".ts",
+    ".mp4",
+    ".avi",
+    ".mov",
+    ".mkv",
+    ".webm",
+    ".flv",
+    ".wmv",
+    ".ts",
 }
 
 # MAGIC BYTES FOR VIDEO MIME DETECTION
-MAGIC_BYTES: Dict[bytes, str] = {
+MAGIC_BYTES: dict[bytes, str] = {
     b"\x00\x00\x00\x18ftyp": "video/mp4",
     b"\x00\x00\x00\x1cftyp": "video/mp4",
-    b"\x1aE\xdf\xa3":        "video/webm",
-    b"RIFF":                  "video/avi",
-    b"FLV":                   "video/x-flv",
+    b"\x1aE\xdf\xa3": "video/webm",
+    b"RIFF": "video/avi",
+    b"FLV": "video/x-flv",
 }
 
 # DRM DETECTION SIGNATURES
 DRM_SIGNATURES = [b"drm", b"DRM", b"encrypted", b"ENCRYPTED", b"protect"]
 
 # EASYOCR SINGLETON — loaded once, reused across all calls
-_easyocr_reader: Optional[Any] = None
+_easyocr_reader: Any | None = None
 
 
 def _get_easyocr_reader() -> Any:
     global _easyocr_reader
     if _easyocr_reader is None:
         import easyocr
+
         _easyocr_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
     return _easyocr_reader
 
@@ -123,7 +138,7 @@ _SLIDE_NUM_RE = re.compile(
 _FIN_NUMERIC_KW = {"$", "%", "billion", "million", "revenue", "earnings", "ebitda", "eps"}
 
 
-def _extract_slide_number(caption: str) -> Optional[int]:
+def _extract_slide_number(caption: str) -> int | None:
     m = _SLIDE_NUM_RE.search(caption)
     if m:
         for g in m.groups():
@@ -137,10 +152,10 @@ def _is_numeric_frame(caption: str) -> bool:
     return any(kw in lower for kw in _FIN_NUMERIC_KW)
 
 
-def _build_combined_text(speech_text: str, nearby_frames: List[Dict[str, Any]]) -> str:
+def _build_combined_text(speech_text: str, nearby_frames: list[dict[str, Any]]) -> str:
     parts = [speech_text]
     for frame in nearby_frames:
-        ts  = frame.get("timestamp", 0.0)
+        ts = frame.get("timestamp", 0.0)
         cap = frame.get("caption", "")
         ocr = frame.get("ocr_text", "")
         if cap:
@@ -154,6 +169,7 @@ def _build_combined_text(speech_text: str, nearby_frames: List[Dict[str, Any]]) 
 
 # SHA-256 FILE HASH
 
+
 def _sha256(file_path: str) -> str:
     h = hashlib.sha256()
     with open(file_path, "rb") as f:
@@ -164,6 +180,7 @@ def _sha256(file_path: str) -> str:
 
 # MD5 HASH OF FRAME FILE FOR DUPLICATE DETECTION
 
+
 def _frame_hash(path: str) -> str:
     h = hashlib.md5()
     with open(path, "rb") as f:
@@ -173,6 +190,7 @@ def _frame_hash(path: str) -> str:
 
 
 # MAGIC-BYTE MIME DETECTION — SECTION 2.3
+
 
 def _detect_mime(file_path: str) -> str:
     try:
@@ -190,7 +208,7 @@ def _detect_mime(file_path: str) -> str:
             ".webm": "video/webm",
             ".flv": "video/x-flv",
             ".wmv": "video/x-ms-wmv",
-            ".ts":  "video/mp2t",
+            ".ts": "video/mp2t",
         }
         return fallback.get(ext, "application/octet-stream")
     except Exception:
@@ -198,6 +216,7 @@ def _detect_mime(file_path: str) -> str:
 
 
 # DRM DETECTION — SECTION 2.3
+
 
 def _is_drm_protected(file_path: str) -> bool:
     try:
@@ -209,6 +228,7 @@ def _is_drm_protected(file_path: str) -> bool:
 
 
 # DISK SPACE GUARD — SECTION 2.3
+
 
 def _check_disk_space(path: str) -> None:
     try:
@@ -227,8 +247,8 @@ def _check_disk_space(path: str) -> None:
 
 # FFMPEG / FFPROBE RESOLVER
 
-_ffmpeg_cache: Optional[str] = None
-_ffprobe_cache: Optional[str] = None
+_ffmpeg_cache: str | None = None
+_ffprobe_cache: str | None = None
 
 
 def _test_binary(path: str) -> bool:
@@ -258,6 +278,7 @@ def _resolve_ffmpeg() -> str:
     # imageio-ffmpeg bundles a static Windows binary — works even when conda ffmpeg has DLL issues
     try:
         import imageio_ffmpeg  # type: ignore
+
         bundled = imageio_ffmpeg.get_ffmpeg_exe()
         if bundled and bundled not in candidates:
             candidates.append(bundled)
@@ -310,10 +331,12 @@ def _resolve_ffprobe() -> str:
 
 # PYAV METADATA FALLBACK — used when ffprobe subprocess is unavailable/broken
 
-def _probe_with_pyav(file_path: str) -> Dict[str, Any]:
+
+def _probe_with_pyav(file_path: str) -> dict[str, Any]:
     """Metadata extraction via PyAV (uses bundled libav DLLs, no subprocess)."""
     try:
         import av  # type: ignore
+
         container = av.open(file_path)
 
         duration = None
@@ -332,43 +355,48 @@ def _probe_with_pyav(file_path: str) -> Dict[str, Any]:
                 if video_stream.average_rate:
                     fps = float(video_stream.average_rate)
                 ctx = video_stream.codec_context
-                width  = ctx.width  or 0
+                width = ctx.width or 0
                 height = ctx.height or 0
-                codec  = ctx.name
+                codec = ctx.name
             except Exception:
                 pass
 
-        audio_codec    = None
+        audio_codec = None
         audio_channels = 0
         if audio_stream:
             try:
                 ctx = audio_stream.codec_context
-                audio_codec    = ctx.name
+                audio_codec = ctx.name
                 audio_channels = getattr(ctx, "channels", 0) or 0
             except Exception:
                 pass
 
         result = {
-            "duration":         duration,
-            "size":             0,
-            "bitrate":          container.bit_rate or 0,
-            "format_name":      container.format.long_name if container.format else "",
-            "has_video":        video_stream is not None,
-            "has_audio":        audio_stream is not None,
-            "codec":            codec,
-            "fps":              fps,
-            "width":            width,
-            "height":           height,
-            "color_space":      None,
-            "is_hdr":           False,
-            "audio_codec":      audio_codec,
-            "audio_channels":   audio_channels,
+            "duration": duration,
+            "size": 0,
+            "bitrate": container.bit_rate or 0,
+            "format_name": container.format.long_name if container.format else "",
+            "has_video": video_stream is not None,
+            "has_audio": audio_stream is not None,
+            "codec": codec,
+            "fps": fps,
+            "width": width,
+            "height": height,
+            "color_space": None,
+            "is_hdr": False,
+            "audio_codec": audio_codec,
+            "audio_channels": audio_channels,
             "subtitle_streams": [],
-            "chapter_streams":  [],
-            "streams":          [],
+            "chapter_streams": [],
+            "streams": [],
         }
         container.close()
-        logger.info(event="pyav_probe_success", duration=duration, has_video=result["has_video"], file=file_path)
+        logger.info(
+            event="pyav_probe_success",
+            duration=duration,
+            has_video=result["has_video"],
+            file=file_path,
+        )
         return result
     except Exception as e:
         logger.warning(event="pyav_probe_failed", error=str(e), file=file_path)
@@ -377,14 +405,18 @@ def _probe_with_pyav(file_path: str) -> Dict[str, Any]:
 
 # FFPROBE FULL METADATA — SECTION 4.1
 
-def _probe_metadata(file_path: str) -> Dict[str, Any]:
+
+def _probe_metadata(file_path: str) -> dict[str, Any]:
     # Try ffprobe subprocess first (richer metadata: chapters, subtitles, HDR)
     try:
         ffprobe = _resolve_ffprobe()
         result = subprocess.run(
             [
-                ffprobe, "-v", "error",
-                "-print_format", "json",
+                ffprobe,
+                "-v",
+                "error",
+                "-print_format",
+                "json",
                 "-show_format",
                 "-show_streams",
                 file_path,
@@ -408,23 +440,25 @@ def _probe_metadata(file_path: str) -> Dict[str, Any]:
                 pass
 
             return {
-                "duration":      duration,
-                "size":          int(fmt.get("size", 0)),
-                "bitrate":       int(fmt.get("bit_rate", 0)),
-                "format_name":   fmt.get("format_name", ""),
-                "has_video":     video_stream is not None,
-                "has_audio":     audio_stream is not None,
-                "codec":         video_stream.get("codec_name") if video_stream else None,
-                "fps":           _parse_fps(video_stream.get("r_frame_rate", "0/1")) if video_stream else None,
-                "width":         int(video_stream.get("width", 0)) if video_stream else 0,
-                "height":        int(video_stream.get("height", 0)) if video_stream else 0,
-                "color_space":   video_stream.get("color_space") if video_stream else None,
-                "is_hdr":        _detect_hdr(video_stream) if video_stream else False,
-                "audio_codec":   audio_stream.get("codec_name") if audio_stream else None,
+                "duration": duration,
+                "size": int(fmt.get("size", 0)),
+                "bitrate": int(fmt.get("bit_rate", 0)),
+                "format_name": fmt.get("format_name", ""),
+                "has_video": video_stream is not None,
+                "has_audio": audio_stream is not None,
+                "codec": video_stream.get("codec_name") if video_stream else None,
+                "fps": (
+                    _parse_fps(video_stream.get("r_frame_rate", "0/1")) if video_stream else None
+                ),
+                "width": int(video_stream.get("width", 0)) if video_stream else 0,
+                "height": int(video_stream.get("height", 0)) if video_stream else 0,
+                "color_space": video_stream.get("color_space") if video_stream else None,
+                "is_hdr": _detect_hdr(video_stream) if video_stream else False,
+                "audio_codec": audio_stream.get("codec_name") if audio_stream else None,
                 "audio_channels": int(audio_stream.get("channels", 0)) if audio_stream else 0,
                 "subtitle_streams": [s for s in streams if s.get("codec_type") == "subtitle"],
-                "chapter_streams":  data.get("chapters", []),
-                "streams":          streams,
+                "chapter_streams": data.get("chapters", []),
+                "streams": streams,
             }
         logger.warning(
             event="ffprobe_nonzero",
@@ -442,7 +476,7 @@ def _probe_metadata(file_path: str) -> Dict[str, Any]:
     return _probe_with_pyav(file_path)
 
 
-def _parse_fps(rate_str: str) -> Optional[float]:
+def _parse_fps(rate_str: str) -> float | None:
     try:
         num, den = rate_str.split("/")
         return float(num) / float(den) if float(den) != 0 else None
@@ -450,19 +484,20 @@ def _parse_fps(rate_str: str) -> Optional[float]:
         return None
 
 
-def _detect_hdr(stream: Dict) -> bool:
+def _detect_hdr(stream: dict) -> bool:
     transfer = stream.get("color_transfer", "")
     return transfer in ("smpte2084", "arib-std-b67", "smpte428")
 
 
 # SUBTITLE EXTRACTION — SECTION 4.1
 
+
 def _extract_subtitles(
     file_path: str,
-    subtitle_streams: List[Dict],
+    subtitle_streams: list[dict],
     output_dir: Path,
-) -> List[Dict[str, Any]]:
-    results: List[Dict[str, Any]] = []
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
     ffmpeg = _resolve_ffmpeg()
 
     for idx, stream in enumerate(subtitle_streams[:3]):
@@ -472,24 +507,34 @@ def _extract_subtitles(
 
         try:
             cmd = [
-                ffmpeg, "-y", "-i", file_path,
-                "-map", f"0:s:{idx}",
-                "-f", "srt",
+                ffmpeg,
+                "-y",
+                "-i",
+                file_path,
+                "-map",
+                f"0:s:{idx}",
+                "-f",
+                "srt",
                 str(out_file),
             ]
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30,
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             if result.returncode == 0 and out_file.exists():
                 text = out_file.read_text(encoding="utf-8", errors="replace")
                 cleaned = _clean_subtitle_text(text)
                 if cleaned:
-                    results.append({
-                        "language":   lang,
-                        "codec":      codec,
-                        "text":       cleaned,
-                        "track_idx":  idx,
-                    })
+                    results.append(
+                        {
+                            "language": lang,
+                            "codec": codec,
+                            "text": cleaned,
+                            "track_idx": idx,
+                        }
+                    )
         except Exception as e:
             logger.warning(event="subtitle_extract_failed", track=idx, error=str(e))
 
@@ -498,6 +543,7 @@ def _extract_subtitles(
 
 def _clean_subtitle_text(raw: str) -> str:
     import re
+
     # STRIP SRT TIMESTAMPS AND INDICES
     text = re.sub(r"\d+\n\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}\n", "", raw)
     text = re.sub(r"<[^>]+>", "", text)
@@ -507,12 +553,13 @@ def _clean_subtitle_text(raw: str) -> str:
 
 # CHAPTER EXTRACTION — SECTION 4.1
 
-def _extract_chapters(chapters: List[Dict]) -> List[Dict[str, Any]]:
+
+def _extract_chapters(chapters: list[dict]) -> list[dict[str, Any]]:
     result = []
     for ch in chapters:
         try:
             start = float(ch.get("start_time", 0))
-            end   = float(ch.get("end_time", 0))
+            end = float(ch.get("end_time", 0))
             title = ch.get("tags", {}).get("title", f"Chapter_{ch.get('id', 0)}")
             result.append({"title": title, "start": start, "end": end})
         except Exception:
@@ -522,12 +569,17 @@ def _extract_chapters(chapters: List[Dict]) -> List[Dict[str, Any]]:
 
 # HDR TONE-MAP TO SDR — SECTION 4.1
 
+
 def _tonemap_frame(frame_path: str, output_path: str) -> bool:
     try:
         ffmpeg = _resolve_ffmpeg()
         cmd = [
-            ffmpeg, "-y", "-i", frame_path,
-            "-vf", "zscale=transfer=linear,tonemap=hable,zscale=transfer=bt709",
+            ffmpeg,
+            "-y",
+            "-i",
+            frame_path,
+            "-vf",
+            "zscale=transfer=linear,tonemap=hable,zscale=transfer=bt709",
             output_path,
         ]
         result = subprocess.run(cmd, capture_output=True, timeout=15)
@@ -538,7 +590,8 @@ def _tonemap_frame(frame_path: str, output_path: str) -> bool:
 
 # DEINTERLACE CHECK — SECTION 4.1
 
-def _needs_deinterlace(stream: Optional[Dict]) -> bool:
+
+def _needs_deinterlace(stream: dict | None) -> bool:
     if not stream:
         return False
     return stream.get("field_order", "progressive") not in ("progressive", "unknown", "")
@@ -546,15 +599,21 @@ def _needs_deinterlace(stream: Optional[Dict]) -> bool:
 
 # AUDIO EXTRACTION WITH HDR HANDLING
 
+
 def _extract_audio(file_path: str, audio_path: str) -> None:
     ffmpeg = _resolve_ffmpeg()
     cmd = [
-        ffmpeg, "-y",
-        "-i", file_path,
+        ffmpeg,
+        "-y",
+        "-i",
+        file_path,
         "-vn",
-        "-ar", str(settings.AUDIO_SAMPLE_RATE),
-        "-ac", "1",
-        "-f", "wav",
+        "-ar",
+        str(settings.AUDIO_SAMPLE_RATE),
+        "-ac",
+        "1",
+        "-f",
+        "wav",
         audio_path,
     ]
     result = subprocess.run(
@@ -575,16 +634,18 @@ def _extract_audio(file_path: str, audio_path: str) -> None:
 # Running Tesseract+EasyOCR here and TrOCR in the chunker was triple-OCR per frame;
 # removing the ingestor-level calls saves ~300–800 ms per frame with no quality loss.
 
+
 def _extract_frame_ocr(image_path: str) -> str:  # noqa: ARG001
     return ""
 
 
 # BLUR SCORE
 
+
 def _blur_score(image_path: str) -> float:
     try:
         import cv2
-        import numpy as np
+
         img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
         if img is None:
             return 1.0
@@ -596,10 +657,12 @@ def _blur_score(image_path: str) -> float:
 
 # COSINE SIMILARITY FOR DUPLICATE FRAME DETECTION — SECTION 4.1
 
+
 def _frame_cosine_similarity(path1: str, path2: str) -> float:
     try:
         import cv2
         import numpy as np
+
         img1 = cv2.imread(path1, cv2.IMREAD_GRAYSCALE)
         img2 = cv2.imread(path2, cv2.IMREAD_GRAYSCALE)
         if img1 is None or img2 is None:
@@ -617,21 +680,22 @@ def _frame_cosine_similarity(path1: str, path2: str) -> float:
 
 # SPEECH ALIGNMENT
 
-def _link_speech(timestamp: float, speech_segments: List[Dict]) -> Optional[Dict]:
+
+def _link_speech(timestamp: float, speech_segments: list[dict]) -> dict | None:
     for seg in speech_segments:
         if seg["start"] <= timestamp <= seg["end"]:
             return seg
     return None
 
 
-def _alignment_score(caption: str, speech: Optional[Dict]) -> float:
+def _alignment_score(caption: str, speech: dict | None) -> float:
     if not speech or not caption:
         return 0.0
     speech_text = speech.get("text", "")
     if not speech_text:
         return 0.0
     caption_words = set(caption.lower().split())
-    speech_words  = set(speech_text.lower().split())
+    speech_words = set(speech_text.lower().split())
     if not speech_words:
         return 0.0
     return round(len(caption_words & speech_words) / len(speech_words), 3)
@@ -639,17 +703,18 @@ def _alignment_score(caption: str, speech: Optional[Dict]) -> float:
 
 # BASE STRUCTURE
 
+
 def _base_structure(
     doc_id: str,
     session_id: str,
     file_hash: str,
     source_path: str,
     **extra: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     return {
-        "doc_id":      doc_id,
-        "session_id":  session_id,
-        "file_hash":   file_hash,
+        "doc_id": doc_id,
+        "session_id": session_id,
+        "file_hash": file_hash,
         "source_path": source_path,
         **extra,
     }
@@ -657,14 +722,16 @@ def _base_structure(
 
 # THUMBNAIL GRID — SECTION 4.1
 
+
 def _build_thumbnail_grid(
-    frame_paths: List[str],
+    frame_paths: list[str],
     output_path: Path,
     rows: int = 3,
     cols: int = 3,
-) -> Optional[str]:
+) -> str | None:
     try:
         from PIL import Image as PILImage
+
         selected = frame_paths[: rows * cols]
         if not selected:
             return None
@@ -683,14 +750,19 @@ def _build_thumbnail_grid(
 
 # CORRUPT VIDEO RECOVERY — SECTION 4.1
 
+
 def _attempt_recovery(file_path: str, output_path: str) -> bool:
     try:
         ffmpeg = _resolve_ffmpeg()
         cmd = [
-            ffmpeg, "-y",
-            "-err_detect", "ignore_err",
-            "-i", file_path,
-            "-c", "copy",
+            ffmpeg,
+            "-y",
+            "-err_detect",
+            "ignore_err",
+            "-i",
+            file_path,
+            "-c",
+            "copy",
             output_path,
         ]
         result = subprocess.run(cmd, capture_output=True, timeout=60)
@@ -708,7 +780,7 @@ def _run_audio_pipeline(
     session_id: str,
     file_hash: str,
     source_path: str,
-) -> Tuple[List[Dict], List[IngestedDocument], Optional[str]]:
+) -> tuple[list[dict], list[IngestedDocument], str | None]:
     """Extract audio track and run Whisper ingestion in a worker thread.
 
     Returns (speech_segments, ingested_docs, detected_language). Does NOT
@@ -717,26 +789,29 @@ def _run_audio_pipeline(
     """
     _extract_audio(file_path, audio_path)
     from app.ingestion.audio_ingest import ingest as _audio_ingest
+
     audio_docs = _audio_ingest(audio_path, session_id)
 
-    speech_segs: List[Dict] = []
-    result_docs: List[IngestedDocument] = []
+    speech_segs: list[dict] = []
+    result_docs: list[IngestedDocument] = []
     for i, doc in enumerate(audio_docs):
         s = doc.structure or {}
         start_t = s.get("timestamp_start")
-        end_t   = s.get("timestamp_end")
+        end_t = s.get("timestamp_end")
         if start_t is None or end_t is None or end_t <= start_t:
             continue
         _speech_clean = _sanitize(doc.text, surface="video_speech_ingest", file=source_name)
         _speech_clean = _scrub_pii(_speech_clean, surface="video_speech_ingest")
-        speech_segs.append({
-            "index":      i,
-            "start":      start_t,
-            "end":        end_t,
-            "text":       _speech_clean,
-            "confidence": s.get("confidence", 1.0),
-            "language":   s.get("language"),
-        })
+        speech_segs.append(
+            {
+                "index": i,
+                "start": start_t,
+                "end": end_t,
+                "text": _speech_clean,
+                "confidence": s.get("confidence", 1.0),
+                "language": s.get("language"),
+            }
+        )
         result_docs.append(
             IngestedDocument(
                 text=_speech_clean,
@@ -746,7 +821,10 @@ def _run_audio_pipeline(
                 source=source_name,
                 chunk_id=i,
                 structure=_base_structure(
-                    doc_id, session_id, file_hash, source_path,
+                    doc_id,
+                    session_id,
+                    file_hash,
+                    source_path,
                     chunk_type="audio_segment",
                     start_time=round(start_t, 3),
                     end_time=round(end_t, 3),
@@ -761,8 +839,8 @@ def _run_audio_pipeline(
                     ingestion_time=time.time(),
                 ),
                 extra_metadata={
-                    "importance_score":   s.get("confidence", 1.0),
-                    "modality_weight":    1.2,
+                    "importance_score": s.get("confidence", 1.0),
+                    "modality_weight": 1.2,
                     "data_quality_score": s.get("confidence", 1.0),
                 },
             ).finalize()
@@ -773,8 +851,10 @@ def _run_audio_pipeline(
 
 # MAIN ASYNC INGEST
 
-async def ingest_async(file_path: str, session_id: str) -> List[IngestedDocument]:
+
+async def ingest_async(file_path: str, session_id: str) -> list[IngestedDocument]:
     import contextvars
+
     loop = asyncio.get_running_loop()
     ctx = contextvars.copy_context()
     return await loop.run_in_executor(None, ctx.run, ingest, file_path, session_id)
@@ -782,7 +862,8 @@ async def ingest_async(file_path: str, session_id: str) -> List[IngestedDocument
 
 # MAIN SYNC INGEST
 
-def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
+
+def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
 
     if not session_id:
         raise ValueError("SESSION_ID_REQUIRED")
@@ -818,9 +899,9 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
     # DISK SPACE GUARD — SECTION 2.3
     _check_disk_space(file_path)
 
-    start       = time.time()
-    doc_id      = str(uuid.uuid4())
-    file_hash   = _sha256(file_path)
+    start = time.time()
+    doc_id = str(uuid.uuid4())
+    file_hash = _sha256(file_path)
     source_name = path.name
     source_path = str(path.resolve())
 
@@ -834,11 +915,12 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         encoding="binary",
     )
 
-    audio_path:       Optional[str]  = None
-    frame_temp_dir:   Optional[Path] = None
-    frame_staging_dir: Optional[Path] = None
-    recovered_path:   Optional[str]  = None
+    audio_path: str | None = None
+    frame_temp_dir: Path | None = None
+    frame_staging_dir: Path | None = None
+    recovered_path: str | None = None
     from app.utils.paths import resolved_staging_dir
+
     staging = resolved_staging_dir()
 
     # FFMPEG AVAILABILITY CHECK — fail fast with clear message
@@ -861,7 +943,9 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
         # Both ffprobe and PyAV returned empty — file is likely corrupt or unreadable
         if not probe:
-            raise ValueError("CORRUPTED_FILE: video probe failed with all methods (ffprobe + PyAV). File may be corrupt or an unsupported format.")
+            raise ValueError(
+                "CORRUPTED_FILE: video probe failed with all methods (ffprobe + PyAV). File may be corrupt or an unsupported format."
+            )
 
         video_duration = probe.get("duration")
 
@@ -876,35 +960,37 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         has_audio = probe.get("has_audio", False)
 
         universal_meta.duration_s = video_duration
-        universal_meta.custom_fields.update({
-            "codec":          probe.get("codec"),
-            "fps":            probe.get("fps"),
-            "width":          probe.get("width"),
-            "height":         probe.get("height"),
-            "bitrate":        probe.get("bitrate"),
-            "is_hdr":         probe.get("is_hdr", False),
-            "color_space":    probe.get("color_space"),
-            "audio_codec":    probe.get("audio_codec"),
-            "audio_channels": probe.get("audio_channels"),
-            "audio_available": has_audio,
-            "has_video":      has_video,
-            "format_name":    probe.get("format_name"),
-        })
+        universal_meta.custom_fields.update(
+            {
+                "codec": probe.get("codec"),
+                "fps": probe.get("fps"),
+                "width": probe.get("width"),
+                "height": probe.get("height"),
+                "bitrate": probe.get("bitrate"),
+                "is_hdr": probe.get("is_hdr", False),
+                "color_space": probe.get("color_space"),
+                "audio_codec": probe.get("audio_codec"),
+                "audio_channels": probe.get("audio_channels"),
+                "audio_available": has_audio,
+                "has_video": has_video,
+                "format_name": probe.get("format_name"),
+            }
+        )
 
-        documents: List[IngestedDocument] = []
+        documents: list[IngestedDocument] = []
 
         # SHORT VIDEO — SINGLE CHUNK; SKIP SCENE DETECTION — SECTION 4.1
-        skip_scene_detection = (video_duration is not None and video_duration < 2.0)
+        skip_scene_detection = video_duration is not None and video_duration < 2.0
 
         # AUDIO + FRAME EXTRACTION — PARALLEL — SECTION 4.1
         # Audio pipeline (ffmpeg demux + Whisper transcription) and frame extraction
         # (OpenCV) have zero resource contention: audio uses GPU for Whisper while
         # frame extraction is pure CPU. Both run in the thread pool simultaneously;
         # subtitle and chapter extraction run on the main thread in the same window.
-        speech_segments: List[Dict] = []
+        speech_segments: list[dict] = []
         audio_future = None
         frame_future = None
-        audio_path_tmp: Optional[str] = None
+        audio_path_tmp: str | None = None
 
         with ThreadPoolExecutor(max_workers=2) as _pool:
             if has_audio:
@@ -912,8 +998,13 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 os.close(fd)
                 audio_future = _pool.submit(
                     _run_audio_pipeline,
-                    file_path, audio_path_tmp, source_name,
-                    doc_id, session_id, file_hash, source_path,
+                    file_path,
+                    audio_path_tmp,
+                    source_name,
+                    doc_id,
+                    session_id,
+                    file_hash,
+                    source_path,
                 )
 
             if has_video:
@@ -935,8 +1026,9 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     for sub in subtitles:
                         if not sub.get("text"):
                             continue
-                        sub["text"] = _sanitize(sub["text"], surface="video_subtitle_ingest",
-                                                file=source_name)
+                        sub["text"] = _sanitize(
+                            sub["text"], surface="video_subtitle_ingest", file=source_name
+                        )
                         sub["text"] = _scrub_pii(sub["text"], surface="video_subtitle_ingest")
                         documents.append(
                             IngestedDocument(
@@ -946,15 +1038,18 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                                 source_type="video",
                                 source=source_name,
                                 structure=_base_structure(
-                                    doc_id, session_id, file_hash, source_path,
+                                    doc_id,
+                                    session_id,
+                                    file_hash,
+                                    source_path,
                                     content_type="video_subtitle",
                                     subtitle_language=sub["language"],
                                     subtitle_codec=sub["codec"],
                                     ingestion_time=time.time(),
                                 ),
                                 extra_metadata={
-                                    "importance_score":   0.8,
-                                    "modality_weight":    1.0,
+                                    "importance_score": 0.8,
+                                    "modality_weight": 1.0,
                                     "data_quality_score": 0.8,
                                 },
                             ).finalize()
@@ -1000,7 +1095,7 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
             )
 
         # FRAME EXTRACTION RESULT — SECTION 4.1
-        frames: List[Dict] = []
+        frames: list[dict] = []
         if has_video and frame_future is not None:
             try:
                 frames = frame_future.result()
@@ -1034,7 +1129,7 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         seen_frame_hashes: set = set()
         total_frames_count = len(frames)
         # Collect frame captions + OCR for combined_text linking to speech segments
-        frame_manifest: List[Dict[str, Any]] = []
+        frame_manifest: list[dict[str, Any]] = []
 
         if total_frames_count > settings.MAX_VIDEO_FRAMES:
             logger.warning(
@@ -1048,9 +1143,9 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 f"VIDEO_FRAMES_CAPPED: extracted {total_frames_count}, capped at {settings.MAX_VIDEO_FRAMES}"
             )
 
-        for frame in frames[:settings.MAX_VIDEO_FRAMES]:
+        for frame in frames[: settings.MAX_VIDEO_FRAMES]:
             try:
-                ts     = frame["timestamp_start"]
+                ts = frame["timestamp_start"]
                 f_path = frame["path"]
 
                 if not Path(f_path).exists():
@@ -1075,9 +1170,7 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 if frame_staging_dir is None:
                     frame_staging_dir = staging / f"frames_{doc_id}"
                     frame_staging_dir.mkdir(parents=True, exist_ok=True)
-                persistent_frame_path = str(
-                    frame_staging_dir / Path(processing_path).name
-                )
+                persistent_frame_path = str(frame_staging_dir / Path(processing_path).name)
                 shutil.copy2(processing_path, persistent_frame_path)
 
                 # FRAME CAPTION — ML inference is the chunker's job; store path for VideoChunker
@@ -1089,21 +1182,23 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     ocr_text = _sanitize(ocr_text, surface="video_ocr_ingest", file=source_name)
                     ocr_text = _scrub_pii(ocr_text, surface="video_ocr_ingest")
 
-                blur         = _blur_score(persistent_frame_path)
-                linked       = _link_speech(ts, speech_segments)
-                align        = _alignment_score(caption, linked)
+                blur = _blur_score(persistent_frame_path)
+                linked = _link_speech(ts, speech_segments)
+                align = _alignment_score(caption, linked)
                 # Raised threshold to 0.2 — finance audio/slides often phrase the same
                 # number differently (e.g. "four billion" vs "$4B"), so 0.1 caused too many
                 # false conflict flags on financial presentation videos.
                 conflict_flag = bool(linked and ocr_text and align < 0.2)
-                slide_number  = _extract_slide_number(caption)
+                slide_number = _extract_slide_number(caption)
 
                 # Collect for combined_text linking in the post-frame pass
-                frame_manifest.append({
-                    "timestamp": ts,
-                    "caption":   caption,
-                    "ocr_text":  ocr_text or "",
-                })
+                frame_manifest.append(
+                    {
+                        "timestamp": ts,
+                        "caption": caption,
+                        "ocr_text": ocr_text or "",
+                    }
+                )
 
                 documents.append(
                     IngestedDocument(
@@ -1114,7 +1209,10 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                         source=source_name,
                         chunk_id=frame["frame_index"],
                         structure=_base_structure(
-                            doc_id, session_id, file_hash, source_path,
+                            doc_id,
+                            session_id,
+                            file_hash,
+                            source_path,
                             chunk_type="frame",
                             timestamp_sec=round(ts, 3),
                             timestamp_start=ts,
@@ -1136,8 +1234,8 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                             ingestion_time=time.time(),
                         ),
                         extra_metadata={
-                            "importance_score":   blur,
-                            "modality_weight":    1.0,
+                            "importance_score": blur,
+                            "modality_weight": 1.0,
                             "data_quality_score": blur,
                         },
                     ).finalize()
@@ -1153,15 +1251,18 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                             source_type="video",
                             source=source_name,
                             structure=_base_structure(
-                                doc_id, session_id, file_hash, source_path,
+                                doc_id,
+                                session_id,
+                                file_hash,
+                                source_path,
                                 timestamp_start=ts,
                                 frame_index=frame["frame_index"],
                                 content_type="video_ocr",
                                 ingestion_time=time.time(),
                             ),
                             extra_metadata={
-                                "importance_score":   0.7,
-                                "modality_weight":    0.9,
+                                "importance_score": 0.7,
+                                "modality_weight": 0.9,
                                 "data_quality_score": 0.7,
                             },
                         ).finalize()
@@ -1174,7 +1275,9 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     error=str(e),
                     session_id=session_id,
                 )
-                universal_meta.add_error(f"FRAME_PROCESS_ERROR at ts={frame.get('timestamp_start')}: {e}")
+                universal_meta.add_error(
+                    f"FRAME_PROCESS_ERROR at ts={frame.get('timestamp_start')}: {e}"
+                )
 
         # POST-FRAME PASS — attach combined_text to speech docs
         if frame_manifest:
@@ -1185,7 +1288,8 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 st = doc.structure.get("start_time", 0.0)
                 et = doc.structure.get("end_time", st)
                 nearby = [
-                    f for f in frame_manifest
+                    f
+                    for f in frame_manifest
                     if f["timestamp"] >= st - _WINDOW and f["timestamp"] <= et + _WINDOW
                 ]
                 if nearby:
@@ -1245,7 +1349,7 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         raise
 
     finally:
-        # TEMP FILE CLEANUP 
+        # TEMP FILE CLEANUP
         if audio_path and os.path.exists(audio_path):
             try:
                 os.remove(audio_path)
@@ -1264,11 +1368,14 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
 # ─── Phase 1: VideoIngestor ────────────────────────────────────────────────────
 
-from app.ingestion.base_ingest import BaseIngestor
-from app.ingestion.schema import RawExtract
 from prometheus_client import Counter as _Counter
 
-_EXTRACTS_TOTAL = _Counter("magik_video_extracts_total", "Total extracts produced by video ingestor")
+from app.ingestion.base_ingest import BaseIngestor
+from app.ingestion.schema import RawExtract
+
+_EXTRACTS_TOTAL = _Counter(
+    "magik_video_extracts_total", "Total extracts produced by video ingestor"
+)
 _EXTRACT_ERRORS = _Counter("magik_video_extract_errors_total", "Errors in video ingestor")
 
 
@@ -1290,10 +1397,12 @@ class VideoIngestor(BaseIngestor):
         self,
         path: Path,
         metadata: UniversalMetadata,
-    ) -> List[RawExtract]:
+    ) -> list[RawExtract]:
         source = path.name
         suffix = path.suffix.lower()
-        logger.info(event="extraction_start", modality="video", file=str(path), size=path.stat().st_size)
+        logger.info(
+            event="extraction_start", modality="video", file=str(path), size=path.stat().st_size
+        )
         try:
             if suffix not in SUPPORTED_VIDEO_FORMATS:
                 raise UnsupportedMimeError(f"UNSUPPORTED_VIDEO_FORMAT: {suffix}")
@@ -1305,23 +1414,30 @@ class VideoIngestor(BaseIngestor):
                 raise FileTooLargeError(f"VIDEO_TOO_LARGE: {file_size}")
 
             # Probe duration + resolution via ffprobe
-            duration_s: Optional[float] = None
-            width: Optional[int] = None
-            height: Optional[int] = None
+            duration_s: float | None = None
+            width: int | None = None
+            height: int | None = None
             has_audio = False
             has_video = False
 
             try:
                 probe_result = subprocess.run(
                     [
-                        "ffprobe", "-v", "error",
-                        "-print_format", "json",
-                        "-show_streams", "-show_format",
+                        "ffprobe",
+                        "-v",
+                        "error",
+                        "-print_format",
+                        "json",
+                        "-show_streams",
+                        "-show_format",
                         str(path),
                     ],
-                    capture_output=True, text=True, timeout=30,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
                 )
                 import json as _json
+
                 probe_data = _json.loads(probe_result.stdout or "{}")
                 fmt = probe_data.get("format", {})
                 duration_s = float(fmt.get("duration", 0) or 0) or None
@@ -1375,7 +1491,9 @@ class VideoIngestor(BaseIngestor):
             ]
         except Exception as _exc:
             _EXTRACT_ERRORS.inc()
-            logger.error(event="extraction_failed", modality="video", source=source, error=str(_exc))
+            logger.error(
+                event="extraction_failed", modality="video", source=source, error=str(_exc)
+            )
             raise
 
 
@@ -1383,35 +1501,59 @@ class VideoIngestor(BaseIngestor):
 # FRAME EXTRACTION  (moved from video_chunker.py — ingestion concern)
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def _vf_make_metrics():
     if not settings.PROMETHEUS_ENABLED:
+
         class _Noop:
-            def observe(self, *a, **kw): pass
-            def inc(self, *a, **kw): pass
-            def set(self, *a, **kw): pass
-            def labels(self, **kw): return self
+            def observe(self, *a, **kw):
+                pass
+
+            def inc(self, *a, **kw):
+                pass
+
+            def set(self, *a, **kw):
+                pass
+
+            def labels(self, **kw):
+                return self
+
         noop = _Noop()
         return noop, noop, noop, noop
     try:
         from prometheus_client import Counter, Gauge, Histogram
-        frames_extracted = Counter("video_frames_extracted_total", "Total frames extracted", ["session_id"])
-        frames_skipped   = Counter("video_frames_skipped_total",   "Total frames skipped",  ["reason"])
-        extract_duration = Histogram("video_frame_extraction_duration_seconds", "Frame extraction time")
-        active           = Gauge("video_frame_active_extractions", "In-progress extractions")
+
+        frames_extracted = Counter(
+            "video_frames_extracted_total", "Total frames extracted", ["session_id"]
+        )
+        frames_skipped = Counter("video_frames_skipped_total", "Total frames skipped", ["reason"])
+        extract_duration = Histogram(
+            "video_frame_extraction_duration_seconds", "Frame extraction time"
+        )
+        active = Gauge("video_frame_active_extractions", "In-progress extractions")
         return frames_extracted, frames_skipped, extract_duration, active
     except Exception:
+
         class _Noop:
-            def observe(self, *a, **kw): pass
-            def inc(self, *a, **kw): pass
-            def set(self, *a, **kw): pass
-            def labels(self, **kw): return self
+            def observe(self, *a, **kw):
+                pass
+
+            def inc(self, *a, **kw):
+                pass
+
+            def set(self, *a, **kw):
+                pass
+
+            def labels(self, **kw):
+                return self
+
         noop = _Noop()
         return noop, noop, noop, noop
 
 
 _VF_FRAMES_EXTRACTED, _VF_FRAMES_SKIPPED, _VF_EXTRACT_DURATION, _VF_ACTIVE = _vf_make_metrics()
 
-_VF_SEMAPHORE: Optional[asyncio.Semaphore] = None
+_VF_SEMAPHORE: asyncio.Semaphore | None = None
 
 
 def _vf_get_semaphore() -> asyncio.Semaphore:
@@ -1437,7 +1579,7 @@ class FrameMetadata:
         video_id: str,
         blur_score: float,
         brightness_mean: float,
-        phash: Optional[str],
+        phash: str | None,
         is_scene_boundary: bool,
         scene_index: int,
         shot_type: str,
@@ -1447,94 +1589,135 @@ class FrameMetadata:
         extraction_method: str,
         session_id: str,
     ) -> None:
-        self.frame_index       = frame_index
-        self.timestamp_start   = timestamp_start
-        self.timestamp_end     = timestamp_end
-        self.path              = path
-        self.frame_width       = frame_width
-        self.frame_height      = frame_height
-        self.fps               = fps
-        self.video_duration    = video_duration
-        self.video_id          = video_id
-        self.blur_score        = blur_score
-        self.brightness_mean   = brightness_mean
-        self.phash             = phash
+        self.frame_index = frame_index
+        self.timestamp_start = timestamp_start
+        self.timestamp_end = timestamp_end
+        self.path = path
+        self.frame_width = frame_width
+        self.frame_height = frame_height
+        self.fps = fps
+        self.video_duration = video_duration
+        self.video_id = video_id
+        self.blur_score = blur_score
+        self.brightness_mean = brightness_mean
+        self.phash = phash
         self.is_scene_boundary = is_scene_boundary
-        self.scene_index       = scene_index
-        self.shot_type         = shot_type
-        self.hdr_detected      = hdr_detected
-        self.interlaced        = interlaced
-        self.aspect_ratio      = aspect_ratio
+        self.scene_index = scene_index
+        self.shot_type = shot_type
+        self.hdr_detected = hdr_detected
+        self.interlaced = interlaced
+        self.aspect_ratio = aspect_ratio
         self.extraction_method = extraction_method
-        self.session_id        = session_id
+        self.session_id = session_id
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {k: getattr(self, k) for k in (
-            "frame_index", "timestamp_start", "timestamp_end", "path",
-            "frame_width", "frame_height", "fps", "video_duration", "video_id",
-            "blur_score", "brightness_mean", "phash", "is_scene_boundary",
-            "scene_index", "shot_type", "hdr_detected", "interlaced",
-            "aspect_ratio", "extraction_method", "session_id",
-        )}
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            k: getattr(self, k)
+            for k in (
+                "frame_index",
+                "timestamp_start",
+                "timestamp_end",
+                "path",
+                "frame_width",
+                "frame_height",
+                "fps",
+                "video_duration",
+                "video_id",
+                "blur_score",
+                "brightness_mean",
+                "phash",
+                "is_scene_boundary",
+                "scene_index",
+                "shot_type",
+                "hdr_detected",
+                "interlaced",
+                "aspect_ratio",
+                "extraction_method",
+                "session_id",
+            )
+        }
 
 
 class VideoFrameError(Exception):
     """Base exception for video frame extraction errors."""
 
+
 class VideoOpenError(VideoFrameError):
     """Raised when the video file cannot be opened."""
+
 
 class VideoTooShortError(VideoFrameError):
     """Raised when the video is too short for scene detection."""
 
+
 class NoFramesExtractedError(VideoFrameError):
     """Raised when zero frames survive all filters."""
+
 
 class DiskSpaceError(VideoFrameError):
     """Raised when insufficient disk space is available."""
 
 
-def _probe_video(video_path: str) -> Dict[str, Any]:
+def _probe_video(video_path: str) -> dict[str, Any]:
     import json
+
     ffprobe = shutil.which("ffprobe") or "ffprobe"
     cmd = [
-        ffprobe, "-v", "error", "-select_streams", "v:0",
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
         "-show_entries",
         "stream=width,height,r_frame_rate,avg_frame_rate,codec_name,color_transfer,color_space,field_order",
-        "-show_entries", "format=duration,size",
-        "-of", "json", video_path,
+        "-show_entries",
+        "format=duration,size",
+        "-of",
+        "json",
+        video_path,
     ]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        data   = json.loads(result.stdout or "{}")
+        data = json.loads(result.stdout or "{}")
         stream = (data.get("streams") or [{}])[0]
-        fmt    = data.get("format", {})
-        fps    = 0.0
+        fmt = data.get("format", {})
+        fps = 0.0
         try:
             num, den = stream.get("r_frame_rate", "0/1").split("/")
             fps = float(num) / max(float(den), 1e-6)
         except Exception:
             pass
-        hdr         = stream.get("color_transfer", "") in ("smpte2084", "arib-std-b67", "smpte428")
+        hdr = stream.get("color_transfer", "") in ("smpte2084", "arib-std-b67", "smpte428")
         field_order = stream.get("field_order", "progressive")
-        interlaced  = field_order not in ("progressive", "unknown", "")
-        duration    = 0.0
+        interlaced = field_order not in ("progressive", "unknown", "")
+        duration = 0.0
         try:
             duration = float(fmt.get("duration", 0))
         except Exception:
             pass
         return {
-            "width": int(stream.get("width", 0)), "height": int(stream.get("height", 0)),
-            "fps": fps, "codec": stream.get("codec_name", "unknown"),
-            "hdr": hdr, "interlaced": interlaced, "duration": duration,
+            "width": int(stream.get("width", 0)),
+            "height": int(stream.get("height", 0)),
+            "fps": fps,
+            "codec": stream.get("codec_name", "unknown"),
+            "hdr": hdr,
+            "interlaced": interlaced,
+            "duration": duration,
         }
     except Exception as exc:
         logger.warning(event="ffprobe_failed", error=str(exc))
-        return {"width": 0, "height": 0, "fps": 0.0, "codec": "unknown",
-                "hdr": False, "interlaced": False, "duration": 0.0}
+        return {
+            "width": 0,
+            "height": 0,
+            "fps": 0.0,
+            "codec": "unknown",
+            "hdr": False,
+            "interlaced": False,
+            "duration": 0.0,
+        }
 
 
-def _detect_scenes_pyscenedetect(video_path: str, threshold: float) -> List[float]:
+def _detect_scenes_pyscenedetect(video_path: str, threshold: float) -> list[float]:
     if not _SCENEDETECT_AVAILABLE:
         return []
     try:
@@ -1560,6 +1743,7 @@ def _cv_blur_score(frame: Any) -> float:
 def _cv_brightness_mean(frame: Any) -> float:
     try:
         import numpy as np
+
         return float(np.mean(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)))
     except Exception:
         return 128.0
@@ -1569,7 +1753,7 @@ def _cv_is_too_dark(brightness: float) -> bool:
     return brightness < settings.FRAME_DARKNESS_THRESHOLD
 
 
-def _cv_compute_phash(image_path: str) -> Optional[str]:
+def _cv_compute_phash(image_path: str) -> str | None:
     if not _IMAGEHASH_AVAILABLE:
         return None
     try:
@@ -1589,7 +1773,7 @@ def _cv_phash_distance(h1: str, h2: str) -> int:
 def _cv_tonemap_frame(frame: Any) -> Any:
     try:
         tonemap = cv2.createTonemapReinhard(gamma=2.2)
-        f32     = frame.astype(_np.float32) / frame.max()
+        f32 = frame.astype(_np.float32) / frame.max()
         return (tonemap.process(f32) * 255).clip(0, 255).astype(_np.uint8)
     except Exception:
         return frame
@@ -1605,8 +1789,10 @@ def _cv_deinterlace_frame(frame: Any) -> Any:
 def _cv_classify_shot(frame: Any) -> str:
     try:
         density = float(_np.mean(cv2.Canny(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), 50, 150) > 0))
-        if density < 0.03: return "wide"
-        if density < 0.10: return "medium"
+        if density < 0.03:
+            return "wide"
+        if density < 0.10:
+            return "medium"
         return "close"
     except Exception:
         return "unknown"
@@ -1617,7 +1803,9 @@ def _cv_resize_if_needed(frame: Any, max_dim: int) -> Any:
     if max(h, w) <= max_dim:
         return frame
     scale = max_dim / max(h, w)
-    return cv2.resize(frame, (max(int(w * scale), 1), max(int(h * scale), 1)), interpolation=cv2.INTER_AREA)
+    return cv2.resize(
+        frame, (max(int(w * scale), 1), max(int(h * scale), 1)), interpolation=cv2.INTER_AREA
+    )
 
 
 def _cv_save_frame(frame: Any, path: str, quality: int = 95) -> bool:
@@ -1628,24 +1816,31 @@ def _cv_save_frame(frame: Any, path: str, quality: int = 95) -> bool:
 
 
 def _extract_frames_opencv(
-    video_path: str, interval_sec: int, max_frames: int,
-    max_dim: int, max_duration: float, scene_thresh: float,
-    session_id: str, temp_dir: Path, probe: Dict[str, Any],
-) -> List[FrameMetadata]:
+    video_path: str,
+    interval_sec: int,
+    max_frames: int,
+    max_dim: int,
+    max_duration: float,
+    scene_thresh: float,
+    session_id: str,
+    temp_dir: Path,
+    probe: dict[str, Any],
+) -> list[FrameMetadata]:
     fps = max(probe.get("fps") or 25.0, 0.01)
-    duration     = probe.get("duration") or 0.0
+    duration = probe.get("duration") or 0.0
     hdr_detected = probe.get("hdr", False)
-    interlaced   = probe.get("interlaced", False)
-    video_id     = os.path.basename(video_path)
+    interlaced = probe.get("interlaced", False)
+    video_id = os.path.basename(video_path)
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise VideoOpenError(f"VIDEO_OPEN_FAILED: {video_path}")
 
     import numpy as np
+
     interval_frames = max(int(fps * interval_sec), 1)
-    frames: List[FrameMetadata] = []
-    seen_phashes: List[str] = []
+    frames: list[FrameMetadata] = []
+    seen_phashes: list[str] = []
     prev_frame = None
     frame_idx = 0
     saved = 0
@@ -1660,10 +1855,14 @@ def _extract_frames_opencv(
             if timestamp > max_duration:
                 break
 
-            take_frame = (frame_idx % interval_frames == 0)
+            take_frame = frame_idx % interval_frames == 0
             diff = 0.0
             if prev_frame is not None:
-                _p = cv2.resize(prev_frame, (frame.shape[1], frame.shape[0])) if prev_frame.shape != frame.shape else prev_frame
+                _p = (
+                    cv2.resize(prev_frame, (frame.shape[1], frame.shape[0]))
+                    if prev_frame.shape != frame.shape
+                    else prev_frame
+                )
                 diff = float(np.mean(cv2.absdiff(_p, frame)))
                 if diff > scene_thresh:
                     take_frame = True
@@ -1687,26 +1886,45 @@ def _extract_frames_opencv(
                         frame_path = str(temp_dir / f"frame_{saved:06d}.jpg")
                         if _cv_save_frame(frame, frame_path):
                             ph = _cv_compute_phash(frame_path)
-                            if ph and seen_phashes and min(_cv_phash_distance(ph, e) for e in seen_phashes) < 8:
+                            if (
+                                ph
+                                and seen_phashes
+                                and min(_cv_phash_distance(ph, e) for e in seen_phashes) < 8
+                            ):
                                 Path(frame_path).unlink(missing_ok=True)
                                 _VF_FRAMES_SKIPPED.labels(reason="duplicate_phash").inc()
                             else:
                                 if ph:
                                     seen_phashes.append(ph)
-                                ts_end = min(round((frame_idx + interval_frames) / fps, 3), duration)
-                                frames.append(FrameMetadata(
-                                    frame_index=saved, timestamp_start=round(timestamp, 3),
-                                    timestamp_end=ts_end, path=frame_path,
-                                    frame_width=w_r, frame_height=h_r, fps=fps,
-                                    video_duration=round(duration, 3), video_id=video_id,
-                                    blur_score=round(_cv_blur_score(frame), 4),
-                                    brightness_mean=round(brightness, 2), phash=ph,
-                                    is_scene_boundary=(prev_frame is not None and diff > scene_thresh),
-                                    scene_index=scene_idx, shot_type=_cv_classify_shot(frame),
-                                    hdr_detected=hdr_detected, interlaced=interlaced,
-                                    aspect_ratio=round(w_r / max(h_r, 1), 3),
-                                    extraction_method="opencv_fallback", session_id=session_id,
-                                ))
+                                ts_end = min(
+                                    round((frame_idx + interval_frames) / fps, 3), duration
+                                )
+                                frames.append(
+                                    FrameMetadata(
+                                        frame_index=saved,
+                                        timestamp_start=round(timestamp, 3),
+                                        timestamp_end=ts_end,
+                                        path=frame_path,
+                                        frame_width=w_r,
+                                        frame_height=h_r,
+                                        fps=fps,
+                                        video_duration=round(duration, 3),
+                                        video_id=video_id,
+                                        blur_score=round(_cv_blur_score(frame), 4),
+                                        brightness_mean=round(brightness, 2),
+                                        phash=ph,
+                                        is_scene_boundary=(
+                                            prev_frame is not None and diff > scene_thresh
+                                        ),
+                                        scene_index=scene_idx,
+                                        shot_type=_cv_classify_shot(frame),
+                                        hdr_detected=hdr_detected,
+                                        interlaced=interlaced,
+                                        aspect_ratio=round(w_r / max(h_r, 1), 3),
+                                        extraction_method="opencv_fallback",
+                                        session_id=session_id,
+                                    )
+                                )
                                 saved += 1
             prev_frame = frame
             frame_idx += 1
@@ -1716,24 +1934,30 @@ def _extract_frames_opencv(
 
 
 def _extract_frames_pyscenedetect(
-    video_path: str, max_frames: int, max_dim: int,
-    max_duration: float, threshold: float, session_id: str,
-    temp_dir: Path, probe: Dict[str, Any],
-) -> List[FrameMetadata]:
+    video_path: str,
+    max_frames: int,
+    max_dim: int,
+    max_duration: float,
+    threshold: float,
+    session_id: str,
+    temp_dir: Path,
+    probe: dict[str, Any],
+) -> list[FrameMetadata]:
     if not _SCENEDETECT_AVAILABLE or cv2 is None:
         raise VideoFrameError("PYSCENEDETECT_OR_CV2_UNAVAILABLE")
 
-    fps          = max(probe.get("fps") or 25.0, 0.01)
-    duration     = probe.get("duration") or 0.0
+    fps = max(probe.get("fps") or 25.0, 0.01)
+    duration = probe.get("duration") or 0.0
     hdr_detected = probe.get("hdr", False)
-    interlaced   = probe.get("interlaced", False)
-    video_id     = os.path.basename(video_path)
+    interlaced = probe.get("interlaced", False)
+    video_id = os.path.basename(video_path)
 
     # AdaptiveDetector needs its own correctly-scaled threshold, not the
     # OpenCV mean-absdiff SCENE_CHANGE_THRESHOLD that used to be passed here.
     adaptive_threshold = settings.VIDEO_SCENE_ADAPTIVE_THRESHOLD
-    scene_timestamps = [ts for ts in _detect_scenes_pyscenedetect(video_path, adaptive_threshold)
-                        if ts > 0.1]
+    scene_timestamps = [
+        ts for ts in _detect_scenes_pyscenedetect(video_path, adaptive_threshold) if ts > 0.1
+    ]
 
     # Blend scene cuts with uniform timeline samples. An earnings/investor
     # webcast is a near-static chart + persistent ticker overlay: scene
@@ -1741,7 +1965,7 @@ def _extract_frames_pyscenedetect(
     # points in the call. Uniform coverage guarantees max_frames spread across
     # the whole recording; scene cuts still contribute their (few) real
     # transitions. Downstream pHash dedup drops any that are truly identical.
-    uniform_ts: List[float] = []
+    uniform_ts: list[float] = []
     if settings.VIDEO_UNIFORM_TIMELINE_COVERAGE and duration > 0 and max_frames > 0:
         span = min(duration, max_duration)
         uniform_ts = [round(i * span / max_frames, 3) for i in range(max_frames)]
@@ -1751,16 +1975,17 @@ def _extract_frames_pyscenedetect(
         # Even-subsample down to max_frames (preserves timeline spread rather
         # than truncating to the first max_frames seconds).
         step = len(all_timestamps) / float(max_frames)
-        all_timestamps = [all_timestamps[min(int(i * step), len(all_timestamps) - 1)]
-                          for i in range(max_frames)]
+        all_timestamps = [
+            all_timestamps[min(int(i * step), len(all_timestamps) - 1)] for i in range(max_frames)
+        ]
         all_timestamps = sorted(set(all_timestamps))
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise VideoOpenError(f"VIDEO_OPEN_FAILED: {video_path}")
 
-    frames: List[FrameMetadata] = []
-    seen_phashes: List[str] = []
+    frames: list[FrameMetadata] = []
+    seen_phashes: list[str] = []
     saved = 0
 
     try:
@@ -1785,29 +2010,48 @@ def _extract_frames_pyscenedetect(
                 frame = _cv_deinterlace_frame(frame)
             frame = _cv_resize_if_needed(frame, max_dim)
             h_r, w_r = frame.shape[:2]
-            next_ts   = all_timestamps[scene_idx + 1] if scene_idx + 1 < len(all_timestamps) else duration
+            next_ts = (
+                all_timestamps[scene_idx + 1] if scene_idx + 1 < len(all_timestamps) else duration
+            )
             frame_path = str(temp_dir / f"frame_{saved:06d}.jpg")
             if not _cv_save_frame(frame, frame_path):
                 continue
             ph = _cv_compute_phash(frame_path)
-            if ph and seen_phashes and min(_cv_phash_distance(ph, e) for e in seen_phashes) < settings.VIDEO_FRAME_DEDUP_HAMMING:
+            if (
+                ph
+                and seen_phashes
+                and min(_cv_phash_distance(ph, e) for e in seen_phashes)
+                < settings.VIDEO_FRAME_DEDUP_HAMMING
+            ):
                 Path(frame_path).unlink(missing_ok=True)
                 _VF_FRAMES_SKIPPED.labels(reason="duplicate_phash").inc()
                 continue
             if ph:
                 seen_phashes.append(ph)
-            frames.append(FrameMetadata(
-                frame_index=saved, timestamp_start=round(ts, 3),
-                timestamp_end=round(min(next_ts, duration), 3), path=frame_path,
-                frame_width=w_r, frame_height=h_r, fps=fps,
-                video_duration=round(duration, 3), video_id=video_id,
-                blur_score=round(_cv_blur_score(frame), 4),
-                brightness_mean=round(brightness, 2), phash=ph,
-                is_scene_boundary=(scene_idx > 0), scene_index=scene_idx,
-                shot_type=_cv_classify_shot(frame), hdr_detected=hdr_detected,
-                interlaced=interlaced, aspect_ratio=round(w_r / max(h_r, 1), 3),
-                extraction_method="pyscenedetect", session_id=session_id,
-            ))
+            frames.append(
+                FrameMetadata(
+                    frame_index=saved,
+                    timestamp_start=round(ts, 3),
+                    timestamp_end=round(min(next_ts, duration), 3),
+                    path=frame_path,
+                    frame_width=w_r,
+                    frame_height=h_r,
+                    fps=fps,
+                    video_duration=round(duration, 3),
+                    video_id=video_id,
+                    blur_score=round(_cv_blur_score(frame), 4),
+                    brightness_mean=round(brightness, 2),
+                    phash=ph,
+                    is_scene_boundary=(scene_idx > 0),
+                    scene_index=scene_idx,
+                    shot_type=_cv_classify_shot(frame),
+                    hdr_detected=hdr_detected,
+                    interlaced=interlaced,
+                    aspect_ratio=round(w_r / max(h_r, 1), 3),
+                    extraction_method="pyscenedetect",
+                    session_id=session_id,
+                )
+            )
             saved += 1
     finally:
         cap.release()
@@ -1819,7 +2063,7 @@ def extract_frames(
     interval_sec: int,
     session_id: str,
     skip_scene_detection: bool = False,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Extract keyframes from a video file.
 
     Primary path: PySceneDetect (semantic scene boundaries).
@@ -1828,6 +2072,7 @@ def extract_frames(
     Returns List[FrameMetadata.to_dict()].
     """
     import math as _math
+
     if cv2 is None:
         raise ImportError("OPENCV_REQUIRED_FOR_FRAME_EXTRACTION")
     if not session_id:
@@ -1838,8 +2083,8 @@ def extract_frames(
         raise ValueError("EMPTY_VIDEO_FILE")
 
     interval_sec = max(1, min(int(interval_sec), 300))
-    max_frames   = settings.MAX_VIDEO_FRAMES
-    max_dim      = settings.MAX_IMAGE_DIM
+    max_frames = settings.MAX_VIDEO_FRAMES
+    max_dim = settings.MAX_IMAGE_DIM
     max_duration = float(settings.MAX_VIDEO_DURATION_SEC)
     scene_thresh = settings.SCENE_CHANGE_THRESHOLD
 
@@ -1848,45 +2093,65 @@ def extract_frames(
 
     try:
         from app.utils.paths import resolved_temp_frames_dir
+
         temp_root = resolved_temp_frames_dir()
     except Exception:
         import tempfile as _tf
+
         temp_root = Path(_tf.gettempdir())
 
     _check_disk_space(str(temp_root))
     import tempfile as _tf
+
     temp_dir = Path(_tf.mkdtemp(prefix="frames_", dir=str(temp_root)))
 
     try:
-        probe    = _probe_video(video_path)
-        fps      = probe.get("fps") or 25.0
+        probe = _probe_video(video_path)
+        fps = probe.get("fps") or 25.0
         if fps <= 0 or _math.isnan(fps):
             fps = 25.0
         duration = probe.get("duration") or 0.0
-        is_short = (0 < duration < 2.0)
+        is_short = 0 < duration < 2.0
 
-        frames: List[FrameMetadata]
+        frames: list[FrameMetadata]
         if _SCENEDETECT_AVAILABLE and not is_short and duration >= 2.0 and not skip_scene_detection:
             try:
                 frames = _extract_frames_pyscenedetect(
-                    video_path=video_path, max_frames=max_frames, max_dim=max_dim,
-                    max_duration=max_duration, threshold=scene_thresh,
-                    session_id=session_id, temp_dir=temp_dir, probe=probe,
+                    video_path=video_path,
+                    max_frames=max_frames,
+                    max_dim=max_dim,
+                    max_duration=max_duration,
+                    threshold=scene_thresh,
+                    session_id=session_id,
+                    temp_dir=temp_dir,
+                    probe=probe,
                 )
                 if not frames:
                     raise NoFramesExtractedError("PYSCENEDETECT_PRODUCED_NO_FRAMES")
             except (VideoFrameError, Exception) as exc:
                 logger.warning(event="pyscenedetect_fallback_to_opencv", error=str(exc))
                 frames = _extract_frames_opencv(
-                    video_path=video_path, interval_sec=interval_sec, max_frames=max_frames,
-                    max_dim=max_dim, max_duration=max_duration, scene_thresh=scene_thresh,
-                    session_id=session_id, temp_dir=temp_dir, probe=probe,
+                    video_path=video_path,
+                    interval_sec=interval_sec,
+                    max_frames=max_frames,
+                    max_dim=max_dim,
+                    max_duration=max_duration,
+                    scene_thresh=scene_thresh,
+                    session_id=session_id,
+                    temp_dir=temp_dir,
+                    probe=probe,
                 )
         else:
             frames = _extract_frames_opencv(
-                video_path=video_path, interval_sec=interval_sec, max_frames=max_frames,
-                max_dim=max_dim, max_duration=max_duration, scene_thresh=scene_thresh,
-                session_id=session_id, temp_dir=temp_dir, probe=probe,
+                video_path=video_path,
+                interval_sec=interval_sec,
+                max_frames=max_frames,
+                max_dim=max_dim,
+                max_duration=max_duration,
+                scene_thresh=scene_thresh,
+                session_id=session_id,
+                temp_dir=temp_dir,
+                probe=probe,
             )
 
         if not frames:
@@ -1913,12 +2178,13 @@ def extract_frames(
 async def extract_frames_async(
     video_path: str,
     session_id: str,
-    interval_sec: Optional[int] = None,
-) -> List[Dict[str, Any]]:
+    interval_sec: int | None = None,
+) -> list[dict[str, Any]]:
     async with _vf_get_semaphore():
         import contextvars
+
         loop = asyncio.get_event_loop()
-        ctx  = contextvars.copy_context()
+        ctx = contextvars.copy_context()
         return await loop.run_in_executor(
             None,
             ctx.run,
@@ -1930,7 +2196,7 @@ async def extract_frames_async(
         )
 
 
-async def ingest_video_full(file_path: str, session_id: str) -> List[IngestedDocument]:
+async def ingest_video_full(file_path: str, session_id: str) -> list[IngestedDocument]:
     """Production video ingestion: VideoIngestor.extract() → VideoChunker.chunk().
 
     Replaces the backward-compat ingest() as the INGESTION_HANDLERS entry.
@@ -1985,5 +2251,3 @@ async def ingest_video_full(file_path: str, session_id: str) -> List[IngestedDoc
         session_id=session_id,
     )
     return docs
-
-

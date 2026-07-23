@@ -13,7 +13,7 @@ docs/VIDEO_MODALITY_ACCURACY_REPORT.md for the (separately maintained)
 accuracy evaluation harness.
 
 Start the server and have the benchmark video ingested first to run these:
-    bash start_server.sh
+    python start_server.py
     pytest tests/integration/test_video_streaming_integration.py -v
 """
 

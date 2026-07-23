@@ -12,24 +12,23 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from app.core.config import settings
-
 
 # CONTEXT VARS — BOUND PER REQUEST
 
 request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
 session_id_ctx: ContextVar[str] = ContextVar("session_id", default="-")
-trace_id_ctx:   ContextVar[str] = ContextVar("trace_id",   default="-")
-span_id_ctx:    ContextVar[str] = ContextVar("span_id",    default="-")
-user_id_ctx:    ContextVar[str] = ContextVar("user_id",    default="-")
+trace_id_ctx: ContextVar[str] = ContextVar("trace_id", default="-")
+span_id_ctx: ContextVar[str] = ContextVar("span_id", default="-")
+user_id_ctx: ContextVar[str] = ContextVar("user_id", default="-")
 
 # FINANCE / CHUNKER CONTEXT VARS (Phase 8)
-chunk_id_var:             ContextVar[Optional[str]] = ContextVar("chunk_id",             default=None)
-modality_var:             ContextVar[Optional[str]] = ContextVar("modality",             default=None)
-page_number_var:          ContextVar[Optional[int]] = ContextVar("page_number",          default=None)
-finance_entity_count_var: ContextVar[Optional[int]] = ContextVar("finance_entity_count", default=None)
+chunk_id_var: ContextVar[str | None] = ContextVar("chunk_id", default=None)
+modality_var: ContextVar[str | None] = ContextVar("modality", default=None)
+page_number_var: ContextVar[int | None] = ContextVar("page_number", default=None)
+finance_entity_count_var: ContextVar[int | None] = ContextVar("finance_entity_count", default=None)
 
 
 # INTERNAL STATE
@@ -39,12 +38,13 @@ _LOGGER_INITIALIZED: bool = False
 
 # CONTEXT BINDING
 
+
 def bind_request_context(
     request_id: str = "-",
     session_id: str = "-",
-    trace_id:   str = "-",
-    span_id:    str = "-",
-    user_id:    str = "-",
+    trace_id: str = "-",
+    span_id: str = "-",
+    user_id: str = "-",
 ) -> None:
     request_id_ctx.set(request_id or str(uuid.uuid4()))
     session_id_ctx.set(session_id or "-")
@@ -71,14 +71,33 @@ def get_current_session_id() -> str:
 
 # SKIP KEYS FOR FORMATTERS
 
-_SKIP_KEYS = frozenset({
-    "name", "msg", "args", "levelname", "levelno",
-    "pathname", "filename", "module", "exc_info",
-    "exc_text", "stack_info", "lineno", "funcName",
-    "created", "msecs", "relativeCreated", "thread",
-    "threadName", "processName", "process", "message",
-    "taskName", "event",
-})
+_SKIP_KEYS = frozenset(
+    {
+        "name",
+        "msg",
+        "args",
+        "levelname",
+        "levelno",
+        "pathname",
+        "filename",
+        "module",
+        "exc_info",
+        "exc_text",
+        "stack_info",
+        "lineno",
+        "funcName",
+        "created",
+        "msecs",
+        "relativeCreated",
+        "thread",
+        "threadName",
+        "processName",
+        "process",
+        "message",
+        "taskName",
+        "event",
+    }
+)
 
 # VALUES TO SUPPRESS IN OUTPUT
 _SUPPRESS_VALUES = (None, "", "-", [], {}, ())
@@ -95,12 +114,13 @@ class _StripAnsiFilter(logging.Filter):
         record.msg = _ANSI_RE.sub("", str(record.msg))
         if record.args:
             if isinstance(record.args, dict):
-                record.args = {k: _ANSI_RE.sub("", str(v)) if isinstance(v, str) else v
-                               for k, v in record.args.items()}
+                record.args = {
+                    k: _ANSI_RE.sub("", str(v)) if isinstance(v, str) else v
+                    for k, v in record.args.items()
+                }
             elif isinstance(record.args, tuple):
                 record.args = tuple(
-                    _ANSI_RE.sub("", str(a)) if isinstance(a, str) else a
-                    for a in record.args
+                    _ANSI_RE.sub("", str(a)) if isinstance(a, str) else a for a in record.args
                 )
         # Strip color_message injected by uvicorn's DefaultFormatter
         if hasattr(record, "color_message"):
@@ -110,13 +130,14 @@ class _StripAnsiFilter(logging.Filter):
 
 # CLEAN CONSOLE FORMATTER
 
+
 class CleanFormatter(logging.Formatter):
 
     LEVEL_COLORS = {
-        "DEBUG":    "\033[36m",
-        "INFO":     "\033[32m",
-        "WARNING":  "\033[33m",
-        "ERROR":    "\033[31m",
+        "DEBUG": "\033[36m",
+        "INFO": "\033[32m",
+        "WARNING": "\033[33m",
+        "ERROR": "\033[31m",
         "CRITICAL": "\033[35m",
     }
     RESET = "\033[0m"
@@ -182,27 +203,28 @@ class CleanFormatter(logging.Formatter):
 
 # JSON FORMATTER
 
+
 class JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
-        _chunk_id   = chunk_id_var.get(None)
-        _modality   = modality_var.get(None)
-        _page_num   = page_number_var.get(None)
+        _chunk_id = chunk_id_var.get(None)
+        _modality = modality_var.get(None)
+        _page_num = page_number_var.get(None)
         _entity_cnt = finance_entity_count_var.get(None)
 
-        payload: Dict[str, Any] = {
-            "timestamp":  datetime.now(tz=timezone.utc).isoformat(),
-            "level":      record.levelname,
-            "logger":     record.name,
-            "event":      getattr(record, "event", None) or record.getMessage(),
+        payload: dict[str, Any] = {
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "event": getattr(record, "event", None) or record.getMessage(),
             "request_id": request_id_ctx.get("-"),
             "session_id": session_id_ctx.get("-"),
-            "trace_id":   trace_id_ctx.get("-"),
-            "span_id":    span_id_ctx.get("-"),
-            "user_id":    user_id_ctx.get("-"),
-            "service":    settings.APP_NAME,
-            "version":    settings.APP_VERSION,
-            "env":        settings.ENV,
+            "trace_id": trace_id_ctx.get("-"),
+            "span_id": span_id_ctx.get("-"),
+            "user_id": user_id_ctx.get("-"),
+            "service": settings.APP_NAME,
+            "version": settings.APP_VERSION,
+            "env": settings.ENV,
         }
         if _chunk_id is not None:
             payload["chunk_id"] = _chunk_id
@@ -226,9 +248,7 @@ class JsonFormatter(logging.Formatter):
                 payload[key] = str(value)
 
         if record.exc_info:
-            payload["traceback"] = "".join(
-                traceback.format_exception(*record.exc_info)
-            )
+            payload["traceback"] = "".join(traceback.format_exception(*record.exc_info))
 
         if record.stack_info:
             payload["stack_info"] = record.stack_info
@@ -236,15 +256,18 @@ class JsonFormatter(logging.Formatter):
         try:
             return json.dumps(payload, ensure_ascii=False, default=str)
         except Exception:
-            return json.dumps({
-                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-                "level":     record.levelname,
-                "event":     "LOG_SERIALIZE_FAILED",
-                "error":     str(record.getMessage()),
-            })
+            return json.dumps(
+                {
+                    "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                    "level": record.levelname,
+                    "event": "LOG_SERIALIZE_FAILED",
+                    "error": str(record.getMessage()),
+                }
+            )
 
 
 # STRUCTURED LOGGER WRAPPER
+
 
 class StructuredLogger:
 
@@ -254,18 +277,39 @@ class StructuredLogger:
     # to use one of these names (e.g. logger.info(..., filename=...)) would crash
     # the caller. We remap any collision to "<key>_" so the value is preserved
     # and the log call can never fail. See logging.Logger.makeRecord.
-    _RESERVED_LOGRECORD_KEYS = frozenset({
-        "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
-        "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
-        "created", "msecs", "relativeCreated", "thread", "threadName",
-        "processName", "process", "taskName", "message", "asctime",
-    })
+    _RESERVED_LOGRECORD_KEYS = frozenset(
+        {
+            "name",
+            "msg",
+            "args",
+            "levelname",
+            "levelno",
+            "pathname",
+            "filename",
+            "module",
+            "exc_info",
+            "exc_text",
+            "stack_info",
+            "lineno",
+            "funcName",
+            "created",
+            "msecs",
+            "relativeCreated",
+            "thread",
+            "threadName",
+            "processName",
+            "process",
+            "taskName",
+            "message",
+            "asctime",
+        }
+    )
 
     def __init__(self, logger: logging.Logger) -> None:
         self._logger = logger
 
-    def _build_extra(self, event: Optional[str], **kwargs: Any) -> Dict[str, Any]:
-        safe: Dict[str, Any] = {"event": event}
+    def _build_extra(self, event: str | None, **kwargs: Any) -> dict[str, Any]:
+        safe: dict[str, Any] = {"event": event}
         for key, value in kwargs.items():
             if key in self._RESERVED_LOGRECORD_KEYS or key == "event":
                 safe[f"{key}_"] = value
@@ -276,7 +320,7 @@ class StructuredLogger:
     def _log(
         self,
         level: str,
-        event: Optional[str] = None,
+        event: str | None = None,
         exc_info: bool = False,
         **kwargs: Any,
     ) -> None:
@@ -287,30 +331,31 @@ class StructuredLogger:
             exc_info=exc_info,
         )
 
-    def debug(self, event: Optional[str] = None, **kwargs: Any) -> None:
+    def debug(self, event: str | None = None, **kwargs: Any) -> None:
         self._log("debug", event, **kwargs)
 
-    def info(self, event: Optional[str] = None, **kwargs: Any) -> None:
+    def info(self, event: str | None = None, **kwargs: Any) -> None:
         self._log("info", event, **kwargs)
 
-    def warning(self, event: Optional[str] = None, **kwargs: Any) -> None:
+    def warning(self, event: str | None = None, **kwargs: Any) -> None:
         self._log("warning", event, **kwargs)
 
-    def error(self, event: Optional[str] = None, **kwargs: Any) -> None:
+    def error(self, event: str | None = None, **kwargs: Any) -> None:
         self._log("error", event, **kwargs)
 
-    def critical(self, event: Optional[str] = None, **kwargs: Any) -> None:
+    def critical(self, event: str | None = None, **kwargs: Any) -> None:
         self._log("critical", event, **kwargs)
 
-    def exception(self, event: Optional[str] = None, **kwargs: Any) -> None:
+    def exception(self, event: str | None = None, **kwargs: Any) -> None:
         extra = self._build_extra(event, **kwargs)
         self._logger.exception(event or "exception", extra=extra)
 
-    def bind(self, **kwargs: Any) -> "BoundLogger":
+    def bind(self, **kwargs: Any) -> BoundLogger:
         return BoundLogger(self, **kwargs)
 
 
 # BOUND LOGGER — CARRIES FIXED FIELDS
+
 
 class BoundLogger:
 
@@ -318,29 +363,30 @@ class BoundLogger:
         self._parent = parent
         self._bound = bound
 
-    def _merge(self, **kwargs: Any) -> Dict[str, Any]:
+    def _merge(self, **kwargs: Any) -> dict[str, Any]:
         return {**self._bound, **kwargs}
 
-    def debug(self, event: Optional[str] = None, **kwargs: Any) -> None:
+    def debug(self, event: str | None = None, **kwargs: Any) -> None:
         self._parent.debug(event, **self._merge(**kwargs))
 
-    def info(self, event: Optional[str] = None, **kwargs: Any) -> None:
+    def info(self, event: str | None = None, **kwargs: Any) -> None:
         self._parent.info(event, **self._merge(**kwargs))
 
-    def warning(self, event: Optional[str] = None, **kwargs: Any) -> None:
+    def warning(self, event: str | None = None, **kwargs: Any) -> None:
         self._parent.warning(event, **self._merge(**kwargs))
 
-    def error(self, event: Optional[str] = None, **kwargs: Any) -> None:
+    def error(self, event: str | None = None, **kwargs: Any) -> None:
         self._parent.error(event, **self._merge(**kwargs))
 
-    def critical(self, event: Optional[str] = None, **kwargs: Any) -> None:
+    def critical(self, event: str | None = None, **kwargs: Any) -> None:
         self._parent.critical(event, **self._merge(**kwargs))
 
-    def exception(self, event: Optional[str] = None, **kwargs: Any) -> None:
+    def exception(self, event: str | None = None, **kwargs: Any) -> None:
         self._parent.exception(event, **self._merge(**kwargs))
 
 
 # LOG LEVEL RESOLUTION
+
 
 def _get_log_level() -> int:
     level_str = str(getattr(settings, "LOG_LEVEL", "INFO")).upper()
@@ -348,6 +394,7 @@ def _get_log_level() -> int:
 
 
 # FORMATTER FACTORY
+
 
 def _build_console_formatter() -> logging.Formatter:
     use_json = getattr(settings, "LOG_JSON", False)
@@ -366,6 +413,7 @@ def _build_file_formatter() -> logging.Formatter:
 
 # CONSOLE HANDLER
 
+
 def _build_console_handler(level: int) -> logging.StreamHandler:
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(level)
@@ -375,9 +423,10 @@ def _build_console_handler(level: int) -> logging.StreamHandler:
 
 # ROTATING FILE HANDLER
 
+
 def _build_file_handler(
     level: int,
-) -> Optional[RotatingFileHandler]:
+) -> RotatingFileHandler | None:
     if not getattr(settings, "ENABLE_FILE_LOGGING", True):
         return None
 
@@ -406,15 +455,28 @@ def _build_file_handler(
 # SUPPRESS NOISY THIRD-PARTY LOGGERS
 
 _SUPPRESS_LOGGERS = (
-    "httpx", "httpcore", "urllib3", "requests",
-    "openai", "anthropic", "cohere",
-    "sentence_transformers", "transformers",
-    "faster_whisper", "torch",
-    "PIL", "pdfplumber", "pydub",
-    "pymongo", "motor",
-    "qdrant_client", "grpc",
-    "presidio-analyzer", "presidio_analyzer",   # suppress CuPy GPU + language warnings
-    "presidio-anonymizer", "presidio_anonymizer",
+    "httpx",
+    "httpcore",
+    "urllib3",
+    "requests",
+    "openai",
+    "anthropic",
+    "cohere",
+    "sentence_transformers",
+    "transformers",
+    "faster_whisper",
+    "torch",
+    "PIL",
+    "pdfplumber",
+    "pydub",
+    "pymongo",
+    "motor",
+    "qdrant_client",
+    "grpc",
+    "presidio-analyzer",
+    "presidio_analyzer",  # suppress CuPy GPU + language warnings
+    "presidio-anonymizer",
+    "presidio_anonymizer",
 )
 
 
@@ -424,6 +486,7 @@ def _suppress_noisy_loggers() -> None:
 
 
 # UVICORN INTEGRATION
+
 
 class _HealthAccessFilter(logging.Filter):
     """Drop access-log lines for noisy probe endpoints (/health, /metrics)."""
@@ -453,9 +516,11 @@ def _configure_uvicorn_loggers(
 
 # OPENTELEMETRY CONTEXT INJECTION
 
+
 def _inject_otel_context() -> None:
     try:
         from opentelemetry import trace
+
         span = trace.get_current_span()
         ctx = span.get_span_context()
         if ctx and ctx.is_valid:
@@ -466,6 +531,7 @@ def _inject_otel_context() -> None:
 
 
 # SETUP
+
 
 def _setup_logging() -> None:
     global _LOGGER_INITIALIZED
@@ -511,6 +577,7 @@ def _setup_logging() -> None:
 
 # PUBLIC API
 
+
 def get_logger(name: str) -> StructuredLogger:
     _setup_logging()
     return StructuredLogger(logging.getLogger(name))
@@ -522,14 +589,15 @@ def get_bound_logger(name: str, **bound: Any) -> BoundLogger:
 
 # HELPER UTILITIES
 
+
 def log_latency(
     logger: StructuredLogger,
     event: str,
     start_time: float,
-    extra: Optional[Dict[str, Any]] = None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     try:
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "latency_sec": round(time.time() - start_time, 4),
         }
         if extra:
@@ -557,7 +625,7 @@ def log_slow_request(
     logger: StructuredLogger,
     path: str,
     latency: float,
-    threshold: Optional[float] = None,
+    threshold: float | None = None,
 ) -> None:
     threshold = threshold or getattr(settings, "SLOW_REQUEST_THRESHOLD", 3.0)
     if latency > threshold:

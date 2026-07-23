@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import os
 import re
 import shutil
@@ -10,16 +9,16 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from app.core.config import settings
 from app.ingestion.schema import (
     EmptyFileError,
     FileTooLargeError,
     IngestedDocument,
+    Modality,
     UnsupportedMimeError,
     build_universal_metadata,
-    Modality,
     normalize_text,
     redact_pii,
 )
@@ -30,29 +29,37 @@ logger = get_logger(__name__)
 
 # SUPPORTED FORMATS
 SUPPORTED_AUDIO_FORMATS = {
-    ".mp3", ".wav", ".flac", ".aac", ".ogg",
-    ".m4a", ".opus", ".wma", ".aiff",
+    ".mp3",
+    ".wav",
+    ".flac",
+    ".aac",
+    ".ogg",
+    ".m4a",
+    ".opus",
+    ".wma",
+    ".aiff",
 }
 
 # MAGIC BYTES MAP
-_AUDIO_MAGIC: Dict[bytes, str] = {
-    b"ID3":       "audio/mpeg",
-    b"fLaC":      "audio/flac",
-    b"OggS":      "audio/ogg",
-    b"RIFF":      "audio/wav",
+_AUDIO_MAGIC: dict[bytes, str] = {
+    b"ID3": "audio/mpeg",
+    b"fLaC": "audio/flac",
+    b"OggS": "audio/ogg",
+    b"RIFF": "audio/wav",
 }
 
 # FILLER WORD PATTERN
-_FILLER_PATTERN: Optional[re.Pattern] = None
+_FILLER_PATTERN: re.Pattern | None = None
 
 # YAMNET MODEL SINGLETON
-_yamnet_model: Optional[Any] = None
+_yamnet_model: Any | None = None
 
 
 def _get_yamnet() -> Any:
     global _yamnet_model
     if _yamnet_model is None:
         import tensorflow_hub as hub
+
         _yamnet_model = hub.load("https://tfhub.dev/google/yamnet/1")
     return _yamnet_model
 
@@ -73,6 +80,7 @@ def _get_filler_pattern() -> re.Pattern:
 
 # SHA256 DEDUP
 
+
 def _sha256_check(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -83,6 +91,7 @@ def _sha256_check(path: Path) -> str:
 
 # MD5 FILE HASH
 
+
 def _file_hash(path: Path) -> str:
     h = hashlib.md5()
     with open(path, "rb") as f:
@@ -92,6 +101,7 @@ def _file_hash(path: Path) -> str:
 
 
 # MAGIC BYTE MIME DETECTION
+
 
 def _detect_mime(path: Path) -> str:
     try:
@@ -105,10 +115,14 @@ def _detect_mime(path: Path) -> str:
                     return mime
         suffix = path.suffix.lower()
         mime_map = {
-            ".mp3": "audio/mpeg", ".wav": "audio/wav",
-            ".flac": "audio/flac", ".aac": "audio/aac",
-            ".ogg": "audio/ogg", ".m4a": "audio/mp4",
-            ".opus": "audio/opus", ".wma": "audio/x-ms-wma",
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".flac": "audio/flac",
+            ".aac": "audio/aac",
+            ".ogg": "audio/ogg",
+            ".m4a": "audio/mp4",
+            ".opus": "audio/opus",
+            ".wma": "audio/x-ms-wma",
             ".aiff": "audio/aiff",
         }
         return mime_map.get(suffix, "application/octet-stream")
@@ -117,6 +131,7 @@ def _detect_mime(path: Path) -> str:
 
 
 # DISK SPACE GUARD
+
 
 def _check_disk_space(path: Path) -> None:
     try:
@@ -134,6 +149,7 @@ def _check_disk_space(path: Path) -> None:
 
 # PATH TRAVERSAL GUARD
 
+
 def _safe_resolve(file_path: str) -> Path:
     path = Path(file_path).expanduser().resolve()
     chroot = settings.CHROOT_BASE.resolve()
@@ -145,6 +161,7 @@ def _safe_resolve(file_path: str) -> Path:
 
 
 # VALIDATION
+
 
 def _validate_audio_file(path: Path) -> None:
     if not path.exists():
@@ -171,6 +188,7 @@ def _validate_audio_file(path: Path) -> None:
 
 # DRM DETECTION
 
+
 def _is_drm_protected(path: Path) -> bool:
     try:
         suffix = path.suffix.lower()
@@ -186,8 +204,10 @@ def _is_drm_protected(path: Path) -> bool:
 
 # AUDIO LOAD VIA PYDUB
 
+
 def _load_audio(file_path: str) -> Any:
     from pydub import AudioSegment
+
     try:
         audio = AudioSegment.from_file(file_path)
     except Exception as exc:
@@ -199,11 +219,17 @@ def _load_audio(file_path: str) -> Any:
         )
         try:
             import subprocess
+
             repaired = file_path + "_repaired.wav"
             result = subprocess.run(
                 [
-                    settings.FFMPEG_PATH, "-err_detect", "ignore_err",
-                    "-i", file_path, "-y", repaired,
+                    settings.FFMPEG_PATH,
+                    "-err_detect",
+                    "ignore_err",
+                    "-i",
+                    file_path,
+                    "-y",
+                    repaired,
                 ],
                 capture_output=True,
                 timeout=settings.FFMPEG_TIMEOUT_SEC,
@@ -225,6 +251,7 @@ def _load_audio(file_path: str) -> Any:
 
 # CHANNEL MIXDOWN TO MONO
 
+
 def _to_mono(audio: Any) -> Any:
     if audio.channels > 1:
         return audio.set_channels(1)
@@ -232,6 +259,7 @@ def _to_mono(audio: Any) -> Any:
 
 
 # RESAMPLE TO 16KHZ
+
 
 def _resample(audio: Any) -> Any:
     target = settings.AUDIO_SAMPLE_RATE
@@ -247,6 +275,7 @@ def _resample(audio: Any) -> Any:
 
 # SNR ESTIMATION
 
+
 def _estimate_snr(audio: Any) -> float:
     try:
         dbfs = audio.dBFS
@@ -259,22 +288,30 @@ def _estimate_snr(audio: Any) -> float:
 
 # CLIPPING DETECTION VIA LIBROSA
 
+
 def _detect_clipping(file_path: str) -> bool:
     try:
         import librosa
         import numpy as np
+
         y, _ = librosa.load(file_path, sr=None, mono=True, duration=30)
         peak = float(np.abs(y).max())
-        return peak >= settings.AUDIO_CLIPPING_THRESHOLD if hasattr(settings, "AUDIO_CLIPPING_THRESHOLD") else peak >= 0.99
+        return (
+            peak >= settings.AUDIO_CLIPPING_THRESHOLD
+            if hasattr(settings, "AUDIO_CLIPPING_THRESHOLD")
+            else peak >= 0.99
+        )
     except Exception:
         return False
 
 
 # SILENCE DETECTION
 
-def _detect_silent_ranges(audio: Any) -> List[Tuple[int, int]]:
+
+def _detect_silent_ranges(audio: Any) -> list[tuple[int, int]]:
     try:
         from pydub import silence as pydub_silence
+
         return pydub_silence.detect_silence(
             audio,
             min_silence_len=settings.AUDIO_SILENCE_GAP_MS,
@@ -287,14 +324,16 @@ def _detect_silent_ranges(audio: Any) -> List[Tuple[int, int]]:
 
 # SEGMENT IN SILENT RANGE
 
-def _is_inaudible(start_sec: float, silent_ranges: List[Tuple[int, int]]) -> bool:
+
+def _is_inaudible(start_sec: float, silent_ranges: list[tuple[int, int]]) -> bool:
     start_ms = start_sec * 1000
     return any(s <= start_ms <= e for s, e in silent_ranges)
 
 
 # CONFIDENCE FROM LOGPROB
 
-def _compute_confidence(avg_logprob: Optional[float]) -> float:
+
+def _compute_confidence(avg_logprob: float | None) -> float:
     if avg_logprob is None:
         return 1.0
     return round(max(0.0, min(1.0, 1.0 + avg_logprob)), 4)
@@ -302,7 +341,8 @@ def _compute_confidence(avg_logprob: Optional[float]) -> float:
 
 # HALLUCINATION RISK
 
-def _hallucination_risk(confidence: float, no_speech_prob: Optional[float]) -> str:
+
+def _hallucination_risk(confidence: float, no_speech_prob: float | None) -> str:
     nsp = no_speech_prob or 0.0
     if confidence < 0.4 or nsp > 0.8:
         return "high"
@@ -312,6 +352,7 @@ def _hallucination_risk(confidence: float, no_speech_prob: Optional[float]) -> s
 
 
 # SPEECH RATE FLAG
+
 
 def _speed_flag(text: str, duration: float) -> bool:
     words = len(text.split())
@@ -323,12 +364,14 @@ def _speed_flag(text: str, duration: float) -> bool:
 
 # FILLER WORD REMOVAL
 
+
 def _strip_fillers(text: str) -> str:
     pattern = _get_filler_pattern()
     return pattern.sub("", text).strip()
 
 
 # DOMAIN VOCAB CORRECTION
+
 
 def _apply_domain_vocab(text: str) -> str:
     if not settings.WHISPER_DOMAIN_VOCAB:
@@ -338,12 +381,16 @@ def _apply_domain_vocab(text: str) -> str:
     for term in settings.WHISPER_DOMAIN_VOCAB:
         if term.lower() in lower:
             corrected = re.sub(
-                re.escape(term), term, corrected, flags=re.IGNORECASE,
+                re.escape(term),
+                term,
+                corrected,
+                flags=re.IGNORECASE,
             )
     return corrected
 
 
 # NORMALIZE PUNCTUATION
+
 
 def _normalize_punctuation(text: str) -> str:
     text = re.sub(r"\s+([.,!?;:])", r"\1", text)
@@ -353,20 +400,28 @@ def _normalize_punctuation(text: str) -> str:
 
 # ID3 METADATA VIA MUTAGEN
 
-def _extract_id3(file_path: str) -> Dict[str, Any]:
-    meta: Dict[str, Any] = {}
+
+def _extract_id3(file_path: str) -> dict[str, Any]:
+    meta: dict[str, Any] = {}
     try:
         from mutagen import File as MutaFile
+
         mf = MutaFile(file_path)
         if mf is None:
             return meta
         tag_map = {
-            "TIT2": "title", "TPE1": "artist", "TALB": "album",
-            "TDRC": "year", "TCON": "genre", "TRCK": "track",
+            "TIT2": "title",
+            "TPE1": "artist",
+            "TALB": "album",
+            "TDRC": "year",
+            "TCON": "genre",
+            "TRCK": "track",
         }
         for tag_key, friendly in tag_map.items():
             if tag_key in mf:
-                meta[friendly] = str(mf[tag_key].text[0]) if hasattr(mf[tag_key], "text") else str(mf[tag_key])
+                meta[friendly] = (
+                    str(mf[tag_key].text[0]) if hasattr(mf[tag_key], "text") else str(mf[tag_key])
+                )
     except ImportError:
         logger.debug(event="mutagen_not_installed")
     except Exception as exc:
@@ -377,15 +432,15 @@ def _extract_id3(file_path: str) -> Dict[str, Any]:
 # NOISE CLASSIFICATION VIA YAMNET
 
 _YAMNET_SPEECH_CLASSES = {0, 1, 2, 3, 4}
-_YAMNET_MUSIC_CLASSES  = {137, 138, 139, 140}
-_YAMNET_CROWD_CLASSES  = {70, 71, 72}
+_YAMNET_MUSIC_CLASSES = {137, 138, 139, 140}
+_YAMNET_CROWD_CLASSES = {70, 71, 72}
 
 
-def _classify_noise(file_path: str) -> Optional[str]:
+def _classify_noise(file_path: str) -> str | None:
     try:
-        import tensorflow as tf
-        import numpy as np
         import librosa
+        import numpy as np
+        import tensorflow as tf
 
         model = _get_yamnet()
         y, _ = librosa.load(file_path, sr=16000, mono=True, duration=10)
@@ -405,34 +460,64 @@ def _classify_noise(file_path: str) -> Optional[str]:
 
 
 # FINANCE TOPIC TRANSITION PHRASES
-_TOPIC_TRANSITIONS: List[str] = [
-    "moving to", "turning to", "let me now", "on the balance sheet",
-    "cash flow", "guidance", "next question", "question and answer", "q&a",
-    "opening remarks", "prepared remarks", "i'll turn it over",
-    "income statement", "operating expenses", "earnings per share",
-    "capital expenditure", "free cash flow", "outlook", "fiscal year",
+_TOPIC_TRANSITIONS: list[str] = [
+    "moving to",
+    "turning to",
+    "let me now",
+    "on the balance sheet",
+    "cash flow",
+    "guidance",
+    "next question",
+    "question and answer",
+    "q&a",
+    "opening remarks",
+    "prepared remarks",
+    "i'll turn it over",
+    "income statement",
+    "operating expenses",
+    "earnings per share",
+    "capital expenditure",
+    "free cash flow",
+    "outlook",
+    "fiscal year",
 ]
 
 # EARNINGS CALL SECTION MARKERS
 _PREPARED_REMARKS_KW = [
-    "good morning", "good afternoon", "good evening",
-    "thank you for joining", "welcome to",
-    "let me walk you through", "our results", "quarterly results",
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "thank you for joining",
+    "welcome to",
+    "let me walk you through",
+    "our results",
+    "quarterly results",
 ]
 _QA_KW = [
-    "question and answer", "q&a session", "open up for questions",
-    "first question", "next question", "your question please", "please go ahead",
+    "question and answer",
+    "q&a session",
+    "open up for questions",
+    "first question",
+    "next question",
+    "your question please",
+    "please go ahead",
 ]
 _OPERATOR_KW = ["operator:", "operator,", "this is the operator"]
 
 # SPEAKER ROLE KEYWORD MAP
-_SPEAKER_ROLE_MAP: Dict[str, str] = {
-    "ceo": "CEO", "chief executive": "CEO",
-    "cfo": "CFO", "chief financial": "CFO",
-    "cto": "CTO", "chief technology": "CTO",
-    "coo": "COO", "chief operating": "COO",
-    "analyst": "analyst", "research": "analyst",
-    "operator": "operator", "moderator": "moderator",
+_SPEAKER_ROLE_MAP: dict[str, str] = {
+    "ceo": "CEO",
+    "chief executive": "CEO",
+    "cfo": "CFO",
+    "chief financial": "CFO",
+    "cto": "CTO",
+    "chief technology": "CTO",
+    "coo": "COO",
+    "chief operating": "COO",
+    "analyst": "analyst",
+    "research": "analyst",
+    "operator": "operator",
+    "moderator": "moderator",
 }
 
 # FINANCE ENTITY REGEXES
@@ -440,12 +525,12 @@ _FIN_AMOUNT_RE = re.compile(
     r'\$[\d,]+\.?\d*\s?[BMKTbmkt]?|\b\d[\d,.]*\s?(?:billion|million|thousand)\b',
     re.IGNORECASE,
 )
-_FIN_PCT_RE   = re.compile(r'[\d.]+\s?(?:percent|%)')
+_FIN_PCT_RE = re.compile(r'[\d.]+\s?(?:percent|%)')
 _FIN_TICKER_RE = re.compile(r'\b[A-Z]{2,5}\b')
 _FIN_QUARTER_RE = re.compile(r'Q[1-4]\s?(?:FY)?\s?\d{2,4}|H[12]\s?\d{4}', re.IGNORECASE)
 
 
-def _infer_speaker_role(speaker_name: Optional[str]) -> str:
+def _infer_speaker_role(speaker_name: str | None) -> str:
     if not speaker_name:
         return "unknown"
     lower = speaker_name.lower()
@@ -455,12 +540,12 @@ def _infer_speaker_role(speaker_name: Optional[str]) -> str:
     return "executive"
 
 
-def _extract_finance_entities(text: str) -> Dict[str, List[str]]:
+def _extract_finance_entities(text: str) -> dict[str, list[str]]:
     return {
-        "amounts":     _FIN_AMOUNT_RE.findall(text)[:20],
+        "amounts": _FIN_AMOUNT_RE.findall(text)[:20],
         "percentages": _FIN_PCT_RE.findall(text)[:20],
-        "tickers":     list({t for t in _FIN_TICKER_RE.findall(text) if len(t) >= 2})[:20],
-        "dates":       _FIN_QUARTER_RE.findall(text)[:10],
+        "tickers": list({t for t in _FIN_TICKER_RE.findall(text) if len(t) >= 2})[:20],
+        "dates": _FIN_QUARTER_RE.findall(text)[:10],
     }
 
 
@@ -475,7 +560,7 @@ def _detect_call_section(text: str, prior_section: str) -> str:
     return prior_section
 
 
-def _detect_topic_section(text: str) -> Optional[str]:
+def _detect_topic_section(text: str) -> str | None:
     lower = text.lower()
     for phrase in _TOPIC_TRANSITIONS:
         if phrase in lower:
@@ -483,11 +568,9 @@ def _detect_topic_section(text: str) -> Optional[str]:
     return None
 
 
-def _audio_is_earnings_call(segments: List[Dict[str, Any]]) -> bool:
+def _audio_is_earnings_call(segments: list[dict[str, Any]]) -> bool:
     sample_text = " ".join(s["text"] for s in segments[:30]).lower()
-    operator_turns = sum(
-        1 for s in segments if "operator" in (s.get("text") or "").lower()
-    )
+    operator_turns = sum(1 for s in segments if "operator" in (s.get("text") or "").lower())
     return (
         operator_turns >= 5
         or "earnings call" in sample_text
@@ -498,8 +581,9 @@ def _audio_is_earnings_call(segments: List[Dict[str, Any]]) -> bool:
 
 # DIARIZATION VIA PYANNOTE
 
-def _diarize(file_path: str, session_id: str) -> Dict[Tuple[float, float], str]:
-    speaker_map: Dict[Tuple[float, float], str] = {}
+
+def _diarize(file_path: str, session_id: str) -> dict[tuple[float, float], str]:
+    speaker_map: dict[tuple[float, float], str] = {}
     if not settings.DIARIZATION_ENABLED:
         return speaker_map
     try:
@@ -507,6 +591,7 @@ def _diarize(file_path: str, session_id: str) -> Dict[Tuple[float, float], str]:
             logger.warning(event="diarization_skipped_no_hf_token", session_id=session_id)
             return speaker_map
         from app.core.model_loader import model_loader
+
         pipeline = model_loader.get_diarizer()
         if pipeline is None:
             return speaker_map
@@ -521,8 +606,8 @@ def _diarize(file_path: str, session_id: str) -> Dict[Tuple[float, float], str]:
 def _get_speaker(
     seg_start: float,
     seg_end: float,
-    speaker_map: Dict[Tuple[float, float], str],
-) -> Optional[str]:
+    speaker_map: dict[tuple[float, float], str],
+) -> str | None:
     for (start, end), speaker in speaker_map.items():
         if seg_start >= start and seg_end <= end:
             return speaker
@@ -531,8 +616,10 @@ def _get_speaker(
 
 # LONG AUDIO CHUNKING — SPLIT INTO 30-MIN SEGMENTS
 
-def _chunk_audio_file(file_path: str, preloaded: Optional[Any] = None) -> List[str]:
+
+def _chunk_audio_file(file_path: str, preloaded: Any | None = None) -> list[str]:
     from pydub import AudioSegment
+
     chunk_duration_ms = settings.AUDIO_CHUNK_DURATION_SEC * 1000
     audio = preloaded if preloaded is not None else AudioSegment.from_file(file_path)
     total_ms = len(audio)
@@ -541,12 +628,13 @@ def _chunk_audio_file(file_path: str, preloaded: Optional[Any] = None) -> List[s
         return [file_path]
 
     from app.utils.paths import resolved_temp_dir
+
     tmp_dir = resolved_temp_dir() / f"audio_chunks_{uuid.uuid4().hex}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    chunks: List[str] = []
+    chunks: list[str] = []
 
     for i, start_ms in enumerate(range(0, total_ms, chunk_duration_ms)):
-        segment = audio[start_ms: start_ms + chunk_duration_ms]
+        segment = audio[start_ms : start_ms + chunk_duration_ms]
         chunk_path = str(tmp_dir / f"chunk_{i}.wav")
         segment.export(chunk_path, format="wav")
         chunks.append(chunk_path)
@@ -562,11 +650,13 @@ def _chunk_audio_file(file_path: str, preloaded: Optional[Any] = None) -> List[s
 
 # TRANSCRIBE SINGLE FILE
 
+
 def _transcribe_file(
     file_path: str,
     session_id: str,
-) -> Tuple[Any, Any, float]:
+) -> tuple[Any, Any, float]:
     from app.core.model_loader import model_loader
+
     whisper = model_loader.get_whisper()
     t_start = time.time()
     segments_iter, info = whisper.transcribe(
@@ -574,8 +664,8 @@ def _transcribe_file(
         language=None,
         beam_size=2,
         word_timestamps=False,
-        vad_filter=True,                 # Silero VAD skips silence — 20-40% faster on speech+pauses
-        condition_on_previous_text=False, # prevents hallucination loops on long recordings
+        vad_filter=True,  # Silero VAD skips silence — 20-40% faster on speech+pauses
+        condition_on_previous_text=False,  # prevents hallucination loops on long recordings
     )
     latency = round(time.time() - t_start, 2)
     return segments_iter, info, latency
@@ -584,7 +674,7 @@ def _transcribe_file(
 def _transcribe_chunk_eager(
     chunk_file: str,
     session_id: str,
-) -> Tuple[List[Any], Any, float, float]:
+) -> tuple[list[Any], Any, float, float]:
     """Materialize all segments within the calling thread (GPU GIL released during CTranslate2 ops)."""
     segments_iter, info, latency = _transcribe_file(chunk_file, session_id)
     chunk_duration = float(getattr(info, "duration", 0.0) or 0.0)
@@ -594,7 +684,8 @@ def _transcribe_chunk_eager(
 
 # MAIN INGEST
 
-def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
+
+def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
     if not session_id:
         raise ValueError("SESSION_ID_REQUIRED")
 
@@ -628,7 +719,7 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         session_id=session_id,
     )
 
-    temp_chunk_paths: List[str] = []
+    temp_chunk_paths: list[str] = []
 
     try:
         # LOAD AND VALIDATE AUDIO
@@ -687,6 +778,7 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         # Sanitize id3 metadata text fields (untrusted data from audio file tags)
         try:
             from app.guardrails.input_guard import sanitize as _gs
+
             id3_meta = {k: _gs(str(v), surface="audio_id3_ingest") for k, v in id3_meta.items()}
         except Exception:
             pass
@@ -705,7 +797,7 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         # DIARIZATION + TRANSCRIPTION — run concurrently (both are independent on the same file).
         # Diarization runs in its own thread while transcription threads process audio chunks.
         # This makes diarization time effectively free on top of transcription time.
-        speaker_map: Dict[Tuple[float, float], str] = {}
+        speaker_map: dict[tuple[float, float], str] = {}
         diarize_future = None
         diarize_pool = None
         if not is_music and settings.DIARIZATION_ENABLED:
@@ -740,11 +832,11 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         )
 
         # TRANSCRIPTION — PARALLEL ACROSS CHUNKS
-        all_segments: List[Dict[str, Any]] = []
+        all_segments: list[dict[str, Any]] = []
 
         # Submit all chunks concurrently; CTranslate2 releases GIL during CUDA ops,
         # so two Whisper large-v3 instances (×1.55 GB each) fit safely on A10G 24 GB.
-        chunk_results: List[Tuple[int, List[Any], Any, float, float]] = []
+        chunk_results: list[tuple[int, list[Any], Any, float, float]] = []
         with ThreadPoolExecutor(max_workers=settings.AUDIO_TRANSCRIPTION_WORKERS) as pool:
             futures = {
                 pool.submit(_transcribe_chunk_eager, chunk_file, session_id): chunk_idx
@@ -753,7 +845,9 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
             for fut, chunk_idx in futures.items():
                 try:
                     segs, info, transcribe_latency, chunk_duration = fut.result()
-                    chunk_results.append((chunk_idx, segs, info, transcribe_latency, chunk_duration))
+                    chunk_results.append(
+                        (chunk_idx, segs, info, transcribe_latency, chunk_duration)
+                    )
                 except Exception as exc:
                     logger.error(
                         event="audio_chunk_transcription_failed",
@@ -817,15 +911,17 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     )
                     continue
 
-                all_segments.append({
-                    "text": raw_text,
-                    "start": seg_start,
-                    "end": seg_end,
-                    "avg_logprob": avg_logprob,
-                    "no_speech_prob": no_speech_prob,
-                    "language": language,
-                    "chunk_idx": chunk_idx,
-                })
+                all_segments.append(
+                    {
+                        "text": raw_text,
+                        "start": seg_start,
+                        "end": seg_end,
+                        "avg_logprob": avg_logprob,
+                        "no_speech_prob": no_speech_prob,
+                        "language": language,
+                        "chunk_idx": chunk_idx,
+                    }
+                )
                 seg_count += 1
 
             global_offset += chunk_duration
@@ -841,7 +937,7 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
         current_call_section: str = "prepared_remarks"
 
         # BUILD INGESTED DOCUMENTS
-        documents: List[IngestedDocument] = []
+        documents: list[IngestedDocument] = []
         global_idx = 0
 
         for seg_data in all_segments:
@@ -867,6 +963,7 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 _text_norm = redact_pii(normalize_text(text))
                 try:
                     from app.guardrails.input_guard import sanitize as _gs
+
                     text = _gs(_text_norm, surface="audio_ingest")
                 except Exception as e:
                     logger.warning(event="sanitize_failed", surface="audio_ingest", error=str(e))
@@ -880,13 +977,14 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
             if speaker:
                 try:
                     from app.guardrails.input_guard import sanitize as _gs
+
                     speaker = _gs(speaker, surface="audio_speaker_ingest")
                 except Exception:
                     pass
-            speaker_role   = _infer_speaker_role(speaker)
-            finance_ents   = _extract_finance_entities(text) if not inaudible else {}
+            speaker_role = _infer_speaker_role(speaker)
+            finance_ents = _extract_finance_entities(text) if not inaudible else {}
             current_call_section = _detect_call_section(text, current_call_section)
-            topic_section  = _detect_topic_section(text)
+            topic_section = _detect_topic_section(text)
 
             doc = IngestedDocument(
                 text=text,
@@ -1008,15 +1106,17 @@ def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
 # ASYNC WRAPPER
 
-async def async_ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
+
+async def async_ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
     return await asyncio.to_thread(ingest, file_path, session_id)
 
 
 # ─── Phase 1: AudioIngestor ────────────────────────────────────────────────────
 
+from prometheus_client import Counter
+
 from app.ingestion.base_ingest import BaseIngestor
 from app.ingestion.schema import RawExtract, UniversalMetadata
-from prometheus_client import Counter
 
 _EXTRACTS_TOTAL = Counter("magik_audio_extracts_total", "Total extracts produced by audio ingestor")
 _EXTRACT_ERRORS = Counter("magik_audio_extract_errors_total", "Errors in audio ingestor")
@@ -1040,10 +1140,12 @@ class AudioIngestor(BaseIngestor):
         self,
         path: Path,
         metadata: UniversalMetadata,
-    ) -> List[RawExtract]:
+    ) -> list[RawExtract]:
         source = path.name
         suffix = path.suffix.lower()
-        logger.info(event="extraction_start", modality="audio", file=str(path), size=path.stat().st_size)
+        logger.info(
+            event="extraction_start", modality="audio", file=str(path), size=path.stat().st_size
+        )
         try:
             if suffix not in SUPPORTED_AUDIO_FORMATS:
                 raise UnsupportedMimeError(f"UNSUPPORTED_AUDIO_FORMAT: {suffix}")
@@ -1059,6 +1161,7 @@ class AudioIngestor(BaseIngestor):
             # DRM / encryption check (can't process DRM audio)
             try:
                 from pydub import AudioSegment
+
                 audio = AudioSegment.from_file(str(path))
                 duration_s = len(audio) / 1000.0
             except Exception as exc:
@@ -1068,14 +1171,17 @@ class AudioIngestor(BaseIngestor):
                 try:
                     import subprocess
                     import tempfile
+
                     tmp = tempfile.mktemp(suffix=".wav")
                     subprocess.run(
                         ["ffmpeg", "-y", "-i", str(path), "-ar", "16000", "-ac", "1", tmp],
-                        capture_output=True, timeout=120,
+                        capture_output=True,
+                        timeout=120,
                     )
                     if not Path(tmp).exists() or Path(tmp).stat().st_size == 0:
                         raise ValueError(f"AUDIO_REPAIR_FAILED: {path.name}")
                     from pydub import AudioSegment
+
                     audio = AudioSegment.from_wav(tmp)
                     duration_s = len(audio) / 1000.0
                 except Exception as repair_exc:
@@ -1104,6 +1210,7 @@ class AudioIngestor(BaseIngestor):
 
             # Export as 16kHz mono WAV bytes for chunker
             import io as _io
+
             wav_buf = _io.BytesIO()
             audio.set_frame_rate(16000).set_channels(1).export(wav_buf, format="wav")
             audio_bytes = wav_buf.getvalue()
@@ -1132,11 +1239,13 @@ class AudioIngestor(BaseIngestor):
             ]
         except Exception as _exc:
             _EXTRACT_ERRORS.inc()
-            logger.error(event="extraction_failed", modality="audio", source=source, error=str(_exc))
+            logger.error(
+                event="extraction_failed", modality="audio", source=source, error=str(_exc)
+            )
             raise
 
 
-async def ingest_audio_full(file_path: str, session_id: str) -> List[IngestedDocument]:
+async def ingest_audio_full(file_path: str, session_id: str) -> list[IngestedDocument]:
     """Production audio ingestion: AudioIngestor.extract() → AudioChunker.chunk().
 
     Replaces the backward-compat ingest() as the INGESTION_HANDLERS entry.
@@ -1190,5 +1299,3 @@ async def ingest_audio_full(file_path: str, session_id: str) -> List[IngestedDoc
         session_id=session_id,
     )
     return docs
-
-

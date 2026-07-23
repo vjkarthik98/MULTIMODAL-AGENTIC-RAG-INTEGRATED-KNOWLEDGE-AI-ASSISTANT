@@ -1,15 +1,20 @@
 """video_embedder.py — Finance-grade embedder for video/webcast chunks."""
+
 from __future__ import annotations
 
 import re
-from typing import Any, List
+from typing import Any
 
-from app.embeddings.base_embedder import (
-    BaseEmbedder, sanitize_text, normalize_finance_numbers, valid_embedding,
-)
-from app.core.config import settings
-from app.utils.logger import get_logger
 from prometheus_client import Counter
+
+from app.core.config import settings
+from app.embeddings.base_embedder import (
+    BaseEmbedder,
+    normalize_finance_numbers,
+    sanitize_text,
+    valid_embedding,
+)
+from app.utils.logger import get_logger
 
 _HAS_DIGITS_RE = re.compile(r"\d")
 
@@ -61,13 +66,13 @@ class VideoEmbedder(BaseEmbedder):
         header = self._speaker_header(s)
 
         # Build [SLIDE N AT ts]: caption blocks from frame_captions
-        slide_parts: List[str] = []
-        for fc in (s.get("frame_captions") or []):
+        slide_parts: list[str] = []
+        for fc in s.get("frame_captions") or []:
             if not isinstance(fc, dict):
                 continue
-            caption  = (fc.get("frame_caption") or "").strip()
+            caption = (fc.get("frame_caption") or "").strip()
             ocr_text = (fc.get("ocr_text") or "").strip()
-            ts       = fc.get("frame_timestamp")
+            ts = fc.get("frame_timestamp")
             slide_num = fc.get("slide_number")
             if slide_num is not None and ts is not None:
                 tag = f"[SLIDE {slide_num} AT {float(ts):.1f}s]"
@@ -85,7 +90,7 @@ class VideoEmbedder(BaseEmbedder):
                 slide_parts.append(f"[ON-SCREEN TEXT]: {ocr_text}")
 
         # Slide bullets amplified ×3 (primary slide retrieval anchor)
-        slide_bullets: List[str] = s.get("slide_bullets") or []
+        slide_bullets: list[str] = s.get("slide_bullets") or []
         bullet_block = ""
         if slide_bullets:
             bullet_text = " ".join(str(b) for b in slide_bullets[:10])
@@ -94,30 +99,30 @@ class VideoEmbedder(BaseEmbedder):
         slide_block = (" " + " ".join(slide_parts)) if slide_parts else ""
         entity_suffix = self._entity_suffix(s)
         result = f"{header}{base_text}{slide_block}{bullet_block}{entity_suffix}"
-        return result[:settings.MAX_PROMPT_CHARS]
+        return result[: settings.MAX_PROMPT_CHARS]
 
     def _audio_only_text(self, doc: Any) -> str:
         """Audio-only embedding: transcript + speaker/timestamp header."""
-        s          = getattr(doc, "structure", {}) or {}
+        s = getattr(doc, "structure", {}) or {}
         transcript = (s.get("transcript") or "").strip()
         if not transcript:
             return ""
         base_text = sanitize_text(transcript) or transcript
         base_text = normalize_finance_numbers(base_text)
-        header    = self._speaker_header(s)
+        header = self._speaker_header(s)
         entity_suffix = self._entity_suffix(s)
-        result    = f"{header}{base_text}{entity_suffix}"
-        return result[:settings.MAX_PROMPT_CHARS]
+        result = f"{header}{base_text}{entity_suffix}"
+        return result[: settings.MAX_PROMPT_CHARS]
 
     def _visual_only_text(self, doc: Any) -> str:
         """Visual-only embedding: frame captions + slide bullets + on-screen OCR."""
-        s            = getattr(doc, "structure", {}) or {}
-        frame_parts: List[str] = []
-        for fc in (s.get("frame_captions") or []):
+        s = getattr(doc, "structure", {}) or {}
+        frame_parts: list[str] = []
+        for fc in s.get("frame_captions") or []:
             if isinstance(fc, dict):
-                caption   = (fc.get("frame_caption") or "").strip()
-                ocr_text  = (fc.get("ocr_text") or "").strip()
-                ts        = fc.get("frame_timestamp")
+                caption = (fc.get("frame_caption") or "").strip()
+                ocr_text = (fc.get("ocr_text") or "").strip()
+                ts = fc.get("frame_timestamp")
                 slide_num = fc.get("slide_number")
                 if slide_num is not None and ts is not None:
                     tag = f"[SLIDE {slide_num} AT {float(ts):.1f}s]"
@@ -132,7 +137,7 @@ class VideoEmbedder(BaseEmbedder):
                         frame_parts.append(line)
                 if ocr_text:
                     frame_parts.append(f"[ON-SCREEN TEXT]: {ocr_text}")
-        slide_bullets: List[str] = s.get("slide_bullets") or []
+        slide_bullets: list[str] = s.get("slide_bullets") or []
         if slide_bullets:
             bullet_text = " ".join(str(b) for b in slide_bullets[:10])
             frame_parts.extend([bullet_text] * 3)  # amplify ×3
@@ -140,12 +145,12 @@ class VideoEmbedder(BaseEmbedder):
         if not visual_text:
             return ""
         visual_text = normalize_finance_numbers(visual_text)
-        return visual_text[:settings.MAX_PROMPT_CHARS]
+        return visual_text[: settings.MAX_PROMPT_CHARS]
 
     @staticmethod
     def _speaker_header(s: dict) -> str:
         # [VIDEO] prefix per Phase 2.7 spec format
-        parts: List[str] = ["[VIDEO]"]
+        parts: list[str] = ["[VIDEO]"]
         name = (s.get("speaker_name") or s.get("speaker") or "").strip()
         role = (s.get("speaker_role") or "").strip()
         if name and role:
@@ -156,7 +161,7 @@ class VideoEmbedder(BaseEmbedder):
             parts.append(f"[SPEAKER: {role}]")
         # Millisecond-precision timestamps per spec
         ts_s = s.get("start_timestamp") or s.get("timestamp_start")
-        ts_e = s.get("end_timestamp")   or s.get("timestamp_end")
+        ts_e = s.get("end_timestamp") or s.get("timestamp_end")
         if ts_s is not None and ts_e is not None:
             parts.append(f"[{float(ts_s):.3f}s-{float(ts_e):.3f}s]")
         elif ts_s is not None:
@@ -169,14 +174,14 @@ class VideoEmbedder(BaseEmbedder):
     @staticmethod
     def _entity_suffix(s: dict) -> str:
         fin_entities: dict = s.get("finance_entities") or {}
-        entity_tokens: List[str] = []
+        entity_tokens: list[str] = []
         if isinstance(fin_entities, dict):
             for v in fin_entities.values():
                 if isinstance(v, list):
                     entity_tokens.extend(str(x) for x in v[:4])
         return (f" [ENTITIES: {', '.join(entity_tokens)}]") if entity_tokens else ""
 
-    def embed_documents(self, docs: List[Any], session_id: str = "default") -> List[Any]:
+    def embed_documents(self, docs: list[Any], session_id: str = "default") -> list[Any]:
         """Embed video docs with THREE named vectors (Phase 2.7) + SigLIP for frames.
 
         transcript_frame docs (embedding_space="text"):
@@ -190,23 +195,26 @@ class VideoEmbedder(BaseEmbedder):
         from pathlib import Path as _Path
 
         # Split by embedding_space before BGE encoding to avoid dimension mismatch.
-        vision_docs = [d for d in docs
-                       if (getattr(d, "structure", None) or {}).get("embedding_space") == "vision"]
-        text_docs   = [d for d in docs if d not in vision_docs]
+        vision_docs = [
+            d
+            for d in docs
+            if (getattr(d, "structure", None) or {}).get("embedding_space") == "vision"
+        ]
+        text_docs = [d for d in docs if d not in vision_docs]
 
         # ── Text / transcript docs: existing BGE combined + audio/visual path ──
-        text_results: List[Any] = []
+        text_results: list[Any] = []
         if text_docs:
             text_results = super().embed_documents(text_docs, session_id=session_id)
 
         if text_results:
             embedder = self._get_model()
             for vector_name, text_fn, attr in [
-                ("audio",  self._audio_only_text,  "embedding_audio"),
+                ("audio", self._audio_only_text, "embedding_audio"),
                 ("visual", self._visual_only_text, "embedding_visual"),
             ]:
-                texts: List[str] = []
-                rdocs: List[Any] = []
+                texts: list[str] = []
+                rdocs: list[Any] = []
                 for doc in text_results:
                     t = text_fn(doc)
                     if t:
@@ -215,8 +223,8 @@ class VideoEmbedder(BaseEmbedder):
                 if not texts:
                     continue
                 for i in range(0, len(texts), embedder.batch_size):
-                    batch_texts = texts[i:i + embedder.batch_size]
-                    batch_docs  = rdocs[i:i + embedder.batch_size]
+                    batch_texts = texts[i : i + embedder.batch_size]
+                    batch_docs = rdocs[i : i + embedder.batch_size]
                     try:
                         embs = embedder._encode_with_retry(embedder.model, batch_texts)
                         for doc, emb in zip(batch_docs, embs):
@@ -233,17 +241,13 @@ class VideoEmbedder(BaseEmbedder):
                         )
 
         # ── Vision / frame docs: SigLIP 1152-dim from frame image file ──────
-        vision_results: List[Any] = list(vision_docs)  # return even if embed fails
+        vision_results: list[Any] = list(vision_docs)  # return even if embed fails
         if vision_docs:
-            vision_results = self._embed_vision_frames(
-                vision_docs, session_id, _Path
-            )
+            vision_results = self._embed_vision_frames(vision_docs, session_id, _Path)
 
         return text_results + vision_results
 
-    def _embed_vision_frames(
-        self, docs: List[Any], session_id: str, _Path: Any
-    ) -> List[Any]:
+    def _embed_vision_frames(self, docs: list[Any], session_id: str, _Path: Any) -> list[Any]:
         """Embed video frame images with SigLIP → vision_collection (1152-dim).
 
         Docs without a valid asset_path or where SigLIP is unavailable are
@@ -251,9 +255,11 @@ class VideoEmbedder(BaseEmbedder):
         """
         try:
             from app.core.model_loader import model_loader
+
             # get_siglip() returns (processor, model, device)
             siglip_processor, siglip_model, siglip_device = model_loader.get_siglip()
             from app.embeddings.image_embedder import ImageEmbedder
+
             ie = ImageEmbedder(
                 model=siglip_model,
                 processor=siglip_processor,
@@ -264,7 +270,7 @@ class VideoEmbedder(BaseEmbedder):
             return docs
 
         for doc in docs:
-            s          = getattr(doc, "structure", {}) or {}
+            s = getattr(doc, "structure", {}) or {}
             asset_path = s.get("asset_path", "")
             if not asset_path or not _Path(asset_path).exists():
                 continue

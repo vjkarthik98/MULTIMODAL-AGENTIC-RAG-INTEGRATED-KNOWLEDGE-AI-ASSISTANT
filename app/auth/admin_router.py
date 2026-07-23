@@ -14,14 +14,14 @@ Routes:
   GET    /admin/system/audit             — recent audit log entries
   GET    /admin/stats                    — platform-wide usage summary
 """
+
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.auth.dependencies import get_current_admin_user
@@ -35,8 +35,10 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _get_users_col():
     from app.core.infra_registry import infra
+
     mongo = infra.get_mongo()
     if mongo is None:
         raise HTTPException(status_code=503, detail="MongoDB unavailable")
@@ -45,6 +47,7 @@ def _get_users_col():
 
 def _get_messages_col():
     from app.core.infra_registry import infra
+
     mongo = infra.get_mongo()
     if mongo is None:
         return None
@@ -53,15 +56,16 @@ def _get_messages_col():
 
 def _get_summaries_col():
     from app.core.infra_registry import infra
+
     mongo = infra.get_mongo()
     if mongo is None:
         return None
     return mongo.client[settings.MONGO_DB_NAME][settings.MONGO_SUMMARIES_COLLECTION]
 
 
-def _user_stats(user_id: str) -> Dict[str, Any]:
+def _user_stats(user_id: str) -> dict[str, Any]:
     """Compute per-user usage statistics from MongoDB."""
-    stats: Dict[str, Any] = {
+    stats: dict[str, Any] = {
         "total_queries": 0,
         "total_messages": 0,
         "total_summaries": 0,
@@ -71,9 +75,7 @@ def _user_stats(user_id: str) -> Dict[str, Any]:
         msg_col = _get_messages_col()
         if msg_col is not None:
             stats["total_messages"] = msg_col.count_documents({"user_id": user_id})
-            stats["total_queries"] = msg_col.count_documents(
-                {"user_id": user_id, "role": "user"}
-            )
+            stats["total_queries"] = msg_col.count_documents({"user_id": user_id, "role": "user"})
         sum_col = _get_summaries_col()
         if sum_col is not None:
             stats["total_summaries"] = sum_col.count_documents({"user_id": user_id})
@@ -82,9 +84,11 @@ def _user_stats(user_id: str) -> Dict[str, Any]:
 
     try:
         from app.core.infra_registry import infra
+
         vs = infra.get_vector_store()
         if vs:
-            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            from qdrant_client.models import FieldCondition, Filter, MatchValue
+
             result = vs.client.count(
                 collection_name=vs.text_collection,
                 count_filter=Filter(
@@ -101,16 +105,17 @@ def _user_stats(user_id: str) -> Dict[str, Any]:
 
 def _doc_to_user(doc: dict) -> dict:
     return {
-        "user_id":    doc.get("user_id"),
-        "email":      doc.get("email"),
-        "role":       doc.get("role", "user"),
-        "is_active":  doc.get("is_active", True),
+        "user_id": doc.get("user_id"),
+        "email": doc.get("email"),
+        "role": doc.get("role", "user"),
+        "is_active": doc.get("is_active", True),
         "created_at": doc.get("created_at"),
         "last_login": doc.get("last_login"),
     }
 
 
 # ── Request / response models ─────────────────────────────────────────────────
+
 
 class RoleUpdate(BaseModel):
     role: UserRole
@@ -122,12 +127,13 @@ class StatusUpdate(BaseModel):
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+
 @router.get("/users", summary="List all users")
 async def list_users(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     _admin: UserPublic = Depends(get_current_admin_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """List all registered users with basic profile info."""
     col = _get_users_col()
     total = col.count_documents({})
@@ -144,7 +150,7 @@ async def list_users(
 async def get_user(
     user_id: str,
     _admin: UserPublic = Depends(get_current_admin_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Full profile + usage statistics for a specific user."""
     col = _get_users_col()
     doc = col.find_one({"user_id": user_id}, {"hashed_password": 0, "_id": 0})
@@ -160,7 +166,7 @@ async def update_user_role(
     user_id: str,
     body: RoleUpdate,
     admin: UserPublic = Depends(get_current_admin_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Change a user's role (user ↔ admin). Admins cannot demote themselves."""
     if user_id == admin.user_id and body.role != UserRole.ADMIN:
         raise HTTPException(
@@ -190,7 +196,7 @@ async def update_user_status(
     user_id: str,
     body: StatusUpdate,
     admin: UserPublic = Depends(get_current_admin_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Block or unblock a user. Blocked users cannot log in."""
     if user_id == admin.user_id and not body.is_active:
         raise HTTPException(
@@ -219,7 +225,7 @@ async def update_user_status(
 async def admin_purge_user(
     user_id: str,
     admin: UserPublic = Depends(get_current_admin_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Permanently delete all data for a user across Qdrant, Redis, and MongoDB.
     Also removes their account. This cannot be undone.
@@ -233,6 +239,7 @@ async def admin_purge_user(
     # Purge memory (Redis + Mongo messages/summaries)
     try:
         from app.memory.memory_manager import MemoryManager
+
         manager = MemoryManager()
         await asyncio.to_thread(manager.gdpr_purge, user_id)
     except Exception as exc:
@@ -241,6 +248,7 @@ async def admin_purge_user(
     # Purge BM25
     try:
         from app.core.infra_registry import infra
+
         bm25 = infra.get_bm25()
         if bm25 and hasattr(bm25, "purge_by_session"):
             await asyncio.to_thread(bm25.purge_by_session, user_id)
@@ -268,11 +276,11 @@ async def admin_purge_user(
 @router.get("/system/health", summary="System health overview")
 async def system_health(
     _admin: UserPublic = Depends(get_current_admin_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Live health status of Qdrant, Redis, MongoDB, and loaded models."""
     from app.core.infra_registry import infra
 
-    health: Dict[str, Any] = {
+    health: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "infra": {},
         "models": {},
@@ -285,6 +293,7 @@ async def system_health(
 
     try:
         from app.core.model_loader import model_loader
+
         health["models"] = model_loader.health_check()
     except Exception as exc:
         health["models"] = {"error": str(exc)}
@@ -296,7 +305,7 @@ async def system_health(
 async def get_audit_log(
     limit: int = Query(100, ge=1, le=1000),
     _admin: UserPublic = Depends(get_current_admin_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Return the most recent audit log entries from the append-only audit log file.
     Each line is a JSON event (login, query, ingest, purge, etc).
@@ -305,7 +314,7 @@ async def get_audit_log(
 
     entries = []
     try:
-        with open(settings.AUDIT_LOG_PATH, "r", encoding="utf-8") as f:
+        with open(settings.AUDIT_LOG_PATH, encoding="utf-8") as f:
             lines = f.readlines()
         # Most recent first
         for line in reversed(lines[-limit:]):
@@ -329,9 +338,9 @@ async def get_audit_log(
 @router.get("/stats", summary="Platform-wide usage summary")
 async def platform_stats(
     _admin: UserPublic = Depends(get_current_admin_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Aggregate statistics across all users — total users, queries, chunks stored."""
-    stats: Dict[str, Any] = {
+    stats: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "total_users": 0,
         "active_users": 0,
@@ -343,9 +352,9 @@ async def platform_stats(
 
     try:
         col = _get_users_col()
-        stats["total_users"]  = col.count_documents({})
+        stats["total_users"] = col.count_documents({})
         stats["active_users"] = col.count_documents({"is_active": True})
-        stats["admin_users"]  = col.count_documents({"role": "admin"})
+        stats["admin_users"] = col.count_documents({"role": "admin"})
     except Exception:
         pass
 
@@ -361,6 +370,7 @@ async def platform_stats(
 
     try:
         from app.core.infra_registry import infra
+
         vs = infra.get_vector_store()
         if vs:
             info = vs.client.get_collection(vs.text_collection)

@@ -5,7 +5,7 @@ import hashlib
 import math
 import time
 import unicodedata
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -14,12 +14,14 @@ logger = get_logger(__name__)
 
 try:
     from app.guardrails.input_guard import sanitize as _guard_sanitize
+
     _GUARD_AVAILABLE = True
 except Exception:
     _GUARD_AVAILABLE = False
 
 try:
     import pybreaker
+
     _fusion_breaker = pybreaker.CircuitBreaker(
         fail_max=settings.CIRCUIT_BREAKER_MAX_FAILURES,
         reset_timeout=settings.CIRCUIT_BREAKER_RESET_TIMEOUT,
@@ -38,27 +40,28 @@ except ImportError:
 # BUDGET RATIOS
 _SUMMARY_RATIO = 0.30
 _HISTORY_RATIO = 0.55
-_VECTOR_RATIO  = 0.15
+_VECTOR_RATIO = 0.15
 
 # MODALITY RECENCY WEIGHTS
-_MODALITY_WEIGHTS: Dict[str, float] = {
-    "text":     1.0,
-    "image":    1.05,
-    "audio":    1.1,
-    "video":    1.1,
-    "table":    1.0,
+_MODALITY_WEIGHTS: dict[str, float] = {
+    "text": 1.0,
+    "image": 1.05,
+    "audio": 1.1,
+    "video": 1.1,
+    "table": 1.0,
     "document": 1.0,
 }
 
 # ROLE WEIGHTS FOR IMPORTANCE SCORING
-_ROLE_WEIGHTS: Dict[str, float] = {
-    "system":    1.5,
+_ROLE_WEIGHTS: dict[str, float] = {
+    "system": 1.5,
     "assistant": 1.2,
-    "user":      1.0,
+    "user": 1.0,
 }
 
 
 # NORMALIZE TEXT
+
 
 def _normalize(text: str) -> str:
     text = unicodedata.normalize("NFC", str(text or ""))
@@ -67,26 +70,30 @@ def _normalize(text: str) -> str:
 
 # TRUNCATE
 
+
 def _truncate(text: str, limit: int) -> str:
     if not text:
         return ""
-    return text[:max(limit, 0)]
+    return text[: max(limit, 0)]
 
 
 # HASH MESSAGE
 
-def _hash_msg(msg: Dict[str, Any]) -> str:
+
+def _hash_msg(msg: dict[str, Any]) -> str:
     base = f"{msg.get('role', '')}|{str(msg.get('content', ''))[:200]}"
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 
 # HASH TEXT PREFIX
 
+
 def _hash_prefix(text: str, length: int = 200) -> str:
     return hashlib.sha256(text[:length].encode("utf-8")).hexdigest()
 
 
 # RECENCY SCORE
+
 
 def _recency_score(ts: Any, now: float) -> float:
     try:
@@ -101,7 +108,8 @@ def _recency_score(ts: Any, now: float) -> float:
 
 # IMPORTANCE SCORE
 
-def _importance_score(msg: Dict[str, Any]) -> float:
+
+def _importance_score(msg: dict[str, Any]) -> float:
     try:
         val = float(msg.get("importance", 0.5))
         if math.isnan(val) or math.isinf(val):
@@ -113,30 +121,28 @@ def _importance_score(msg: Dict[str, Any]) -> float:
 
 # MODALITY WEIGHT
 
-def _modality_weight(msg: Dict[str, Any]) -> float:
+
+def _modality_weight(msg: dict[str, Any]) -> float:
     return _MODALITY_WEIGHTS.get(str(msg.get("modality", "text")).lower(), 1.0)
 
 
 # ROLE WEIGHT
 
-def _role_weight(msg: Dict[str, Any]) -> float:
+
+def _role_weight(msg: dict[str, Any]) -> float:
     return _ROLE_WEIGHTS.get(str(msg.get("role", "user")).lower(), 1.0)
 
 
 # COMPOSITE SCORE
 
-def _composite_score(msg: Dict[str, Any], now: float) -> float:
+
+def _composite_score(msg: dict[str, Any], now: float) -> float:
     recency = _recency_score(msg.get("timestamp"), now)
     importance = _importance_score(msg)
     modality = _modality_weight(msg)
     role = _role_weight(msg)
 
-    score = (
-        0.40 * recency +
-        0.30 * importance +
-        0.20 * role +
-        0.10 * modality
-    )
+    score = 0.40 * recency + 0.30 * importance + 0.20 * role + 0.10 * modality
 
     if math.isnan(score) or math.isinf(score):
         return 0.0
@@ -146,9 +152,10 @@ def _composite_score(msg: Dict[str, Any], now: float) -> float:
 
 # DEDUP MESSAGES
 
-def _dedup_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+
+def _dedup_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set = set()
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
 
     for msg in messages:
         try:
@@ -168,7 +175,8 @@ def _dedup_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 # DEDUP SUMMARY VS HISTORY — REMOVE OVERLAPPING PREFIX
 
-def _dedup_summary_history(summary: str, history: str) -> Tuple[str, str]:
+
+def _dedup_summary_history(summary: str, history: str) -> tuple[str, str]:
     if not summary or not history:
         return summary, history
 
@@ -180,7 +188,8 @@ def _dedup_summary_history(summary: str, history: str) -> Tuple[str, str]:
 
 # FORMAT SINGLE MESSAGE
 
-def _format_message(msg: Dict[str, Any], char_limit: int) -> str:
+
+def _format_message(msg: dict[str, Any], char_limit: int) -> str:
     try:
         role = str(msg.get("role", "user")).lower()
         if role not in {"user", "assistant", "system"}:
@@ -227,8 +236,9 @@ def _format_message(msg: Dict[str, Any], char_limit: int) -> str:
 
 # FORMAT HISTORY LIST
 
+
 def _format_history(
-    messages: List[Dict[str, Any]],
+    messages: list[dict[str, Any]],
     max_chars: int,
     max_messages: int,
 ) -> str:
@@ -241,10 +251,7 @@ def _format_history(
     messages = _dedup_messages(messages)
 
     # SCORE AND SORT
-    scored = [
-        (_composite_score(m, now), m)
-        for m in messages
-    ]
+    scored = [(_composite_score(m, now), m) for m in messages]
     scored.sort(key=lambda x: x[0], reverse=True)
 
     # TAKE TOP BY SCORE BUT CAP AT MAX_MESSAGES
@@ -258,7 +265,7 @@ def _format_history(
 
     per_msg_limit = max(max_chars // max(len(top_sorted), 1), 100)
 
-    parts: List[str] = []
+    parts: list[str] = []
     total = 0
 
     for msg in top_sorted:
@@ -275,13 +282,17 @@ def _format_history(
 
 # FETCH MONGO SUMMARY — SAFE
 
+
 def _fetch_mongo_summary(session_id: str) -> str:
     try:
         from app.core.infra_registry import infra
+
         mongo = infra.get_mongo()
         if mongo and hasattr(mongo, "get_latest_summary"):
+
             def _do():
                 return mongo.get_latest_summary(session_id) or ""
+
             if _PYBREAKER_AVAILABLE:
                 return _fusion_breaker(_do)()
             return _do()
@@ -296,14 +307,15 @@ def _fetch_mongo_summary(session_id: str) -> str:
 
 # FORMAT VECTOR MEMORIES
 
+
 def _format_vector_memories(
-    vector_memories: List[Dict[str, Any]],
+    vector_memories: list[dict[str, Any]],
     max_chars: int,
 ) -> str:
     if not vector_memories:
         return ""
 
-    parts: List[str] = []
+    parts: list[str] = []
     total = 0
     seen: set = set()
 
@@ -333,11 +345,12 @@ def _format_vector_memories(
 
 # MAIN BUILD MEMORY CONTEXT
 
+
 def build_memory_context(
     summary: str,
-    filtered_history: List[Dict[str, Any]],
-    vector_memories: Optional[List[Dict[str, Any]]] = None,
-    max_total_chars: Optional[int] = None,
+    filtered_history: list[dict[str, Any]],
+    vector_memories: list[dict[str, Any]] | None = None,
+    max_total_chars: int | None = None,
     session_id: str = "default",
 ) -> str:
     start = time.time()
@@ -379,10 +392,10 @@ def build_memory_context(
         # BUDGET ALLOCATION
         summary_budget = int(max_total_chars * _SUMMARY_RATIO)
         history_budget = int(max_total_chars * _HISTORY_RATIO)
-        vector_budget  = int(max_total_chars * _VECTOR_RATIO)
+        vector_budget = int(max_total_chars * _VECTOR_RATIO)
 
         # ASSEMBLE PARTS
-        parts: List[str] = []
+        parts: list[str] = []
 
         # HEADER
         parts.append(
@@ -393,24 +406,15 @@ def build_memory_context(
 
         # LONG-TERM SUMMARY
         if summary:
-            parts.append(
-                "[Long-Term Summary]\n" +
-                _truncate(summary, summary_budget)
-            )
+            parts.append("[Long-Term Summary]\n" + _truncate(summary, summary_budget))
 
         # VECTOR-RETRIEVED MEMORIES
         if vector_str:
-            parts.append(
-                "[Retrieved Memories]\n" +
-                _truncate(vector_str, vector_budget)
-            )
+            parts.append("[Retrieved Memories]\n" + _truncate(vector_str, vector_budget))
 
         # RECENT CONVERSATION
         if history_str:
-            parts.append(
-                "[Recent Conversation]\n" +
-                _truncate(history_str, history_budget)
-            )
+            parts.append("[Recent Conversation]\n" + _truncate(history_str, history_budget))
 
         # INSTRUCTION FOOTER
         parts.append(
@@ -468,11 +472,12 @@ def build_memory_context(
 
 # ASYNC WRAPPER
 
+
 async def async_build_memory_context(
     summary: str,
-    filtered_history: List[Dict[str, Any]],
-    vector_memories: Optional[List[Dict[str, Any]]] = None,
-    max_total_chars: Optional[int] = None,
+    filtered_history: list[dict[str, Any]],
+    vector_memories: list[dict[str, Any]] | None = None,
+    max_total_chars: int | None = None,
     session_id: str = "default",
 ) -> str:
     return await asyncio.to_thread(
@@ -483,5 +488,3 @@ async def async_build_memory_context(
         max_total_chars,
         session_id,
     )
-
-

@@ -4,10 +4,11 @@ Calls app/ingestion/audio_ingest.py:ingest() — the same code production runs.
 Extracts Whisper transcript from ingested audio documents and scores WER
 against gold_transcript_excerpt in audio_gold.jsonl.
 """
+
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List
+from typing import Any
 
 from app.eval.config import EvalConfig
 from app.eval.datasets.gold_loader import load_gold
@@ -15,7 +16,7 @@ from app.eval.metrics.audio_metrics import audio_wer_batch
 from app.eval.metrics.base import MetricResult, SuiteResult
 
 
-def _collect_transcript(documents: List[Any]) -> str:
+def _collect_transcript(documents: list[Any]) -> str:
     """Collect all speech transcript text from ingested audio documents."""
     parts = []
     for doc in documents:
@@ -47,12 +48,16 @@ def run_audio_suite(cfg: EvalConfig) -> SuiteResult:
 
     gold_rows = load_gold("audio", gold_dir=cfg.gold_dir, include_todos=False)
     if not gold_rows:
-        result.add(MetricResult.empty("audio_wer", "no curated audio gold rows; run download_eval_corpus.sh first"))
+        result.add(
+            MetricResult.empty(
+                "audio_wer", "no curated audio gold rows; run download_eval_corpus.sh first"
+            )
+        )
         result.duration_sec = time.time() - t0
         return result
 
-    transcripts: List[str] = []
-    gold_transcripts: List[str] = []
+    transcripts: list[str] = []
+    gold_transcripts: list[str] = []
 
     raw_corpus_dir = cfg.raw_corpus_dir / "audio"
 
@@ -69,7 +74,8 @@ def run_audio_suite(cfg: EvalConfig) -> SuiteResult:
 
         session_id = f"{cfg.session_prefix}_audio_{row['id']}"
         try:
-            from app.utils.paths import set_current_user, reset_current_user
+            from app.utils.paths import reset_current_user, set_current_user
+
             _token = set_current_user(cfg.user_id)
             try:
                 docs = audio_ingest.ingest(

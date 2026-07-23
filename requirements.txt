@@ -14,21 +14,23 @@ python-dotenv>=1.0
 
 
 
-# LLM — llama-cpp-python (CUDA 12.x / A10G build)
-# ── MUST be built from source so the CUDA backend is statically linked and
-#    actually enumerates the GPU (the prebuilt wheels' dynamic backend registers
-#    0 devices on this box → silent CPU fallback at ~5 tok/s). Build against the
-#    system CUDA 12.8 toolkit (matches torch+cu124's libcudart.so.12):
-#
+# LLM — llama-cpp-python
+# ── This line installs the prebuilt CPU (BLAS) wheel — correct as-is for a
+#    CPU-only box; device_manager.llm_gpu_layers() returns 0 automatically
+#    when torch.cuda.is_available() is False, so gguf_model.py runs Mistral-7B
+#    Q4_K_M on CPU with no code changes needed.
+# ── On a CUDA box (AWS g5.xlarge), the prebuilt wheel's dynamic backend
+#    registers 0 GPU devices → silent CPU fallback at ~5 tok/s. Rebuild from
+#    source against the system CUDA toolkit — see install_cuda.sh, or:
 #   CMAKE_ARGS="-DGGML_CUDA=on -DGGML_BACKEND_DL=OFF -DGGML_NATIVE=OFF \
 #     -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc" \
 #   CUDACXX=/usr/local/cuda-12.8/bin/nvcc CUDA_HOME=/usr/local/cuda-12.8 \
 #   pip install "llama-cpp-python==0.3.30" --no-binary llama-cpp-python --force-reinstall --no-cache-dir
 #
-# llama.cpp runs as a SEPARATE process (llama-server, own CUDA context) — in
-# process it corrupts PyTorch's CUDA context on worker threads and SIGSEGVs the
-# embed stage. start_server.sh launches `python -m llama_cpp.server`; the
-# sse-starlette + starlette-context deps below are required by that server.
+# llama.cpp runs as a SEPARATE process (llama-server, own CUDA context on GPU
+# boxes) — in-process it corrupts PyTorch's CUDA context on worker threads and
+# SIGSEGVs the embed stage. start_server.sh launches `python -m llama_cpp.server`;
+# the sse-starlette + starlette-context deps below are required by that server.
 llama-cpp-python>=0.2.60
 sse-starlette>=2.0
 starlette-context>=0.3
@@ -36,12 +38,22 @@ huggingface_hub>=0.22
 
 
 
-# EMBEDDINGS & MODELS — CUDA 12.x / A10G 24 GB
-# ── PyTorch MUST be installed before this file using the cu124 index ──────────
-#   pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 \
-#     --index-url https://download.pytorch.org/whl/cu124
-# pip install -r requirements.txt will upgrade torch to cu130 (PyPI default) — prevent
-# this by running the explicit cu124 install above AFTER requirements.txt.
+# EMBEDDINGS & MODELS — hardware-agnostic pins; the actual CPU-vs-CUDA torch
+# BUILD is an index-URL choice pip requirements files can't express, so install
+# torch explicitly BEFORE this file with the index matching your target:
+#
+#   CPU (local, no GPU):
+#     pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+#   CUDA (AWS g5.xlarge / A10G):
+#     pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 \
+#       --index-url https://download.pytorch.org/whl/cu124
+#
+# Either way, `pip install -r requirements.txt` afterward is a no-op for torch —
+# it only pulls a build if the >=2.6 constraint isn't already satisfied, so it
+# never overwrites your chosen CPU/CUDA build with the PyPI-default one.
+# device_manager.py (app/core/) then auto-detects torch.cuda.is_available() at
+# runtime and routes every model to the right device — no other code changes
+# needed between the two targets.
 torch>=2.6
 torchvision>=0.21
 torchaudio>=2.6
@@ -49,7 +61,10 @@ sentence-transformers>=2.7
 transformers>=4.39
 sentencepiece>=0.2.0
 accelerate>=1.1.0
-bitsandbytes>=0.46.1            # CUDA auto-detected; int8/int4 quant for Qwen2-VL
+# int8/int4 quant for Qwen2-VL — only invoked when device_manager reports
+# "cuda" (model_loader.py gates BitsAndBytesConfig behind that check), so it's
+# simply unused (not broken) on a CPU box. Ships Windows + Linux wheels either way.
+bitsandbytes>=0.46.1
 faster-whisper>=1.0
 qwen-vl-utils>=0.0.8             # image/video preprocessing helper for Qwen2-VL processor
 tiktoken>=0.7                   # tokenisation used in approx_tokens() / finance_numbers.py
@@ -108,7 +123,9 @@ opencv-python>=4.9
 pytesseract>=0.3
 easyocr>=1.7
 imagehash>=4.3
-cairosvg>=2.7                   # SVG→PNG conversion in image_ingest.py + image_chunker.py
+cairosvg>=2.7                   # SVG→PNG conversion — needs Cairo DLLs on Windows (GTK runtime);
+                                 # both call sites wrap the import in try/except ImportError, so
+                                 # missing Cairo just disables SVG rasterization, doesn't crash.
 rawpy>=0.21                     # RAW camera format support (CR2/NEF/ARW) in image_ingest.py
 mediapipe>=0.10                 # face detection / count in image_ingest.py
 # Optional: HEIC/HEIF support for iPhone photos. Safe to omit on systems
@@ -123,9 +140,13 @@ numba>=0.59.0                   # pinned: Python 3.12 requires >=0.59.0
 llvmlite>=0.42.0                # pinned: paired with numba>=0.59.0
 librosa>=0.10                   # audio feature extraction / duration analysis in audio_ingest.py
 mutagen>=1.47                   # audio file metadata (bitrate, codec, tags) in audio_ingest.py
-# YAMNet noise/crowd classification — optional, imported inside try/except.
-# [and-cuda] installs GPU-enabled TensorFlow (CUDA 12 runtime bundled by TF).
-tensorflow[and-cuda]>=2.16
+# YAMNet noise/crowd classification — optional, imported inside try/except
+# (_classify_noise in audio_ingest.py); missing tensorflow just disables it.
+# The `[and-cuda]` extra (bundles CUDA 12 runtime as pip deps) only ships Linux
+# wheels — doesn't exist for Windows at all — so it's marker-gated to Linux;
+# everywhere else (Windows laptop, CPU) gets the plain CPU package.
+tensorflow[and-cuda]>=2.16; sys_platform == "linux"
+tensorflow>=2.16; sys_platform != "linux"
 tensorflow-hub>=0.16
 
 
@@ -140,7 +161,9 @@ scenedetect[opencv]>=0.6        # PySceneDetect — adaptive scene detection in 
 # DOCUMENT PROCESSING
 pdfplumber>=0.10
 pymupdf>=1.23
-camelot-py[cv]>=0.11
+camelot-py[cv]>=0.11             # lattice-flavor tables need Ghostscript on PATH; guarded with
+                                  # try/except ImportError in pdf_ingest.py — pdfplumber covers
+                                  # standard tables if Ghostscript isn't installed.
 python-docx>=1.1
 openpyxl>=3.1
 chardet>=5.0
@@ -173,7 +196,11 @@ structlog>=24.1
 
 
 # SECURITY / PII
-python-magic>=0.4.14
+# router.py does `import magic` unguarded at module load — on Windows the
+# plain `python-magic` package has no libmagic DLL to bind to and raises
+# ImportError. python-magic-bin bundles the DLL. (Linux/Mac keep python-magic.)
+python-magic-bin>=0.4.14; sys_platform == "win32"
+python-magic>=0.4.14; sys_platform != "win32"
 bleach>=6.1
 presidio-analyzer>=2.2
 presidio-anonymizer>=2.2

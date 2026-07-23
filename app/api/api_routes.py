@@ -8,9 +8,18 @@ import time
 import unicodedata
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -49,8 +58,8 @@ def _prewarm_models_for_upload(ext: str) -> None:
     slower than before, only sometimes faster.
     """
     try:
-        from app.ingestion.router import EXT_TO_MODALITY
         from app.core.model_registry import model_registry
+        from app.ingestion.router import EXT_TO_MODALITY
 
         modality = EXT_TO_MODALITY.get(ext)
         if not modality:
@@ -68,7 +77,7 @@ def _prewarm_models_for_upload(ext: str) -> None:
         logger.debug(event="upload_prewarm_skip", ext=ext, error=str(exc))
 
 
-def get_current_user_id(request: Request, explicit_user_id: Optional[str] = None) -> str:
+def get_current_user_id(request: Request, explicit_user_id: str | None = None) -> str:
     """
     Resolve current user id from request.state.user (set by AuthMiddleware from JWT).
     The explicit_user_id form-field parameter is ignored — user_id is always
@@ -79,44 +88,98 @@ def get_current_user_id(request: Request, explicit_user_id: Optional[str] = None
         return request.state.user.user_id
     return settings.DEFAULT_DEV_USER_ID
 
+
 # ALLOWED EXTENSIONS
 ALLOWED_EXTENSIONS = {
-    ".pdf", ".txt", ".md", ".docx", ".xlsx", ".xls",
-    ".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif",
-    ".tiff", ".tif", ".heic", ".heif",
-    ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".opus",
-    ".mp4", ".avi", ".mov", ".mkv", ".webm",
-    ".svg", ".cr2", ".nef", ".arw",
+    ".pdf",
+    ".txt",
+    ".md",
+    ".docx",
+    ".xlsx",
+    ".xls",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".bmp",
+    ".webp",
+    ".gif",
+    ".tiff",
+    ".tif",
+    ".heic",
+    ".heif",
+    ".mp3",
+    ".wav",
+    ".m4a",
+    ".flac",
+    ".ogg",
+    ".aac",
+    ".opus",
+    ".mp4",
+    ".avi",
+    ".mov",
+    ".mkv",
+    ".webm",
+    ".svg",
+    ".cr2",
+    ".nef",
+    ".arw",
 }
 
 # EXTENSION TO MODALITY MAP
-_EXT_MODALITY: Dict[str, str] = {
-    ".txt": "text", ".md": "text", ".markdown": "text",
-    ".csv": "text", ".json": "text", ".log": "text",
-    ".pdf": "pdf", ".docx": "docx", ".doc": "docx",
-    ".xlsx": "xlsx", ".xls": "xlsx",
-    ".png": "image", ".jpg": "image", ".jpeg": "image",
-    ".bmp": "image", ".webp": "image", ".gif": "image",
-    ".tiff": "image", ".tif": "image",
-    ".heic": "image", ".heif": "image",
-    ".svg": "image", ".cr2": "image", ".nef": "image", ".arw": "image",
-    ".mp3": "audio", ".wav": "audio", ".m4a": "audio",
-    ".flac": "audio", ".ogg": "audio", ".aac": "audio",
-    ".opus": "audio", ".wma": "audio", ".aiff": "audio",
-    ".mp4": "video", ".avi": "video", ".mov": "video",
-    ".mkv": "video", ".webm": "video", ".flv": "video",
-    ".wmv": "video", ".ts": "video",
+_EXT_MODALITY: dict[str, str] = {
+    ".txt": "text",
+    ".md": "text",
+    ".markdown": "text",
+    ".csv": "text",
+    ".json": "text",
+    ".log": "text",
+    ".pdf": "pdf",
+    ".docx": "docx",
+    ".doc": "docx",
+    ".xlsx": "xlsx",
+    ".xls": "xlsx",
+    ".png": "image",
+    ".jpg": "image",
+    ".jpeg": "image",
+    ".bmp": "image",
+    ".webp": "image",
+    ".gif": "image",
+    ".tiff": "image",
+    ".tif": "image",
+    ".heic": "image",
+    ".heif": "image",
+    ".svg": "image",
+    ".cr2": "image",
+    ".nef": "image",
+    ".arw": "image",
+    ".mp3": "audio",
+    ".wav": "audio",
+    ".m4a": "audio",
+    ".flac": "audio",
+    ".ogg": "audio",
+    ".aac": "audio",
+    ".opus": "audio",
+    ".wma": "audio",
+    ".aiff": "audio",
+    ".mp4": "video",
+    ".avi": "video",
+    ".mov": "video",
+    ".mkv": "video",
+    ".webm": "video",
+    ".flv": "video",
+    ".wmv": "video",
+    ".ts": "video",
 }
 
 # MODALITY TO SIZE LIMIT MAP
-_MODALITY_SIZE_LIMITS: Dict[str, int] = {
-    "text":   settings.MAX_FILE_SIZE_TEXT,
-    "pdf":    settings.MAX_FILE_SIZE_PDF,
-    "docx":   settings.MAX_FILE_SIZE_DOCX,
-    "xlsx":   settings.MAX_FILE_SIZE_XLSX,
-    "image":  settings.MAX_FILE_SIZE_IMAGE,
-    "audio":  settings.MAX_FILE_SIZE_AUDIO,
-    "video":  settings.MAX_FILE_SIZE_VIDEO,
+_MODALITY_SIZE_LIMITS: dict[str, int] = {
+    "text": settings.MAX_FILE_SIZE_TEXT,
+    "pdf": settings.MAX_FILE_SIZE_PDF,
+    "docx": settings.MAX_FILE_SIZE_DOCX,
+    "xlsx": settings.MAX_FILE_SIZE_XLSX,
+    "image": settings.MAX_FILE_SIZE_IMAGE,
+    "audio": settings.MAX_FILE_SIZE_AUDIO,
+    "video": settings.MAX_FILE_SIZE_VIDEO,
 }
 
 # LAZY SINGLETONS
@@ -127,7 +190,7 @@ _audit_log_enabled: bool = settings.AUDIT_LOG_ENABLED
 # IN-MEMORY FILE DEDUP — maps SHA-256 hex → doc_id of first successful ingest
 # Bounded LRU so it never grows without limit on long-running servers
 _INGEST_DEDUP_MAX = 10_000
-_INGEST_DEDUP: Dict[str, str] = {}
+_INGEST_DEDUP: dict[str, str] = {}
 
 
 def _dedup_set(file_hash: str, request_id: str) -> None:
@@ -145,6 +208,7 @@ def _get_rag_pipeline():
     global _rag_pipeline
     if _rag_pipeline is None:
         from app.pipeline.rag_pipeline import RAGPipeline
+
         _rag_pipeline = RAGPipeline()
     return _rag_pipeline
 
@@ -153,22 +217,24 @@ def _get_query_pipeline():
     global _query_pipeline_fn
     if _query_pipeline_fn is None:
         from app.pipeline.query_pipeline import query_pipeline
+
         _query_pipeline_fn = query_pipeline
     return _query_pipeline_fn
 
 
 # REQUEST MODELS
 
+
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=8000)
     session_id: str = Field(default="default", max_length=128)
     # Optional: identify which user's knowledge base to query against.
     # Overrides X-User-ID header. Falls back to header → dev default if omitted.
-    user_id: Optional[str] = Field(default=None, max_length=128)
+    user_id: str | None = Field(default=None, max_length=128)
     # Optional: restrict retrieval to chunks whose `source` filename
     # contains any of these substrings. Use this to scope a query to a
     # specific uploaded file when the session has many ingested documents.
-    sources: Optional[List[str]] = Field(default=None, max_length=20)
+    sources: list[str] | None = Field(default=None, max_length=20)
     no_cache: bool = Field(default=False)
     force_web: bool = Field(default=False)
 
@@ -190,7 +256,7 @@ class QueryRequest(BaseModel):
 
     @field_validator("sources")
     @classmethod
-    def validate_sources(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+    def validate_sources(cls, v: list[str] | None) -> list[str] | None:
         if v is None:
             return None
         cleaned = [s.strip()[:256] for s in v if s and s.strip()]
@@ -200,9 +266,9 @@ class QueryRequest(BaseModel):
 class FeedbackRequest(BaseModel):
     session_id: str = Field(..., min_length=1, max_length=128)
     vote: str = Field(..., pattern="^(up|down|none)$")
-    message_id: Optional[str] = Field(default=None, max_length=128)
-    query: Optional[str] = Field(default=None, max_length=500)
-    response_snippet: Optional[str] = Field(default=None, max_length=500)
+    message_id: str | None = Field(default=None, max_length=128)
+    query: str | None = Field(default=None, max_length=500)
+    response_snippet: str | None = Field(default=None, max_length=500)
 
 
 class ClearMemoryRequest(BaseModel):
@@ -214,13 +280,13 @@ class GDPRPurgeRequest(BaseModel):
 
 
 class SessionUpdateRequest(BaseModel):
-    title: Optional[str] = Field(None, max_length=200)
-    pinned: Optional[bool] = None
-    archived: Optional[bool] = None
+    title: str | None = Field(None, max_length=200)
+    pinned: bool | None = None
+    archived: bool | None = None
 
     @field_validator("title")
     @classmethod
-    def _strip_title(cls, v: Optional[str]) -> Optional[str]:
+    def _strip_title(cls, v: str | None) -> str | None:
         if v is None:
             return v
         v = v.strip()
@@ -230,6 +296,7 @@ class SessionUpdateRequest(BaseModel):
 
 
 # HELPERS
+
 
 def _clean(text: str) -> str:
     text = unicodedata.normalize("NFC", str(text or ""))
@@ -251,6 +318,7 @@ from app.utils.net import resolve_client_ip as _client_ip
 def _check_disk_space(path: Path) -> None:
     try:
         import shutil
+
         usage = shutil.disk_usage(path)
         min_bytes = getattr(settings, "MIN_FREE_DISK_MB", 500) * 1024 * 1024
         if usage.free < min_bytes:
@@ -288,11 +356,13 @@ def _rate_limit_check(request: Request) -> None:
 
 # MALWARE SCAN — CLAMAV
 
+
 def _malware_scan(file_path: str) -> bool:
     if not getattr(settings, "MALWARE_SCAN_ENABLED", False):
         return True
     try:
         import clamd
+
         socket_path = getattr(settings, "CLAMAV_SOCKET", "/var/run/clamav/clamd.ctl")
         cd = clamd.ClamdUnixSocket(path=socket_path)
         result = cd.scan(file_path)
@@ -316,21 +386,31 @@ def _malware_scan(file_path: str) -> bool:
 
 # PROMPT INJECTION CHECK — delegates to unified guardrail (Phase 26)
 
+
 def _check_prompt_injection(query: str, correlation_id: str = "", session_id: str = "") -> str:
     from app.guardrails.input_guard import sanitize as _guard_sanitize
-    return _guard_sanitize(query, surface="api", session_id=session_id, correlation_id=correlation_id)
+
+    return _guard_sanitize(
+        query, surface="api", session_id=session_id, correlation_id=correlation_id
+    )
 
 
 # PII SCRUB ON RAW QUERY — strip PII before the query enters the pipeline.
 # Applied on the short query string (better Presidio accuracy than on the full prompt).
 
+
 def _scrub_query_pii(query: str, session_id: str = "") -> str:
     try:
         from app.guardrails.pii import scrub_pii as _sp
+
         cleaned, changed = _sp(query)
         if changed:
-            logger.warning(event="query_pii_scrubbed", session_id=session_id,
-                           original_len=len(query), scrubbed_len=len(cleaned))
+            logger.warning(
+                event="query_pii_scrubbed",
+                session_id=session_id,
+                original_len=len(query),
+                scrubbed_len=len(cleaned),
+            )
         return cleaned
     except Exception as _e:
         logger.warning(event="query_pii_scrub_failed", error=str(_e))
@@ -342,10 +422,12 @@ def _scrub_query_pii(query: str, session_id: str = "") -> str:
 
 _URL_RE = re.compile(r'https?://[^\s\'"<>]+', re.IGNORECASE)
 
+
 def _check_query_ssrf(query: str) -> bool:
     """Return True if the query contains a URL that is an SSRF risk."""
     try:
         from app.guardrails.ssrf import is_ssrf_risk
+
         for url in _URL_RE.findall(query):
             if is_ssrf_risk(url):
                 return True
@@ -356,7 +438,8 @@ def _check_query_ssrf(query: str) -> bool:
 
 # CLEANUP TEMP FILE
 
-def _cleanup_file(file_path: Optional[Path]) -> None:
+
+def _cleanup_file(file_path: Path | None) -> None:
     if file_path and file_path.exists():
         try:
             file_path.unlink()
@@ -370,8 +453,10 @@ def _cleanup_file(file_path: Optional[Path]) -> None:
 
 # SHA-256 FILE HASH FOR DEDUP
 
+
 def _compute_file_hash(file_path: Path) -> str:
     import hashlib
+
     h = hashlib.sha256()
     with open(file_path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
@@ -390,9 +475,14 @@ def _qdrant_has_checksum(user_id: str, file_hash: str) -> bool:
         vs = infra.get_vector_store()
         if vs is None:
             return False
-        return bool(vs.search_by_payload(
-            field="checksum_sha256", value=file_hash, user_id=user_id, limit=1,
-        ))
+        return bool(
+            vs.search_by_payload(
+                field="checksum_sha256",
+                value=file_hash,
+                user_id=user_id,
+                limit=1,
+            )
+        )
     except Exception:
         return False
 
@@ -434,6 +524,7 @@ _INGEST_422_PREFIXES = (
 
 # INGEST
 
+
 @router.post("/ingest")
 async def ingest_document(
     request: Request,
@@ -444,7 +535,7 @@ async def ingest_document(
 ) -> JSONResponse:
     start = time.time()
     request_id = _request_id()
-    file_path: Optional[Path] = None
+    file_path: Path | None = None
     user_id = current_user.user_id
 
     _rate_limit_check(request)
@@ -454,6 +545,7 @@ async def ingest_document(
     # so a fresh guest session from a new tab doesn't reset the effective quota.
     if current_user.role == UserRole.GUEST:
         from app.auth.guest_service import check_and_increment_uploads
+
         allowed = await asyncio.to_thread(check_and_increment_uploads, user_id, _client_ip(request))
         if not allowed:
             raise HTTPException(
@@ -503,8 +595,7 @@ async def ingest_document(
                     raise HTTPException(
                         status_code=413,
                         detail=(
-                            f"File too large for type {ext}: "
-                            f"max {max_size // (1024 * 1024)}MB"
+                            f"File too large for type {ext}: " f"max {max_size // (1024 * 1024)}MB"
                         ),
                     )
                 f.write(chunk)
@@ -512,7 +603,11 @@ async def ingest_document(
         if size == 0:
             return JSONResponse(
                 status_code=422,
-                content={"request_id": request_id, "error_code": "EMPTY_FILE", "detail": "Uploaded file is empty"},
+                content={
+                    "request_id": request_id,
+                    "error_code": "EMPTY_FILE",
+                    "detail": "Uploaded file is empty",
+                },
             )
 
         if not _malware_scan(str(file_path)):
@@ -532,6 +627,7 @@ async def ingest_document(
                 # Copy to kb_dir so the file shows in the sidebar list even though
                 # the vectors are already in Qdrant from a prior upload.
                 import shutil as _shutil
+
                 kb_dir = user_knowledge_base_dir(user_id)
                 kb_path = kb_dir / filename
                 if not kb_path.exists():
@@ -539,15 +635,15 @@ async def ingest_document(
                 return JSONResponse(
                     status_code=200,
                     content={
-                        "request_id":  request_id,
-                        "status":      "duplicate",
-                        "duplicate":   True,
-                        "file_hash":   file_hash,
-                        "filename":    filename,
-                        "ext":         ext,
-                        "modality":    _EXT_MODALITY.get(ext, "unknown"),
-                        "file_size":   size,
-                        "latency":     latency,
+                        "request_id": request_id,
+                        "status": "duplicate",
+                        "duplicate": True,
+                        "file_hash": file_hash,
+                        "filename": filename,
+                        "ext": ext,
+                        "modality": _EXT_MODALITY.get(ext, "unknown"),
+                        "file_size": size,
+                        "latency": latency,
                     },
                 )
             # Stale entry — vectors no longer in Qdrant. Drop it and re-ingest.
@@ -569,7 +665,7 @@ async def ingest_document(
         # kb_path is the intended destination — the pipeline copies here only on success.
         # We never copy before the pipeline finishes so the file never appears in the
         # sidebar before embeddings are in Qdrant.
-        kb_dir  = user_knowledge_base_dir(user_id)
+        kb_dir = user_knowledge_base_dir(user_id)
         kb_path = kb_dir / filename
 
         # REGISTER DEDUP NOW (per-user key) — prevents duplicate submissions
@@ -582,6 +678,7 @@ async def ingest_document(
         # CUDA device first and cause a SIGSEGV when the ingest thread later
         # tries to initialise its own CUBLAS handle.
         from app.core.startup_optimizer import is_ingest_thread_ready, seed_gpu_ingest_thread
+
         if not is_ingest_thread_ready():
             await asyncio.to_thread(seed_gpu_ingest_thread)
 
@@ -589,6 +686,7 @@ async def ingest_document(
         # The background job owns the staging file, copies to kb_path on success,
         # and cleans up staging when done.
         from app.pipeline.ingestion_pipeline import IngestionPipeline
+
         pipeline_instance = IngestionPipeline()
         job_id = await pipeline_instance.process_file_background(
             str(file_path), session_id, user_id, kb_path=str(kb_path)
@@ -624,12 +722,12 @@ async def ingest_document(
             status_code=202,
             content={
                 "request_id": request_id,
-                "status":     "processing",
-                "job_id":     job_id,
-                "filename":   filename,
-                "modality":   modality,
-                "file_size":  size,
-                "ext":        ext,
+                "status": "processing",
+                "job_id": job_id,
+                "filename": filename,
+                "modality": modality,
+                "file_size": size,
+                "ext": ext,
                 "session_id": session_id,
             },
         )
@@ -655,6 +753,7 @@ async def ingest_document(
 # DIRECT LLM GENERATE — eval judge endpoint (no RAG, no guardrails, raw LLM output)
 # Only accessible internally; used by GGUFJudge to score Ragas metrics.
 
+
 class GenerateRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=16000)
     max_tokens: int = Field(default=512, ge=1, le=2048)
@@ -665,10 +764,11 @@ class GenerateRequest(BaseModel):
 async def llm_generate(
     request_body: GenerateRequest,
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Direct LLM generation — bypasses RAG pipeline. Used by eval judge."""
     try:
         from app.core.model_loader import model_loader
+
         llm = model_loader.get_llm()
         if llm is None:
             raise HTTPException(status_code=503, detail="LLM not loaded")
@@ -684,54 +784,65 @@ async def llm_generate(
     except Exception as exc:
         request_id = str(uuid.uuid4())
         logger.error(event="llm_generate_failed", error=str(exc), request_id=request_id)
-        raise HTTPException(status_code=500, detail={"message": "Internal server error", "request_id": request_id})
+        raise HTTPException(
+            status_code=500, detail={"message": "Internal server error", "request_id": request_id}
+        )
 
 
 # HEALTH
 
+
 @router.get("/health")
-def health_check() -> Dict[str, Any]:
+def health_check() -> dict[str, Any]:
     return {
-        "status":    "ok",
-        "service":   settings.APP_NAME,
-        "version":   settings.APP_VERSION,
+        "status": "ok",
+        "service": settings.APP_NAME,
+        "version": settings.APP_VERSION,
         "timestamp": time.time(),
     }
 
 
 # INFRA HEALTH
 
+
 @router.get("/infra/health")
-def infra_health(current_user=Depends(get_current_user)) -> Dict[str, Any]:
+def infra_health(current_user=Depends(get_current_user)) -> dict[str, Any]:
     try:
         return {
             "status": "ok",
-            "infra":  infra.health_check(),
+            "infra": infra.health_check(),
         }
     except Exception as exc:
         request_id = str(uuid.uuid4())
         logger.error(event="infra_health_failed", error=str(exc), request_id=request_id)
-        raise HTTPException(status_code=500, detail={"message": "Internal server error", "request_id": request_id})
+        raise HTTPException(
+            status_code=500, detail={"message": "Internal server error", "request_id": request_id}
+        )
 
 
 # TOOLS LIST
 
+
 @router.get("/tools")
-def list_tools(current_user=Depends(get_current_user)) -> Dict[str, Any]:
+def list_tools(current_user=Depends(get_current_user)) -> dict[str, Any]:
     try:
         from app.agents.tool_registry import ToolRegistry
+
         registry = ToolRegistry()
         return {
             "status": "ok",
-            "tools":  registry.list_tools(),
+            "tools": registry.list_tools(),
         }
     except Exception as exc:
         request_id = str(uuid.uuid4())
         logger.error(event="list_tools_failed", error=str(exc), request_id=request_id)
-        raise HTTPException(status_code=500, detail={"message": "Internal server error", "request_id": request_id})
+        raise HTTPException(
+            status_code=500, detail={"message": "Internal server error", "request_id": request_id}
+        )
 
 
 # QUERY
+
 
 @router.post("/query")
 async def query_rag(
@@ -739,7 +850,7 @@ async def query_rag(
     request: Request,
     background_tasks: BackgroundTasks,
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     start = time.time()
     request_id = _request_id()
     session_id = request_body.session_id
@@ -757,9 +868,13 @@ async def query_rag(
         if _is_gibberish(query):
             logger.info(event="query_gibberish_rejected", session_id=session_id)
             return {
-                "request_id": request_id, "answer": _gibberish_msg(query),
-                "confidence": 0.0, "sources": [], "cache_hit": False,
-                "decision": "gibberish_rejected", "latency": round(time.time() - start, 3),
+                "request_id": request_id,
+                "answer": _gibberish_msg(query),
+                "confidence": 0.0,
+                "sources": [],
+                "cache_hit": False,
+                "decision": "gibberish_rejected",
+                "latency": round(time.time() - start, 3),
             }
 
         # PROMPT INJECTION CHECK
@@ -772,17 +887,18 @@ async def query_rag(
                 "It matched a restricted pattern (prompt injection or policy violation). "
                 "Please rephrase your query."
             )
-            logger.warning(event="query_blocked_by_guardrail",
-                           request_id=request_id, session_id=session_id)
+            logger.warning(
+                event="query_blocked_by_guardrail", request_id=request_id, session_id=session_id
+            )
             return {
                 "request_id": request_id,
-                "answer":     _blocked_msg,
+                "answer": _blocked_msg,
                 "confidence": 0.0,
-                "sources":    [],
-                "cache_hit":  False,
-                "decision":   "blocked",
-                "source":     "input_guard",
-                "latency":    round(time.time() - start, 3),
+                "sources": [],
+                "cache_hit": False,
+                "decision": "blocked",
+                "source": "input_guard",
+                "latency": round(time.time() - start, 3),
             }
 
         if _check_query_ssrf(query):
@@ -791,23 +907,22 @@ async def query_rag(
                 "It contains a URL pointing to a private or restricted network address. "
                 "Please remove the URL and try again."
             )
-            logger.warning(event="query_blocked_ssrf",
-                           request_id=request_id, session_id=session_id)
+            logger.warning(event="query_blocked_ssrf", request_id=request_id, session_id=session_id)
             return {
                 "request_id": request_id,
-                "answer":     _ssrf_msg,
+                "answer": _ssrf_msg,
                 "confidence": 0.0,
-                "sources":    [],
-                "cache_hit":  False,
-                "decision":   "blocked",
-                "source":     "ssrf_guard",
-                "latency":    round(time.time() - start, 3),
+                "sources": [],
+                "cache_hit": False,
+                "decision": "blocked",
+                "source": "ssrf_guard",
+                "latency": round(time.time() - start, 3),
             }
 
         # PII SCRUB — strip PII from the raw query before it enters the pipeline
         query = _scrub_query_pii(query, session_id=session_id)
 
-        query = query[:settings.MAX_PROMPT_CHARS]
+        query = query[: settings.MAX_PROMPT_CHARS]
 
         _audit_log(
             "query_received",
@@ -829,20 +944,29 @@ async def query_rag(
         _stream_joined = False
         try:
             from app.pipeline.query_pipeline import _cache_key as _qck
+
             _join_ev = _INFLIGHT_STREAMS.get(_qck(session_id, query))
             if _join_ev is not None:
                 await asyncio.wait_for(_join_ev.wait(), timeout=120.0)
                 _stream_joined = True
-                logger.info(event="meta_joined_inflight_stream",
-                            request_id=request_id, session_id=session_id)
+                logger.info(
+                    event="meta_joined_inflight_stream",
+                    request_id=request_id,
+                    session_id=session_id,
+                )
         except asyncio.TimeoutError:
-            logger.warning(event="meta_inflight_stream_timeout",
-                           request_id=request_id, session_id=session_id)
+            logger.warning(
+                event="meta_inflight_stream_timeout", request_id=request_id, session_id=session_id
+            )
         except Exception:
             pass
 
         result = await asyncio.to_thread(
-            pipeline_fn, query, session_id, request_body.sources, user_id,
+            pipeline_fn,
+            query,
+            session_id,
+            request_body.sources,
+            user_id,
             # A just-joined stream result IS the fresh regeneration the user
             # asked for — read it from cache even when no_cache was requested.
             request_body.no_cache and not _stream_joined,
@@ -887,18 +1011,18 @@ async def query_rag(
         )
 
         flat_response = {
-            "answer":               validated.response,
-            "confidence":           validated.confidence,
-            "decision":             validated.decision,
-            "source":               validated.source,
-            "session_id":           session_id,
-            "request_id":           request_id,
-            "latency":              latency,
-            "sources":              sources,
-            "is_fallback":          validated.is_fallback,
+            "answer": validated.response,
+            "confidence": validated.confidence,
+            "decision": validated.decision,
+            "source": validated.source,
+            "session_id": session_id,
+            "request_id": request_id,
+            "latency": latency,
+            "sources": sources,
+            "is_fallback": validated.is_fallback,
             "hallucination_warning": validated.hallucination_warning,
-            "memory_injected":      bool(result.get("memory_injected", False)),
-            "cache_hit":            bool(result.get("cache_hit", False)),
+            "memory_injected": bool(result.get("memory_injected", False)),
+            "cache_hit": bool(result.get("cache_hit", False)),
         }
 
         _audit_log(
@@ -945,13 +1069,13 @@ async def query_rag(
 # yields the complete answer as one token). Short answers keep the smooth
 # 1-char feel; long ones grow the chunk instead of the wait.
 _STREAM_CHUNK_DELAY_SEC = 0.008
-_STREAM_MAX_TICKS = 160          # worst-case replay ≈ 160 × 8ms ≈ 1.3s
+_STREAM_MAX_TICKS = 160  # worst-case replay ≈ 160 × 8ms ≈ 1.3s
 
 
 def _stream_chunks(text: str):
     chunk = max(1, len(text) // _STREAM_MAX_TICKS)
     for i in range(0, len(text), chunk):
-        yield text[i:i + chunk]
+        yield text[i : i + chunk]
 
 
 # IN-FLIGHT STREAM REGISTRY — the frontend fires /rag/query/stream and
@@ -961,20 +1085,25 @@ def _stream_chunks(text: str):
 # and then serves the stream's cache-written answer (identical text, ~15ms)
 # instead of generating a duplicate. Single-worker uvicorn ⇒ in-process dict
 # is sufficient.
-_INFLIGHT_STREAMS: Dict[str, asyncio.Event] = {}
+_INFLIGHT_STREAMS: dict[str, asyncio.Event] = {}
 
 
 _VOWELS = frozenset('aeiou')
+
+
 def _gibberish_msg(query: str) -> str:
     return (
         f'It looks like you typed “{query}”, which doesn’t appear to be '
         "a complete question or message. "
         "Could you please clarify what you need help with?"
     )
+
+
 # Stale fallback messages produced by old code versions — treat as cache misses
 _STALE_CACHE_PHRASES = [
     "The provided documents do not contain the information needed to answer this question.",
 ]
+
 
 def _is_gibberish(query: str) -> bool:
     """Return True for random-character or number-jumble inputs that can't be answered."""
@@ -1029,13 +1158,19 @@ async def stream_query(
     # guest session from a new tab doesn't reset the effective quota.
     if current_user.role == UserRole.GUEST:
         from app.auth.guest_service import check_and_increment_queries
-        allowed = await asyncio.to_thread(check_and_increment_queries, current_user.user_id, _client_ip(request))
+
+        allowed = await asyncio.to_thread(
+            check_and_increment_queries, current_user.user_id, _client_ip(request)
+        )
         if not allowed:
+
             async def _guest_limit_stream():
                 import json as _json
+
                 payload = _json.dumps({"__type__": "guest_limit", "limit_type": "queries"})
                 yield f"data: {payload}\n\n"
                 yield "data: [DONE]\n\n"
+
             return StreamingResponse(
                 _guest_limit_stream(),
                 media_type="text/event-stream",
@@ -1098,7 +1233,7 @@ async def stream_query(
         # PII SCRUB — strip PII from the raw query before it enters the pipeline
         query = _scrub_query_pii(query, session_id=session_id)
 
-        query = query[:settings.MAX_PROMPT_CHARS]
+        query = query[: settings.MAX_PROMPT_CHARS]
 
         # GIBBERISH GUARD — reject random-character inputs before any pipeline work
         if _is_gibberish(query):
@@ -1115,8 +1250,11 @@ async def stream_query(
             return StreamingResponse(
                 gibberish_stream(),
                 media_type="text/event-stream",
-                headers={"X-Request-ID": request_id, "Cache-Control": "no-cache",
-                         "X-Accel-Buffering": "no"},
+                headers={
+                    "X-Request-ID": request_id,
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
             )
 
         # WEB SEARCH DETECTION — must run BEFORE the cache check so stale
@@ -1125,12 +1263,24 @@ async def stream_query(
         #   • real-time signals ("today", "stock price", "latest", etc.)
         # When triggered the web tool is called directly and ONLY web source
         # chips are emitted — no KB file sources are shown at all.
-        _EXPLICIT_WEB_PHRASES = frozenset({
-            "from web", "from the web", "search web", "search the web",
-            "get from web", "get it from web", "web search", "find online",
-            "search online", "look online", "from internet", "from the internet",
-            "find on the internet", "look it up",
-        })
+        _EXPLICIT_WEB_PHRASES = frozenset(
+            {
+                "from web",
+                "from the web",
+                "search web",
+                "search the web",
+                "get from web",
+                "get it from web",
+                "web search",
+                "find online",
+                "search online",
+                "look online",
+                "from internet",
+                "from the internet",
+                "find on the internet",
+                "look it up",
+            }
+        )
         # NOTE: bare "current" and "share price" were removed — both are
         # ordinary terms inside static finance documents ("current rating",
         # "current price target", "12-month price target ... share price of
@@ -1140,9 +1290,17 @@ async def stream_query(
         # DOCX/PDF context for common document questions. The remaining
         # signals are specific enough to real-time intent to keep.
         _REALTIME_SIGNALS = {
-            "today", "now", "latest", "live", "right now",
-            "stock price", "price today", "news today",
-            "this week", "this month", "currently trading",
+            "today",
+            "now",
+            "latest",
+            "live",
+            "right now",
+            "stock price",
+            "price today",
+            "news today",
+            "this week",
+            "this month",
+            "currently trading",
         }
         _q_lower = query.lower()
         _is_web_request = (
@@ -1154,18 +1312,19 @@ async def stream_query(
         if _is_web_request:
             try:
                 from app.pipeline.query_pipeline import _get_tool_registry
+
                 _reg = _get_tool_registry()
                 _search_tool = _reg.get_optional("search")
                 if _search_tool is not None:
-                    _tool_out = await asyncio.to_thread(
-                        _search_tool.handler, query, {}, session_id
-                    ) or {}
+                    _tool_out = (
+                        await asyncio.to_thread(_search_tool.handler, query, {}, session_id) or {}
+                    )
                     _web_answer = (_tool_out.get("answer") or "").strip()
                     if _web_answer:
                         logger.info(event="stream_web_search", session_id=session_id)
 
                         _web_sources = _tool_out.get("sources") or []
-                        _web_titles  = _tool_out.get("titles") or []
+                        _web_titles = _tool_out.get("titles") or []
 
                         async def web_event_stream():
                             for piece in _stream_chunks(_web_answer):
@@ -1176,10 +1335,15 @@ async def stream_query(
                             # cards below the answer (same contract as the KB path).
                             if _web_sources:
                                 _payload = [
-                                    {"source": u, "modality": "web",
-                                     "title": (_web_titles[_i] if _i < len(_web_titles) else ""),
-                                     "page_number": None, "start_time": None}
-                                    for _i, u in enumerate(_web_sources) if u
+                                    {
+                                        "source": u,
+                                        "modality": "web",
+                                        "title": (_web_titles[_i] if _i < len(_web_titles) else ""),
+                                        "page_number": None,
+                                        "start_time": None,
+                                    }
+                                    for _i, u in enumerate(_web_sources)
+                                    if u
                                 ]
                                 yield f'data: {{"__type__":"sources","data":{json.dumps(_payload)}}}\n\n'
                             yield "data: [DONE]\n\n"
@@ -1188,8 +1352,8 @@ async def stream_query(
                             web_event_stream(),
                             media_type="text/event-stream",
                             headers={
-                                "X-Request-ID":      request_id,
-                                "Cache-Control":     "no-cache",
+                                "X-Request-ID": request_id,
+                                "Cache-Control": "no-cache",
                                 "X-Accel-Buffering": "no",
                             },
                         )
@@ -1205,6 +1369,7 @@ async def stream_query(
         # On a cache hit we stream the cached answer immediately.
         try:
             from app.pipeline.query_pipeline import _cache_get
+
             cached = None if request_body.no_cache else _cache_get(session_id, query)
         except Exception:
             cached = None
@@ -1225,6 +1390,7 @@ async def stream_query(
                     await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
                 if cached_sources:
                     import json as _json
+
                     yield f'data: {{"__type__":"sources","data":{_json.dumps(cached_sources)}}}\n\n'
                 yield "data: [DONE]\n\n"
 
@@ -1232,9 +1398,9 @@ async def stream_query(
                 cached_event_stream(),
                 media_type="text/event-stream",
                 headers={
-                    "X-Request-ID":      request_id,
-                    "X-Cache":           "HIT",
-                    "Cache-Control":     "no-cache",
+                    "X-Request-ID": request_id,
+                    "X-Cache": "HIT",
+                    "Cache-Control": "no-cache",
                     "X-Accel-Buffering": "no",
                 },
             )
@@ -1246,6 +1412,7 @@ async def stream_query(
         # Register as the in-flight generation for this (session, query) so the
         # parallel /rag/query call joins this result instead of duplicating it.
         from app.pipeline.query_pipeline import _cache_key as _qck
+
         _inflight_key = _qck(session_id, query)
         _inflight_ev = asyncio.Event()
         _INFLIGHT_STREAMS[_inflight_key] = _inflight_ev
@@ -1260,8 +1427,8 @@ async def stream_query(
 
         async def event_stream():
             _answer_parts: list = []
-            _final_answer: Optional[str] = None
-            _sources_payload: Optional[str] = None
+            _final_answer: str | None = None
+            _sources_payload: str | None = None
             _refused = False
             _loop = asyncio.get_running_loop()
             _STOP = object()
@@ -1290,6 +1457,7 @@ async def stream_query(
                         # for both the client bubble and persistence below.
                         _final_answer = token[9:]
                         import json as _json
+
                         yield f'data: {{"__type__":"replace","data":{_json.dumps(_final_answer)}}}\n\n'
                         continue
                     if token.startswith("\x00SOURCES\x00"):
@@ -1305,6 +1473,7 @@ async def stream_query(
                 _src: list = []
                 if _sources_payload:
                     import json as _json
+
                     try:
                         _src = _json.loads(_sources_payload)
                     except Exception:
@@ -1316,6 +1485,7 @@ async def stream_query(
                     # call is now only made by the client on refusal fallback.
                     try:
                         from app.pipeline.query_pipeline import _store_interaction
+
                         await asyncio.to_thread(
                             _store_interaction,
                             session_id,
@@ -1326,8 +1496,9 @@ async def stream_query(
                             sources=_src,
                         )
                     except Exception as _se:
-                        logger.warning(event="stream_save_turn_failed",
-                                       session_id=session_id, error=str(_se))
+                        logger.warning(
+                            event="stream_save_turn_failed", session_id=session_id, error=str(_se)
+                        )
                     try:
                         # ALWAYS write the fresh result — including no_cache
                         # (regenerate): no_cache means "don't READ stale", not
@@ -1335,23 +1506,32 @@ async def stream_query(
                         # the next page-reload both need this entry; on
                         # regenerate we intentionally OVERWRITE the old answer.
                         from app.pipeline.query_pipeline import _cache_get, _cache_set
-                        if request_body.no_cache or not await asyncio.to_thread(_cache_get, session_id, query):
-                            await asyncio.to_thread(_cache_set, session_id, query, {
-                                    "answer":                _full_answer,
-                                    "sources":               _src,
-                                    "sources_used":          len(_src),
-                                    "confidence":            0.9,
-                                    "decision":              "rag",
-                                    "source":                "stream",
-                                    "session_id":            session_id,
-                                    "request_id":            request_id,
-                                    "is_fallback":           False,
+
+                        if request_body.no_cache or not await asyncio.to_thread(
+                            _cache_get, session_id, query
+                        ):
+                            await asyncio.to_thread(
+                                _cache_set,
+                                session_id,
+                                query,
+                                {
+                                    "answer": _full_answer,
+                                    "sources": _src,
+                                    "sources_used": len(_src),
+                                    "confidence": 0.9,
+                                    "decision": "rag",
+                                    "source": "stream",
+                                    "session_id": session_id,
+                                    "request_id": request_id,
+                                    "is_fallback": False,
                                     "hallucination_warning": False,
-                                    "metadata":              {"from_stream": True},
-                                })
+                                    "metadata": {"from_stream": True},
+                                },
+                            )
                     except Exception as _ce:
-                        logger.debug(event="stream_cache_write_failed",
-                                     session_id=session_id, error=str(_ce))
+                        logger.debug(
+                            event="stream_cache_write_failed", session_id=session_id, error=str(_ce)
+                        )
 
                 yield "data: [DONE]\n\n"
             except Exception as exc:
@@ -1374,8 +1554,8 @@ async def stream_query(
             event_stream(),
             media_type="text/event-stream",
             headers={
-                "X-Request-ID":      request_id,
-                "Cache-Control":     "no-cache",
+                "X-Request-ID": request_id,
+                "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
             },
         )
@@ -1388,7 +1568,7 @@ async def stream_query(
         # release any parallel /rag/query waiter immediately.
         try:
             _INFLIGHT_STREAMS.pop(_inflight_key, None)  # type: ignore[has-type]
-            _inflight_ev.set()                           # type: ignore[has-type]
+            _inflight_ev.set()  # type: ignore[has-type]
         except NameError:
             pass
         logger.error(
@@ -1401,6 +1581,7 @@ async def stream_query(
 
 # UPLOAD
 
+
 @router.post("/upload")
 async def upload_file(
     request: Request,
@@ -1408,10 +1589,10 @@ async def upload_file(
     file: UploadFile = File(...),
     session_id: str = Form("default"),
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     start = time.time()
     request_id = _request_id()
-    file_path: Optional[Path] = None
+    file_path: Path | None = None
     user_id = current_user.user_id
 
     _rate_limit_check(request)
@@ -1420,6 +1601,7 @@ async def upload_file(
     # client IP too (see check_and_increment_uploads docstring).
     if current_user.role == UserRole.GUEST:
         from app.auth.guest_service import check_and_increment_uploads
+
         allowed = await asyncio.to_thread(check_and_increment_uploads, user_id, _client_ip(request))
         if not allowed:
             raise HTTPException(
@@ -1469,8 +1651,7 @@ async def upload_file(
                     raise HTTPException(
                         status_code=413,
                         detail=(
-                            f"File too large for type {ext}: "
-                            f"max {max_size // (1024 * 1024)}MB"
+                            f"File too large for type {ext}: " f"max {max_size // (1024 * 1024)}MB"
                         ),
                     )
                 f.write(chunk)
@@ -1487,6 +1668,7 @@ async def upload_file(
 
         # PERSIST TO KNOWLEDGE BASE — copy original file before pipeline may clean staging
         import shutil as _shutil
+
         kb_dir = user_knowledge_base_dir(user_id)
         kb_path = kb_dir / filename
         _shutil.copy2(str(file_path), str(kb_path))
@@ -1503,6 +1685,7 @@ async def upload_file(
 
         # INGEST THREAD READINESS GATE — mirrors the gate in /ingest.
         from app.core.startup_optimizer import is_ingest_thread_ready, seed_gpu_ingest_thread
+
         if not is_ingest_thread_ready():
             await asyncio.to_thread(seed_gpu_ingest_thread)
 
@@ -1511,14 +1694,18 @@ async def upload_file(
         # (or by seed_gpu_ingest_thread() above).  Using asyncio.to_thread()
         # here dispatches to a random OS thread that has no CUDA context; after
         # llama.cpp initialises its CUBLAS handle that causes a SIGSEGV.
-        from app.pipeline.ingestion_pipeline import process_file
         from app.core.startup_optimizer import get_gpu_ingest_executor
+        from app.pipeline.ingestion_pipeline import process_file
+
         _ingest_loop = asyncio.get_running_loop()
         try:
             result = await asyncio.wait_for(
                 _ingest_loop.run_in_executor(
                     get_gpu_ingest_executor(),
-                    process_file, str(file_path), session_id, user_id,
+                    process_file,
+                    str(file_path),
+                    session_id,
+                    user_id,
                 ),
                 timeout=settings.FILE_PROCESSING_TIMEOUT_SEC,
             )
@@ -1571,16 +1758,16 @@ async def upload_file(
         )
 
         return {
-            "request_id":     request_id,
-            "status":         result.get("status", "success"),
-            "filename":       filename,
-            "file_size":      size,
-            "file_size_mb":   round(size / (1024 * 1024), 2),
-            "ext":            ext,
-            "modality":       _EXT_MODALITY.get(ext, "unknown"),
-            "chunks":         chunks,
-            "stored":         stored,
-            "latency":        latency,
+            "request_id": request_id,
+            "status": result.get("status", "success"),
+            "filename": filename,
+            "file_size": size,
+            "file_size_mb": round(size / (1024 * 1024), 2),
+            "ext": ext,
+            "modality": _EXT_MODALITY.get(ext, "unknown"),
+            "chunks": chunks,
+            "stored": stored,
+            "latency": latency,
             "pipeline_events": result.get("events", []),
         }
 
@@ -1602,18 +1789,20 @@ async def upload_file(
 
 # CLEAR MEMORY
 
+
 @router.post("/memory/clear")
 async def clear_memory(
     request_body: ClearMemoryRequest,
     request: Request,
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     request_id = _request_id()
     session_id = request_body.session_id
     user_id = current_user.user_id
 
     try:
         from app.memory.memory_manager import MemoryManager
+
         manager = MemoryManager()
         await asyncio.to_thread(manager.clear, session_id)
 
@@ -1632,9 +1821,9 @@ async def clear_memory(
 
         return {
             "request_id": request_id,
-            "status":     "ok",
+            "status": "ok",
             "session_id": session_id,
-            "message":    "Session memory cleared",
+            "message": "Session memory cleared",
         }
 
     except Exception as exc:
@@ -1649,16 +1838,18 @@ async def clear_memory(
 
 # CLEAR QUERY RESPONSE CACHE
 
+
 @router.post("/cache/clear")
 async def clear_query_cache(
     request: Request,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Flush all query-response cache entries (qresp:* keys in Redis).
     Use this when cached answers are stale or were generated by MockLLM."""
     request_id = _request_id()
 
     try:
         from app.core.infra_registry import infra
+
         memory = infra.get_memory()
         deleted = 0
         if memory and hasattr(memory, "cache_flush_query_cache"):
@@ -1673,9 +1864,9 @@ async def clear_query_cache(
 
         return {
             "request_id": request_id,
-            "status":     "ok",
-            "deleted":    deleted,
-            "message":    f"Query response cache cleared ({deleted} entries removed)",
+            "status": "ok",
+            "deleted": deleted,
+            "message": f"Query response cache cleared ({deleted} entries removed)",
         }
 
     except Exception as exc:
@@ -1689,12 +1880,13 @@ async def clear_query_cache(
 
 # GDPR PURGE
 
+
 @router.post("/memory/purge")
 async def gdpr_purge(
     request_body: GDPRPurgeRequest,
     request: Request,
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     request_id = _request_id()
     # Admins may purge any user_id; regular users may only purge their own data
     if current_user.role.value == "admin":
@@ -1707,6 +1899,7 @@ async def gdpr_purge(
 
     try:
         from app.memory.memory_manager import MemoryManager
+
         manager = MemoryManager()
         await asyncio.to_thread(manager.gdpr_purge, user_id)
 
@@ -1732,9 +1925,9 @@ async def gdpr_purge(
 
         return {
             "request_id": request_id,
-            "status":     "ok",
-            "user_id":    user_id,
-            "message":    "All user data purged",
+            "status": "ok",
+            "user_id": user_id,
+            "message": "All user data purged",
         }
 
     except HTTPException:
@@ -1752,28 +1945,30 @@ async def gdpr_purge(
 
 # SESSION HISTORY
 
+
 @router.get("/memory/history/{session_id}")
 async def get_history(
     session_id: str,
     limit: int = 20,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     request_id = _request_id()
 
     try:
         from app.memory.memory_manager import MemoryManager
+
         manager = MemoryManager()
         history = await asyncio.to_thread(manager.get_history, session_id, limit)
 
         return {
             "request_id": request_id,
-            "status":     "ok",
+            "status": "ok",
             "session_id": session_id,
-            "count":      len(history),
-            "history":    [
+            "count": len(history),
+            "history": [
                 {
-                    "role":      msg.get("role"),
-                    "content":   msg.get("content", "")[:500],
-                    "modality":  msg.get("modality", "text"),
+                    "role": msg.get("role"),
+                    "content": msg.get("content", "")[:500],
+                    "modality": msg.get("modality", "text"),
                     "timestamp": msg.get("timestamp"),
                 }
                 for msg in history
@@ -1792,20 +1987,22 @@ async def get_history(
 
 # METRICS
 
+
 @router.get("/metrics")
-def metrics() -> Dict[str, Any]:
+def metrics() -> dict[str, Any]:
     if not getattr(settings, "PROMETHEUS_ENABLED", False):
         return {
-            "status":  "disabled",
+            "status": "disabled",
             "message": "Set PROMETHEUS_ENABLED=true to enable metrics",
         }
 
     try:
         from app.core.model_loader import model_loader
+
         return {
             "status": "ok",
             "models": model_loader.health_check(),
-            "infra":  infra.health_check(),
+            "infra": infra.health_check(),
         }
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
@@ -1813,10 +2010,12 @@ def metrics() -> Dict[str, Any]:
 
 # MODEL HEALTH
 
+
 @router.get("/models/health")
-def model_health(current_user=Depends(get_current_user)) -> Dict[str, Any]:
+def model_health(current_user=Depends(get_current_user)) -> dict[str, Any]:
     try:
         from app.core.model_loader import model_loader
+
         return {
             "status": "ok",
             "models": model_loader.health_check(),
@@ -1824,12 +2023,13 @@ def model_health(current_user=Depends(get_current_user)) -> Dict[str, Any]:
     except Exception as exc:
         request_id = str(uuid.uuid4())
         logger.error(event="model_health_failed", error=str(exc), request_id=request_id)
-        raise HTTPException(status_code=500, detail={"message": "Internal server error", "request_id": request_id})
-
-
+        raise HTTPException(
+            status_code=500, detail={"message": "Internal server error", "request_id": request_id}
+        )
 
 
 # ─── KNOWLEDGE BASE ───────────────────────────────────────────────────────────
+
 
 def _qdrant_embedded_sources(user_id: str) -> set:
     """Return the set of source filenames that have at least one point in Qdrant for this user.
@@ -1841,7 +2041,8 @@ def _qdrant_embedded_sources(user_id: str) -> set:
         vs = infra.get_vector_store()
         if vs is None or not hasattr(vs, "client"):
             return set()
-        from qdrant_client.http.models import Filter, FieldCondition, MatchValue
+        from qdrant_client.http.models import FieldCondition, Filter, MatchValue
+
         sources: set = set()
         for collection in (vs.text_collection, vs.vision_collection):
             if collection not in getattr(vs, "_collection_cache", {}):
@@ -1850,9 +2051,9 @@ def _qdrant_embedded_sources(user_id: str) -> set:
             while True:
                 points, next_offset = vs.client.scroll(
                     collection_name=collection,
-                    scroll_filter=Filter(must=[
-                        FieldCondition(key="user_id", match=MatchValue(value=user_id))
-                    ]),
+                    scroll_filter=Filter(
+                        must=[FieldCondition(key="user_id", match=MatchValue(value=user_id))]
+                    ),
                     with_payload=True,
                     with_vectors=False,
                     limit=500,
@@ -1874,10 +2075,11 @@ def _qdrant_embedded_sources(user_id: str) -> set:
 async def list_knowledge_base(
     request: Request,
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """List all files in the authenticated user's knowledge base."""
     user_id = current_user.user_id
     from app.utils.paths import user_knowledge_base_dir
+
     kb_dir = user_knowledge_base_dir(user_id)
 
     # Get the set of filenames that actually have embeddings in Qdrant.
@@ -1898,17 +2100,19 @@ async def list_knowledge_base(
                 pass
             continue
         stat = f.stat()
-        files.append({
-            "filename":      f.name,
-            "size_bytes":    stat.st_size,
-            "size_mb":       round(stat.st_size / (1024 * 1024), 3),
-            "uploaded_at":   stat.st_mtime,
-            "modality":      _EXT_MODALITY.get(f.suffix.lower(), "unknown"),
-        })
+        files.append(
+            {
+                "filename": f.name,
+                "size_bytes": stat.st_size,
+                "size_mb": round(stat.st_size / (1024 * 1024), 3),
+                "uploaded_at": stat.st_mtime,
+                "modality": _EXT_MODALITY.get(f.suffix.lower(), "unknown"),
+            }
+        )
     return {
-        "user_id":    user_id,
+        "user_id": user_id,
         "file_count": len(files),
-        "files":      files,
+        "files": files,
     }
 
 
@@ -1917,7 +2121,7 @@ async def delete_knowledge_base_file(
     filename: str,
     request: Request,
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Permanently delete a file from the authenticated user's knowledge base AND
     purge its vectors from Qdrant and BM25 so it no longer appears in query results.
@@ -1931,6 +2135,7 @@ async def delete_knowledge_base_file(
         raise HTTPException(status_code=400, detail="Invalid filename")
 
     from app.utils.paths import user_knowledge_base_dir
+
     kb_dir = user_knowledge_base_dir(user_id)
     file_path = kb_dir / safe_name
 
@@ -1944,11 +2149,12 @@ async def delete_knowledge_base_file(
     try:
         vs = infra.get_vector_store()
         if vs:
-            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            from qdrant_client.models import FieldCondition, Filter, MatchValue
+
             # Include user_id so one user's delete never touches another user's vectors.
             _filter = Filter(
                 must=[
-                    FieldCondition(key="source",  match=MatchValue(value=safe_name)),
+                    FieldCondition(key="source", match=MatchValue(value=safe_name)),
                     FieldCondition(key="user_id", match=MatchValue(value=user_id)),
                 ]
             )
@@ -2012,27 +2218,33 @@ async def delete_knowledge_base_file(
         ip=_client_ip(request),
     )
 
-    logger.info(event="knowledge_base_file_deleted", user_id=user_id, file=safe_name,
-                qdrant_purged=qdrant_purged, bm25_purged=bm25_purged,
-                cache_flushed=cache_flushed)
+    logger.info(
+        event="knowledge_base_file_deleted",
+        user_id=user_id,
+        file=safe_name,
+        qdrant_purged=qdrant_purged,
+        bm25_purged=bm25_purged,
+        cache_flushed=cache_flushed,
+    )
 
     return {
-        "request_id":    request_id,
-        "status":        "deleted",
-        "filename":      safe_name,
-        "user_id":       user_id,
+        "request_id": request_id,
+        "status": "deleted",
+        "filename": safe_name,
+        "user_id": user_id,
         "qdrant_purged": qdrant_purged,
-        "bm25_purged":   bm25_purged,
+        "bm25_purged": bm25_purged,
         "cache_flushed": cache_flushed,
     }
 
 
 # ─── CHAT SESSIONS (RECENTS) ──────────────────────────────────────────────────
 
+
 @router.get("/sessions")
 async def list_chat_sessions(
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """List the authenticated user's saved chats for the Recents sidebar."""
     user_id = current_user.user_id
     request_id = _request_id()
@@ -2042,9 +2254,9 @@ async def list_chat_sessions(
         sessions = await asyncio.to_thread(mongo.list_chat_sessions, user_id) if mongo else []
         return {
             "request_id": request_id,
-            "status":     "ok",
-            "count":      len(sessions),
-            "sessions":   sessions,
+            "status": "ok",
+            "count": len(sessions),
+            "sessions": sessions,
         }
     except Exception as exc:
         logger.error(event="api_sessions_list_failed", request_id=request_id, error=str(exc))
@@ -2055,21 +2267,28 @@ async def list_chat_sessions(
 async def get_chat_session(
     session_id: str,
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Fetch one chat's full transcript — used when a Recents entry is opened."""
     user_id = current_user.user_id
     request_id = _request_id()
 
     try:
         mongo = infra.get_mongo()
-        session = await asyncio.to_thread(mongo.get_chat_session, user_id, session_id) if mongo else None
+        session = (
+            await asyncio.to_thread(mongo.get_chat_session, user_id, session_id) if mongo else None
+        )
         if not session:
             raise HTTPException(status_code=404, detail="Chat not found")
         return {"request_id": request_id, "status": "ok", **session}
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error(event="api_session_fetch_failed", request_id=request_id, session_id=session_id, error=str(exc))
+        logger.error(
+            event="api_session_fetch_failed",
+            request_id=request_id,
+            session_id=session_id,
+            error=str(exc),
+        )
         raise HTTPException(status_code=500, detail="Failed to load chat")
 
 
@@ -2078,7 +2297,7 @@ async def delete_chat_session(
     session_id: str,
     request: Request,
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Permanently delete a chat session — removes the session record, all
     messages, all summaries from MongoDB, and the live Redis context."""
     user_id = current_user.user_id
@@ -2098,7 +2317,9 @@ async def delete_chat_session(
             if redis_mem is not None:
                 await asyncio.to_thread(redis_mem.delete, session_id)
         except Exception as exc:
-            logger.warning(event="session_delete_redis_failed", session_id=session_id, error=str(exc))
+            logger.warning(
+                event="session_delete_redis_failed", session_id=session_id, error=str(exc)
+            )
 
         _audit_log(
             "chat_session_delete",
@@ -2112,7 +2333,12 @@ async def delete_chat_session(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error(event="api_session_delete_failed", request_id=request_id, session_id=session_id, error=str(exc))
+        logger.error(
+            event="api_session_delete_failed",
+            request_id=request_id,
+            session_id=session_id,
+            error=str(exc),
+        )
         raise HTTPException(status_code=500, detail="Failed to delete chat")
 
 
@@ -2120,7 +2346,7 @@ async def delete_chat_session(
 async def delete_all_chat_sessions(
     request: Request,
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Permanently delete ALL chat sessions for the current user."""
     user_id = current_user.user_id
     request_id = _request_id()
@@ -2136,8 +2362,13 @@ async def delete_all_chat_sessions(
         except Exception:
             pass
 
-        _audit_log("all_sessions_deleted", request_id=request_id,
-                   session_id=user_id, count=count, ip=_client_ip(request))
+        _audit_log(
+            "all_sessions_deleted",
+            request_id=request_id,
+            session_id=user_id,
+            count=count,
+            ip=_client_ip(request),
+        )
         return {"request_id": request_id, "status": "ok", "deleted": count}
     except Exception as exc:
         logger.error(event="api_delete_all_sessions_failed", request_id=request_id, error=str(exc))
@@ -2146,8 +2377,8 @@ async def delete_all_chat_sessions(
 
 class LastMessagePatchRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=50000)
-    sources: Optional[List[Dict[str, Any]]] = Field(default=None)
-    msg_id: Optional[str] = Field(default=None, max_length=128)
+    sources: list[dict[str, Any]] | None = Field(default=None)
+    msg_id: str | None = Field(default=None, max_length=128)
 
 
 @router.patch("/sessions/{session_id}/last-message")
@@ -2155,7 +2386,7 @@ async def patch_last_message(
     session_id: str,
     body: LastMessagePatchRequest,
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Overwrite the last assistant message content + sources so reload shows
     exactly what the user saw during streaming."""
     user_id = current_user.user_id
@@ -2182,7 +2413,7 @@ async def update_chat_session(
     body: SessionUpdateRequest,
     request: Request,
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Rename, pin/unpin, or archive/unarchive a chat in Recents."""
     user_id = current_user.user_id
     request_id = _request_id()
@@ -2193,7 +2424,11 @@ async def update_chat_session(
 
     try:
         mongo = infra.get_mongo()
-        updated = await asyncio.to_thread(mongo.update_chat_session, user_id, session_id, fields) if mongo else False
+        updated = (
+            await asyncio.to_thread(mongo.update_chat_session, user_id, session_id, fields)
+            if mongo
+            else False
+        )
         if not updated:
             raise HTTPException(status_code=404, detail="Chat not found")
 
@@ -2210,7 +2445,12 @@ async def update_chat_session(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error(event="api_session_update_failed", request_id=request_id, session_id=session_id, error=str(exc))
+        logger.error(
+            event="api_session_update_failed",
+            request_id=request_id,
+            session_id=session_id,
+            error=str(exc),
+        )
         raise HTTPException(status_code=500, detail="Failed to update chat")
 
 
@@ -2219,7 +2459,7 @@ async def submit_feedback(
     body: FeedbackRequest,
     request: Request,
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Record a thumbs-up / thumbs-down rating for an assistant message."""
     user_id = current_user.user_id
     request_id = _request_id()
@@ -2229,15 +2469,30 @@ async def submit_feedback(
         if mongo:
             _vote_val = None if body.vote == "none" else body.vote
             saved, _ = await asyncio.gather(
-                asyncio.to_thread(
-                    mongo.save_feedback,
-                    user_id, body.session_id, body.vote,
-                    body.message_id, body.query, body.response_snippet,
-                ) if body.vote != "none" else asyncio.sleep(0),
-                asyncio.to_thread(
-                    mongo.patch_message_vote,
-                    user_id, body.session_id, body.message_id or "", _vote_val,
-                ) if body.message_id else asyncio.sleep(0),
+                (
+                    asyncio.to_thread(
+                        mongo.save_feedback,
+                        user_id,
+                        body.session_id,
+                        body.vote,
+                        body.message_id,
+                        body.query,
+                        body.response_snippet,
+                    )
+                    if body.vote != "none"
+                    else asyncio.sleep(0)
+                ),
+                (
+                    asyncio.to_thread(
+                        mongo.patch_message_vote,
+                        user_id,
+                        body.session_id,
+                        body.message_id or "",
+                        _vote_val,
+                    )
+                    if body.message_id
+                    else asyncio.sleep(0)
+                ),
             )
         else:
             saved = False
@@ -2264,14 +2519,16 @@ async def submit_feedback(
 
 # GET /api/ingestion/status/{job_id} — poll IngestJob progress
 
+
 @router.get("/ingestion/status/{job_id}")
 async def get_ingestion_status(
     job_id: str,
     request: Request,
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Poll ingestion job progress (for audio/video uploads)."""
     from app.pipeline.ingestion_pipeline import get_ingest_job
+
     job = get_ingest_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -2281,14 +2538,16 @@ async def get_ingestion_status(
     # derived from file size (~6s per MB observed for large-v3 on GPU), capped
     # below 1.0 so it never shows "done" before the pipeline actually finishes.
     try:
-        if (job.get("status") in ("extracting", "queued")
-                and str(job.get("modality")) in ("mp3", "mp4")
-                and float(job.get("progress") or 0.0) < 0.9
-                and float(job.get("started_at") or 0.0) > 0.0):
-            elapsed  = time.time() - float(job["started_at"])
-            size_mb  = max(1.0, float(job.get("size_bytes") or 0) / (1024 * 1024))
+        if (
+            job.get("status") in ("extracting", "queued")
+            and str(job.get("modality")) in ("mp3", "mp4")
+            and float(job.get("progress") or 0.0) < 0.9
+            and float(job.get("started_at") or 0.0) > 0.0
+        ):
+            elapsed = time.time() - float(job["started_at"])
+            size_mb = max(1.0, float(job.get("size_bytes") or 0) / (1024 * 1024))
             expected = max(20.0, size_mb * 6.0)
-            est      = min(0.90, elapsed / expected)
+            est = min(0.90, elapsed / expected)
             job["progress"] = max(float(job.get("progress") or 0.0), round(est, 3))
     except Exception:
         pass
@@ -2297,12 +2556,13 @@ async def get_ingestion_status(
 
 # GET /api/sources/{chunk_id} — return full chunk metadata for TranscriptViewer
 
+
 @router.get("/api/sources/{chunk_id}")
 async def get_source_chunk(
     chunk_id: str,
     request: Request,
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Return full metadata for a single chunk (used by TranscriptViewer)."""
     user_id = current_user.user_id
     try:
@@ -2319,13 +2579,13 @@ async def get_source_chunk(
         if not results:
             raise HTTPException(status_code=404, detail="Chunk not found")
         chunk = results[0]
-        meta  = chunk.get("metadata", {}) or {}
+        meta = chunk.get("metadata", {}) or {}
         if meta.get("user_id") != user_id:
             raise HTTPException(status_code=403, detail="Forbidden")
         return {
-            "chunk_id":   chunk_id,
-            "text":       chunk.get("text", ""),
-            "metadata":   meta,
+            "chunk_id": chunk_id,
+            "text": chunk.get("text", ""),
+            "metadata": meta,
         }
     except HTTPException:
         raise
@@ -2336,11 +2596,12 @@ async def get_source_chunk(
 
 # GET /api/kb/files — list all files in user's KB
 
+
 @router.get("/api/kb/files")
 async def list_kb_files(
     request: Request,
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """List all ingested files in the user's knowledge base."""
     user_id = current_user.user_id
     try:
@@ -2355,16 +2616,16 @@ async def list_kb_files(
             limit=1000,
         )
         # Group by source filename
-        seen:  Dict[str, Dict] = {}
+        seen: dict[str, dict] = {}
         for r in results:
-            meta   = r.get("metadata", {}) or {}
-            src    = meta.get("source") or meta.get("source_file") or ""
-            fhash  = meta.get("checksum_sha256", "") or meta.get("file_hash", "")
+            meta = r.get("metadata", {}) or {}
+            src = meta.get("source") or meta.get("source_file") or ""
+            fhash = meta.get("checksum_sha256", "") or meta.get("file_hash", "")
             if src not in seen:
                 seen[src] = {
-                    "filename":    src,
-                    "modality":    meta.get("modality", "unknown"),
-                    "file_hash":   fhash,
+                    "filename": src,
+                    "modality": meta.get("modality", "unknown"),
+                    "file_hash": fhash,
                     "chunk_count": 0,
                     "ingested_at": meta.get("ingestion_time", ""),
                 }
@@ -2378,12 +2639,13 @@ async def list_kb_files(
 
 # DELETE /api/kb/files/{file_hash} — delete a specific file from KB
 
+
 @router.delete("/api/kb/files/{file_hash}")
 async def delete_kb_file(
     file_hash: str,
     request: Request,
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Delete all chunks for a file from the user's knowledge base."""
     user_id = current_user.user_id
     try:
@@ -2419,12 +2681,13 @@ async def delete_kb_file(
 
 # GET /api/transcript/{file_hash} — full ordered transcript for audio/video
 
+
 @router.get("/api/transcript/{file_hash}")
 async def get_transcript(
     file_hash: str,
     request: Request,
     current_user: UserPublic = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Return full ordered transcript chunks for an audio/video file."""
     user_id = current_user.user_id
     try:
@@ -2446,16 +2709,18 @@ async def get_transcript(
             modality = meta.get("modality", "")
             if modality not in ("mp3", "mp4", "audio", "video"):
                 continue
-            chunks.append({
-                "chunk_id":       r.get("id", ""),
-                "text":           r.get("text", ""),
-                "start":          meta.get("start_timestamp") or meta.get("timestamp_start"),
-                "end":            meta.get("end_timestamp") or meta.get("timestamp_end"),
-                "speaker_name":   meta.get("speaker_name"),
-                "speaker_role":   meta.get("speaker_role"),
-                "call_section":   meta.get("call_section"),
-                "chunk_index":    meta.get("chunk_index", 0),
-            })
+            chunks.append(
+                {
+                    "chunk_id": r.get("id", ""),
+                    "text": r.get("text", ""),
+                    "start": meta.get("start_timestamp") or meta.get("timestamp_start"),
+                    "end": meta.get("end_timestamp") or meta.get("timestamp_end"),
+                    "speaker_name": meta.get("speaker_name"),
+                    "speaker_role": meta.get("speaker_role"),
+                    "call_section": meta.get("call_section"),
+                    "chunk_index": meta.get("chunk_index", 0),
+                }
+            )
         chunks.sort(key=lambda x: (x.get("chunk_index") or 0, x.get("start") or 0))
         return {"transcript": chunks, "count": len(chunks)}
     except HTTPException:

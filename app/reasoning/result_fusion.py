@@ -2,14 +2,13 @@ import asyncio
 import hashlib
 import math
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import structlog
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 from prometheus_client import Counter, Histogram
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
 
@@ -42,12 +41,14 @@ _semaphore = asyncio.Semaphore(5)
 
 # SHA-256 HASH FOR DEDUP
 
-def _hash(text: str, meta: Dict) -> str:
+
+def _hash(text: str, meta: dict) -> str:
     base = f"{text[:200]}|{meta.get('doc_id')}|{meta.get('chunk_id')}"
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 
 # VALID SCORE CHECK
+
 
 def _valid_score(score: float) -> bool:
     return not (math.isnan(score) or math.isinf(score))
@@ -55,20 +56,22 @@ def _valid_score(score: float) -> bool:
 
 # VALID EMBEDDING CHECK
 
+
 def _valid_embedding(emb: Any) -> bool:
-    return (
-        isinstance(emb, list) and
-        len(emb) in (settings.TEXT_EMBEDDING_DIM, settings.VISION_EMBEDDING_DIM)
+    return isinstance(emb, list) and len(emb) in (
+        settings.TEXT_EMBEDDING_DIM,
+        settings.VISION_EMBEDDING_DIM,
     )
 
 
 # COSINE SIMILARITY
 
-def _cosine(v1: List[float], v2: List[float]) -> float:
-    a     = np.nan_to_num(np.array(v1, dtype=float))
-    b     = np.nan_to_num(np.array(v2, dtype=float))
+
+def _cosine(v1: list[float], v2: list[float]) -> float:
+    a = np.nan_to_num(np.array(v1, dtype=float))
+    b = np.nan_to_num(np.array(v2, dtype=float))
     denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-8
-    val   = float(np.dot(a, b) / denom)
+    val = float(np.dot(a, b) / denom)
     if math.isnan(val) or math.isinf(val):
         return 0.0
     return val
@@ -76,8 +79,9 @@ def _cosine(v1: List[float], v2: List[float]) -> float:
 
 # MODALITY COUNTS FOR LOGGING
 
-def _modality_counts(results: List[Dict]) -> Dict[str, int]:
-    counts: Dict[str, int] = {}
+
+def _modality_counts(results: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
     for r in results:
         m = (r.get("metadata", {}) or {}).get("modality", "unknown")
         counts[m] = counts.get(m, 0) + 1
@@ -85,34 +89,44 @@ def _modality_counts(results: List[Dict]) -> Dict[str, int]:
 
 
 # FINANCE ANTONYM PAIRS — keyword-level hard rule (Phase 6.8)
-_FINANCE_ANTONYMS: frozenset = frozenset({
-    ("grew", "fell"), ("fell", "grew"),
-    ("profit", "loss"), ("loss", "profit"),
-    ("increased", "decreased"), ("decreased", "increased"),
-    ("beat", "missed"), ("missed", "beat"),
-    ("gain", "decline"), ("decline", "gain"),
-    ("positive", "negative"), ("negative", "positive"),
-    ("surplus", "deficit"), ("deficit", "surplus"),
-})
+_FINANCE_ANTONYMS: frozenset = frozenset(
+    {
+        ("grew", "fell"),
+        ("fell", "grew"),
+        ("profit", "loss"),
+        ("loss", "profit"),
+        ("increased", "decreased"),
+        ("decreased", "increased"),
+        ("beat", "missed"),
+        ("missed", "beat"),
+        ("gain", "decline"),
+        ("decline", "gain"),
+        ("positive", "negative"),
+        ("negative", "positive"),
+        ("surplus", "deficit"),
+        ("deficit", "surplus"),
+    }
+)
 
 # SOURCE CREDIBILITY WEIGHTS — applied to web results (Phase 6.8)
-_SOURCE_CREDIBILITY: Dict[str, float] = {
-    "sec.gov":       1.30,
-    "ft.com":        1.20,
-    "reuters.com":   1.20,
+_SOURCE_CREDIBILITY: dict[str, float] = {
+    "sec.gov": 1.30,
+    "ft.com": 1.20,
+    "reuters.com": 1.20,
     "bloomberg.com": 1.20,
-    "wsj.com":       1.15,
-    "cnbc.com":      1.10,
-    "reddit.com":    0.60,
-    "twitter.com":   0.50,
-    "x.com":         0.50,
+    "wsj.com": 1.15,
+    "cnbc.com": 1.10,
+    "reddit.com": 0.60,
+    "twitter.com": 0.50,
+    "x.com": 0.50,
 }
 
-_WEB_FRESHNESS_WINDOW_SECONDS: float = 4 * 3600.0   # 4-hour cliff for market data
+_WEB_FRESHNESS_WINDOW_SECONDS: float = 4 * 3600.0  # 4-hour cliff for market data
 
 
 # CONTRADICTION DETECTION
 # COMPARES ANSWER PAIRS FOR SEMANTIC OPPOSITION + FINANCE ANTONYM CHECK
+
 
 def _finance_antonym_contradiction(text_a: str, text_b: str) -> bool:
     """True when two texts contain opposing finance sentiment words for the same entity."""
@@ -124,19 +138,19 @@ def _finance_antonym_contradiction(text_a: str, text_b: str) -> bool:
     return False
 
 
-def _detect_contradictions(results: List[Dict]) -> List[Tuple[int, int, float]]:
+def _detect_contradictions(results: list[dict]) -> list[tuple[int, int, float]]:
     """
     RETURNS LIST OF (IDX_A, IDX_B, SIMILARITY) FOR PAIRS WHERE SIMILARITY IS LOW
     DESPITE HIGH SCORES, OR FINANCE ANTONYMS ARE FOUND — POTENTIAL CONTRADICTION.
     """
-    contradictions: List[Tuple[int, int, float]] = []
+    contradictions: list[tuple[int, int, float]] = []
 
     for i in range(len(results)):
         for j in range(i + 1, len(results)):
             text_i = results[i].get("text", "") or ""
             text_j = results[j].get("text", "") or ""
-            emb_i  = results[i].get("embedding")
-            emb_j  = results[j].get("embedding")
+            emb_i = results[i].get("embedding")
+            emb_j = results[j].get("embedding")
 
             # EMBEDDING-BASED CHECK
             if _valid_embedding(emb_i) and _valid_embedding(emb_j):
@@ -149,33 +163,34 @@ def _detect_contradictions(results: List[Dict]) -> List[Tuple[int, int, float]]:
 
             # FINANCE KEYWORD ANTONYM HARD RULE — no embedding needed
             if text_i and text_j and _finance_antonym_contradiction(text_i, text_j):
-                contradictions.append((i, j, -1.0))   # -1.0 = antonym-flagged
+                contradictions.append((i, j, -1.0))  # -1.0 = antonym-flagged
 
     return contradictions
 
 
 # CONFIDENCE SCORING PER RESULT
 
-def _confidence_score(result: Dict, all_results: List[Dict]) -> float:
+
+def _confidence_score(result: dict, all_results: list[dict]) -> float:
     """
     CONFIDENCE = HOW CONSISTENTLY SUPPORTED ACROSS ALL RESULTS.
     HIGH CONFIDENCE = HIGH SCORE + SUPPORTED BY MULTIPLE DOCS.
     """
     base_score = result.get("score", 0.0)
-    text       = (result.get("text", "") or "").lower()
+    text = (result.get("text", "") or "").lower()
 
     if not text:
         return base_score
 
     # COUNT HOW MANY OTHER RESULTS SHARE SIGNIFICANT WORDS
-    words       = set(w for w in text.split() if len(w) > 4)
-    support     = 0
+    words = set(w for w in text.split() if len(w) > 4)
+    support = 0
     total_other = 0
 
     for other in all_results:
         if other is result:
             continue
-        other_text  = (other.get("text", "") or "").lower()
+        other_text = (other.get("text", "") or "").lower()
         other_words = set(w for w in other_text.split() if len(w) > 4)
         total_other += 1
         if words & other_words:
@@ -190,14 +205,15 @@ def _confidence_score(result: Dict, all_results: List[Dict]) -> float:
 
 # SCORE NORMALIZATION — MIN-MAX
 
-def _normalize_scores(results: List[Dict]) -> List[Dict]:
+
+def _normalize_scores(results: list[dict]) -> list[dict]:
     if not results:
         return results
 
     scores = np.array([r.get("score", 0.0) for r in results], dtype=float)
     scores = np.nan_to_num(scores, nan=0.0, posinf=1.0, neginf=0.0)
-    min_s  = scores.min()
-    max_s  = scores.max()
+    min_s = scores.min()
+    max_s = scores.max()
 
     for i, r in enumerate(results):
         if max_s - min_s > 1e-6:
@@ -210,25 +226,27 @@ def _normalize_scores(results: List[Dict]) -> List[Dict]:
 
 # SCORE FUSION — COMBINES NORM SCORE + QUALITY + MODALITY + RECENCY
 
-def _score_fusion(results: List[Dict]) -> List[Dict]:
+
+def _score_fusion(results: list[dict]) -> list[dict]:
     modality_weights = settings.FUSION_MODALITY_WEIGHTS
 
     for r in results:
-        base     = r.get("norm_score", 0.0)
-        meta     = r.get("metadata", {}) or {}
+        base = r.get("norm_score", 0.0)
+        meta = r.get("metadata", {}) or {}
         modality = meta.get("modality", "text")
 
         modality_boost = modality_weights.get(modality, 1.0)
 
-        text    = str(r.get("text", ""))
+        text = str(r.get("text", ""))
         quality = (
-            0.1 if len(text) < settings.CHUNK_MIN_SIZE
+            0.1
+            if len(text) < settings.CHUNK_MIN_SIZE
             else min(len(text) / settings.FUSION_MAX_TEXT_CHARS, 1.0)
         )
 
         # SOURCE CREDIBILITY WEIGHT (web results only)
-        source_url        = str(meta.get("source_url", "") or "")
-        credibility_mult  = 1.0
+        source_url = str(meta.get("source_url", "") or "")
+        credibility_mult = 1.0
         for domain, weight in _SOURCE_CREDIBILITY.items():
             if domain in source_url:
                 credibility_mult = weight
@@ -236,14 +254,14 @@ def _score_fusion(results: List[Dict]) -> List[Dict]:
 
         # RECENCY — linear decay for research docs; sharp 4-hour cliff for web
         recency = 0.0
-        ts      = meta.get("timestamp_start") or meta.get("ingestion_time") or meta.get("fetched_at")
+        ts = meta.get("timestamp_start") or meta.get("ingestion_time") or meta.get("fetched_at")
         if ts:
             try:
                 age = max(time.time() - float(ts), 0.0)
                 if modality == "web":
                     recency = 1.0 / (1.0 + age / settings.MEMORY_RECENCY_SCALE)
                     if age > _WEB_FRESHNESS_WINDOW_SECONDS:
-                        recency *= 0.7   # sharp cliff: stale market data
+                        recency *= 0.7  # sharp cliff: stale market data
                 else:
                     recency = 1.0 / (1.0 + age / settings.MEMORY_RECENCY_SCALE)
             except Exception:
@@ -258,11 +276,15 @@ def _score_fusion(results: List[Dict]) -> List[Dict]:
             hierarchy_boost = 1.02
 
         final_score = (
-            settings.FUSION_SCORE_WEIGHT    * base +
-            settings.FUSION_QUALITY_WEIGHT  * quality +
-            settings.FUSION_MODALITY_WEIGHT * modality_boost +
-            0.05 * recency
-        ) * hierarchy_boost * credibility_mult
+            (
+                settings.FUSION_SCORE_WEIGHT * base
+                + settings.FUSION_QUALITY_WEIGHT * quality
+                + settings.FUSION_MODALITY_WEIGHT * modality_boost
+                + 0.05 * recency
+            )
+            * hierarchy_boost
+            * credibility_mult
+        )
 
         if not _valid_score(final_score):
             final_score = 0.0
@@ -276,15 +298,17 @@ def _score_fusion(results: List[Dict]) -> List[Dict]:
 # (raw RRF scores are inherently small ~1/61 and cannot be compared against
 #  an absolute threshold before _normalize_scores rescales them to [0,1])
 
-def _filter(results: List[Dict]) -> List[Dict]:
+
+def _filter(results: list[dict]) -> list[dict]:
     return [r for r in results if r.get("text")]
 
 
 # EXACT DEDUP BY HASH
 
-def _dedup(results: List[Dict]) -> List[Dict]:
-    seen:   set        = set()
-    unique: List[Dict] = []
+
+def _dedup(results: list[dict]) -> list[dict]:
+    seen: set = set()
+    unique: list[dict] = []
     for r in results:
         h = _hash(r.get("text", ""), r.get("metadata", {}))
         if h in seen:
@@ -296,12 +320,13 @@ def _dedup(results: List[Dict]) -> List[Dict]:
 
 # MMR DIVERSITY — MAXIMAL MARGINAL RELEVANCE
 
+
 def _diversity(
-    results: List[Dict],
+    results: list[dict],
     top_k: int,
     sim_threshold: float,
-) -> List[Dict]:
-    selected: List[Dict] = []
+) -> list[dict]:
+    selected: list[dict] = []
 
     for r in results:
         v1 = r.get("embedding")
@@ -332,23 +357,24 @@ def _diversity(
 # CROSS-MODAL RESULT LINKING
 # LINKS IMAGE/AUDIO RESULTS TO THEIR PARENT TEXT CHUNK
 
-def _cross_modal_link(results: List[Dict]) -> List[Dict]:
-    text_chunks: Dict[str, Dict] = {}
+
+def _cross_modal_link(results: list[dict]) -> list[dict]:
+    text_chunks: dict[str, dict] = {}
 
     for r in results:
         meta = r.get("metadata", {}) or {}
         if meta.get("modality") == "text":
             doc_id = meta.get("doc_id")
-            page   = meta.get("page")
-            key    = f"{doc_id}:{page}"
+            page = meta.get("page")
+            key = f"{doc_id}:{page}"
             text_chunks[key] = r
 
     for r in results:
         meta = r.get("metadata", {}) or {}
         if meta.get("modality") in ("image", "audio", "video"):
             doc_id = meta.get("doc_id")
-            page   = meta.get("page")
-            key    = f"{doc_id}:{page}"
+            page = meta.get("page")
+            key = f"{doc_id}:{page}"
             if key in text_chunks:
                 r["linked_text_chunk"] = text_chunks[key].get("text", "")[:200]
 
@@ -357,10 +383,11 @@ def _cross_modal_link(results: List[Dict]) -> List[Dict]:
 
 # RESOLVE CONTRADICTIONS — FLAG AND REDUCE CONFIDENCE OF CONFLICTING RESULTS
 
+
 def _resolve_contradictions(
-    results: List[Dict],
-    contradictions: List[Tuple[int, int, float]],
-) -> List[Dict]:
+    results: list[dict],
+    contradictions: list[tuple[int, int, float]],
+) -> list[dict]:
     if not contradictions:
         return results
 
@@ -384,7 +411,7 @@ def _resolve_contradictions(
         )
 
     for i in flagged_indices:
-        results[i]["final_score"]      = results[i].get("final_score", 0.0) * 0.5
+        results[i]["final_score"] = results[i].get("final_score", 0.0) * 0.5
         results[i]["contradiction_flag"] = True
 
     return results
@@ -392,24 +419,25 @@ def _resolve_contradictions(
 
 # MAIN FUSE
 
+
 class ResultFusion:
 
     def __init__(self) -> None:
-        self.top_k         = settings.RERANK_TOP_K
+        self.top_k = settings.RERANK_TOP_K
         self.sim_threshold = settings.FUSION_SIMILARITY_THRESHOLD
-        self.min_score     = settings.FUSION_MIN_SCORE
+        self.min_score = settings.FUSION_MIN_SCORE
 
     def fuse(
         self,
-        results: List[Dict],
+        results: list[dict],
         session_id: str = "default",
         detect_contradictions: bool = True,
-    ) -> List[Dict]:
+    ) -> list[dict]:
 
         if not results:
             return []
 
-        start       = time.time()
+        start = time.time()
         input_count = len(results)
 
         with tracer.start_as_current_span("result_fusion") as span:
@@ -421,11 +449,11 @@ class ResultFusion:
                 results = [dict(r) for r in results]
 
                 # CAP INPUT
-                results = results[:settings.FUSION_MAX_INPUT]
+                results = results[: settings.FUSION_MAX_INPUT]
 
                 # FILTER LOW SCORE AND EMPTY TEXT
-                results         = _filter(results)
-                filtered_count  = len(results)
+                results = _filter(results)
+                filtered_count = len(results)
 
                 if not results:
                     span.set_status(Status(StatusCode.OK))
@@ -464,7 +492,7 @@ class ResultFusion:
                 # MMR DIVERSITY SELECTION
                 results = _diversity(results, self.top_k, self.sim_threshold)
 
-                output  = results[:self.top_k]
+                output = results[: self.top_k]
                 latency = round(time.time() - start, 2)
 
                 _fusion_duration.labels(status="success").observe(latency)
@@ -487,7 +515,7 @@ class ResultFusion:
                 return output
 
             except Exception as exc:
-                latency    = round(time.time() - start, 2)
+                latency = round(time.time() - start, 2)
                 error_type = type(exc).__name__
 
                 _fusion_duration.labels(status="error").observe(latency)
@@ -510,7 +538,7 @@ class ResultFusion:
                         key=lambda x: x.get("score", 0.0),
                         reverse=True,
                     )
-                    return fallback[:self.top_k]
+                    return fallback[: self.top_k]
                 except Exception:
                     return []
 
@@ -518,14 +546,13 @@ class ResultFusion:
 
     async def fuse_async(
         self,
-        results: List[Dict],
+        results: list[dict],
         session_id: str = "default",
         detect_contradictions: bool = True,
-    ) -> List[Dict]:
+    ) -> list[dict]:
 
         async with _semaphore:
             return await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self.fuse(results, session_id, detect_contradictions),
             )
-

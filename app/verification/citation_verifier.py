@@ -16,7 +16,7 @@ frames use subtype="frame"), `asset_path`, `chunk_id`, `cite_key`.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List
+from typing import Any
 
 from app.verification.verification_schema import CitationCheckResult
 
@@ -28,8 +28,9 @@ _MIN_CLAIM_SUPPORT_FRAC = 0.20
 class CitationVerifier:
     """Every cited chunk must actually contain the claim it's cited for."""
 
-    def check(self, answer: str, docs: List[Dict[str, Any]],
-              sources: List[Dict[str, Any]]) -> CitationCheckResult:
+    def check(
+        self, answer: str, docs: list[dict[str, Any]], sources: list[dict[str, Any]]
+    ) -> CitationCheckResult:
         if not answer or not sources:
             return CitationCheckResult(score=100.0, checked_count=0)
 
@@ -45,7 +46,7 @@ class CitationVerifier:
 
         cite_to_text = self._cite_key_to_chunk_text(docs, sources)
 
-        bad: List[str] = []
+        bad: list[str] = []
         for key in cited:
             chunk_text = cite_to_text.get(key, "")
             if not chunk_text:
@@ -59,15 +60,16 @@ class CitationVerifier:
         return CitationCheckResult(score=score, bad_citations=bad, checked_count=checked)
 
     @staticmethod
-    def _cite_key_to_chunk_text(docs: List[Dict[str, Any]],
-                                 sources: List[Dict[str, Any]]) -> Dict[str, str]:
-        chunk_id_to_doc: Dict[str, Dict[str, Any]] = {}
+    def _cite_key_to_chunk_text(
+        docs: list[dict[str, Any]], sources: list[dict[str, Any]]
+    ) -> dict[str, str]:
+        chunk_id_to_doc: dict[str, dict[str, Any]] = {}
         for d in docs or []:
             cid = str((d.get("metadata") or {}).get("chunk_id") or "")
             if cid:
                 chunk_id_to_doc[cid] = d
 
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         for s in sources or []:
             key = s.get("cite_key")
             if not key:
@@ -83,7 +85,7 @@ class CitationVerifier:
     @staticmethod
     def _claim_supported(answer: str, cite_key: str, chunk_text: str) -> bool:
         idx = answer.find(cite_key)
-        window = answer[max(0, idx - _CLAIM_WINDOW_CHARS):idx] if idx >= 0 else answer
+        window = answer[max(0, idx - _CLAIM_WINDOW_CHARS) : idx] if idx >= 0 else answer
         words = [w.lower() for w in _CLAIM_WORD_RE.findall(window) if len(w) > 4]
         if not words:
             # No substantive claim text before the tag (e.g. tag opens the

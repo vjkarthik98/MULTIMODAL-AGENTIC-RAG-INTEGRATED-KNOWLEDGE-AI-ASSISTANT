@@ -6,16 +6,17 @@ MAGIK spec (Phase 3.7):
   - bm25_mp4_visual.pkl   → frame captions + OCR only
   - bm25_mp4_combined.pkl → all combined (the main index file)
 """
+
 from __future__ import annotations
 
 import pickle
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any
 
 from prometheus_client import Counter
 from rank_bm25 import BM25Plus
 
-from app.bm25.base_bm25 import BaseBM25, _INDEX_VERSION
+from app.bm25.base_bm25 import _INDEX_VERSION, BaseBM25
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -48,23 +49,24 @@ class VideoBM25(BaseBM25):
 
     modality = "mp4"
 
-    def __init__(self, user_id: Optional[str] = None) -> None:
+    def __init__(self, user_id: str | None = None) -> None:
         super().__init__(user_id=user_id)
-        self._sub_audio_corpus: List[List[str]] = []
-        self._sub_visual_corpus: List[List[str]] = []
-        self._sub_audio_docs: List[Any] = []
-        self._sub_visual_docs: List[Any] = []
-        self._bm25_audio: Optional[BM25Plus] = None
-        self._bm25_visual: Optional[BM25Plus] = None
+        self._sub_audio_corpus: list[list[str]] = []
+        self._sub_visual_corpus: list[list[str]] = []
+        self._sub_audio_docs: list[Any] = []
+        self._sub_visual_docs: list[Any] = []
+        self._bm25_audio: BM25Plus | None = None
+        self._bm25_visual: BM25Plus | None = None
 
     def _build_indexed_text(self, doc: Any) -> str:
         try:
             s = getattr(doc, "structure", {}) or {}
-            parts: List[str] = list(self._base_text(doc))
+            parts: list[str] = list(self._base_text(doc))
 
             # ── Audio track tokens (same enrichment as AudioBM25) ─────────────────
-            name = (s.get("speaker_name") or s.get("speaker") or
-                    getattr(doc, "speaker", None) or "").strip()
+            name = (
+                s.get("speaker_name") or s.get("speaker") or getattr(doc, "speaker", None) or ""
+            ).strip()
             role = (s.get("speaker_role") or "").strip()
             if name:
                 parts.append(f"speaker {name}")
@@ -73,13 +75,16 @@ class VideoBM25(BaseBM25):
             if name and role:
                 parts.append(f"speaker {name} {role}")
 
-            ts_s = s.get("start_timestamp") or s.get("timestamp_start") or \
-                   getattr(doc, "timestamp_start", None)
+            ts_s = (
+                s.get("start_timestamp")
+                or s.get("timestamp_start")
+                or getattr(doc, "timestamp_start", None)
+            )
             if ts_s is not None:
                 try:
                     total_sec = int(float(ts_s))
-                    minute    = total_sec // 60
-                    second    = total_sec % 60
+                    minute = total_sec // 60
+                    second = total_sec % 60
                     parts.append(f"timestamp_{total_sec}")
                     parts.append(f"time {minute}")
                     parts.append(f"minute {minute}")
@@ -113,7 +118,7 @@ class VideoBM25(BaseBM25):
             # ── Visual track tokens ───────────────────────────────────────────────
 
             # Slide bullets amplified ×3 — slide content is the dominant retrieval signal
-            slide_bullets: List[str] = s.get("slide_bullets") or []
+            slide_bullets: list[str] = s.get("slide_bullets") or []
             if slide_bullets:
                 bullet_text = " ".join(str(b) for b in slide_bullets[:10])
                 parts.append(bullet_text)
@@ -126,7 +131,7 @@ class VideoBM25(BaseBM25):
                 parts.append(f"frame {frame_index}")
 
             # Frame captions — scene change tokens, frame_caption key, numeric repeat
-            frame_captions: List[Any] = s.get("frame_captions") or []
+            frame_captions: list[Any] = s.get("frame_captions") or []
             for fc in frame_captions[:5]:
                 if isinstance(fc, dict):
                     cap = (fc.get("frame_caption") or "").strip()
@@ -136,9 +141,14 @@ class VideoBM25(BaseBM25):
                     if cap:
                         parts.append(cap[:200])
                         cap_lower = cap.lower()
-                        if any(kw in cap_lower for kw in ("chart", "graph", "bar chart", "line chart", "pie")):
+                        if any(
+                            kw in cap_lower
+                            for kw in ("chart", "graph", "bar chart", "line chart", "pie")
+                        ):
                             parts.append("chart_appears")
-                        if any(kw in cap_lower for kw in ("table", " row", " column", "spreadsheet")):
+                        if any(
+                            kw in cap_lower for kw in ("table", " row", " column", "spreadsheet")
+                        ):
                             parts.append("table_shown")
                     if ocr:
                         parts.append(ocr[:100])
@@ -166,7 +176,7 @@ class VideoBM25(BaseBM25):
     def _build_audio_text(self, doc: Any) -> str:
         """Transcript-only text for the audio sub-index."""
         s = getattr(doc, "structure", {}) or {}
-        parts: List[str] = []
+        parts: list[str] = []
 
         # Transcript / base text
         text = getattr(doc, "text", "") or ""
@@ -184,8 +194,8 @@ class VideoBM25(BaseBM25):
         if ts_s is not None:
             try:
                 total_sec = int(float(ts_s))
-                minute    = total_sec // 60
-                second    = total_sec % 60
+                minute = total_sec // 60
+                second = total_sec % 60
                 parts.append(f"timestamp_{total_sec}")
                 parts.append(f"time {minute}")
                 parts.append(f"minute {minute}")
@@ -214,16 +224,16 @@ class VideoBM25(BaseBM25):
     def _build_visual_text(self, doc: Any) -> str:
         """Frame caption + OCR text for the visual sub-index."""
         s = getattr(doc, "structure", {}) or {}
-        parts: List[str] = []
+        parts: list[str] = []
 
-        slide_bullets: List[str] = s.get("slide_bullets") or []
+        slide_bullets: list[str] = s.get("slide_bullets") or []
         if slide_bullets:
             bullet_text = " ".join(str(b) for b in slide_bullets[:10])
             # ×2 amplification for visual content
             parts.append(bullet_text)
             parts.append(bullet_text)
 
-        frame_captions: List[Any] = s.get("frame_captions") or []
+        frame_captions: list[Any] = s.get("frame_captions") or []
         for fc in frame_captions[:8]:
             if isinstance(fc, dict):
                 cap = (fc.get("frame_caption") or "").strip()
@@ -236,7 +246,10 @@ class VideoBM25(BaseBM25):
                 if cap:
                     parts.append(cap[:300])
                     cap_lower = cap.lower()
-                    if any(kw in cap_lower for kw in ("chart", "graph", "bar chart", "line chart", "pie")):
+                    if any(
+                        kw in cap_lower
+                        for kw in ("chart", "graph", "bar chart", "line chart", "pie")
+                    ):
                         parts.append("chart_appears")
                     if any(kw in cap_lower for kw in ("table", " row", " column", "spreadsheet")):
                         parts.append("table_shown")
@@ -255,8 +268,9 @@ class VideoBM25(BaseBM25):
 
     # ── Sub-index path helpers ────────────────────────────────────────────────
 
-    def _sub_path(self, tag: str, user_id: Optional[str] = None) -> Path:
+    def _sub_path(self, tag: str, user_id: str | None = None) -> Path:
         from app.utils.paths import user_dir
+
         uid = user_id or self._loaded_user_id or "default"
         p = user_dir(uid) / "bm25_index"
         p.mkdir(parents=True, exist_ok=True)
@@ -266,9 +280,9 @@ class VideoBM25(BaseBM25):
 
     def add_documents(
         self,
-        documents: List[Any],
+        documents: list[Any],
         session_id: str = "",
-        user_id: Optional[str] = None,
+        user_id: str | None = None,
     ) -> None:
         # Main (combined) index via parent
         super().add_documents(documents, session_id=session_id, user_id=user_id)
@@ -286,9 +300,9 @@ class VideoBM25(BaseBM25):
 
         self._rebuild_sub_indexes(user_id)
 
-    def _rebuild_sub_indexes(self, user_id: Optional[str] = None) -> None:
+    def _rebuild_sub_indexes(self, user_id: str | None = None) -> None:
         for tag, corpus, docs, attr_bm25 in [
-            ("audio",  self._sub_audio_corpus,  self._sub_audio_docs,  "_bm25_audio"),
+            ("audio", self._sub_audio_corpus, self._sub_audio_docs, "_bm25_audio"),
             ("visual", self._sub_visual_corpus, self._sub_visual_docs, "_bm25_visual"),
         ]:
             if not corpus:
@@ -299,11 +313,15 @@ class VideoBM25(BaseBM25):
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
             with open(tmp, "wb") as f:
-                pickle.dump({
-                    "index_version": _INDEX_VERSION,
-                    "documents": docs,
-                    "tokenized_corpus": corpus,
-                }, f, protocol=pickle.HIGHEST_PROTOCOL)
+                pickle.dump(
+                    {
+                        "index_version": _INDEX_VERSION,
+                        "documents": docs,
+                        "tokenized_corpus": corpus,
+                    },
+                    f,
+                    protocol=pickle.HIGHEST_PROTOCOL,
+                )
             tmp.replace(path)
             logger.info(event="bm25_video_sub_saved", tag=tag, docs=len(corpus))
 
@@ -312,7 +330,7 @@ class VideoBM25(BaseBM25):
         query: str,
         sub_index: str,
         top_k: int = 10,
-    ) -> List[Any]:
+    ) -> list[Any]:
         """Search a video sub-index.
 
         sub_index: 'audio' | 'visual' | 'combined'
@@ -333,5 +351,6 @@ class VideoBM25(BaseBM25):
 
         scores = bm25.get_scores(tokens)
         import numpy as _np
+
         ranked = _np.argsort(scores)[::-1][:top_k]
         return [(docs[i], float(scores[i])) for i in ranked if float(scores[i]) > 0]

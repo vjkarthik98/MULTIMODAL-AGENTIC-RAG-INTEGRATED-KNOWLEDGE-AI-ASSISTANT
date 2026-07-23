@@ -9,17 +9,17 @@ MAGIK spec (Phase 3.1):
 Sub-indexes are built/updated automatically alongside the main index whenever
 AUDIO_SPEAKER_SUBINDEX_ENABLED is True in config.
 """
+
 from __future__ import annotations
 
 import pickle
 from pathlib import Path
-from typing import Any, List, Optional
-
-from rank_bm25 import BM25Plus
+from typing import Any
 
 from prometheus_client import Counter
+from rank_bm25 import BM25Plus
 
-from app.bm25.base_bm25 import BaseBM25, _INDEX_VERSION
+from app.bm25.base_bm25 import _INDEX_VERSION, BaseBM25
 from app.core.config import settings
 from app.utils.logger import get_logger
 
@@ -39,7 +39,7 @@ _ROLE_CFO = {"cfo", "chief financial officer", "chief financial"}
 _QA_SECTIONS = {"qa_session", "q&a", "question and answer", "qa", "questions and answers"}
 
 
-def _speaker_role_tag(doc: Any) -> Optional[str]:
+def _speaker_role_tag(doc: Any) -> str | None:
     """Return 'ceo', 'cfo', 'qa', or None based on speaker/call_section metadata."""
     s = getattr(doc, "structure", {}) or {}
 
@@ -76,23 +76,23 @@ class TxtBM25(BaseBM25):
 
     modality = "txt"
 
-    def __init__(self, user_id: Optional[str] = None) -> None:
+    def __init__(self, user_id: str | None = None) -> None:
         super().__init__(user_id=user_id)
         # Speaker sub-indexes — each is a lightweight (corpus, BM25Plus) pair
-        self._sub_ceo: List[List[str]] = []
-        self._sub_cfo: List[List[str]] = []
-        self._sub_qa:  List[List[str]] = []
-        self._bm25_ceo: Optional[BM25Plus] = None
-        self._bm25_cfo: Optional[BM25Plus] = None
-        self._bm25_qa:  Optional[BM25Plus] = None
-        self._sub_docs_ceo: List[Any] = []
-        self._sub_docs_cfo: List[Any] = []
-        self._sub_docs_qa:  List[Any] = []
+        self._sub_ceo: list[list[str]] = []
+        self._sub_cfo: list[list[str]] = []
+        self._sub_qa: list[list[str]] = []
+        self._bm25_ceo: BM25Plus | None = None
+        self._bm25_cfo: BM25Plus | None = None
+        self._bm25_qa: BM25Plus | None = None
+        self._sub_docs_ceo: list[Any] = []
+        self._sub_docs_cfo: list[Any] = []
+        self._sub_docs_qa: list[Any] = []
 
     def _build_indexed_text(self, doc: Any) -> str:
         try:
             s = getattr(doc, "structure", {}) or {}
-            parts: List[str] = list(self._base_text(doc))
+            parts: list[str] = list(self._base_text(doc))
 
             # Extra section_title boost for TXT (base already added ×2; add once more)
             section_title = (s.get("section_title") or "").strip()
@@ -101,7 +101,7 @@ class TxtBM25(BaseBM25):
 
             # Speaker prefix for transcript speaker-turn chunks
             speaker = (s.get("speaker") or s.get("speaker_name") or "").strip()
-            role    = (s.get("speaker_role") or "").strip()
+            role = (s.get("speaker_role") or "").strip()
             if speaker:
                 parts.append(f"speaker {speaker}")
             if role:
@@ -136,8 +136,9 @@ class TxtBM25(BaseBM25):
 
     # ── Sub-index path helpers ────────────────────────────────────────────────
 
-    def _sub_path(self, role_tag: str, user_id: Optional[str] = None) -> Path:
+    def _sub_path(self, role_tag: str, user_id: str | None = None) -> Path:
         from app.utils.paths import user_data_dir
+
         uid = user_id or self._loaded_user_id or "default"
         return user_data_dir(uid) / "bm25_index" / f"txt_{role_tag}.pkl"
 
@@ -145,9 +146,9 @@ class TxtBM25(BaseBM25):
 
     def add_documents(
         self,
-        documents: List[Any],
+        documents: list[Any],
         session_id: str = "",
-        user_id: Optional[str] = None,
+        user_id: str | None = None,
     ) -> None:
         # Main index via parent
         super().add_documents(documents, session_id=session_id, user_id=user_id)
@@ -174,14 +175,11 @@ class TxtBM25(BaseBM25):
 
         self._rebuild_sub_indexes(user_id)
 
-    def _rebuild_sub_indexes(self, user_id: Optional[str] = None) -> None:
+    def _rebuild_sub_indexes(self, user_id: str | None = None) -> None:
         for tag, corpus, docs, attr_bm25, attr_docs, attr_sub in [
-            ("ceo", self._sub_ceo, self._sub_docs_ceo,
-             "_bm25_ceo", "_sub_docs_ceo", "_sub_ceo"),
-            ("cfo", self._sub_cfo, self._sub_docs_cfo,
-             "_bm25_cfo", "_sub_docs_cfo", "_sub_cfo"),
-            ("qa",  self._sub_qa,  self._sub_docs_qa,
-             "_bm25_qa",  "_sub_docs_qa",  "_sub_qa"),
+            ("ceo", self._sub_ceo, self._sub_docs_ceo, "_bm25_ceo", "_sub_docs_ceo", "_sub_ceo"),
+            ("cfo", self._sub_cfo, self._sub_docs_cfo, "_bm25_cfo", "_sub_docs_cfo", "_sub_cfo"),
+            ("qa", self._sub_qa, self._sub_docs_qa, "_bm25_qa", "_sub_docs_qa", "_sub_qa"),
         ]:
             if not corpus:
                 continue
@@ -191,11 +189,15 @@ class TxtBM25(BaseBM25):
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
             with open(tmp, "wb") as f:
-                pickle.dump({
-                    "index_version": _INDEX_VERSION,
-                    "documents": getattr(self, attr_docs),
-                    "tokenized_corpus": corpus,
-                }, f, protocol=pickle.HIGHEST_PROTOCOL)
+                pickle.dump(
+                    {
+                        "index_version": _INDEX_VERSION,
+                        "documents": getattr(self, attr_docs),
+                        "tokenized_corpus": corpus,
+                    },
+                    f,
+                    protocol=pickle.HIGHEST_PROTOCOL,
+                )
             tmp.replace(path)
             logger.info(event="bm25_sub_index_saved", tag=tag, docs=len(corpus))
 
@@ -204,7 +206,7 @@ class TxtBM25(BaseBM25):
         query: str,
         role_tag: str,
         top_k: int = 10,
-    ) -> List[Any]:
+    ) -> list[Any]:
         """Search a speaker sub-index (role_tag: 'ceo'|'cfo'|'qa').
 
         Returns list of (doc, score) pairs, sorted descending.
@@ -221,6 +223,7 @@ class TxtBM25(BaseBM25):
 
         scores = bm25.get_scores(tokens)
         import numpy as _np
+
         if len(scores) == 0:
             return []
         ranked = _np.argsort(scores)[::-1][:top_k]

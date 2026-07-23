@@ -3,7 +3,7 @@ import hashlib
 import re
 import time
 import unicodedata
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import structlog
 from opentelemetry import trace
@@ -37,6 +37,7 @@ _semaphore = asyncio.Semaphore(5)
 
 # NORMALIZE TEXT
 
+
 def _clean(text: str) -> str:
     text = unicodedata.normalize("NFC", str(text or ""))
     return " ".join(text.strip().split())
@@ -44,16 +45,18 @@ def _clean(text: str) -> str:
 
 # SHA-256 HASH FOR DEDUP
 
-def _hash(msg: Dict) -> str:
+
+def _hash(msg: dict) -> str:
     base = f"{msg.get('role')}|{str(msg.get('content'))[:200]}"
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 
 # DEDUP HISTORY
 
-def _dedup(history: List[Dict]) -> List[Dict]:
-    seen: set        = set()
-    out:  List[Dict] = []
+
+def _dedup(history: list[dict]) -> list[dict]:
+    seen: set = set()
+    out: list[dict] = []
     for msg in history:
         try:
             h = _hash(msg)
@@ -68,16 +71,19 @@ def _dedup(history: List[Dict]) -> List[Dict]:
 
 # IMPORTANCE SORT
 
-def _sort_by_importance(history: List[Dict]) -> List[Dict]:
-    def _imp(m: Dict) -> float:
+
+def _sort_by_importance(history: list[dict]) -> list[dict]:
+    def _imp(m: dict) -> float:
         try:
             return float(m.get("importance", 0.5))
         except Exception:
             return 0.5
+
     return sorted(history, key=_imp, reverse=True)
 
 
 # PII SCRUB BEFORE SUMMARIZATION
+
 
 def _scrub_pii(text: str) -> str:
     if not settings.PII_DETECTION_ENABLED:
@@ -85,13 +91,23 @@ def _scrub_pii(text: str) -> str:
     try:
         from presidio_analyzer import AnalyzerEngine
         from presidio_anonymizer import AnonymizerEngine
-        entities   = getattr(settings, "PII_ENTITIES", [
-            "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER",
-            "US_SSN", "CREDIT_CARD", "LOCATION", "IP_ADDRESS",
-        ])
-        analyzer   = AnalyzerEngine()
+
+        entities = getattr(
+            settings,
+            "PII_ENTITIES",
+            [
+                "PERSON",
+                "EMAIL_ADDRESS",
+                "PHONE_NUMBER",
+                "US_SSN",
+                "CREDIT_CARD",
+                "LOCATION",
+                "IP_ADDRESS",
+            ],
+        )
+        analyzer = AnalyzerEngine()
         anonymizer = AnonymizerEngine()
-        results    = analyzer.analyze(text=text, entities=entities, language="en")
+        results = analyzer.analyze(text=text, entities=entities, language="en")
         if results:
             text = anonymizer.anonymize(text=text, analyzer_results=results).text
     except ImportError:
@@ -103,20 +119,21 @@ def _scrub_pii(text: str) -> str:
 
 # FORMAT CONVERSATION FOR SUMMARIZATION INPUT
 
-def _format_for_summary(history: List[Dict]) -> str:
+
+def _format_for_summary(history: list[dict]) -> str:
     max_chars = settings.MEMORY_SUMMARY_INPUT_CHARS
-    max_msgs  = settings.MAX_HISTORY_MESSAGES
+    max_msgs = settings.MAX_HISTORY_MESSAGES
 
     history = _dedup(history[-max_msgs:])
     history = _sort_by_importance(history)
 
-    parts: List[str] = []
-    total: int       = 0
+    parts: list[str] = []
+    total: int = 0
 
     for msg in history:
         try:
-            role     = str(msg.get("role", "user")).upper()
-            content  = _clean(msg.get("content", ""))
+            role = str(msg.get("role", "user")).upper()
+            content = _clean(msg.get("content", ""))
             modality = msg.get("modality", "text")
 
             if len(content) < 5:
@@ -124,11 +141,11 @@ def _format_for_summary(history: List[Dict]) -> str:
 
             # PII SCRUB BEFORE SENDING TO LLM
             content = _scrub_pii(content)
-            content = content[:settings.MAX_PROMPT_CHARS]
+            content = content[: settings.MAX_PROMPT_CHARS]
 
             mod_tag = f"[{modality.upper()}] " if modality != "text" else ""
-            line    = f"{role}: {mod_tag}{content}"
-            length  = len(line)
+            line = f"{role}: {mod_tag}{content}"
+            length = len(line)
 
             if total + length > max_chars:
                 break
@@ -144,17 +161,20 @@ def _format_for_summary(history: List[Dict]) -> str:
 
 # KEYWORD EXTRACTION FOR SUMMARY TAGS
 
-def _extract_keywords(text: str, max_kw: int = 10) -> List[str]:
+
+def _extract_keywords(text: str, max_kw: int = 10) -> list[str]:
     try:
         import yake
+
         extractor = yake.KeywordExtractor(top=max_kw, stopwords=None)
-        kws       = extractor.extract_keywords(text)
+        kws = extractor.extract_keywords(text)
         return [kw for kw, _ in kws]
     except ImportError:
         pass
     try:
         from keybert import KeyBERT
-        kb  = KeyBERT()
+
+        kb = KeyBERT()
         kws = kb.extract_keywords(text, top_n=max_kw)
         return [kw for kw, _ in kws]
     except ImportError:
@@ -164,6 +184,7 @@ def _extract_keywords(text: str, max_kw: int = 10) -> List[str]:
 
 # COMPRESSION RATIO CHECK
 
+
 def _compression_ratio(original: str, summary: str) -> float:
     if not original:
         return 0.0
@@ -171,6 +192,7 @@ def _compression_ratio(original: str, summary: str) -> float:
 
 
 # VALIDATE SUMMARY OUTPUT
+
 
 def _validate(summary: str) -> str:
     if not summary:
@@ -181,7 +203,7 @@ def _validate(summary: str) -> str:
     if len(summary) < settings.MIN_SUMMARY_LENGTH:
         return ""
 
-    summary = summary[:settings.MEMORY_SUMMARY_MAX_CHARS]
+    summary = summary[: settings.MEMORY_SUMMARY_MAX_CHARS]
 
     required = ["Key Facts", "User Intent"]
 
@@ -229,9 +251,7 @@ def _build_prompt(conv: str) -> str:
         "- Keep only factual, actionable information\n"
         "- No hallucination or inference beyond what is stated\n"
         "- No filler words\n"
-        "- Be maximally concise\n"
-        + _FINANCE_NUMBER_RULE
-        + "\n"
+        "- Be maximally concise\n" + _FINANCE_NUMBER_RULE + "\n"
     )
 
     format_block = (
@@ -244,12 +264,13 @@ def _build_prompt(conv: str) -> str:
 
     max_chars = settings.MAX_PROMPT_CHARS
     available = max_chars - len(instruction) - len(format_block) - 50
-    body      = f"Conversation:\n{conv[:max(available, 0)]}\n\n"
+    body = f"Conversation:\n{conv[:max(available, 0)]}\n\n"
 
     return instruction + body + format_block
 
 
 # INCREMENTAL SUMMARY — MERGE EXISTING SUMMARY WITH NEW TURNS
+
 
 def _build_incremental_prompt(
     existing_summary: str,
@@ -261,9 +282,7 @@ def _build_incremental_prompt(
         "- Preserve existing facts unless contradicted\n"
         "- Add new facts from new turns\n"
         "- Remove outdated entries if new turns contradict them\n"
-        "- Be maximally concise\n"
-        + _FINANCE_NUMBER_RULE
-        + "\n"
+        "- Be maximally concise\n" + _FINANCE_NUMBER_RULE + "\n"
     )
 
     format_block = (
@@ -274,23 +293,24 @@ def _build_incremental_prompt(
         "Context:\n- ..."
     )
 
-    max_chars  = settings.MAX_PROMPT_CHARS
-    available  = max_chars - len(instruction) - len(format_block) - 100
-    half       = available // 2
+    max_chars = settings.MAX_PROMPT_CHARS
+    available = max_chars - len(instruction) - len(format_block) - 100
+    half = available // 2
 
     existing_block = f"EXISTING SUMMARY:\n{existing_summary[:half]}\n\n"
-    new_block      = f"NEW TURNS:\n{new_turns[:half]}\n\n"
+    new_block = f"NEW TURNS:\n{new_turns[:half]}\n\n"
 
     return instruction + existing_block + new_block + format_block
 
 
 # PERSIST SUMMARY TO MONGO
 
+
 def _persist_summary(
     summary: str,
     session_id: str,
     mongo_memory: Any,
-    keywords: Optional[List[str]] = None,
+    keywords: list[str] | None = None,
 ) -> None:
     try:
         if mongo_memory and hasattr(mongo_memory, "store_summary"):
@@ -311,12 +331,13 @@ def _persist_summary(
 
 # MAIN SYNC SUMMARIZER
 
+
 def summarize_conversation(
     llm: Any,
-    history: List[Dict],
+    history: list[dict],
     session_id: str = "default",
     mongo_memory: Any = None,
-    existing_summary: Optional[str] = None,
+    existing_summary: str | None = None,
 ) -> str:
 
     if not history:
@@ -440,7 +461,7 @@ def summarize_conversation(
             return summary
 
         except Exception as exc:
-            latency    = round(time.time() - start, 2)
+            latency = round(time.time() - start, 2)
             error_type = type(exc).__name__
 
             _summary_duration.labels(status="error").observe(latency)
@@ -460,12 +481,13 @@ def summarize_conversation(
 
 # ASYNC WRAPPER
 
+
 async def summarize_conversation_async(
     llm: Any,
-    history: List[Dict],
+    history: list[dict],
     session_id: str = "default",
     mongo_memory: Any = None,
-    existing_summary: Optional[str] = None,
+    existing_summary: str | None = None,
 ) -> str:
 
     async with _semaphore:
@@ -482,6 +504,7 @@ async def summarize_conversation_async(
 
 
 # GDPR PURGE — DELETE ALL SUMMARIES FOR A USER/SESSION
+
 
 async def gdpr_purge_summaries(
     session_id: str,
@@ -504,5 +527,3 @@ async def gdpr_purge_summaries(
             session_id=session_id,
             error=str(exc),
         )
-
-

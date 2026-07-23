@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import hashlib
-import time
 import re
+import time
 import unicodedata
-from dataclasses import dataclass, field as dc_field
-from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
-from uuid import UUID, uuid4
 from copy import deepcopy
+from dataclasses import dataclass
+from dataclasses import field as dc_field
+from enum import Enum
+from typing import Any
+from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -21,34 +22,36 @@ logger = get_logger(__name__)
 # RAW EXTRACT — lightweight intermediary between ingestor and chunker (Phase 1)
 # Each ingestor returns List[RawExtract]; chunkers consume them and produce List[IngestedDocument].
 
+
 @dataclass
 class RawExtract:
-    text: str                                # raw extracted text (prose, row, transcript, caption)
-    extract_type: str                        # "prose"|"table_row"|"heading"|"footnote"|"header_footer"
-                                             # "image_raw"|"image_region"|"scanned_page"
-                                             # "audio_raw"|"video_raw"|"segment"|"frame"
-                                             # "named_range"|"unit_header"|"chart_image"
-                                             # "comment"|"speaker_turn"
-    page: Optional[int] = None              # PDF page number (1-indexed)
-    sheet: Optional[str] = None             # Excel sheet name
-    bbox: Optional[Tuple[float, float, float, float]] = None   # (x0, y0, x1, y1)
-    timestamp_start: Optional[float] = None # audio/video seconds
-    timestamp_end: Optional[float] = None
-    font_size: Optional[float] = None       # PDF font size in points
-    is_bold: bool = False                   # PDF/DOCX bold flag
-    speaker_label: Optional[str] = None     # audio/video speaker ID
-    raw_source_ref: str = ""                # e.g. "page_12", "sheet_Income_Statement", "0:28:30"
-    raw_bytes: Optional[bytes] = None       # image/audio/video binary content
-    style_name: Optional[str] = None        # DOCX paragraph style name
-    extra: Dict[str, Any] = dc_field(default_factory=dict)  # modality-specific overflow
+    text: str  # raw extracted text (prose, row, transcript, caption)
+    extract_type: str  # "prose"|"table_row"|"heading"|"footnote"|"header_footer"
+    # "image_raw"|"image_region"|"scanned_page"
+    # "audio_raw"|"video_raw"|"segment"|"frame"
+    # "named_range"|"unit_header"|"chart_image"
+    # "comment"|"speaker_turn"
+    page: int | None = None  # PDF page number (1-indexed)
+    sheet: str | None = None  # Excel sheet name
+    bbox: tuple[float, float, float, float] | None = None  # (x0, y0, x1, y1)
+    timestamp_start: float | None = None  # audio/video seconds
+    timestamp_end: float | None = None
+    font_size: float | None = None  # PDF font size in points
+    is_bold: bool = False  # PDF/DOCX bold flag
+    speaker_label: str | None = None  # audio/video speaker ID
+    raw_source_ref: str = ""  # e.g. "page_12", "sheet_Income_Statement", "0:28:30"
+    raw_bytes: bytes | None = None  # image/audio/video binary content
+    style_name: str | None = None  # DOCX paragraph style name
+    extra: dict[str, Any] = dc_field(default_factory=dict)  # modality-specific overflow
 
 
 # MODALITY ENUM
 
+
 class Modality(str, Enum):
-    TEXT  = "text"
-    PDF   = "pdf"
-    WORD  = "word"
+    TEXT = "text"
+    PDF = "pdf"
+    WORD = "word"
     EXCEL = "excel"
     IMAGE = "image"
     AUDIO = "audio"
@@ -57,87 +60,110 @@ class Modality(str, Enum):
 
 # PROCESSING STATUS ENUM
 
+
 class ProcessingStatus(str, Enum):
-    PENDING    = "pending"
+    PENDING = "pending"
     PROCESSING = "processing"
-    SUCCESS    = "success"
-    FAILED     = "failed"
-    SKIPPED    = "skipped"
-    DUPLICATE  = "duplicate"
+    SUCCESS = "success"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    DUPLICATE = "duplicate"
 
 
 # EMBEDDING SPACE ENUM
 
+
 class EmbeddingSpace(str, Enum):
-    TEXT   = "text"
+    TEXT = "text"
     VISION = "vision"
 
 
 # ALLOWED MODALITIES AND SUBTYPES
 
 ALLOWED_MODALITIES = {
-    "text", "table", "pdf",
+    "text",
+    "table",
+    "pdf",
     # extension-based names used by per-modality chunkers
-    "txt",                       # txt_chunker
-    "image", "jpg", "jpeg", "png",  # image_chunker
-    "audio", "mp3", "wav",       # audio_chunker
-    "video", "mp4",              # video_chunker
-    "word", "docx",              # docx_chunker
-    "excel", "xlsx",             # xlsx_chunker
+    "txt",  # txt_chunker
+    "image",
+    "jpg",
+    "jpeg",
+    "png",  # image_chunker
+    "audio",
+    "mp3",
+    "wav",  # audio_chunker
+    "video",
+    "mp4",  # video_chunker
+    "word",
+    "docx",  # docx_chunker
+    "excel",
+    "xlsx",  # xlsx_chunker
 }
 
-_TXT_SUBTYPES   = {"paragraph", "heading", "section", "list", "speaker_turn", "unknown"}
+_TXT_SUBTYPES = {"paragraph", "heading", "section", "list", "speaker_turn", "unknown"}
 _IMAGE_SUBTYPES = {"caption", "ocr", "image_frame", "unknown"}
 _AUDIO_SUBTYPES = {"speech", "unknown"}
 _VIDEO_SUBTYPES = {"speech", "frame", "ocr", "transcript_frame", "unknown"}
-_WORD_SUBTYPES  = {"paragraph", "table", "list", "heading", "annotation", "definition", "unknown"}
+_WORD_SUBTYPES = {"paragraph", "table", "list", "heading", "annotation", "definition", "unknown"}
 _EXCEL_SUBTYPES = {"table_row_group", "assumptions", "named_ranges", "chart_caption", "unknown"}
 
-ALLOWED_SUBTYPES: Dict[str, set] = {
-    "text":  {"paragraph", "heading", "page", "chunk", "speaker_turn", "section", "list", "unknown"},
+ALLOWED_SUBTYPES: dict[str, set] = {
+    "text": {"paragraph", "heading", "page", "chunk", "speaker_turn", "section", "list", "unknown"},
     "table": {"structured", "unknown"},
-    "pdf":   {"paragraph", "table", "table_summary", "footnote", "figure_caption", "list", "heading", "ocr", "unknown"},
+    "pdf": {
+        "paragraph",
+        "table",
+        "table_summary",
+        "footnote",
+        "figure_caption",
+        "list",
+        "heading",
+        "ocr",
+        "unknown",
+    },
     # extension-based aliases share subtype sets with their semantic counterparts
-    "txt":  _TXT_SUBTYPES,
+    "txt": _TXT_SUBTYPES,
     "image": _IMAGE_SUBTYPES,
-    "jpg":   _IMAGE_SUBTYPES,
-    "jpeg":  _IMAGE_SUBTYPES,
-    "png":   _IMAGE_SUBTYPES,
+    "jpg": _IMAGE_SUBTYPES,
+    "jpeg": _IMAGE_SUBTYPES,
+    "png": _IMAGE_SUBTYPES,
     "audio": _AUDIO_SUBTYPES,
-    "mp3":   _AUDIO_SUBTYPES,
-    "wav":   _AUDIO_SUBTYPES,
+    "mp3": _AUDIO_SUBTYPES,
+    "wav": _AUDIO_SUBTYPES,
     "video": _VIDEO_SUBTYPES,
-    "mp4":   _VIDEO_SUBTYPES,
-    "word":  _WORD_SUBTYPES,
-    "docx":  _WORD_SUBTYPES,
+    "mp4": _VIDEO_SUBTYPES,
+    "word": _WORD_SUBTYPES,
+    "docx": _WORD_SUBTYPES,
     "excel": _EXCEL_SUBTYPES,
-    "xlsx":  _EXCEL_SUBTYPES,
+    "xlsx": _EXCEL_SUBTYPES,
 }
 
 ALLOWED_EMBEDDING_SPACES = {"text", "vision"}
 
-MODALITY_QUALITY_FLOORS: Dict[str, float] = {
-    "text":  0.1,
+MODALITY_QUALITY_FLOORS: dict[str, float] = {
+    "text": 0.1,
     "table": 0.1,
-    "pdf":   0.1,
-    "txt":   0.1,
+    "pdf": 0.1,
+    "txt": 0.1,
     "image": 0.0,
-    "jpg":   0.0,
-    "jpeg":  0.0,
-    "png":   0.0,
+    "jpg": 0.0,
+    "jpeg": 0.0,
+    "png": 0.0,
     "audio": 0.0,
-    "mp3":   0.0,
-    "wav":   0.0,
+    "mp3": 0.0,
+    "wav": 0.0,
     "video": 0.0,
-    "mp4":   0.0,
-    "word":  0.1,
-    "docx":  0.1,
+    "mp4": 0.0,
+    "word": 0.1,
+    "docx": 0.1,
     "excel": 0.1,
-    "xlsx":  0.1,
+    "xlsx": 0.1,
 }
 
 
-# UNIVERSAL METADATA 
+# UNIVERSAL METADATA
+
 
 class UniversalMetadata(BaseModel):
     # UNIQUE INGESTION EVENT ID
@@ -145,57 +171,57 @@ class UniversalMetadata(BaseModel):
 
     # SOURCE
     source_path: str = Field(default="")
-    modality: str    = Field(default="text")
+    modality: str = Field(default="text")
 
     # MIME — MAGIC-BYTE DETECTED; NEVER TRUST EXTENSION
     mime_type: str = Field(default="application/octet-stream")
 
     # SIZE AND CHECKSUM
-    file_size_bytes: int   = Field(default=0, ge=0)
-    checksum_sha256: str   = Field(default="")
+    file_size_bytes: int = Field(default=0, ge=0)
+    checksum_sha256: str = Field(default="")
 
     # TIMESTAMPS
-    created_at: Optional[float]  = Field(default=None)
-    modified_at: Optional[float] = Field(default=None)
-    ingested_at: float           = Field(default_factory=time.time)
+    created_at: float | None = Field(default=None)
+    modified_at: float | None = Field(default=None)
+    ingested_at: float = Field(default_factory=time.time)
 
     # CONTENT PROPERTIES
-    language: str    = Field(default="unknown")
-    encoding: str    = Field(default="utf-8")
+    language: str = Field(default="unknown")
+    encoding: str = Field(default="utf-8")
 
     # DOCUMENT STRUCTURE
-    page_count: Optional[int]    = Field(default=None, ge=0)
-    duration_s: Optional[float]  = Field(default=None, ge=0.0)
+    page_count: int | None = Field(default=None, ge=0)
+    duration_s: float | None = Field(default=None, ge=0.0)
 
     # PROCESSING RESULTS
-    chunk_count: int             = Field(default=0, ge=0)
-    embedding_model: str         = Field(default="")
-    extraction_quality: float    = Field(default=1.0, ge=0.0)
+    chunk_count: int = Field(default=0, ge=0)
+    embedding_model: str = Field(default="")
+    extraction_quality: float = Field(default=1.0, ge=0.0)
 
     # NON-FATAL ERRORS DURING PROCESSING
-    error_log: List[str] = Field(default_factory=list)
+    error_log: list[str] = Field(default_factory=list)
 
     # AUTO-GENERATED SEMANTIC TAGS (KEYBERT/YAKE)
-    tags: List[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
 
     # MODALITY-SPECIFIC EXTRAS
-    custom_fields: Dict[str, Any] = Field(default_factory=dict)
+    custom_fields: dict[str, Any] = Field(default_factory=dict)
 
     # PII REDACTION FLAG
-    pii_redacted: bool          = Field(default=False)
-    pii_entities_found: int     = Field(default=0)
+    pii_redacted: bool = Field(default=False)
+    pii_entities_found: int = Field(default=0)
 
     # DEDUP FLAG
-    is_duplicate: bool          = Field(default=False)
-    duplicate_of: Optional[str] = Field(default=None)
+    is_duplicate: bool = Field(default=False)
+    duplicate_of: str | None = Field(default=None)
 
     # SECURITY FLAGS
-    malware_scanned: bool       = Field(default=False)
-    malware_clean: bool         = Field(default=True)
-    password_protected: bool    = Field(default=False)
-    has_javascript: bool        = Field(default=False)
-    has_macros: bool            = Field(default=False)
-    has_signatures: bool        = Field(default=False)
+    malware_scanned: bool = Field(default=False)
+    malware_clean: bool = Field(default=True)
+    password_protected: bool = Field(default=False)
+    has_javascript: bool = Field(default=False)
+    has_macros: bool = Field(default=False)
+    has_signatures: bool = Field(default=False)
 
     # PROCESSING STATUS
     status: str = Field(default=ProcessingStatus.PENDING)
@@ -218,68 +244,69 @@ class UniversalMetadata(BaseModel):
         self.error_log.append(msg)
         logger.warning(event="metadata_error_logged", error_msg=msg, file_id=str(self.file_id))
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "file_id":            str(self.file_id),
-            "source_path":        self.source_path,
-            "modality":           self.modality,
-            "mime_type":          self.mime_type,
-            "file_size_bytes":    self.file_size_bytes,
-            "checksum_sha256":    self.checksum_sha256,
-            "created_at":         self.created_at,
-            "modified_at":        self.modified_at,
-            "ingested_at":        self.ingested_at,
-            "language":           self.language,
-            "encoding":           self.encoding,
-            "page_count":         self.page_count,
-            "duration_s":         self.duration_s,
-            "chunk_count":        self.chunk_count,
-            "embedding_model":    self.embedding_model,
+            "file_id": str(self.file_id),
+            "source_path": self.source_path,
+            "modality": self.modality,
+            "mime_type": self.mime_type,
+            "file_size_bytes": self.file_size_bytes,
+            "checksum_sha256": self.checksum_sha256,
+            "created_at": self.created_at,
+            "modified_at": self.modified_at,
+            "ingested_at": self.ingested_at,
+            "language": self.language,
+            "encoding": self.encoding,
+            "page_count": self.page_count,
+            "duration_s": self.duration_s,
+            "chunk_count": self.chunk_count,
+            "embedding_model": self.embedding_model,
             "extraction_quality": self.extraction_quality,
-            "error_log":          self.error_log,
-            "tags":               self.tags,
-            "custom_fields":      self.custom_fields,
-            "pii_redacted":       self.pii_redacted,
+            "error_log": self.error_log,
+            "tags": self.tags,
+            "custom_fields": self.custom_fields,
+            "pii_redacted": self.pii_redacted,
             "pii_entities_found": self.pii_entities_found,
-            "is_duplicate":       self.is_duplicate,
-            "duplicate_of":       self.duplicate_of,
-            "malware_scanned":    self.malware_scanned,
-            "malware_clean":      self.malware_clean,
+            "is_duplicate": self.is_duplicate,
+            "duplicate_of": self.duplicate_of,
+            "malware_scanned": self.malware_scanned,
+            "malware_clean": self.malware_clean,
             "password_protected": self.password_protected,
-            "has_javascript":     self.has_javascript,
-            "has_macros":         self.has_macros,
-            "has_signatures":     self.has_signatures,
-            "status":             self.status,
+            "has_javascript": self.has_javascript,
+            "has_macros": self.has_macros,
+            "has_signatures": self.has_signatures,
+            "status": self.status,
         }
 
 
 # INGESTED DOCUMENT SCHEMA
 
+
 class IngestedDocument(BaseModel):
 
     # CORE FIELDS
-    text:        str
-    modality:    str
-    subtype:     Optional[str] = None
-    source_type: str           = "file"
-    source:      Optional[str] = None
-    page:        Optional[int] = None
-    chunk_id:    Optional[int] = None
+    text: str
+    modality: str
+    subtype: str | None = None
+    source_type: str = "file"
+    source: str | None = None
+    page: int | None = None
+    chunk_id: int | None = None
 
     # STRUCTURED FIELDS
-    structure:      Dict[str, Any]        = Field(default_factory=dict)
-    extra_metadata: Dict[str, Any]        = Field(default_factory=dict)
-    embedding:        Optional[List[float]] = None
-    embedding_alt:    Optional[List[float]] = None   # secondary embedding (e.g. xlsx markdown repr)
-    embedding_audio:  Optional[List[float]] = None   # video: audio-only BGE vector
-    embedding_visual: Optional[List[float]] = None   # video: visual-only BGE vector
+    structure: dict[str, Any] = Field(default_factory=dict)
+    extra_metadata: dict[str, Any] = Field(default_factory=dict)
+    embedding: list[float] | None = None
+    embedding_alt: list[float] | None = None  # secondary embedding (e.g. xlsx markdown repr)
+    embedding_audio: list[float] | None = None  # video: audio-only BGE vector
+    embedding_visual: list[float] | None = None  # video: visual-only BGE vector
 
     # UNIVERSAL METADATA ATTACHED AT INGEST TIME
-    universal_metadata: Optional[UniversalMetadata] = None
+    universal_metadata: UniversalMetadata | None = None
 
     # NORMALIZE
 
-    def normalize(self) -> "IngestedDocument":
+    def normalize(self) -> IngestedDocument:
         # NFC UNICODE NORMALIZATION — SECTION 2.3
         self.text = unicodedata.normalize("NFC", (self.text or "").strip())
 
@@ -292,7 +319,7 @@ class IngestedDocument(BaseModel):
             self.text = self.text.replace("\x00", "")
             logger.warning(event="null_bytes_stripped", count=null_count)
 
-        self.modality    = (self.modality or "").strip().lower()
+        self.modality = (self.modality or "").strip().lower()
         self.source_type = (self.source_type or "file").strip().lower()
 
         if self.subtype:
@@ -311,7 +338,7 @@ class IngestedDocument(BaseModel):
 
     # VALIDATE
 
-    def validate(self) -> "IngestedDocument":
+    def validate(self) -> IngestedDocument:
 
         # TEXT LENGTH
         if len(self.text) < 3:
@@ -344,9 +371,9 @@ class IngestedDocument(BaseModel):
         if not isinstance(self.structure, dict):
             raise ValueError("INVALID_STRUCTURE")
 
-        self.structure.setdefault("doc_id",          str(uuid4()))
-        self.structure.setdefault("session_id",      "default")
-        self.structure.setdefault("content_type",    "unknown")
+        self.structure.setdefault("doc_id", str(uuid4()))
+        self.structure.setdefault("session_id", "default")
+        self.structure.setdefault("content_type", "unknown")
         self.structure.setdefault("embedding_space", "text")
 
         if self.structure["embedding_space"] not in ALLOWED_EMBEDDING_SPACES:
@@ -358,9 +385,9 @@ class IngestedDocument(BaseModel):
 
         floor = MODALITY_QUALITY_FLOORS.get(self.modality, 0.0)
 
-        self.extra_metadata.setdefault("importance_score",    1.0)
-        self.extra_metadata.setdefault("modality_weight",     1.0)
-        self.extra_metadata.setdefault("data_quality_score",  1.0)
+        self.extra_metadata.setdefault("importance_score", 1.0)
+        self.extra_metadata.setdefault("modality_weight", 1.0)
+        self.extra_metadata.setdefault("data_quality_score", 1.0)
 
         # CLAMP SCORES
         for key in ("importance_score", "modality_weight", "data_quality_score"):
@@ -386,12 +413,12 @@ class IngestedDocument(BaseModel):
 
     # FINALIZE
 
-    def finalize(self) -> "IngestedDocument":
+    def finalize(self) -> IngestedDocument:
         return self.normalize().validate()
 
     # CLONE
 
-    def clone(self, **updates: Any) -> "IngestedDocument":
+    def clone(self, **updates: Any) -> IngestedDocument:
         data = deepcopy(self.to_dict())
 
         data.update(updates)
@@ -414,7 +441,8 @@ class IngestedDocument(BaseModel):
         return (
             self.embedding is not None
             and isinstance(self.embedding, list)
-            and len(self.embedding) in (
+            and len(self.embedding)
+            in (
                 settings.TEXT_EMBEDDING_DIM,
                 settings.VISION_EMBEDDING_DIM,
             )
@@ -436,37 +464,40 @@ class IngestedDocument(BaseModel):
 
     # SERIALIZE
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "text":               self.text,
-            "modality":           self.modality,
-            "subtype":            self.subtype,
-            "source_type":        self.source_type,
-            "source":             self.source,
-            "page":               self.page,
-            "chunk_id":           self.chunk_id,
-            "structure":          self.structure,
-            "extra_metadata":     self.extra_metadata,
-            "embedding":          self.embedding,
-            "universal_metadata": self.universal_metadata.to_dict() if self.universal_metadata else None,
+            "text": self.text,
+            "modality": self.modality,
+            "subtype": self.subtype,
+            "source_type": self.source_type,
+            "source": self.source,
+            "page": self.page,
+            "chunk_id": self.chunk_id,
+            "structure": self.structure,
+            "extra_metadata": self.extra_metadata,
+            "embedding": self.embedding,
+            "universal_metadata": (
+                self.universal_metadata.to_dict() if self.universal_metadata else None
+            ),
         }
 
     # SUMMARY
 
-    def summary(self) -> Dict[str, Any]:
+    def summary(self) -> dict[str, Any]:
         return {
-            "modality":        self.modality,
-            "subtype":         self.subtype,
-            "source":          self.source,
-            "chunk_id":        self.chunk_id,
-            "doc_id":          self.doc_id(),
-            "session_id":      self.session_id(),
+            "modality": self.modality,
+            "subtype": self.subtype,
+            "source": self.source,
+            "chunk_id": self.chunk_id,
+            "doc_id": self.doc_id(),
+            "session_id": self.session_id(),
             "embedding_space": self.embedding_space(),
-            "quality":         self.extra_metadata.get("data_quality_score", 1.0),
-            "has_embedding":   self.is_embeddable(),
-            "text_length":     len(self.text),
-            "content_hash":    self.content_hash(),
+            "quality": self.extra_metadata.get("data_quality_score", 1.0),
+            "has_embedding": self.is_embeddable(),
+            "text_length": len(self.text),
+            "content_hash": self.content_hash(),
         }
+
 
 def normalize_text(text: str) -> str:
 
@@ -485,6 +516,7 @@ def normalize_text(text: str) -> str:
         text = text.replace("\x00", "")
 
     return text.strip()
+
 
 def redact_pii(text: str) -> str:
 
@@ -517,8 +549,9 @@ def redact_pii(text: str) -> str:
 
     return text
 
+
 def sanitize_prompt_injection(text: str) -> str:
-  
+
     if not text:
         return ""
 
@@ -545,7 +578,8 @@ def sanitize_prompt_injection(text: str) -> str:
         )
 
     return sanitized
-    
+
+
 def build_universal_metadata(
     source_path: str = "",
     modality: str = "text",
@@ -555,7 +589,6 @@ def build_universal_metadata(
     **kwargs,
 ) -> UniversalMetadata:
 
-
     return UniversalMetadata(
         source_path=source_path,
         modality=modality,
@@ -564,6 +597,7 @@ def build_universal_metadata(
         checksum_sha256=checksum_sha256,
         **kwargs,
     )
+
 
 def sha256_file(file_path: str) -> str:
 
@@ -575,37 +609,40 @@ def sha256_file(file_path: str) -> str:
 
     return h.hexdigest()
 
+
 from app.core.response import ProcessingResult  # noqa: F401  (re-exported for ingestion callers)
 
 # ERROR DETAIL
 
-class ErrorDetail(BaseModel):
-    code:     str
-    message:  str
-    severity: str                    = "medium"
-    field:    Optional[str]          = None
-    context:  Dict[str, Any]         = Field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+class ErrorDetail(BaseModel):
+    code: str
+    message: str
+    severity: str = "medium"
+    field: str | None = None
+    context: dict[str, Any] = Field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "code":     self.code,
-            "message":  self.message,
+            "code": self.code,
+            "message": self.message,
             "severity": self.severity,
-            "field":    self.field,
-            "context":  self.context,
+            "field": self.field,
+            "context": self.context,
         }
 
 
 # VALIDATION RESULT
 
+
 class ValidationResult(BaseModel):
-    valid:     bool
-    modality:  str   = "unknown"
-    file_size: int   = 0
-    mime_type: str   = ""
-    errors:    List[ErrorDetail] = Field(default_factory=list)
-    warnings:  List[str]         = Field(default_factory=list)
-    latency:   float             = 0.0
+    valid: bool
+    modality: str = "unknown"
+    file_size: int = 0
+    mime_type: str = ""
+    errors: list[ErrorDetail] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    latency: float = 0.0
 
     @property
     def has_errors(self) -> bool:
@@ -620,7 +657,7 @@ class ValidationResult(BaseModel):
         code: str,
         message: str,
         severity: str = "high",
-        field: Optional[str] = None,
+        field: str | None = None,
     ) -> None:
         self.errors.append(ErrorDetail(code=code, message=message, severity=severity, field=field))
         self.valid = False
@@ -628,46 +665,48 @@ class ValidationResult(BaseModel):
     def add_warning(self, message: str) -> None:
         self.warnings.append(message)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "valid":     self.valid,
-            "modality":  self.modality,
+            "valid": self.valid,
+            "modality": self.modality,
             "file_size": self.file_size,
             "mime_type": self.mime_type,
-            "errors":    [e.to_dict() for e in self.errors],
-            "warnings":  self.warnings,
-            "latency":   self.latency,
+            "errors": [e.to_dict() for e in self.errors],
+            "warnings": self.warnings,
+            "latency": self.latency,
         }
 
 
 # QUERY RESPONSE
 
-class QueryResponse(BaseModel):
-    success:      bool  = True
-    answer:       str   = ""
-    confidence:   float = Field(default=0.5, ge=0.0, le=1.0)
-    sources_used: int   = 0
-    decision:     str   = "unknown"
-    source:       str   = "agent"
-    session_id:   str   = "default"
-    latency:      float = 0.0
-    metadata:     Dict[str, Any] = Field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+class QueryResponse(BaseModel):
+    success: bool = True
+    answer: str = ""
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    sources_used: int = 0
+    decision: str = "unknown"
+    source: str = "agent"
+    session_id: str = "default"
+    latency: float = 0.0
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "success":      self.success,
-            "answer":       self.answer,
-            "confidence":   self.confidence,
+            "success": self.success,
+            "answer": self.answer,
+            "confidence": self.confidence,
             "sources_used": self.sources_used,
-            "decision":     self.decision,
-            "source":       self.source,
-            "session_id":   self.session_id,
-            "latency":      self.latency,
-            "metadata":     self.metadata,
+            "decision": self.decision,
+            "source": self.source,
+            "session_id": self.session_id,
+            "latency": self.latency,
+            "metadata": self.metadata,
         }
 
 
 # FACTORY HELPERS
+
 
 def ok(
     modality: str,
@@ -676,8 +715,8 @@ def ok(
     chunks: int = 0,
     stored: int = 0,
     source: str = "",
-    metadata: Optional[UniversalMetadata] = None,
-    warnings: Optional[List[str]] = None,
+    metadata: UniversalMetadata | None = None,
+    warnings: list[str] | None = None,
 ) -> ProcessingResult:
     return ProcessingResult(
         success=True,
@@ -699,7 +738,7 @@ def err(
     session_id: str = "default",
     latency: float = 0.0,
     severity: str = "medium",
-    field: Optional[str] = None,
+    field: str | None = None,
 ) -> ProcessingResult:
     result = ProcessingResult(
         success=False,
@@ -707,9 +746,7 @@ def err(
         session_id=session_id,
         latency=latency,
     )
-    result.errors.append(
-        ErrorDetail(code=code, message=message, severity=severity, field=field)
-    )
+    result.errors.append(ErrorDetail(code=code, message=message, severity=severity, field=field))
     return result
 
 
@@ -718,7 +755,7 @@ def validation_ok(
     file_size: int,
     mime_type: str,
     latency: float = 0.0,
-    warnings: Optional[List[str]] = None,
+    warnings: list[str] | None = None,
 ) -> ValidationResult:
     return ValidationResult(
         valid=True,
@@ -737,7 +774,7 @@ def validation_err(
     file_size: int = 0,
     mime_type: str = "",
     latency: float = 0.0,
-    field: Optional[str] = None,
+    field: str | None = None,
 ) -> ValidationResult:
     result = ValidationResult(
         valid=False,
@@ -750,37 +787,40 @@ def validation_err(
     return result
 
 
-
-
-
-
 # CUSTOM EXCEPTIONS
+
 
 class EmptyFileError(ValueError):
     pass
 
+
 class FileTooLargeError(ValueError):
     pass
+
 
 class UnsupportedMimeError(ValueError):
     pass
 
+
 class CorruptFileError(ValueError):
     pass
+
 
 class DuplicateFileError(ValueError):
     pass
 
+
 class PasswordProtectedError(ValueError):
     pass
+
 
 class EmptyContentError(ValueError):
     pass
 
+
 class MalwareDetectedError(RuntimeError):
     pass
 
+
 class DiskSpaceError(RuntimeError):
     pass
-
-

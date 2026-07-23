@@ -14,8 +14,9 @@ import re
 import subprocess
 import time
 import uuid
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any
 
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
@@ -50,28 +51,36 @@ _EXTRACT_ERRORS = Counter("magik_pdf_extract_errors_total", "Errors in pdf inges
 _semaphore = asyncio.Semaphore(5)
 
 _PDF_WATERMARK_STRIP = {
-    "DRAFT", "CONFIDENTIAL", "FOR DISCUSSION ONLY", "PRELIMINARY",
-    "RESTRICTED", "CLASSIFIED", "DO NOT COPY", "SAMPLE",
+    "DRAFT",
+    "CONFIDENTIAL",
+    "FOR DISCUSSION ONLY",
+    "PRELIMINARY",
+    "RESTRICTED",
+    "CLASSIFIED",
+    "DO NOT COPY",
+    "SAMPLE",
 }
 
 # Character-level translation for EDGAR/PDF ligatures and smart punctuation.
 # Applied before any NLP/guardrail pass so downstream tokenisers see plain ASCII.
-_LIGATURE_MAP = str.maketrans({
-    '\xa0':  ' ',    # non-breaking space  →  regular space  (very common in EDGAR: "September\xa028")
-    '\xad':  '',     # soft hyphen          →  drop
-    '’': "'",   # right single quote
-    '‘': "'",   # left  single quote
-    '“': '"',   # left  double quote
-    '”': '"',   # right double quote
-    '–': '-',   # en dash
-    '—': '--',  # em dash
-    '•': '-',   # bullet
-    '…': '...', # ellipsis
-    'ﬁ': 'fi',  # fi ligature
-    'ﬂ': 'fl',  # fl ligature
-    'ﬃ': 'ffi', # ffi ligature
-    'ﬄ': 'ffl', # ffl ligature
-})
+_LIGATURE_MAP = str.maketrans(
+    {
+        '\xa0': ' ',  # non-breaking space  →  regular space  (very common in EDGAR: "September\xa028")
+        '\xad': '',  # soft hyphen          →  drop
+        '’': "'",  # right single quote
+        '‘': "'",  # left  single quote
+        '“': '"',  # left  double quote
+        '”': '"',  # right double quote
+        '–': '-',  # en dash
+        '—': '--',  # em dash
+        '•': '-',  # bullet
+        '…': '...',  # ellipsis
+        'ﬁ': 'fi',  # fi ligature
+        'ﬂ': 'fl',  # fl ligature
+        'ﬃ': 'ffi',  # ffi ligature
+        'ﬄ': 'ffl',  # ffl ligature
+    }
+)
 
 
 def _normalize_pdf_text(text: str) -> str:
@@ -81,7 +90,7 @@ def _normalize_pdf_text(text: str) -> str:
     can match patterns like '$391,035' that would otherwise contain '\xa0'.
     """
     text = text.translate(_LIGATURE_MAP)
-    text = re.sub(r' {2,}', ' ', text)   # collapse multiple spaces (keep newlines)
+    text = re.sub(r' {2,}', ' ', text)  # collapse multiple spaces (keep newlines)
     return text
 
 
@@ -90,31 +99,31 @@ def _normalize_pdf_text(text: str) -> str:
 _SEC_PART_RE = re.compile(r'^PART\s+([IVX]+)\s*$', re.IGNORECASE)
 _SEC_ITEM_RE = re.compile(r'^Item\s+(\d+[A-Z]?)\.?\s*(.*)', re.IGNORECASE)
 
-_SEC_ITEMS: Dict[str, str] = {
-    "1":   "Business",
-    "1A":  "Risk Factors",
-    "1B":  "Unresolved Staff Comments",
-    "2":   "Properties",
-    "3":   "Legal Proceedings",
-    "4":   "Mine Safety Disclosures",
-    "5":   "Market for Registrant's Common Equity",
-    "6":   "Reserved",
-    "7":   "Management's Discussion and Analysis",
-    "7A":  "Quantitative and Qualitative Disclosures About Market Risk",
-    "8":   "Financial Statements and Supplementary Data",
-    "9":   "Changes in and Disagreements with Accountants",
-    "9A":  "Controls and Procedures",
-    "9B":  "Other Information",
-    "10":  "Directors, Executive Officers and Corporate Governance",
-    "11":  "Executive Compensation",
-    "12":  "Security Ownership",
-    "13":  "Certain Relationships and Related Transactions",
-    "14":  "Principal Accountant Fees and Services",
-    "15":  "Exhibits, Financial Statement Schedules",
+_SEC_ITEMS: dict[str, str] = {
+    "1": "Business",
+    "1A": "Risk Factors",
+    "1B": "Unresolved Staff Comments",
+    "2": "Properties",
+    "3": "Legal Proceedings",
+    "4": "Mine Safety Disclosures",
+    "5": "Market for Registrant's Common Equity",
+    "6": "Reserved",
+    "7": "Management's Discussion and Analysis",
+    "7A": "Quantitative and Qualitative Disclosures About Market Risk",
+    "8": "Financial Statements and Supplementary Data",
+    "9": "Changes in and Disagreements with Accountants",
+    "9A": "Controls and Procedures",
+    "9B": "Other Information",
+    "10": "Directors, Executive Officers and Corporate Governance",
+    "11": "Executive Compensation",
+    "12": "Security Ownership",
+    "13": "Certain Relationships and Related Transactions",
+    "14": "Principal Accountant Fees and Services",
+    "15": "Exhibits, Financial Statement Schedules",
 }
 
 
-def _classify_10k_section(text: str) -> Optional[str]:
+def _classify_10k_section(text: str) -> str | None:
     """If text matches a SEC 10-K Part or Item heading, return a canonical label.
 
     Returns None when the text is ordinary prose, not a section marker.
@@ -125,14 +134,15 @@ def _classify_10k_section(text: str) -> Optional[str]:
         return f"PART {m.group(1).upper()}"
     m = _SEC_ITEM_RE.match(t)
     if m:
-        num   = m.group(1).upper()
-        desc  = (m.group(2) or "").strip()
+        num = m.group(1).upper()
+        desc = (m.group(2) or "").strip()
         canon = _SEC_ITEMS.get(num, desc)
         return f"Item {num}. {canon or desc}"
     return None
 
 
 # ─── Utilities ────────────────────────────────────────────────────────────────
+
 
 def _file_hash(path: str) -> str:
     h = hashlib.sha256()
@@ -166,6 +176,7 @@ def _is_pdf_encrypted(file_path: str) -> bool:
     """
     try:
         import fitz
+
         doc = fitz.open(file_path)
         needs_pw = doc.needs_pass
         doc.close()
@@ -177,6 +188,7 @@ def _is_pdf_encrypted(file_path: str) -> bool:
 def _check_pdf_javascript(file_path: str) -> bool:
     try:
         import fitz
+
         doc = fitz.open(file_path)
         has_js = False
         for page in doc:
@@ -204,6 +216,7 @@ def _is_pdfa(file_path: str) -> bool:
 def _has_xfa(file_path: str) -> bool:
     try:
         import fitz
+
         doc = fitz.open(file_path)
         result = False
         for page in doc:
@@ -221,7 +234,9 @@ def _repair_pdf(file_path: str) -> str:
         repaired = file_path + ".repaired.pdf"
         subprocess.run(
             ["qpdf", "--replace-input", file_path, "--", repaired],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if os.path.exists(repaired):
             return repaired
@@ -243,18 +258,17 @@ def _text_density(text: str, page_area: float) -> float:
     return len(text.strip()) / page_area
 
 
-def _ocr_page_image(pix: Any, page_num: int) -> Tuple[str, float]:
+def _ocr_page_image(pix: Any, page_num: int) -> tuple[str, float]:
     try:
         import pytesseract
         from PIL import Image
+
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         # Explicit DPI silences Tesseract's "Estimating resolution as N" warnings
         # (pixmaps carry no DPI metadata).
         _ocr_cfg = "--dpi 200"
         ocr_text = (pytesseract.image_to_string(img, config=_ocr_cfg) or "").strip()
-        data = pytesseract.image_to_data(
-            img, output_type=pytesseract.Output.DICT, config=_ocr_cfg
-        )
+        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT, config=_ocr_cfg)
         confs = [int(c) for c in data["conf"] if str(c).lstrip("-").isdigit() and int(c) >= 0]
         confidence = round(sum(confs) / max(len(confs), 1) / 100.0, 3) if confs else 0.5
         return ocr_text, confidence
@@ -269,8 +283,8 @@ def _extract_pdf_text_multicolumn(page: Any) -> str:
         page_width = page.rect.width
         if not blocks or page_width <= 0:
             return (page.get_text() or "").strip()
-        left: List[Tuple[float, str]] = []
-        right: List[Tuple[float, str]] = []
+        left: list[tuple[float, str]] = []
+        right: list[tuple[float, str]] = []
         for b in blocks:
             if b[6] != 0:
                 continue
@@ -310,7 +324,7 @@ def _correct_reading_order(text: str) -> str:
     return "\n".join(output)
 
 
-def _coalesce_leading_labels(cells: List[str]) -> List[str]:
+def _coalesce_leading_labels(cells: list[str]) -> list[str]:
     """Merge consecutive leading non-numeric cells into one label cell.
 
     Fixes pdfplumber splitting long segment names across columns, e.g.:
@@ -318,9 +332,10 @@ def _coalesce_leading_labels(cells: List[str]) -> List[str]:
     ['Wearables, Home and Accessories', '$37,005', ...]
     """
     import re as _re_cl
+
     if len(cells) <= 1:
         return cells
-    label_parts: List[str] = []
+    label_parts: list[str] = []
     j = 0
     while j < len(cells) and not _re_cl.search(r'[\d$]', cells[j]):
         label_parts.append(cells[j])
@@ -331,7 +346,7 @@ def _coalesce_leading_labels(cells: List[str]) -> List[str]:
     return [combined] + list(cells[j:])
 
 
-def _merge_row_cells(row: List[str]) -> List[str]:
+def _merge_row_cells(row: list[str]) -> list[str]:
     """Merge adjacent currency/percent fragments so '$' + '201,183' → '$201,183'.
 
     pdfplumber splits PDF table cells at glyph boundaries, producing many None/empty
@@ -343,9 +358,10 @@ def _merge_row_cells(row: List[str]) -> List[str]:
     - '$16,74' + '1' → '$16,741'   (split mid-3-digit group)
     """
     import re as _re_merge
+
     # Collapse empty strings so adjacency checks below work correctly.
     cells = [c for c in row if c]
-    merged: List[str] = []
+    merged: list[str] = []
     i = 0
     while i < len(cells):
         cell = cells[i]
@@ -368,19 +384,30 @@ def _merge_row_cells(row: List[str]) -> List[str]:
             continue
         # "$ N" followed by "M,NNN..." — text strategy splits "$ 29,749" into "$ 2"+"9,749"
         # Pattern: cell is "$ " + digits (no comma), next cell starts with digit + comma groups
-        if (_re_merge.match(r'^\$\s*\d+$', cell) and i + 1 < len(cells)
-                and _re_merge.match(r'^\d(?:,\d{3})*$', cells[i + 1])):
+        if (
+            _re_merge.match(r'^\$\s*\d+$', cell)
+            and i + 1 < len(cells)
+            and _re_merge.match(r'^\d(?:,\d{3})*$', cells[i + 1])
+        ):
             merged.append('$' + cell[1:].strip() + cells[i + 1])
             i += 2
             continue
         # "$N,NN" followed by short digit — split mid 3-digit group: "$16,74"+"1"→"$16,741"
-        if (_re_merge.match(r'^\$\d{1,3},\d{1,2}$', cell) and i + 1 < len(cells)
-                and _re_merge.match(r'^\d{1,2}$', cells[i + 1])):
+        if (
+            _re_merge.match(r'^\$\d{1,3},\d{1,2}$', cell)
+            and i + 1 < len(cells)
+            and _re_merge.match(r'^\d{1,2}$', cells[i + 1])
+        ):
             merged.append(cell + cells[i + 1])
             i += 2
             continue
         # "(N)" followed by "%" → "(N)%"
-        if cell.startswith("(") and cell.endswith(")") and i + 1 < len(cells) and cells[i + 1] == "%":
+        if (
+            cell.startswith("(")
+            and cell.endswith(")")
+            and i + 1 < len(cells)
+            and cells[i + 1] == "%"
+        ):
             merged.append(cell + "%")
             i += 2
             continue
@@ -398,6 +425,7 @@ def _merge_row_cells(row: List[str]) -> List[str]:
 
 def _table_to_text(rows: Iterable[Iterable[object]]) -> str:
     import re as _re
+
     cleaned = [
         [str(cell or "").strip() for cell in row]
         for row in (rows or [])
@@ -419,8 +447,9 @@ def _table_to_text(rows: Iterable[Iterable[object]]) -> str:
     return "\n".join(result_rows)
 
 
-def _table_to_markdown(rows: List[List[str]]) -> str:
+def _table_to_markdown(rows: list[list[str]]) -> str:
     import re as _re_md
+
     if not rows:
         return ""
     # Apply cell merging to every row before building markdown
@@ -439,7 +468,9 @@ def _table_to_markdown(rows: List[List[str]]) -> str:
     first_cell = first_row[0] if first_row else ""
     rest_cells = first_row[1:] if len(first_row) > 1 else []
     _label_first = bool(first_cell) and not _re_md.search(r'[\d$]', first_cell)
-    _finance_values = bool(rest_cells) and bool(_re_md.search(r'\$\d|\b\d{5,}', " ".join(rest_cells)))
+    _finance_values = bool(rest_cells) and bool(
+        _re_md.search(r'\$\d|\b\d{5,}', " ".join(rest_cells))
+    )
     _is_data_first = _label_first and _finance_values
 
     if _is_data_first:
@@ -467,7 +498,7 @@ def _table_to_markdown(rows: List[List[str]]) -> str:
         #   (b) no individual cell longer than 30 chars (description rows have long
         #       first cells; prose paragraphs are merged into one very long cell).
         _year_header_idx = None
-        _years_found: List[str] = []
+        _years_found: list[str] = []
         for _scan_idx, _scan_row in enumerate(cleaned_rows):
             _joined = "".join(_scan_row).replace(" ", "")
             _yrs = sorted(set(_re_md.findall(r'20\d{2}', _joined)), reverse=True)
@@ -480,18 +511,23 @@ def _table_to_markdown(rows: List[List[str]]) -> str:
 
         if _year_header_idx is not None:
             # Data rows follow the year-header row.
-            _data_rows = cleaned_rows[_year_header_idx + 1:]
+            _data_rows = cleaned_rows[_year_header_idx + 1 :]
             # Compute ncols from financial data rows only, within the first 20 rows
             # after the year header.  The thousands-separator pattern (\d{1,3}(?:,\d{3})+)
             # matches "37,005", "$391,035", "$201,183" etc., but NOT year values like
             # "2024", "2023," or sentence fragments that incidentally contain digits.
-            _fin_rows = [r for r in _data_rows[:20]
-                         if any(_re_md.search(r'\d{1,3}(?:,\d{3})+', c) for c in r)]
-            ncols = max((len(r) for r in _fin_rows),
-                        default=max((len(r) for r in _data_rows[:20] if r), default=4))
+            _fin_rows = [
+                r
+                for r in _data_rows[:20]
+                if any(_re_md.search(r'\d{1,3}(?:,\d{3})+', c) for c in r)
+            ]
+            ncols = max(
+                (len(r) for r in _fin_rows),
+                default=max((len(r) for r in _data_rows[:20] if r), default=4),
+            )
             # Include Change columns only when the table is wide enough for them.
             _add_change = ncols > len(_years_found) + 1
-            _clean_hdr: List[str] = ["Segment"]
+            _clean_hdr: list[str] = ["Segment"]
             for yr in _years_found:
                 _clean_hdr.append(f"FY{yr}")
                 if _add_change and len(_clean_hdr) < ncols:
@@ -514,15 +550,16 @@ def _table_to_markdown(rows: List[List[str]]) -> str:
     return "\n".join(lines)
 
 
-def _detect_fiscal_years_from_rows(rows: List[List[str]]) -> List[str]:
+def _detect_fiscal_years_from_rows(rows: list[list[str]]) -> list[str]:
     """Return sorted list of FY-prefixed fiscal years found in the first 15 rows."""
     import re as _re_fy
+
     text = " ".join(str(c or "") for row in rows[:15] for c in row)
     years = sorted(set(_re_fy.findall(r'20\d{2}', text)), reverse=True)
     return [f"FY{y}" for y in years[:5]]
 
 
-def _infer_table_title(rows: List[List[str]], section_title: str = "") -> str:
+def _infer_table_title(rows: list[list[str]], section_title: str = "") -> str:
     """Classify a financial table by its dominant keyword pattern."""
     text = " ".join(str(c or "") for row in rows[:6] for c in row).lower()
     if "gross margin" in text:
@@ -553,12 +590,13 @@ def _table_to_nl_summary(md: str, page: int, table_title: str, doc_name: str = "
     so that embedding similarity aligns tightly with queries like "Wearables revenue 2024".
     """
     import re as _re_nl
+
     lines = [l.strip() for l in md.strip().split("\n") if l.strip()]
     if not lines:
         return ""
 
     # Locate the clean header row that contains FY20XX tokens
-    header_cells: Optional[List[str]] = None
+    header_cells: list[str] | None = None
     data_start = 0
     for i, line in enumerate(lines):
         if "|" not in line:
@@ -577,8 +615,8 @@ def _table_to_nl_summary(md: str, page: int, table_title: str, doc_name: str = "
         return ""
 
     # Identify which column indexes carry FY20XX values
-    year_cols: List[str] = []
-    year_idxs: List[int] = []
+    year_cols: list[str] = []
+    year_idxs: list[int] = []
     for j, c in enumerate(header_cells):
         if _re_nl.match(r"FY20\d{2}$", c):
             year_cols.append(c)
@@ -589,8 +627,7 @@ def _table_to_nl_summary(md: str, page: int, table_title: str, doc_name: str = "
 
     loc = ", ".join(p for p in [doc_name, f"Page {page}" if page else ""] if p)
     header_str = " | ".join(header_cells)
-    out = [f"{table_title} ({loc})" if loc else table_title,
-           f"Columns: {header_str}", ""]
+    out = [f"{table_title} ({loc})" if loc else table_title, f"Columns: {header_str}", ""]
 
     for line in lines[data_start:]:
         if "|" not in line:
@@ -602,7 +639,7 @@ def _table_to_nl_summary(md: str, page: int, table_title: str, doc_name: str = "
         # Skip empty, disclosure/footnote rows (very long first cells)
         if not segment or not any(ch.isalpha() for ch in segment) or len(segment) > 70:
             continue
-        val_parts: List[str] = []
+        val_parts: list[str] = []
         for yr, idx in zip(year_cols, year_idxs):
             if idx < len(cells):
                 v = cells[idx]
@@ -611,10 +648,12 @@ def _table_to_nl_summary(md: str, page: int, table_title: str, doc_name: str = "
                 # Normalize "$ 383,285" (space after $) → "$383,285"
                 v = _re_nl.sub(r'^\$\s+', '$', v)
                 # Accept comma-formatted amounts: "37,005", "$201,183", "$383,285"
-                _plain  = _re_nl.match(r"^\d{1,3}(?:,\d{3})+$", v)
+                _plain = _re_nl.match(r"^\d{1,3}(?:,\d{3})+$", v)
                 _dollar = _re_nl.match(r"^\$\d{1,3}(?:,\d{3})+$", v)
                 # Accept percentage values: "37.2%", "24.1%", "46.2%", "(7)%"
-                _pct    = _re_nl.match(r"^-?\d+(?:\.\d+)?%$", v) or _re_nl.match(r"^\(\d+(?:\.\d+)?\)%$", v)
+                _pct = _re_nl.match(r"^-?\d+(?:\.\d+)?%$", v) or _re_nl.match(
+                    r"^\(\d+(?:\.\d+)?\)%$", v
+                )
                 if not (_plain or _dollar or _pct):
                     continue
                 if _plain:
@@ -630,7 +669,7 @@ def _table_to_nl_summary(md: str, page: int, table_title: str, doc_name: str = "
     return "\n".join(out) if len(out) > 3 else ""
 
 
-def _detect_font_size(page: Any, text_block: str) -> Optional[float]:
+def _detect_font_size(page: Any, text_block: str) -> float | None:
     try:
         spans = page.get_text("dict").get("blocks", [])
         for block in spans:
@@ -661,8 +700,9 @@ def _detect_is_bold(page: Any, text_block: str) -> bool:
     return False
 
 
-def _detect_heading(text: str, font_size: Optional[float], is_bold: bool,
-                    body_font_size: Optional[float]) -> bool:
+def _detect_heading(
+    text: str, font_size: float | None, is_bold: bool, body_font_size: float | None
+) -> bool:
     t = text.strip()
     if not t or len(t) > 250:
         return False
@@ -687,6 +727,7 @@ def _detect_heading(text: str, font_size: Optional[float], is_bold: bool,
 
 # ─── Phase 1: PdfIngestor ─────────────────────────────────────────────────────
 
+
 class PdfIngestor(BaseIngestor):
     """Extracts raw content from PDF files → List[RawExtract].
 
@@ -705,10 +746,12 @@ class PdfIngestor(BaseIngestor):
         self,
         path: Path,
         metadata: UniversalMetadata,
-    ) -> List[RawExtract]:
+    ) -> list[RawExtract]:
         source = path.name
         file_path = str(path)
-        logger.info(event="extraction_start", modality="pdf", file=str(path), size=path.stat().st_size)
+        logger.info(
+            event="extraction_start", modality="pdf", file=str(path), size=path.stat().st_size
+        )
         try:
             if _is_pdf_encrypted(file_path):
                 raise ValueError(f"PASSWORD_PROTECTED_PDF: {path.name}")
@@ -721,6 +764,7 @@ class PdfIngestor(BaseIngestor):
             is_xfa = _has_xfa(file_path)
 
             import fitz
+
             try:
                 pdf = fitz.open(file_path)
             except Exception:
@@ -734,11 +778,11 @@ class PdfIngestor(BaseIngestor):
                     raise ValueError(f"PDF_CORRUPT_UNRECOVERABLE: {exc}")
 
             total_pages = len(pdf)
-            extracts: List[RawExtract] = []
-            header_footer_counts: Dict[str, int] = {}
+            extracts: list[RawExtract] = []
+            header_footer_counts: dict[str, int] = {}
 
             # Estimate body font size from first few text-heavy pages
-            body_font_size: Optional[float] = None
+            body_font_size: float | None = None
             try:
                 for pg in list(pdf)[:5]:
                     for block in pg.get_text("dict").get("blocks", []):
@@ -754,7 +798,7 @@ class PdfIngestor(BaseIngestor):
 
             # PASS 1: collect page metadata + pixmap bytes for OCR pages.
             # All PyMuPDF calls stay on main thread (fitz is not thread-safe).
-            _page_records: List[Dict] = []
+            _page_records: list[dict] = []
             for i, page in enumerate(pdf, start=1):
                 rotation = _get_page_rotation(page)
                 if rotation not in (0, 360):
@@ -773,22 +817,27 @@ class PdfIngestor(BaseIngestor):
                 # text layer but low density. Off by default — it's slow on filings
                 # (10-Ks) and pages with text rarely need it. Gated behind config.
                 needs_supl_ocr = (
-                    settings.PDF_SUPPLEMENTAL_OCR_ENABLED
-                    and bool(raw_text)
-                    and density < 0.01
+                    settings.PDF_SUPPLEMENTAL_OCR_ENABLED and bool(raw_text) and density < 0.01
                 )
-                pix_info: Optional[Tuple[bytes, int, int]] = None
+                pix_info: tuple[bytes, int, int] | None = None
                 if needs_full_ocr or needs_supl_ocr:
                     try:
                         pix = page.get_pixmap(dpi=200)
                         pix_info = (bytes(pix.samples), pix.width, pix.height)
                     except Exception as exc:
                         logger.warning("pdf_pixmap_failed", page=i, error=str(exc))
-                _page_records.append({
-                    "page_num": i, "page": page, "raw_text": raw_text, "rect": rect,
-                    "density": density, "needs_full_ocr": needs_full_ocr,
-                    "needs_supl_ocr": needs_supl_ocr, "pix_info": pix_info,
-                })
+                _page_records.append(
+                    {
+                        "page_num": i,
+                        "page": page,
+                        "raw_text": raw_text,
+                        "rect": rect,
+                        "density": density,
+                        "needs_full_ocr": needs_full_ocr,
+                        "needs_supl_ocr": needs_supl_ocr,
+                        "pix_info": pix_info,
+                    }
+                )
 
             # PASS 2: parallel Tesseract OCR — Tesseract is thread-safe, semaphore
             # bounds CPU concurrency to settings.PDF_OCR_WORKERS processes.
@@ -796,12 +845,14 @@ class PdfIngestor(BaseIngestor):
 
             async def _ocr_bytes_async(
                 samples: bytes, w: int, h: int, page_num: int
-            ) -> Tuple[int, Tuple[str, float]]:
+            ) -> tuple[int, tuple[str, float]]:
                 async with _ocr_sem:
-                    def _run() -> Tuple[str, float]:
+
+                    def _run() -> tuple[str, float]:
                         try:
                             import pytesseract
                             from PIL import Image as _PILImg
+
                             img = _PILImg.frombytes("RGB", [w, h], samples)
                             # Pixmaps are rendered at dpi=200 but carry no DPI
                             # metadata; tell Tesseract explicitly to silence the
@@ -814,36 +865,38 @@ class PdfIngestor(BaseIngestor):
                                 img, output_type=pytesseract.Output.DICT, config=_ocr_cfg
                             )
                             confs = [
-                                int(c) for c in data["conf"]
+                                int(c)
+                                for c in data["conf"]
                                 if str(c).lstrip("-").isdigit() and int(c) >= 0
                             ]
                             confidence = (
-                                round(sum(confs) / max(len(confs), 1) / 100.0, 3)
-                                if confs else 0.5
+                                round(sum(confs) / max(len(confs), 1) / 100.0, 3) if confs else 0.5
                             )
                             return ocr_text, confidence
                         except Exception as exc:
                             logger.warning("ocr_page_failed", page=page_num, error=str(exc))
                             return "", 0.0
+
                     return page_num, await asyncio.to_thread(_run)
 
             _ocr_tasks = [
                 _ocr_bytes_async(*rec["pix_info"], rec["page_num"])
-                for rec in _page_records if rec["pix_info"] is not None
+                for rec in _page_records
+                if rec["pix_info"] is not None
             ]
-            _ocr_results: Dict[int, Tuple[str, float]] = {}
+            _ocr_results: dict[int, tuple[str, float]] = {}
             if _ocr_tasks:
                 for _pnum, _res in await asyncio.gather(*_ocr_tasks):
                     _ocr_results[_pnum] = _res
 
             # PASS 3: finalize extracts using parallel OCR results (main thread).
             for rec in _page_records:
-                i       = rec["page_num"]
-                page    = rec["page"]
+                i = rec["page_num"]
+                page = rec["page"]
                 raw_text = rec["raw_text"]
-                rect    = rec["rect"]
+                rect = rec["rect"]
                 ocr_conf = 1.0
-                is_ocr   = False
+                is_ocr = False
 
                 if rec["needs_full_ocr"]:
                     _ocr_invocations.inc()
@@ -853,7 +906,9 @@ class PdfIngestor(BaseIngestor):
                         if ocr_result:
                             raw_text = ocr_result
                     elif rec["pix_info"] is None:
-                        logger.warning("pdf_ocr_fallback_failed", page=i, error="pixmap unavailable")
+                        logger.warning(
+                            "pdf_ocr_fallback_failed", page=i, error="pixmap unavailable"
+                        )
                 elif rec["needs_supl_ocr"]:
                     _ocr_invocations.inc()
                     if i in _ocr_results:
@@ -891,7 +946,9 @@ class PdfIngestor(BaseIngestor):
 
                 # Watermark stripping — remove lines that are solely watermark tokens
                 _page_lines = page_text.split("\n")
-                _filtered = [ln for ln in _page_lines if ln.strip().upper() not in _PDF_WATERMARK_STRIP]
+                _filtered = [
+                    ln for ln in _page_lines if ln.strip().upper() not in _PDF_WATERMARK_STRIP
+                ]
                 if len(_filtered) < len(_page_lines):
                     page_text = "\n".join(_filtered).strip()
 
@@ -901,7 +958,9 @@ class PdfIngestor(BaseIngestor):
                 # For heading detection, check the first non-blank line —
                 # headings are at the top of the page, not the full page text.
                 _first_line = next((ln.strip() for ln in page_text.split("\n") if ln.strip()), "")
-                is_heading = _detect_heading(_first_line or page_text, font_sz, is_bold, body_font_size)
+                is_heading = _detect_heading(
+                    _first_line or page_text, font_sz, is_bold, body_font_size
+                )
 
                 # Classify SEC 10-K Part/Item headings for downstream hierarchy building
                 _sec_label = _classify_10k_section(_first_line) if _first_line else None
@@ -913,24 +972,26 @@ class PdfIngestor(BaseIngestor):
                 else:
                     ext_type = "prose"
 
-                extracts.append(RawExtract(
-                    text=page_text,
-                    extract_type=ext_type,
-                    page=i,
-                    bbox=(rect.x0, rect.y0, rect.x1, rect.y1),
-                    font_size=font_sz,
-                    is_bold=is_bold,
-                    raw_source_ref=f"pdf:{path.name}|page:{i}",
-                    extra={
-                        "total_pages": total_pages,
-                        "ocr_confidence": ocr_conf,
-                        "is_ocr": is_ocr,
-                        "is_pdfa": is_pdfa,
-                        "has_xfa": is_xfa,
-                        "has_javascript": has_js,
-                        "sec_section": _sec_label,   # canonical SEC label e.g. "Item 7. MD&A"
-                    },
-                ))
+                extracts.append(
+                    RawExtract(
+                        text=page_text,
+                        extract_type=ext_type,
+                        page=i,
+                        bbox=(rect.x0, rect.y0, rect.x1, rect.y1),
+                        font_size=font_sz,
+                        is_bold=is_bold,
+                        raw_source_ref=f"pdf:{path.name}|page:{i}",
+                        extra={
+                            "total_pages": total_pages,
+                            "ocr_confidence": ocr_conf,
+                            "is_ocr": is_ocr,
+                            "is_pdfa": is_pdfa,
+                            "has_xfa": is_xfa,
+                            "has_javascript": has_js,
+                            "sec_section": _sec_label,  # canonical SEC label e.g. "Item 7. MD&A"
+                        },
+                    )
+                )
 
                 # Embedded images → image_raw extracts
                 for img_idx, img_ref in enumerate(page.get_images(full=True)):
@@ -940,20 +1001,23 @@ class PdfIngestor(BaseIngestor):
                         img_bytes = base.get("image")
                         if not img_bytes or len(img_bytes) < 256:
                             continue
-                        extracts.append(RawExtract(
-                            text="",
-                            extract_type="image_region",
-                            page=i,
-                            raw_source_ref=f"pdf:{path.name}|page:{i}|img:{img_idx}",
-                            raw_bytes=img_bytes,
-                            extra={
-                                "img_ext": base.get("ext", "png"),
-                                "context_text": page_text[:500],
-                            },
-                        ))
+                        extracts.append(
+                            RawExtract(
+                                text="",
+                                extract_type="image_region",
+                                page=i,
+                                raw_source_ref=f"pdf:{path.name}|page:{i}|img:{img_idx}",
+                                raw_bytes=img_bytes,
+                                extra={
+                                    "img_ext": base.get("ext", "png"),
+                                    "context_text": page_text[:500],
+                                },
+                            )
+                        )
                     except Exception as exc:
-                        logger.warning("pdf_image_extract_failed", page=i,
-                                       img_idx=img_idx, error=str(exc))
+                        logger.warning(
+                            "pdf_image_extract_failed", page=i, img_idx=img_idx, error=str(exc)
+                        )
 
             # Hyperlinks as footnote extracts
             try:
@@ -962,12 +1026,14 @@ class PdfIngestor(BaseIngestor):
                         uri = link.get("uri", "")
                         if uri:
                             uri = self._sanitize(uri, surface="pdf_hyperlink_ingest")
-                            extracts.append(RawExtract(
-                                text=f"[HYPERLINK page={i}] {uri}",
-                                extract_type="footnote",
-                                page=i,
-                                raw_source_ref=f"pdf:{path.name}|page:{i}|link",
-                            ))
+                            extracts.append(
+                                RawExtract(
+                                    text=f"[HYPERLINK page={i}] {uri}",
+                                    extract_type="footnote",
+                                    page=i,
+                                    raw_source_ref=f"pdf:{path.name}|page:{i}|link",
+                                )
+                            )
             except Exception as exc:
                 logger.warning("pdf_hyperlink_extraction_failed", error=str(exc))
             finally:
@@ -978,8 +1044,11 @@ class PdfIngestor(BaseIngestor):
             # (e.g. "1", "2", "3") from being treated as headers and corrupting
             # every financial number in the document via str.replace.
             repeated = {
-                k for k, v in header_footer_counts.items()
-                if v > 3 and k.strip() and len(k.strip()) >= 4
+                k
+                for k, v in header_footer_counts.items()
+                if v > 3
+                and k.strip()
+                and len(k.strip()) >= 4
                 and not k.strip().replace(",", "").replace(".", "").isdigit()
             }
             if repeated:
@@ -990,7 +1059,7 @@ class PdfIngestor(BaseIngestor):
 
             # Build page → last known section title so pdfplumber table extracts
             # (appended after all prose) can carry the correct section context to the chunker.
-            _page_to_section: Dict[int, str] = {}
+            _page_to_section: dict[int, str] = {}
             _last_sec = ""
             for _ex in extracts:
                 if _ex.extract_type == "heading" and _ex.text:
@@ -1004,8 +1073,10 @@ class PdfIngestor(BaseIngestor):
             # lines strategy partially misses. We use text strategy when it finds
             # more financial data rows (rows containing digits or $) for the same page.
             try:
-                import pdfplumber
                 import re as _plumber_re
+
+                import pdfplumber
+
                 _TEXT_STRAT = {
                     "vertical_strategy": "text",
                     "horizontal_strategy": "text",
@@ -1013,7 +1084,9 @@ class PdfIngestor(BaseIngestor):
 
                 def _count_data_rows(tables: list) -> int:
                     return sum(
-                        1 for t in tables for r in t
+                        1
+                        for t in tables
+                        for r in t
                         if any(_plumber_re.search(r'[\d$]', str(c or '')) for c in r)
                     )
 
@@ -1029,6 +1102,7 @@ class PdfIngestor(BaseIngestor):
                             text_tables = page.extract_tables(_TEXT_STRAT) or []
                             lines_dr = _count_data_rows(lines_tables)
                             text_dr = _count_data_rows(text_tables)
+
                             # Use text strategy only when it finds significantly more data rows
                             # (indicates a borderless table missed by lines strategy, e.g. the
                             # Apple 10K product-category breakdown which lines strategy truncates).
@@ -1040,9 +1114,12 @@ class PdfIngestor(BaseIngestor):
                             # residual fragments that confuse the LLM.
                             def _has_unrepaired_shatter(tables: list) -> bool:
                                 import re as _qre
+
                                 for t in tables:
                                     for row in t:
-                                        raw = [str(c or "").strip() for c in row if (c or "").strip()]
+                                        raw = [
+                                            str(c or "").strip() for c in row if (c or "").strip()
+                                        ]
                                         repaired = _merge_row_cells(raw)
                                         for c in repaired:
                                             # Still lone "$ N" (< 3 digits) after repair
@@ -1053,7 +1130,9 @@ class PdfIngestor(BaseIngestor):
                                                 return True
                                 return False
 
-                            if text_dr > lines_dr * 2 + 2 and not _has_unrepaired_shatter(text_tables):
+                            if text_dr > lines_dr * 2 + 2 and not _has_unrepaired_shatter(
+                                text_tables
+                            ):
                                 best_tables = text_tables
                         except Exception:
                             pass
@@ -1071,19 +1150,21 @@ class PdfIngestor(BaseIngestor):
                             md_clean = self._sanitize(md, surface="pdf_table_ingest")
                             md_clean = self._scrub_pii(md_clean, surface="pdf_table_ingest")
                             if md_clean:
-                                extracts.append(RawExtract(
-                                    text=md_clean,
-                                    extract_type="table_row",
-                                    page=i,
-                                    raw_source_ref=f"pdf:{path.name}|page:{i}|table:{t_idx}",
-                                    extra={
-                                        "markdown": md_clean,
-                                        "table_index": t_idx,
-                                        "section_title": _sec_ctx,
-                                        "fiscal_years": _fiscal_yrs,
-                                        "table_title": _t_title,
-                                    },
-                                ))
+                                extracts.append(
+                                    RawExtract(
+                                        text=md_clean,
+                                        extract_type="table_row",
+                                        page=i,
+                                        raw_source_ref=f"pdf:{path.name}|page:{i}|table:{t_idx}",
+                                        extra={
+                                            "markdown": md_clean,
+                                            "table_index": t_idx,
+                                            "section_title": _sec_ctx,
+                                            "fiscal_years": _fiscal_yrs,
+                                            "table_title": _t_title,
+                                        },
+                                    )
+                                )
 
                             # NL summary: "- Wearables: FY2024 $37,005M, FY2023 $39,845M"
                             # High semantic overlap with natural language queries.
@@ -1092,31 +1173,39 @@ class PdfIngestor(BaseIngestor):
                                 _nl_clean = self._sanitize(_nl, surface="pdf_table_ingest")
                                 _nl_clean = self._scrub_pii(_nl_clean, surface="pdf_table_ingest")
                                 if _nl_clean:
-                                    extracts.append(RawExtract(
-                                        text=_nl_clean,
-                                        extract_type="table_summary",
-                                        page=i,
-                                        raw_source_ref=f"pdf:{path.name}|page:{i}|table:{t_idx}|nl",
-                                        extra={
-                                            "fiscal_years": _fiscal_yrs,
-                                            "table_title": _t_title,
-                                            "section_title": _sec_ctx,
-                                        },
-                                    ))
+                                    extracts.append(
+                                        RawExtract(
+                                            text=_nl_clean,
+                                            extract_type="table_summary",
+                                            page=i,
+                                            raw_source_ref=f"pdf:{path.name}|page:{i}|table:{t_idx}|nl",
+                                            extra={
+                                                "fiscal_years": _fiscal_yrs,
+                                                "table_title": _t_title,
+                                                "section_title": _sec_ctx,
+                                            },
+                                        )
+                                    )
 
                     # Outline/bookmarks
                     try:
                         outline = getattr(pdf_p, "outline", None)
                         if outline:
-                            outline_text = self._sanitize(str(outline)[:2000], surface="pdf_outline_ingest")
-                            outline_text = self._scrub_pii(outline_text, surface="pdf_outline_ingest")
+                            outline_text = self._sanitize(
+                                str(outline)[:2000], surface="pdf_outline_ingest"
+                            )
+                            outline_text = self._scrub_pii(
+                                outline_text, surface="pdf_outline_ingest"
+                            )
                             if outline_text:
-                                extracts.append(RawExtract(
-                                    text=f"[OUTLINE]\n{outline_text}",
-                                    extract_type="heading",
-                                    raw_source_ref=f"pdf:{path.name}|outline",
-                                    extra={"is_outline": True},
-                                ))
+                                extracts.append(
+                                    RawExtract(
+                                        text=f"[OUTLINE]\n{outline_text}",
+                                        extract_type="heading",
+                                        raw_source_ref=f"pdf:{path.name}|outline",
+                                        extra={"is_outline": True},
+                                    )
+                                )
                     except Exception:
                         pass
             except Exception as exc:
@@ -1126,6 +1215,7 @@ class PdfIngestor(BaseIngestor):
             # Deduplicates against pdfplumber results by first-50-char content hash.
             try:
                 import camelot
+
                 _plumber_sigs = {ex.text[:50] for ex in extracts if ex.extract_type == "table_row"}
                 _camelot_tables = camelot.read_pdf(file_path, pages="1-end", flavor="lattice")
                 for ct in _camelot_tables:
@@ -1142,32 +1232,36 @@ class PdfIngestor(BaseIngestor):
                     md_clean = self._sanitize(md, surface="pdf_table_ingest")
                     md_clean = self._scrub_pii(md_clean, surface="pdf_table_ingest")
                     if md_clean:
-                        extracts.append(RawExtract(
-                            text=md_clean,
-                            extract_type="table_row",
-                            page=ct.page,
-                            raw_source_ref=f"pdf:{path.name}|page:{ct.page}|camelot",
-                            extra={
-                                "markdown": md_clean,
-                                "extractor": "camelot",
-                                "accuracy": ct.parsing_report.get("accuracy"),
-                                "fiscal_years": _fiscal_yrs,
-                                "table_title": _t_title,
-                            },
-                        ))
+                        extracts.append(
+                            RawExtract(
+                                text=md_clean,
+                                extract_type="table_row",
+                                page=ct.page,
+                                raw_source_ref=f"pdf:{path.name}|page:{ct.page}|camelot",
+                                extra={
+                                    "markdown": md_clean,
+                                    "extractor": "camelot",
+                                    "accuracy": ct.parsing_report.get("accuracy"),
+                                    "fiscal_years": _fiscal_yrs,
+                                    "table_title": _t_title,
+                                },
+                            )
+                        )
                         _plumber_sigs.add(_md_sig)
                     _nl = _table_to_nl_summary(md, ct.page, _t_title, path.stem)
                     if _nl:
                         _nl_clean = self._sanitize(_nl, surface="pdf_table_ingest")
                         _nl_clean = self._scrub_pii(_nl_clean, surface="pdf_table_ingest")
                         if _nl_clean:
-                            extracts.append(RawExtract(
-                                text=_nl_clean,
-                                extract_type="table_summary",
-                                page=ct.page,
-                                raw_source_ref=f"pdf:{path.name}|page:{ct.page}|camelot|nl",
-                                extra={"fiscal_years": _fiscal_yrs, "table_title": _t_title},
-                            ))
+                            extracts.append(
+                                RawExtract(
+                                    text=_nl_clean,
+                                    extract_type="table_summary",
+                                    page=ct.page,
+                                    raw_source_ref=f"pdf:{path.name}|page:{ct.page}|camelot|nl",
+                                    extra={"fiscal_years": _fiscal_yrs, "table_title": _t_title},
+                                )
+                            )
             except ImportError:
                 pass  # camelot optional; pdfplumber handles standard tables
             except Exception as exc:
@@ -1188,7 +1282,7 @@ class PdfIngestor(BaseIngestor):
                     r'Form\s*10-?K\s*\|\s*(\d{1,3})\b|\b(\d{1,3})\s*\|\s*Apple\s+Inc',
                     re.IGNORECASE,
                 )
-                _printed: Dict[int, int] = {}
+                _printed: dict[int, int] = {}
                 for _rec in _page_records:
                     _tail = (_rec.get("raw_text") or "")[-400:]
                     _mm = _foot_re.search(_tail)
@@ -1216,7 +1310,9 @@ class PdfIngestor(BaseIngestor):
                 logger.warning(event="pdf_page_remap_failed", error=str(_remap_err))
 
             _EXTRACTS_TOTAL.inc(len(extracts))
-            logger.info(event="extraction_complete", modality="pdf", file=str(path), extracts=len(extracts))
+            logger.info(
+                event="extraction_complete", modality="pdf", file=str(path), extracts=len(extracts)
+            )
             return extracts
         except Exception as _exc:
             _EXTRACT_ERRORS.inc()
@@ -1226,20 +1322,30 @@ class PdfIngestor(BaseIngestor):
 
 # ─── Backward-compat ingest() — full pipeline ─────────────────────────────────
 
-def _base_structure(doc_id: str, session_id: str, source_path: str, **extra: Any) -> Dict[str, Any]:
+
+def _base_structure(doc_id: str, session_id: str, source_path: str, **extra: Any) -> dict[str, Any]:
     return {"doc_id": doc_id, "session_id": session_id, "source_path": source_path, **extra}
 
 
-def _redact_pii(text: str) -> Tuple[str, Dict[str, int]]:
+def _redact_pii(text: str) -> tuple[str, dict[str, int]]:
     if not settings.PII_DETECTION_ENABLED:
         return text, {}
-    entity_counts: Dict[str, int] = {}
+    entity_counts: dict[str, int] = {}
     try:
         from presidio_analyzer import AnalyzerEngine
         from presidio_anonymizer import AnonymizerEngine
-        entities = getattr(settings, "PII_ENTITIES", [
-            "EMAIL_ADDRESS", "PHONE_NUMBER", "US_SSN", "CREDIT_CARD", "IP_ADDRESS",
-        ])
+
+        entities = getattr(
+            settings,
+            "PII_ENTITIES",
+            [
+                "EMAIL_ADDRESS",
+                "PHONE_NUMBER",
+                "US_SSN",
+                "CREDIT_CARD",
+                "IP_ADDRESS",
+            ],
+        )
         analyzer = AnalyzerEngine()
         anonymizer = AnonymizerEngine()
         results = analyzer.analyze(text=text, entities=entities, language="en")
@@ -1257,6 +1363,7 @@ def _redact_pii(text: str) -> Tuple[str, Dict[str, int]]:
 def _pii_scrub(text: str, surface: str) -> str:
     try:
         from app.guardrails.pii import scrub_pii as _gp_scrub
+
         cleaned, _ = _gp_scrub(text)
         return cleaned
     except Exception:
@@ -1267,12 +1374,13 @@ def _pii_scrub(text: str, surface: str) -> str:
 def _sanitize_text(text: str, surface: str) -> str:
     try:
         from app.guardrails.input_guard import sanitize as _g
+
         return _g(text, surface=surface)
     except Exception:
         return text
 
 
-async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
+async def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
     """Backward-compatible entry point. Router imports this until Phase 8."""
     if not session_id:
         raise ValueError("SESSION_ID_REQUIRED")
@@ -1295,7 +1403,9 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
         async with _semaphore:
             try:
-                logger.info("pdf_ingest_start", file=path.name, size=file_size, session_id=session_id)
+                logger.info(
+                    "pdf_ingest_start", file=path.name, size=file_size, session_id=session_id
+                )
 
                 import fitz
                 import pdfplumber
@@ -1315,6 +1425,7 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 is_xfa = _has_xfa(file_path)
 
                 from app.utils.paths import resolved_images_dir
+
                 image_dir = resolved_images_dir() / doc_id
                 image_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1330,8 +1441,8 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                         raise ValueError(f"PDF_CORRUPT_UNRECOVERABLE: {exc}")
 
                 total_pages = len(pdf)
-                documents: List[IngestedDocument] = []
-                header_footer_counts: Dict[str, int] = {}
+                documents: list[IngestedDocument] = []
+                header_footer_counts: dict[str, int] = {}
 
                 for i, page in enumerate(pdf, start=1):
                     rotation = _get_page_rotation(page)
@@ -1379,16 +1490,19 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     page_text = _correct_reading_order(page_text) if page_text else page_text
 
                     if page_text:
-                        page_sub_chunks: List[str] = []
+                        page_sub_chunks: list[str] = []
                         if len(page_text) > settings.CHUNK_SIZE:
                             try:
                                 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
                                 _splitter = RecursiveCharacterTextSplitter(
                                     chunk_size=settings.CHUNK_SIZE,
                                     chunk_overlap=settings.CHUNK_OVERLAP,
                                     separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""],
                                 )
-                                page_sub_chunks = [c.strip() for c in _splitter.split_text(page_text) if c.strip()]
+                                page_sub_chunks = [
+                                    c.strip() for c in _splitter.split_text(page_text) if c.strip()
+                                ]
                             except Exception:
                                 pass
                         if not page_sub_chunks:
@@ -1404,7 +1518,9 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                                     source=source_name,
                                     page=i,
                                     structure=_base_structure(
-                                        doc_id, session_id, source_path_str,
+                                        doc_id,
+                                        session_id,
+                                        source_path_str,
                                         page=i,
                                         page_number=i,
                                         total_pages=total_pages,
@@ -1440,24 +1556,31 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                             img_path = image_dir / f"p{i}_img{img_idx}.png"
                             img_path.write_bytes(img_bytes)
                             from app.ingestion.image_ingest import ingest as image_ingest
+
                             img_docs = image_ingest(str(img_path), session_id)
                             for d in img_docs:
-                                d.structure.update({
-                                    "doc_id": doc_id,
-                                    "page": i,
-                                    "context_text": page_text[:500] if page_text else "",
-                                    "source_path": source_path_str,
-                                })
+                                d.structure.update(
+                                    {
+                                        "doc_id": doc_id,
+                                        "page": i,
+                                        "context_text": page_text[:500] if page_text else "",
+                                        "source_path": source_path_str,
+                                    }
+                                )
                                 documents.append(d)
                         except Exception as exc:
-                            logger.warning("pdf_image_extract_failed", page=i,
-                                           img_idx=img_idx, error=str(exc))
+                            logger.warning(
+                                "pdf_image_extract_failed", page=i, img_idx=img_idx, error=str(exc)
+                            )
 
                 # Strip repeated headers/footers.
                 # Guard: minimum 4 characters — see extract() for full rationale.
                 repeated = {
-                    k for k, v in header_footer_counts.items()
-                    if v > 3 and k.strip() and len(k.strip()) >= 4
+                    k
+                    for k, v in header_footer_counts.items()
+                    if v > 3
+                    and k.strip()
+                    and len(k.strip()) >= 4
                     and not k.strip().replace(",", "").replace(".", "").isdigit()
                 }
                 if repeated:
@@ -1476,7 +1599,9 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                                 md = _table_to_markdown(rows)
                                 if not txt:
                                     continue
-                                combined = _sanitize_text(f"{txt}\n\n{md}", surface="pdf_table_ingest")
+                                combined = _sanitize_text(
+                                    f"{txt}\n\n{md}", surface="pdf_table_ingest"
+                                )
                                 combined = _pii_scrub(combined, surface="pdf_table_ingest")
                                 documents.append(
                                     IngestedDocument(
@@ -1487,7 +1612,9 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                                         source=source_name,
                                         page=i,
                                         structure=_base_structure(
-                                            doc_id, session_id, source_path_str,
+                                            doc_id,
+                                            session_id,
+                                            source_path_str,
                                             page=i,
                                             page_number=i,
                                             total_pages=total_pages,
@@ -1510,8 +1637,12 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                         try:
                             outline = getattr(pdf_p, "outline", None)
                             if outline:
-                                outline_text = _sanitize_text(str(outline)[:2000], surface="pdf_outline_ingest")
-                                outline_text = _pii_scrub(outline_text, surface="pdf_outline_ingest")
+                                outline_text = _sanitize_text(
+                                    str(outline)[:2000], surface="pdf_outline_ingest"
+                                )
+                                outline_text = _pii_scrub(
+                                    outline_text, surface="pdf_outline_ingest"
+                                )
                                 documents.append(
                                     IngestedDocument(
                                         text=f"[OUTLINE]\n{outline_text}",
@@ -1520,7 +1651,9 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                                         source_type="pdf",
                                         source=source_name,
                                         structure=_base_structure(
-                                            doc_id, session_id, source_path_str,
+                                            doc_id,
+                                            session_id,
+                                            source_path_str,
                                             content_type="pdf_outline",
                                             ingestion_time=time.time(),
                                         ),
@@ -1554,7 +1687,9 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                                         source=source_name,
                                         page=i,
                                         structure=_base_structure(
-                                            doc_id, session_id, source_path_str,
+                                            doc_id,
+                                            session_id,
+                                            source_path_str,
                                             page=i,
                                             content_type="pdf_hyperlink",
                                             ingestion_time=time.time(),
@@ -1582,8 +1717,14 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 _ingest_duration.labels(status="success").observe(latency)
                 span.set_attribute("docs.count", len(documents))
                 span.set_status(Status(StatusCode.OK))
-                logger.info("pdf_ingest_success", file=path.name, docs=len(documents),
-                            pages=total_pages, latency=latency, session_id=session_id)
+                logger.info(
+                    "pdf_ingest_success",
+                    file=path.name,
+                    docs=len(documents),
+                    pages=total_pages,
+                    latency=latency,
+                    session_id=session_id,
+                )
                 return documents
 
             except Exception as exc:
@@ -1593,16 +1734,23 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 _ingest_errors.labels(error_type=error_type).inc()
                 span.set_status(Status(StatusCode.ERROR, str(exc)))
                 span.record_exception(exc)
-                logger.error("pdf_ingest_failed", file=path.name, session_id=session_id,
-                             error=str(exc), error_type=error_type, latency=latency)
+                logger.error(
+                    "pdf_ingest_failed",
+                    file=path.name,
+                    session_id=session_id,
+                    error=str(exc),
+                    error_type=error_type,
+                    latency=latency,
+                )
                 raise
 
 
-def ingest_sync(file_path: str, session_id: str) -> List[IngestedDocument]:
+def ingest_sync(file_path: str, session_id: str) -> list[IngestedDocument]:
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 future = pool.submit(asyncio.run, ingest(file_path, session_id))
                 return future.result()
@@ -1613,7 +1761,8 @@ def ingest_sync(file_path: str, session_id: str) -> List[IngestedDocument]:
 
 # ─── Production path: PdfIngestor → PdfChunker ────────────────────────────────
 
-async def ingest_pdf_full(file_path: str, session_id: str) -> List[IngestedDocument]:
+
+async def ingest_pdf_full(file_path: str, session_id: str) -> list[IngestedDocument]:
     """Production PDF ingestion: PdfIngestor.extract() → PdfChunker.chunk().
 
     Replaces the backward-compat ingest() as the INGESTION_HANDLERS entry.
@@ -1621,8 +1770,8 @@ async def ingest_pdf_full(file_path: str, session_id: str) -> List[IngestedDocum
     section_title, section_hierarchy, chunk_type, is_ocr, has_figure,
     finance_entities, char_start, char_end, token_count, page_range, etc.
     """
-    from app.ingestion.schema import UniversalMetadata
     from app.chunking import chunk_raw_extracts
+    from app.ingestion.schema import UniversalMetadata
 
     if not session_id:
         raise ValueError("SESSION_ID_REQUIRED")

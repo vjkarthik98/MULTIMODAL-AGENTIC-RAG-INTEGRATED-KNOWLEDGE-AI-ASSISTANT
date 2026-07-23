@@ -14,6 +14,7 @@ Model: prometheus-eval/prometheus-7b-v2.0 (Apache-2.0, Mistral-7B based)
 Quant: Q8_0 GGUF (~7.7GB VRAM) — highest fidelity that fits the free headroom.
 Path:  ./.hf_cache/gguf/prometheus-7b-v2.0.Q8_0.gguf
 """
+
 from __future__ import annotations
 
 import os
@@ -67,7 +68,7 @@ _ABS_TASK = (
 # Rubrics — one per generation metric. These ARE the scoring contract the golden
 # dataset reshape must align to (each row's reference_answer must be gradable
 # against these). Score 1..5, normalized to 0..1 as (score-1)/4.
-RUBRICS: t.Dict[str, str] = {
+RUBRICS: dict[str, str] = {
     "faithfulness": (
         "[Is every factual claim in the response grounded in and supported by the "
         "provided context, with no fabricated or unsupported information?]\n"
@@ -160,6 +161,7 @@ def _load_prometheus():
             )
         try:
             from llama_cpp import Llama
+
             print(f"[eval] Loading Prometheus-2-7B judge (Q8_0) from {_MODEL_PATH} ...")
             _llm = Llama(
                 model_path=_MODEL_PATH,
@@ -189,7 +191,7 @@ _RESULT_RE = re.compile(r"\[RESULT\]\s*([1-5])", re.IGNORECASE)
 _FALLBACK_INT_RE = re.compile(r"([1-5])\s*$")
 
 
-def _parse_score(raw: str) -> t.Optional[int]:
+def _parse_score(raw: str) -> int | None:
     """Extract the integer 1..5 verdict from Prometheus output."""
     m = _RESULT_RE.search(raw)
     if m:
@@ -207,7 +209,7 @@ def score(
     reference_answer: str,
     rubric: str,
     max_tokens: int = 512,
-) -> t.Tuple[str, t.Optional[int]]:
+) -> tuple[str, int | None]:
     """Run one Prometheus direct-assessment. Returns (feedback, score_1_5)."""
     llm = _load_prometheus()
     prompt = _build_prompt(instruction, response, reference_answer, rubric)
@@ -224,7 +226,7 @@ def score(
     return raw, _parse_score(raw)
 
 
-def _normalize(score_1_5: t.Optional[int]) -> t.Optional[float]:
+def _normalize(score_1_5: int | None) -> float | None:
     """Map a 1..5 Prometheus verdict to 0..1. None → None (skipped)."""
     if score_1_5 is None:
         return None
@@ -233,7 +235,8 @@ def _normalize(score_1_5: t.Optional[int]) -> t.Optional[float]:
 
 # ── Metric builders ───────────────────────────────────────────────────────────
 
-def grade_metric(metric: str, row: t.Dict[str, t.Any]) -> t.Optional[float]:
+
+def grade_metric(metric: str, row: dict[str, t.Any]) -> float | None:
     """Grade a single eval row for one metric. Returns normalized 0..1 (or None)."""
     rubric = RUBRICS.get(metric)
     if rubric is None:
@@ -281,7 +284,7 @@ def grade_metric(metric: str, row: t.Dict[str, t.Any]) -> t.Optional[float]:
     return _normalize(s)
 
 
-def grade_behavioral(rubric_id: str, query: str, answer: str, reference: str) -> t.Optional[float]:
+def grade_behavioral(rubric_id: str, query: str, answer: str, reference: str) -> float | None:
     """Grade a refusal/adversarial row with its behavioral rubric → 0..1 (or None)."""
     rubric = RUBRICS.get(rubric_id)
     if rubric is None:

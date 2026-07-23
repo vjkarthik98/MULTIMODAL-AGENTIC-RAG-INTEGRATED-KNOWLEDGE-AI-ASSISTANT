@@ -5,24 +5,23 @@ functions: detect_pii() for audit/logging, scrub_pii() for output.
 
 Pre-warmed at server startup via warm_up() called from infra_registry.
 """
+
 from __future__ import annotations
 
 import re
 import threading
-from typing import List, Optional
 
-import structlog
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 # Lazy-loaded Presidio objects — initialized once via warm_up()
-_analyzer: Optional[object] = None
-_anonymizer: Optional[object] = None
+_analyzer: object | None = None
+_anonymizer: object | None = None
 _lock = threading.Lock()
 
 # Extra regex-based PII patterns from policies.yaml
-_EXTRA_PATTERNS: List[dict] = []
+_EXTRA_PATTERNS: list[dict] = []
 _POLICY_LOADED = False
 
 
@@ -32,6 +31,7 @@ def _load_extra_patterns() -> None:
         return
     try:
         from app.guardrails._policy_loader import get_policy
+
         p = get_policy()
         _EXTRA_PATTERNS = p.get("pii", {}).get("extra_regex_patterns", [])
     except Exception:
@@ -54,8 +54,12 @@ def warm_up() -> None:
             # behaviour, not errors. Both the Python warnings and logging channels
             # need to be silenced because Presidio uses both.
             _warnings.filterwarnings("ignore", category=UserWarning, module="presidio")
-            for _plog in ("presidio-analyzer", "presidio_analyzer",
-                          "presidio-anonymizer", "presidio_anonymizer"):
+            for _plog in (
+                "presidio-analyzer",
+                "presidio_analyzer",
+                "presidio-anonymizer",
+                "presidio_anonymizer",
+            ):
                 _logging.getLogger(_plog).setLevel(_logging.ERROR)
 
             from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
@@ -91,12 +95,13 @@ def _get_engines():
     return _analyzer, _anonymizer
 
 
-def _get_entity_types() -> List[str]:
+def _get_entity_types() -> list[str]:
     # PERSON is intentionally excluded — CEO names, author names, and other
     # public figures are not PII in this context and cause false positives.
     _SAFE = ["EMAIL_ADDRESS", "PHONE_NUMBER", "US_SSN", "CREDIT_CARD", "IP_ADDRESS"]
     try:
         from app.guardrails._policy_loader import get_policy
+
         policy_types = get_policy().get("pii", {}).get("entity_types", _SAFE)
         # Always strip PERSON even if policy re-adds it
         return [e for e in policy_types if e != "PERSON"]
@@ -128,9 +133,31 @@ _PII_SCORE_THRESHOLD = 0.35
 # This is a precision fix (drop that one false-positive span), not a weakening
 # of the guardrail — a genuine URL never continues into a known file extension.
 _DOC_EXTENSIONS = {
-    "docx", "doc", "pdf", "xlsx", "xls", "pptx", "ppt", "csv", "txt",
-    "jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff",
-    "mp3", "mp4", "wav", "mov", "avi", "json", "xml", "md",
+    "docx",
+    "doc",
+    "pdf",
+    "xlsx",
+    "xls",
+    "pptx",
+    "ppt",
+    "csv",
+    "txt",
+    "jpg",
+    "jpeg",
+    "png",
+    "gif",
+    "bmp",
+    "webp",
+    "tif",
+    "tiff",
+    "mp3",
+    "mp4",
+    "wav",
+    "mov",
+    "avi",
+    "json",
+    "xml",
+    "md",
 }
 _WORD_CHAR_RE = re.compile(r"[A-Za-z0-9_]")
 
@@ -149,12 +176,13 @@ def _is_filename_false_positive(text: str, start: int, end: int) -> bool:
 
 def _filter_false_positives(text: str, results: list) -> list:
     return [
-        r for r in results
+        r
+        for r in results
         if not (r.entity_type == "URL" and _is_filename_false_positive(text, r.start, r.end))
     ]
 
 
-def detect_pii(text: str, language: str = "en") -> List[dict]:
+def detect_pii(text: str, language: str = "en") -> list[dict]:
     """Detect PII entities in text. Returns list of {entity_type, start, end, score}."""
     if not text:
         return []
@@ -175,7 +203,7 @@ def detect_pii(text: str, language: str = "en") -> List[dict]:
                 "start": r.start,
                 "end": r.end,
                 "score": round(r.score, 3),
-                "text": text[r.start:r.end],
+                "text": text[r.start : r.end],
             }
             for r in results
         ]
@@ -213,6 +241,7 @@ def scrub_pii(text: str, language: str = "en") -> tuple[str, bool]:
             return scrubbed, scrubbed != text
 
         from presidio_anonymizer.entities import OperatorConfig
+
         operators = {
             entity: OperatorConfig("replace", {"new_value": f"<{entity}>"})
             for entity in _get_entity_types()

@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
 import structlog
 from opentelemetry import trace
@@ -28,8 +28,9 @@ _infra_init_errors = Counter(
     "Infrastructure initialization errors by service",
     ["service", "error_type"],
 )
-from app.core.metrics import circuit_breaker_state as _circuit_breaker_state
 from app.core.metrics import circuit_breaker_failures as _circuit_breaker_failures
+from app.core.metrics import circuit_breaker_state as _circuit_breaker_state
+
 _infra_available = Gauge(
     "infra_service_available",
     "Whether an infra service is available (1=yes, 0=no)",
@@ -39,6 +40,7 @@ _infra_available = Gauge(
 
 # CIRCUIT BREAKER
 
+
 class _CircuitBreaker:
 
     def __init__(
@@ -47,16 +49,16 @@ class _CircuitBreaker:
         fail_max: int = 5,
         reset_timeout: int = 60,
     ) -> None:
-        self.name          = name
-        self.fail_max      = fail_max
+        self.name = name
+        self.fail_max = fail_max
         self.reset_timeout = reset_timeout
-        self._failures     = 0
-        self._opened_at    = 0.0
-        self._open         = False
+        self._failures = 0
+        self._opened_at = 0.0
+        self._open = False
 
     def record_success(self) -> None:
-        self._failures  = 0
-        self._open      = False
+        self._failures = 0
+        self._open = False
         self._opened_at = 0.0
         _circuit_breaker_state.labels(service=self.name).set(0)
         _circuit_breaker_failures.labels(service=self.name).set(0)
@@ -66,7 +68,7 @@ class _CircuitBreaker:
         _circuit_breaker_failures.labels(service=self.name).set(self._failures)
 
         if self._failures >= self.fail_max:
-            self._open      = True
+            self._open = True
             self._opened_at = time.time()
             _circuit_breaker_state.labels(service=self.name).set(1)
             logger.warning(
@@ -80,8 +82,8 @@ class _CircuitBreaker:
         if self._open:
             # HALF-OPEN PROBE AFTER RESET TIMEOUT
             if time.time() - self._opened_at >= self.reset_timeout:
-                self._open      = False
-                self._failures  = 0
+                self._open = False
+                self._failures = 0
                 self._opened_at = 0.0
                 _circuit_breaker_state.labels(service=self.name).set(0)
                 _circuit_breaker_failures.labels(service=self.name).set(0)
@@ -101,17 +103,17 @@ class _CircuitBreaker:
 class InfraRegistry:
 
     def __init__(self) -> None:
-        self._vector_store: Optional[QdrantVectorStore] = None
-        self._bm25:         Optional[BM25Retriever]     = None
-        self._memory:       Optional[RedisMemory]       = None
-        self._mongo:        Optional[MongoMemory]       = None
-        self._cache:        Optional[Any]               = None
-        self._cache_failed: bool                        = False
+        self._vector_store: QdrantVectorStore | None = None
+        self._bm25: BM25Retriever | None = None
+        self._memory: RedisMemory | None = None
+        self._mongo: MongoMemory | None = None
+        self._cache: Any | None = None
+        self._cache_failed: bool = False
 
         self._initialized: bool = False
 
         # CIRCUIT BREAKERS PER SERVICE
-        self._cb: Dict[str, _CircuitBreaker] = {
+        self._cb: dict[str, _CircuitBreaker] = {
             "qdrant": _CircuitBreaker(
                 "qdrant",
                 fail_max=getattr(settings, "QDRANT_CB_FAIL_MAX", 5),
@@ -171,7 +173,7 @@ class InfraRegistry:
         with tracer.start_as_current_span(f"infra_init_{name}") as span:
             span.set_attribute("service", name)
             try:
-                obj     = fn()
+                obj = fn()
                 latency = round(time.time() - start, 2)
                 _infra_init_duration.labels(service=name).observe(latency)
                 span.set_attribute("latency", latency)
@@ -203,6 +205,7 @@ class InfraRegistry:
             # upload doesn't pay the cold build cost on the request path.
             try:
                 from app.ingestion.txt_ingest import warm_language_detector
+
                 warm_language_detector()
             except Exception:
                 pass
@@ -234,7 +237,7 @@ class InfraRegistry:
 
     # QDRANT VECTOR STORE
 
-    def get_vector_store(self) -> Optional[QdrantVectorStore]:
+    def get_vector_store(self) -> QdrantVectorStore | None:
         if self._vector_store:
             return self._vector_store
 
@@ -260,13 +263,14 @@ class InfraRegistry:
     # local server is unavailable; callers must treat None as "no cache" and degrade
     # to in-process behavior.
 
-    def get_cache(self) -> Optional[Any]:
+    def get_cache(self) -> Any | None:
         if self._cache is not None:
             return self._cache
         if self._cache_failed:
             return None
         try:
             import redis as _redis_lib
+
             client = _redis_lib.Redis(
                 host=settings.LOCAL_CACHE_HOST,
                 port=settings.LOCAL_CACHE_PORT,
@@ -300,9 +304,9 @@ class InfraRegistry:
             return self._bm25
 
         try:
-            start       = time.time()
-            self._bm25  = BM25Retriever()
-            latency     = round(time.time() - start, 2)
+            start = time.time()
+            self._bm25 = BM25Retriever()
+            latency = round(time.time() - start, 2)
             _infra_init_duration.labels(service="bm25").observe(latency)
             _infra_available.labels(service="bm25").set(1)
             logger.info("bm25_initialized", latency=latency)
@@ -319,7 +323,7 @@ class InfraRegistry:
 
     # REDIS MEMORY
 
-    def get_memory(self) -> Optional[RedisMemory]:
+    def get_memory(self) -> RedisMemory | None:
         if self._memory:
             return self._memory
 
@@ -341,7 +345,7 @@ class InfraRegistry:
 
     # MONGO MEMORY
 
-    def get_mongo(self) -> Optional[MongoMemory]:
+    def get_mongo(self) -> MongoMemory | None:
         if self._mongo:
             return self._mongo
 
@@ -363,36 +367,30 @@ class InfraRegistry:
 
     # HEALTH CHECK
 
-    def health_check(self) -> Dict[str, Any]:
-        circuit_states = {
-            name: cb.is_open()
-            for name, cb in self._cb.items()
-        }
-        failure_counts = {
-            name: cb._failures
-            for name, cb in self._cb.items()
-        }
+    def health_check(self) -> dict[str, Any]:
+        circuit_states = {name: cb.is_open() for name, cb in self._cb.items()}
+        failure_counts = {name: cb._failures for name, cb in self._cb.items()}
 
         return {
-            "qdrant":          self._vector_store is not None,
-            "redis":           self._memory is not None,
-            "mongo":           self._mongo is not None,
-            "bm25":            self._bm25 is not None,
-            "initialized":     self._initialized,
-            "circuits_open":   circuit_states,
-            "failure_counts":  failure_counts,
+            "qdrant": self._vector_store is not None,
+            "redis": self._memory is not None,
+            "mongo": self._mongo is not None,
+            "bm25": self._bm25 is not None,
+            "initialized": self._initialized,
+            "circuits_open": circuit_states,
+            "failure_counts": failure_counts,
         }
 
     # RESET ALL SERVICES AND CIRCUIT BREAKERS
 
     def reset(self) -> None:
         self._vector_store = None
-        self._bm25         = None
-        self._memory       = None
-        self._mongo        = None
-        self._cache        = None
+        self._bm25 = None
+        self._memory = None
+        self._mongo = None
+        self._cache = None
         self._cache_failed = False
-        self._initialized  = False
+        self._initialized = False
 
         for name, cb in self._cb.items():
             cb.record_success()
@@ -404,14 +402,14 @@ class InfraRegistry:
 
     async def gdpr_purge(
         self,
-        session_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-    ) -> Dict[str, bool]:
+        session_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, bool]:
 
         if not session_id and not user_id:
             raise ValueError("GDPR_PURGE_REQUIRES_SESSION_ID_OR_USER_ID")
 
-        results: Dict[str, bool] = {}
+        results: dict[str, bool] = {}
 
         # PURGE QDRANT
         try:
@@ -466,4 +464,3 @@ class InfraRegistry:
 # SINGLETON
 
 infra = InfraRegistry()
-

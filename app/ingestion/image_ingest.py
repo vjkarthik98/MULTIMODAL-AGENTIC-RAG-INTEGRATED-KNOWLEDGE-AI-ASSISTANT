@@ -4,29 +4,26 @@ import asyncio
 import hashlib
 import io
 import math
-import os
 import re
 import shutil
 import time
 import unicodedata
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.core.config import settings
 from app.ingestion.schema import (
-    EmptyContentError,
     EmptyFileError,
     FileTooLargeError,
     IngestedDocument,
+    Modality,
     UnsupportedMimeError,
     build_universal_metadata,
-    Modality,
     normalize_text,
     redact_pii,
-    sha256_file,
 )
 from app.utils.logger import get_logger
 
@@ -34,9 +31,20 @@ logger = get_logger(__name__)
 
 # SUPPORTED FORMATS
 SUPPORTED_IMAGE_FORMATS = {
-    ".jpg", ".jpeg", ".png", ".bmp", ".webp",
-    ".tiff", ".tif", ".gif", ".heic", ".heif",
-    ".svg", ".cr2", ".nef", ".arw",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".bmp",
+    ".webp",
+    ".tiff",
+    ".tif",
+    ".gif",
+    ".heic",
+    ".heif",
+    ".svg",
+    ".cr2",
+    ".nef",
+    ".arw",
 }
 
 # RAW FORMATS REQUIRING RAWPY
@@ -47,30 +55,43 @@ HEIC_FORMATS = {".heic", ".heif"}
 
 # WATERMARK KEYWORDS
 _WATERMARK_KEYWORDS = {
-    "CONFIDENTIAL", "DRAFT", "WATERMARK", "SAMPLE",
-    "RESTRICTED", "CLASSIFIED", "DO NOT COPY",
+    "CONFIDENTIAL",
+    "DRAFT",
+    "WATERMARK",
+    "SAMPLE",
+    "RESTRICTED",
+    "CLASSIFIED",
+    "DO NOT COPY",
 }
 
 # WEAK CAPTION PREFIXES TO STRIP
 _WEAK_PREFIXES = [
-    "a blurry image of", "a close up of", "an image of",
-    "a picture of", "a photo of", "photo of", "image of",
-    "this is a", "this is an",
+    "a blurry image of",
+    "a close up of",
+    "an image of",
+    "a picture of",
+    "a photo of",
+    "photo of",
+    "image of",
+    "this is a",
+    "this is an",
 ]
 
 # EASYOCR SINGLETON — loaded once, reused across all calls
-_easyocr_reader: Optional[Any] = None
+_easyocr_reader: Any | None = None
 
 
 def _get_easyocr_reader() -> Any:
     global _easyocr_reader
     if _easyocr_reader is None:
         import easyocr
+
         _easyocr_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
     return _easyocr_reader
 
 
 # SHA256 FILE HASH
+
 
 def _file_hash(file_path: str) -> str:
     h = hashlib.md5()
@@ -81,6 +102,7 @@ def _file_hash(file_path: str) -> str:
 
 
 # MAGIC BYTE MIME DETECTION
+
 
 def _detect_mime_from_bytes(header: bytes, suffix: str) -> str:
     if header.startswith(b"\xff\xd8\xff"):
@@ -106,6 +128,7 @@ def _detect_mime_from_bytes(header: bytes, suffix: str) -> str:
 
 # DISK SPACE GUARD
 
+
 def _check_disk_space(path: Path) -> None:
     try:
         usage = shutil.disk_usage(path.parent)
@@ -122,6 +145,7 @@ def _check_disk_space(path: Path) -> None:
 
 # PATH TRAVERSAL GUARD
 
+
 def _safe_resolve(file_path: str) -> Path:
     path = Path(file_path).expanduser().resolve()
     chroot = settings.CHROOT_BASE.resolve()
@@ -133,6 +157,7 @@ def _safe_resolve(file_path: str) -> Path:
 
 
 # VALIDATION
+
 
 def _validate_image_file(path: Path) -> None:
     if not path.exists():
@@ -156,11 +181,14 @@ def _validate_image_file(path: Path) -> None:
         with open(path, "rb") as f:
             header = f.read(16)
         mime = _detect_mime_from_bytes(header, suffix)
-        if mime == "application/octet-stream" and suffix not in HEIC_FORMATS | RAW_FORMATS | {".svg"}:
+        if mime == "application/octet-stream" and suffix not in HEIC_FORMATS | RAW_FORMATS | {
+            ".svg"
+        }:
             raise UnsupportedMimeError(f"MAGIC_BYTE_MIME_MISMATCH: detected {mime} for {suffix}")
 
 
 # IMAGE LOADING — WITH FORMAT BRANCHING
+
 
 def _load_image(path: Path, session_id: str) -> Image.Image:
     suffix = path.suffix.lower()
@@ -169,9 +197,11 @@ def _load_image(path: Path, session_id: str) -> Image.Image:
     if suffix in RAW_FORMATS:
         try:
             import rawpy
+
             with rawpy.imread(str(path)) as raw:
                 rgb = raw.postprocess(use_camera_wb=True, output_bps=8)
             import numpy as np
+
             return Image.fromarray(rgb, "RGB")
         except ImportError:
             raise ImportError("RAWPY_REQUIRED for RAW image formats (.cr2, .nef, .arw)")
@@ -182,6 +212,7 @@ def _load_image(path: Path, session_id: str) -> Image.Image:
     if suffix in HEIC_FORMATS:
         try:
             from pillow_heif import register_heif_opener
+
             register_heif_opener()
         except ImportError:
             raise UnsupportedMimeError("Install pillow-heif for HEIC support")
@@ -190,6 +221,7 @@ def _load_image(path: Path, session_id: str) -> Image.Image:
     if suffix == ".svg":
         try:
             import cairosvg
+
             png_data = cairosvg.svg2png(url=str(path))
             img = Image.open(io.BytesIO(png_data)).convert("RGB")
             logger.debug(event="svg_rasterized", file=path.name, session_id=session_id)
@@ -222,6 +254,7 @@ def _load_image(path: Path, session_id: str) -> Image.Image:
             if img.info.get("icc_profile"):
                 try:
                     from PIL import ImageCms
+
                     icc_data = img.info["icc_profile"]
                     src_profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_data))
                     dst_profile = ImageCms.createProfile("sRGB")
@@ -250,6 +283,7 @@ def _load_image(path: Path, session_id: str) -> Image.Image:
 
 # DIMENSION VALIDATION
 
+
 def _validate_dimensions(img: Image.Image) -> None:
     w, h = img.size
     if w == 0 or h == 0:
@@ -260,7 +294,8 @@ def _validate_dimensions(img: Image.Image) -> None:
 
 # ASPECT RATIO CHECK
 
-def _check_aspect_ratio(w: int, h: int) -> Optional[str]:
+
+def _check_aspect_ratio(w: int, h: int) -> str | None:
     if h == 0:
         return None
     ratio = w / h
@@ -270,6 +305,7 @@ def _check_aspect_ratio(w: int, h: int) -> Optional[str]:
 
 
 # RESIZE IF NEEDED
+
 
 def _resize_if_needed(img: Image.Image) -> Image.Image:
     w, h = img.size
@@ -293,10 +329,12 @@ def _resize_if_needed(img: Image.Image) -> Image.Image:
 
 # EXIF EXTRACTION
 
-def _extract_exif(path: Path) -> Dict[str, Any]:
-    exif_data: Dict[str, Any] = {}
+
+def _extract_exif(path: Path) -> dict[str, Any]:
+    exif_data: dict[str, Any] = {}
     try:
-        from PIL.ExifTags import TAGS, GPSTAGS
+        from PIL.ExifTags import GPSTAGS, TAGS
+
         with Image.open(path) as img:
             raw_exif = img._getexif()  # type: ignore[attr-defined]
             if not raw_exif:
@@ -310,7 +348,7 @@ def _extract_exif(path: Path) -> Dict[str, Any]:
                         # ANONYMIZE GPS IN PRIVACY MODE
                         exif_data["gps_stripped"] = True
                         continue
-                    gps: Dict[str, Any] = {}
+                    gps: dict[str, Any] = {}
                     for gps_tag_id, gps_value in value.items():
                         gps_tag = GPSTAGS.get(gps_tag_id, str(gps_tag_id))
                         gps[gps_tag] = str(gps_value)
@@ -330,16 +368,22 @@ def _extract_exif(path: Path) -> Dict[str, Any]:
 
 # IPTC / XMP METADATA
 
-def _extract_iptc_xmp(path: Path) -> Dict[str, Any]:
-    meta: Dict[str, Any] = {}
+
+def _extract_iptc_xmp(path: Path) -> dict[str, Any]:
+    meta: dict[str, Any] = {}
     try:
         from PIL import IptcImagePlugin
+
         with Image.open(path) as img:
             iptc = IptcImagePlugin.getiptcinfo(img)
             if iptc:
                 for key, val in iptc.items():
                     try:
-                        meta[str(key)] = val.decode("utf-8", errors="replace") if isinstance(val, bytes) else str(val)
+                        meta[str(key)] = (
+                            val.decode("utf-8", errors="replace")
+                            if isinstance(val, bytes)
+                            else str(val)
+                        )
                     except Exception:
                         pass
     except Exception:
@@ -349,28 +393,35 @@ def _extract_iptc_xmp(path: Path) -> Dict[str, Any]:
 
 # OCR PREPROCESSING
 
+
 def _preprocess_for_ocr(img: Image.Image):
-    import numpy as np
     import cv2
+    import numpy as np
+
     arr = np.array(img)
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
     denoised = cv2.fastNlMeansDenoising(gray, h=10)
     thresh = cv2.adaptiveThreshold(
-        denoised, 255,
+        denoised,
+        255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 11, 2,
+        cv2.THRESH_BINARY,
+        11,
+        2,
     )
     return thresh
 
 
 # OCR EXTRACTION — TESSERACT + EASYOCR ENSEMBLE
 
+
 def _extract_ocr(img: Image.Image, session_id: str) -> str:
-    text_parts: List[str] = []
+    text_parts: list[str] = []
 
     # TESSERACT
     try:
         import pytesseract
+
         processed = _preprocess_for_ocr(img)
         tesseract_text = (pytesseract.image_to_string(processed) or "").strip()
         if len(tesseract_text) >= settings.CHUNK_MIN_SIZE:
@@ -381,6 +432,7 @@ def _extract_ocr(img: Image.Image, session_id: str) -> str:
     # EASYOCR ENSEMBLE
     try:
         import numpy as np
+
         reader = _get_easyocr_reader()
         results = reader.readtext(np.array(img))
         easy_text = " ".join([r[1] for r in results if r[2] > 0.3]).strip()
@@ -394,15 +446,17 @@ def _extract_ocr(img: Image.Image, session_id: str) -> str:
     combined = " ".join(text_parts)
     if len(combined) < settings.CHUNK_MIN_SIZE:
         return ""
-    return combined[:settings.MAX_PROMPT_CHARS]
+    return combined[: settings.MAX_PROMPT_CHARS]
 
 
 # BLUR SCORE
 
+
 def _blur_score(img: Image.Image) -> float:
     try:
-        import numpy as np
         import cv2
+        import numpy as np
+
         gray = np.array(img.convert("L"))
         laplacian = cv2.Laplacian(gray, cv2.CV_64F).var()
         return float(min(laplacian / 100.0, 1.0))
@@ -412,9 +466,11 @@ def _blur_score(img: Image.Image) -> float:
 
 # PERCEPTUAL HASH
 
-def _phash(img: Image.Image) -> Optional[str]:
+
+def _phash(img: Image.Image) -> str | None:
     try:
         import imagehash
+
         return str(imagehash.phash(img))
     except ImportError:
         return None
@@ -424,10 +480,12 @@ def _phash(img: Image.Image) -> Optional[str]:
 
 # COLOR ANALYSIS — DOMINANT PALETTE
 
-def _dominant_colors(img: Image.Image, k: int = 5) -> List[str]:
+
+def _dominant_colors(img: Image.Image, k: int = 5) -> list[str]:
     try:
         import numpy as np
         from sklearn.cluster import KMeans
+
         small = img.resize((100, 100))
         arr = np.array(small).reshape(-1, 3).astype(float)
         km = KMeans(n_clusters=k, n_init=3, random_state=0)
@@ -440,10 +498,12 @@ def _dominant_colors(img: Image.Image, k: int = 5) -> List[str]:
 
 # FACE DETECTION — COUNT ONLY, NO IDENTIFICATION
 
+
 def _face_count(img: Image.Image) -> int:
     try:
         import mediapipe as mp
         import numpy as np
+
         mp_face = mp.solutions.face_detection
         with mp_face.FaceDetection(model_selection=0, min_detection_confidence=0.5) as detector:
             arr = np.array(img)
@@ -459,9 +519,11 @@ def _face_count(img: Image.Image) -> int:
 
 # SOLID COLOR CHECK — LOW CONTENT FLAG
 
+
 def _is_solid_color(img: Image.Image) -> bool:
     try:
         import numpy as np
+
         arr = np.array(img.resize((50, 50)))
         std = float(arr.std())
         return std < 5.0
@@ -471,6 +533,7 @@ def _is_solid_color(img: Image.Image) -> bool:
 
 # WATERMARK DETECTION
 
+
 def _detect_watermark(text: str) -> bool:
     upper = text.upper()
     return any(kw in upper for kw in _WATERMARK_KEYWORDS)
@@ -478,7 +541,8 @@ def _detect_watermark(text: str) -> bool:
 
 # THUMBNAIL GENERATION
 
-def _generate_thumbnail(img: Image.Image, path: Path, session_id: str) -> Optional[str]:
+
+def _generate_thumbnail(img: Image.Image, path: Path, session_id: str) -> str | None:
     try:
         thumb = img.copy()
         thumb.thumbnail(
@@ -486,6 +550,7 @@ def _generate_thumbnail(img: Image.Image, path: Path, session_id: str) -> Option
             Image.LANCZOS,
         )
         from app.utils.paths import resolved_temp_dir
+
         thumb_path = resolved_temp_dir() / f"thumb_{uuid.uuid4().hex}.jpg"
         thumb.save(str(thumb_path), "JPEG", quality=85)
         logger.debug(event="thumbnail_generated", path=str(thumb_path), session_id=session_id)
@@ -505,7 +570,7 @@ _CAPTION_MIN_WORDS = 5
 _CAPTION_MIN_CHARS = 10
 
 
-def _clean_caption(text: str) -> Optional[str]:
+def _clean_caption(text: str) -> str | None:
     if not text:
         return None
     text = text.strip()
@@ -515,13 +580,14 @@ def _clean_caption(text: str) -> Optional[str]:
     lower = text.lower()
     for prefix in _WEAK_PREFIXES:
         if lower.startswith(prefix):
-            text = text[len(prefix):].strip()
+            text = text[len(prefix) :].strip()
             lower = text.lower()
             break
     if "\x00" in text:
         text = text.replace("\x00", "")
     try:
         from app.guardrails.input_guard import sanitize as _guard_sanitize
+
         text = _guard_sanitize(text, surface="frame_captioner")
     except Exception:
         pass
@@ -537,11 +603,13 @@ def _clean_caption(text: str) -> Optional[str]:
 
 # CAPTION + CLASSIFICATION — VISION PROVIDER
 
+
 def _classify_and_caption(
     file_path: str, ocr_text: str, session_id: str
-) -> Tuple[str, str, List[str]]:
+) -> tuple[str, str, list[str]]:
     try:
         from app.chunking.image_chunker import classify_and_caption
+
         raw_caption, image_type, extracted_numbers = classify_and_caption(
             file_path, session_id=session_id, ocr_text=ocr_text, use_cache=True
         )
@@ -555,6 +623,7 @@ def _classify_and_caption(
 
 
 # QUALITY SCORE
+
 
 def _image_quality_score(
     blur: float,
@@ -578,6 +647,7 @@ def _image_quality_score(
 
 # SHA256 DEDUP CHECK
 
+
 def _sha256_check(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -587,6 +657,7 @@ def _sha256_check(path: Path) -> str:
 
 
 # CAPTION CONFIDENCE PROXY
+
 
 def _compute_caption_confidence(caption: str) -> float:
     words = caption.split()
@@ -600,8 +671,9 @@ def _compute_caption_confidence(caption: str) -> float:
 
 # MULTI-PAGE TIFF HANDLER
 
-def _load_tiff_pages(path: Path) -> List[Image.Image]:
-    pages: List[Image.Image] = []
+
+def _load_tiff_pages(path: Path) -> list[Image.Image]:
+    pages: list[Image.Image] = []
     try:
         with Image.open(path) as img:
             for i in range(getattr(img, "n_frames", 1)):
@@ -615,15 +687,16 @@ def _load_tiff_pages(path: Path) -> List[Image.Image]:
 
 # MAIN INGEST
 
+
 def ingest(
     file_path: str,
     session_id: str,
-    parent_doc_id:   Optional[str] = None,
-    parent_modality: Optional[str] = None,
-    parent_source:   Optional[str] = None,
-    parent_page:     Optional[int] = None,
-    parent_sheet:    Optional[str] = None,
-) -> List[IngestedDocument]:
+    parent_doc_id: str | None = None,
+    parent_modality: str | None = None,
+    parent_source: str | None = None,
+    parent_page: int | None = None,
+    parent_sheet: str | None = None,
+) -> list[IngestedDocument]:
     if not session_id:
         raise ValueError("SESSION_ID_REQUIRED")
 
@@ -653,7 +726,7 @@ def ingest(
 
     # MULTI-PAGE TIFF
     is_multi_tiff = ext in {".tiff", ".tif"}
-    tiff_pages: List[Image.Image] = []
+    tiff_pages: list[Image.Image] = []
     total_frames = 1
 
     try:
@@ -688,7 +761,9 @@ def ingest(
 
         # ANALYSIS
         ocr_text = _extract_ocr(img, session_id)
-        caption, image_type, extracted_numbers = _classify_and_caption(file_path, ocr_text, session_id)
+        caption, image_type, extracted_numbers = _classify_and_caption(
+            file_path, ocr_text, session_id
+        )
         blur = _blur_score(img)
         ph = _phash(img)
         solid = _is_solid_color(img)
@@ -741,7 +816,7 @@ def ingest(
             },
         )
 
-        base_structure: Dict[str, Any] = {
+        base_structure: dict[str, Any] = {
             "doc_id": doc_id,
             "session_id": session_id,
             "file_hash": file_hash,
@@ -750,11 +825,11 @@ def ingest(
             "asset_path": source_path,
             # When this image came from a parent docx/xlsx, link back so retrieval
             # can group "page 4 of foo.docx contains image X".
-            "parent_doc_id":   parent_doc_id,
+            "parent_doc_id": parent_doc_id,
             "parent_modality": parent_modality,
-            "parent_source":   parent_source,
-            "parent_page":     parent_page,
-            "parent_sheet":    parent_sheet,
+            "parent_source": parent_source,
+            "parent_page": parent_page,
+            "parent_sheet": parent_sheet,
             "original_width": original_width,
             "original_height": original_height,
             "image_width": width,
@@ -771,7 +846,7 @@ def ingest(
             "privacy_mode": settings.IMAGE_PRIVACY_MODE,
         }
 
-        documents: List[IngestedDocument] = []
+        documents: list[IngestedDocument] = []
 
         # CAPTION DOCUMENT
         # PRE-04/POST-03: Use unified guardrail sanitizer (Phase 26) instead of
@@ -779,11 +854,16 @@ def ingest(
         _norm_caption = redact_pii(normalize_text(caption))
         try:
             from app.guardrails.input_guard import sanitize as _guard_sanitize
+
             caption_clean = _guard_sanitize(_norm_caption, surface="image_ingest")
         except Exception as e:
             logger.warning(event="sanitize_failed", surface="image_caption_ingest", error=str(e))
             caption_clean = _norm_caption
-        cap_conf = _compute_caption_confidence(caption_clean) if caption_clean != "[Image: no caption generated]" else 0.0
+        cap_conf = (
+            _compute_caption_confidence(caption_clean)
+            if caption_clean != "[Image: no caption generated]"
+            else 0.0
+        )
         documents.append(
             IngestedDocument(
                 text=caption_clean,
@@ -794,16 +874,16 @@ def ingest(
                 metadata=metadata,
                 structure={
                     **base_structure,
-                    "content_type":      "image_caption",
-                    "embedding_space":   "text",
-                    "caption":           caption_clean,
+                    "content_type": "image_caption",
+                    "embedding_space": "text",
+                    "caption": caption_clean,
                     "caption_confidence": cap_conf,
-                    "image_type":        image_type,
+                    "image_type": image_type,
                     "extracted_numbers": extracted_numbers,
-                    "width":             width,
-                    "height":            height,
-                    "is_solid_color":    solid,
-                    "total_frames":      total_frames,
+                    "width": width,
+                    "height": height,
+                    "is_solid_color": solid,
+                    "total_frames": total_frames,
                 },
                 extra_metadata={
                     "modality_weight": 1.0,
@@ -820,6 +900,7 @@ def ingest(
             _ocr_norm = redact_pii(normalize_text(ocr_text))
             try:
                 from app.guardrails.input_guard import sanitize as _gs
+
                 ocr_clean = _gs(_ocr_norm, surface="image_ocr_ingest")
             except Exception as e:
                 logger.warning(event="sanitize_failed", surface="image_ocr_ingest", error=str(e))
@@ -834,9 +915,9 @@ def ingest(
                     metadata=metadata,
                     structure={
                         **base_structure,
-                        "content_type":      "image_ocr",
-                        "embedding_space":   "text",
-                        "image_type":        image_type,
+                        "content_type": "image_ocr",
+                        "embedding_space": "text",
+                        "image_type": image_type,
                         "extracted_numbers": extracted_numbers,
                     },
                     extra_metadata={
@@ -863,22 +944,22 @@ def ingest(
                 metadata=metadata,
                 structure={
                     **base_structure,
-                    "content_type":      "image_semantic",
-                    "embedding_space":   "vision",
-                    "frame_path":        source_path,
-                    "caption":           caption_clean,
+                    "content_type": "image_semantic",
+                    "embedding_space": "vision",
+                    "frame_path": source_path,
+                    "caption": caption_clean,
                     "caption_confidence": cap_conf,
-                    "image_type":        image_type,
+                    "image_type": image_type,
                     "extracted_numbers": extracted_numbers,
-                    "blur_score":        blur,
-                    "quality_score":     quality,
-                    "solid_color":       solid,
+                    "blur_score": blur,
+                    "quality_score": quality,
+                    "solid_color": solid,
                     "watermark_detected": watermark,
-                    "face_count":        face_count,
-                    "perceptual_hash":   ph,
-                    "dominant_colors":   colors,
-                    "image_width":       width,
-                    "image_height":      height,
+                    "face_count": face_count,
+                    "perceptual_hash": ph,
+                    "dominant_colors": colors,
+                    "image_width": width,
+                    "image_height": height,
                 },
                 extra_metadata={
                     "modality_weight": 1.0,
@@ -898,9 +979,12 @@ def ingest(
                 _pc_norm = redact_pii(normalize_text(page_caption))
                 try:
                     from app.guardrails.input_guard import sanitize as _gs
+
                     page_caption_clean = _gs(_pc_norm, surface="image_page_caption_ingest")
                 except Exception as e:
-                    logger.warning(event="sanitize_failed", surface="image_page_caption_ingest", error=str(e))
+                    logger.warning(
+                        event="sanitize_failed", surface="image_page_caption_ingest", error=str(e)
+                    )
                     page_caption_clean = _pc_norm
 
                 documents.append(
@@ -913,10 +997,10 @@ def ingest(
                         metadata=metadata,
                         structure={
                             **base_structure,
-                            "content_type":      "tiff_page_caption",
-                            "tiff_page":         page_idx,
-                            "embedding_space":   "text",
-                            "image_type":        page_image_type,
+                            "content_type": "tiff_page_caption",
+                            "tiff_page": page_idx,
+                            "embedding_space": "text",
+                            "image_type": page_image_type,
                             "extracted_numbers": page_extracted_numbers,
                         },
                         extra_metadata={
@@ -931,9 +1015,12 @@ def ingest(
                     _po_norm = redact_pii(normalize_text(page_ocr))
                     try:
                         from app.guardrails.input_guard import sanitize as _gs
+
                         page_ocr_clean = _gs(_po_norm, surface="image_page_ocr_ingest")
                     except Exception as e:
-                        logger.warning(event="sanitize_failed", surface="image_page_ocr_ingest", error=str(e))
+                        logger.warning(
+                            event="sanitize_failed", surface="image_page_ocr_ingest", error=str(e)
+                        )
                         page_ocr_clean = _po_norm
                     documents.append(
                         IngestedDocument(
@@ -945,10 +1032,10 @@ def ingest(
                             metadata=metadata,
                             structure={
                                 **base_structure,
-                                "content_type":      "tiff_page_ocr",
-                                "tiff_page":         page_idx,
-                                "embedding_space":   "text",
-                                "image_type":        page_image_type,
+                                "content_type": "tiff_page_ocr",
+                                "tiff_page": page_idx,
+                                "embedding_space": "text",
+                                "image_type": page_image_type,
                                 "extracted_numbers": page_extracted_numbers,
                             },
                             extra_metadata={
@@ -1014,15 +1101,17 @@ def ingest(
 
 # ASYNC WRAPPER
 
-async def async_ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
+
+async def async_ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
     return await asyncio.to_thread(ingest, file_path, session_id)
 
 
 # ─── Phase 1: ImageIngestor ────────────────────────────────────────────────────
 
+from prometheus_client import Counter
+
 from app.ingestion.base_ingest import BaseIngestor
 from app.ingestion.schema import RawExtract, UniversalMetadata
-from prometheus_client import Counter
 
 _EXTRACTS_TOTAL = Counter("magik_image_extracts_total", "Total extracts produced by image ingestor")
 _EXTRACT_ERRORS = Counter("magik_image_extract_errors_total", "Errors in image ingestor")
@@ -1046,9 +1135,11 @@ class ImageIngestor(BaseIngestor):
         self,
         path: Path,
         metadata: UniversalMetadata,
-    ) -> List[RawExtract]:
+    ) -> list[RawExtract]:
         source = path.name
-        logger.info(event="extraction_start", modality="image", file=str(path), size=path.stat().st_size)
+        logger.info(
+            event="extraction_start", modality="image", file=str(path), size=path.stat().st_size
+        )
         try:
             _validate_image_file(path)
             _check_disk_space(path)
@@ -1069,6 +1160,7 @@ class ImageIngestor(BaseIngestor):
             exif_data: dict = {}
             try:
                 from PIL.ExifTags import TAGS
+
                 raw_exif = img._getexif() or {}
                 exif_data = {TAGS.get(k, k): str(v) for k, v in raw_exif.items() if v is not None}
             except Exception:
@@ -1078,6 +1170,7 @@ class ImageIngestor(BaseIngestor):
             phash_str: str = ""
             try:
                 import imagehash
+
                 phash_str = str(imagehash.phash(img))
             except Exception:
                 pass
@@ -1091,7 +1184,7 @@ class ImageIngestor(BaseIngestor):
             if not settings.IMAGE_PRIVACY_MODE:
                 face_count = _face_count(img)
             # thumbnail
-            thumb_path_str: Optional[str] = None
+            thumb_path_str: str | None = None
             try:
                 thumb_path_str = _generate_thumbnail(
                     img, path, str(getattr(metadata, "session_id", ""))
@@ -1126,13 +1219,16 @@ class ImageIngestor(BaseIngestor):
             ]
         except Exception as _exc:
             _EXTRACT_ERRORS.inc()
-            logger.error(event="extraction_failed", modality="image", source=source, error=str(_exc))
+            logger.error(
+                event="extraction_failed", modality="image", source=source, error=str(_exc)
+            )
             raise
 
 
 # ─── Phase 1.5: ingest_image_full ─────────────────────────────────────────────
 
-async def ingest_image_full(file_path: str, session_id: str) -> List[IngestedDocument]:
+
+async def ingest_image_full(file_path: str, session_id: str) -> list[IngestedDocument]:
     """Production image ingestion: ImageIngestor.extract() → ImageChunker.chunk().
 
     Replaces the backward-compat ingest() as the INGESTION_HANDLERS entry.
@@ -1141,8 +1237,8 @@ async def ingest_image_full(file_path: str, session_id: str) -> List[IngestedDoc
     blur_score, quality_score, watermark_detected, face_count, dominant_colors,
     perceptual_hash, time_period, data_series, token_count.
     """
-    from app.ingestion.schema import UniversalMetadata
     from app.chunking import chunk_raw_extracts
+    from app.ingestion.schema import UniversalMetadata
 
     if not session_id:
         raise ValueError("SESSION_ID_REQUIRED")

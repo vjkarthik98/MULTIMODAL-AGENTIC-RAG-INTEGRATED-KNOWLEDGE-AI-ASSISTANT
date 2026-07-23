@@ -3,6 +3,7 @@
 Uses Python's built-in smtplib (no extra packages needed).
 Configured via SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASSWORD in .env.
 """
+
 from __future__ import annotations
 
 import smtplib
@@ -20,14 +21,12 @@ _FROM = f"{settings.EMAIL_FROM_NAME} <{settings.EMAIL_FROM}>"
 def _send(to_email: str, subject: str, html: str) -> None:
     """Send a single HTML email via SMTP. Raises RuntimeError if not configured."""
     if not settings.SMTP_USER or not settings.SMTP_PASSWORD:
-        raise RuntimeError(
-            "SMTP_USER / SMTP_PASSWORD not set. Add them to your .env file."
-        )
+        raise RuntimeError("SMTP_USER / SMTP_PASSWORD not set. Add them to your .env file.")
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"]    = _FROM
-    msg["To"]      = to_email
+    msg["From"] = _FROM
+    msg["To"] = to_email
     msg.attach(MIMEText(html, "html"))
 
     with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
@@ -40,8 +39,12 @@ def _send(to_email: str, subject: str, html: str) -> None:
 def send_otp_email(to_email: str, otp_code: str) -> None:
     """Send a 6-digit OTP to the user's email address."""
     if settings.DEV_OTP_LOG:
-        logger.warning(event="dev_otp_log", to=to_email, otp=otp_code,
-                       note="DEV_OTP_LOG=true — not sent via email")
+        logger.warning(
+            event="dev_otp_log",
+            to=to_email,
+            otp=otp_code,
+            note="DEV_OTP_LOG=true — not sent via email",
+        )
         return
     html = f"""
 <!DOCTYPE html>
@@ -107,8 +110,12 @@ def send_password_reset_email(to_email: str, reset_token: str) -> None:
     """Send a password-reset link containing the one-time reset token."""
     reset_url = f"{settings.FRONTEND_URL}/reset-password?token={reset_token}"
     if settings.DEV_OTP_LOG:
-        logger.warning(event="dev_reset_log", to=to_email, reset_url=reset_url,
-                       note="DEV_OTP_LOG=true — not sent via email")
+        logger.warning(
+            event="dev_reset_log",
+            to=to_email,
+            reset_url=reset_url,
+            note="DEV_OTP_LOG=true — not sent via email",
+        )
         return
 
     html = f"""

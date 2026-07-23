@@ -1,0 +1,206 @@
+name: Eval Gate
+
+# Two-tier RAG-quality gate (see docs/runbooks/ci-cd.md for the full design
+# rationale):
+#
+#   tier1-retrieval  — BM25 + Qdrant + BGE embedder, NO LLM generation.
+#                       ~3GB RAM. Runs on every PR, on a standard hosted
+#                       runner, and blocks merge on regression.
+#
+#   tier2-full-suite — full generation + Prometheus-2-7B judge suite.
+#                       Needs the full resident model stack (~17.7GB+ per
+#                       CLAUDE.md's model catalog) AND a live running API
+#                       (app/eval/run.py routes generation calls through
+#                       HTTP to /rag/query, not in-process). This does not
+#                       fit on any hosted CI runner or a 16GB laptop —
+#                       it runs ONLY on the self-hosted runner registered on
+#                       the real AWS GPU box, triggered by schedule /
+#                       workflow_dispatch / repository_dispatch — deliberately
+#                       NEVER by `pull_request`, since this is a public repo
+#                       and a fork PR must never be able to execute on a
+#                       self-hosted runner.
+#
+#   seed-eval-fixtures — one-off/maintainer job. The gold QA set
+#                       (app/eval/datasets/gold/*.jsonl) is versioned in git,
+#                       but the underlying ingested corpus (Qdrant vectors +
+#                       local BM25 .pkl indexes under data/, per
+#                       app/bm25/base_bm25.py) is NOT — data/ is gitignored
+#                       and BM25 indexes are local files, not cloud state.
+#                       This job (self-hosted only, manual) re-ingests
+#                       data/raw/finance into the real Qdrant Cloud collection
+#                       + local BM25 index, then publishes the BM25 index as
+#                       a GitHub Actions cache that tier1-retrieval restores.
+#                       Must be re-run whenever the gold set / corpus changes
+#                       (cache key is keyed on the gold-set file hashes).
+
+on:
+  # Same doc-only-skip reasoning as ci.yml — see the note there. Only
+  # pull_request needs it; workflow_dispatch/schedule/repository_dispatch
+  # aren't file-change triggers, so paths-ignore doesn't apply to them.
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Run seed-eval-fixtures instead of tier2 (re-ingest eval corpus, refresh BM25 cache)"
+        type: boolean
+        default: false
+  schedule:
+    - cron: "0 3 * * *"   # nightly tier2 run
+  repository_dispatch:
+    types: [post-deploy-eval]   # triggered by cd.yml after a successful deploy
+
+concurrency:
+  group: eval-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false   # never cancel a gate mid-run
+
+permissions:
+  contents: read
+
+env:
+  EVAL_USER_ID: ${{ vars.EVAL_USER_ID || 'eval_default' }}
+
+jobs:
+  # ---------------------------------------------------------------------
+  # TIER 1 — blocks every PR. Hosted runner, no GPU, no live server needed
+  # (retrieval_runner.py calls HybridRetriever in-process).
+  # ---------------------------------------------------------------------
+  tier1-retrieval:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      QDRANT_URL: ${{ secrets.QDRANT_URL }}
+      QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+      DATA_DIR: ${{ github.workspace }}/data
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # BM25 index for EVAL_USER_ID is gitignored local state (data/), not
+      # reproducible from a bare checkout — restore it from the cache the
+      # seed-eval-fixtures job publishes. A cache miss here means the gate
+      # WILL fail with a clear "no_gold_data"/retrieval error, not a false
+      # pass — see docs/runbooks/ci-cd.md if that happens.
+      - name: Restore eval BM25 index
+        uses: actions/cache/restore@v4
+        with:
+          path: data/users/${{ env.EVAL_USER_ID }}/bm25_index
+          key: bm25-eval-index-${{ hashFiles('app/eval/datasets/gold/**') }}
+          restore-keys: |
+            bm25-eval-index-
+
+      - name: Retrieval gate
+        run: python -m app.eval.run --suite retrieval
+        # Exit code IS the gate (runner.check_thresholds()) — no separate
+        # --gate flag exists in app/eval/run.py. Non-zero fails this job,
+        # which GitHub branch protection should mark as a required check.
+
+      # Pipeline observability, not RAG-quality dashboards (that's Phase 31 /
+      # Grafana): surfaces pass/fail + metrics directly on the PR's Actions
+      # run page, no external service needed.
+      - name: Post report to job summary
+        if: always()
+        run: |
+          echo "## Tier-1 Retrieval Gate" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f app/eval/reports/rag_report.md ]; then
+            cat app/eval/reports/rag_report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No report written — the run likely failed before scoring. Check the logs above._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rag-report-tier1-${{ github.event.pull_request.number }}
+          path: app/eval/reports/
+          retention-days: 30
+
+  # ---------------------------------------------------------------------
+  # SEED — manual only. Re-ingests the eval corpus on the box that actually
+  # has data/raw/finance and publishes the resulting BM25 index to the cache
+  # tier1-retrieval restores. Never triggered automatically.
+  # ---------------------------------------------------------------------
+  seed-eval-fixtures:
+    if: github.event_name == 'workflow_dispatch' && inputs.seed == true
+    runs-on: [self-hosted, gpu]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ingest eval corpus (Qdrant + local BM25)
+        run: python -m app.eval.datasets.build_gold_set --ingest
+
+      - name: Publish BM25 index cache
+        uses: actions/cache/save@v4
+        with:
+          path: data/users/${{ env.EVAL_USER_ID }}/bm25_index
+          key: bm25-eval-index-${{ hashFiles('app/eval/datasets/gold/**') }}
+
+  # ---------------------------------------------------------------------
+  # TIER 2 — full generation + judge suite. Self-hosted on the real GPU box
+  # ONLY. Needs the live API up (app/eval/run.py's generation suites call
+  # /rag/query over HTTP) — cd.yml's deploy job must complete before this
+  # is meaningfully triggered via repository_dispatch.
+  # ---------------------------------------------------------------------
+  tier2-full-suite:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'repository_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && inputs.seed != true)
+    runs-on: [self-hosted, gpu]
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Full suite (retrieval + generation + behavioral + routing + e2e + ocr/audio/video + regression)
+        id: full_suite
+        run: python -m app.eval.run --suite full
+        # thresholds.yaml currently has gate_enabled: false (stale v3 baseline
+        # retired — judge changed to Prometheus-2-7B, gold set 14->164 rows).
+        # Until baseline v4 is recorded and gate_enabled flips true, this
+        # step's exit code is always 0 (informational only) — see
+        # docs/runbooks/ci-cd.md for the re-baseline procedure. Once enabled,
+        # a non-zero exit here should trigger the rollback path in cd.yml.
+
+      - name: Post report to job summary
+        if: always()
+        run: |
+          echo "## Tier-2 Full Eval Suite (${{ github.event_name }})" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f app/eval/reports/rag_report.md ]; then
+            cat app/eval/reports/rag_report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No report written — the run likely failed before scoring. Check the logs above._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # No one watches a 3am scheduled run's Actions tab live — this is the
+      # nightly/post-deploy tier, so failure needs to reach someone async.
+      # No-op until SLACK_WEBHOOK_URL is set (repo secret) — see
+      # docs/runbooks/ci-cd.md. Uses a plain incoming-webhook POST so it
+      # works with Slack as-is and with Discord by swapping "text" for
+      # "content" in the payload.
+      - name: Notify on failure (Slack, optional)
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        run: |
+          curl -sf -X POST -H "Content-Type: application/json" \
+            -d "{\"text\": \"MAGIK Tier-2 eval suite FAILED (${{ github.event_name }}, run ${{ github.run_id }}): ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "$SLACK_WEBHOOK_URL"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rag-report-tier2-${{ github.run_id }}
+          path: app/eval/reports/
+          retention-days: 90

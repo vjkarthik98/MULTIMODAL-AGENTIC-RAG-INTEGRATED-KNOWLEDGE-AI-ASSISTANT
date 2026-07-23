@@ -4,11 +4,11 @@ Calls app/ingestion/image_ingest.py:ingest() — the same code production runs.
 Extracts OCR text from ingested image documents and scores CER/WER/exact-match
 against gold_ocr_text in image_gold.jsonl (P1-8 garbled-text measurement).
 """
+
 from __future__ import annotations
 
 import time
-from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 from app.eval.config import EvalConfig
 from app.eval.datasets.gold_loader import load_gold
@@ -16,7 +16,7 @@ from app.eval.metrics.base import MetricResult, SuiteResult
 from app.eval.metrics.ocr_metrics import ocr_metrics_batch
 
 
-def _collect_ocr_text(documents: List[Any]) -> str:
+def _collect_ocr_text(documents: list[Any]) -> str:
     """Collect all OCR text from ingested image documents."""
     parts = []
     for doc in documents:
@@ -52,14 +52,18 @@ def run_ocr_suite(cfg: EvalConfig) -> SuiteResult:
     gold_rows = load_gold("image", gold_dir=cfg.gold_dir, include_todos=False)
     if not gold_rows:
         # All rows are TODO — this is expected at v1 before corpus download
-        result.add(MetricResult.empty("ocr_cer", "no curated image gold rows; run download_eval_corpus.sh first"))
+        result.add(
+            MetricResult.empty(
+                "ocr_cer", "no curated image gold rows; run download_eval_corpus.sh first"
+            )
+        )
         result.add(MetricResult.empty("ocr_wer", "no curated image gold rows"))
         result.add(MetricResult.empty("ocr_exact_match", "no curated image gold rows"))
         result.duration_sec = time.time() - t0
         return result
 
-    hypotheses: List[str] = []
-    gold_ocr_texts: List[str] = []
+    hypotheses: list[str] = []
+    gold_ocr_texts: list[str] = []
 
     raw_corpus_dir = cfg.raw_corpus_dir / "image"
 
@@ -76,7 +80,8 @@ def run_ocr_suite(cfg: EvalConfig) -> SuiteResult:
 
         session_id = f"{cfg.session_prefix}_ocr_{row['id']}"
         try:
-            from app.utils.paths import set_current_user, reset_current_user
+            from app.utils.paths import reset_current_user, set_current_user
+
             _token = set_current_user(cfg.user_id)
             try:
                 docs = image_ingest.ingest(

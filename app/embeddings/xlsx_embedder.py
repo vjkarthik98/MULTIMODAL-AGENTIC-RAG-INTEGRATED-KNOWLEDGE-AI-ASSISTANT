@@ -6,20 +6,22 @@ Most complex modality embedder: produces two embeddings per table chunk —
 
 Phase 5 hybrid retrieval queries both and takes max(score).
 """
+
 from __future__ import annotations
 
 import time
-from typing import Any, List
+from typing import Any
 
+from prometheus_client import Counter
+
+from app.core.config import settings
 from app.embeddings.base_embedder import (
     BaseEmbedder,
     normalize_finance_numbers,
     sanitize_text,
     valid_embedding,
 )
-from app.core.config import settings
 from app.utils.logger import get_logger
-from prometheus_client import Counter
 
 logger = get_logger(__name__)
 
@@ -47,10 +49,15 @@ class XlsxEmbedder(BaseEmbedder):
     def _expand_numbers_for_embedding(text: str) -> str:
         """Expand scale-suffixed numbers so both '4.3B' and '4300 million' retrieval paths work."""
         import re
+
         _scale_re = re.compile(r'\b(\d[\d,]*\.?\d*)\s*(M|B|K|bn|mn)\b', re.IGNORECASE)
-        _map = {"m": ("million", 1e6), "mn": ("million", 1e6),
-                "b": ("billion", 1e9), "bn": ("billion", 1e9),
-                "k": ("thousand", 1e3)}
+        _map = {
+            "m": ("million", 1e6),
+            "mn": ("million", 1e6),
+            "b": ("billion", 1e9),
+            "bn": ("billion", 1e9),
+            "k": ("thousand", 1e3),
+        }
         extras: list = []
         for m in _scale_re.finditer(text):
             raw = m.group(1).replace(",", "")
@@ -74,9 +81,9 @@ class XlsxEmbedder(BaseEmbedder):
         try:
             s = getattr(doc, "structure", {}) or {}
 
-            sheet      = (s.get("sheet_name") or s.get("sheet") or "").strip()
+            sheet = (s.get("sheet_name") or s.get("sheet") or "").strip()
             unit_scale = (s.get("unit_scale") or "").strip()
-            sem_group  = (s.get("semantic_group") or "").strip()
+            sem_group = (s.get("semantic_group") or "").strip()
 
             parts = []
             if sheet:
@@ -93,11 +100,16 @@ class XlsxEmbedder(BaseEmbedder):
             if chunk_type in ("named_range", "named_ranges", "assumptions"):
                 nr_keys = s.get("named_ranges_in_chunk") or []
                 if nr_keys:
-                    prefix = "Financial model assumptions: " + ", ".join(str(k) for k in nr_keys[:5]) + " | " + prefix
+                    prefix = (
+                        "Financial model assumptions: "
+                        + ", ".join(str(k) for k in nr_keys[:5])
+                        + " | "
+                        + prefix
+                    )
 
             # Expand scale-suffixed numbers for cross-scale retrieval
             expanded = self._expand_numbers_for_embedding(cleaned_text)
-            result = (prefix + expanded)[:settings.MAX_PROMPT_CHARS]
+            result = (prefix + expanded)[: settings.MAX_PROMPT_CHARS]
             _EMBED_BUILT.inc()
             return result
         except Exception as _exc:
@@ -107,50 +119,50 @@ class XlsxEmbedder(BaseEmbedder):
 
     def _build_alt_embed_text(self, doc: Any) -> str:
         """Build markdown table text for embedding_alt (structural path)."""
-        s          = getattr(doc, "structure", {}) or {}
-        sheet      = (s.get("sheet_name") or s.get("sheet") or "").strip()
+        s = getattr(doc, "structure", {}) or {}
+        sheet = (s.get("sheet_name") or s.get("sheet") or "").strip()
         unit_scale = (s.get("unit_scale") or "").strip()
-        markdown   = (s.get("markdown_repr") or "").strip()
+        markdown = (s.get("markdown_repr") or "").strip()
 
         prefix = f"Sheet: {sheet}" if sheet else ""
         if unit_scale:
             prefix += f" | ({unit_scale})"
         if prefix:
-            return (prefix + " | " + markdown)[:settings.MAX_PROMPT_CHARS]
-        return markdown[:settings.MAX_PROMPT_CHARS]
+            return (prefix + " | " + markdown)[: settings.MAX_PROMPT_CHARS]
+        return markdown[: settings.MAX_PROMPT_CHARS]
 
     def embed_documents(
         self,
-        docs: List[Any],
+        docs: list[Any],
         session_id: str = "default",
-    ) -> List[Any]:
+    ) -> list[Any]:
         # Step 1: primary NL embedding via parent
         embedded = super().embed_documents(docs, session_id=session_id)
 
         # Step 2: secondary markdown embedding for table chunks that have markdown_repr
         embedder = self._get_model()
-        alt_texts: List[str]  = []
-        alt_docs:  List[Any]  = []
+        alt_texts: list[str] = []
+        alt_docs: list[Any] = []
 
         for doc in embedded:
-            s        = getattr(doc, "structure", {}) or {}
+            s = getattr(doc, "structure", {}) or {}
             markdown = (s.get("markdown_repr") or "").strip()
             if not markdown:
                 continue
             alt_raw = self._build_alt_embed_text(doc)
-            clean   = sanitize_text(alt_raw)
+            clean = sanitize_text(alt_raw)
             if not clean:
                 continue
             clean = normalize_finance_numbers(clean)
-            alt_texts.append(clean[:settings.MAX_PROMPT_CHARS])
+            alt_texts.append(clean[: settings.MAX_PROMPT_CHARS])
             alt_docs.append(doc)
 
         if alt_docs:
             try:
                 t = time.time()
                 for i in range(0, len(alt_texts), embedder.batch_size):
-                    batch_texts = alt_texts[i:i + embedder.batch_size]
-                    batch_docs  = alt_docs[i:i + embedder.batch_size]
+                    batch_texts = alt_texts[i : i + embedder.batch_size]
+                    batch_docs = alt_docs[i : i + embedder.batch_size]
                     embs = embedder._encode_with_retry(embedder.model, batch_texts)
                     for doc, emb in zip(batch_docs, embs):
                         if valid_embedding(emb, embedder.expected_dim):

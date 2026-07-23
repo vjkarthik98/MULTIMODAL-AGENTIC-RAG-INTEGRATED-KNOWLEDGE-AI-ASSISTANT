@@ -1,5 +1,9 @@
 # 🧠 Multimodal RAG Knowledge Assistant
 
+[![CI](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/ci.yml)
+[![Eval Gate](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/eval-gate.yml/badge.svg)](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/eval-gate.yml)
+[![CD](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/cd.yml/badge.svg)](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/cd.yml)
+
 ## 🚀 Overview
 
 A production-grade **Multimodal Retrieval-Augmented Generation (RAG) system** that supports **text, PDFs, images, audio, and video**, with memory-aware and reasoning-enhanced responses.

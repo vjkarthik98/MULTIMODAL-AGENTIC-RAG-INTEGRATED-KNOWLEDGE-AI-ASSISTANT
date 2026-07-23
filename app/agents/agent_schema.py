@@ -1,11 +1,10 @@
 import math
 import time
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import settings
-
 
 # ACTION TYPE
 
@@ -14,49 +13,51 @@ ActionType = Literal["rag", "search", "direct", "memory", "hybrid"]
 ALLOWED_ACTIONS = {"rag", "search", "direct", "memory", "hybrid"}
 
 # STEP COST LEVELS
-COST_LOW    = "low"
+COST_LOW = "low"
 COST_MEDIUM = "medium"
-COST_HIGH   = "high"
+COST_HIGH = "high"
 
 
 # TOOL CALL SCHEMA — SINGLE TOOL INVOCATION CONTRACT
+
 
 class ToolCall(BaseModel):
 
     model_config = {"validate_assignment": True}
 
-    name:       str
-    input:      Dict[str, Any]  = Field(default_factory=dict)
-    output:     Optional[Any]   = Field(default=None)
-    status:     str             = Field(default="pending")
-    latency_ms: Optional[float] = Field(default=None)
-    error:      Optional[str]   = Field(default=None)
-    timestamp:  float           = Field(default_factory=time.time)
+    name: str
+    input: dict[str, Any] = Field(default_factory=dict)
+    output: Any | None = Field(default=None)
+    status: str = Field(default="pending")
+    latency_ms: float | None = Field(default=None)
+    error: str | None = Field(default=None)
+    timestamp: float = Field(default_factory=time.time)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "name":       self.name,
-            "input":      self.input,
-            "output":     self.output,
-            "status":     self.status,
+            "name": self.name,
+            "input": self.input,
+            "output": self.output,
+            "status": self.status,
             "latency_ms": self.latency_ms,
-            "error":      self.error,
-            "timestamp":  self.timestamp,
+            "error": self.error,
+            "timestamp": self.timestamp,
         }
 
 
 # EXECUTION STEP SCHEMA — SINGLE PLAN STEP
 
+
 class ExecutionStep(BaseModel):
 
     model_config = {"validate_assignment": True}
 
-    tool:        str
-    description: str  = Field(default="")
-    optional:    bool = Field(default=False)
-    cost:        str  = Field(default=COST_MEDIUM)
-    depends_on:  List[str] = Field(default_factory=list)
-    parallel:    bool = Field(default=False)
+    tool: str
+    description: str = Field(default="")
+    optional: bool = Field(default=False)
+    cost: str = Field(default=COST_MEDIUM)
+    depends_on: list[str] = Field(default_factory=list)
+    parallel: bool = Field(default=False)
 
     @field_validator("cost")
     @classmethod
@@ -66,25 +67,26 @@ class ExecutionStep(BaseModel):
             return COST_MEDIUM
         return v
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "tool":        self.tool,
+            "tool": self.tool,
             "description": self.description,
-            "optional":    self.optional,
-            "cost":        self.cost,
-            "depends_on":  self.depends_on,
-            "parallel":    self.parallel,
+            "optional": self.optional,
+            "cost": self.cost,
+            "depends_on": self.depends_on,
+            "parallel": self.parallel,
         }
 
 
 # EXECUTION PLAN SCHEMA
 
+
 class ExecutionPlan(BaseModel):
 
     model_config = {"validate_assignment": True}
 
-    steps:  List[ExecutionStep] = Field(default_factory=list)
-    trace:  Dict[str, Any]      = Field(default_factory=dict)
+    steps: list[ExecutionStep] = Field(default_factory=list)
+    trace: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def total_cost(self) -> str:
@@ -94,16 +96,16 @@ class ExecutionPlan(BaseModel):
         max_cost = max(cost_rank.get(s.cost, 1) for s in self.steps)
         return [COST_LOW, COST_MEDIUM, COST_HIGH][max_cost]
 
-    def tool_sequence(self) -> List[str]:
+    def tool_sequence(self) -> list[str]:
         return [s.tool for s in self.steps]
 
-    def parallel_groups(self) -> List[List[ExecutionStep]]:
+    def parallel_groups(self) -> list[list[ExecutionStep]]:
         """
         GROUP STEPS INTO SEQUENTIAL BATCHES WHERE PARALLEL STEPS
         CAN EXECUTE CONCURRENTLY AND NON-PARALLEL STEPS BLOCK.
         """
-        groups: List[List[ExecutionStep]] = []
-        current_group: List[ExecutionStep] = []
+        groups: list[list[ExecutionStep]] = []
+        current_group: list[ExecutionStep] = []
 
         for step in self.steps:
             if step.parallel:
@@ -119,78 +121,77 @@ class ExecutionPlan(BaseModel):
 
         return groups
 
-    def to_list(self) -> List[Dict[str, Any]]:
+    def to_list(self) -> list[dict[str, Any]]:
         return [s.to_dict() for s in self.steps]
 
 
 # AGENT SIGNAL SCHEMA — STRUCTURED SIGNALS FROM ROUTER ANALYSIS
 
+
 class AgentSignals(BaseModel):
 
     model_config = {"validate_assignment": True}
 
-    is_recent:              bool  = False
-    is_memory:              bool  = False
-    is_web:                 bool  = False
-    is_complex:             bool  = False
-    is_reasoning:           bool  = False
-    has_multimodal_hint:    bool  = False
-    is_code:                bool  = False
-    is_greeting:            bool  = False
-    is_math:                bool  = False
-    is_security:            bool  = False
-    multi_question:         bool  = False
-    has_question_mark:      bool  = False
-    token_count:            int   = 0
+    is_recent: bool = False
+    is_memory: bool = False
+    is_web: bool = False
+    is_complex: bool = False
+    is_reasoning: bool = False
+    has_multimodal_hint: bool = False
+    is_code: bool = False
+    is_greeting: bool = False
+    is_math: bool = False
+    is_security: bool = False
+    multi_question: bool = False
+    has_question_mark: bool = False
+    token_count: int = 0
     # Finance domain signals (Phase 7)
-    is_earnings_call_query:    bool  = False
-    is_regulatory_query:       bool  = False
-    is_financial_model_query:  bool  = False
-    is_market_data_query:      bool  = False
+    is_earnings_call_query: bool = False
+    is_regulatory_query: bool = False
+    is_financial_model_query: bool = False
+    is_market_data_query: bool = False
 
     def __getitem__(self, key: str) -> Any:
         return getattr(self, key)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return self.model_dump()
 
-    def active_signals(self) -> List[str]:
-        return [
-            k for k, v in self.model_dump().items()
-            if isinstance(v, bool) and v
-        ]
+    def active_signals(self) -> list[str]:
+        return [k for k, v in self.model_dump().items() if isinstance(v, bool) and v]
 
 
 # AGENT DECISION SCHEMA — CORE ROUTING DECISION
+
 
 class AgentDecision(BaseModel):
 
     model_config = {"validate_assignment": True}
 
     # CORE FIELDS
-    action:     ActionType
-    reason:     str
+    action: ActionType
+    reason: str
 
     # CONFIDENCE
     confidence: float = Field(default=0.8, ge=0.0, le=1.0)
 
     # CONTEXT
-    session_id:      str              = Field(default="default")
-    signals:         Dict[str, Any]   = Field(default_factory=dict)
-    suggested_tools: List[str]        = Field(default_factory=list)
-    action_history:  List[str]        = Field(default_factory=list)
-    trace:           Dict[str, Any]   = Field(default_factory=dict)
-    tool_calls:      List[ToolCall]   = Field(default_factory=list)
-    query_type:      Optional[str]    = Field(default=None)
+    session_id: str = Field(default="default")
+    signals: dict[str, Any] = Field(default_factory=dict)
+    suggested_tools: list[str] = Field(default_factory=list)
+    action_history: list[str] = Field(default_factory=list)
+    trace: dict[str, Any] = Field(default_factory=dict)
+    tool_calls: list[ToolCall] = Field(default_factory=list)
+    query_type: str | None = Field(default=None)
     # Finance retrieval filters (Phase 7)
-    modality_hint:       Optional[str]   = Field(default=None)
-    source_type_filter:  List[str]       = Field(default_factory=list)
-    subtype_filter:      List[str]       = Field(default_factory=list)
-    call_section_filter: Optional[str]   = Field(default=None)
+    modality_hint: str | None = Field(default=None)
+    source_type_filter: list[str] = Field(default_factory=list)
+    subtype_filter: list[str] = Field(default_factory=list)
+    call_section_filter: str | None = Field(default=None)
 
     # TIMING
-    created_at: float          = Field(default_factory=time.time)
-    latency_ms: Optional[float] = Field(default=None)
+    created_at: float = Field(default_factory=time.time)
+    latency_ms: float | None = Field(default=None)
 
     # VALIDATORS
 
@@ -310,36 +311,36 @@ class AgentDecision(BaseModel):
 
     # SERIALIZATION
 
-    def to_dict(self, minimal: bool = False) -> Dict[str, Any]:
+    def to_dict(self, minimal: bool = False) -> dict[str, Any]:
         if minimal:
             return {
-                "action":     self.action,
+                "action": self.action,
                 "confidence": self.confidence,
             }
 
         return {
-            "action":              self.action,
-            "reason":              self.reason,
-            "confidence":          self.confidence,
-            "session_id":          self.session_id,
-            "signals":             self.signals,
-            "suggested_tools":     self.suggested_tools,
-            "action_history":      self.action_history,
-            "trace":               self.trace,
-            "tool_calls":          [tc.to_dict() for tc in self.tool_calls],
-            "query_type":          self.query_type,
-            "modality_hint":       self.modality_hint,
-            "source_type_filter":  self.source_type_filter,
-            "subtype_filter":      self.subtype_filter,
+            "action": self.action,
+            "reason": self.reason,
+            "confidence": self.confidence,
+            "session_id": self.session_id,
+            "signals": self.signals,
+            "suggested_tools": self.suggested_tools,
+            "action_history": self.action_history,
+            "trace": self.trace,
+            "tool_calls": [tc.to_dict() for tc in self.tool_calls],
+            "query_type": self.query_type,
+            "modality_hint": self.modality_hint,
+            "source_type_filter": self.source_type_filter,
+            "subtype_filter": self.subtype_filter,
             "call_section_filter": self.call_section_filter,
-            "created_at":          self.created_at,
-            "latency_ms":          self.latency_ms,
+            "created_at": self.created_at,
+            "latency_ms": self.latency_ms,
         }
 
-    def to_log_dict(self) -> Dict[str, Any]:
+    def to_log_dict(self) -> dict[str, Any]:
         return {
-            "action":     self.action,
-            "reason":     self.reason,
+            "action": self.action,
+            "reason": self.reason,
             "confidence": self.confidence,
             "session_id": self.session_id,
             "latency_ms": self.latency_ms,
@@ -349,24 +350,25 @@ class AgentDecision(BaseModel):
 
 # AGENT RESPONSE SCHEMA — FINAL OUTPUT FROM AGENT
 
+
 class AgentResponse(BaseModel):
 
     model_config = {"validate_assignment": True}
 
-    response:           str
-    source:             str   = "agent"
-    decision:           str   = "unknown"
-    reason:             str   = ""
-    confidence:         float = Field(default=0.5, ge=0.0, le=1.0)
-    request_id:         str   = Field(default="")
-    session_id:         str   = Field(default="default")
-    latency:            float = Field(default=0.0, ge=0.0)
-    agent_latency:      float = Field(default=0.0, ge=0.0)
-    agent_latency_ms:   float = Field(default=0.0, ge=0.0)
-    metadata:           Dict[str, Any] = Field(default_factory=dict)
+    response: str
+    source: str = "agent"
+    decision: str = "unknown"
+    reason: str = ""
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    request_id: str = Field(default="")
+    session_id: str = Field(default="default")
+    latency: float = Field(default=0.0, ge=0.0)
+    agent_latency: float = Field(default=0.0, ge=0.0)
+    agent_latency_ms: float = Field(default=0.0, ge=0.0)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     hallucination_warning: bool = Field(default=False)
-    is_fallback:        bool  = Field(default=False)
-    sources:            List[Dict[str, Any]] = Field(default_factory=list)
+    is_fallback: bool = Field(default=False)
+    sources: list[dict[str, Any]] = Field(default_factory=list)
 
     @field_validator("confidence", mode="before")
     @classmethod
@@ -381,28 +383,27 @@ class AgentResponse(BaseModel):
 
     @field_validator("sources", mode="before")
     @classmethod
-    def coerce_sources(cls, v: Any) -> List[Dict[str, Any]]:
+    def coerce_sources(cls, v: Any) -> list[dict[str, Any]]:
         if v is None:
             return []
         if isinstance(v, list):
             return v
         return []
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "response":            self.response,
-            "source":              self.source,
-            "decision":            self.decision,
-            "reason":              self.reason,
-            "confidence":          self.confidence,
-            "request_id":          self.request_id,
-            "session_id":          self.session_id,
-            "latency":             self.latency,
-            "agent_latency":       self.agent_latency,
-            "agent_latency_ms":    self.agent_latency_ms,
-            "metadata":            self.metadata,
+            "response": self.response,
+            "source": self.source,
+            "decision": self.decision,
+            "reason": self.reason,
+            "confidence": self.confidence,
+            "request_id": self.request_id,
+            "session_id": self.session_id,
+            "latency": self.latency,
+            "agent_latency": self.agent_latency,
+            "agent_latency_ms": self.agent_latency_ms,
+            "metadata": self.metadata,
             "hallucination_warning": self.hallucination_warning,
-            "is_fallback":         self.is_fallback,
-            "sources":             self.sources,
+            "is_fallback": self.is_fallback,
+            "sources": self.sources,
         }
-

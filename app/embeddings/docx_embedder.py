@@ -1,12 +1,14 @@
 """docx_embedder.py — Finance-grade embedder for DOCX chunks."""
+
 from __future__ import annotations
 
 from typing import Any
 
-from app.embeddings.base_embedder import BaseEmbedder
-from app.core.config import settings
-from app.utils.logger import get_logger
 from prometheus_client import Counter
+
+from app.core.config import settings
+from app.embeddings.base_embedder import BaseEmbedder
+from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -45,7 +47,7 @@ class DocxEmbedder(BaseEmbedder):
                     text = cleaned_text
             else:
                 heading = (s.get("heading") or s.get("section_title") or "").strip()
-                text    = (f"Section: {heading} | {cleaned_text}") if heading else cleaned_text
+                text = (f"Section: {heading} | {cleaned_text}") if heading else cleaned_text
 
             # Defined-term amplification — legal finance docs use precise clause names
             defined_terms: dict = s.get("defined_terms") or {}
@@ -53,7 +55,7 @@ class DocxEmbedder(BaseEmbedder):
                 term_tokens = " ".join(str(k) for k in list(defined_terms.keys())[:10])
                 text = f"{text} [Terms: {term_tokens}]"
 
-            result = text[:settings.MAX_PROMPT_CHARS]
+            result = text[: settings.MAX_PROMPT_CHARS]
             logger.debug(event="embed_text_built", modality="docx", chars=len(result))
             _EMBED_BUILT.inc()
             return result

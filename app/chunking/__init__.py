@@ -1,4 +1,5 @@
 """Chunking package — per-modality dispatch entry point."""
+
 from __future__ import annotations
 
 from typing import Any, List
@@ -21,24 +22,25 @@ def _get_chunker_map() -> dict:
         from app.chunking.txt_chunker import TxtChunker
         from app.chunking.video_chunker import VideoChunker
         from app.chunking.xlsx_chunker import XlsxChunker
+
         _CHUNKER_MAP = {
-            "text":  TxtChunker,
-            "txt":   TxtChunker,
-            "pdf":   PdfChunker,
-            "word":  DocxChunker,
-            "docx":  DocxChunker,
+            "text": TxtChunker,
+            "txt": TxtChunker,
+            "pdf": PdfChunker,
+            "word": DocxChunker,
+            "docx": DocxChunker,
             "excel": XlsxChunker,
-            "xlsx":  XlsxChunker,
+            "xlsx": XlsxChunker,
             "image": ImageChunker,
             "audio": AudioChunker,
-            "mp3":   AudioChunker,
+            "mp3": AudioChunker,
             "video": VideoChunker,
-            "mp4":   VideoChunker,
+            "mp4": VideoChunker,
         }
     return _CHUNKER_MAP
 
 
-def chunk_raw_extracts(extracts: List[Any], meta: Any, modality: str) -> List[Any]:
+def chunk_raw_extracts(extracts: list[Any], meta: Any, modality: str) -> list[Any]:
     """Route List[RawExtract] through the correct per-modality chunker.
 
     Each modality's chunker is isolated — an error in one modality cannot

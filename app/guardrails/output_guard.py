@@ -12,18 +12,17 @@ Checks (in order):
 Returns GuardedOutput. Raises GuardrailBlocked only for toxicity (hard
 block). All other checks result in warnings or in-place scrubbing.
 """
+
 from __future__ import annotations
 
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-
-import structlog
+from typing import Any
 
 from app.guardrails.audit import audit_decision
 from app.guardrails.exceptions import GuardrailBlocked
-from app.guardrails.metrics import record_block, record_scrub, record_allow
+from app.guardrails.metrics import record_allow, record_block, record_scrub
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -32,7 +31,7 @@ logger = get_logger(__name__)
 # Policy cache
 # ---------------------------------------------------------------------------
 _policy: dict = {}
-_template_patterns: List[re.Pattern] = []
+_template_patterns: list[re.Pattern] = []
 _toxicity_threshold: float = 0.75
 _groundedness_threshold: float = 0.30
 _max_answer_chars: int = 16000
@@ -43,9 +42,9 @@ _refusal_templates: dict = {}
 # entirely — covers the highest-severity categories (email, phone, SSN,
 # credit card) so a total module failure still doesn't ship raw PII.
 _EMERGENCY_PII_RE = re.compile(
-    r"[\w.+-]+@[\w-]+\.[\w.-]+"                          # email
-    r"|\b\d{3}-\d{2}-\d{4}\b"                             # US SSN
-    r"|\b(?:\d[ -]*?){13,16}\b"                           # credit card
+    r"[\w.+-]+@[\w-]+\.[\w.-]+"  # email
+    r"|\b\d{3}-\d{2}-\d{4}\b"  # US SSN
+    r"|\b(?:\d[ -]*?){13,16}\b"  # credit card
     r"|\b(?:\+?\d{1,2}[ -]?)?\(?\d{3}\)?[ -]?\d{3}[ -]?\d{4}\b"  # phone
 )
 _policy_loaded = False
@@ -59,6 +58,7 @@ def _load_policy() -> None:
         return
     try:
         from app.guardrails._policy_loader import get_policy
+
         _policy = get_policy()
         out = _policy.get("output", {})
         _toxicity_threshold = float(out.get("toxicity_threshold", 0.75))
@@ -83,6 +83,7 @@ def _load_policy() -> None:
 # Result type
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class GuardedOutput:
     text: str
@@ -92,17 +93,18 @@ class GuardedOutput:
     pii_scrubbed: bool = False
     template_artifacts_stripped: bool = False
     citations_validated: bool = False
-    fabricated_citations: List[str] = field(default_factory=list)
+    fabricated_citations: list[str] = field(default_factory=list)
     hallucination_warning: bool = False
-    hallucination_detail: Optional[Dict[str, Any]] = None
+    hallucination_detail: dict[str, Any] | None = None
     toxicity_score: float = 0.0
-    repairs_applied: List[str] = field(default_factory=list)
+    repairs_applied: list[str] = field(default_factory=list)
     latency_ms: float = 0.0
 
 
 # ---------------------------------------------------------------------------
 # Internal checks
 # ---------------------------------------------------------------------------
+
 
 def _strip_template_artifacts(text: str) -> tuple[str, bool]:
     """Remove llama/mistral token artifacts and prompt template leakage."""
@@ -118,7 +120,7 @@ def _strip_template_artifacts(text: str) -> tuple[str, bool]:
 _NUMERIC_CITATION_RE = re.compile(r'\[\s*\d+(?:\s*,\s*\d+)*\s*\]')
 
 
-def _detect_suspect_citations(answer: str, sources: List[Dict]) -> List[str]:
+def _detect_suspect_citations(answer: str, sources: list[dict]) -> list[str]:
     """Detect (but do NOT mutate) citation tokens for audit/metrics only.
 
     The answer body is cleaned downstream by
@@ -132,7 +134,7 @@ def _detect_suspect_citations(answer: str, sources: List[Dict]) -> List[str]:
     sales") and wiped [2,3] before the source-chip filter could read it.
     """
     source_filenames = set()
-    for src in (sources or []):
+    for src in sources or []:
         fn = src.get("filename") or src.get("source") or src.get("file") or ""
         if fn:
             source_filenames.add(fn.lower())
@@ -140,7 +142,7 @@ def _detect_suspect_citations(answer: str, sources: List[Dict]) -> List[str]:
         if "_" in str(chunk_id):
             source_filenames.add(str(chunk_id).split("_", 1)[-1].lower())
 
-    suspect: List[str] = []
+    suspect: list[str] = []
     for match in re.finditer(r'\[([^\]]+)\]', answer):
         token = match.group(1).strip()
         # Numeric / multi-index citations are always legitimate.
@@ -148,7 +150,10 @@ def _detect_suspect_citations(answer: str, sources: List[Dict]) -> List[str]:
             continue
         # Structured locator markers emitted by ingestion/reranker are not
         # fabrications (they are stripped downstream, not leaked).
-        if re.match(r'(?i)^(sheet|page|pg|pages?|hyperlink|src|spk|t|para|paragraph|row|rows|section|figure|fig|table|caption|slide|frame|timestamp|error_markers)\b', token):
+        if re.match(
+            r'(?i)^(sheet|page|pg|pages?|hyperlink|src|spk|t|para|paragraph|row|rows|section|figure|fig|table|caption|slide|frame|timestamp|error_markers)\b',
+            token,
+        ):
             continue
         token_lower = token.lower()
         if source_filenames and any(
@@ -163,12 +168,13 @@ def _detect_suspect_citations(answer: str, sources: List[Dict]) -> List[str]:
 
 def _check_groundedness(
     answer: str,
-    context_chunks: List[str],
+    context_chunks: list[str],
     session_id: str,
-) -> tuple[bool, Optional[Dict]]:
+) -> tuple[bool, dict | None]:
     """Reuse Phase 25 hallucination detector. Returns (flagged, detail)."""
     try:
         from app.eval.metrics.hallucination import hallucination_flag_single
+
         result = hallucination_flag_single(answer, context_chunks)
         flagged = result.get("confidence", 0.0) >= _groundedness_threshold
         return flagged, result
@@ -181,7 +187,7 @@ def _check_groundedness(
 # cached by Python (sys.modules only caches successes), so the old per-call
 # `from detoxify import Detoxify` re-scanned the path on every answer; and
 # when installed, `Detoxify("original")` would reload the full model per call.
-_detoxify_model: Optional[object] = None
+_detoxify_model: object | None = None
 _detoxify_checked = False
 
 
@@ -192,6 +198,7 @@ def _get_detoxify():
     _detoxify_checked = True
     try:
         from detoxify import Detoxify
+
         _detoxify_model = Detoxify("original")
     except ImportError:
         _detoxify_model = None
@@ -245,13 +252,15 @@ def _check_toxicity(answer: str) -> float:
 
 def _get_refusal(key: str) -> str:
     _load_policy()
-    return _refusal_templates.get(key) or _refusal_templates.get("generic", "I'm unable to process that request.")
+    return _refusal_templates.get(key) or _refusal_templates.get(
+        "generic", "I'm unable to process that request."
+    )
 
 
-def _check_mojibake_repairs(sources: List[Dict]) -> List[str]:
+def _check_mojibake_repairs(sources: list[dict]) -> list[str]:
     """Check if any source chunk was mojibake-repaired and return repair notes."""
     repairs = []
-    for src in (sources or []):
+    for src in sources or []:
         count = src.get("repaired_mojibake_count") or src.get("repairs_applied", 0)
         if count and int(count) > 0:
             fn = src.get("filename") or src.get("source") or "unknown"
@@ -263,10 +272,11 @@ def _check_mojibake_repairs(sources: List[Dict]) -> List[str]:
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def check(
     answer: str,
-    context_chunks: Optional[List[str]] = None,
-    sources: Optional[List[Dict]] = None,
+    context_chunks: list[str] | None = None,
+    sources: list[dict] | None = None,
     session_id: str = "",
     correlation_id: str = "",
     surface: str = "output",
@@ -302,7 +312,7 @@ def check(
     #    lexical scorer compares a mutated answer against the context and
     #    inflates hallucination_rate (the Phase 26 regression root cause).
     hallucination_warning = False
-    hallucination_detail: Optional[Dict] = None
+    hallucination_detail: dict | None = None
     if context_chunks:
         hallucination_warning, hallucination_detail = _check_groundedness(
             answer, context_chunks, session_id
@@ -337,7 +347,7 @@ def check(
     #    filename leakage. Callers that need the cited-source indices MUST run
     #    extract_cited_indices() on the RAW answer (before this guard) — which
     #    is why this guard must not delete citation tokens.
-    fabricated_citations: List[str] = []
+    fabricated_citations: list[str] = []
     if _citation_validation:
         fabricated_citations = _detect_suspect_citations(answer, sources)
         if fabricated_citations:
@@ -356,6 +366,7 @@ def check(
     pii_scrubbed = False
     try:
         from app.guardrails.pii import scrub_pii
+
         answer, pii_scrubbed = scrub_pii(answer)
         if pii_scrubbed:
             record_scrub("pii", surface)

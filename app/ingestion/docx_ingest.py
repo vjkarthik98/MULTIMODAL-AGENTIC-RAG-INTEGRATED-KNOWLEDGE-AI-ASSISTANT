@@ -16,7 +16,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
@@ -57,6 +57,7 @@ _CLAUSE_NUM_RE = re.compile(
 
 # ─── Utilities ────────────────────────────────────────────────────────────────
 
+
 def _file_hash(path: str) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -77,6 +78,7 @@ def _quality(text: str) -> float:
 def _is_docx_encrypted(file_path: str) -> bool:
     try:
         import zipfile
+
         with zipfile.ZipFile(file_path, "r") as z:
             names = z.namelist()
             if "EncryptedPackage" in names or "EncryptionInfo" in names:
@@ -95,6 +97,7 @@ def _has_macros(file_path: str) -> bool:
 def _repair_docx(file_path: str) -> str:
     try:
         import zipfile
+
         repaired = file_path + ".repaired.docx"
         with zipfile.ZipFile(file_path, "r") as zin:
             with zipfile.ZipFile(repaired, "w", zipfile.ZIP_DEFLATED) as zout:
@@ -113,7 +116,9 @@ def _convert_doc_to_docx(file_path: str) -> str:
     out_dir = Path(file_path).parent
     result = subprocess.run(
         ["libreoffice", "--headless", "--convert-to", "docx", "--outdir", str(out_dir), file_path],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     converted = str(out_dir / (Path(file_path).stem + ".docx"))
     if os.path.exists(converted):
@@ -121,7 +126,7 @@ def _convert_doc_to_docx(file_path: str) -> str:
     raise RuntimeError(f"LIBREOFFICE_CONVERSION_FAILED: {result.stderr[:300]}")
 
 
-def _heading_level(paragraph: Any) -> Optional[int]:
+def _heading_level(paragraph: Any) -> int | None:
     try:
         style_name = paragraph.style.name if paragraph.style else ""
         if "Heading" in style_name:
@@ -153,7 +158,23 @@ def _looks_like_heading(text: str, paragraph: Any) -> bool:
             return True
     except Exception:
         pass
-    _stop = {"of", "the", "and", "for", "to", "in", "on", "a", "an", "or", "by", "with", "at", "as", "from"}
+    _stop = {
+        "of",
+        "the",
+        "and",
+        "for",
+        "to",
+        "in",
+        "on",
+        "a",
+        "an",
+        "or",
+        "by",
+        "with",
+        "at",
+        "as",
+        "from",
+    }
     content = [w for w in words if w[:1].isalpha() and w.lower() not in _stop]
     if 1 <= len(content) <= 9:
         cap = sum(1 for w in content if w[:1].isupper())
@@ -169,8 +190,8 @@ def _iter_body_blocks(doc: Any):
     walked together via the body XML so heading attribution stays correct).
     """
     from docx.oxml.ns import qn
-    from docx.text.paragraph import Paragraph
     from docx.table import Table
+    from docx.text.paragraph import Paragraph
 
     para_idx = 0
     tbl_idx = 0
@@ -183,7 +204,7 @@ def _iter_body_blocks(doc: Any):
             tbl_idx += 1
 
 
-def _format_table_rows(rows: List[List[str]]) -> str:
+def _format_table_rows(rows: list[list[str]]) -> str:
     lines = []
     for row in rows:
         cells = [str(c or "").strip() for c in row]
@@ -195,6 +216,7 @@ def _format_table_rows(rows: List[List[str]]) -> str:
 def _pii_scrub(text: str, surface: str) -> str:
     try:
         from app.guardrails.pii import scrub_pii as _gp_scrub
+
         cleaned, _ = _gp_scrub(text)
         return cleaned
     except Exception:
@@ -204,12 +226,14 @@ def _pii_scrub(text: str, surface: str) -> str:
 def _sanitize_text(text: str, surface: str) -> str:
     try:
         from app.guardrails.input_guard import sanitize as _g
+
         return _g(text, surface=surface)
     except Exception:
         return text
 
 
 # ─── Phase 1: DocxIngestor ────────────────────────────────────────────────────
+
 
 class DocxIngestor(BaseIngestor):
     """Extracts raw content from DOCX/DOC files → List[RawExtract].
@@ -229,11 +253,13 @@ class DocxIngestor(BaseIngestor):
         self,
         path: Path,
         metadata: UniversalMetadata,
-    ) -> List[RawExtract]:
+    ) -> list[RawExtract]:
         source = path.name
         file_path = str(path)
         ext = path.suffix.lower()
-        logger.info(event="extraction_start", modality="docx", file=str(path), size=path.stat().st_size)
+        logger.info(
+            event="extraction_start", modality="docx", file=str(path), size=path.stat().st_size
+        )
         try:
             if _is_docx_encrypted(file_path):
                 raise ValueError(f"PASSWORD_PROTECTED_DOCX: {path.name}")
@@ -250,12 +276,14 @@ class DocxIngestor(BaseIngestor):
 
             try:
                 import docx as python_docx
+
                 doc = python_docx.Document(active_path)
             except Exception:
                 logger.warning("docx_corrupt_attempting_repair", file=path.name)
                 repaired = _repair_docx(active_path)
                 try:
                     import docx as python_docx
+
                     doc = python_docx.Document(repaired)
                 except Exception as exc:
                     raise ValueError(f"DOCX_CORRUPT_UNRECOVERABLE: {exc}")
@@ -264,8 +292,8 @@ class DocxIngestor(BaseIngestor):
             if not has_content:
                 raise ValueError("EMPTY_DOCUMENT")
 
-            extracts: List[RawExtract] = []
-            current_heading: Optional[str] = None
+            extracts: list[RawExtract] = []
+            current_heading: str | None = None
 
             # Paragraphs + tables, walked together in true document order so a
             # table's heading/section attribution reflects the heading it
@@ -288,7 +316,7 @@ class DocxIngestor(BaseIngestor):
                         continue
                     text = self._scrub_pii(text, surface="docx_ingest")
 
-                    style_name: Optional[str] = None
+                    style_name: str | None = None
                     try:
                         style_name = para.style.name if para.style else None
                     except Exception:
@@ -304,31 +332,35 @@ class DocxIngestor(BaseIngestor):
 
                     if level:
                         current_heading = text
-                        extracts.append(RawExtract(
-                            text=text,
-                            extract_type="heading",
-                            is_bold=is_bold,
-                            style_name=style_name,
-                            raw_source_ref=f"docx:{path.name}|para:{i}",
-                            extra={
-                                "heading_level": level,
-                                "paragraph_index": i,
-                            },
-                        ))
+                        extracts.append(
+                            RawExtract(
+                                text=text,
+                                extract_type="heading",
+                                is_bold=is_bold,
+                                style_name=style_name,
+                                raw_source_ref=f"docx:{path.name}|para:{i}",
+                                extra={
+                                    "heading_level": level,
+                                    "paragraph_index": i,
+                                },
+                            )
+                        )
                     else:
-                        extracts.append(RawExtract(
-                            text=text,
-                            extract_type="prose",
-                            is_bold=is_bold,
-                            style_name=style_name,
-                            raw_source_ref=f"docx:{path.name}|para:{i}",
-                            extra={
-                                "paragraph_index": i,
-                                "section_title": current_heading,
-                                "defined_terms": _DEFINED_TERM_RE.findall(text),
-                                "clause_numbers": _CLAUSE_NUM_RE.findall(text),
-                            },
-                        ))
+                        extracts.append(
+                            RawExtract(
+                                text=text,
+                                extract_type="prose",
+                                is_bold=is_bold,
+                                style_name=style_name,
+                                raw_source_ref=f"docx:{path.name}|para:{i}",
+                                extra={
+                                    "paragraph_index": i,
+                                    "section_title": current_heading,
+                                    "defined_terms": _DEFINED_TERM_RE.findall(text),
+                                    "clause_numbers": _CLAUSE_NUM_RE.findall(text),
+                                },
+                            )
+                        )
                 else:
                     table = block
                     t_idx = idx
@@ -338,22 +370,27 @@ class DocxIngestor(BaseIngestor):
                         if any(row):
                             combined_row = " | ".join(str(c or "") for c in row)
                             combined_row = self._sanitize(combined_row, surface="docx_table_ingest")
-                            combined_row = self._scrub_pii(combined_row, surface="docx_table_ingest")
+                            combined_row = self._scrub_pii(
+                                combined_row, surface="docx_table_ingest"
+                            )
                             if combined_row.strip():
                                 row_texts.append(combined_row)
-                                extracts.append(RawExtract(
-                                    text=combined_row,
-                                    extract_type="table_row",
-                                    raw_source_ref=f"docx:{path.name}|table:{t_idx}|row:{len(row_texts)}",
-                                    extra={
-                                        "table_index": t_idx,
-                                        "section_title": current_heading,
-                                    },
-                                ))
+                                extracts.append(
+                                    RawExtract(
+                                        text=combined_row,
+                                        extract_type="table_row",
+                                        raw_source_ref=f"docx:{path.name}|table:{t_idx}|row:{len(row_texts)}",
+                                        extra={
+                                            "table_index": t_idx,
+                                            "section_title": current_heading,
+                                        },
+                                    )
+                                )
 
             # Comments
             try:
                 from docx.oxml.ns import qn
+
                 comments_part = doc.part.package.part_related_by(
                     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"
                 )
@@ -367,18 +404,21 @@ class DocxIngestor(BaseIngestor):
                         ).strip()
                         try:
                             from app.guardrails.pii import scrub_pii
+
                             author, _ = scrub_pii(author)
                         except Exception:
                             pass
                         if body_text:
                             body_text = self._sanitize(body_text, surface="docx_comment_ingest")
                             body_text = self._scrub_pii(body_text, surface="docx_comment_ingest")
-                            extracts.append(RawExtract(
-                                text=f"[COMMENT by {author} on {date_str}] {body_text}",
-                                extract_type="comment",
-                                raw_source_ref=f"docx:{path.name}|comment",
-                                extra={"comment_author": author, "comment_date": date_str},
-                            ))
+                            extracts.append(
+                                RawExtract(
+                                    text=f"[COMMENT by {author} on {date_str}] {body_text}",
+                                    extract_type="comment",
+                                    raw_source_ref=f"docx:{path.name}|comment",
+                                    extra={"comment_author": author, "comment_date": date_str},
+                                )
+                            )
             except Exception:
                 pass
 
@@ -388,15 +428,21 @@ class DocxIngestor(BaseIngestor):
                     try:
                         part = getattr(doc.part, fn_type, None)
                         if part:
-                            xml_text = part._element.text_content() if hasattr(part._element, "text_content") else ""
+                            xml_text = (
+                                part._element.text_content()
+                                if hasattr(part._element, "text_content")
+                                else ""
+                            )
                             xml_text = self._sanitize(xml_text, surface="docx_footnote_ingest")
                             xml_text = self._scrub_pii(xml_text, surface="docx_footnote_ingest")
                             if xml_text.strip():
-                                extracts.append(RawExtract(
-                                    text=f"[{fn_type.upper()}] {xml_text[:1000]}",
-                                    extract_type="footnote",
-                                    raw_source_ref=f"docx:{path.name}|{fn_type}",
-                                ))
+                                extracts.append(
+                                    RawExtract(
+                                        text=f"[{fn_type.upper()}] {xml_text[:1000]}",
+                                        extract_type="footnote",
+                                        raw_source_ref=f"docx:{path.name}|{fn_type}",
+                                    )
+                                )
                     except Exception:
                         pass
             except Exception:
@@ -406,15 +452,19 @@ class DocxIngestor(BaseIngestor):
             try:
                 for section in doc.sections:
                     for hf_type, hf_obj in [("header", section.header), ("footer", section.footer)]:
-                        hf_text = " ".join(p.text.strip() for p in hf_obj.paragraphs if p.text.strip())
+                        hf_text = " ".join(
+                            p.text.strip() for p in hf_obj.paragraphs if p.text.strip()
+                        )
                         hf_text = self._sanitize(hf_text, surface="docx_headerfooter_ingest")
                         hf_text = self._scrub_pii(hf_text, surface="docx_headerfooter_ingest")
                         if hf_text:
-                            extracts.append(RawExtract(
-                                text=f"[{hf_type.upper()}] {hf_text}",
-                                extract_type="header_footer",
-                                raw_source_ref=f"docx:{path.name}|{hf_type}",
-                            ))
+                            extracts.append(
+                                RawExtract(
+                                    text=f"[{hf_type.upper()}] {hf_text}",
+                                    extract_type="header_footer",
+                                    raw_source_ref=f"docx:{path.name}|{hf_type}",
+                                )
+                            )
             except Exception:
                 pass
 
@@ -438,13 +488,15 @@ class DocxIngestor(BaseIngestor):
                         ext_hint = "." + ct.split("/", 1)[-1].split(";", 1)[0].strip().lower()
                         if ext_hint == ".jpeg":
                             ext_hint = ".jpg"
-                        extracts.append(RawExtract(
-                            text="",
-                            extract_type="image_region",
-                            raw_source_ref=f"docx:{path.name}|img:{img_idx}",
-                            raw_bytes=blob,
-                            extra={"img_ext": ext_hint, "section_title": current_heading},
-                        ))
+                        extracts.append(
+                            RawExtract(
+                                text="",
+                                extract_type="image_region",
+                                raw_source_ref=f"docx:{path.name}|img:{img_idx}",
+                                raw_bytes=blob,
+                                extra={"img_ext": ext_hint, "section_title": current_heading},
+                            )
+                        )
                         img_idx += 1
                     except Exception as exc:
                         logger.warning("docx_embedded_image_failed", error=str(exc))
@@ -455,7 +507,9 @@ class DocxIngestor(BaseIngestor):
                 raise ValueError("NO_EXTRACTS_PRODUCED")
 
             _EXTRACTS_TOTAL.inc(len(extracts))
-            logger.info(event="extraction_complete", modality="docx", file=str(path), extracts=len(extracts))
+            logger.info(
+                event="extraction_complete", modality="docx", file=str(path), extracts=len(extracts)
+            )
             return extracts
         except Exception as _exc:
             _EXTRACT_ERRORS.inc()
@@ -465,15 +519,21 @@ class DocxIngestor(BaseIngestor):
 
 # ─── Backward-compat ingest() — full pipeline ─────────────────────────────────
 
-def _base_structure(doc_id: str, session_id: str, source_path: str, **extra: Any) -> Dict[str, Any]:
+
+def _base_structure(doc_id: str, session_id: str, source_path: str, **extra: Any) -> dict[str, Any]:
     return {"doc_id": doc_id, "session_id": session_id, "source_path": source_path, **extra}
 
 
 def _ingest_embedded_image_bytes(
-    blob: bytes, ext_hint: str, session_id: str,
-    parent_doc_id: str, parent_modality: str, parent_source: str,
-    parent_page: Optional[int] = None, parent_sheet: Optional[str] = None,
-) -> List[IngestedDocument]:
+    blob: bytes,
+    ext_hint: str,
+    session_id: str,
+    parent_doc_id: str,
+    parent_modality: str,
+    parent_source: str,
+    parent_page: int | None = None,
+    parent_sheet: str | None = None,
+) -> list[IngestedDocument]:
     if not blob or len(blob) < 256:
         return []
     safe_ext = (ext_hint or ".png").lower().strip()
@@ -482,6 +542,7 @@ def _ingest_embedded_image_bytes(
     if safe_ext not in {".png", ".jpg", ".bmp", ".gif", ".webp", ".tiff", ".tif"}:
         safe_ext = ".png"
     from app.utils.paths import resolved_temp_dir
+
     tmp_dir = resolved_temp_dir() / "embedded_images"
     try:
         tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -493,18 +554,31 @@ def _ingest_embedded_image_bytes(
         if not tmp_path.exists():
             tmp_path.write_bytes(blob)
         from app.ingestion.image_ingest import ingest as image_ingest
-        return image_ingest(
-            str(tmp_path), session_id,
-            parent_doc_id=parent_doc_id, parent_modality=parent_modality,
-            parent_source=parent_source, parent_page=parent_page, parent_sheet=parent_sheet,
-        ) or []
+
+        return (
+            image_ingest(
+                str(tmp_path),
+                session_id,
+                parent_doc_id=parent_doc_id,
+                parent_modality=parent_modality,
+                parent_source=parent_source,
+                parent_page=parent_page,
+                parent_sheet=parent_sheet,
+            )
+            or []
+        )
     except Exception as exc:
-        logger.warning("embedded_image_ingest_failed", parent_source=parent_source,
-                       sheet=parent_sheet, page=parent_page, error=str(exc))
+        logger.warning(
+            "embedded_image_ingest_failed",
+            parent_source=parent_source,
+            sheet=parent_sheet,
+            page=parent_page,
+            error=str(exc),
+        )
         return []
 
 
-async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
+async def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
     """Backward-compatible entry point. Router imports this until Phase 8."""
     if not session_id:
         raise ValueError("SESSION_ID_REQUIRED")
@@ -527,7 +601,9 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
         async with _semaphore:
             try:
-                logger.info("docx_ingest_start", file=path.name, size=file_size, session_id=session_id)
+                logger.info(
+                    "docx_ingest_start", file=path.name, size=file_size, session_id=session_id
+                )
 
                 ext = path.suffix.lower()
                 doc_id = str(uuid.uuid4())
@@ -547,23 +623,27 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
                 try:
                     import docx as python_docx
+
                     doc = python_docx.Document(active_path)
                 except Exception:
                     logger.warning("docx_corrupt_attempting_repair", file=path.name)
                     repaired = _repair_docx(active_path)
                     try:
                         import docx as python_docx
+
                         doc = python_docx.Document(repaired)
                     except Exception as exc:
                         raise ValueError(f"DOCX_CORRUPT_UNRECOVERABLE: {exc}")
 
-                has_content = any((p.text or "").strip() for p in doc.paragraphs) or bool(doc.tables)
+                has_content = any((p.text or "").strip() for p in doc.paragraphs) or bool(
+                    doc.tables
+                )
                 if not has_content:
                     raise ValueError("EMPTY_DOCUMENT")
 
-                documents: List[IngestedDocument] = []
-                current_heading: Optional[str] = None
-                _para_buffer: List[str] = []
+                documents: list[IngestedDocument] = []
+                current_heading: str | None = None
+                _para_buffer: list[str] = []
                 _para_buffer_start_idx = 0
                 _chunk_target = min(settings.CHUNK_SIZE, 800)
 
@@ -583,7 +663,9 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                             source_type="word",
                             source=source_name,
                             structure=_base_structure(
-                                doc_id, session_id, source_path_str,
+                                doc_id,
+                                session_id,
+                                source_path_str,
                                 paragraph_index=_para_buffer_start_idx,
                                 heading_level=None,
                                 page_number=None,
@@ -615,10 +697,12 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     subtype = "heading" if level else "paragraph"
                     try:
                         from app.guardrails.input_guard import sanitize as _guard_sanitize
+
                         _clean = _guard_sanitize(text, surface="docx_ingest")
                         if _clean != text:
-                            logger.warning("docx_injection_sanitized", file=source_name,
-                                           paragraph_index=i)
+                            logger.warning(
+                                "docx_injection_sanitized", file=source_name, paragraph_index=i
+                            )
                             text = _clean
                     except Exception as _ge:
                         logger.warning("docx_guardrail_failed", file=source_name, error=str(_ge))
@@ -638,7 +722,9 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                                     source_type="word",
                                     source=source_name,
                                     structure=_base_structure(
-                                        doc_id, session_id, source_path_str,
+                                        doc_id,
+                                        session_id,
+                                        source_path_str,
                                         paragraph_index=i,
                                         heading_level=level,
                                         page_number=None,
@@ -670,8 +756,11 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 for t_idx, table in enumerate(doc.tables):
                     rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
                     combined = _sanitize_text(
-                        "\n".join("[TABLE: " + " | ".join(str(c or "") for c in row) + "]"
-                                  for row in rows if any(row)),
+                        "\n".join(
+                            "[TABLE: " + " | ".join(str(c or "") for c in row) + "]"
+                            for row in rows
+                            if any(row)
+                        ),
                         surface="docx_table_ingest",
                     )
                     combined = _pii_scrub(combined, surface="docx_table_ingest")
@@ -685,7 +774,9 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                             source_type="word",
                             source=source_name,
                             structure=_base_structure(
-                                doc_id, session_id, source_path_str,
+                                doc_id,
+                                session_id,
+                                source_path_str,
                                 table_index=t_idx,
                                 page_number=None,
                                 total_pages=None,
@@ -707,6 +798,7 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 # Comments
                 try:
                     from docx.oxml.ns import qn
+
                     comments_part = doc.part.package.part_related_by(
                         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"
                     )
@@ -719,6 +811,7 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                             ).strip()
                             try:
                                 from app.guardrails.pii import scrub_pii
+
                                 author, _ = scrub_pii(author)
                             except Exception:
                                 pass
@@ -733,7 +826,9 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                                         source_type="word",
                                         source=source_name,
                                         structure=_base_structure(
-                                            doc_id, session_id, source_path_str,
+                                            doc_id,
+                                            session_id,
+                                            source_path_str,
                                             comment_author=author,
                                             comment_date=date_str,
                                             content_type="docx_comment",
@@ -755,7 +850,11 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                         try:
                             part = getattr(doc.part, fn_type, None)
                             if part:
-                                xml_text = part._element.text_content() if hasattr(part._element, "text_content") else ""
+                                xml_text = (
+                                    part._element.text_content()
+                                    if hasattr(part._element, "text_content")
+                                    else ""
+                                )
                                 xml_text = _sanitize_text(xml_text, surface="docx_footnote_ingest")
                                 xml_text = _pii_scrub(xml_text, surface="docx_footnote_ingest")
                                 if xml_text.strip():
@@ -767,7 +866,9 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                                             source_type="word",
                                             source=source_name,
                                             structure=_base_structure(
-                                                doc_id, session_id, source_path_str,
+                                                doc_id,
+                                                session_id,
+                                                source_path_str,
                                                 content_type=f"docx_{fn_type}",
                                                 ingestion_time=time.time(),
                                             ),
@@ -786,8 +887,13 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 # Headers / Footers
                 try:
                     for section in doc.sections:
-                        for hf_type, hf_obj in [("header", section.header), ("footer", section.footer)]:
-                            hf_text = " ".join(p.text.strip() for p in hf_obj.paragraphs if p.text.strip())
+                        for hf_type, hf_obj in [
+                            ("header", section.header),
+                            ("footer", section.footer),
+                        ]:
+                            hf_text = " ".join(
+                                p.text.strip() for p in hf_obj.paragraphs if p.text.strip()
+                            )
                             hf_text = _sanitize_text(hf_text, surface="docx_headerfooter_ingest")
                             hf_text = _pii_scrub(hf_text, surface="docx_headerfooter_ingest")
                             if hf_text:
@@ -799,7 +905,9 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                                         source_type="word",
                                         source=source_name,
                                         structure=_base_structure(
-                                            doc_id, session_id, source_path_str,
+                                            doc_id,
+                                            session_id,
+                                            source_path_str,
                                             content_type=f"docx_{hf_type}",
                                             ingestion_time=time.time(),
                                         ),
@@ -817,9 +925,10 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 # so BLIP forward passes overlap instead of running one at a time.
                 try:
                     import concurrent.futures as _cf
+
                     related = getattr(doc.part, "related_parts", {}) or {}
                     seen_blobs: set = set()
-                    image_jobs: List[Tuple[bytes, str]] = []
+                    image_jobs: list[tuple[bytes, str]] = []
                     for _rel_id, part in related.items():
                         try:
                             ct = getattr(part, "content_type", "") or ""
@@ -840,19 +949,25 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                             logger.warning("docx_embedded_image_scan_part_failed", error=str(exc))
 
                     if image_jobs:
-                        def _caption_one(args: Tuple[bytes, str]) -> List[IngestedDocument]:
+
+                        def _caption_one(args: tuple[bytes, str]) -> list[IngestedDocument]:
                             blob, ext_hint = args
                             try:
                                 return _ingest_embedded_image_bytes(
-                                    blob=blob, ext_hint=ext_hint, session_id=session_id,
-                                    parent_doc_id=doc_id, parent_modality="word",
+                                    blob=blob,
+                                    ext_hint=ext_hint,
+                                    session_id=session_id,
+                                    parent_doc_id=doc_id,
+                                    parent_modality="word",
                                     parent_source=source_name,
                                 )
                             except Exception as exc:
                                 logger.warning("docx_embedded_image_failed", error=str(exc))
                                 return []
 
-                        max_workers = min(len(image_jobs), getattr(settings, "VIDEO_CAPTION_CONCURRENCY", 3))
+                        max_workers = min(
+                            len(image_jobs), getattr(settings, "VIDEO_CAPTION_CONCURRENCY", 3)
+                        )
                         with _cf.ThreadPoolExecutor(max_workers=max_workers) as img_pool:
                             for result in img_pool.map(_caption_one, image_jobs):
                                 documents.extend(result)
@@ -866,8 +981,13 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 _ingest_duration.labels(status="success").observe(latency)
                 span.set_attribute("docs.count", len(documents))
                 span.set_status(Status(StatusCode.OK))
-                logger.info("docx_ingest_success", file=path.name, docs=len(documents),
-                            latency=latency, session_id=session_id)
+                logger.info(
+                    "docx_ingest_success",
+                    file=path.name,
+                    docs=len(documents),
+                    latency=latency,
+                    session_id=session_id,
+                )
                 return documents
 
             except Exception as exc:
@@ -877,16 +997,23 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 _ingest_errors.labels(error_type=error_type).inc()
                 span.set_status(Status(StatusCode.ERROR, str(exc)))
                 span.record_exception(exc)
-                logger.error("docx_ingest_failed", file=path.name, session_id=session_id,
-                             error=str(exc), error_type=error_type, latency=latency)
+                logger.error(
+                    "docx_ingest_failed",
+                    file=path.name,
+                    session_id=session_id,
+                    error=str(exc),
+                    error_type=error_type,
+                    latency=latency,
+                )
                 raise
 
 
-def ingest_sync(file_path: str, session_id: str) -> List[IngestedDocument]:
+def ingest_sync(file_path: str, session_id: str) -> list[IngestedDocument]:
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 future = pool.submit(asyncio.run, ingest(file_path, session_id))
                 return future.result()
@@ -897,15 +1024,16 @@ def ingest_sync(file_path: str, session_id: str) -> List[IngestedDocument]:
 
 # ─── Production path: DocxIngestor → DocxChunker ──────────────────────────────
 
-async def ingest_docx_full(file_path: str, session_id: str) -> List[IngestedDocument]:
+
+async def ingest_docx_full(file_path: str, session_id: str) -> list[IngestedDocument]:
     """Production DOCX ingestion: DocxIngestor.extract() → DocxChunker.chunk().
 
     Produces modality='docx' docs with full Phase 1.3/2.3 metadata:
     heading_hierarchy, defined_terms, has_bold_terms, has_italic_terms,
     clause_numbers, finance_entities, char_start, char_end, token_count, etc.
     """
-    from app.ingestion.schema import UniversalMetadata
     from app.chunking import chunk_raw_extracts
+    from app.ingestion.schema import UniversalMetadata
 
     if not session_id:
         raise ValueError("SESSION_ID_REQUIRED")

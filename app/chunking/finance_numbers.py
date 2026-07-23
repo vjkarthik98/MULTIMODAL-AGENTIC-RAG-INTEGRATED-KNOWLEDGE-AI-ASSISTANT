@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Dict, List, Tuple
 
 try:
     import tiktoken as _tiktoken
+
     _enc = _tiktoken.get_encoding("cl100k_base")
 
     def approx_tokens(text: str) -> int:
         return len(_enc.encode(text, disallowed_special=()))
+
 except Exception:
+
     def approx_tokens(text: str) -> int:  # type: ignore[misc]
         return int(len(text.split()) * 1.3)
 
@@ -37,14 +39,14 @@ _FIN_RE = re.compile(
 _SLOT = "\x02FIN_{n}\x03"
 
 
-def protect(text: str) -> Tuple[str, Dict[str, str]]:
+def protect(text: str) -> tuple[str, dict[str, str]]:
     """Replace finance numbers with stable single-token placeholders.
 
     Returns (protected_text, mapping) where mapping is placeholder→original.
     The placeholders survive any whitespace-based splitter because they contain
     no spaces, commas, or dots.
     """
-    mapping: Dict[str, str] = {}
+    mapping: dict[str, str] = {}
     counter = [0]
 
     def _sub(m: re.Match) -> str:
@@ -56,7 +58,7 @@ def protect(text: str) -> Tuple[str, Dict[str, str]]:
     return _FIN_RE.sub(_sub, text), mapping
 
 
-def restore(text: str, mapping: Dict[str, str]) -> str:
+def restore(text: str, mapping: dict[str, str]) -> str:
     """Restore protected finance number placeholders to their original form."""
     for k, v in mapping.items():
         text = text.replace(k, v)
@@ -69,6 +71,6 @@ def deterministic_chunk_id(source: str, locator: str, idx: int) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
-def extract_finance_entities(text: str) -> List[str]:
+def extract_finance_entities(text: str) -> list[str]:
     """Lightweight regex extractor — returns unique finance entities in order."""
     return list(dict.fromkeys(_FIN_RE.findall(text)))

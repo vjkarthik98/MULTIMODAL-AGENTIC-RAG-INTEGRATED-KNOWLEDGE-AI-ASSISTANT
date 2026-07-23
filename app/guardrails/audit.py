@@ -15,6 +15,7 @@ Every allow/block/scrub decision is logged with:
 Output goes to structlog (JSON), which writes to the configured log file
 and is picked up by the existing OTel pipeline.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -22,14 +23,15 @@ import hmac
 import json
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
 import structlog
+
 from app.utils.logger import get_logger
 
 logger = get_logger("guardrails.audit")
 
-_HMAC_SECRET: Optional[bytes] = None
+_HMAC_SECRET: bytes | None = None
 
 
 _audit_logger = structlog.get_logger("guardrails.audit")
@@ -51,7 +53,7 @@ def _get_hmac_secret() -> bytes:
     return _HMAC_SECRET
 
 
-def _sign(payload: Dict[str, Any]) -> str:
+def _sign(payload: dict[str, Any]) -> str:
     """Return HMAC-SHA256 hex digest of the JSON-serialized payload."""
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=True)
     return hmac.new(
@@ -70,7 +72,7 @@ def audit_decision(
     correlation_id: str = "",
     query_prefix: str = "",
     latency_ms: float = 0.0,
-    extra: Optional[Dict[str, Any]] = None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     """Emit a structured audit log entry.
 
@@ -86,7 +88,7 @@ def audit_decision(
         extra:          additional context (never include raw PII)
     """
     try:
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "correlation_id": correlation_id or "",
             "session_id": session_id or "",

@@ -10,6 +10,7 @@ Flow:
      to receive the full JWT access+refresh pair.
   5. Backup codes: 8 single-use codes stored as bcrypt hashes in MongoDB.
 """
+
 from __future__ import annotations
 
 import base64
@@ -17,7 +18,6 @@ import io
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
 
 import pyotp
 
@@ -27,14 +27,16 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 _ISSUER = getattr(settings, "APP_NAME", "Multimodal RAG Assistant")
-_MFA_TOKEN_TTL_MINUTES = 10          # mfa_token expires after 10 min
-_BACKUP_CODE_COUNT     = 8
+_MFA_TOKEN_TTL_MINUTES = 10  # mfa_token expires after 10 min
+_BACKUP_CODE_COUNT = 8
 
 
 # ── MongoDB helpers ───────────────────────────────────────────────────────────
 
+
 def _col():
     from app.core.infra_registry import infra
+
     mongo = infra.get_mongo()
     if mongo is None:
         raise RuntimeError("MongoDB unavailable")
@@ -44,21 +46,24 @@ def _col():
 
 # ── Backup code helpers ───────────────────────────────────────────────────────
 
-def _generate_backup_codes() -> tuple[List[str], List[str]]:
+
+def _generate_backup_codes() -> tuple[list[str], list[str]]:
     """Return (plaintext_codes, bcrypt_hashes). Store hashes; show plaintext once."""
     from passlib.context import CryptContext
+
     _ctx = CryptContext(schemes=["bcrypt"])
     codes, hashes = [], []
     for _ in range(_BACKUP_CODE_COUNT):
-        code = secrets.token_hex(5).upper()   # e.g. "A3F9B2C1D4"
+        code = secrets.token_hex(5).upper()  # e.g. "A3F9B2C1D4"
         codes.append(code)
         hashes.append(_ctx.hash(code))
     return codes, hashes
 
 
-def _verify_backup_code(plain: str, stored_hashes: List[str]) -> Optional[int]:
+def _verify_backup_code(plain: str, stored_hashes: list[str]) -> int | None:
     """Return the index of the matching backup code, or None."""
     from passlib.context import CryptContext
+
     _ctx = CryptContext(schemes=["bcrypt"])
     for i, h in enumerate(stored_hashes):
         if h and _ctx.verify(plain.strip().upper(), h):
@@ -68,9 +73,11 @@ def _verify_backup_code(plain: str, stored_hashes: List[str]) -> Optional[int]:
 
 # ── MFA token (short-lived JWT for the mfa_required step) ────────────────────
 
+
 def _issue_mfa_token(user_id: str) -> str:
     """Issue a short-lived token that gates the MFA verify step."""
     from jose import jwt as jose_jwt
+
     now = datetime.now(timezone.utc)
     payload = {
         "sub": user_id,
@@ -84,9 +91,13 @@ def _issue_mfa_token(user_id: str) -> str:
 
 def _verify_mfa_token(token: str) -> str:
     """Verify and return user_id from MFA challenge token. Raises ValueError on failure."""
-    from jose import JWTError, jwt as jose_jwt
+    from jose import JWTError
+    from jose import jwt as jose_jwt
+
     try:
-        payload = jose_jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+        payload = jose_jwt.decode(
+            token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
+        )
     except JWTError as exc:
         raise ValueError("Invalid or expired MFA token") from exc
     if payload.get("type") != "mfa_challenge":
@@ -95,6 +106,7 @@ def _verify_mfa_token(token: str) -> str:
 
 
 # ── Core MFA service ──────────────────────────────────────────────────────────
+
 
 class MFAService:
 
@@ -111,12 +123,13 @@ class MFAService:
             raise ValueError("MFA is already enabled for this account")
 
         secret = pyotp.random_base32()
-        totp   = pyotp.TOTP(secret)
-        uri    = totp.provisioning_uri(name=email, issuer_name=_ISSUER)
+        totp = pyotp.TOTP(secret)
+        uri = totp.provisioning_uri(name=email, issuer_name=_ISSUER)
 
         # Generate QR code as base64 data URI
         try:
             import qrcode
+
             qr = qrcode.make(uri)
             buf = io.BytesIO()
             qr.save(buf, format="PNG")
@@ -132,18 +145,18 @@ class MFAService:
         logger.info(event="mfa_enroll_started", user_id=user_id)
 
         return {
-            "secret":     secret,          # show once — user stores in authenticator
-            "uri":        uri,
-            "qr_code":    qr_b64,          # base64 PNG for display in UI
+            "secret": secret,  # show once — user stores in authenticator
+            "uri": uri,
+            "qr_code": qr_b64,  # base64 PNG for display in UI
         }
 
-    def verify_enroll(self, user_id: str, code: str) -> List[str]:
+    def verify_enroll(self, user_id: str, code: str) -> list[str]:
         """
         Confirm enrolment by verifying the first TOTP code.
         Returns plaintext backup codes (show once).
         """
-        col   = _col()
-        doc   = col.find_one({"user_id": user_id})
+        col = _col()
+        doc = col.find_one({"user_id": user_id})
         if not doc:
             raise ValueError("User not found")
 
@@ -152,22 +165,25 @@ class MFAService:
             raise ValueError("No pending MFA enrolment found — call /auth/mfa/enroll first")
 
         totp = pyotp.TOTP(secret)
-        if not totp.verify(code, valid_window=1):    # ±30s tolerance
+        if not totp.verify(code, valid_window=1):  # ±30s tolerance
             raise ValueError("Invalid TOTP code")
 
         plaintext_codes, hashed_codes = _generate_backup_codes()
 
         col.update_one(
             {"user_id": user_id},
-            {"$set": {
-                "mfa_enabled":        True,
-                "mfa_secret":         secret,
-                "mfa_backup_hashes":  hashed_codes,
-                "mfa_enrolled_at":    datetime.now(timezone.utc),
-            }, "$unset": {"mfa_pending_secret": ""}},
+            {
+                "$set": {
+                    "mfa_enabled": True,
+                    "mfa_secret": secret,
+                    "mfa_backup_hashes": hashed_codes,
+                    "mfa_enrolled_at": datetime.now(timezone.utc),
+                },
+                "$unset": {"mfa_pending_secret": ""},
+            },
         )
         logger.info(event="mfa_enroll_completed", user_id=user_id)
-        return plaintext_codes     # caller shows these once; never stored in plaintext
+        return plaintext_codes  # caller shows these once; never stored in plaintext
 
     def begin_login(self, user_id: str) -> str:
         """
@@ -191,7 +207,7 @@ class MFAService:
             raise ValueError("MFA not enabled for this user")
 
         secret = doc.get("mfa_secret", "")
-        totp   = pyotp.TOTP(secret)
+        totp = pyotp.TOTP(secret)
 
         if totp.verify(code, valid_window=1):
             logger.info(event="mfa_login_success", user_id=user_id)
@@ -226,12 +242,14 @@ class MFAService:
 
         col.update_one(
             {"user_id": user_id},
-            {"$unset": {
-                "mfa_enabled": "",
-                "mfa_secret": "",
-                "mfa_backup_hashes": "",
-                "mfa_enrolled_at": "",
-            }},
+            {
+                "$unset": {
+                    "mfa_enabled": "",
+                    "mfa_secret": "",
+                    "mfa_backup_hashes": "",
+                    "mfa_enrolled_at": "",
+                }
+            },
         )
         logger.info(event="mfa_disabled", user_id=user_id)
 

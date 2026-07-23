@@ -15,18 +15,19 @@ Deterministic, read-only against Qdrant (no GPU, no auth). Run as the KB owner:
     EVAL_USER_ID=<owner-uuid> python -m app.eval.datasets.verify_gold_index
     python -m app.eval.datasets.verify_gold_index --dry
 """
+
 from __future__ import annotations
 
 import json
 import re
 import sys
-from pathlib import Path
+
+from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from app.core.config import settings
 from app.eval.config import EVAL_USER_ID, REPORTS_DIR
 from app.eval.datasets.rebuild_gold import GOLD, MODALITY_FILES, read_jsonl, write_jsonl
 from app.vectorstore.qdrant_store import QdrantVectorStore
-from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 _CHUNK_RE = re.compile(r"^(?P<src>.+)::chunk_(?P<cid>\d+)$")
 
@@ -131,7 +132,13 @@ def verify(dry: bool = False) -> None:
     idx = _load_index(store, EVAL_USER_ID)
     print(f"[verify] {len(idx)} chunks indexed across {len({s for s, _ in idx})} sources")
 
-    report: dict[str, list] = {"facts_missing": [], "chunk_not_found": [], "locators_filled": [], "ok": [], "repaired": []}
+    report: dict[str, list] = {
+        "facts_missing": [],
+        "chunk_not_found": [],
+        "locators_filled": [],
+        "ok": [],
+        "repaired": [],
+    }
 
     for modality, fname in MODALITY_FILES.items():
         path = GOLD / fname
@@ -175,13 +182,19 @@ def verify(dry: bool = False) -> None:
                     resolved = [pl for _, pl in repaired]
                     combined = " ".join(_payload_text(p) for p in resolved)
                     status = _facts_status(facts, combined)
-                    report["repaired"].append({"id": row["id"], "new_chunks": row["relevant_chunk_ids"]})
+                    report["repaired"].append(
+                        {"id": row["id"], "new_chunks": row["relevant_chunk_ids"]}
+                    )
                     changed = True
 
             if status == "facts_missing":
-                report["facts_missing"].append({
-                    "id": row["id"], "facts": facts, "chunks": row.get("relevant_chunk_ids"),
-                })
+                report["facts_missing"].append(
+                    {
+                        "id": row["id"],
+                        "facts": facts,
+                        "chunks": row.get("relevant_chunk_ids"),
+                    }
+                )
             elif resolved:
                 report["ok"].append(row["id"])
 

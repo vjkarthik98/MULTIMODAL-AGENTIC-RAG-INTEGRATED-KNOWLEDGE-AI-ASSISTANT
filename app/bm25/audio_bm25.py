@@ -1,7 +1,8 @@
 """audio_bm25.py — BM25 index for audio/earnings call transcript chunks."""
+
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Any
 
 from prometheus_client import Counter
 
@@ -36,11 +37,12 @@ class AudioBM25(BaseBM25):
     def _build_indexed_text(self, doc: Any) -> str:
         try:
             s = getattr(doc, "structure", {}) or {}
-            parts: List[str] = list(self._base_text(doc))
+            parts: list[str] = list(self._base_text(doc))
 
             # Speaker identity — name, role, composite "speaker CFO john smith"
-            name = (s.get("speaker_name") or s.get("speaker") or
-                    getattr(doc, "speaker", None) or "").strip()
+            name = (
+                s.get("speaker_name") or s.get("speaker") or getattr(doc, "speaker", None) or ""
+            ).strip()
             role = (s.get("speaker_role") or "").strip()
             if name:
                 parts.append(f"speaker {name}")
@@ -53,13 +55,16 @@ class AudioBM25(BaseBM25):
             #   "timestamp_1842"  → "find audio near 1842 seconds"
             #   "time 30"         → "at 30 minutes"
             #   "at_30_42"        → MM_SS format for "at 30:42"
-            ts_s = s.get("start_timestamp") or s.get("timestamp_start") or \
-                   getattr(doc, "timestamp_start", None)
+            ts_s = (
+                s.get("start_timestamp")
+                or s.get("timestamp_start")
+                or getattr(doc, "timestamp_start", None)
+            )
             if ts_s is not None:
                 try:
                     total_sec = int(float(ts_s))
-                    minute    = total_sec // 60
-                    second    = total_sec % 60
+                    minute = total_sec // 60
+                    second = total_sec % 60
                     parts.append(f"timestamp_{total_sec}")
                     parts.append(f"time {minute}")
                     parts.append(f"minute {minute}")

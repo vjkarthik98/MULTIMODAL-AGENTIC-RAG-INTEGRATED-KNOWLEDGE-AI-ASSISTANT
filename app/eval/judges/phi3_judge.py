@@ -7,6 +7,7 @@ Completely separate from Mistral 7B (RAG model) — no interference.
 Model: microsoft/Phi-3-mini-4k-instruct-gguf (MIT license)
 Path:  /opt/dlami/nvme/hf_cache/Phi-3-mini-4k-instruct-q4.gguf
 """
+
 from __future__ import annotations
 
 import json
@@ -21,11 +22,12 @@ from langchain_core.prompt_values import PromptValue
 try:
     from ragas.llms.base import BaseRagasLLM
     from ragas.run_config import RunConfig
+
     RAGAS_AVAILABLE = True
 except ImportError:
     RAGAS_AVAILABLE = False
     BaseRagasLLM = object  # type: ignore
-    RunConfig = object     # type: ignore
+    RunConfig = object  # type: ignore
 
 _MODEL_PATH = os.getenv(
     "PHI3_JUDGE_MODEL_PATH",
@@ -45,11 +47,12 @@ def _load_phi3():
             return _llm
         try:
             from llama_cpp import Llama
+
             print(f"[eval] Loading Phi-3 judge from {_MODEL_PATH} ...")
             _llm = Llama(
                 model_path=_MODEL_PATH,
                 n_ctx=4096,
-                n_gpu_layers=32,    # full GPU offload for Phi-3-mini
+                n_gpu_layers=32,  # full GPU offload for Phi-3-mini
                 n_threads=4,
                 verbose=False,
             )
@@ -60,6 +63,7 @@ def _load_phi3():
 
 
 # ── JSON extraction ───────────────────────────────────────────────────────────
+
 
 def _extract_json(text: str) -> str:
     """Extract first valid JSON object or array from text."""
@@ -103,7 +107,7 @@ def _extract_json(text: str) -> str:
                 elif c == end_char:
                     depth -= 1
                     if depth == 0:
-                        candidate = text[idx:i+1]
+                        candidate = text[idx : i + 1]
                         try:
                             json.loads(candidate)
                             return candidate.strip()
@@ -113,6 +117,7 @@ def _extract_json(text: str) -> str:
 
 
 # ── Prompt builder ────────────────────────────────────────────────────────────
+
 
 def _build_prompt(ragas_prompt: str) -> str:
     """
@@ -124,7 +129,9 @@ def _build_prompt(ragas_prompt: str) -> str:
 
     # Faithfulness decomposition — long_form_answer prompt
     if "simpler_statements" in p or "sentence_index" in p or "break down each sentence" in p:
-        schema = '[{"sentence_index": 0, "simpler_statements": ["full statement without pronouns"]}]'
+        schema = (
+            '[{"sentence_index": 0, "simpler_statements": ["full statement without pronouns"]}]'
+        )
         instruction = "Break down each sentence into simpler statements. Output ONLY a JSON array."
 
     # Faithfulness NLI — nli_statements prompt
@@ -157,14 +164,11 @@ def _build_prompt(ragas_prompt: str) -> str:
         "Output ONLY raw JSON. No preamble. No explanation. No markdown. No extra text."
     )
 
-    return (
-        f"<|system|>\n{system}<|end|>\n"
-        f"<|user|>\n{ragas_prompt}<|end|>\n"
-        f"<|assistant|>\n"
-    )
+    return f"<|system|>\n{system}<|end|>\n" f"<|user|>\n{ragas_prompt}<|end|>\n" f"<|assistant|>\n"
 
 
 # ── Core generate ─────────────────────────────────────────────────────────────
+
 
 def _generate(prompt_text: str) -> str:
     llm = _load_phi3()
@@ -173,7 +177,7 @@ def _generate(prompt_text: str) -> str:
         output = llm(
             full_prompt,
             max_tokens=1024,
-            temperature=0.0,    # deterministic JSON output
+            temperature=0.0,  # deterministic JSON output
             stop=["<|end|>", "<|user|>", "<|system|>"],
         )
         raw = output["choices"][0]["text"].strip()
@@ -184,13 +188,14 @@ def _generate(prompt_text: str) -> str:
 
 # ── Ragas-compatible judge ────────────────────────────────────────────────────
 
+
 class Phi3Judge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: ignore
     """
     Phi-3-mini-4k-instruct as Ragas judge.
     Loads ~2.3GB on GPU alongside Mistral. Outputs strict JSON reliably.
     """
 
-    def __init__(self, run_config: t.Optional[t.Any] = None):
+    def __init__(self, run_config: t.Any | None = None):
         if RAGAS_AVAILABLE:
             cfg = run_config or RunConfig(max_workers=1, timeout=600)
             super().__init__(run_config=cfg)
@@ -199,8 +204,8 @@ class Phi3Judge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: ignore
         self,
         prompt: PromptValue,
         n: int = 1,
-        temperature: t.Optional[float] = None,
-        stop: t.Optional[t.List[str]] = None,
+        temperature: float | None = None,
+        stop: list[str] | None = None,
         callbacks: t.Any = None,
     ) -> LLMResult:
         text = prompt.to_string() if hasattr(prompt, "to_string") else str(prompt)
@@ -211,15 +216,14 @@ class Phi3Judge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: ignore
         self,
         prompt: PromptValue,
         n: int = 1,
-        temperature: t.Optional[float] = None,
-        stop: t.Optional[t.List[str]] = None,
+        temperature: float | None = None,
+        stop: list[str] | None = None,
         callbacks: t.Any = None,
     ) -> LLMResult:
         import asyncio
+
         text = prompt.to_string() if hasattr(prompt, "to_string") else str(prompt)
-        out = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: _generate(text)
-        )
+        out = await asyncio.get_event_loop().run_in_executor(None, lambda: _generate(text))
         return LLMResult(generations=[[Generation(text=out)] for _ in range(n)])
 
     def set_run_config(self, run_config: t.Any) -> None:
@@ -227,7 +231,7 @@ class Phi3Judge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: ignore
             super().set_run_config(run_config)
 
 
-def get_judge() -> "Phi3Judge":
+def get_judge() -> Phi3Judge:
     if not RAGAS_AVAILABLE:
         raise ImportError("ragas is not installed")
     return Phi3Judge()

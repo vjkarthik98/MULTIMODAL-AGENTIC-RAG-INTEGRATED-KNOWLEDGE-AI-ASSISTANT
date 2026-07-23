@@ -4,6 +4,7 @@ Registered once at import time — consistent with the pattern used in
 agent_router.py and query_pipeline.py. Labels mirror the GuardrailBlocked
 fields so dashboards can slice by surface and guard_type.
 """
+
 from __future__ import annotations
 
 from prometheus_client import Counter, Histogram
@@ -33,18 +34,12 @@ guardrail_latency_seconds = Histogram(
 
 def record_block(guard_type: str, surface: str) -> None:
     guardrail_blocks_total.labels(guard_type=guard_type, surface=surface).inc()
-    guardrail_decisions_total.labels(
-        action="block", guard_type=guard_type, surface=surface
-    ).inc()
+    guardrail_decisions_total.labels(action="block", guard_type=guard_type, surface=surface).inc()
 
 
 def record_allow(guard_type: str, surface: str) -> None:
-    guardrail_decisions_total.labels(
-        action="allow", guard_type=guard_type, surface=surface
-    ).inc()
+    guardrail_decisions_total.labels(action="allow", guard_type=guard_type, surface=surface).inc()
 
 
 def record_scrub(guard_type: str, surface: str) -> None:
-    guardrail_decisions_total.labels(
-        action="scrub", guard_type=guard_type, surface=surface
-    ).inc()
+    guardrail_decisions_total.labels(action="scrub", guard_type=guard_type, surface=surface).inc()

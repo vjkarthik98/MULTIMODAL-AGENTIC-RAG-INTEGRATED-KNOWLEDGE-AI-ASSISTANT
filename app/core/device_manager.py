@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Dict, Optional
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -60,39 +59,39 @@ MODEL_NAMES = (
 )
 
 # Hybrid profile: heavy attention models on GPU, tiny models on CPU.
-_HYBRID_MAP: Dict[str, str] = {
-    "llm":            "cuda",
-    "siglip":         "cuda",
-    "blip":           "cuda",
-    "qwen2_vl":       "cuda",
-    "trocr":          "cuda",
-    "diarizer":       "cuda",
-    "ner":            "cuda",
-    "whisper":        "cuda",
-    "text_embedder":  "cpu",
-    "reranker":       "cpu",
+_HYBRID_MAP: dict[str, str] = {
+    "llm": "cuda",
+    "siglip": "cuda",
+    "blip": "cuda",
+    "qwen2_vl": "cuda",
+    "trocr": "cuda",
+    "diarizer": "cuda",
+    "ner": "cuda",
+    "whisper": "cuda",
+    "text_embedder": "cpu",
+    "reranker": "cpu",
 }
 
-_ALL_GPU_MAP: Dict[str, str] = {name: "cuda" for name in MODEL_NAMES}
-_ALL_CPU_MAP: Dict[str, str] = {name: "cpu"  for name in MODEL_NAMES}
+_ALL_GPU_MAP: dict[str, str] = {name: "cuda" for name in MODEL_NAMES}
+_ALL_CPU_MAP: dict[str, str] = {name: "cpu" for name in MODEL_NAMES}
 
 
 @dataclass
 class DeviceDecision:
-    device: str            # "cuda" | "cpu" | "mps"
-    dtype:  Optional[str]  # "float16" | "float32" | "int8" | None
-    notes:  str = ""
+    device: str  # "cuda" | "cpu" | "mps"
+    dtype: str | None  # "float16" | "float32" | "int8" | None
+    notes: str = ""
 
 
 class DeviceManager:
 
     def __init__(self) -> None:
-        self._lock          = threading.Lock()
-        self._torch         = None
-        self._cuda_ok       = False
-        self._mps_ok        = False
+        self._lock = threading.Lock()
+        self._torch = None
+        self._cuda_ok = False
+        self._mps_ok = False
         self._vram_total_gb = 0.0
-        self._profile       = self._resolve_profile(settings.MODELS_DEVICE_PROFILE)
+        self._profile = self._resolve_profile(settings.MODELS_DEVICE_PROFILE)
         self._probe()
 
         logger.info(
@@ -109,16 +108,16 @@ class DeviceManager:
     def _probe(self) -> None:
         try:
             import torch  # noqa: F401
-            self._torch  = torch
+
+            self._torch = torch
             self._cuda_ok = bool(torch.cuda.is_available())
-            self._mps_ok  = bool(
-                getattr(torch.backends, "mps", None)
-                and torch.backends.mps.is_available()
+            self._mps_ok = bool(
+                getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()
             )
             if self._cuda_ok:
                 try:
                     props = torch.cuda.get_device_properties(0)
-                    self._vram_total_gb = round(props.total_memory / (1024 ** 3), 2)
+                    self._vram_total_gb = round(props.total_memory / (1024**3), 2)
                 except Exception:
                     self._vram_total_gb = 0.0
         except Exception:
@@ -169,20 +168,20 @@ class DeviceManager:
 
     def _override_for(self, name: str) -> str:
         overrides = {
-            "llm":           settings.LLM_DEVICE_HINT,
+            "llm": settings.LLM_DEVICE_HINT,
             "text_embedder": settings.EMBEDDER_DEVICE,
-            "reranker":      settings.RERANKER_DEVICE,
-            "siglip":        settings.SIGLIP_DEVICE,
-            "blip":          settings.BLIP_DEVICE,
-            "qwen2_vl":      settings.QWEN2_VL_DEVICE,
-            "trocr":         settings.TROCR_DEVICE,
-            "diarizer":      settings.DIARIZER_DEVICE,
-            "ner":           settings.NER_DEVICE,
-            "whisper":       settings.WHISPER_DEVICE,
+            "reranker": settings.RERANKER_DEVICE,
+            "siglip": settings.SIGLIP_DEVICE,
+            "blip": settings.BLIP_DEVICE,
+            "qwen2_vl": settings.QWEN2_VL_DEVICE,
+            "trocr": settings.TROCR_DEVICE,
+            "diarizer": settings.DIARIZER_DEVICE,
+            "ner": settings.NER_DEVICE,
+            "whisper": settings.WHISPER_DEVICE,
         }
         return (overrides.get(name) or "").strip().lower()
 
-    def _profile_map(self) -> Dict[str, str]:
+    def _profile_map(self) -> dict[str, str]:
         p = self.profile
         if p == "all_gpu":
             return _ALL_GPU_MAP
@@ -208,9 +207,9 @@ class DeviceManager:
 
     # PER-MODEL DTYPE — fp16 on CUDA for vision/audio; respect EMBEDDER_HALF_PRECISION
 
-    def dtype_for(self, name: str, device: Optional[str] = None) -> Optional[str]:
+    def dtype_for(self, name: str, device: str | None = None) -> str | None:
         name = name.lower()
-        dev  = device or self.device_for(name)
+        dev = device or self.device_for(name)
 
         if dev == "cpu":
             # Faster-whisper on CPU is fastest with int8 quantization
@@ -244,15 +243,15 @@ class DeviceManager:
     # FULL DECISION — used by loaders that want device + dtype + notes together
 
     def decision_for(self, name: str) -> DeviceDecision:
-        dev   = self.device_for(name)
+        dev = self.device_for(name)
         dtype = self.dtype_for(name, dev)
         return DeviceDecision(device=dev, dtype=dtype, notes=self.profile)
 
     # GGUF n_gpu_layers — auto-pick based on actual free VRAM at load time.
     # Mistral Q4_K_M has 32 transformer blocks; each costs ~128 MB of VRAM.
     # We reserve 512 MB headroom so other models (embedder, SigLIP, Whisper) don't OOM.
-    _LAYERS_PER_GB = 7.5          # ~128 MB per layer → ~7.5 layers per GB
-    _VRAM_HEADROOM_GB = 2.0       # reserve 2 GB for non-LLM models (Qwen3+BGE+SigLIP+BLIP+Whisper)
+    _LAYERS_PER_GB = 7.5  # ~128 MB per layer → ~7.5 layers per GB
+    _VRAM_HEADROOM_GB = 2.0  # reserve 2 GB for non-LLM models (Qwen3+BGE+SigLIP+BLIP+Whisper)
 
     def llm_gpu_layers(self) -> int:
         llm_device = self.device_for("llm")
@@ -264,11 +263,11 @@ class DeviceManager:
         # Query actual free VRAM right now (other models may already be loaded).
         try:
             import torch
-            free_bytes = (
-                torch.cuda.get_device_properties(0).total_memory
-                - torch.cuda.memory_reserved(0)
-            )
-            free_gb = free_bytes / (1024 ** 3)
+
+            free_bytes = torch.cuda.get_device_properties(
+                0
+            ).total_memory - torch.cuda.memory_reserved(0)
+            free_gb = free_bytes / (1024**3)
         except Exception:
             # Can't query VRAM — fall back to full offload and let llama_cpp try.
             return settings.LLM_GPU_LAYERS_ALL
@@ -281,6 +280,7 @@ class DeviceManager:
             return settings.LLM_GPU_LAYERS_ALL  # -1
 
         import logging as _logging
+
         _logging.getLogger(__name__).info(
             "llm_gpu_layers_partial",
             extra={
@@ -293,13 +293,13 @@ class DeviceManager:
 
     # SNAPSHOT — for /ready and logging
 
-    def snapshot(self) -> Dict[str, Dict[str, Optional[str]]]:
-        out: Dict[str, Dict[str, Optional[str]]] = {
+    def snapshot(self) -> dict[str, dict[str, str | None]]:
+        out: dict[str, dict[str, str | None]] = {
             "_summary": {
-                "profile":        self.profile,
-                "cuda":           str(self._cuda_ok),
-                "mps":            str(self._mps_ok),
-                "vram_total_gb":  str(self._vram_total_gb),
+                "profile": self.profile,
+                "cuda": str(self._cuda_ok),
+                "mps": str(self._mps_ok),
+                "vram_total_gb": str(self._vram_total_gb),
                 "vram_budget_gb": str(settings.VRAM_BUDGET_GB),
             },
         }

@@ -1,8 +1,9 @@
 """pdf_bm25.py — BM25 index for PDF document chunks."""
+
 from __future__ import annotations
 
 import re
-from typing import Any, List
+from typing import Any
 
 from prometheus_client import Counter
 
@@ -22,42 +23,45 @@ _BM25_INDEX_ERRORS = Counter(
 
 # Filename stem → short company token for BM25 boosting
 _SOURCE_COMPANY_TOKENS: dict[str, str] = {
-    "apple":     "apple",
+    "apple": "apple",
     "microsoft": "microsoft",
-    "google":    "google alphabet",
-    "alphabet":  "alphabet google",
-    "amazon":    "amazon",
-    "meta":      "meta facebook",
-    "nvidia":    "nvidia",
-    "tesla":     "tesla",
+    "google": "google alphabet",
+    "alphabet": "alphabet google",
+    "amazon": "amazon",
+    "meta": "meta facebook",
+    "nvidia": "nvidia",
+    "tesla": "tesla",
     "berkshire": "berkshire hathaway",
-    "jpmorgan":  "jpmorgan chase",
+    "jpmorgan": "jpmorgan chase",
 }
 
 # Financial-statement table types mapped to BM25-boosted token strings
 _TABLE_BM25_TOKENS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"income statement|statement.{0,10}operation", re.I),
-     "income statement revenue operating expenses earnings"),
-    (re.compile(r"balance sheet|financial position",           re.I),
-     "balance sheet assets liabilities equity"),
-    (re.compile(r"cash flow",                                  re.I),
-     "cash flow operating investing financing activities"),
-    (re.compile(r"net sales|revenue.{0,10}product",            re.I),
-     "net sales revenue product category segment"),
-    (re.compile(r"gross margin",                               re.I),
-     "gross margin profit"),
-    (re.compile(r"income tax",                                 re.I),
-     "income tax provision effective rate"),
-    (re.compile(r"capital return|repurchase|dividend",         re.I),
-     "capital return share repurchase dividend"),
-    (re.compile(r"shareholders?.{0,6}equity",                  re.I),
-     "shareholders equity retained earnings"),
-    (re.compile(r"segment",                                    re.I),
-     "segment results geography"),
+    (
+        re.compile(r"income statement|statement.{0,10}operation", re.I),
+        "income statement revenue operating expenses earnings",
+    ),
+    (
+        re.compile(r"balance sheet|financial position", re.I),
+        "balance sheet assets liabilities equity",
+    ),
+    (re.compile(r"cash flow", re.I), "cash flow operating investing financing activities"),
+    (
+        re.compile(r"net sales|revenue.{0,10}product", re.I),
+        "net sales revenue product category segment",
+    ),
+    (re.compile(r"gross margin", re.I), "gross margin profit"),
+    (re.compile(r"income tax", re.I), "income tax provision effective rate"),
+    (
+        re.compile(r"capital return|repurchase|dividend", re.I),
+        "capital return share repurchase dividend",
+    ),
+    (re.compile(r"shareholders?.{0,6}equity", re.I), "shareholders equity retained earnings"),
+    (re.compile(r"segment", re.I), "segment results geography"),
 ]
 
 _SEC_ITEM_RE = re.compile(r'^Item\s+(\d+[A-Z]?)\.?\s*(.*)', re.IGNORECASE)
-_FY_RE       = re.compile(r'\bFY?(20\d{2})\b')
+_FY_RE = re.compile(r'\bFY?(20\d{2})\b')
 
 
 def _company_tokens(source: str) -> str:
@@ -94,7 +98,7 @@ class PdfBM25(BaseBM25):
     def _build_indexed_text(self, doc: Any) -> str:
         try:
             s = getattr(doc, "structure", {}) or {}
-            parts: List[str] = list(self._base_text(doc))
+            parts: list[str] = list(self._base_text(doc))
 
             # ── Company tokens ──────────────────────────────────────────────
             source = getattr(doc, "source", "") or ""
@@ -108,7 +112,7 @@ class PdfBM25(BaseBM25):
                 parts.append(f"page {page}")
 
             # ── Section hierarchy path ──────────────────────────────────────
-            hierarchy: List[str] = s.get("section_hierarchy") or []
+            hierarchy: list[str] = s.get("section_hierarchy") or []
             if hierarchy:
                 hier_text = " ".join(str(h) for h in hierarchy)
                 parts.append(hier_text)
@@ -140,7 +144,7 @@ class PdfBM25(BaseBM25):
                         parts.append(ttype_tokens)
 
                 # Fiscal year tokens — repeat each year so "2024" retrieval is strong
-                fiscal_years: List[str] = s.get("fiscal_years") or s.get("column_headers") or []
+                fiscal_years: list[str] = s.get("fiscal_years") or s.get("column_headers") or []
                 for fy in fiscal_years[:4]:
                     fy_str = str(fy)
                     parts.append(fy_str)
@@ -159,7 +163,7 @@ class PdfBM25(BaseBM25):
                         parts.extend(str(x) for x in v[:3])
 
             # ── Sub-chunk disambiguation ────────────────────────────────────
-            sub_idx   = s.get("sub_chunk_index")
+            sub_idx = s.get("sub_chunk_index")
             sub_total = s.get("total_sub_chunks")
             if sub_idx is not None and sub_total and int(sub_total) > 1:
                 parts.append(f"part {int(sub_idx)+1} of {sub_total}")

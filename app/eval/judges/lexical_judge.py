@@ -5,17 +5,17 @@ All scores are clearly labelled as lexical_fallback so reports don't mislead.
 
 This is NOT a substitute for a real LLM judge — it will not catch subtle hallucinations.
 """
+
 from __future__ import annotations
 
 import re
-from typing import List, Optional
 
 
-def _tokenize(text: str) -> List[str]:
+def _tokenize(text: str) -> list[str]:
     return re.findall(r"\b\w+\b", text.lower())
 
 
-def _rouge_l(hyp: List[str], ref: List[str]) -> float:
+def _rouge_l(hyp: list[str], ref: list[str]) -> float:
     """ROUGE-L (LCS-based F1) between two token lists."""
     if not hyp or not ref:
         return 0.0
@@ -38,7 +38,7 @@ def _rouge_l(hyp: List[str], ref: List[str]) -> float:
 
 def lexical_faithfulness(
     answer: str,
-    contexts: List[str],
+    contexts: list[str],
 ) -> float:
     """Approximate faithfulness: fraction of answer tokens covered by context tokens."""
     if not answer or not contexts:
@@ -60,7 +60,7 @@ def lexical_answer_relevancy(
 
 
 def lexical_context_recall(
-    contexts: List[str],
+    contexts: list[str],
     reference_answer: str,
 ) -> float:
     """Approximate context recall: fraction of reference answer tokens in context."""

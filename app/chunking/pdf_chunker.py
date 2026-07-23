@@ -5,14 +5,12 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from app.chunking.base_chunker import BaseChunker
 from app.chunking.finance_numbers import (
     deterministic_chunk_id,
     extract_finance_entities,
 )
-from app.core.config import settings
 from app.ingestion.schema import IngestedDocument, RawExtract, UniversalMetadata
 from app.utils.logger import get_logger, modality_var
 
@@ -22,7 +20,7 @@ _SEC_PART_RE = re.compile(r'^PART\s+([IVX]+)\s*$', re.IGNORECASE)
 _SEC_ITEM_RE = re.compile(r'^Item\s+(\d+[A-Z]?)\.?\s*(.*)', re.IGNORECASE)
 
 
-def _classify_sec_heading(text: str) -> Optional[str]:
+def _classify_sec_heading(text: str) -> str | None:
     """Return 'part', 'item', or None for the given heading text."""
     t = text.strip()
     if _SEC_PART_RE.match(t):
@@ -31,8 +29,10 @@ def _classify_sec_heading(text: str) -> Optional[str]:
         return "item"
     return None
 
+
 import time
-from prometheus_client import Counter, Histogram
+
+from prometheus_client import Counter
 
 logger = get_logger(__name__)
 
@@ -55,7 +55,9 @@ _BLIP_SEMAPHORE = threading.Semaphore(2)
 def _ocr_bytes(raw_bytes: bytes) -> str:
     try:
         from PIL import Image
+
         from app.chunking.image_chunker import ocr as _ocr
+
         img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
         return _ocr(img)
     except Exception as exc:
@@ -66,7 +68,9 @@ def _ocr_bytes(raw_bytes: bytes) -> str:
 def _caption_bytes(raw_bytes: bytes) -> str:
     try:
         from PIL import Image
+
         from app.chunking.image_chunker import blip_caption
+
         img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
         return blip_caption(img)
     except Exception as exc:
@@ -78,15 +82,15 @@ def _make_table_chunk(
     ext: RawExtract,
     chunk_type: str,
     subtype: str,
-    section_title: Optional[str],
-    section_hierarchy: List[str],
+    section_title: str | None,
+    section_hierarchy: list[str],
     source: str,
     meta: UniversalMetadata,
-    chunker: "PdfChunker",
-    chunk_idx_ref: List[int],
-    char_offset_ref: List[int],
+    chunker: PdfChunker,
+    chunk_idx_ref: list[int],
+    char_offset_ref: list[int],
     surface: str,
-) -> Optional[IngestedDocument]:
+) -> IngestedDocument | None:
     """Emit exactly one IngestedDocument from a table_row or table_summary RawExtract."""
     extra = ext.extra or {}
     md_text = extra.get("markdown", ext.text or "")
@@ -110,28 +114,30 @@ def _make_table_chunk(
     chunk_text = nl_text if chunk_type == "financial_table_summary" else f"{_prefix}\n\n{nl_text}"
 
     fin_entities = extract_finance_entities(chunk_text)
-    chunk_hash = deterministic_chunk_id(source, f"p{ext.page or 0}_{chunk_type}_{chunk_idx_ref[0]}", chunk_idx_ref[0])
+    chunk_hash = deterministic_chunk_id(
+        source, f"p{ext.page or 0}_{chunk_type}_{chunk_idx_ref[0]}", chunk_idx_ref[0]
+    )
 
     structure = {
-        "chunk_hash_id":      chunk_hash,
-        "source_file":        source,
-        "chunk_index":        chunk_idx_ref[0],
-        "page_number":        ext.page,
-        "page_range":         [ext.page, ext.page] if ext.page else None,
-        "chunk_type":         chunk_type,
-        "section_title":      _sec if not _bad_sec else None,
-        "section_hierarchy":  section_hierarchy[:],
-        "table_title":        _t_title or None,
-        "column_headers":     _fiscal_yrs,
-        "fiscal_years":       _fiscal_yrs,
-        "row_range":          None,
-        "is_ocr":             False,
-        "footnotes":          [],
-        "footnote_markers":   [],
-        "has_figure":         False,
-        "finance_entities":   fin_entities,
-        "char_start":         char_offset_ref[0],
-        "char_end":           char_offset_ref[0] + len(chunk_text),
+        "chunk_hash_id": chunk_hash,
+        "source_file": source,
+        "chunk_index": chunk_idx_ref[0],
+        "page_number": ext.page,
+        "page_range": [ext.page, ext.page] if ext.page else None,
+        "chunk_type": chunk_type,
+        "section_title": _sec if not _bad_sec else None,
+        "section_hierarchy": section_hierarchy[:],
+        "table_title": _t_title or None,
+        "column_headers": _fiscal_yrs,
+        "fiscal_years": _fiscal_yrs,
+        "row_range": None,
+        "is_ocr": False,
+        "footnotes": [],
+        "footnote_markers": [],
+        "has_figure": False,
+        "finance_entities": fin_entities,
+        "char_start": char_offset_ref[0],
+        "char_end": char_offset_ref[0] + len(chunk_text),
     }
     doc = chunker._make_doc(
         text=chunk_text,
@@ -155,9 +161,9 @@ class PdfChunker(BaseChunker):
 
     def chunk(
         self,
-        extracts: List[RawExtract],
+        extracts: list[RawExtract],
         meta: UniversalMetadata,
-    ) -> List[IngestedDocument]:
+    ) -> list[IngestedDocument]:
         source = Path(meta.source_path).name or "unknown.pdf"
         surface = "pdf_chunker"
         modality_var.set("pdf")
@@ -168,17 +174,17 @@ class PdfChunker(BaseChunker):
             return []
 
         try:
-            docs: List[IngestedDocument] = []
+            docs: list[IngestedDocument] = []
             chunk_idx = [0]
             # Cumulative character offset across all emitted chunks for precise citation
             char_offset = [0]
 
-            section_title: Optional[str] = None
-            section_hierarchy: List[str] = []
+            section_title: str | None = None
+            section_hierarchy: list[str] = []
             prose_buf: str = ""
-            prose_page: Optional[int] = None
-            prose_footnotes: List[str] = []
-            pending_table_rows: List[RawExtract] = []
+            prose_page: int | None = None
+            prose_footnotes: list[str] = []
+            pending_table_rows: list[RawExtract] = []
             seen_hashes: set = set()
 
             def flush_prose() -> None:
@@ -193,27 +199,29 @@ class PdfChunker(BaseChunker):
                         continue
                     seen_hashes.add(h)
                     fin_entities = extract_finance_entities(piece)
-                    chunk_hash = deterministic_chunk_id(source, f"p{prose_page or 0}_prose_{chunk_idx[0]}", chunk_idx[0])
+                    chunk_hash = deterministic_chunk_id(
+                        source, f"p{prose_page or 0}_prose_{chunk_idx[0]}", chunk_idx[0]
+                    )
                     structure = {
-                        "chunk_hash_id":     chunk_hash,
-                        "source_file":       source,
-                        "chunk_index":       chunk_idx[0],
-                        "page_number":       prose_page,
-                        "page_range":        [prose_page, prose_page] if prose_page else None,
-                        "chunk_type":        "paragraph",
-                        "section_title":     section_title,
+                        "chunk_hash_id": chunk_hash,
+                        "source_file": source,
+                        "chunk_index": chunk_idx[0],
+                        "page_number": prose_page,
+                        "page_range": [prose_page, prose_page] if prose_page else None,
+                        "chunk_type": "paragraph",
+                        "section_title": section_title,
                         "section_hierarchy": section_hierarchy[:],
-                        "table_title":       None,
-                        "column_headers":    [],
-                        "row_range":         None,
-                        "is_ocr":            False,
-                        "footnotes":         prose_footnotes[:],
-                        "footnote_markers":  [],
-                        "has_figure":        False,
-                        "figure_path":       None,
-                        "finance_entities":  fin_entities,
-                        "char_start":        char_offset[0],
-                        "char_end":          char_offset[0] + len(piece),
+                        "table_title": None,
+                        "column_headers": [],
+                        "row_range": None,
+                        "is_ocr": False,
+                        "footnotes": prose_footnotes[:],
+                        "footnote_markers": [],
+                        "has_figure": False,
+                        "figure_path": None,
+                        "finance_entities": fin_entities,
+                        "char_start": char_offset[0],
+                        "char_end": char_offset[0] + len(piece),
                     }
                     doc = self._make_doc(
                         text=piece,
@@ -256,11 +264,13 @@ class PdfChunker(BaseChunker):
             # Pre-compute BLIP captions + TrOCR for all image_region extracts
             # concurrently before the sequential pass. Keyed by id(ext) so the
             # main loop can look up results without changing its structure.
-            _img_cache: Dict[int, Tuple[str, str]] = {}
-            _img_extracts = [e for e in extracts
-                             if e.extract_type == "image_region" and e.raw_bytes]
+            _img_cache: dict[int, tuple[str, str]] = {}
+            _img_extracts = [
+                e for e in extracts if e.extract_type == "image_region" and e.raw_bytes
+            ]
             if _img_extracts:
-                def _caption_and_ocr_safe(ext_obj: RawExtract) -> Tuple[int, str, str]:
+
+                def _caption_and_ocr_safe(ext_obj: RawExtract) -> tuple[int, str, str]:
                     raw = ext_obj.raw_bytes or b""
                     with _BLIP_SEMAPHORE:
                         cap = _caption_bytes(raw)
@@ -284,8 +294,8 @@ class PdfChunker(BaseChunker):
                     if heading_text:
                         # Prefer canonical SEC label from ingestor (e.g. "Item 7. MD&A")
                         sec_label = (ext.extra or {}).get("sec_section") or heading_text
-                        sec_kind  = _classify_sec_heading(heading_text)
-                        font      = ext.font_size or 12.0
+                        sec_kind = _classify_sec_heading(heading_text)
+                        font = ext.font_size or 12.0
 
                         if sec_kind == "part":
                             # PART I / II / III → reset to top level
@@ -376,24 +386,26 @@ class PdfChunker(BaseChunker):
                         if not piece.strip():
                             continue
                         fin_entities = extract_finance_entities(piece)
-                        chunk_hash = deterministic_chunk_id(source, f"p{ext.page or 0}_ocr_{chunk_idx[0]}", chunk_idx[0])
+                        chunk_hash = deterministic_chunk_id(
+                            source, f"p{ext.page or 0}_ocr_{chunk_idx[0]}", chunk_idx[0]
+                        )
                         structure = {
-                            "chunk_hash_id":     chunk_hash,
-                            "source_file":       source,
-                            "chunk_index":       chunk_idx[0],
-                            "page_number":       ext.page,
-                            "page_range":        [ext.page, ext.page] if ext.page else None,
-                            "chunk_type":        "paragraph",
-                            "section_title":     section_title,
+                            "chunk_hash_id": chunk_hash,
+                            "source_file": source,
+                            "chunk_index": chunk_idx[0],
+                            "page_number": ext.page,
+                            "page_range": [ext.page, ext.page] if ext.page else None,
+                            "chunk_type": "paragraph",
+                            "section_title": section_title,
                             "section_hierarchy": section_hierarchy[:],
-                            "is_ocr":            True,
-                            "footnotes":         [],
-                            "footnote_markers":  [],
-                            "has_figure":        False,
-                            "figure_path":       None,
-                            "finance_entities":  fin_entities,
-                            "char_start":        char_offset[0],
-                            "char_end":          char_offset[0] + len(piece),
+                            "is_ocr": True,
+                            "footnotes": [],
+                            "footnote_markers": [],
+                            "has_figure": False,
+                            "figure_path": None,
+                            "finance_entities": fin_entities,
+                            "char_start": char_offset[0],
+                            "char_end": char_offset[0] + len(piece),
                         }
                         doc = self._make_doc(
                             text=piece,
@@ -421,24 +433,26 @@ class PdfChunker(BaseChunker):
                     if not combined:
                         continue
                     fin_entities = extract_finance_entities(combined)
-                    chunk_hash = deterministic_chunk_id(source, f"p{ext.page or 0}_img_{chunk_idx[0]}", chunk_idx[0])
+                    chunk_hash = deterministic_chunk_id(
+                        source, f"p{ext.page or 0}_img_{chunk_idx[0]}", chunk_idx[0]
+                    )
                     structure = {
-                        "chunk_hash_id":    chunk_hash,
-                        "source_file":      source,
-                        "chunk_index":      chunk_idx[0],
-                        "page_number":      ext.page,
-                        "page_range":       [ext.page, ext.page] if ext.page else None,
-                        "chunk_type":       "figure_caption",
-                        "section_title":    section_title,
-                        "caption":          caption_text,
-                        "ocr_text":         ocr_text,
-                        "footnotes":        [],
+                        "chunk_hash_id": chunk_hash,
+                        "source_file": source,
+                        "chunk_index": chunk_idx[0],
+                        "page_number": ext.page,
+                        "page_range": [ext.page, ext.page] if ext.page else None,
+                        "chunk_type": "figure_caption",
+                        "section_title": section_title,
+                        "caption": caption_text,
+                        "ocr_text": ocr_text,
+                        "footnotes": [],
                         "footnote_markers": [],
-                        "has_figure":       True,
-                        "figure_path":      None,
+                        "has_figure": True,
+                        "figure_path": None,
                         "finance_entities": fin_entities,
-                        "char_start":       char_offset[0],
-                        "char_end":         char_offset[0] + len(combined),
+                        "char_start": char_offset[0],
+                        "char_end": char_offset[0] + len(combined),
                     }
                     doc = self._make_doc(
                         text=combined,

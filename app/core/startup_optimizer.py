@@ -21,7 +21,6 @@ import queue as _queue
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import List
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -43,14 +42,13 @@ logger = get_logger(__name__)
 # alive across idle gaps of any length.
 # ---------------------------------------------------------------------------
 
+
 class _PersistentSingleThreadExecutor:
     """Single OS thread that never times out, compatible with asyncio run_in_executor."""
 
     def __init__(self, thread_name: str) -> None:
         self._q: _queue.SimpleQueue = _queue.SimpleQueue()
-        self._thread = threading.Thread(
-            target=self._loop, name=thread_name, daemon=True
-        )
+        self._thread = threading.Thread(target=self._loop, name=thread_name, daemon=True)
         self._thread.start()
 
     def _loop(self) -> None:
@@ -114,7 +112,7 @@ async def preload_gpu_models() -> None:
     Load all configured GPU models concurrently, then warm them.
     Runs as a background task — Uvicorn is already accepting requests.
     """
-    requested: List[str] = list(settings.WARMUP_MODELS) or ["text_embedder"]
+    requested: list[str] = list(settings.WARMUP_MODELS) or ["text_embedder"]
 
     logger.info(
         event="gpu_preload_started",
@@ -144,7 +142,7 @@ async def preload_gpu_models() -> None:
     await loop.run_in_executor(_warmup_executor, _log_vram_usage)
 
 
-def _load_models_parallel(requested: List[str]) -> None:
+def _load_models_parallel(requested: list[str]) -> None:
     """Load models one at a time in priority order with OOM guards between each.
 
     Parallel loading 12 GPU models simultaneously causes CUDA OOM during
@@ -153,19 +151,19 @@ def _load_models_parallel(requested: List[str]) -> None:
     """
     # Priority order: highest-priority / most-critical models first so the
     # app is usable for text queries while vision/audio models are still loading.
-    _PRIORITY: List[str] = [
-        "text_embedder",    # embedding backbone — needed by every modality
-        "llm",              # GGUF LLM — needed for all answers
-        "reranker",         # cross-encoder — needed for every retrieval
-        "siglip",           # vision backbone (image_embedder + siglip_text_embedder depend on it)
-        "image_embedder",   # depends on siglip being loaded
+    _PRIORITY: list[str] = [
+        "text_embedder",  # embedding backbone — needed by every modality
+        "llm",  # GGUF LLM — needed for all answers
+        "reranker",  # cross-encoder — needed for every retrieval
+        "siglip",  # vision backbone (image_embedder + siglip_text_embedder depend on it)
+        "image_embedder",  # depends on siglip being loaded
         "siglip_text_embedder",
-        "qwen2_vl",         # video/chart captioning (INT8, ~2.2 GB)
-        "trocr",            # OCR for PDF/image (~1.5 GB)
-        "whisper",          # audio transcription (1.55 GB)
-        "ner",              # NER entity extraction (0.4 GB)
-        "finbert",          # finance sentiment (0.4 GB)
-        "diarizer",         # speaker diarization (0.6 GB) — last, needs HF token
+        "qwen2_vl",  # video/chart captioning (INT8, ~2.2 GB)
+        "trocr",  # OCR for PDF/image (~1.5 GB)
+        "whisper",  # audio transcription (1.55 GB)
+        "ner",  # NER entity extraction (0.4 GB)
+        "finbert",  # finance sentiment (0.4 GB)
+        "diarizer",  # speaker diarization (0.6 GB) — last, needs HF token
     ]
 
     # Only load models that were requested.
@@ -173,10 +171,13 @@ def _load_models_parallel(requested: List[str]) -> None:
     # Any requested model not in the priority list goes at the end.
     ordered += [m for m in requested if m not in _PRIORITY]
 
-    from app.core.model_registry import model_registry
     import gc
+
+    from app.core.model_registry import model_registry
+
     try:
         import torch
+
         _has_cuda = torch.cuda.is_available()
     except Exception:
         _has_cuda = False
@@ -225,19 +226,23 @@ def _seed_pytorch_cuda_contexts(torch) -> None:
     kernel BGE needs is already compiled/cached on both threads and is simply
     reused once the GGUF model is resident — no crash.
     """
+
     def _real_forward() -> str:
         # Prefer a true embedder forward (covers SDPA); fall back to matmul.
         try:
             from app.core.model_loader import model_loader
+
             emb = model_loader.get_embedder()
             if emb is not None:
                 emb.embed_texts(["cuda context fence"])
                 import torch as _t
+
                 _t.cuda.synchronize()
                 return "embed"
         except Exception:
             pass
         import torch as _t
+
         c = _t.mm(_t.randn(64, 64, device="cuda"), _t.randn(64, 64, device="cuda"))
         _t.cuda.synchronize()
         return f"mm:{float(c.sum()):.1f}"
@@ -298,6 +303,7 @@ def _warmup_text_embedder() -> None:
         return
     try:
         from app.core.model_loader import model_loader
+
         if model_loader._text_embedder is None:
             return
         emb = model_loader.get_embedder()
@@ -326,6 +332,7 @@ def _warmup_ingest_thread() -> None:
     """
     try:
         from app.core.model_loader import model_loader
+
         if model_loader._text_embedder is None:
             return
         emb = model_loader.get_embedder()
@@ -335,6 +342,7 @@ def _warmup_ingest_thread() -> None:
         # ingest thread starts — avoids any stream ordering surprises.
         try:
             import torch
+
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
         except Exception:
@@ -363,6 +371,7 @@ def _warmup_guardrails_sync() -> None:
     """
     try:
         from app.guardrails import warm_up as guardrail_warm_up
+
         guardrail_warm_up()
         logger.debug(event="cuda_warmup_done", model="guardrails")
     except Exception as exc:
@@ -372,6 +381,7 @@ def _warmup_guardrails_sync() -> None:
 def _warmup_llm() -> None:
     try:
         from app.core.model_loader import model_loader
+
         if model_loader._llm is None:
             return
         # Flush all pending PyTorch CUDA ops before llama.cpp initialises its
@@ -379,6 +389,7 @@ def _warmup_llm() -> None:
         # on the same device and the process segfaults.
         try:
             import torch
+
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
         except Exception:
@@ -399,6 +410,7 @@ def _warmup_siglip() -> None:
         return
     try:
         from app.core.model_loader import model_loader
+
         if model_loader._siglip_model is None:
             return
         result = model_loader.get_siglip()
@@ -408,6 +420,7 @@ def _warmup_siglip() -> None:
         if device != "cuda":
             return
         import torch
+
         # SigLIP SO400M uses 384×384 input — match the real resolution.
         dummy = torch.zeros(1, 3, 384, 384, device=device, dtype=torch.float16)
         with torch.no_grad():
@@ -422,6 +435,7 @@ def _warmup_blip() -> None:
         return
     try:
         from app.core.model_loader import model_loader
+
         if model_loader._blip_model is None:
             return
         result = model_loader.get_blip()
@@ -431,6 +445,7 @@ def _warmup_blip() -> None:
         if device != "cuda":
             return
         import torch
+
         dummy = torch.zeros(1, 3, 384, 384, device=device, dtype=torch.float16)
         with torch.no_grad():
             model.vision_model(pixel_values=dummy)
@@ -444,6 +459,7 @@ def _warmup_qwen2_vl() -> None:
         return
     try:
         from app.core.model_loader import model_loader
+
         if model_loader._qwen2vl_model is None:
             return
         result = model_loader.get_qwen2_vl()
@@ -452,13 +468,19 @@ def _warmup_qwen2_vl() -> None:
         processor, model, device = result
         if device != "cuda":
             return
-        from PIL import Image as _PIL
         import torch
+        from PIL import Image as _PIL
+
         dummy_img = _PIL.new("RGB", (224, 224), color=128)
-        messages = [{"role": "user", "content": [
-            {"type": "image", "image": dummy_img},
-            {"type": "text", "text": "warmup"},
-        ]}]
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": dummy_img},
+                    {"type": "text", "text": "warmup"},
+                ],
+            }
+        ]
         text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = processor(text=[text], images=[dummy_img], return_tensors="pt").to(device)
         with torch.no_grad():
@@ -473,10 +495,12 @@ def _warmup_trocr() -> None:
         return
     try:
         from app.core.model_loader import model_loader
+
         if model_loader._trocr_model is None:
             return
-        from PIL import Image
         import numpy as np
+        from PIL import Image
+
         result = model_loader.get_trocr()
         if result is None or result[1] is None:
             return
@@ -495,9 +519,14 @@ def _warmup_whisper() -> None:
         return
     try:
         from app.core.model_loader import model_loader
+
         if model_loader._whisper is None:
             return
-        import tempfile, struct, wave, os
+        import os
+        import struct
+        import tempfile
+        import wave
+
         whisper = model_loader.get_whisper()
         if whisper is None:
             return
@@ -523,6 +552,7 @@ def _warmup_ner() -> None:
         return
     try:
         from app.core.model_loader import model_loader
+
         if model_loader._ner is None:
             return
         ner = model_loader.get_ner()
@@ -537,6 +567,7 @@ def _warmup_ner() -> None:
 def _warmup_finbert() -> None:
     try:
         from app.core.model_loader import model_loader
+
         if model_loader._finbert is None:
             return
         finbert = model_loader.get_finbert()
@@ -551,6 +582,7 @@ def _warmup_finbert() -> None:
 def _warmup_reranker() -> None:
     try:
         from app.core.model_loader import model_loader
+
         if model_loader._reranker is None:
             return
         reranker = model_loader.get_reranker()
@@ -581,6 +613,7 @@ def seed_gpu_ingest_thread() -> None:
 
     try:
         from app.core.model_loader import model_loader
+
         emb = model_loader.get_embedder()
         if emb is None:
             logger.warning(event="lazy_ingest_seed_skipped", reason="embedder_unavailable")
@@ -588,6 +621,7 @@ def seed_gpu_ingest_thread() -> None:
         # Flush any pending PyTorch CUDA ops in the calling thread first.
         try:
             import torch
+
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
         except Exception:
@@ -603,11 +637,12 @@ def seed_gpu_ingest_thread() -> None:
 def _log_vram_usage() -> None:
     try:
         import torch
+
         if not torch.cuda.is_available():
             return
-        allocated = round(torch.cuda.memory_allocated(0) / 1024 ** 3, 2)
-        reserved  = round(torch.cuda.memory_reserved(0) / 1024 ** 3, 2)
-        total     = round(torch.cuda.get_device_properties(0).total_memory / 1024 ** 3, 2)
+        allocated = round(torch.cuda.memory_allocated(0) / 1024**3, 2)
+        reserved = round(torch.cuda.memory_reserved(0) / 1024**3, 2)
+        total = round(torch.cuda.get_device_properties(0).total_memory / 1024**3, 2)
         logger.info(
             event="vram_usage_after_preload",
             allocated_gb=allocated,
@@ -626,6 +661,7 @@ def set_cuda_performance_flags() -> None:
     """
     try:
         import torch
+
         if not torch.cuda.is_available():
             return
         # Enable TF32 for matrix multiplications (Turing/Ampere; T4 supports this)

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import io
 import re
+import time
 from pathlib import Path
-from typing import Dict, List, Optional
+
+from prometheus_client import Counter
 
 from app.chunking.base_chunker import BaseChunker
 from app.chunking.finance_numbers import (
@@ -13,9 +15,6 @@ from app.chunking.finance_numbers import (
 )
 from app.ingestion.schema import IngestedDocument, RawExtract, UniversalMetadata
 from app.utils.logger import get_logger, modality_var
-
-import time
-from prometheus_client import Counter, Histogram
 
 logger = get_logger(__name__)
 
@@ -62,7 +61,9 @@ _DOCX_PROSE_TARGET_TOKENS = 280
 def _caption_bytes(raw_bytes: bytes) -> str:
     try:
         from PIL import Image
+
         from app.chunking.image_chunker import blip_caption
+
         img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
         return blip_caption(img)
     except Exception as exc:
@@ -70,7 +71,7 @@ def _caption_bytes(raw_bytes: bytes) -> str:
         return ""
 
 
-def _heading_level_from_style(style_name: Optional[str]) -> int:
+def _heading_level_from_style(style_name: str | None) -> int:
     """Extract numeric heading level from DOCX style name (e.g. 'Heading 2' → 2)."""
     if not style_name:
         return 0
@@ -81,7 +82,7 @@ def _heading_level_from_style(style_name: Optional[str]) -> int:
 _SECTION_NUMBER_RE = re.compile(r"^\s*(\d+(?:\.\d+)*)")
 
 
-def _section_number(heading: Optional[str]) -> Optional[str]:
+def _section_number(heading: str | None) -> str | None:
     """Short section id for the LLM-facing citation tag ("4.1 DCF Model Key
     Assumptions" -> "4.1"). A 60+ char heading is a lot for a small quantized
     model to copy verbatim into a citation; a short number is far more
@@ -100,9 +101,9 @@ class DocxChunker(BaseChunker):
 
     def chunk(
         self,
-        extracts: List[RawExtract],
+        extracts: list[RawExtract],
         meta: UniversalMetadata,
-    ) -> List[IngestedDocument]:
+    ) -> list[IngestedDocument]:
         source = Path(meta.source_path).name or "unknown.docx"
         surface = "docx_chunker"
         modality_var.set("docx")
@@ -112,22 +113,22 @@ class DocxChunker(BaseChunker):
             logger.warning(event="no_extracts_received", modality="docx", source=source)
             return []
         try:
-            docs: List[IngestedDocument] = []
+            docs: list[IngestedDocument] = []
             chunk_idx = [0]
             char_offset = [0]  # cumulative character offset through document
 
             # Section hierarchy stack: index = level-1, value = heading text
-            hierarchy: List[str] = []
+            hierarchy: list[str] = []
             prose_buf: str = ""
-            pending_table_rows: List[RawExtract] = []
-            table_headers: List[str] = []
-            current_table_index: Optional[int] = None
-            defined_terms: Dict[str, str] = {}
+            pending_table_rows: list[RawExtract] = []
+            table_headers: list[str] = []
+            current_table_index: int | None = None
+            defined_terms: dict[str, str] = {}
             seen_hashes: set = set()
-            paragraph_index = [0]   # paragraph counter within current section (MD Phase 1.3)
-            table_index = [0]       # table counter in document (MD Phase 1.3)
+            paragraph_index = [0]  # paragraph counter within current section (MD Phase 1.3)
+            table_index = [0]  # table counter in document (MD Phase 1.3)
 
-            def current_heading() -> Optional[str]:
+            def current_heading() -> str | None:
                 return hierarchy[-1] if hierarchy else None
 
             def flush_prose() -> None:
@@ -148,29 +149,31 @@ class DocxChunker(BaseChunker):
                     # Capture defined terms from this prose chunk
                     for m in _DEFINED_TERM_RE.finditer(piece):
                         term = m.group(1).strip()
-                        defined_terms[term] = piece[m.end(): m.end() + 80].strip()
+                        defined_terms[term] = piece[m.end() : m.end() + 80].strip()
 
                     fin_entities = extract_finance_entities(piece)
                     paragraph_index[0] += 1
-                    chunk_hash = deterministic_chunk_id(source, f"para_{chunk_idx[0]}", chunk_idx[0])
+                    chunk_hash = deterministic_chunk_id(
+                        source, f"para_{chunk_idx[0]}", chunk_idx[0]
+                    )
                     structure = {
-                        "chunk_hash_id":    chunk_hash,
-                        "source_file":      source,
-                        "chunk_index":      chunk_idx[0],
-                        "paragraph_index":  paragraph_index[0],
-                        "heading":          current_heading(),
-                        "section_id":       _section_number(current_heading()),
-                        "section_title":    current_heading(),
+                        "chunk_hash_id": chunk_hash,
+                        "source_file": source,
+                        "chunk_index": chunk_idx[0],
+                        "paragraph_index": paragraph_index[0],
+                        "heading": current_heading(),
+                        "section_id": _section_number(current_heading()),
+                        "section_title": current_heading(),
                         "heading_hierarchy": hierarchy[:],
-                        "heading_level":    len(hierarchy),
-                        "chunk_type":       "paragraph",
-                        "has_bold_terms":   bold_terms,
+                        "heading_level": len(hierarchy),
+                        "chunk_type": "paragraph",
+                        "has_bold_terms": bold_terms,
                         "has_italic_terms": italic_terms,
-                        "clause_numbers":   clause_nums,
-                        "defined_terms":    {},
+                        "clause_numbers": clause_nums,
+                        "defined_terms": {},
                         "finance_entities": fin_entities,
-                        "char_start":       char_offset[0],
-                        "char_end":         char_offset[0] + len(piece),
+                        "char_start": char_offset[0],
+                        "char_end": char_offset[0] + len(piece),
                     }
                     char_offset[0] += len(piece) + 1
                     doc = self._make_doc(
@@ -189,37 +192,41 @@ class DocxChunker(BaseChunker):
                         chunk_idx[0] += 1
                 prose_buf = ""
 
-            def _emit_table_chunk(row_texts: List[str], row_range: List[int], is_first: bool) -> None:
+            def _emit_table_chunk(
+                row_texts: list[str], row_range: list[int], is_first: bool
+            ) -> None:
                 header_line = " | ".join(table_headers) if table_headers else ""
                 nl_text = (f"{header_line}\n" if header_line else "") + "\n".join(row_texts)
                 fin_entities = extract_finance_entities(nl_text)
                 tbl_bold = _BOLD_TERM_RE.findall(nl_text)
                 tbl_italic = [g1 or g2 for g1, g2 in _ITALIC_TERM_RE.findall(nl_text)]
                 tbl_clauses = _CLAUSE_NUM_RE.findall(nl_text)
-                chunk_hash = deterministic_chunk_id(source, f"table_r{row_range[0]}_{chunk_idx[0]}", chunk_idx[0])
+                chunk_hash = deterministic_chunk_id(
+                    source, f"table_r{row_range[0]}_{chunk_idx[0]}", chunk_idx[0]
+                )
                 if is_first:
                     table_index[0] += 1
                 structure = {
-                    "chunk_hash_id":    chunk_hash,
-                    "source_file":      source,
-                    "chunk_index":      chunk_idx[0],
-                    "paragraph_index":  paragraph_index[0],
-                    "table_index":      table_index[0],
-                    "heading":          current_heading(),
-                    "section_id":       _section_number(current_heading()),
-                    "section_title":    current_heading(),
+                    "chunk_hash_id": chunk_hash,
+                    "source_file": source,
+                    "chunk_index": chunk_idx[0],
+                    "paragraph_index": paragraph_index[0],
+                    "table_index": table_index[0],
+                    "heading": current_heading(),
+                    "section_id": _section_number(current_heading()),
+                    "section_title": current_heading(),
                     "heading_hierarchy": hierarchy[:],
-                    "heading_level":    len(hierarchy),
-                    "chunk_type":       "table",
-                    "column_headers":   table_headers[:],
-                    "row_range":        row_range,
-                    "has_bold_terms":   tbl_bold,
+                    "heading_level": len(hierarchy),
+                    "chunk_type": "table",
+                    "column_headers": table_headers[:],
+                    "row_range": row_range,
+                    "has_bold_terms": tbl_bold,
                     "has_italic_terms": tbl_italic,
-                    "clause_numbers":   tbl_clauses,
-                    "defined_terms":    {},
+                    "clause_numbers": tbl_clauses,
+                    "defined_terms": {},
                     "finance_entities": fin_entities,
-                    "char_start":       char_offset[0],
-                    "char_end":         char_offset[0] + len(nl_text),
+                    "char_start": char_offset[0],
+                    "char_end": char_offset[0] + len(nl_text),
                 }
                 char_offset[0] += len(nl_text) + 1
                 doc = self._make_doc(
@@ -257,7 +264,7 @@ class DocxChunker(BaseChunker):
                     overlap = _TABLE_OVERLAP_ROWS
                     i = 0
                     while i < len(pending_table_rows):
-                        group = pending_table_rows[i: i + step]
+                        group = pending_table_rows[i : i + step]
                         row_texts = [r.text for r in group]
                         row_range = [i + 1, min(i + step, len(pending_table_rows))]
                         _emit_table_chunk(row_texts, row_range, is_first=(i == 0))
@@ -322,19 +329,21 @@ class DocxChunker(BaseChunker):
                     comment_text = (ext.text or "").strip()
                     if not comment_text:
                         continue
-                    chunk_hash = deterministic_chunk_id(source, f"comment_{chunk_idx[0]}", chunk_idx[0])
+                    chunk_hash = deterministic_chunk_id(
+                        source, f"comment_{chunk_idx[0]}", chunk_idx[0]
+                    )
                     structure = {
-                        "chunk_hash_id":    chunk_hash,
-                        "source_file":      source,
-                        "chunk_index":      chunk_idx[0],
-                        "heading":          current_heading(),
-                        "section_id":       _section_number(current_heading()),
-                        "section_title":    current_heading(),
+                        "chunk_hash_id": chunk_hash,
+                        "source_file": source,
+                        "chunk_index": chunk_idx[0],
+                        "heading": current_heading(),
+                        "section_id": _section_number(current_heading()),
+                        "section_title": current_heading(),
                         "heading_hierarchy": hierarchy[:],
-                        "chunk_type":       "annotation",
+                        "chunk_type": "annotation",
                         "finance_entities": extract_finance_entities(comment_text),
-                        "char_start":       char_offset[0],
-                        "char_end":         char_offset[0] + len(comment_text),
+                        "char_start": char_offset[0],
+                        "char_end": char_offset[0] + len(comment_text),
                     }
                     char_offset[0] += len(comment_text) + 1
                     doc = self._make_doc(
@@ -362,18 +371,18 @@ class DocxChunker(BaseChunker):
                         continue
                     chunk_hash = deterministic_chunk_id(source, f"img_{chunk_idx[0]}", chunk_idx[0])
                     structure = {
-                        "chunk_hash_id":   chunk_hash,
-                        "source_file":     source,
-                        "chunk_index":     chunk_idx[0],
-                        "heading":         current_heading(),
-                        "section_id":      _section_number(current_heading()),
-                        "section_title":   current_heading(),
+                        "chunk_hash_id": chunk_hash,
+                        "source_file": source,
+                        "chunk_index": chunk_idx[0],
+                        "heading": current_heading(),
+                        "section_id": _section_number(current_heading()),
+                        "section_title": current_heading(),
                         "heading_hierarchy": hierarchy[:],
-                        "chunk_type":      "figure_caption",
-                        "caption":         cap,
+                        "chunk_type": "figure_caption",
+                        "caption": cap,
                         "finance_entities": extract_finance_entities(cap),
-                        "char_start":      char_offset[0],
-                        "char_end":        char_offset[0] + len(cap),
+                        "char_start": char_offset[0],
+                        "char_end": char_offset[0] + len(cap),
                     }
                     char_offset[0] += len(cap) + 1
                     doc = self._make_doc(
@@ -403,23 +412,23 @@ class DocxChunker(BaseChunker):
                 def_clauses = _CLAUSE_NUM_RE.findall(def_text)
                 chunk_hash = deterministic_chunk_id(source, "definitions", chunk_idx[0])
                 structure = {
-                    "chunk_hash_id":    chunk_hash,
-                    "source_file":      source,
-                    "chunk_index":      chunk_idx[0],
-                    "heading":          current_heading(),
-                    "section_id":       _section_number(current_heading()),
-                    "section_title":    current_heading(),
+                    "chunk_hash_id": chunk_hash,
+                    "source_file": source,
+                    "chunk_index": chunk_idx[0],
+                    "heading": current_heading(),
+                    "section_id": _section_number(current_heading()),
+                    "section_title": current_heading(),
                     "heading_hierarchy": hierarchy[:],
-                    "heading_level":    len(hierarchy),
-                    "paragraph_index":  paragraph_index[0],
-                    "chunk_type":       "definitions",
-                    "has_bold_terms":   def_bold,
+                    "heading_level": len(hierarchy),
+                    "paragraph_index": paragraph_index[0],
+                    "chunk_type": "definitions",
+                    "has_bold_terms": def_bold,
                     "has_italic_terms": def_italic,
-                    "clause_numbers":   def_clauses,
-                    "defined_terms":    defined_terms,
+                    "clause_numbers": def_clauses,
+                    "defined_terms": defined_terms,
                     "finance_entities": extract_finance_entities(def_text),
-                    "char_start":       char_offset[0],
-                    "char_end":         char_offset[0] + len(def_text),
+                    "char_start": char_offset[0],
+                    "char_end": char_offset[0] + len(def_text),
                 }
                 char_offset[0] += len(def_text) + 1
                 doc = self._make_doc(

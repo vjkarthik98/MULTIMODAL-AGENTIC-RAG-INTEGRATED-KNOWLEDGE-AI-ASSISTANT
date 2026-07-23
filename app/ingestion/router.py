@@ -2,44 +2,29 @@ import asyncio
 import contextvars
 import hashlib
 import mimetypes
-import os
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import magic
-import structlog
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 from prometheus_client import Counter, Histogram
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
-from app.core.response import ErrorCode, Modality, Severity, UniversalErrorResponse
-from app.ingestion.audio_ingest import ingest as audio_ingest
-from app.ingestion.audio_ingest import AudioIngestor
-from app.ingestion.audio_ingest import ingest_audio_full
-from app.ingestion.docx_ingest import ingest as word_ingest  # kept for backward compat
-from app.ingestion.docx_ingest import ingest_docx_full
-from app.ingestion.docx_ingest import DocxIngestor
-from app.ingestion.image_ingest import ingest as image_ingest  # backward-compat
-from app.ingestion.image_ingest import ImageIngestor
-from app.ingestion.image_ingest import ingest_image_full
-from app.ingestion.pdf_ingest import ingest as pdf_ingest  # kept for backward compat
-from app.ingestion.pdf_ingest import ingest_pdf_full
-from app.ingestion.pdf_ingest import PdfIngestor
-from app.ingestion.schema import IngestedDocument
-from app.ingestion.txt_ingest import ingest as text_ingest
-from app.ingestion.txt_ingest import TxtIngestor
-from app.ingestion.video_ingest import ingest as video_ingest
-from app.ingestion.video_ingest import ingest_video_full
-from app.ingestion.video_ingest import VideoIngestor
-from app.ingestion.xlsx_ingest import ingest as excel_ingest  # backward-compat
-from app.ingestion.xlsx_ingest import XlsxIngestor
-from app.ingestion.xlsx_ingest import ingest_xlsx_full
-from app.utils.logger import get_logger
+from app.core.response import Modality
 from app.guardrails.exceptions import GuardrailBlocked
+from app.ingestion.audio_ingest import AudioIngestor, ingest_audio_full
+from app.ingestion.docx_ingest import DocxIngestor, ingest_docx_full
+from app.ingestion.image_ingest import ImageIngestor, ingest_image_full
+from app.ingestion.pdf_ingest import PdfIngestor, ingest_pdf_full
+from app.ingestion.schema import IngestedDocument
+from app.ingestion.txt_ingest import TxtIngestor
+from app.ingestion.txt_ingest import ingest as text_ingest
+from app.ingestion.video_ingest import VideoIngestor, ingest_video_full
+from app.ingestion.xlsx_ingest import XlsxIngestor, ingest_xlsx_full
+from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -62,21 +47,43 @@ _ingestion_docs = Histogram(
 )
 
 # EXTENSION MAPS
-TEXT_EXTENSIONS: Set[str]  = {".txt", ".md", ".rst", ".csv", ".log", ".json", ".yaml", ".yml"}
-PDF_EXTENSIONS: Set[str]   = {".pdf"}
-WORD_EXTENSIONS: Set[str]  = {".docx", ".doc"}
-EXCEL_EXTENSIONS: Set[str] = {".xlsx", ".xls"}
-IMAGE_EXTENSIONS: Set[str] = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif", ".heic", ".heif", ".gif", ".svg"}
-AUDIO_EXTENSIONS: Set[str] = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma", ".aiff", ".opus"}
-VIDEO_EXTENSIONS: Set[str] = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".ts"}
+TEXT_EXTENSIONS: set[str] = {".txt", ".md", ".rst", ".csv", ".log", ".json", ".yaml", ".yml"}
+PDF_EXTENSIONS: set[str] = {".pdf"}
+WORD_EXTENSIONS: set[str] = {".docx", ".doc"}
+EXCEL_EXTENSIONS: set[str] = {".xlsx", ".xls"}
+IMAGE_EXTENSIONS: set[str] = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".bmp",
+    ".webp",
+    ".tiff",
+    ".tif",
+    ".heic",
+    ".heif",
+    ".gif",
+    ".svg",
+}
+AUDIO_EXTENSIONS: set[str] = {
+    ".mp3",
+    ".wav",
+    ".m4a",
+    ".flac",
+    ".ogg",
+    ".aac",
+    ".wma",
+    ".aiff",
+    ".opus",
+}
+VIDEO_EXTENSIONS: set[str] = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv", ".ts"}
 
 # "document" kept as alias so any callers using old string still work
-DOCUMENT_EXTENSIONS: Set[str] = PDF_EXTENSIONS | WORD_EXTENSIONS | EXCEL_EXTENSIONS
+DOCUMENT_EXTENSIONS: set[str] = PDF_EXTENSIONS | WORD_EXTENSIONS | EXCEL_EXTENSIONS
 
-EXT_TO_MODALITY: Dict[str, str] = {
-    **{ext: "text"  for ext in TEXT_EXTENSIONS},
-    **{ext: "pdf"   for ext in PDF_EXTENSIONS},
-    **{ext: "word"  for ext in WORD_EXTENSIONS},
+EXT_TO_MODALITY: dict[str, str] = {
+    **{ext: "text" for ext in TEXT_EXTENSIONS},
+    **{ext: "pdf" for ext in PDF_EXTENSIONS},
+    **{ext: "word" for ext in WORD_EXTENSIONS},
     **{ext: "excel" for ext in EXCEL_EXTENSIONS},
     **{ext: "image" for ext in IMAGE_EXTENSIONS},
     **{ext: "audio" for ext in AUDIO_EXTENSIONS},
@@ -84,91 +91,91 @@ EXT_TO_MODALITY: Dict[str, str] = {
 }
 
 # MAGIC-BYTE MIME TO MODALITY MAP
-MIME_TO_MODALITY: Dict[str, str] = {
-    "text/plain":                  "text",
-    "text/markdown":               "text",
-    "text/csv":                    "text",
-    "text/x-rst":                  "text",
-    "application/json":            "text",
-    "application/x-yaml":          "text",
-    "application/pdf":             "pdf",
-    "application/msword":          "word",
+MIME_TO_MODALITY: dict[str, str] = {
+    "text/plain": "text",
+    "text/markdown": "text",
+    "text/csv": "text",
+    "text/x-rst": "text",
+    "application/json": "text",
+    "application/x-yaml": "text",
+    "application/pdf": "pdf",
+    "application/msword": "word",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "word",
-    "application/vnd.ms-excel":    "excel",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":       "excel",
-    "image/jpeg":                  "image",
-    "image/png":                   "image",
-    "image/gif":                   "image",
-    "image/webp":                  "image",
-    "image/tiff":                  "image",
-    "image/bmp":                   "image",
-    "image/heic":                  "image",
-    "image/heif":                  "image",
-    "image/svg+xml":               "image",
-    "audio/mpeg":                  "audio",
-    "audio/wav":                   "audio",
-    "audio/x-wav":                 "audio",
-    "audio/flac":                  "audio",
-    "audio/ogg":                   "audio",
-    "audio/aac":                   "audio",
-    "audio/mp4":                   "audio",
-    "audio/x-m4a":                 "audio",
-    "audio/opus":                  "audio",
-    "video/mp4":                   "video",
-    "video/x-msvideo":             "video",
-    "video/quicktime":             "video",
-    "video/x-matroska":            "video",
-    "video/webm":                  "video",
-    "video/x-flv":                 "video",
-    "video/x-ms-wmv":              "video",
-    "video/mp2t":                  "video",
+    "application/vnd.ms-excel": "excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "excel",
+    "image/jpeg": "image",
+    "image/png": "image",
+    "image/gif": "image",
+    "image/webp": "image",
+    "image/tiff": "image",
+    "image/bmp": "image",
+    "image/heic": "image",
+    "image/heif": "image",
+    "image/svg+xml": "image",
+    "audio/mpeg": "audio",
+    "audio/wav": "audio",
+    "audio/x-wav": "audio",
+    "audio/flac": "audio",
+    "audio/ogg": "audio",
+    "audio/aac": "audio",
+    "audio/mp4": "audio",
+    "audio/x-m4a": "audio",
+    "audio/opus": "audio",
+    "video/mp4": "video",
+    "video/x-msvideo": "video",
+    "video/quicktime": "video",
+    "video/x-matroska": "video",
+    "video/webm": "video",
+    "video/x-flv": "video",
+    "video/x-ms-wmv": "video",
+    "video/mp2t": "video",
 }
 
-MODALITY_LABEL: Dict[str, str] = {
-    "text":  Modality.TEXT,
-    "pdf":   Modality.PDF,
-    "word":  Modality.PDF,
+MODALITY_LABEL: dict[str, str] = {
+    "text": Modality.TEXT,
+    "pdf": Modality.PDF,
+    "word": Modality.PDF,
     "excel": Modality.PDF,
     "image": Modality.IMAGE,
     "audio": Modality.AUDIO,
     "video": Modality.VIDEO,
 }
 
-MODALITY_SIZE_LIMITS: Dict[str, int] = {
-    "text":  settings.MAX_FILE_SIZE_TEXT,
-    "pdf":   settings.MAX_FILE_SIZE_PDF,
-    "word":  settings.MAX_FILE_SIZE_DOCX,
+MODALITY_SIZE_LIMITS: dict[str, int] = {
+    "text": settings.MAX_FILE_SIZE_TEXT,
+    "pdf": settings.MAX_FILE_SIZE_PDF,
+    "word": settings.MAX_FILE_SIZE_DOCX,
     "excel": settings.MAX_FILE_SIZE_XLSX,
     "image": settings.MAX_FILE_SIZE_IMAGE,
     "audio": settings.MAX_FILE_SIZE_AUDIO,
     "video": settings.MAX_FILE_SIZE_VIDEO,
 }
 
-INGESTION_HANDLERS: Dict[str, Callable] = {
-    "text":  text_ingest,
-    "pdf":   ingest_pdf_full,   # full path: PdfIngestor → PdfChunker (rich metadata)
-    "word":  ingest_docx_full,   # full path: DocxIngestor → DocxChunker (rich metadata)
-    "excel": ingest_xlsx_full,   # full path: XlsxIngestor → XlsxChunker (rich metadata)
-    "image": ingest_image_full,   # full path: ImageIngestor → ImageChunker (rich metadata)
+INGESTION_HANDLERS: dict[str, Callable] = {
+    "text": text_ingest,
+    "pdf": ingest_pdf_full,  # full path: PdfIngestor → PdfChunker (rich metadata)
+    "word": ingest_docx_full,  # full path: DocxIngestor → DocxChunker (rich metadata)
+    "excel": ingest_xlsx_full,  # full path: XlsxIngestor → XlsxChunker (rich metadata)
+    "image": ingest_image_full,  # full path: ImageIngestor → ImageChunker (rich metadata)
     "audio": ingest_audio_full,  # full path: AudioIngestor → AudioChunker (rich metadata)
     "video": ingest_video_full,  # full path: VideoIngestor → VideoChunker (rich metadata)
 }
 
 # Per-modality ingestor classes exposing .extract(path, meta) -> List[RawExtract].
 # Used by the new per-modality pipeline chain (ingestion_pipeline.py Step 4).
-INGESTOR_MAP: Dict[str, type] = {
-    "text":  TxtIngestor,
-    "txt":   TxtIngestor,
-    "pdf":   PdfIngestor,
-    "word":  DocxIngestor,
-    "docx":  DocxIngestor,
+INGESTOR_MAP: dict[str, type] = {
+    "text": TxtIngestor,
+    "txt": TxtIngestor,
+    "pdf": PdfIngestor,
+    "word": DocxIngestor,
+    "docx": DocxIngestor,
     "excel": XlsxIngestor,
-    "xlsx":  XlsxIngestor,
+    "xlsx": XlsxIngestor,
     "image": ImageIngestor,
     "audio": AudioIngestor,
-    "mp3":   AudioIngestor,
+    "mp3": AudioIngestor,
     "video": VideoIngestor,
-    "mp4":   VideoIngestor,
+    "mp4": VideoIngestor,
 }
 
 MAX_INGESTED_DOCS: int = 5000
@@ -179,11 +186,13 @@ _semaphore = asyncio.Semaphore(5)
 
 # SHA-256 HASH
 
+
 def _stable_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 # FILE SHA-256 FOR DEDUP CHECK
+
 
 def _file_sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -194,6 +203,7 @@ def _file_sha256(path: Path) -> str:
 
 
 # MAGIC-BYTE MIME DETECTION — NEVER TRUST EXTENSION
+
 
 def _detect_mime_magic(path: Path) -> str:
     try:
@@ -208,6 +218,7 @@ def _detect_mime_magic(path: Path) -> str:
 
 # MIME VALIDATION AGAINST ALLOWLIST
 
+
 def _validate_mime(path: Path, mime: str) -> None:
     allowed = settings.ALLOWED_MIME_TYPES
     if allowed and mime and mime not in allowed:
@@ -215,6 +226,7 @@ def _validate_mime(path: Path, mime: str) -> None:
 
 
 # NULL-BYTE DETECTION
+
 
 def _check_null_bytes(path: Path) -> int:
     count = 0
@@ -228,6 +240,7 @@ def _check_null_bytes(path: Path) -> int:
 
 
 # PATH TRAVERSAL GUARD
+
 
 def _guard_path(file_path: str) -> Path:
 
@@ -253,18 +266,20 @@ def _guard_path(file_path: str) -> Path:
 
 # DISK SPACE GUARD
 
+
 def _check_disk_space(path: Path) -> None:
     try:
         import shutil
+
         min_free_mb = getattr(settings, "MIN_FREE_DISK_MB", 500)
         stat = shutil.disk_usage(str(path.parent))
         free_mb = stat.free / (1024 * 1024)
         if free_mb < min_free_mb:
-            raise IOError(
+            raise OSError(
                 f"INSUFFICIENT_DISK_SPACE: {free_mb:.1f} MB free, "
                 f"minimum required {min_free_mb} MB"
             )
-    except IOError:
+    except OSError:
         raise
     except Exception as exc:
         logger.warning("disk_space_check_failed", error=str(exc))
@@ -272,16 +287,18 @@ def _check_disk_space(path: Path) -> None:
 
 # CLAMAV MALWARE SCAN — PHASE 25
 
+
 def _clamav_scan(path: Path) -> None:
     if not getattr(settings, "CLAMAV_ENABLED", False):
         return
     try:
         import clamd
-        host    = getattr(settings, "CLAMAV_HOST", "localhost")
-        port    = getattr(settings, "CLAMAV_PORT", 3310)
+
+        host = getattr(settings, "CLAMAV_HOST", "localhost")
+        port = getattr(settings, "CLAMAV_PORT", 3310)
         timeout = getattr(settings, "CLAMAV_TIMEOUT", 30)
-        cd      = clamd.ClamdNetworkSocket(host=host, port=port, timeout=timeout)
-        result  = cd.scan(str(path))
+        cd = clamd.ClamdNetworkSocket(host=host, port=port, timeout=timeout)
+        result = cd.scan(str(path))
         if result:
             status = result.get(str(path), ("OK", ""))[0]
             if status == "FOUND":
@@ -299,7 +316,8 @@ def _clamav_scan(path: Path) -> None:
 
 # MODALITY DETECTION — MAGIC-BYTE FIRST, EXTENSION FALLBACK
 
-def detect_modality(file_path: str) -> Tuple[str, str]:
+
+def detect_modality(file_path: str) -> tuple[str, str]:
     """
     Returns (modality, mime_type).
     Uses magic-byte MIME detection as primary source.
@@ -322,10 +340,10 @@ def detect_modality(file_path: str) -> Tuple[str, str]:
     _check_disk_space(path)
 
     # MAGIC-BYTE MIME DETECTION
-    mime          = _detect_mime_magic(path)
+    mime = _detect_mime_magic(path)
     mime_modality = MIME_TO_MODALITY.get(mime)
-    ext           = path.suffix.lower()
-    ext_modality  = EXT_TO_MODALITY.get(ext)
+    ext = path.suffix.lower()
+    ext_modality = EXT_TO_MODALITY.get(ext)
 
     # MISMATCH: magic bytes contradict the file extension — reject immediately
     if mime_modality and ext_modality and mime_modality != ext_modality:
@@ -343,13 +361,12 @@ def detect_modality(file_path: str) -> Tuple[str, str]:
     limit = MODALITY_SIZE_LIMITS.get(modality, settings.MAX_FILE_SIZE_MB * 1024 * 1024)
     if stat.st_size > limit:
         raise ValueError(
-            f"FILE_TOO_LARGE: {stat.st_size} bytes exceeds "
-            f"{limit} bytes for {modality}"
+            f"FILE_TOO_LARGE: {stat.st_size} bytes exceeds " f"{limit} bytes for {modality}"
         )
 
     # ALLOWED EXTENSIONS CHECK
     allowed_types = settings.ALLOWED_FILE_TYPES
-    ext           = path.suffix.lower()
+    ext = path.suffix.lower()
     if allowed_types and ext.lstrip(".") not in allowed_types:
         raise ValueError(f"EXT_NOT_ALLOWED: {ext}")
 
@@ -361,15 +378,16 @@ def detect_modality(file_path: str) -> Tuple[str, str]:
 
 # DOCUMENT VALIDATION
 
+
 def _validate_documents(
-    documents: List[IngestedDocument],
+    documents: list[IngestedDocument],
     session_id: str,
     modality: str,
-) -> List[IngestedDocument]:
+) -> list[IngestedDocument]:
 
-    validated: List[IngestedDocument] = []
-    seen:      Set[str]               = set()
-    skipped    = 0
+    validated: list[IngestedDocument] = []
+    seen: set[str] = set()
+    skipped = 0
 
     for i, doc in enumerate(documents):
         try:
@@ -415,14 +433,14 @@ def _validate_documents(
     return validated
 
 
-
 # MAIN ASYNC ROUTE INGESTION
+
 
 async def route_ingestion(
     file_path: str,
     session_id: str,
-    user_id: Optional[str] = None,
-) -> List[IngestedDocument]:
+    user_id: str | None = None,
+) -> list[IngestedDocument]:
 
     if not session_id:
         raise ValueError("SESSION_ID_REQUIRED")
@@ -434,13 +452,14 @@ async def route_ingestion(
     # caller spun up a fresh event loop via asyncio.run() in a worker thread,
     # which would otherwise have an empty context.
     _user_token = None
-    from app.utils.paths import set_current_user, get_current_user
+    from app.utils.paths import get_current_user, set_current_user
+
     effective_uid = user_id or settings.DEFAULT_DEV_USER_ID
     if get_current_user() != effective_uid:
         _user_token = set_current_user(effective_uid)
 
     start = time.time()
-    path  = Path(file_path)
+    path = Path(file_path)
 
     with tracer.start_as_current_span("route_ingestion") as span:
         span.set_attribute("file.name", path.name)
@@ -450,9 +469,7 @@ async def route_ingestion(
             async with _semaphore:
 
                 # MALWARE SCAN — BEFORE ANYTHING ELSE
-                await asyncio.get_event_loop().run_in_executor(
-                    None, _clamav_scan, path
-                )
+                await asyncio.get_event_loop().run_in_executor(None, _clamav_scan, path)
 
                 # NULL BYTE CHECK
                 null_count = await asyncio.get_event_loop().run_in_executor(
@@ -467,9 +484,7 @@ async def route_ingestion(
                     )
 
                 # SHA-256 DEDUP CHECK
-                checksum = await asyncio.get_event_loop().run_in_executor(
-                    None, _file_sha256, path
-                )
+                checksum = await asyncio.get_event_loop().run_in_executor(None, _file_sha256, path)
                 span.set_attribute("file.sha256", checksum)
 
                 # MODALITY + MIME DETECTION
@@ -495,6 +510,7 @@ async def route_ingestion(
                 # Other models stay unloaded so VRAM/RAM stay free.
                 try:
                     from app.core.model_registry import model_registry
+
                     await asyncio.get_event_loop().run_in_executor(
                         None,
                         model_registry.ensure_for_modality,
@@ -559,7 +575,7 @@ async def route_ingestion(
                 return docs
 
         except Exception as exc:
-            latency   = round(time.time() - start, 2)
+            latency = round(time.time() - start, 2)
             error_type = type(exc).__name__
             modality_label = "unknown"
 
@@ -589,16 +605,18 @@ async def route_ingestion(
         finally:
             if _user_token is not None:
                 from app.utils.paths import reset_current_user
+
                 reset_current_user(_user_token)
 
 
 # SYNC WRAPPER FOR BACKWARD COMPATIBILITY WITH SYNC CALLERS
 
+
 def route_ingestion_sync(
     file_path: str,
     session_id: str,
-    user_id: Optional[str] = None,
-) -> List[IngestedDocument]:
+    user_id: str | None = None,
+) -> list[IngestedDocument]:
     # ALWAYS run asyncio.run() in a dedicated thread — never in the calling thread.
     #
     # In Python 3.12, asyncio.get_event_loop() in a non-main thread raises
@@ -612,10 +630,9 @@ def route_ingestion_sync(
     # Fix: always off-load asyncio.run() to a fresh OS thread so the gpu_ingest
     # thread's CUDA state is never touched by asyncio book-keeping.
     import concurrent.futures as _cf
+
     with _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="ingest_sync") as pool:
         return pool.submit(
             asyncio.run,
             route_ingestion(file_path, session_id, user_id=user_id),
         ).result()
-
-

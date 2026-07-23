@@ -1,13 +1,15 @@
 """audio_embedder.py — Finance-grade embedder for audio/transcript chunks."""
+
 from __future__ import annotations
 
 import re
-from typing import Any, List
+from typing import Any
 
-from app.embeddings.base_embedder import BaseEmbedder
-from app.core.config import settings
-from app.utils.logger import get_logger
 from prometheus_client import Counter
+
+from app.core.config import settings
+from app.embeddings.base_embedder import BaseEmbedder
+from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -20,28 +22,35 @@ logger = get_logger(__name__)
 # retrievable by number too. Amplification only affects the embedding vector;
 # the stored transcript and the answer text are untouched.
 _RATE_WORD_MAP = [
-    (re.compile(r"\bthree(?:\s+|-)quarters?\s+of\s+a\s+percentage\s+point", re.I),
-     "75 basis points 0.75 percentage point"),
-    (re.compile(r"\b(?:a\s+)?half(?:\s+of)?\s+a?\s*percentage\s+point", re.I),
-     "50 basis points 0.50 percentage point half point rate cut"),
-    (re.compile(r"\bhalf\s+point\b", re.I),
-     "50 basis points 0.50 percentage point"),
-    (re.compile(r"\b(?:a\s+)?quarter(?:\s+of\s+a)?\s+percentage\s+point", re.I),
-     "25 basis points 0.25 percentage point quarter point"),
-    (re.compile(r"\bquarter\s+point\b", re.I),
-     "25 basis points 0.25 percentage point"),
-    (re.compile(r"\b(?:a\s+)?full\s+percentage\s+point", re.I),
-     "100 basis points 1.00 percentage point"),
+    (
+        re.compile(r"\bthree(?:\s+|-)quarters?\s+of\s+a\s+percentage\s+point", re.I),
+        "75 basis points 0.75 percentage point",
+    ),
+    (
+        re.compile(r"\b(?:a\s+)?half(?:\s+of)?\s+a?\s*percentage\s+point", re.I),
+        "50 basis points 0.50 percentage point half point rate cut",
+    ),
+    (re.compile(r"\bhalf\s+point\b", re.I), "50 basis points 0.50 percentage point"),
+    (
+        re.compile(r"\b(?:a\s+)?quarter(?:\s+of\s+a)?\s+percentage\s+point", re.I),
+        "25 basis points 0.25 percentage point quarter point",
+    ),
+    (re.compile(r"\bquarter\s+point\b", re.I), "25 basis points 0.25 percentage point"),
+    (
+        re.compile(r"\b(?:a\s+)?full\s+percentage\s+point", re.I),
+        "100 basis points 1.00 percentage point",
+    ),
 ]
 
 
-def _amplify_rate_expressions(text: str) -> List[str]:
+def _amplify_rate_expressions(text: str) -> list[str]:
     """Return numeric amplification tokens for any spoken rate expression found."""
-    out: List[str] = []
+    out: list[str] = []
     for pat, expansion in _RATE_WORD_MAP:
         if pat.search(text):
             out.append(expansion)
     return out
+
 
 _EMBED_BUILT = Counter(
     "magik_audio_embed_text_built_total",
@@ -64,7 +73,7 @@ class AudioEmbedder(BaseEmbedder):
     so queries like "AAPL Q3 revenue" hit the right speaker segment.
     """
 
-    def embed_documents(self, documents: List[Any], session_id: str = "default") -> List[Any]:
+    def embed_documents(self, documents: list[Any], session_id: str = "default") -> list[Any]:
         results = super().embed_documents(documents, session_id=session_id)
         # FinBERT tone annotation is globally opt-in (extra GPU pass per batch,
         # settings.FINBERT_ENABLED defaults off since most modalities get no
@@ -79,7 +88,7 @@ class AudioEmbedder(BaseEmbedder):
         try:
             s = getattr(doc, "structure", {}) or {}
 
-            header_parts: List[str] = []
+            header_parts: list[str] = []
 
             # Section prefix — bakes call context into the vector.
             # "[Q&A SESSION]" / "[PREPARED REMARKS]" from spec Phase 2.6.
@@ -101,7 +110,7 @@ class AudioEmbedder(BaseEmbedder):
 
             # Timestamps at millisecond precision — spec Phase 2.6 critical field.
             ts_s = s.get("start_timestamp") or s.get("timestamp_start")
-            ts_e = s.get("end_timestamp")   or s.get("timestamp_end")
+            ts_e = s.get("end_timestamp") or s.get("timestamp_end")
             if ts_s is not None and ts_e is not None:
                 header_parts.append(f"[{float(ts_s):.3f}s-{float(ts_e):.3f}s]")
             elif ts_s is not None:
@@ -111,7 +120,7 @@ class AudioEmbedder(BaseEmbedder):
 
             # Finance entity amplification — append tickers/amounts/companies.
             fin_entities: dict = s.get("finance_entities") or {}
-            entity_tokens: List[str] = []
+            entity_tokens: list[str] = []
             if isinstance(fin_entities, dict):
                 for v in fin_entities.values():
                     if isinstance(v, list):
@@ -133,7 +142,7 @@ class AudioEmbedder(BaseEmbedder):
                 qa_token = " [management answer]"
 
             result = f"{header}{cleaned_text}{qa_token}{rate_suffix}{suffix}"
-            result = result[:settings.MAX_PROMPT_CHARS]
+            result = result[: settings.MAX_PROMPT_CHARS]
             logger.debug(event="embed_text_built", modality="audio", chars=len(result))
             _EMBED_BUILT.inc()
             return result

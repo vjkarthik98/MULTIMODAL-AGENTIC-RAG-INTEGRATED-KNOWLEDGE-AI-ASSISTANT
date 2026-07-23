@@ -14,7 +14,7 @@ among those packages today, and this file must not become the first one.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 from app.verification.verification_schema import GroundednessResult
 
@@ -22,15 +22,18 @@ from app.verification.verification_schema import GroundednessResult
 class GroundednessChecker:
     """Every important statement in the answer must be supported by retrieved docs."""
 
-    def check(self, answer: str, docs: List[Dict[str, Any]], query: str = "") -> GroundednessResult:
+    def check(self, answer: str, docs: list[dict[str, Any]], query: str = "") -> GroundednessResult:
         if not answer:
             return GroundednessResult(score=0.0, is_hallucinated=True)
         if not docs:
             # Empty-retrieval path is handled upstream (explicit "no information"
             # answer) — a groundedness check with no evidence to check against
             # is meaningless, not automatically passing.
-            return GroundednessResult(score=0.0, is_hallucinated=True,
-                                       unsupported_claims=["no retrieved evidence to verify against"])
+            return GroundednessResult(
+                score=0.0,
+                is_hallucinated=True,
+                unsupported_claims=["no retrieved evidence to verify against"],
+            )
 
         from app.reasoning.reasoning_engine import _hallucination_guard, _unsupported_numbers
 
@@ -45,7 +48,7 @@ class GroundednessChecker:
         raw_score = max(0.0, support_score - numeric_penalty)
         score = round(raw_score * 100.0, 2)
 
-        unsupported_claims: List[str] = []
+        unsupported_claims: list[str] = []
         if is_hallucinated:
             unsupported_claims.append(
                 f"answer support score {support_score:.2f} below hallucination threshold"

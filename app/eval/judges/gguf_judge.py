@@ -4,6 +4,7 @@ Uses /rag/llm/generate (direct LLM, no RAG pipeline) to avoid context
 pollution from retrieval. Extracts JSON from Mistral's conversational
 response using regex so Ragas can parse the structured output it needs.
 """
+
 from __future__ import annotations
 
 import json
@@ -18,16 +19,17 @@ from langchain_core.prompt_values import PromptValue
 try:
     from ragas.llms.base import BaseRagasLLM
     from ragas.run_config import RunConfig
+
     RAGAS_AVAILABLE = True
 except ImportError:
     RAGAS_AVAILABLE = False
     BaseRagasLLM = object  # type: ignore[assignment,misc]
-    RunConfig = object     # type: ignore[assignment,misc]
+    RunConfig = object  # type: ignore[assignment,misc]
 
-_SERVER_URL   = os.getenv("EVAL_SERVER_URL", "http://127.0.0.1:8000")
+_SERVER_URL = os.getenv("EVAL_SERVER_URL", "http://127.0.0.1:8000")
 _JUDGE_SESSION = "eval_judge"
-_JUDGE_USER    = "eval_default"
-_HTTP_TIMEOUT  = 300
+_JUDGE_USER = "eval_default"
+_HTTP_TIMEOUT = 300
 
 
 def _extract_json_from_text(text: str) -> str:
@@ -76,7 +78,7 @@ def _extract_json_from_text(text: str) -> str:
                 elif c == end_char:
                     depth -= 1
                     if depth == 0:
-                        candidate = text[idx:i+1]
+                        candidate = text[idx : i + 1]
                         try:
                             json.loads(candidate)
                             return candidate.strip()
@@ -94,7 +96,7 @@ class GGUFJudge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: ignore[mi
     Ragas can parse faithfulness/relevancy scores correctly.
     """
 
-    def __init__(self, temperature: float = 0.1, run_config: t.Optional[t.Any] = None):
+    def __init__(self, temperature: float = 0.1, run_config: t.Any | None = None):
         if RAGAS_AVAILABLE:
             cfg = run_config or RunConfig(max_workers=1, timeout=_HTTP_TIMEOUT)
             super().__init__(run_config=cfg)
@@ -109,7 +111,9 @@ class GGUFJudge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: ignore[mi
         # that matches what Ragas expects for each metric
         if "simpler_statements" in prompt_text or "sentence_index" in prompt_text:
             suffix = "\nRespond with ONLY a JSON array like: [{\"sentence_index\": 0, \"simpler_statements\": [\"statement here\"]}]"
-        elif "nli_statements" in prompt_text or ("verdict" in prompt_text and "statements" in prompt_text):
+        elif "nli_statements" in prompt_text or (
+            "verdict" in prompt_text and "statements" in prompt_text
+        ):
             suffix = "\nRespond with ONLY a JSON array like: [{\"statement\": \"text\", \"reason\": \"reason\", \"verdict\": 1}]"
         elif "noncommittal" in prompt_text or "generate a question" in prompt_text.lower():
             suffix = "\nRespond with ONLY a JSON object like: {\"question\": \"text\", \"noncommittal\": 0}"
@@ -121,14 +125,11 @@ class GGUFJudge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: ignore[mi
         forced_prompt = (
             "[INST] You are a JSON-only evaluator. "
             "Output ONLY raw JSON with no preamble, no explanation, no markdown. "
-            "Follow the exact schema shown.\n\n"
-            + prompt_text
-            + suffix
-            + " [/INST]"
+            "Follow the exact schema shown.\n\n" + prompt_text + suffix + " [/INST]"
         )
         payload = {
-            "prompt":      forced_prompt,
-            "max_tokens":  512,
+            "prompt": forced_prompt,
+            "max_tokens": 512,
             "temperature": self._temperature,
         }
         try:
@@ -144,6 +145,7 @@ class GGUFJudge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: ignore[mi
 
                 # Validate it's actually parseable JSON
                 import json as _json
+
                 try:
                     _json.loads(extracted)
                     return extracted
@@ -160,8 +162,8 @@ class GGUFJudge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: ignore[mi
         self,
         prompt: PromptValue,
         n: int = 1,
-        temperature: t.Optional[float] = None,
-        stop: t.Optional[t.List[str]] = None,
+        temperature: float | None = None,
+        stop: list[str] | None = None,
         callbacks: t.Any = None,
     ) -> LLMResult:
         text_prompt = prompt.to_string() if hasattr(prompt, "to_string") else str(prompt)
@@ -173,11 +175,12 @@ class GGUFJudge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: ignore[mi
         self,
         prompt: PromptValue,
         n: int = 1,
-        temperature: t.Optional[float] = None,
-        stop: t.Optional[t.List[str]] = None,
+        temperature: float | None = None,
+        stop: list[str] | None = None,
         callbacks: t.Any = None,
     ) -> LLMResult:
         import asyncio
+
         text_prompt = prompt.to_string() if hasattr(prompt, "to_string") else str(prompt)
         text = await asyncio.get_event_loop().run_in_executor(
             None, lambda: self._call_server(text_prompt)
@@ -190,7 +193,7 @@ class GGUFJudge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: ignore[mi
             super().set_run_config(run_config)
 
 
-def get_judge(temperature: float = 0.1) -> "GGUFJudge":
+def get_judge(temperature: float = 0.1) -> GGUFJudge:
     """Return a GGUFJudge instance. Raises ImportError if ragas unavailable."""
     if not RAGAS_AVAILABLE:
         raise ImportError("ragas is not installed. Run: pip install ragas==0.1.21")

@@ -5,10 +5,10 @@ Each user gets their own bucket keyed at u:{user_id}:ratelimit:{window}.
 This ensures one user's heavy traffic cannot starve others.
 Falls back gracefully if Redis is unavailable.
 """
+
 from __future__ import annotations
 
 import time
-from typing import Optional
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -20,7 +20,7 @@ _WINDOW_SECONDS = 60  # 1 minute rolling window
 
 def check_user_rate_limit(
     user_id: str,
-    limit: Optional[int] = None,
+    limit: int | None = None,
     window: int = _WINDOW_SECONDS,
 ) -> None:
     """
@@ -36,6 +36,7 @@ def check_user_rate_limit(
 
     try:
         from app.core.infra_registry import infra
+
         # Local Redis cache (~0.5ms) — sliding-window counters are per-instance
         # anyway, so local is correct and avoids the ~200ms Upstash round-trip.
         r = infra.get_cache()

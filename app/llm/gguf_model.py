@@ -5,14 +5,8 @@ import queue as _queue
 import threading
 import time
 import unicodedata
-from typing import Any, Dict, Iterator, List, Optional
-
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
+from collections.abc import Iterator
+from typing import Any
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -22,9 +16,11 @@ logger = get_logger(__name__)
 
 # PROMETHEUS METRICS — SECTION 6
 
+
 def _get_metrics():
     try:
-        from prometheus_client import Counter, Histogram, Gauge
+        from prometheus_client import Counter, Gauge, Histogram
+
         llm_latency = Histogram(
             "llm_call_latency_seconds",
             "LLM inference latency",
@@ -46,16 +42,16 @@ def _get_metrics():
             ["service"],
         )
         return {
-            "llm_latency":    llm_latency,
-            "llm_errors":     llm_errors,
-            "llm_tokens":     llm_tokens,
-            "circuit_state":  circuit_state,
+            "llm_latency": llm_latency,
+            "llm_errors": llm_errors,
+            "llm_tokens": llm_tokens,
+            "circuit_state": circuit_state,
         }
     except Exception:
         return {}
 
 
-_METRICS: Dict[str, Any] = {}
+_METRICS: dict[str, Any] = {}
 
 if settings.PROMETHEUS_ENABLED:
     try:
@@ -98,20 +94,21 @@ def _set_circuit_state(service: str, open_: bool) -> None:
 
 # CIRCUIT BREAKER — SECTION 2.1
 
+
 class _CircuitBreaker:
 
     def __init__(
         self,
-        fail_max:      int   = 5,
+        fail_max: int = 5,
         reset_timeout: float = 60.0,
-        name:          str   = "gguf_llm",
+        name: str = "gguf_llm",
     ) -> None:
-        self.fail_max      = fail_max
+        self.fail_max = fail_max
         self.reset_timeout = reset_timeout
-        self.name          = name
-        self._failures     = 0
-        self._opened_at:   Optional[float] = None
-        self._lock         = threading.Lock()
+        self.name = name
+        self._failures = 0
+        self._opened_at: float | None = None
+        self._lock = threading.Lock()
 
     @property
     def is_open(self) -> bool:
@@ -122,7 +119,7 @@ class _CircuitBreaker:
             if elapsed >= self.reset_timeout:
                 # HALF-OPEN: allow one attempt
                 self._opened_at = None
-                self._failures  = 0
+                self._failures = 0
                 _set_circuit_state(self.name, False)
                 logger.info(event="circuit_breaker_half_open", service=self.name)
                 return False
@@ -130,7 +127,7 @@ class _CircuitBreaker:
 
     def record_success(self) -> None:
         with self._lock:
-            self._failures  = 0
+            self._failures = 0
             self._opened_at = None
             _set_circuit_state(self.name, False)
 
@@ -146,7 +143,7 @@ class _CircuitBreaker:
                     failures=self._failures,
                 )
 
-    def __enter__(self) -> "_CircuitBreaker":
+    def __enter__(self) -> _CircuitBreaker:
         if self.is_open:
             raise RuntimeError(
                 f"CIRCUIT_BREAKER_OPEN: {self.name} — too many failures, "
@@ -212,7 +209,7 @@ _CHATML_SYSTEM_DEFAULT = (
 # LLAMA-SERVER HTTP CLIENT
 #
 # Drop-in replacement for the in-process llama_cpp.Llama callable. It proxies
-# inference to a separate llama-server process (launched by start_server.sh)
+# inference to a separate llama-server process (launched by start_server.py)
 # that owns its OWN CUDA context. This is what lets the LLM stay on the GPU
 # without corrupting PyTorch's CUDA context in the main process (the in-process
 # embed-stage SIGSEGV).
@@ -224,25 +221,27 @@ _CHATML_SYSTEM_DEFAULT = (
 #   - detokenize(List[int]) -> bytes (via /extras/detokenize)
 # so generate(), stream() and _truncate_to_token_budget() work UNCHANGED.
 
+
 class _LlamaServerClient:
 
     def __init__(self, base_url: str) -> None:
         self._base = base_url.rstrip("/")
         import requests  # local import keeps module import cheap
+
         self._requests = requests
 
     def __call__(self, prompt: str, stream: bool = True, **kwargs: Any):
         # Map llama_cpp kwargs straight onto the OpenAI-compatible /v1/completions.
         payload = {
-            "prompt":         prompt,
-            "max_tokens":     kwargs.get("max_tokens"),
-            "temperature":    kwargs.get("temperature"),
-            "top_p":          kwargs.get("top_p"),
-            "top_k":          kwargs.get("top_k"),
-            "min_p":          kwargs.get("min_p"),
+            "prompt": prompt,
+            "max_tokens": kwargs.get("max_tokens"),
+            "temperature": kwargs.get("temperature"),
+            "top_p": kwargs.get("top_p"),
+            "top_k": kwargs.get("top_k"),
+            "min_p": kwargs.get("min_p"),
             "repeat_penalty": kwargs.get("repeat_penalty"),
-            "stop":           kwargs.get("stop"),
-            "stream":         True,
+            "stop": kwargs.get("stop"),
+            "stream": True,
         }
         payload = {k: v for k, v in payload.items() if v is not None}
         resp = self._requests.post(
@@ -260,18 +259,25 @@ class _LlamaServerClient:
                 break
             try:
                 import json as _json
+
                 yield _json.loads(line)
             except Exception:
                 continue
 
-    def tokenize(self, data: bytes) -> List[int]:
-        text = data.decode("utf-8", errors="replace") if isinstance(data, (bytes, bytearray)) else str(data)
+    def tokenize(self, data: bytes) -> list[int]:
+        text = (
+            data.decode("utf-8", errors="replace")
+            if isinstance(data, (bytes, bytearray))
+            else str(data)
+        )
         r = self._requests.post(f"{self._base}/extras/tokenize", json={"input": text}, timeout=30)
         r.raise_for_status()
         return list(r.json().get("tokens", []))
 
-    def detokenize(self, tokens: List[int]) -> bytes:
-        r = self._requests.post(f"{self._base}/extras/detokenize", json={"tokens": list(tokens)}, timeout=30)
+    def detokenize(self, tokens: list[int]) -> bytes:
+        r = self._requests.post(
+            f"{self._base}/extras/detokenize", json={"tokens": list(tokens)}, timeout=30
+        )
         r.raise_for_status()
         return str(r.json().get("text", "")).encode("utf-8", errors="replace")
 
@@ -285,20 +291,21 @@ class _LlamaServerClient:
 
 # GGUF MODEL CLASS
 
+
 class GGUFModel:
 
     def __init__(
         self,
-        model_path:   Optional[str] = None,
-        n_gpu_layers: int           = 0,
+        model_path: str | None = None,
+        n_gpu_layers: int = 0,
     ) -> None:
-        self._model_path      = model_path or settings.LLM_MODEL_PATH
-        self._llm             = None
-        self._lock            = threading.RLock()
-        self.n_gpu_layers     = n_gpu_layers
+        self._model_path = model_path or settings.LLM_MODEL_PATH
+        self._llm = None
+        self._lock = threading.RLock()
+        self.n_gpu_layers = n_gpu_layers
         self.max_prompt_chars = settings.MAX_PROMPT_CHARS
-        self._model_name      = os.path.basename(self._model_path)
-        self._circuit         = _CircuitBreaker(
+        self._model_name = os.path.basename(self._model_path)
+        self._circuit = _CircuitBreaker(
             fail_max=5,
             reset_timeout=60.0,
             name="gguf_llm",
@@ -326,6 +333,7 @@ class GGUFModel:
 
     def _sanitize_prompt(self, prompt: str) -> str:
         from app.guardrails.input_guard import sanitize as _guard_sanitize
+
         cleaned = _guard_sanitize(prompt, surface="gguf_model")
         if cleaned != prompt:
             logger.warning(event="gguf_prompt_injection_stripped")
@@ -362,7 +370,7 @@ class GGUFModel:
         # STRIP ARTIFACT PREFIXES
         for prefix in _STRIP_PREFIXES:
             if text.startswith(prefix):
-                text = text[len(prefix):].strip()
+                text = text[len(prefix) :].strip()
 
         # STRIP NULL BYTES
         text = text.replace("\x00", "")
@@ -400,14 +408,13 @@ class GGUFModel:
 
             model_size = os.path.getsize(self._model_path)
             if model_size < 1024 * 1024:
-                raise ValueError(
-                    f"MODEL_TOO_SMALL: {model_size} bytes — likely corrupt"
-                )
+                raise ValueError(f"MODEL_TOO_SMALL: {model_size} bytes — likely corrupt")
 
             start = time.time()
 
             try:
                 from llama_cpp import Llama
+
                 self._llm = Llama(
                     model_path=self._model_path,
                     n_ctx=settings.CONTEXT_MAX_TOKENS,
@@ -475,12 +482,12 @@ class GGUFModel:
 
     def generate(
         self,
-        prompt:      str,
-        max_tokens:  Optional[int]   = None,
-        temperature: Optional[float] = None,
-        top_p:       Optional[float] = None,
-        retries:     int             = 2,
-        session_id:  str             = "",
+        prompt: str,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        retries: int = 2,
+        session_id: str = "",
     ) -> str:
 
         prompt = self._normalize(prompt)
@@ -489,9 +496,9 @@ class GGUFModel:
         if not prompt:
             return ""
 
-        max_tokens_  = max_tokens   if max_tokens   is not None else settings.LLM_MAX_TOKENS
-        temperature_ = temperature  if temperature  is not None else settings.LLM_TEMPERATURE
-        top_p_       = top_p        if top_p        is not None else settings.LLM_TOP_P
+        max_tokens_ = max_tokens if max_tokens is not None else settings.LLM_MAX_TOKENS
+        temperature_ = temperature if temperature is not None else settings.LLM_TEMPERATURE
+        top_p_ = top_p if top_p is not None else settings.LLM_TOP_P
 
         # TOKEN-SAFE TRUNCATION — must happen before the llama.cpp call.
         # Character limits fail for financial/numeric text (1–2 chars/token).
@@ -503,17 +510,15 @@ class GGUFModel:
         # CIRCUIT BREAKER CHECK — SECTION 2.1
         if self._circuit.is_open:
             _record_error("circuit_breaker_open")
-            raise RuntimeError(
-                "CIRCUIT_BREAKER_OPEN: LLM is temporarily unavailable"
-            )
+            raise RuntimeError("CIRCUIT_BREAKER_OPEN: LLM is temporarily unavailable")
 
-        last_exc: Optional[Exception] = None
+        last_exc: Exception | None = None
         wait = float(settings.LLM_RETRY_WAIT_MIN)
 
         for attempt in range(max(retries, 0) + 1):
             try:
                 with self._circuit:
-                    llm   = self._load()
+                    llm = self._load()
                     start = time.time()
 
                     # INFERENCE LOCK — llama.cpp is NOT thread-safe. Concurrent
@@ -529,8 +534,8 @@ class GGUFModel:
                     # retried the whole generation up to 2 more times — turning
                     # one slow call into a ~3× latency catastrophe.
                     timed_out = False
-                    deadline  = start + settings.LLM_CALL_TIMEOUT_SEC
-                    parts: List[str] = []
+                    deadline = start + settings.LLM_CALL_TIMEOUT_SEC
+                    parts: list[str] = []
                     with self._lock:
                         for chunk in llm(
                             prompt,
@@ -550,7 +555,7 @@ class GGUFModel:
                                 timed_out = True
                                 break
 
-                    elapsed  = time.time() - start
+                    elapsed = time.time() - start
                     raw_text = "".join(parts)
 
                     if timed_out:
@@ -567,9 +572,9 @@ class GGUFModel:
 
                     text = self._clean_output(raw_text)
 
-                    prompt_tokens     = 0  # not reported in stream mode
+                    prompt_tokens = 0  # not reported in stream mode
                     completion_tokens = len(parts)
-                    tps               = round(completion_tokens / max(elapsed, 1e-6), 1)
+                    tps = round(completion_tokens / max(elapsed, 1e-6), 1)
 
                     _record_latency(self._model_name, "generate", elapsed)
                     _record_tokens(self._model_name, completion_tokens)
@@ -599,7 +604,7 @@ class GGUFModel:
                 time.sleep(min(wait, float(settings.LLM_RETRY_WAIT_MAX)))
                 wait *= 2.0
 
-            except RuntimeError as e:
+            except RuntimeError:
                 # CIRCUIT BREAKER OPEN — DO NOT RETRY
                 _record_error("circuit_breaker_open")
                 raise
@@ -632,11 +637,11 @@ class GGUFModel:
 
     def stream(
         self,
-        prompt:      str,
-        max_tokens:  Optional[int]   = None,
-        temperature: Optional[float] = None,
-        top_p:       Optional[float] = None,
-        session_id:  str             = "",
+        prompt: str,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        session_id: str = "",
     ) -> Iterator[str]:
 
         prompt = self._normalize(prompt)
@@ -658,7 +663,7 @@ class GGUFModel:
         try:
             llm = self._load()
 
-            start       = time.time()
+            start = time.time()
             token_count = 0
 
             # THREAD+QUEUE STREAMING TIMEOUT
@@ -673,9 +678,9 @@ class GGUFModel:
             _SENTINEL = object()
             tok_q: _queue.Queue = _queue.Queue(maxsize=512)
 
-            _max_tok  = max_tokens   if max_tokens   is not None else settings.LLM_MAX_TOKENS
-            _temp     = temperature  if temperature  is not None else settings.LLM_TEMPERATURE
-            _top_p_v  = top_p        if top_p        is not None else settings.LLM_TOP_P
+            _max_tok = max_tokens if max_tokens is not None else settings.LLM_MAX_TOKENS
+            _temp = temperature if temperature is not None else settings.LLM_TEMPERATURE
+            _top_p_v = top_p if top_p is not None else settings.LLM_TOP_P
 
             def _generate() -> None:
                 try:
@@ -705,8 +710,8 @@ class GGUFModel:
             # Separate timeouts: longer for first token (covers prefill),
             # shorter per-token guard (catches mid-generation stalls).
             _first_tok_timeout = float(settings.LLM_CALL_TIMEOUT_SEC)
-            _per_tok_timeout   = min(30.0, _first_tok_timeout)
-            _is_first_token    = True
+            _per_tok_timeout = min(30.0, _first_tok_timeout)
+            _is_first_token = True
 
             while True:
                 _timeout = _first_tok_timeout if _is_first_token else _per_tok_timeout
@@ -714,7 +719,7 @@ class GGUFModel:
                     item = tok_q.get(timeout=_timeout)
                 except _queue.Empty:
                     elapsed = round(time.time() - start, 1)
-                    phase   = "prefill" if _is_first_token else "generation"
+                    phase = "prefill" if _is_first_token else "generation"
                     logger.warning(
                         event="gguf_stream_timeout",
                         phase=phase,
@@ -740,7 +745,7 @@ class GGUFModel:
                 yield token
 
             latency = round(time.time() - start, 2)
-            tps     = round(token_count / max(latency, 1e-6), 1)
+            tps = round(token_count / max(latency, 1e-6), 1)
 
             _record_latency(self._model_name, "stream", latency)
             _record_tokens(self._model_name, token_count)
@@ -796,22 +801,19 @@ class GGUFModel:
 
     # HEALTH CHECK
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(self) -> dict[str, Any]:
         model_exists = os.path.exists(self._model_path)
-        model_size   = (
-            os.path.getsize(self._model_path)
-            if model_exists else 0
-        )
+        model_size = os.path.getsize(self._model_path) if model_exists else 0
         return {
-            "loaded":          self._llm is not None,
-            "model_path":      self._model_path,
-            "model_name":      self._model_name,
-            "model_exists":    model_exists,
-            "model_size_mb":   round(model_size / (1024 * 1024), 1) if model_size else 0,
-            "n_gpu_layers":    self.n_gpu_layers,
-            "n_threads":       settings.LLM_THREADS,
-            "n_ctx":           settings.CONTEXT_MAX_TOKENS,
-            "circuit_open":    self._circuit.is_open,
+            "loaded": self._llm is not None,
+            "model_path": self._model_path,
+            "model_name": self._model_name,
+            "model_exists": model_exists,
+            "model_size_mb": round(model_size / (1024 * 1024), 1) if model_size else 0,
+            "n_gpu_layers": self.n_gpu_layers,
+            "n_threads": settings.LLM_THREADS,
+            "n_ctx": settings.CONTEXT_MAX_TOKENS,
+            "circuit_open": self._circuit.is_open,
             "circuit_failures": self._circuit._failures,
         }
 
@@ -825,7 +827,7 @@ class GGUFModel:
 
     # CONTEXT MANAGER SUPPORT
 
-    def __enter__(self) -> "GGUFModel":
+    def __enter__(self) -> GGUFModel:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:

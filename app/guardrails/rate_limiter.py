@@ -12,15 +12,13 @@ Policy (from policies.yaml):
   rate_limit.window_sec            — rolling window in seconds (default 60)
   rate_limit.ban_duration_sec      — how long the ban lasts (default 300)
 """
+
 from __future__ import annotations
 
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, Dict, Optional
-
-import structlog
 
 from app.guardrails.audit import audit_decision
 from app.guardrails.exceptions import GuardrailBlocked
@@ -30,11 +28,11 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # ── Policy ────────────────────────────────────────────────────────────────────
-_block_threshold: int   = 5
-_window_sec: float      = 60.0
+_block_threshold: int = 5
+_window_sec: float = 60.0
 _ban_duration_sec: float = 300.0
-_policy_loaded           = False
-_lock                    = threading.Lock()
+_policy_loaded = False
+_lock = threading.Lock()
 
 
 def _load_policy() -> None:
@@ -43,9 +41,10 @@ def _load_policy() -> None:
         return
     try:
         from app.guardrails._policy_loader import get_policy
+
         rl = get_policy().get("rate_limit", {})
-        _block_threshold  = int(rl.get("block_threshold", 5))
-        _window_sec       = float(rl.get("window_sec", 60.0))
+        _block_threshold = int(rl.get("block_threshold", 5))
+        _window_sec = float(rl.get("window_sec", 60.0))
         _ban_duration_sec = float(rl.get("ban_duration_sec", 300.0))
     except Exception as e:
         logger.warning("rate_limiter_policy_load_failed", error=str(e))
@@ -54,10 +53,12 @@ def _load_policy() -> None:
 
 # ── Redis helpers ─────────────────────────────────────────────────────────────
 
+
 def _get_redis():
     """Return the raw Redis client or None if unavailable."""
     try:
         from app.core.infra_registry import infra
+
         mem = infra.get_memory()
         if mem and hasattr(mem, "_redis"):
             return mem._redis
@@ -86,7 +87,7 @@ def _redis_record_block(r, key_prefix: str, identifier: str, now: float) -> bool
     """
     try:
         count_key = f"RATE_LIMIT:blocks:{key_prefix}:{identifier}"
-        ban_key   = f"RATE_LIMIT:ban:{key_prefix}:{identifier}"
+        ban_key = f"RATE_LIMIT:ban:{key_prefix}:{identifier}"
         pipe = r.pipeline()
         # Add current timestamp as member
         pipe.zadd(count_key, {str(now): now})
@@ -118,17 +119,18 @@ def _redis_reset(r, key_prefix: str, identifier: str) -> None:
 
 # ── In-process fallback (single-worker dev mode) ──────────────────────────────
 
+
 @dataclass
 class _State:
-    block_times: Deque[float] = field(default_factory=deque)
+    block_times: deque[float] = field(default_factory=deque)
     banned_until: float = 0.0
 
 
-_session_state: Dict[str, _State] = {}
-_ip_state: Dict[str, _State] = {}
+_session_state: dict[str, _State] = {}
+_ip_state: dict[str, _State] = {}
 
 
-def _get_state(store: Dict[str, _State], key: str) -> _State:
+def _get_state(store: dict[str, _State], key: str) -> _State:
     if key not in store:
         store[key] = _State()
     return store[key]
@@ -150,16 +152,17 @@ def _local_record_block(state: _State, now: float) -> bool:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+
 def check_and_record(
     session_id: str,
-    ip: Optional[str] = None,
+    ip: str | None = None,
     surface: str = "api",
     correlation_id: str = "",
 ) -> None:
     """Record a block event. Bans the session/IP if threshold is exceeded."""
     _load_policy()
     now = time.time()
-    r   = _get_redis()
+    r = _get_redis()
 
     with _lock:
         if session_id:
@@ -168,7 +171,7 @@ def check_and_record(
                 banned = _redis_record_block(r, "session", session_id, now)
             else:
                 s_state = _get_state(_session_state, session_id)
-                banned  = _local_record_block(s_state, now)
+                banned = _local_record_block(s_state, now)
 
             if banned:
                 logger.warning(
@@ -195,7 +198,7 @@ def check_and_record(
                 banned = _redis_record_block(r, "ip", ip, now)
             else:
                 i_state = _get_state(_ip_state, ip)
-                banned  = _local_record_block(i_state, now)
+                banned = _local_record_block(i_state, now)
 
             if banned:
                 logger.warning(
@@ -220,30 +223,36 @@ def check_and_record(
 
 def enforce(
     session_id: str,
-    ip: Optional[str] = None,
+    ip: str | None = None,
     surface: str = "api",
     correlation_id: str = "",
 ) -> None:
     """Raise GuardrailBlocked if this session/IP is currently banned."""
     _load_policy()
     now = time.time()
-    r   = _get_redis()
+    r = _get_redis()
 
     with _lock:
         if session_id:
             if r is not None:
                 is_banned, remaining = _redis_is_banned(r, "session", session_id, now)
             else:
-                s_state  = _get_state(_session_state, session_id)
+                s_state = _get_state(_session_state, session_id)
                 is_banned = _local_is_banned(s_state, now)
                 remaining = round(s_state.banned_until - now) if is_banned else 0.0
 
             if is_banned:
-                logger.warning("rate_limiter_request_rejected",
-                               session_id=session_id, remaining_sec=remaining, surface=surface)
+                logger.warning(
+                    "rate_limiter_request_rejected",
+                    session_id=session_id,
+                    remaining_sec=remaining,
+                    surface=surface,
+                )
                 raise GuardrailBlocked(
-                    reason="rate_limit_banned", surface=surface,
-                    guard_type="rate_limit", correlation_id=correlation_id,
+                    reason="rate_limit_banned",
+                    surface=surface,
+                    guard_type="rate_limit",
+                    correlation_id=correlation_id,
                     detail=f"session banned for {int(remaining)}s more",
                 )
 
@@ -251,16 +260,19 @@ def enforce(
             if r is not None:
                 is_banned, remaining = _redis_is_banned(r, "ip", ip, now)
             else:
-                i_state  = _get_state(_ip_state, ip)
+                i_state = _get_state(_ip_state, ip)
                 is_banned = _local_is_banned(i_state, now)
                 remaining = round(i_state.banned_until - now) if is_banned else 0.0
 
             if is_banned:
-                logger.warning("rate_limiter_ip_rejected",
-                               ip=ip, remaining_sec=remaining, surface=surface)
+                logger.warning(
+                    "rate_limiter_ip_rejected", ip=ip, remaining_sec=remaining, surface=surface
+                )
                 raise GuardrailBlocked(
-                    reason="rate_limit_banned", surface=surface,
-                    guard_type="rate_limit", correlation_id=correlation_id,
+                    reason="rate_limit_banned",
+                    surface=surface,
+                    guard_type="rate_limit",
+                    correlation_id=correlation_id,
                     detail=f"ip banned for {int(remaining)}s more",
                 )
 

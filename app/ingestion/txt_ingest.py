@@ -14,27 +14,29 @@ import time
 import unicodedata
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import chardet
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 from prometheus_client import Counter, Histogram
-from tenacity import retry, stop_after_attempt, wait_exponential
 
+from app.chunking.finance_numbers import approx_tokens, extract_finance_entities, protect, restore
 from app.core.config import settings
 from app.ingestion.base_ingest import BaseIngestor
 from app.ingestion.schema import IngestedDocument, RawExtract, UniversalMetadata
-from app.chunking.finance_numbers import approx_tokens, extract_finance_entities, protect, restore
+
 # ── TEXT REPAIR PASSES ────────────────────────────────────────────────────────
 
-def repair_mojibake(text: str) -> Tuple[str, int]:
+
+def repair_mojibake(text: str) -> tuple[str, int]:
     if not text:
         return text, 0
     try:
         import ftfy
+
         fixed = ftfy.fix_text(text)
-        diff  = sum(1 for a, b in zip(text, fixed) if a != b) + abs(len(text) - len(fixed))
+        diff = sum(1 for a, b in zip(text, fixed) if a != b) + abs(len(text) - len(fixed))
         return fixed, diff
     except ImportError:
         return text, 0
@@ -44,10 +46,10 @@ def repair_mojibake(text: str) -> Tuple[str, int]:
 
 
 _AMBIGUOUS_FRACTION_RE = re.compile(r"(?<!\d)(\d)(1/4|1/2|3/4)(?!\d)")
-_FRACTION_TO_DECIMAL   = {"1/4": ".25", "1/2": ".50", "3/4": ".75"}
+_FRACTION_TO_DECIMAL = {"1/4": ".25", "1/2": ".50", "3/4": ".75"}
 
 
-def normalize_ambiguous_fractions(text: str) -> Tuple[str, int]:
+def normalize_ambiguous_fractions(text: str) -> tuple[str, int]:
     """Rewrite a digit glued directly to a quarter-fraction (e.g. '41/4') into
     an unambiguous decimal ('4.25').
 
@@ -72,13 +74,13 @@ def normalize_ambiguous_fractions(text: str) -> Tuple[str, int]:
     return _AMBIGUOUS_FRACTION_RE.sub(_sub, text), count[0]
 
 
-_LOG_LINE_RE        = re.compile(r"^\s*---\s*LOG\s+ENTRY", re.IGNORECASE)
-_DEBUG_LINE_RE      = re.compile(r"^\s*===\s*DEBUG[:=]", re.IGNORECASE)
-_ERROR_LINE_RE      = re.compile(r"^\s*ERROR\s*:|^\s*\[ERROR\]|^\s*NULL POINTER", re.IGNORECASE)
-_HTML_TAG_RE        = re.compile(r"<[^>]+>")
-_BINARY_GARBAGE_RE  = re.compile(r"[\x00-\x08\x0E-\x1F]")
-_HEX_ESCAPE_RE      = re.compile(r"(?:\\x[0-9a-fA-F]{2}){3,}")
-_SYMBOL_LINE_RE     = re.compile(r"^[^A-Za-z0-9\s]{20,}$")
+_LOG_LINE_RE = re.compile(r"^\s*---\s*LOG\s+ENTRY", re.IGNORECASE)
+_DEBUG_LINE_RE = re.compile(r"^\s*===\s*DEBUG[:=]", re.IGNORECASE)
+_ERROR_LINE_RE = re.compile(r"^\s*ERROR\s*:|^\s*\[ERROR\]|^\s*NULL POINTER", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_BINARY_GARBAGE_RE = re.compile(r"[\x00-\x08\x0E-\x1F]")
+_HEX_ESCAPE_RE = re.compile(r"(?:\\x[0-9a-fA-F]{2}){3,}")
+_SYMBOL_LINE_RE = re.compile(r"^[^A-Za-z0-9\s]{20,}$")
 
 
 def _is_noise_line(line: str) -> bool:
@@ -94,11 +96,12 @@ def _is_noise_line(line: str) -> bool:
     return False
 
 
-def strip_noise_lines(text: str) -> Tuple[str, int]:
+def strip_noise_lines(text: str) -> tuple[str, int]:
     if not text:
         return text, 0
     try:
         import bleach
+
         text = bleach.clean(text, tags=[], attributes={}, strip=True)
     except ImportError:
         text = _HTML_TAG_RE.sub(" ", text)
@@ -106,7 +109,7 @@ def strip_noise_lines(text: str) -> Tuple[str, int]:
         text = _HTML_TAG_RE.sub(" ", text)
     text = _BINARY_GARBAGE_RE.sub("", text)
     dropped = 0
-    out_lines: List[str] = []
+    out_lines: list[str] = []
     for line in text.split("\n"):
         if _is_noise_line(line):
             dropped += 1
@@ -124,15 +127,17 @@ def _whitespace_ratio(text: str) -> float:
     return sum(1 for c in text if c.isspace()) / len(text)
 
 
-def recover_whitespace(text: str) -> Tuple[str, bool]:
+def recover_whitespace(text: str) -> tuple[str, bool]:
     if not getattr(settings, "TEXT_REPAIR_WHITESPACE", True):
         return text, False
     if not text or len(text) < _MIN_RECOVERY_LEN or _whitespace_ratio(text) >= 0.05:
         return text, False
     try:
-        from wordsegment import load as _ws_load, segment
+        from wordsegment import load as _ws_load
+        from wordsegment import segment
+
         _ws_load()
-        rebuilt: List[str] = []
+        rebuilt: list[str] = []
         for line in text.split("\n"):
             if len(line) >= _MIN_RECOVERY_LEN and _whitespace_ratio(line) < 0.05:
                 words = segment(line)
@@ -153,6 +158,7 @@ _OCR_SUBS = {"0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "@": "a", "$": "s
 def _english_word_ratio(text: str) -> float:
     try:
         from wordfreq import top_n_list
+
         tokens = re.findall(r"[a-z]{3,}", text.lower())
         if not tokens:
             return 0.0
@@ -162,7 +168,7 @@ def _english_word_ratio(text: str) -> float:
         return 1.0
 
 
-def normalize_ocr_noise(text: str) -> Tuple[str, bool]:
+def normalize_ocr_noise(text: str) -> tuple[str, bool]:
     if not getattr(settings, "TEXT_REPAIR_OCR", True):
         return text, False
     if not text or len(text) < 60 or _english_word_ratio(text) >= 0.30:
@@ -174,21 +180,29 @@ def normalize_ocr_noise(text: str) -> Tuple[str, bool]:
         return tok
 
     rebuilt = re.sub(r"\S+", lambda m: _fix_token(m.group(0)), text)
-    return (rebuilt, True) if _english_word_ratio(rebuilt) > _english_word_ratio(text) else (text, False)
+    return (
+        (rebuilt, True)
+        if _english_word_ratio(rebuilt) > _english_word_ratio(text)
+        else (text, False)
+    )
 
 
-_SUPERSCRIPT_RE       = re.compile(r"^\s*[¹²³⁴⁵⁶⁷⁸⁹⁰]\s+")
-_EDITOR_NOTE_RE       = re.compile(r"^\s*\[EDITOR\s+NOTE", re.IGNORECASE)
+_SUPERSCRIPT_RE = re.compile(r"^\s*[¹²³⁴⁵⁶⁷⁸⁹⁰]\s+")
+_EDITOR_NOTE_RE = re.compile(r"^\s*\[EDITOR\s+NOTE", re.IGNORECASE)
 _REFERENCE_MISSING_RE = re.compile(r"^\s*\[REFERENCE\s+MISSING", re.IGNORECASE)
 
 
-def strip_footnotes(text: str) -> Tuple[str, List[str]]:
+def strip_footnotes(text: str) -> tuple[str, list[str]]:
     if not getattr(settings, "TEXT_REPAIR_FOOTNOTES", True) or not text:
         return text, []
-    notes: List[str] = []
-    cleaned: List[str] = []
+    notes: list[str] = []
+    cleaned: list[str] = []
     for line in text.split("\n"):
-        if _SUPERSCRIPT_RE.match(line) or _EDITOR_NOTE_RE.match(line) or _REFERENCE_MISSING_RE.match(line):
+        if (
+            _SUPERSCRIPT_RE.match(line)
+            or _EDITOR_NOTE_RE.match(line)
+            or _REFERENCE_MISSING_RE.match(line)
+        ):
             notes.append(line.strip())
         else:
             cleaned.append(line)
@@ -211,8 +225,12 @@ def is_placeholder(text: str) -> bool:
     return any(pat.match(text.strip()) for pat in _PLACEHOLDER_PATTERNS)
 
 
-def has_title_mismatch(section_title: Optional[str], keywords: List[str]) -> bool:
-    if not getattr(settings, "TEXT_REPAIR_TITLE_MISMATCH", True) or not section_title or not keywords:
+def has_title_mismatch(section_title: str | None, keywords: list[str]) -> bool:
+    if (
+        not getattr(settings, "TEXT_REPAIR_TITLE_MISMATCH", True)
+        or not section_title
+        or not keywords
+    ):
         return False
     title_tokens = set(re.findall(r"[a-z]{3,}", section_title.lower()))
     kw_tokens: set = set()
@@ -234,10 +252,10 @@ _ERROR_MARKER_PATTERNS = [
 ]
 
 
-def detect_error_markers(text: str) -> Tuple[str, List[str]]:
+def detect_error_markers(text: str) -> tuple[str, list[str]]:
     if not text:
         return text, []
-    found: List[str] = []
+    found: list[str] = []
     cleaned = text
     for pat in _ERROR_MARKER_PATTERNS:
         for match in pat.finditer(cleaned):
@@ -258,7 +276,7 @@ def detect_error_markers(text: str) -> Tuple[str, List[str]]:
 _VERSION_RE = re.compile(r"-v(\d+)|REVISED|FINAL|DRAFT", re.IGNORECASE)
 
 
-def extract_version(section_id: Optional[str], section_title: Optional[str]) -> Optional[Dict[str, str]]:
+def extract_version(section_id: str | None, section_title: str | None) -> dict[str, str] | None:
     if not getattr(settings, "TEXT_REPAIR_VERSION_TAG", True):
         return None
     for c in (section_id or "", section_title or ""):
@@ -270,7 +288,7 @@ def extract_version(section_id: Optional[str], section_title: Optional[str]) -> 
     return None
 
 
-def dewrap_hard_linebreaks(text: str) -> Tuple[str, int]:
+def dewrap_hard_linebreaks(text: str) -> tuple[str, int]:
     """Collapse hard line-wrap newlines into spaces so a sentence that only
     wraps because the source file was formatted to a fixed line width (e.g.
     an ~80-char press-release layout) is never fragmented by the chunker.
@@ -295,7 +313,7 @@ def dewrap_hard_linebreaks(text: str) -> Tuple[str, int]:
         return text, 0
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = text.split("\n")
-    out: List[str] = []
+    out: list[str] = []
     merges = 0
     for i, line in enumerate(lines):
         if i == 0:
@@ -311,8 +329,8 @@ def dewrap_hard_linebreaks(text: str) -> Tuple[str, int]:
     return "\n".join(out), merges
 
 
-def repair_text(raw: str) -> Tuple[str, Dict[str, int]]:
-    stats: Dict[str, int] = {}
+def repair_text(raw: str) -> tuple[str, dict[str, int]]:
+    stats: dict[str, int] = {}
     if not raw or not getattr(settings, "TEXT_REPAIR_ENABLED", True):
         return raw, stats
     text = raw
@@ -333,6 +351,8 @@ def repair_text(raw: str) -> Tuple[str, Dict[str, int]]:
         if n:
             stats["ambiguous_fractions_normalized"] = n
     return text, stats
+
+
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -351,14 +371,28 @@ _ingest_errors = Counter(
 )
 
 SUPPORTED_TEXT_EXTENSIONS = {
-    ".txt", ".md", ".rst", ".csv", ".log",
-    ".json", ".yaml", ".yml",
+    ".txt",
+    ".md",
+    ".rst",
+    ".csv",
+    ".log",
+    ".json",
+    ".yaml",
+    ".yml",
 }
 
 BINARY_MAGIC_SIGNATURES = [
-    b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"%PDF",
-    b"PK\x03\x04", b"\x1f\x8b", b"BM", b"ID3",
-    b"\x00\x00\x00", b"RIFF", b"\x7fELF",
+    b"\x89PNG",
+    b"\xff\xd8\xff",
+    b"GIF8",
+    b"%PDF",
+    b"PK\x03\x04",
+    b"\x1f\x8b",
+    b"BM",
+    b"ID3",
+    b"\x00\x00\x00",
+    b"RIFF",
+    b"\x7fELF",
 ]
 
 _semaphore = asyncio.Semaphore(5)
@@ -372,8 +406,13 @@ _SPEAKER_TURN_RE = re.compile(
 )
 _CALL_SECTIONS = {
     "prepared_remarks": ["prepared remarks", "opening remarks", "opening statement"],
-    "qa_session": ["question and answer", "q and a", "q&a session",
-                   "we will now begin", "your first question"],
+    "qa_session": [
+        "question and answer",
+        "q and a",
+        "q&a session",
+        "we will now begin",
+        "your first question",
+    ],
     "operator": ["thank you", "please stand by", "your lines have been placed"],
 }
 
@@ -381,12 +420,30 @@ _NUMBERED_SECTION_RE = re.compile(
     r"(?:^|\n)[ \t]*(?:SECTION\s+)?(\d+)(?:\.\d+)*\s*[:\.\-\)]",
     re.IGNORECASE,
 )
-_FORWARD_LOOKING_WORDS = frozenset([
-    "outlook", "guidance", "forecast", "projection", "forward", "target",
-    "expected", "anticipated", "objective", "strategy", "strategic",
-    "plan", "planned", "pipeline", "upcoming", "going forward",
-    "future", "fy2025", "fy2026", "fy2027",
-])
+_FORWARD_LOOKING_WORDS = frozenset(
+    [
+        "outlook",
+        "guidance",
+        "forecast",
+        "projection",
+        "forward",
+        "target",
+        "expected",
+        "anticipated",
+        "objective",
+        "strategy",
+        "strategic",
+        "plan",
+        "planned",
+        "pipeline",
+        "upcoming",
+        "going forward",
+        "future",
+        "fy2025",
+        "fy2026",
+        "fy2027",
+    ]
+)
 
 _SECTION_HEADER_RE = re.compile(
     r"^[ \t]*\[(DOC-[A-Za-z0-9._\-]+)\][ \t]*(.*)$",
@@ -413,6 +470,7 @@ _FINANCIAL_HEADING_RE = re.compile(
 
 # ─── Utilities ────────────────────────────────────────────────────────────────
 
+
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -430,7 +488,7 @@ def _simhash(text: str) -> int:
     fp = 0
     for i in range(64):
         if v[i] > 0:
-            fp |= (1 << i)
+            fp |= 1 << i
     return fp
 
 
@@ -460,16 +518,16 @@ def _is_binary(path: Path) -> bool:
 def _strip_bom(text: str) -> str:
     for bom in ["﻿", "￾"]:
         if text.startswith(bom):
-            return text[len(bom):]
+            return text[len(bom) :]
     return text
 
 
-def _strip_null_bytes(text: str) -> Tuple[str, int]:
+def _strip_null_bytes(text: str) -> tuple[str, int]:
     count = text.count("\x00")
     return text.replace("\x00", ""), count
 
 
-def _detect_encoding(path: Path) -> Tuple[str, float]:
+def _detect_encoding(path: Path) -> tuple[str, float]:
     with open(path, "rb") as f:
         raw = f.read(32768)
     result = chardet.detect(raw)
@@ -481,22 +539,26 @@ def _detect_encoding(path: Path) -> Tuple[str, float]:
 def _load_text(path: Path) -> str:
     encoding, confidence = _detect_encoding(path)
     if confidence < 0.7:
-        logger.warning("encoding_low_confidence", encoding=encoding,
-                       confidence=round(confidence, 3), file=path.name)
+        logger.warning(
+            "encoding_low_confidence",
+            encoding=encoding,
+            confidence=round(confidence, 3),
+            file=path.name,
+        )
     try:
-        with open(path, "r", encoding=encoding, errors="ignore") as f:
+        with open(path, encoding=encoding, errors="ignore") as f:
             return f.read()
     except Exception:
-        with open(path, "r", encoding="latin-1", errors="ignore") as f:
+        with open(path, encoding="latin-1", errors="ignore") as f:
             return f.read()
 
 
 def _load_text_streaming(path: Path, max_bytes: int) -> str:
     encoding, _ = _detect_encoding(path)
-    parts: List[str] = []
+    parts: list[str] = []
     total = 0
     try:
-        with open(path, "r", encoding=encoding, errors="ignore") as f:
+        with open(path, encoding=encoding, errors="ignore") as f:
             for line in f:
                 if len(line) > 100_000:
                     words = line.split(" ")
@@ -544,12 +606,11 @@ def _get_language_detector():
         return _LANG_DETECTOR
     try:
         from lingua import LanguageDetectorBuilder
+
         # low_accuracy_mode loads smaller models and is markedly faster; language
         # routing only needs the dominant language, not fine-grained scoring.
         _LANG_DETECTOR = (
-            LanguageDetectorBuilder.from_all_languages()
-            .with_low_accuracy_mode()
-            .build()
+            LanguageDetectorBuilder.from_all_languages().with_low_accuracy_mode().build()
         )
     except Exception:
         _LANG_DETECTOR_FAILED = True
@@ -561,7 +622,7 @@ def warm_language_detector() -> None:
     _get_language_detector()
 
 
-def _detect_language(text: str) -> Optional[str]:
+def _detect_language(text: str) -> str | None:
     sample = text[:3000]
     try:
         detector = _get_language_detector()
@@ -575,21 +636,31 @@ def _detect_language(text: str) -> Optional[str]:
     return None
 
 
-def _is_rtl(language: Optional[str]) -> bool:
+def _is_rtl(language: str | None) -> bool:
     return (language or "").lower() in {"ar", "he", "fa", "ur", "yi", "dv", "ku", "ps"}
 
 
-def _redact_pii(text: str) -> Tuple[str, Dict[str, int]]:
+def _redact_pii(text: str) -> tuple[str, dict[str, int]]:
     if not settings.PII_DETECTION_ENABLED:
         return text, {}
-    entity_counts: Dict[str, int] = {}
+    entity_counts: dict[str, int] = {}
     try:
         from presidio_analyzer import AnalyzerEngine
         from presidio_anonymizer import AnonymizerEngine
-        entities = getattr(settings, "PII_ENTITIES", [
-            "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "US_SSN", "CREDIT_CARD",
-            "LOCATION", "IP_ADDRESS",
-        ])
+
+        entities = getattr(
+            settings,
+            "PII_ENTITIES",
+            [
+                "PERSON",
+                "EMAIL_ADDRESS",
+                "PHONE_NUMBER",
+                "US_SSN",
+                "CREDIT_CARD",
+                "LOCATION",
+                "IP_ADDRESS",
+            ],
+        )
         analyzer = AnalyzerEngine()
         anonymizer = AnonymizerEngine()
         results = analyzer.analyze(text=text, entities=entities, language="en")
@@ -616,22 +687,24 @@ def _detect_subtype(chunk: str) -> str:
     return "paragraph"
 
 
-def _extract_heading_level(line: str) -> Optional[int]:
+def _extract_heading_level(line: str) -> int | None:
     match = re.match(r"^(#{1,3})\s", line)
     if match:
         return len(match.group(1))
     return None
 
 
-def _extract_keywords(text: str, max_keywords: int = 5) -> List[str]:
+def _extract_keywords(text: str, max_keywords: int = 5) -> list[str]:
     try:
         import yake
+
         kw_extractor = yake.KeywordExtractor(top=max_keywords, stopwords=None)
         return [kw for kw, _ in kw_extractor.extract_keywords(text)]
     except ImportError:
         pass
     try:
         from keybert import KeyBERT
+
         kb = KeyBERT()
         return [kw for kw, _ in kb.extract_keywords(text, top_n=max_keywords)]
     except ImportError:
@@ -642,6 +715,7 @@ def _extract_keywords(text: str, max_keywords: int = 5) -> List[str]:
 def _readability_score(text: str) -> float:
     try:
         import textstat
+
         return float(textstat.flesch_reading_ease(text))
     except ImportError:
         pass
@@ -667,8 +741,8 @@ def _quality_score(chunk: str) -> float:
     return 1.0
 
 
-def _detect_section_metadata(chunk: str) -> Dict[str, Any]:
-    meta: Dict[str, Any] = {}
+def _detect_section_metadata(chunk: str) -> dict[str, Any]:
+    meta: dict[str, Any] = {}
     m = _NUMBERED_SECTION_RE.search(chunk[:400])
     if m:
         try:
@@ -679,11 +753,11 @@ def _detect_section_metadata(chunk: str) -> Dict[str, Any]:
     return meta
 
 
-def _split_sections(text: str) -> List[Tuple[Optional[str], Optional[str], str]]:
+def _split_sections(text: str) -> list[tuple[str | None, str | None, str]]:
     matches = list(_SECTION_HEADER_RE.finditer(text))
     if not matches:
         return [(None, None, text)]
-    sections: List[Tuple[Optional[str], Optional[str], str]] = []
+    sections: list[tuple[str | None, str | None, str]] = []
     preamble = text[: matches[0].start()].strip()
     if preamble and len(preamble) >= settings.CHUNK_MIN_SIZE:
         sections.append((None, None, preamble))
@@ -706,14 +780,14 @@ def _looks_like_data_row(line: str) -> bool:
     return bool(re.search(r"\S(?:  +)\S", line))
 
 
-def _extract_table_blocks(text: str) -> List[Tuple[int, int, str, List[str]]]:
+def _extract_table_blocks(text: str) -> list[tuple[int, int, str, list[str]]]:
     lines = text.split("\n")
-    offsets: List[int] = []
+    offsets: list[int] = []
     pos = 0
     for line in lines:
         offsets.append(pos)
         pos += len(line) + 1
-    blocks: List[Tuple[int, int, str, List[str]]] = []
+    blocks: list[tuple[int, int, str, list[str]]] = []
     MIN_TABLE_LINES = 4
     i = 0
     while i < len(lines):
@@ -724,7 +798,7 @@ def _extract_table_blocks(text: str) -> List[Tuple[int, int, str, List[str]]]:
             i += 1
             continue
         run_start = i
-        run_lines: List[int] = [i]
+        run_lines: list[int] = [i]
         j = i + 1
         while j < len(lines):
             row = lines[j]
@@ -768,14 +842,14 @@ def _normalize_pipe_row(line: str) -> str:
     return " | ".join(non_trivial)
 
 
-def _extract_pipe_table_blocks(text: str) -> List[Tuple[int, int, str, List[str]]]:
+def _extract_pipe_table_blocks(text: str) -> list[tuple[int, int, str, list[str]]]:
     lines = text.split("\n")
-    offsets: List[int] = []
+    offsets: list[int] = []
     pos = 0
     for line in lines:
         offsets.append(pos)
         pos += len(line) + 1
-    blocks: List[Tuple[int, int, str, List[str]]] = []
+    blocks: list[tuple[int, int, str, list[str]]] = []
     MIN_PIPE_ROWS = 3
     i = 0
     while i < len(lines):
@@ -783,7 +857,7 @@ def _extract_pipe_table_blocks(text: str) -> List[Tuple[int, int, str, List[str]
             i += 1
             continue
         run_start = i
-        run_indices: List[int] = []
+        run_indices: list[int] = []
         j = i
         while j < len(lines):
             ln = lines[j]
@@ -796,7 +870,7 @@ def _extract_pipe_table_blocks(text: str) -> List[Tuple[int, int, str, List[str]
                 break
         content_rows = [k for k in run_indices if not _is_pipe_separator_row(lines[k])]
         if len(content_rows) >= MIN_PIPE_ROWS:
-            look_back_lines: List[str] = []
+            look_back_lines: list[str] = []
             for step in range(1, 13):
                 lb = run_start - step
                 if lb < 0:
@@ -806,7 +880,7 @@ def _extract_pipe_table_blocks(text: str) -> List[Tuple[int, int, str, List[str]
                     break
                 look_back_lines.insert(0, lb_line)
             _year_candidates = look_back_lines + [lines[content_rows[0]].strip()]
-            year_matches: List[str] = []
+            year_matches: list[str] = []
             best_count = 0
             for cand in _year_candidates:
                 yrs = list(dict.fromkeys(_YEAR_IN_LINE_RE.findall(cand)))
@@ -815,7 +889,7 @@ def _extract_pipe_table_blocks(text: str) -> List[Tuple[int, int, str, List[str]
                     year_matches = yrs
             if best_count < 2:
                 year_matches = []
-            preceding_heading: Optional[str] = None
+            preceding_heading: str | None = None
             for step in range(1, 9):
                 lb = run_start - step
                 if lb < 0:
@@ -829,7 +903,7 @@ def _extract_pipe_table_blocks(text: str) -> List[Tuple[int, int, str, List[str]
                     preceding_heading = lb_line
                     break
             header_norm = _normalize_pipe_row(lines[content_rows[0]])
-            header_parts: List[str] = []
+            header_parts: list[str] = []
             if preceding_heading:
                 header_parts.append(preceding_heading)
             if year_matches:
@@ -846,15 +920,15 @@ def _extract_pipe_table_blocks(text: str) -> List[Tuple[int, int, str, List[str]
     return blocks
 
 
-def _make_nl_summary(rows: List[str], years: Optional[List[str]] = None) -> str:
+def _make_nl_summary(rows: list[str], years: list[str] | None = None) -> str:
     years = years or []
-    mapping_lines: List[str] = []
-    fallback_labels: List[str] = []
-    fallback_numbers: List[str] = []
+    mapping_lines: list[str] = []
+    fallback_labels: list[str] = []
+    fallback_numbers: list[str] = []
     seen_labels: set = set()
     for row in rows[:12]:
         parts = [p.strip() for p in row.split("|") if p.strip()]
-        label: Optional[str] = None
+        label: str | None = None
         for p in parts:
             if p and not re.match(r'^[\$\d,\.%\(\)\-\s]+$', p):
                 label = p[:40].strip()
@@ -870,7 +944,7 @@ def _make_nl_summary(rows: List[str], years: Optional[List[str]] = None) -> str:
                 mapping_lines.append(f"{label}: " + ", ".join(pairs))
     if mapping_lines:
         return "[Financial data by fiscal year]\n" + "\n".join(mapping_lines) + "\n"
-    parts_out: List[str] = []
+    parts_out: list[str] = []
     if fallback_labels:
         parts_out.append(" | ".join(fallback_labels[:4]))
     if fallback_numbers:
@@ -880,12 +954,12 @@ def _make_nl_summary(rows: List[str], years: Optional[List[str]] = None) -> str:
     return ""
 
 
-def _chunk_table(header: str, data_rows: List[str], min_size: Optional[int] = None) -> List[str]:
-    chunks: List[str] = []
+def _chunk_table(header: str, data_rows: list[str], min_size: int | None = None) -> list[str]:
+    chunks: list[str] = []
     header_len = len(header) + 1
     _years_m = re.search(r'Years:\s*([0-9,\s]+)', header)
     header_years = re.findall(r'20\d{2}', _years_m.group(1)) if _years_m else []
-    pending_rows: List[str] = []
+    pending_rows: list[str] = []
     pending_len = 0
     effective_min = min_size if min_size is not None else settings.CHUNK_MIN_SIZE
 
@@ -914,7 +988,7 @@ def _detect_transcript_format(text: str) -> bool:
     return len(_SPEAKER_TURN_RE.findall(sample)) >= 3
 
 
-def _extract_speaker(chunk: str) -> Optional[str]:
+def _extract_speaker(chunk: str) -> str | None:
     first_line = chunk.split("\n")[0].strip()
     m = re.match(
         r"^(?P<speaker>[A-Z][A-Z0-9 \-\']+(?:\s*[-–]\s*[A-Z][A-Z0-9 \-]+)?)[ \t]*[:\.](?=[ \t])",
@@ -923,7 +997,7 @@ def _extract_speaker(chunk: str) -> Optional[str]:
     return m.group("speaker").strip() if m else None
 
 
-def _detect_call_section(chunk: str) -> Optional[str]:
+def _detect_call_section(chunk: str) -> str | None:
     lower = chunk.lower()
     for section, keywords in _CALL_SECTIONS.items():
         if any(kw in lower for kw in keywords):
@@ -931,14 +1005,15 @@ def _detect_call_section(chunk: str) -> Optional[str]:
     return None
 
 
-def _extract_section_headings(text: str) -> List[Tuple[int, str]]:
-    headings: List[Tuple[int, str]] = []
+def _extract_section_headings(text: str) -> list[tuple[int, str]]:
+    headings: list[tuple[int, str]] = []
     for m in re.finditer(
         r"(?:^|\n)(?P<heading>"
         r"PART\s+[IVX]+[^\n]{0,60}|"
         r"ITEM\s+\d+[A-Z]?\.[^\n]{0,80}|"
         r"(?:[A-Z][A-Z\s\-\&]{10,60})(?=\n))",
-        text, re.MULTILINE,
+        text,
+        re.MULTILINE,
     ):
         h = m.group("heading").strip()
         if h and len(h.split()) <= 12:
@@ -946,7 +1021,7 @@ def _extract_section_headings(text: str) -> List[Tuple[int, str]]:
     return headings
 
 
-def _split_speaker_aware(text: str, target_size: int, overlap: int) -> List[str]:
+def _split_speaker_aware(text: str, target_size: int, overlap: int) -> list[str]:
     """Split transcript text into pieces that never cross a speaker-turn boundary.
 
     Without this, RecursiveCharacterTextSplitter's generic separators cut a long
@@ -963,19 +1038,20 @@ def _split_speaker_aware(text: str, target_size: int, overlap: int) -> List[str]
     if len(matches) < 2:
         return []
 
-    segments: List[str] = []
+    segments: list[str] = []
     if matches[0].start() > 0:
         pre = text[: matches[0].start()].strip()
         if pre:
             segments.append(pre)
     for i, m in enumerate(matches):
         seg_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        seg = text[m.start():seg_end].strip()
+        seg = text[m.start() : seg_end].strip()
         if seg:
             segments.append(seg)
 
     try:
         from langchain_text_splitters import RecursiveCharacterTextSplitter
+
         sub_splitter = RecursiveCharacterTextSplitter(
             chunk_size=target_size,
             chunk_overlap=overlap,
@@ -984,7 +1060,7 @@ def _split_speaker_aware(text: str, target_size: int, overlap: int) -> List[str]
     except Exception:
         sub_splitter = None
 
-    pieces: List[str] = []
+    pieces: list[str] = []
     for seg in segments:
         if len(seg) <= target_size:
             pieces.append(seg)
@@ -993,15 +1069,15 @@ def _split_speaker_aware(text: str, target_size: int, overlap: int) -> List[str]
         else:
             step = max(target_size - overlap, 1)
             pieces.extend(
-                seg[i:i + target_size].strip()
+                seg[i : i + target_size].strip()
                 for i in range(0, len(seg), step)
-                if seg[i:i + target_size].strip()
+                if seg[i : i + target_size].strip()
             )
     return pieces
 
 
-def _chunk_text(text: str, is_transcript: bool = False) -> List[str]:
-    table_chunks: List[str] = []
+def _chunk_text(text: str, is_transcript: bool = False) -> list[str]:
+    table_chunks: list[str] = []
     pipe_blocks = _extract_pipe_table_blocks(text)
     if pipe_blocks:
         non_pipe_text = text
@@ -1020,7 +1096,7 @@ def _chunk_text(text: str, is_transcript: bool = False) -> List[str]:
 
     protected_text, num_mapping = protect(text)
 
-    chunks: List[str] = []
+    chunks: list[str] = []
     if is_transcript:
         chunks = _split_speaker_aware(protected_text, settings.CHUNK_SIZE, settings.CHUNK_OVERLAP)
         chunks = [restore(c.strip(), num_mapping) for c in chunks if c.strip()]
@@ -1028,10 +1104,25 @@ def _chunk_text(text: str, is_transcript: bool = False) -> List[str]:
     if not chunks:
         try:
             from langchain_text_splitters import RecursiveCharacterTextSplitter
+
             separators = [
-                "\n[DOC-", "\nPART ", "\nITEM ", "\nSECTION ",
-                "\n====", "\n----", "\n####", "\n###", "\n##", "\n#",
-                "\n\n", "\n", ". ", "! ", "? ", " ", "",
+                "\n[DOC-",
+                "\nPART ",
+                "\nITEM ",
+                "\nSECTION ",
+                "\n====",
+                "\n----",
+                "\n####",
+                "\n###",
+                "\n##",
+                "\n#",
+                "\n\n",
+                "\n",
+                ". ",
+                "! ",
+                "? ",
+                " ",
+                "",
             ]
             splitter = RecursiveCharacterTextSplitter(
                 chunk_size=settings.CHUNK_SIZE,
@@ -1048,15 +1139,15 @@ def _chunk_text(text: str, is_transcript: bool = False) -> List[str]:
         overlap = settings.CHUNK_OVERLAP
         step = max(size - overlap, 1)
         for i in range(0, len(protected_text), step):
-            ch = restore(protected_text[i:i + size].strip(), num_mapping)
+            ch = restore(protected_text[i : i + size].strip(), num_mapping)
             if ch:
                 chunks.append(ch)
 
     if chunks:
         headings = _extract_section_headings(text)
         if headings:
-            enriched: List[str] = []
-            active_heading: Optional[str] = None
+            enriched: list[str] = []
+            active_heading: str | None = None
             h_idx = 0
             running_offset = 0
             for chunk in chunks:
@@ -1100,7 +1191,7 @@ class TxtIngestor(BaseIngestor):
         self,
         path: Path,
         metadata: UniversalMetadata,
-    ) -> List[RawExtract]:
+    ) -> list[RawExtract]:
         source = path.name
         file_size = path.stat().st_size
         logger.info(event="extraction_start", modality="txt", file=str(path), size=file_size)
@@ -1125,7 +1216,9 @@ class TxtIngestor(BaseIngestor):
                 logger.warning("null_bytes_stripped", count=null_count, file=path.name)
 
             # Repair
-            raw_text, _ = await asyncio.get_event_loop().run_in_executor(None, repair_text, raw_text)
+            raw_text, _ = await asyncio.get_event_loop().run_in_executor(
+                None, repair_text, raw_text
+            )
 
             # Normalize
             text = _normalize_text(raw_text)
@@ -1162,7 +1255,7 @@ class TxtIngestor(BaseIngestor):
                 None, _detect_transcript_format, text
             )
 
-            extracts: List[RawExtract] = []
+            extracts: list[RawExtract] = []
             for i, (section_id, section_title, body) in enumerate(sections):
                 if is_placeholder(body):
                     continue
@@ -1171,9 +1264,11 @@ class TxtIngestor(BaseIngestor):
                 if not cleaned_body.strip():
                     continue
 
-                extract_type = "speaker_turn" if (
-                    is_transcript and _detect_transcript_format(cleaned_body)
-                ) else "prose"
+                extract_type = (
+                    "speaker_turn"
+                    if (is_transcript and _detect_transcript_format(cleaned_body))
+                    else "prose"
+                )
 
                 source_ref = f"file:{path.name}"
                 if section_id:
@@ -1181,7 +1276,7 @@ class TxtIngestor(BaseIngestor):
                 elif i > 0:
                     source_ref += f"|part:{i}"
 
-                extra: Dict[str, Any] = {}
+                extra: dict[str, Any] = {}
                 if section_id:
                     extra["section_id"] = section_id
                 if section_title:
@@ -1195,18 +1290,22 @@ class TxtIngestor(BaseIngestor):
                 if language:
                     extra["language"] = language
 
-                extracts.append(RawExtract(
-                    text=cleaned_body,
-                    extract_type=extract_type,
-                    raw_source_ref=source_ref,
-                    extra=extra,
-                ))
+                extracts.append(
+                    RawExtract(
+                        text=cleaned_body,
+                        extract_type=extract_type,
+                        raw_source_ref=source_ref,
+                        extra=extra,
+                    )
+                )
 
             if not extracts:
                 raise ValueError("NO_EXTRACTS_PRODUCED")
 
             _EXTRACTS_TOTAL.inc(len(extracts))
-            logger.info(event="extraction_complete", modality="txt", file=str(path), extracts=len(extracts))
+            logger.info(
+                event="extraction_complete", modality="txt", file=str(path), extracts=len(extracts)
+            )
             return extracts
         except Exception as _exc:
             _EXTRACT_ERRORS.inc()
@@ -1216,7 +1315,8 @@ class TxtIngestor(BaseIngestor):
 
 # ─── Backward-compat ingest() — full pipeline (extraction + chunking) ─────────
 
-async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
+
+async def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
     """Backward-compatible entry point.  Router imports this until Phase 8."""
 
     if not session_id:
@@ -1240,7 +1340,9 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
 
         async with _semaphore:
             try:
-                logger.info("txt_ingest_start", file=path.name, size=file_size, session_id=session_id)
+                logger.info(
+                    "txt_ingest_start", file=path.name, size=file_size, session_id=session_id
+                )
 
                 # Binary check
                 is_bin = await asyncio.get_event_loop().run_in_executor(None, _is_binary, path)
@@ -1254,7 +1356,9 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                         None, _load_text_streaming, path, settings.MAX_FILE_SIZE_TEXT
                     )
                 else:
-                    raw_text = await asyncio.get_event_loop().run_in_executor(None, _load_text, path)
+                    raw_text = await asyncio.get_event_loop().run_in_executor(
+                        None, _load_text, path
+                    )
 
                 raw_text = _strip_bom(raw_text)
                 raw_text, null_count = _strip_null_bytes(raw_text)
@@ -1279,10 +1383,15 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 # Injection guard
                 try:
                     from app.guardrails.input_guard import sanitize as _guard_sanitize
+
                     clean = _guard_sanitize(text, surface="txt_ingest")
                     if clean != text:
-                        logger.warning("txt_injection_sanitized", file=path.name,
-                                       original_len=len(text), sanitized_len=len(clean))
+                        logger.warning(
+                            "txt_injection_sanitized",
+                            file=path.name,
+                            original_len=len(text),
+                            sanitized_len=len(clean),
+                        )
                         text = clean
                 except Exception as _ge:
                     logger.warning("txt_guardrail_failed", file=path.name, error=str(_ge))
@@ -1293,10 +1402,15 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 # PII scrub
                 try:
                     from app.guardrails.pii import scrub_pii
+
                     _scrubbed, _changed = scrub_pii(text)
                     if _changed:
-                        logger.warning("txt_pii_scrubbed", file=path.name,
-                                       original_len=len(text), scrubbed_len=len(_scrubbed))
+                        logger.warning(
+                            "txt_pii_scrubbed",
+                            file=path.name,
+                            original_len=len(text),
+                            scrubbed_len=len(_scrubbed),
+                        )
                         text = _scrubbed
                 except Exception as _pe:
                     logger.warning("txt_pii_scrub_failed", file=path.name, error=str(_pe))
@@ -1309,14 +1423,18 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 line_count = text.count("\n") + 1
                 word_count = len(text.split())
 
-                language = await asyncio.get_event_loop().run_in_executor(None, _detect_language, text)
+                language = await asyncio.get_event_loop().run_in_executor(
+                    None, _detect_language, text
+                )
                 is_rtl = _is_rtl(language)
 
                 text, pii_counts = await asyncio.get_event_loop().run_in_executor(
                     None, _redact_pii, text
                 )
 
-                sections = await asyncio.get_event_loop().run_in_executor(None, _split_sections, text)
+                sections = await asyncio.get_event_loop().run_in_executor(
+                    None, _split_sections, text
+                )
                 is_transcript = await asyncio.get_event_loop().run_in_executor(
                     None, _detect_transcript_format, text
                 )
@@ -1324,7 +1442,7 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     logger.info("transcript_format_detected", file=path.name, session_id=session_id)
 
                 # Chunk per section
-                chunk_tuples: List[Tuple[Optional[str], Optional[str], str, Dict[str, Any]]] = []
+                chunk_tuples: list[tuple[str | None, str | None, str, dict[str, Any]]] = []
                 dropped_sections = 0
                 for section_id_val, section_title_val, body in sections:
                     if is_placeholder(body):
@@ -1333,7 +1451,7 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     cleaned_body, footnotes = strip_footnotes(body)
                     cleaned_body, error_markers = detect_error_markers(cleaned_body)
                     title_marked_mismatch = any("wrong label" in m.lower() for m in error_markers)
-                    section_extras: Dict[str, Any] = {}
+                    section_extras: dict[str, Any] = {}
                     if footnotes:
                         section_extras["footnotes"] = footnotes
                     if error_markers:
@@ -1349,35 +1467,45 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     )
                     for ch in section_chunks:
                         if ch and ch.strip():
-                            chunk_tuples.append((section_id_val, section_title_val, ch, section_extras))
+                            chunk_tuples.append(
+                                (section_id_val, section_title_val, ch, section_extras)
+                            )
 
                 if dropped_sections:
-                    logger.info("dropped_empty_sections_total", count=dropped_sections, file=path.name)
+                    logger.info(
+                        "dropped_empty_sections_total", count=dropped_sections, file=path.name
+                    )
                 if not chunk_tuples:
                     raise ValueError("NO_CHUNKS_PRODUCED")
                 if len(chunk_tuples) > settings.MAX_CHUNKS:
-                    logger.warning("chunk_limit_applied", original=len(chunk_tuples),
-                                   limited=settings.MAX_CHUNKS, file=path.name)
-                    chunk_tuples = chunk_tuples[:settings.MAX_CHUNKS]
+                    logger.warning(
+                        "chunk_limit_applied",
+                        original=len(chunk_tuples),
+                        limited=settings.MAX_CHUNKS,
+                        file=path.name,
+                    )
+                    chunk_tuples = chunk_tuples[: settings.MAX_CHUNKS]
 
                 total_chunks = len(chunk_tuples)
-                documents: List[IngestedDocument] = []
+                documents: list[IngestedDocument] = []
                 seen_hashes: set = set()
-                seen_simhashes: List[int] = []
+                seen_simhashes: list[int] = []
 
                 # Transcript state — persists across chunk loop iterations
-                _last_speaker: Optional[str] = None
-                _first_speaker: Optional[str] = None
+                _last_speaker: str | None = None
+                _first_speaker: str | None = None
                 _qa_started = False
-                _current_call_section: Optional[str] = "prepared_remarks" if is_transcript else None
+                _current_call_section: str | None = "prepared_remarks" if is_transcript else None
                 # Character offset tracking for char_start / char_end payload fields
                 _char_offset: int = 0
 
-                for i, (section_id_val, section_title_val, chunk, section_extras) in enumerate(chunk_tuples):
+                for i, (section_id_val, section_title_val, chunk, section_extras) in enumerate(
+                    chunk_tuples
+                ):
                     chunk = chunk.strip()
                     if not chunk:
                         continue
-                    chunk_repairs: Dict[str, Any] = {}
+                    chunk_repairs: dict[str, Any] = {}
                     repaired, ws_fixed = recover_whitespace(chunk)
                     if ws_fixed:
                         chunk = repaired
@@ -1401,12 +1529,12 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                     subtype = _detect_subtype(chunk)
                     keywords = _extract_keywords(chunk)
                     fk_score = _readability_score(chunk)
-                    heading_level: Optional[int] = None
+                    heading_level: int | None = None
                     first_line = chunk.split("\n")[0]
                     heading_level = _extract_heading_level(first_line)
                     title_mismatch = has_title_mismatch(section_title_val, keywords)
 
-                    chunk_extra_metadata: Dict[str, Any] = {
+                    chunk_extra_metadata: dict[str, Any] = {
                         "modality_weight": 1.0,
                         "importance_score": quality,
                         "data_quality_score": quality,
@@ -1419,20 +1547,24 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                         chunk_extra_metadata["title_mismatch"] = True
 
                     _sec_meta = _detect_section_metadata(chunk)
-                    structure_carry_overs: Dict[str, Any] = {}
+                    structure_carry_overs: dict[str, Any] = {}
                     if section_extras.get("error_markers"):
                         structure_carry_overs["error_markers"] = section_extras["error_markers"]
                     if section_extras.get("doc_version"):
                         structure_carry_overs["doc_version"] = section_extras["doc_version"]
-                        structure_carry_overs["doc_version_kind"] = section_extras.get("doc_version_kind")
+                        structure_carry_overs["doc_version_kind"] = section_extras.get(
+                            "doc_version_kind"
+                        )
                     if section_extras.get("footnotes"):
                         structure_carry_overs["footnotes"] = section_extras["footnotes"]
                     if chunk_extra_metadata.get("title_mismatch"):
                         structure_carry_overs["title_mismatch"] = True
 
                     _raw_speaker = _extract_speaker(chunk) if is_transcript else None
-                    _chunk_type = "speaker_turn" if _raw_speaker else (
-                        "heading" if subtype == "heading" else "paragraph"
+                    _chunk_type = (
+                        "speaker_turn"
+                        if _raw_speaker
+                        else ("heading" if subtype == "heading" else "paragraph")
                     )
 
                     if is_transcript:
@@ -1462,7 +1594,11 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                         elif _raw_speaker:
                             # Pre-Q&A new turn: keyword can still flag an operator transition.
                             _keyword_section = _detect_call_section(chunk)
-                            _call_section = "operator" if _keyword_section == "operator" else _current_call_section
+                            _call_section = (
+                                "operator"
+                                if _keyword_section == "operator"
+                                else _current_call_section
+                            )
                         else:
                             # Pre-Q&A continuation: never re-classify from keywords alone.
                             _call_section = _current_call_section
@@ -1470,7 +1606,7 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                         _speaker = None
                         _call_section = None
 
-                    structure_payload: Dict[str, Any] = {
+                    structure_payload: dict[str, Any] = {
                         "doc_id": doc_id,
                         "session_id": session_id,
                         "file_hash": file_hash,
@@ -1526,10 +1662,18 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 span.set_attribute("docs.count", len(documents))
                 span.set_attribute("language", language or "unknown")
                 span.set_status(Status(StatusCode.OK))
-                logger.info("txt_ingest_success", file=path.name, docs=len(documents),
-                            total_chunks=total_chunks, language=language, is_rtl=is_rtl,
-                            word_count=word_count, line_count=line_count, latency=latency,
-                            session_id=session_id)
+                logger.info(
+                    "txt_ingest_success",
+                    file=path.name,
+                    docs=len(documents),
+                    total_chunks=total_chunks,
+                    language=language,
+                    is_rtl=is_rtl,
+                    word_count=word_count,
+                    line_count=line_count,
+                    latency=latency,
+                    session_id=session_id,
+                )
                 return documents
 
             except Exception as exc:
@@ -1539,16 +1683,23 @@ async def ingest(file_path: str, session_id: str) -> List[IngestedDocument]:
                 _ingest_errors.labels(error_type=error_type).inc()
                 span.set_status(Status(StatusCode.ERROR, str(exc)))
                 span.record_exception(exc)
-                logger.error("txt_ingest_failed", file=path.name, session_id=session_id,
-                             error=str(exc), error_type=error_type, latency=latency)
+                logger.error(
+                    "txt_ingest_failed",
+                    file=path.name,
+                    session_id=session_id,
+                    error=str(exc),
+                    error_type=error_type,
+                    latency=latency,
+                )
                 raise
 
 
-def ingest_sync(file_path: str, session_id: str) -> List[IngestedDocument]:
+def ingest_sync(file_path: str, session_id: str) -> list[IngestedDocument]:
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 future = pool.submit(asyncio.run, ingest(file_path, session_id))
                 return future.result()

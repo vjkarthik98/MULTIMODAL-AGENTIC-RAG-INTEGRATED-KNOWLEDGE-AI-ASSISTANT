@@ -1,10 +1,10 @@
 """Eval-only configuration. Reads pipeline settings via get_settings() — never hardcodes."""
+
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from app.core.config import get_settings
 
@@ -20,14 +20,18 @@ THRESHOLDS_PATH: Path = EVAL_ROOT / "thresholds.yaml"
 MANIFEST_PATH: Path = DATASETS_DIR / "manifest.yaml"
 RAW_CORPUS_DIR: Path = _settings.PROJECT_ROOT / "data" / "raw" / "finance"
 
-EVAL_USER_ID: str = os.getenv("EVAL_USER_ID", _settings.PROJECT_ROOT and "eval_default") or "eval_default"
+EVAL_USER_ID: str = (
+    os.getenv("EVAL_USER_ID", _settings.PROJECT_ROOT and "eval_default") or "eval_default"
+)
 EVAL_SESSION_PREFIX: str = "eval"
 EVAL_JUDGE_MODEL: str = os.getenv("EVAL_JUDGE_MODEL", "prometheus_2_7b")
 EVAL_JUDGE_TEMPERATURE: float = float(os.getenv("EVAL_JUDGE_TEMPERATURE", "0.1"))
-EVAL_FAIL_ON_MISSING_JUDGE: bool = os.getenv("EVAL_FAIL_ON_MISSING_JUDGE", "false").lower() == "true"
+EVAL_FAIL_ON_MISSING_JUDGE: bool = (
+    os.getenv("EVAL_FAIL_ON_MISSING_JUDGE", "false").lower() == "true"
+)
 
 
-SUITE_NAMES: List[str] = [
+SUITE_NAMES: list[str] = [
     "retrieval",
     "generation",
     "behavioral",
@@ -45,13 +49,14 @@ SUITE_NAMES: List[str] = [
 @dataclass
 class WeakenSpec:
     """--weaken flag: artificial regressions to prove the gate."""
-    top_k: Optional[int] = None
+
+    top_k: int | None = None
     no_rerank: bool = False
     no_mmr: bool = False
     no_rrf: bool = False
 
     @classmethod
-    def parse(cls, raw: Optional[str]) -> "WeakenSpec":
+    def parse(cls, raw: str | None) -> WeakenSpec:
         spec = cls()
         if not raw:
             return spec
@@ -74,7 +79,7 @@ class WeakenSpec:
     def is_active(self) -> bool:
         return any([self.top_k is not None, self.no_rerank, self.no_mmr, self.no_rrf])
 
-    def as_dict(self) -> Dict[str, object]:
+    def as_dict(self) -> dict[str, object]:
         return {
             "top_k": self.top_k,
             "no_rerank": self.no_rerank,
@@ -98,7 +103,7 @@ class EvalConfig:
     weaken: WeakenSpec = field(default_factory=WeakenSpec)
     # Optional single-modality filter (txt|pdf|docx|xlsx|image|audio|video).
     # When set, retrieval/generation/behavioral suites evaluate ONLY this modality.
-    modality: Optional[str] = None
+    modality: str | None = None
 
     def ensure_dirs(self) -> None:
         for p in (self.gold_dir, self.reports_dir, self.baselines_dir):

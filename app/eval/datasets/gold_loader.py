@@ -2,29 +2,29 @@
 
 Only returns rows that have been human-curated (no TODO values).
 """
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.eval.config import GOLD_DIR
 
-
-GOLD_FILES: Dict[str, str] = {
-    "txt":     "text_gold.jsonl",
-    "pdf":     "pdf_gold.jsonl",
-    "docx":    "docx_gold.jsonl",
-    "xlsx":    "xlsx_gold.jsonl",
-    "image":   "image_gold.jsonl",
-    "audio":   "audio_gold.jsonl",
-    "video":   "video_gold.jsonl",
+GOLD_FILES: dict[str, str] = {
+    "txt": "text_gold.jsonl",
+    "pdf": "pdf_gold.jsonl",
+    "docx": "docx_gold.jsonl",
+    "xlsx": "xlsx_gold.jsonl",
+    "image": "image_gold.jsonl",
+    "audio": "audio_gold.jsonl",
+    "video": "video_gold.jsonl",
     "routing": "routing_gold.jsonl",
-    "e2e":     "e2e_gold.jsonl",
+    "e2e": "e2e_gold.jsonl",
 }
 
 
-def _is_curated(row: Dict[str, Any]) -> bool:
+def _is_curated(row: dict[str, Any]) -> bool:
     """Return True only if this row has real (non-TODO) ground truth."""
     rel = row.get("relevant_chunk_ids")
     ans = row.get("reference_answer", "")
@@ -54,7 +54,7 @@ def load_gold(
     modality: str,
     gold_dir: Path = GOLD_DIR,
     include_todos: bool = False,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Load gold rows for a modality. By default skips unreviewed (TODO) rows."""
     fname = GOLD_FILES.get(modality)
     if not fname:
@@ -81,15 +81,15 @@ def load_gold(
 
 def load_all_gold(
     gold_dir: Path = GOLD_DIR,
-    modalities: Optional[List[str]] = None,
+    modalities: list[str] | None = None,
     include_todos: bool = False,
-) -> Dict[str, List[Dict[str, Any]]]:
+) -> dict[str, list[dict[str, Any]]]:
     """Load gold sets for all (or specified) modalities."""
     targets = modalities or list(GOLD_FILES.keys())
     return {m: load_gold(m, gold_dir=gold_dir, include_todos=include_todos) for m in targets}
 
 
-def gold_stats(gold_dir: Path = GOLD_DIR) -> Dict[str, Dict[str, int]]:
+def gold_stats(gold_dir: Path = GOLD_DIR) -> dict[str, dict[str, int]]:
     """Return {modality: {total, curated, todo}} counts."""
     stats = {}
     for modality, fname in GOLD_FILES.items():

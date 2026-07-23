@@ -5,7 +5,7 @@ without the model loaded. Structural checks only (server responds, model
 generates SOME non-empty text) — no answer-content/accuracy scoring.
 
 Start the server first to actually run these:
-    bash start_server.sh
+    python start_server.py
     pytest tests/integration/test_llm_server_smoke.py -v
 """
 

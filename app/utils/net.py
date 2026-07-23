@@ -6,6 +6,7 @@ direct TCP peer is a configured trusted proxy (settings.TRUSTED_PROXY_IPS) —
 otherwise it's attacker-controlled and any IP-keyed limit built on it (rate
 limits, guest quotas) is trivially bypassed by spoofing the header.
 """
+
 from __future__ import annotations
 
 from fastapi import Request

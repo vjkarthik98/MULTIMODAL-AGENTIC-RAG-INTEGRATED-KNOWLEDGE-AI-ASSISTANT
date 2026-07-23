@@ -5,16 +5,16 @@ then asks cross-modal queries to isolate per-modality regressions.
 Uses the retrieval + generation metrics for each modality so a regression
 in (e.g.) PDF ingestion shows up as a distinct per-modality metric drop.
 """
+
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List
+from typing import Any
 
 from app.eval.config import EvalConfig
 from app.eval.datasets.gold_loader import load_all_gold
 from app.eval.metrics.base import MetricResult, SuiteResult
 from app.eval.metrics.retrieval import aggregate_retrieval_metrics
-
 
 _MODALITIES = ["txt", "pdf", "docx", "xlsx", "image", "audio", "video"]
 
@@ -52,13 +52,15 @@ def run_multimodal_suite(cfg: EvalConfig) -> SuiteResult:
     any_results = False
     for modality, rows in gold.items():
         if not rows:
-            result.add(MetricResult.empty(
-                f"{modality}_recall_at_5",
-                f"no curated {modality} gold rows",
-            ))
+            result.add(
+                MetricResult.empty(
+                    f"{modality}_recall_at_5",
+                    f"no curated {modality} gold rows",
+                )
+            )
             continue
 
-        eval_results: List[Dict[str, Any]] = []
+        eval_results: list[dict[str, Any]] = []
         for row in rows:
             query = row.get("query", "")
             relevant_ids = row.get("relevant_chunk_ids", [])
@@ -87,14 +89,16 @@ def run_multimodal_suite(cfg: EvalConfig) -> SuiteResult:
                 elif cid is not None:
                     retrieved_ids.append(str(cid))
 
-            eval_results.append({
-                "query": query,
-                "retrieved_ids": retrieved_ids,
-                "retrieved_docs": retrieved,
-                "relevant_ids": relevant_ids,
-                "row_id": row["id"],
-                "tags": row.get("tags", []),
-            })
+            eval_results.append(
+                {
+                    "query": query,
+                    "retrieved_ids": retrieved_ids,
+                    "retrieved_docs": retrieved,
+                    "relevant_ids": relevant_ids,
+                    "row_id": row["id"],
+                    "tags": row.get("tags", []),
+                }
+            )
 
         if not eval_results:
             continue

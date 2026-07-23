@@ -7,9 +7,9 @@ import os
 import shutil
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from app.core.config import settings
 from app.ingestion.schema import (
@@ -20,8 +20,6 @@ from app.ingestion.schema import (
     FileTooLargeError,
     IngestedDocument,
     MalwareDetectedError,
-    ProcessingResult,
-    UniversalMetadata,
     UnsupportedMimeError,
 )
 from app.utils.logger import get_logger
@@ -29,11 +27,13 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-# PROMETHEUS METRICS 
+# PROMETHEUS METRICS
+
 
 def _get_metrics():
     try:
         from prometheus_client import Counter, Gauge, Histogram
+
         ingestion_duration = Histogram(
             "file_ingestion_duration_seconds",
             "Ingestion duration by modality",
@@ -65,17 +65,17 @@ def _get_metrics():
         )
         return {
             "ingestion_duration": ingestion_duration,
-            "ingestion_errors":   ingestion_errors,
-            "chunk_count":        chunk_count,
-            "embedding_latency":  embedding_latency,
-            "queue_depth":        queue_depth,
-            "pii_redacted":       pii_redacted,
+            "ingestion_errors": ingestion_errors,
+            "chunk_count": chunk_count,
+            "embedding_latency": embedding_latency,
+            "queue_depth": queue_depth,
+            "pii_redacted": pii_redacted,
         }
     except Exception:
         return {}
 
 
-_METRICS: Dict[str, Any] = {}
+_METRICS: dict[str, Any] = {}
 
 if settings.PROMETHEUS_ENABLED:
     try:
@@ -95,9 +95,7 @@ def _record_duration(modality: str, duration: float) -> None:
 def _record_error(modality: str, error_type: str) -> None:
     try:
         if "ingestion_errors" in _METRICS:
-            _METRICS["ingestion_errors"].labels(
-                modality=modality, error_type=error_type
-            ).inc()
+            _METRICS["ingestion_errors"].labels(modality=modality, error_type=error_type).inc()
     except Exception:
         pass
 
@@ -128,6 +126,7 @@ def _set_queue_depth(depth: int) -> None:
 
 # SHA-256 FILE HASH — SECTION 2.2
 
+
 def _sha256(file_path: str) -> str:
     h = hashlib.sha256()
     with open(file_path, "rb") as f:
@@ -137,6 +136,7 @@ def _sha256(file_path: str) -> str:
 
 
 # DISK SPACE GUARD — SECTION 2.3
+
 
 def _check_disk_space(path: str) -> None:
     try:
@@ -155,11 +155,13 @@ def _check_disk_space(path: str) -> None:
 
 # CLAMAV MALWARE SCAN — SECTION 5
 
+
 def _malware_scan(file_path: str) -> None:
     if not settings.CLAMAV_ENABLED:
         return
     try:
         import pyclamd
+
         cd = pyclamd.ClamdNetworkSocket(
             host=settings.CLAMAV_HOST,
             port=settings.CLAMAV_PORT,
@@ -191,7 +193,7 @@ _TEXT_LIKE_EXTS = {".txt", ".md", ".markdown", ".csv", ".json", ".log"}
 _CORRUPTION_SCAN_MAX_BYTES = 2 * 1024 * 1024  # 2 MiB
 
 
-def _scan_corruption(file_path: str) -> List[str]:
+def _scan_corruption(file_path: str) -> list[str]:
     """Return a list of corruption reason codes for a text-like file.
 
     An empty list means the file looks clean. A non-empty list is
@@ -211,7 +213,7 @@ def _scan_corruption(file_path: str) -> List[str]:
     if not raw:
         return []
 
-    reasons: List[str] = []
+    reasons: list[str] = []
 
     # NULL BYTES — strongest signal of "this is not text"
     if b"\x00" in raw:
@@ -228,16 +230,13 @@ def _scan_corruption(file_path: str) -> List[str]:
     # garbage even when null bytes are absent.
     tail = raw[-64:] if len(raw) >= 64 else raw
     if tail:
-        non_printable = sum(
-            1 for b in tail
-            if b < 0x20 and b not in (0x09, 0x0A, 0x0D)
-        )
+        non_printable = sum(1 for b in tail if b < 0x20 and b not in (0x09, 0x0A, 0x0D))
         if non_printable / len(tail) >= 0.10:
             reasons.append("binary_tail")
 
     # DECODE TEST — try utf-8 strict, fall back to utf-8-sig (strips BOM).
     # If neither works, the file is not valid UTF-8 text.
-    decoded: Optional[str] = None
+    decoded: str | None = None
     for enc in ("utf-8", "utf-8-sig"):
         try:
             decoded = raw.decode(enc)
@@ -258,10 +257,7 @@ def _scan_corruption(file_path: str) -> List[str]:
 
         # CONTROL-CHAR RATIO — non-printable, non-whitespace control
         # codepoints in decoded text.
-        ctrl = sum(
-            1 for ch in decoded
-            if ord(ch) < 0x20 and ch not in ("\t", "\n", "\r")
-        )
+        ctrl = sum(1 for ch in decoded if ord(ch) < 0x20 and ch not in ("\t", "\n", "\r"))
         ctrl_ratio = ctrl / len(decoded)
         if ctrl_ratio >= 0.01:
             reasons.append(f"control_char_ratio={ctrl_ratio:.4f}")
@@ -271,6 +267,7 @@ def _scan_corruption(file_path: str) -> List[str]:
 
 # SHA-256 DEDUP CHECK AGAINST QDRANT — SECTION 2.3
 
+
 def _check_duplicate(file_hash: str, session_id: str, user_id: str = "") -> bool:
     if not settings.DEDUP_ENABLED:
         return False
@@ -278,6 +275,7 @@ def _check_duplicate(file_hash: str, session_id: str, user_id: str = "") -> bool
         return False  # can't do tenant-safe dedup without user_id — skip silently
     try:
         from app.core.infra_registry import infra
+
         vs = infra.get_vector_store()
         if vs is None:
             return False
@@ -296,8 +294,9 @@ def _check_duplicate(file_hash: str, session_id: str, user_id: str = "") -> bool
 
 # MODALITY COUNTS
 
-def _modality_counts(docs: List[IngestedDocument]) -> Dict[str, int]:
-    counts: Dict[str, int] = {}
+
+def _modality_counts(docs: list[IngestedDocument]) -> dict[str, int]:
+    counts: dict[str, int] = {}
     for d in docs:
         m = getattr(d, "modality", "unknown")
         counts[m] = counts.get(m, 0) + 1
@@ -306,7 +305,8 @@ def _modality_counts(docs: List[IngestedDocument]) -> Dict[str, int]:
 
 # VALID CHUNK FILTER
 
-def _valid_chunks(docs: List[IngestedDocument]) -> List[IngestedDocument]:
+
+def _valid_chunks(docs: list[IngestedDocument]) -> list[IngestedDocument]:
     result = []
     for d in docs:
         text = getattr(d, "text", "").strip()
@@ -322,8 +322,9 @@ def _valid_chunks(docs: List[IngestedDocument]) -> List[IngestedDocument]:
 
 # VALID EMBEDDING FILTER
 
-def _valid_embeddings(docs: List[IngestedDocument]) -> Tuple[List[IngestedDocument], int]:
-    valid:   List[IngestedDocument] = []
+
+def _valid_embeddings(docs: list[IngestedDocument]) -> tuple[list[IngestedDocument], int]:
+    valid: list[IngestedDocument] = []
     invalid: int = 0
     for d in docs:
         emb = getattr(d, "embedding", None)
@@ -341,11 +342,12 @@ def _valid_embeddings(docs: List[IngestedDocument]) -> Tuple[List[IngestedDocume
 
 # SPLIT BY EMBEDDING SPACE
 
+
 def _split_by_modality(
-    docs: List[IngestedDocument],
-) -> Tuple[List[IngestedDocument], List[IngestedDocument]]:
-    text_docs:   List[IngestedDocument] = []
-    vision_docs: List[IngestedDocument] = []
+    docs: list[IngestedDocument],
+) -> tuple[list[IngestedDocument], list[IngestedDocument]]:
+    text_docs: list[IngestedDocument] = []
+    vision_docs: list[IngestedDocument] = []
     for d in docs:
         space = (getattr(d, "structure", {}) or {}).get("embedding_space", "text")
         if space == "vision":
@@ -360,11 +362,12 @@ def _split_by_modality(
 # Safe here because dedup is in-memory within a single ingestion run; it is
 # not persisted or compared across processes (cross-run dedup uses Qdrant IDs).
 
-def _dedup_chunks(docs: List[IngestedDocument]) -> List[IngestedDocument]:
-    seen:   set                    = set()
-    unique: List[IngestedDocument] = []
+
+def _dedup_chunks(docs: list[IngestedDocument]) -> list[IngestedDocument]:
+    seen: set = set()
+    unique: list[IngestedDocument] = []
     for d in docs:
-        text      = getattr(d, "text", "")
+        text = getattr(d, "text", "")
         structure = getattr(d, "structure", {}) or {}
         key = hash((text[:100], structure.get("doc_id", ""), getattr(d, "chunk_id", "")))
         if key in seen:
@@ -376,22 +379,25 @@ def _dedup_chunks(docs: List[IngestedDocument]) -> List[IngestedDocument]:
 
 # BATCHED TEXT EMBEDDING WITH PROMETHEUS TIMING
 
+
 def _stream_embed_and_store(
-    text_chunks: List[IngestedDocument],
-    vision_chunks: List[IngestedDocument],
+    text_chunks: list[IngestedDocument],
+    vision_chunks: list[IngestedDocument],
     embedder: Any,
     vector_store: Any,
     session_id: str,
     user_id: str,
     micro_batch: int = 1,
-) -> Tuple[int, int]:
+) -> tuple[int, int]:
     """Embed and store one micro-batch at a time, clearing GPU cache between batches.
 
     Returns (total_embedded, total_stored).
     """
     import gc
+
     try:
         import torch
+
         _cuda = torch.cuda.is_available()
     except ImportError:
         _cuda = False
@@ -402,13 +408,13 @@ def _stream_embed_and_store(
         gc.collect()
 
     total_embedded = 0
-    total_stored   = 0
+    total_stored = 0
     # empty_cache()+gc.collect() after EVERY micro-batch was costing more than
     # the embeds themselves (and forced micro_batch=1 era behavior). Clearing
     # periodically + on failure keeps the OOM protection without the tax.
     clear_every = max(int(settings.INGESTION_CACHE_CLEAR_EVERY), 1)
     batches_done = 0
-    qdrant_batch  = max(int(settings.QDRANT_BATCH_SIZE), micro_batch)
+    qdrant_batch = max(int(settings.QDRANT_BATCH_SIZE), micro_batch)
 
     def _flush(pending: list) -> int:
         if not pending:
@@ -451,13 +457,16 @@ def _stream_embed_and_store(
     # VISION CHUNKS — micro-batched embed, accumulated Qdrant upsert
     if vision_chunks:
         from app.core.model_loader import model_loader as _ml
+
         pending_vision: list = []
         for i in range(0, len(vision_chunks), micro_batch):
             batch = vision_chunks[i : i + micro_batch]
             t_vis = time.time()
             try:
                 multimodal = _ml.get_multimodal_embedder()
-                txt_from_vis, vis_embedded = multimodal.embed_documents(batch, session_id=session_id)
+                txt_from_vis, vis_embedded = multimodal.embed_documents(
+                    batch, session_id=session_id
+                )
                 _record_embed_latency(settings.SIGLIP_MODEL, round(time.time() - t_vis, 3))
                 combined = vis_embedded + txt_from_vis
                 valid, _ = _valid_embeddings(combined)
@@ -488,36 +497,38 @@ def _stream_embed_and_store(
 
 # FALLBACK VECTOR STORE
 
+
 class _UnavailableVectorStore:
     def insert_documents(self, documents: Any, session_id: str = "") -> None:
         logger.warning(event="vector_store_unavailable_skipping_insert")
 
-    def search_by_payload(self, **kwargs: Any) -> List:
+    def search_by_payload(self, **kwargs: Any) -> list:
         return []
 
 
 # PROGRESS EVENT EMITTER — SECTION 4.6
 
+
 class _ProgressEmitter:
 
     # Map (stage, status) → IngestJob status string.  Only "started" transitions
     # are relayed so the job status never goes backwards.
-    _STAGE_MAP: Dict[Tuple[str, str], str] = {
-        ("ingest",  "started"):    "extracting",
-        ("chunk",   "started"):    "chunking",
-        ("embed",   "started"):    "embedding",
-        ("store",   "started"):    "embedding",   # store is fast; keep "embedding" shown
+    _STAGE_MAP: dict[tuple[str, str], str] = {
+        ("ingest", "started"): "extracting",
+        ("chunk", "started"): "chunking",
+        ("embed", "started"): "embedding",
+        ("store", "started"): "embedding",  # store is fast; keep "embedding" shown
     }
 
     def __init__(
         self,
         file_name: str,
         session_id: str,
-        job_cb: Optional[Any] = None,  # Callable[[str], None] — updates IngestJob status
+        job_cb: Any | None = None,  # Callable[[str], None] — updates IngestJob status
     ) -> None:
-        self.file_name  = file_name
+        self.file_name = file_name
         self.session_id = session_id
-        self._job_cb    = job_cb
+        self._job_cb = job_cb
 
     def emit(self, stage: str, status: str, **kwargs: Any) -> None:
         logger.info(
@@ -541,7 +552,8 @@ class _ProgressEmitter:
 # Prevents OOM when multiple users upload simultaneously — each concurrent GPU job
 # (embedding batch_size=128, Whisper 1.55GB, Qwen2-VL 2.2GB) adds to VRAM pressure.
 # Max 3 concurrent jobs leaves headroom on A10G 24GB with ~14GB resident models.
-_GPU_SEMAPHORE: Optional[asyncio.Semaphore] = None
+_GPU_SEMAPHORE: asyncio.Semaphore | None = None
+
 
 def _gpu_semaphore() -> asyncio.Semaphore:
     global _GPU_SEMAPHORE
@@ -553,28 +565,29 @@ def _gpu_semaphore() -> asyncio.Semaphore:
 
 # INGEST JOB — PROGRESS TRACKING (Phase 8)
 
+
 @dataclass
 class IngestJob:
-    job_id:       str
-    filename:     str
-    modality:     str
-    status:       str          # "queued"|"extracting"|"chunking"|"embedding"|"done"|"error"
-    progress:     float = 0.0  # 0.0–1.0
-    chunks_done:  int   = 0
-    chunks_total: int   = 0
-    error:        Optional[str] = None
+    job_id: str
+    filename: str
+    modality: str
+    status: str  # "queued"|"extracting"|"chunking"|"embedding"|"done"|"error"
+    progress: float = 0.0  # 0.0–1.0
+    chunks_done: int = 0
+    chunks_total: int = 0
+    error: str | None = None
     # Wall-clock start + file size — used by the status endpoint to synthesise a
     # smooth, time-based progress estimate during the long audio/video
     # transcription phase (Whisper + diarization), which otherwise reports no
     # incremental progress and leaves the upload bar stalled.
-    started_at:   float = 0.0
-    size_bytes:   int   = 0
+    started_at: float = 0.0
+    size_bytes: int = 0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-_JOB_TTL_SECONDS = 3600   # 1 hour
+_JOB_TTL_SECONDS = 3600  # 1 hour
 
 
 def _job_key(job_id: str) -> str:
@@ -591,6 +604,7 @@ def _store_job(job: IngestJob) -> None:
     """
     try:
         from app.core.infra_registry import infra
+
         cache = infra.get_cache()
         if cache is not None:
             cache.set(_job_key(job.job_id), json.dumps(job.to_dict()), ex=_JOB_TTL_SECONDS)
@@ -598,10 +612,11 @@ def _store_job(job: IngestJob) -> None:
         pass
 
 
-def get_ingest_job(job_id: str) -> Optional[Dict[str, Any]]:
+def get_ingest_job(job_id: str) -> dict[str, Any] | None:
     """Fetch IngestJob dict from the local Redis cache. Returns None if not found."""
     try:
         from app.core.infra_registry import infra
+
         cache = infra.get_cache()
         if cache is not None:
             raw = cache.get(_job_key(job_id))
@@ -614,15 +629,17 @@ def get_ingest_job(job_id: str) -> Optional[Dict[str, Any]]:
 
 # INGESTION PIPELINE CLASS
 
+
 class IngestionPipeline:
 
     def __init__(self) -> None:
         from app.core.infra_registry import infra
+
         self.vector_store = infra.get_vector_store() or _UnavailableVectorStore()
-        self.bm25         = infra.get_bm25()
-        self.max_chunks   = settings.MAX_CHUNKS
-        self.batch_size   = settings.INGESTION_BATCH_SIZE
-        self._semaphore   = asyncio.Semaphore(settings.ASYNC_SEMAPHORE_WORKERS)
+        self.bm25 = infra.get_bm25()
+        self.max_chunks = settings.MAX_CHUNKS
+        self.batch_size = settings.INGESTION_BATCH_SIZE
+        self._semaphore = asyncio.Semaphore(settings.ASYNC_SEMAPHORE_WORKERS)
         self._queue: asyncio.Queue = asyncio.Queue()
 
     # ASYNC PROCESS FILE — SECTION 4.6
@@ -631,21 +648,26 @@ class IngestionPipeline:
         self,
         file_path: str,
         session_id: str = "default",
-        user_id: Optional[str] = None,
-        _job_cb: Optional[Any] = None,
-    ) -> Dict[str, Any]:
+        user_id: str | None = None,
+        _job_cb: Any | None = None,
+    ) -> dict[str, Any]:
         import functools
-        async with _gpu_semaphore():        # module-level: shared across all pipeline instances
-            async with self._semaphore:    # instance-level: local concurrency cap
+
+        async with _gpu_semaphore():  # module-level: shared across all pipeline instances
+            async with self._semaphore:  # instance-level: local concurrency cap
                 # Run on the dedicated GPU ingest executor — its thread already
                 # has PyTorch CUDA initialized from startup warmup.  Using the
                 # default asyncio executor (a brand-new thread) causes a SIGSEGV
                 # because a fresh thread tries to init PyTorch CUBLAS after
                 # llama.cpp already owns the CUDA device.
                 from app.core.startup_optimizer import get_gpu_ingest_executor
+
                 loop = asyncio.get_running_loop()
                 fn = functools.partial(
-                    self.process_file, file_path, session_id, user_id,
+                    self.process_file,
+                    file_path,
+                    session_id,
+                    user_id,
                     _job_cb=_job_cb,
                 )
                 # Audio/video need a much longer cap than documents — Whisper +
@@ -653,11 +675,24 @@ class IngestionPipeline:
                 # many minutes. A too-short timeout fires mid-run, fails the job,
                 # and deletes the staging file out from under frame extraction.
                 _ext = Path(file_path).suffix.lstrip(".").lower()
-                _media_exts = {"mp4", "mov", "avi", "mkv", "webm",
-                               "mp3", "wav", "m4a", "flac", "aac", "ogg"}
-                _timeout = (settings.MEDIA_PROCESSING_TIMEOUT_SEC
-                            if _ext in _media_exts
-                            else settings.FILE_PROCESSING_TIMEOUT_SEC)
+                _media_exts = {
+                    "mp4",
+                    "mov",
+                    "avi",
+                    "mkv",
+                    "webm",
+                    "mp3",
+                    "wav",
+                    "m4a",
+                    "flac",
+                    "aac",
+                    "ogg",
+                }
+                _timeout = (
+                    settings.MEDIA_PROCESSING_TIMEOUT_SEC
+                    if _ext in _media_exts
+                    else settings.FILE_PROCESSING_TIMEOUT_SEC
+                )
                 return await asyncio.wait_for(
                     loop.run_in_executor(get_gpu_ingest_executor(), fn),
                     timeout=_timeout,
@@ -687,9 +722,9 @@ class IngestionPipeline:
         self,
         file_path: str,
         session_id: str = "default",
-        user_id: Optional[str] = None,
+        user_id: str | None = None,
     ) -> asyncio.Future:
-        loop   = asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
         await self._queue.put((file_path, session_id, future, user_id))
         _set_queue_depth(self._queue.qsize())
@@ -702,8 +737,8 @@ class IngestionPipeline:
         self,
         file_path: str,
         session_id: str = "default",
-        user_id: Optional[str] = None,
-        kb_path: Optional[str] = None,
+        user_id: str | None = None,
+        kb_path: str | None = None,
     ) -> str:
         """Start ingestion in background. Returns job_id immediately.
 
@@ -711,12 +746,16 @@ class IngestionPipeline:
         pipeline fails we remove it so a broken file doesn't linger in the sidebar.
         The staging file at file_path is always deleted when the job finishes.
         """
-        job_id   = str(uuid.uuid4())
+        job_id = str(uuid.uuid4())
         filename = Path(file_path).name
-        ext      = Path(file_path).suffix.lstrip(".").lower()
+        ext = Path(file_path).suffix.lstrip(".").lower()
         modality = {
-            "mp3": "mp3", "wav": "mp3", "m4a": "mp3",
-            "mp4": "mp4", "mov": "mp4", "avi": "mp4",
+            "mp3": "mp3",
+            "wav": "mp3",
+            "m4a": "mp3",
+            "mp4": "mp4",
+            "mov": "mp4",
+            "avi": "mp4",
         }.get(ext, ext)
 
         try:
@@ -743,16 +782,20 @@ class IngestionPipeline:
                 job.status = "extracting"
                 _store_job(job)
                 result = await self.process_file_async(
-                    file_path, session_id, user_id, _job_cb=_on_stage,
+                    file_path,
+                    session_id,
+                    user_id,
+                    _job_cb=_on_stage,
                 )
-                job.status       = "done"
-                job.progress     = 1.0
-                job.chunks_done  = result.get("chunks", 0) if isinstance(result, dict) else 0
+                job.status = "done"
+                job.progress = 1.0
+                job.chunks_done = result.get("chunks", 0) if isinstance(result, dict) else 0
                 job.chunks_total = job.chunks_done
                 # Copy to knowledge_base only after embeddings are confirmed in Qdrant.
                 if kb_path:
                     try:
                         import shutil as _shutil
+
                         Path(kb_path).parent.mkdir(parents=True, exist_ok=True)
                         _shutil.copy2(file_path, kb_path)
                     except Exception as _cp_err:
@@ -769,7 +812,7 @@ class IngestionPipeline:
                 )
             except Exception as exc:
                 job.status = "error"
-                job.error  = str(exc)
+                job.error = str(exc)
                 logger.warning(event="background_ingest_failed", job_id=job_id, error=str(exc))
                 # kb_path was never written — nothing to remove.
             finally:
@@ -794,24 +837,25 @@ class IngestionPipeline:
         self,
         file_path: str,
         session_id: str = "default",
-        user_id: Optional[str] = None,
-        _job_cb: Optional[Any] = None,
-    ) -> Dict[str, Any]:
+        user_id: str | None = None,
+        _job_cb: Any | None = None,
+    ) -> dict[str, Any]:
 
         if not session_id:
             raise ValueError("SESSION_ID_REQUIRED")
 
         file_name = os.path.basename(file_path)
-        start     = time.time()
-        progress  = _ProgressEmitter(file_name, session_id, job_cb=_job_cb)
+        start = time.time()
+        progress = _ProgressEmitter(file_name, session_id, job_cb=_job_cb)
 
         # OTEL SPAN STUB
-        span_ctx: Dict[str, Any] = {"trace_id": str(uuid.uuid4())}
+        span_ctx: dict[str, Any] = {"trace_id": str(uuid.uuid4())}
 
         # SET ACTIVE USER FOR ALL DOWNSTREAM STORAGE — every ingestor's
         # resolved_*_dir() helpers read this contextvar so PDF images,
         # frames, OCR thumbs etc. all land under data/users/{user_id}/.
-        from app.utils.paths import set_current_user, reset_current_user
+        from app.utils.paths import reset_current_user, set_current_user
+
         effective_user_id = user_id or settings.DEFAULT_DEV_USER_ID
         _user_token = set_current_user(effective_user_id)
 
@@ -875,16 +919,18 @@ class IngestionPipeline:
             t_ingest = time.time()
 
             from app.ingestion.router import route_ingestion_sync
+
             docs = route_ingestion_sync(file_path, session_id=session_id, user_id=user_id)
 
             if not docs:
                 raise ValueError("INGESTION_EMPTY")
 
             ingest_latency = round(time.time() - t_ingest, 2)
-            modality       = getattr(docs[0], "modality", "unknown") if docs else "unknown"
+            modality = getattr(docs[0], "modality", "unknown") if docs else "unknown"
 
             progress.emit(
-                "ingest", "completed",
+                "ingest",
+                "completed",
                 docs=len(docs),
                 modality=modality,
                 latency=ingest_latency,
@@ -912,7 +958,7 @@ class IngestionPipeline:
                 raise ValueError("NO_VALID_CHUNKS")
 
             if len(chunks) > self.max_chunks:
-                chunks = chunks[:self.max_chunks]
+                chunks = chunks[: self.max_chunks]
                 logger.warning(
                     event="chunk_limit_applied",
                     limit=self.max_chunks,
@@ -925,7 +971,8 @@ class IngestionPipeline:
             _record_chunks(modality, len(chunks))
 
             progress.emit(
-                "chunk", "completed",
+                "chunk",
+                "completed",
                 chunks=len(chunks),
                 latency=chunk_latency,
             )
@@ -936,7 +983,7 @@ class IngestionPipeline:
                     c.structure = {}
                 c.structure.setdefault("checksum_sha256", file_hash)
                 c.structure.setdefault("file_size_bytes", file_size)
-                c.structure.setdefault("ingestion_time",  time.time())
+                c.structure.setdefault("ingestion_time", time.time())
                 if user_id:
                     c.structure["user_id"] = user_id
 
@@ -966,6 +1013,7 @@ class IngestionPipeline:
             # CLEAN UP PERSISTENT FRAME STAGING DIR — done after all embeddings stored.
             if modality in ("video", "mp4"):
                 import shutil as _shutil
+
                 for chunk in chunks:
                     asset = (getattr(chunk, "structure", {}) or {}).get("asset_path", "")
                     if asset:
@@ -980,7 +1028,8 @@ class IngestionPipeline:
             embed_latency = round(time.time() - t_embed, 2)
 
             progress.emit(
-                "embed", "completed",
+                "embed",
+                "completed",
                 embedded=total_embedded,
                 latency=embed_latency,
             )
@@ -996,11 +1045,11 @@ class IngestionPipeline:
             # (Qdrant results are available immediately; BM25 catches up before
             # the next query is likely issued).
             if total > 0 and self.bm25:
-                _bm25_ref   = self.bm25
+                _bm25_ref = self.bm25
                 _chunks_ref = list(chunks)
-                _sess_ref   = session_id
-                _uid_ref    = user_id
-                _mod_ref    = modality
+                _sess_ref = session_id
+                _uid_ref = user_id
+                _mod_ref = modality
 
                 def _bm25_task() -> None:
                     try:
@@ -1014,6 +1063,7 @@ class IngestionPipeline:
                         _record_error(_mod_ref, "bm25_update_failed")
 
                 import concurrent.futures as _cf
+
                 _cf.ThreadPoolExecutor(max_workers=1).submit(_bm25_task)
 
             store_latency = round(time.time() - t_store, 2)
@@ -1022,7 +1072,8 @@ class IngestionPipeline:
             _record_duration(modality, total_latency)
 
             progress.emit(
-                "store", "completed",
+                "store",
+                "completed",
                 stored=total,
                 latency=store_latency,
             )
@@ -1045,37 +1096,37 @@ class IngestionPipeline:
             )
 
             # Phase 24.4 — collect doc_id, pages, warnings from ingested chunks
-            _doc_id   = chunks[0].doc_id() if chunks else ""
-            _pages    = chunks[0].structure.get("total_pages") if chunks else None
-            _warnings: List[str] = []
+            _doc_id = chunks[0].doc_id() if chunks else ""
+            _pages = chunks[0].structure.get("total_pages") if chunks else None
+            _warnings: list[str] = []
             for _c in chunks:
-                for _w in (getattr(_c, "warnings", None) or []):
+                for _w in getattr(_c, "warnings", None) or []:
                     if _w not in _warnings:
                         _warnings.append(_w)
 
             return {
-                "status":            "success",
-                "doc_id":            _doc_id,
-                "filename":          file_name,
-                "modality":          modality,
-                "chunks":            len(chunks),
-                "stored":            total,
-                "session_id":        session_id,
+                "status": "success",
+                "doc_id": _doc_id,
+                "filename": file_name,
+                "modality": modality,
+                "chunks": len(chunks),
+                "stored": total,
+                "session_id": session_id,
                 "ingestion_time_sec": total_latency,
-                "pages":             _pages,
-                "warnings":          _warnings,
-                "file_hash":         file_hash,
-                "embedded":          total_embedded,
-                "user_id":           user_id,
-                "trace_id":          span_ctx["trace_id"],
+                "pages": _pages,
+                "warnings": _warnings,
+                "file_hash": file_hash,
+                "embedded": total_embedded,
+                "user_id": user_id,
+                "trace_id": span_ctx["trace_id"],
             }
 
         except DuplicateFileError as e:
             return {
-                "status":     "duplicate",
-                "message":    str(e),
+                "status": "duplicate",
+                "message": str(e),
                 "session_id": session_id,
-                "latency":    round(time.time() - start, 2),
+                "latency": round(time.time() - start, 2),
             }
 
         except (EmptyFileError, FileTooLargeError, UnsupportedMimeError, CorruptFileError) as e:
@@ -1125,14 +1176,14 @@ pipeline = IngestionPipeline()
 def process_file(
     file_path: str,
     session_id: str = "default",
-    user_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    user_id: str | None = None,
+) -> dict[str, Any]:
     return pipeline.process_file(file_path, session_id, user_id)
 
 
 async def process_file_async(
     file_path: str,
     session_id: str = "default",
-    user_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    user_id: str | None = None,
+) -> dict[str, Any]:
     return await pipeline.process_file_async(file_path, session_id, user_id)

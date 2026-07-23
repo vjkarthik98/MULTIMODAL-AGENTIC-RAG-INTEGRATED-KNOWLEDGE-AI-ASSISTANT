@@ -16,6 +16,7 @@ at https://hf.co/pyannote/speaker-diarization-3.1).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -24,21 +25,29 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Windows' default console codepage (cp1252) can't encode characters like
+# "✓" — reconfigure to UTF-8 so status prints below never crash the whole
+# download run over a cosmetic character. No-op on Linux/Mac (already UTF-8).
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 # ── env must be set before any HuggingFace import ────────────────────────────
 _project_root = Path(__file__).resolve().parents[3]
-_hf_home      = os.getenv("HF_HOME", str(_project_root / ".hf_cache"))
-_gguf_dir     = Path(_hf_home) / "gguf"
-_gguf_file    = "Qwen2.5-14B-Instruct-Q4_K_M.gguf"
+_hf_home = os.getenv("HF_HOME", str(_project_root / ".hf_cache"))
+_gguf_dir = Path(_hf_home) / "gguf"
+_gguf_file = "Qwen2.5-14B-Instruct-Q4_K_M.gguf"
 
-os.environ["HF_HOME"]            = _hf_home
-os.environ["HF_HUB_CACHE"]       = _hf_home + "/hub"
-os.environ["TRANSFORMERS_CACHE"]  = _hf_home + "/hub"
-os.environ["HF_DATASETS_CACHE"]   = _hf_home + "/datasets"
+os.environ["HF_HOME"] = _hf_home
+os.environ["HF_HUB_CACHE"] = _hf_home + "/hub"
+os.environ["TRANSFORMERS_CACHE"] = _hf_home + "/hub"
+os.environ["HF_DATASETS_CACHE"] = _hf_home + "/datasets"
 
 sys.path.insert(0, str(_project_root))
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv(str(_project_root / ".env"))
 except ImportError:
     pass
@@ -46,27 +55,119 @@ except ImportError:
 HF_TOKEN: str = os.getenv("HF_TOKEN", "")
 
 # ── model manifest ────────────────────────────────────────────────────────────
-# Each entry: key, model_id, type, size_gb, gated, optional
+# Each entry: key, model_id, type, size_gb, gated, optional, revision (optional).
+#
+# "revision" pins the exact HF Hub commit/tag downloaded — omit (or leave None)
+# to track the repo's default branch as before (current behavior, unchanged).
+# Once you know a good commit hash for a model (recorded in
+# .hf_cache/download_manifest.json's "revision" field after any download), set
+# it here to freeze that model against future upstream changes. This project
+# can't respons­ibly fabricate "correct" revision hashes sight-unseen — this is
+# the mechanism; filling in specific pins is an operational decision per model.
+#
+# Checksum verification (the other half of "pinned model file + checksum")
+# does NOT need a pre-known hash: _verify_or_record_checksum() records the
+# SHA-256 on first download and compares against it on every subsequent run,
+# so silent corruption or an unexpected upstream file swap is caught even
+# without "revision" ever being set.
 MODELS: list[dict] = [
     # ── Text / embedding ──────────────────────────────────────────────────────
-    {"key": "embedder",  "model_id": "BAAI/bge-large-en-v1.5",               "type": "sentence-transformers",    "size_gb": 1.35, "gated": False},
-    {"key": "reranker",  "model_id": "BAAI/bge-reranker-large",               "type": "sentence-transformers",    "size_gb": 1.34, "gated": False},
-    {"key": "ner",       "model_id": "dslim/bert-base-NER",                   "type": "token-classification",     "size_gb": 0.43, "gated": False},
-    {"key": "finbert",   "model_id": "yiyanghkust/finbert-tone",              "type": "sequence-classification",  "size_gb": 0.44, "gated": False},
-    {"key": "keybert",   "model_id": "sentence-transformers/all-MiniLM-L6-v2","type": "sentence-transformers",    "size_gb": 0.09, "gated": False},
-
+    {
+        "key": "embedder",
+        "model_id": "BAAI/bge-large-en-v1.5",
+        "type": "sentence-transformers",
+        "size_gb": 1.35,
+        "gated": False,
+    },
+    {
+        "key": "reranker",
+        "model_id": "BAAI/bge-reranker-large",
+        "type": "sentence-transformers",
+        "size_gb": 1.34,
+        "gated": False,
+    },
+    {
+        "key": "ner",
+        "model_id": "dslim/bert-base-NER",
+        "type": "token-classification",
+        "size_gb": 0.43,
+        "gated": False,
+    },
+    {
+        "key": "finbert",
+        "model_id": "yiyanghkust/finbert-tone",
+        "type": "sequence-classification",
+        "size_gb": 0.44,
+        "gated": False,
+    },
+    {
+        "key": "keybert",
+        "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+        "type": "sentence-transformers",
+        "size_gb": 0.09,
+        "gated": False,
+    },
     # ── Vision ────────────────────────────────────────────────────────────────
-    {"key": "siglip",    "model_id": "google/siglip-so400m-patch14-384",      "type": "transformers",             "size_gb": 1.76, "gated": False},
-    {"key": "blip",      "model_id": "Salesforce/blip-image-captioning-large","type": "blip-captioning",          "size_gb": 0.90, "gated": False},
-    {"key": "qwen2vl",   "model_id": "Qwen/Qwen2-VL-2B-Instruct",            "type": "qwen2vl",                  "size_gb": 2.20, "gated": False},
-    {"key": "trocr",     "model_id": "microsoft/trocr-large-printed",         "type": "vision-encoder-decoder",   "size_gb": 0.36, "gated": False},
-
+    {
+        "key": "siglip",
+        "model_id": "google/siglip-so400m-patch14-384",
+        "type": "transformers",
+        "size_gb": 1.76,
+        "gated": False,
+    },
+    {
+        "key": "blip",
+        "model_id": "Salesforce/blip-image-captioning-large",
+        "type": "blip-captioning",
+        "size_gb": 0.90,
+        "gated": False,
+    },
+    {
+        "key": "qwen2vl",
+        "model_id": "Qwen/Qwen2-VL-2B-Instruct",
+        "type": "qwen2vl",
+        "size_gb": 2.20,
+        "gated": False,
+    },
+    {
+        "key": "trocr",
+        "model_id": "microsoft/trocr-large-printed",
+        "type": "vision-encoder-decoder",
+        "size_gb": 0.36,
+        "gated": False,
+    },
     # ── Audio ─────────────────────────────────────────────────────────────────
-    {"key": "whisper",   "model_id": "Systran/faster-whisper-large-v3",       "type": "faster-whisper",        "size_gb": 1.55, "gated": False},
-    {"key": "diarizer",  "model_id": "pyannote/speaker-diarization-3.1",       "type": "pyannote", "size_gb": 0.60, "gated": True, "optional": True},
-    {"key": "seg30",     "model_id": "pyannote/segmentation-3.0",              "type": "pyannote", "size_gb": 0.20, "gated": True, "optional": True},
-    {"key": "wespeaker", "model_id": "pyannote/wespeaker-voxceleb-resnet34-LM","type": "pyannote", "size_gb": 0.10, "gated": True, "optional": True},
-
+    {
+        "key": "whisper",
+        "model_id": "Systran/faster-whisper-large-v3",
+        "type": "faster-whisper",
+        "size_gb": 1.55,
+        "gated": False,
+    },
+    {
+        "key": "diarizer",
+        "model_id": "pyannote/speaker-diarization-3.1",
+        "type": "pyannote",
+        "size_gb": 0.60,
+        "gated": True,
+        "optional": True,
+    },
+    {
+        "key": "seg30",
+        "model_id": "pyannote/segmentation-3.0",
+        "type": "pyannote",
+        "size_gb": 0.20,
+        "gated": True,
+        "optional": True,
+    },
+    {
+        "key": "wespeaker",
+        "model_id": "pyannote/wespeaker-voxceleb-resnet34-LM",
+        "type": "pyannote",
+        "size_gb": 0.10,
+        "gated": True,
+        "optional": True,
+    },
     # ── LLM (GGUF single-file) — handled separately below ────────────────────
     # key "gguf" is injected into the run loop, not listed here
 ]
@@ -77,17 +178,16 @@ GGUF_SIZE_GB = 9.0
 
 # ── cache detection ───────────────────────────────────────────────────────────
 
+
 def _is_hub_cached(model_id: str) -> bool:
-    cache_key    = "models--" + model_id.replace("/", "--")
-    snapshots    = Path(_hf_home) / "hub" / cache_key / "snapshots"
+    cache_key = "models--" + model_id.replace("/", "--")
+    snapshots = Path(_hf_home) / "hub" / cache_key / "snapshots"
     if not snapshots.exists():
         return False
     return any(
-        f.is_file()
-        for snap in snapshots.iterdir()
-        if snap.is_dir()
-        for f in snap.rglob("*")
+        f.is_file() for snap in snapshots.iterdir() if snap.is_dir() for f in snap.rglob("*")
     )
+
 
 def _is_gguf_cached() -> bool:
     return (_gguf_dir / _gguf_file).exists()
@@ -95,9 +195,13 @@ def _is_gguf_cached() -> bool:
 
 # ── per-type downloaders ──────────────────────────────────────────────────────
 
-def _dl_transformers(model_id: str, token: str) -> None:
-    from transformers import AutoModel, AutoTokenizer, AutoProcessor
+
+def _dl_transformers(model_id: str, token: str, revision: str | None = None) -> None:
+    from transformers import AutoModel, AutoProcessor, AutoTokenizer
+
     kw = {"token": token} if token else {}
+    if revision:
+        kw["revision"] = revision
     try:
         AutoProcessor.from_pretrained(model_id, **kw)
     except Exception:
@@ -108,45 +212,64 @@ def _dl_transformers(model_id: str, token: str) -> None:
     AutoModel.from_pretrained(model_id, **kw)
 
 
-def _dl_token_classification(model_id: str, token: str) -> None:
+def _dl_token_classification(model_id: str, token: str, revision: str | None = None) -> None:
     from transformers import AutoModelForTokenClassification, AutoTokenizer
+
     kw = {"token": token} if token else {}
+    if revision:
+        kw["revision"] = revision
     AutoTokenizer.from_pretrained(model_id, **kw)
     AutoModelForTokenClassification.from_pretrained(model_id, **kw)
 
 
-def _dl_sequence_classification(model_id: str, token: str) -> None:
+def _dl_sequence_classification(model_id: str, token: str, revision: str | None = None) -> None:
     from transformers import BertForSequenceClassification, BertTokenizer
+
     kw = {"token": token} if token else {}
+    if revision:
+        kw["revision"] = revision
     BertTokenizer.from_pretrained(model_id, **kw)
     BertForSequenceClassification.from_pretrained(model_id, **kw)
 
 
-def _dl_blip_captioning(model_id: str, token: str) -> None:
+def _dl_blip_captioning(model_id: str, token: str, revision: str | None = None) -> None:
     from transformers import BlipForConditionalGeneration, BlipProcessor
+
     kw = {"token": token} if token else {}
+    if revision:
+        kw["revision"] = revision
     BlipProcessor.from_pretrained(model_id, **kw)
     BlipForConditionalGeneration.from_pretrained(model_id, **kw)
 
 
-def _dl_sentence_transformers(model_id: str) -> None:
-    from sentence_transformers import SentenceTransformer, CrossEncoder
+def _dl_sentence_transformers(model_id: str, revision: str | None = None) -> None:
+    from sentence_transformers import CrossEncoder, SentenceTransformer
+
+    kw = {"revision": revision} if revision else {}
     if "reranker" in model_id.lower():
-        CrossEncoder(model_id)
+        CrossEncoder(model_id, **kw)
     else:
-        SentenceTransformer(model_id)
+        SentenceTransformer(model_id, **kw)
 
 
 def _dl_faster_whisper(model_id: str) -> None:
+    # NOTE: no revision pinning here — WhisperModel takes a CTranslate2 size
+    # shorthand / download_root, not a raw HF revision kwarg passed through
+    # to hf_hub_download internally in a way this script can safely target.
+    # Left unpinned rather than guessing at an unsupported argument.
     from faster_whisper import WhisperModel
+
     size = model_id.split("faster-whisper-", 1)[-1]
     WhisperModel(size, device="cpu", compute_type="int8", download_root=None)
 
 
-def _dl_vision_encoder_decoder(model_id: str, token: str) -> None:
+def _dl_vision_encoder_decoder(model_id: str, token: str, revision: str | None = None) -> None:
     import transformers
-    from transformers import VisionEncoderDecoderModel, AutoProcessor
+    from transformers import AutoProcessor, VisionEncoderDecoderModel
+
     kw = {"token": token} if token else {}
+    if revision:
+        kw["revision"] = revision
     AutoProcessor.from_pretrained(model_id, **kw)
     # TrOCR: suppress benign MISSING encoder.pooler.* (pooler unused in cross-attention
     # generation) and UNEXPECTED embed_positions._float_tensor (legacy positional buffer).
@@ -158,16 +281,19 @@ def _dl_vision_encoder_decoder(model_id: str, token: str) -> None:
         transformers.logging.set_verbosity(prev)
 
 
-def _dl_qwen2vl(model_id: str, token: str) -> None:
-    from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+def _dl_qwen2vl(model_id: str, token: str, revision: str | None = None) -> None:
+    from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+
     kw: dict = {"trust_remote_code": True}
     if token:
         kw["token"] = token
+    if revision:
+        kw["revision"] = revision
     AutoProcessor.from_pretrained(model_id, **kw)
     Qwen2VLForConditionalGeneration.from_pretrained(model_id, **kw)
 
 
-def _dl_pyannote(model_id: str, token: str) -> None:
+def _dl_pyannote(model_id: str, token: str, revision: str | None = None) -> None:
     if not token:
         print(f"  SKIP {model_id} — HF_TOKEN not set.")
         print(f"        Accept license: https://hf.co/{model_id}")
@@ -176,15 +302,18 @@ def _dl_pyannote(model_id: str, token: str) -> None:
     # instantiate the model here — avoids torchaudio version mismatches at
     # download time (AudioMetaData removed in torchaudio >= 0.12).
     from huggingface_hub import snapshot_download
+
     snapshot_download(
         repo_id=model_id,
         cache_dir=str(Path(_hf_home) / "hub"),
         token=token,
+        revision=revision,
     )
 
 
-def _dl_gguf() -> None:
+def _dl_gguf(revision: str | None = None) -> None:
     from huggingface_hub import hf_hub_download
+
     _gguf_dir.mkdir(parents=True, exist_ok=True)
     dest = _gguf_dir / _gguf_file
     print(f"  Downloading {_gguf_file} from {GGUF_REPO} ...")
@@ -194,6 +323,7 @@ def _dl_gguf() -> None:
         filename=_gguf_file,
         cache_dir=str(Path(_hf_home) / "hub"),
         token=HF_TOKEN or None,
+        revision=revision,
     )
     if dest.is_symlink() and not dest.exists():
         dest.unlink()  # dangling symlink from a previous interrupted run
@@ -219,9 +349,77 @@ def _dl_gguf() -> None:
     print(f"  Size on disk: {size_gb:.2f} GB")
 
 
+# ── checksums ─────────────────────────────────────────────────────────────────
+# "Pinned model file + checksum" (System Design v2.0 §2.2) doesn't require
+# knowing the correct hash in advance — that's not something this script can
+# responsibly fabricate. Instead: record the SHA-256 the first time a model is
+# downloaded, then verify against it on every later run (including cache-hit
+# runs, so a corrupted or unexpectedly-swapped local file is still caught).
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _sha256_dir(path: Path) -> str:
+    """Combined hash of every real file under path — stable regardless of
+    filesystem traversal order, so it's comparable across machines/runs."""
+    parts = []
+    for f in sorted(path.rglob("*")):
+        if f.is_file():
+            rel = f.relative_to(path).as_posix()
+            parts.append(f"{rel}:{_sha256_file(f)}")
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def _model_checksum(model_id: str, mtype: str) -> str | None:
+    """Compute the current on-disk checksum for a model, or None if its
+    layout doesn't support a clean single hash (rare loader types)."""
+    if mtype == "gguf":
+        path = _gguf_dir / _gguf_file
+        return _sha256_file(path) if path.exists() else None
+    cache_key = "models--" + model_id.replace("/", "--")
+    snapshots = Path(_hf_home) / "hub" / cache_key / "snapshots"
+    if not snapshots.exists():
+        return None
+    revs = [d for d in snapshots.iterdir() if d.is_dir()]
+    if not revs:
+        return None
+    # Hub cache can hold multiple revisions side by side — hash the most
+    # recently modified snapshot, which is the one just downloaded/verified.
+    latest = max(revs, key=lambda d: d.stat().st_mtime)
+    return _sha256_dir(latest)
+
+
+def _verify_or_record_checksum(model_id: str, mtype: str) -> tuple[str | None, bool]:
+    """Returns (sha256, mismatch). mismatch=True means the file(s) on disk no
+    longer match what was recorded the last time this model was downloaded —
+    silent corruption or an unexpected upstream swap, not assumed-safe."""
+    current = _model_checksum(model_id, mtype)
+    if current is None:
+        return None, False
+    manifest_path = Path(_hf_home) / "download_manifest.json"
+    if manifest_path.exists():
+        try:
+            entries = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            entries = []
+        for e in entries:
+            if e.get("model_id") == model_id and e.get("sha256"):
+                return current, e["sha256"] != current
+    return current, False
+
+
 # ── manifest ──────────────────────────────────────────────────────────────────
 
-def _write_manifest(model_id: str, size_gb: float, mtype: str) -> None:
+
+def _write_manifest(
+    model_id: str, size_gb: float, mtype: str, sha256: str | None, revision: str | None
+) -> None:
     manifest_path = Path(_hf_home) / "download_manifest.json"
     entries: list = []
     if manifest_path.exists():
@@ -230,28 +428,95 @@ def _write_manifest(model_id: str, size_gb: float, mtype: str) -> None:
         except Exception:
             entries = []
     entries = [e for e in entries if e.get("model_id") != model_id]
-    entries.append({
-        "model_id":      model_id,
-        "downloaded_at": datetime.now(timezone.utc).isoformat(),
-        "size_gb":       size_gb,
-        "type":          mtype,
-    })
+    entries.append(
+        {
+            "model_id": model_id,
+            "downloaded_at": datetime.now(timezone.utc).isoformat(),
+            "size_gb": size_gb,
+            "type": mtype,
+            "sha256": sha256,
+            "revision": revision,  # None = tracked the default branch, not pinned
+        }
+    )
     manifest_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+
+
+# mtype -> downloader, for every type that shares the (model_id, token, *,
+# revision) signature. gguf/faster-whisper/sentence-transformers/pyannote
+# don't share it (no token, or need the HF_TOKEN early-return below) and stay
+# as explicit branches in _dispatch_download rather than forcing a fake
+# shared signature on them.
+_TOKEN_GATED_DOWNLOADERS: dict = {
+    "qwen2vl": _dl_qwen2vl,
+    "vision-encoder-decoder": _dl_vision_encoder_decoder,
+    "blip-captioning": _dl_blip_captioning,
+    "token-classification": _dl_token_classification,
+    "sequence-classification": _dl_sequence_classification,
+}
+
+
+def _dispatch_download(mtype: str, model_id: str, gated: bool, revision: str | None) -> bool:
+    """Run the right downloader for this model type. Returns False if the
+    caller should count this as a skip rather than a success (pyannote with
+    no HF_TOKEN set — a deliberate, expected skip, not a failure)."""
+    if mtype == "gguf":
+        _dl_gguf(revision=revision)
+        return True
+    if mtype == "faster-whisper":
+        _dl_faster_whisper(model_id)
+        return True
+    if mtype == "sentence-transformers":
+        _dl_sentence_transformers(model_id, revision=revision)
+        return True
+    if mtype == "pyannote":
+        _dl_pyannote(model_id, HF_TOKEN, revision=revision)
+        return bool(HF_TOKEN)
+
+    downloader = _TOKEN_GATED_DOWNLOADERS.get(mtype, _dl_transformers)
+    downloader(model_id, HF_TOKEN if gated else "", revision=revision)
+    return True
+
+
+def _handle_cached(model_id: str, mtype: str, optional: bool) -> str:
+    """Model already on disk — verify its checksum instead of re-downloading.
+    Returns "ok", "mismatch_skip" (optional model, don't fail the run), or
+    "mismatch_fail" (required model, caller should record it as failed)."""
+    _current_sha, mismatch = _verify_or_record_checksum(model_id, mtype)
+    if not mismatch:
+        print("  Already cached — checksum OK, skipping.\n")
+        return "ok"
+    print(
+        f"  CHECKSUM MISMATCH — {model_id} on disk no longer matches the "
+        f"hash recorded at last download. Possible corruption or an "
+        f"unexpected file swap; re-download to be safe.\n"
+    )
+    return "mismatch_skip" if optional else "mismatch_fail"
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download all MAGIK models to .hf_cache/")
-    parser.add_argument("--skip-gated", action="store_true",
-                        help="Skip all gated models (pyannote) without error")
-    parser.add_argument("--only", metavar="KEY",
-                        help="Download only this model key (e.g. embedder, gguf, diarizer)")
+    parser.add_argument(
+        "--skip-gated", action="store_true", help="Skip all gated models (pyannote) without error"
+    )
+    parser.add_argument(
+        "--only", metavar="KEY", help="Download only this model key (e.g. embedder, gguf, diarizer)"
+    )
     args = parser.parse_args()
 
     all_entries = MODELS + [
-        {"key": "gguf", "model_id": GGUF_REPO, "type": "gguf",
-         "size_gb": GGUF_SIZE_GB, "gated": False}
+        {
+            "key": "gguf",
+            "model_id": GGUF_REPO,
+            "type": "gguf",
+            "size_gb": GGUF_SIZE_GB,
+            "gated": False,
+        }
     ]
 
     if args.only:
@@ -272,60 +537,56 @@ def main() -> None:
 
     Path(_hf_home).mkdir(parents=True, exist_ok=True)
 
-    ok = 0; skipped = 0; failed: list[str] = []
+    ok = 0
+    skipped = 0
+    failed: list[str] = []
 
     for i, m in enumerate(run_list, 1):
-        key      = m["key"]
+        key = m["key"]
         model_id = m["model_id"]
-        mtype    = m["type"]
-        gated    = m.get("gated", False)
+        mtype = m["type"]
+        gated = m.get("gated", False)
         optional = m.get("optional", False)
 
+        revision = m.get("revision")
         print(f"[{i}/{len(run_list)}] {key}  —  {model_id}  (~{m['size_gb']:.2f} GB)")
+        if revision:
+            print(f"  Pinned revision: {revision}")
 
         # skip gated if requested
         if gated and args.skip_gated:
-            print(f"  SKIP (--skip-gated)\n")
+            print("  SKIP (--skip-gated)\n")
             skipped += 1
             continue
 
         # fast local cache check
         cached = _is_gguf_cached() if mtype == "gguf" else _is_hub_cached(model_id)
         if cached:
-            print(f"  Already cached — skipping.\n")
-            ok += 1
-            skipped += 1
+            result = _handle_cached(model_id, mtype, optional)
+            if result == "ok":
+                ok += 1
+                skipped += 1
+            elif result == "mismatch_skip":
+                skipped += 1
+            else:  # mismatch_fail
+                failed.append(key)
             continue
 
         t0 = time.time()
         try:
-            if mtype == "gguf":
-                _dl_gguf()
-            elif mtype == "faster-whisper":
-                _dl_faster_whisper(model_id)
-            elif mtype == "sentence-transformers":
-                _dl_sentence_transformers(model_id)
-            elif mtype == "pyannote":
-                _dl_pyannote(model_id, HF_TOKEN)
-                if not HF_TOKEN:
-                    skipped += 1
-                    print()
-                    continue
-            elif mtype == "qwen2vl":
-                _dl_qwen2vl(model_id, HF_TOKEN if gated else "")
-            elif mtype == "vision-encoder-decoder":
-                _dl_vision_encoder_decoder(model_id, HF_TOKEN if gated else "")
-            elif mtype == "blip-captioning":
-                _dl_blip_captioning(model_id, HF_TOKEN if gated else "")
-            elif mtype == "token-classification":
-                _dl_token_classification(model_id, HF_TOKEN if gated else "")
-            elif mtype == "sequence-classification":
-                _dl_sequence_classification(model_id, HF_TOKEN if gated else "")
-            else:
-                _dl_transformers(model_id, HF_TOKEN if gated else "")
+            proceeded = _dispatch_download(mtype, model_id, gated, revision)
+            if not proceeded:
+                skipped += 1
+                print()
+                continue
 
-            _write_manifest(model_id, m["size_gb"], mtype)
-            print(f"  OK in {time.time() - t0:.0f}s\n")
+            sha256 = _model_checksum(model_id, mtype)
+            _write_manifest(model_id, m["size_gb"], mtype, sha256, revision)
+            print(
+                f"  OK in {time.time() - t0:.0f}s"
+                + (f"  sha256={sha256[:12]}..." if sha256 else "")
+            )
+            print()
             ok += 1
 
         except Exception as exc:

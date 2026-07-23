@@ -12,11 +12,11 @@ modality-neutral home for the pure text/diarization-tuple logic; anything
 that touches audio-specific I/O or model loading (diarize(), extract_entities(),
 _run_whisper(), AudioChunker itself) stays in audio_chunker.py.
 """
+
 from __future__ import annotations
 
 import re
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
 
 from app.utils.logger import get_logger
 
@@ -24,8 +24,8 @@ logger = get_logger(__name__)
 
 
 def _merge_fragmented_hosts(
-    diarization: List[Tuple[float, float, str]],
-) -> List[Tuple[float, float, str]]:
+    diarization: list[tuple[float, float, str]],
+) -> list[tuple[float, float, str]]:
     """Collapse diarization labels that are almost certainly the same speaker
     but got split into multiple pseudo-identities by pyannote's clustering.
 
@@ -44,9 +44,9 @@ def _merge_fragmented_hosts(
     if not diarization:
         return diarization
 
-    total_dur: Dict[str, float] = defaultdict(float)
+    total_dur: dict[str, float] = defaultdict(float)
     for start, end, label in diarization:
-        total_dur[label] += (end - start)
+        total_dur[label] += end - start
 
     file_duration = max((e for _, e, _ in diarization), default=0.0)
     if file_duration <= 0 or len(total_dur) < 2:
@@ -56,7 +56,8 @@ def _merge_fragmented_hosts(
     median_dur = durations[len(durations) // 2]
 
     host_candidates = [
-        label for label, dur in total_dur.items()
+        label
+        for label, dur in total_dur.items()
         if dur >= 0.10 * file_duration or (median_dur > 0 and dur >= 3 * median_dur)
     ]
     logger.info(
@@ -65,7 +66,9 @@ def _merge_fragmented_hosts(
         file_duration_sec=round(file_duration, 1),
         median_dur_sec=round(median_dur, 1),
         host_candidates=host_candidates,
-        top5=sorted(({k: round(v, 1) for k, v in total_dur.items()}).items(), key=lambda kv: -kv[1])[:5],
+        top5=sorted(
+            ({k: round(v, 1) for k, v in total_dur.items()}).items(), key=lambda kv: -kv[1]
+        )[:5],
     )
     if len(host_candidates) < 2:
         return diarization
@@ -86,8 +89,8 @@ def _merge_fragmented_hosts(
 
 def _label_at_time(
     t: float,
-    diar_starts: List[float],
-    diarization: List[Tuple[float, float, str]],
+    diar_starts: list[float],
+    diarization: list[tuple[float, float, str]],
 ) -> str:
     """Speaker label at time t, snapping to the NEAREST turn across gaps.
 
@@ -120,7 +123,7 @@ def _label_at_time(
 # Spoken word rate: ~150 wpm → 90s ≈ 225 words ≈ upper bound per chunk.
 _MIN_WORDS = 75
 _MAX_WORDS = 225
-_MERGE_SHORT_S = 30.0    # merge speaker segments shorter than this
+_MERGE_SHORT_S = 30.0  # merge speaker segments shorter than this
 
 _TOPIC_TRANSITIONS = re.compile(
     r"\b(moving to|turning to|let me now|switching to|on the balance sheet|"
@@ -130,16 +133,22 @@ _TOPIC_TRANSITIONS = re.compile(
 )
 
 _CALL_SECTIONS = [
-    ("operator_intro",   re.compile(r"\b(welcome|thank you for joining|good (?:morning|afternoon))\b", re.I)),
+    (
+        "operator_intro",
+        re.compile(r"\b(welcome|thank you for joining|good (?:morning|afternoon))\b", re.I),
+    ),
     # FOMC/press-conference Q&A: "QUESTION.", "QUESTIONER", reporter intros, "from [outlet]"
-    ("qa_session",       re.compile(
-        r"\b(next question|please go ahead|analyst|q&a|question and answer"
-        r"|QUESTION\b|questioner|from (?:the |)(?:wall street|new york times?|reuters|bloomberg|wsj|cnbc|fox|ap |associated press)"
-        r"|reporter|press conference question)\b",
-        re.I,
-    )),
-    ("closing_remarks",  re.compile(r"\b(this concludes|thank you for joining|goodbye)\b", re.I)),
-    ("prepared_remarks", re.compile(r".*", re.I)),   # fallback
+    (
+        "qa_session",
+        re.compile(
+            r"\b(next question|please go ahead|analyst|q&a|question and answer"
+            r"|QUESTION\b|questioner|from (?:the |)(?:wall street|new york times?|reuters|bloomberg|wsj|cnbc|fox|ap |associated press)"
+            r"|reporter|press conference question)\b",
+            re.I,
+        ),
+    ),
+    ("closing_remarks", re.compile(r"\b(this concludes|thank you for joining|goodbye)\b", re.I)),
+    ("prepared_remarks", re.compile(r".*", re.I)),  # fallback
 ]
 
 # News outlets a reporter names when self-introducing at a press conference.
@@ -151,18 +160,27 @@ _NEWS_OUTLETS = (
 )
 
 _ROLE_KEYWORDS = {
-    "Fed Chair":  re.compile(r"\b(chairman|chairwoman|chair powell|chair bernanke|chair yellen|chair jerome|federal reserve chair)\b", re.I),
-    "CEO":        re.compile(r"\bceo\b|\bchief executive\b", re.I),
-    "CFO":        re.compile(r"\bcfo\b|\bchief financial\b", re.I),
+    "Fed Chair": re.compile(
+        r"\b(chairman|chairwoman|chair powell|chair bernanke|chair yellen|chair jerome|federal reserve chair)\b",
+        re.I,
+    ),
+    "CEO": re.compile(r"\bceo\b|\bchief executive\b", re.I),
+    "CFO": re.compile(r"\bcfo\b|\bchief financial\b", re.I),
     # NOTE: "President" is intentionally NOT a role keyword. In FOMC transcripts
     # "president" almost always refers to a regional-Fed president MENTIONED in
     # speech ("New York Fed President John Williams"), not the speaker's own
     # role — matching it mislabelled reporters as "President". Company/earnings-
     # call presidents are named via the self-intro/role signals instead.
-    "Analyst":    re.compile(r"\banalyst\b|\bgoldman\b|\bmorgan\b|\bjp morgan\b|\bciti\b|\bbarclays\b|\bubs\b|\bdeutsche bank\b", re.I),
-    "Reporter":   re.compile(r"\b(reporter|journalist|correspondent|from (?:the |)(?:wall street|new york times?|reuters|bloomberg|wsj|cnbc|fox|associated press|financial times|marketwatch|politico|washington post))\b", re.I),
-    "Operator":   re.compile(r"\boperator\b", re.I),
-    "COO":        re.compile(r"\bcoo\b|\bchief operating\b", re.I),
+    "Analyst": re.compile(
+        r"\banalyst\b|\bgoldman\b|\bmorgan\b|\bjp morgan\b|\bciti\b|\bbarclays\b|\bubs\b|\bdeutsche bank\b",
+        re.I,
+    ),
+    "Reporter": re.compile(
+        r"\b(reporter|journalist|correspondent|from (?:the |)(?:wall street|new york times?|reuters|bloomberg|wsj|cnbc|fox|associated press|financial times|marketwatch|politico|washington post))\b",
+        re.I,
+    ),
+    "Operator": re.compile(r"\boperator\b", re.I),
+    "COO": re.compile(r"\bcoo\b|\bchief operating\b", re.I),
 }
 
 _FILLER = re.compile(r"\b(um|uh|er|ah|you know|i mean|like|so|basically|essentially)\b", re.I)
@@ -182,31 +200,108 @@ _SELF_INTRO_RE = re.compile(
 # trailing sentence fragment ("...took all of that data with Reuters") as the
 # name. Any match whose name tokens are all stopwords is rejected.
 _INTRO_NAME_STOPWORDS = {
-    "the", "that", "this", "data", "it", "them", "us", "questions", "question",
-    "you", "chair", "here", "and", "our", "your", "is", "was", "hi", "hello",
-    "thanks", "thank", "yeah", "so", "just", "now", "again", "well", "of", "all",
-    "into", "account", "took", "take", "taken", "look", "looked", "go", "going",
-    "get", "got", "sort", "kind", "lot", "some", "any", "over", "out", "up",
-    "down", "back", "then", "than", "been", "being", "have", "has", "had", "do",
-    "does", "did", "will", "would", "could", "should", "on", "in", "at", "to",
-    "for", "with", "from", "we", "i", "he", "she", "they", "my", "his", "her",
-    "along", "shared", "spoke", "talked", "along", "put",
+    "the",
+    "that",
+    "this",
+    "data",
+    "it",
+    "them",
+    "us",
+    "questions",
+    "question",
+    "you",
+    "chair",
+    "here",
+    "and",
+    "our",
+    "your",
+    "is",
+    "was",
+    "hi",
+    "hello",
+    "thanks",
+    "thank",
+    "yeah",
+    "so",
+    "just",
+    "now",
+    "again",
+    "well",
+    "of",
+    "all",
+    "into",
+    "account",
+    "took",
+    "take",
+    "taken",
+    "look",
+    "looked",
+    "go",
+    "going",
+    "get",
+    "got",
+    "sort",
+    "kind",
+    "lot",
+    "some",
+    "any",
+    "over",
+    "out",
+    "up",
+    "down",
+    "back",
+    "then",
+    "than",
+    "been",
+    "being",
+    "have",
+    "has",
+    "had",
+    "do",
+    "does",
+    "did",
+    "will",
+    "would",
+    "could",
+    "should",
+    "on",
+    "in",
+    "at",
+    "to",
+    "for",
+    "with",
+    "from",
+    "we",
+    "i",
+    "he",
+    "she",
+    "they",
+    "my",
+    "his",
+    "her",
+    "along",
+    "shared",
+    "spoke",
+    "talked",
+    "put",
 }
 
 
-def _clean_intro_name(raw: str) -> Optional[str]:
+def _clean_intro_name(raw: str) -> str | None:
     """Return a plausible 1-2 token reporter name from a self-intro capture,
     or None if it looks like a sentence fragment rather than a name."""
-    toks = [w.strip(".,'’") for w in raw.split()
-            if w.strip(".,'’").lower() not in _INTRO_NAME_STOPWORDS]
+    toks = [
+        w.strip(".,'’") for w in raw.split() if w.strip(".,'’").lower() not in _INTRO_NAME_STOPWORDS
+    ]
     toks = [w for w in toks if w.isalpha()]
     if not toks:
         return None
     name = " ".join(toks[-2:])  # keep the last 1-2 tokens (first + surname)
     surname = name.split()[-1]
-    if len(surname) < 3:        # a real surname is ≥3 letters
+    if len(surname) < 3:  # a real surname is ≥3 letters
         return None
     return name.title()
+
 
 # Vocative address opening a turn — "Chair Powell, ..." / "Mr. Chairman, ...".
 # Case-insensitive and tolerant of lowercase ASR output (unlike a self-intro,
@@ -216,12 +311,21 @@ _CHAIR_ADDRESS_RE = re.compile(
     re.IGNORECASE,
 )
 _CHAIR_ADDRESS_STOPWORDS = {
-    "of", "the", "and", "is", "was", "said", "noted", "board", "person", "here",
+    "of",
+    "the",
+    "and",
+    "is",
+    "was",
+    "said",
+    "noted",
+    "board",
+    "person",
+    "here",
 }
 _TURN_LEAD_WORDS = 20  # leading words of a turn counted as "near the start"
 
 
-def _detect_role(text: str) -> Optional[str]:
+def _detect_role(text: str) -> str | None:
     for role, pat in _ROLE_KEYWORDS.items():
         if pat.search(text):
             return role
@@ -260,9 +364,9 @@ def _remove_fillers(text: str) -> str:
 
 
 def _map_speaker_roles(
-    diarization: List[Tuple[float, float, str]],
-    words: List[Dict],
-) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
+    diarization: list[tuple[float, float, str]],
+    words: list[dict],
+) -> dict[str, tuple[str | None, str | None]]:
     """Map SPEAKER_XX labels to (role, name) using turn-anchored context.
 
     Binds names using exact word timestamps rather than proportional
@@ -277,7 +381,7 @@ def _map_speaker_roles(
          following (different-label) turn.
     Falls back to per-speaker role-keyword detection when no name is bound.
     """
-    role_name_map: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+    role_name_map: dict[str, tuple[str | None, str | None]] = {}
     if not diarization or not words:
         return role_name_map
 
@@ -288,7 +392,7 @@ def _map_speaker_roles(
 
     # Group words into contiguous per-speaker turns using the real diarization
     # boundaries (ground truth), independent of chunk-assembly granularity.
-    turns: List[Dict] = []
+    turns: list[dict] = []
     for w in words:
         lbl = _label_at(w["start"])
         if not turns or turns[-1]["label"] != lbl:
@@ -296,8 +400,8 @@ def _map_speaker_roles(
         else:
             turns[-1]["words"].append(w["word"])
 
-    label_to_name: Dict[str, str] = {}
-    label_to_role: Dict[str, str] = {}
+    label_to_name: dict[str, str] = {}
+    label_to_role: dict[str, str] = {}
 
     for i, turn in enumerate(turns):
         # Scan the first ~40 words of the turn (not the whole turn): a reporter's
@@ -339,7 +443,7 @@ def _map_speaker_roles(
 
     # --- Assign role and name to each unique speaker label ---
     ordered_labels = list(dict.fromkeys(t["label"] for t in turns))
-    speaker_text: Dict[str, str] = defaultdict(str)
+    speaker_text: dict[str, str] = defaultdict(str)
     for t in turns:
         speaker_text[t["label"]] += " " + " ".join(t["words"][:200])
 
@@ -376,12 +480,12 @@ def _last_sentence(text: str) -> str:
 
 
 def _assemble_chunks(
-    words: List[Dict],
-    diarization: List[Tuple[float, float, str]],
-    role_map: Dict[str, Tuple[Optional[str], Optional[str]]],
+    words: list[dict],
+    diarization: list[tuple[float, float, str]],
+    role_map: dict[str, tuple[str | None, str | None]],
     min_words: int = _MIN_WORDS,
     max_words: int = _MAX_WORDS,
-) -> List[Dict]:
+) -> list[dict]:
     """Group words into speaker-aware, topic-bounded chunks with 1-sentence overlap.
 
     Hard boundaries: speaker change (≥ min_words buffered), topic transition phrase,
@@ -399,12 +503,12 @@ def _assemble_chunks(
         return []
 
     # Pre-extract sorted diarization start times for O(log s) binary search.
-    _diar_starts: List[float] = [seg[0] for seg in diarization]
+    _diar_starts: list[float] = [seg[0] for seg in diarization]
 
     def speaker_at(t: float) -> str:
         return _label_at_time(t, _diar_starts, diarization)
 
-    def _flush(buf: List[str], start: float, end: float, spk: str, overlap_seed: str) -> Dict:
+    def _flush(buf: list[str], start: float, end: float, spk: str, overlap_seed: str) -> dict:
         raw = " ".join(buf)
         text = _remove_fillers(raw)
         role, name = role_map.get(spk, (None, None))
@@ -412,18 +516,18 @@ def _assemble_chunks(
         # Prepend overlap sentence (context bridge, not counted in word_count)
         display = f"{overlap_seed} {text}".strip() if overlap_seed else text
         return {
-            "transcript":    display,
-            "start":         start,
-            "end":           end,
-            "speaker":       spk,
-            "role":          role,
-            "name":          name,
-            "call_section":  _detect_call_section(raw),
+            "transcript": display,
+            "start": start,
+            "end": end,
+            "speaker": spk,
+            "role": role,
+            "name": name,
+            "call_section": _detect_call_section(raw),
             "topic_section": topic.group(0).replace(" ", "_") if topic else None,
         }
 
-    chunks: List[Dict] = []
-    buf_words: List[str] = []
+    chunks: list[dict] = []
+    buf_words: list[str] = []
     buf_start = words[0]["start"]
     buf_end = words[0]["end"]
     buf_speaker = speaker_at(buf_start)

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import List
 
 from app.ingestion.schema import RawExtract, UniversalMetadata
 
@@ -26,7 +25,7 @@ class BaseIngestor(ABC):
         self,
         path: Path,
         metadata: UniversalMetadata,
-    ) -> List[RawExtract]:
+    ) -> list[RawExtract]:
         """Extract raw content from file.
 
         Args:
@@ -44,6 +43,7 @@ class BaseIngestor(ABC):
     def _sanitize(text: str, surface: str) -> str:
         try:
             from app.guardrails.input_guard import sanitize as _g
+
             return _g(text, surface=surface)
         except Exception:
             return text
@@ -55,10 +55,12 @@ class BaseIngestor(ABC):
     @staticmethod
     def _scrub_pii(text: str, surface: str) -> str:
         from app.core.config import settings
+
         if not getattr(settings, "PII_DETECTION_ENABLED", False):
             return text
         try:
             from app.guardrails.pii import scrub_pii
+
             clean, _ = scrub_pii(text)
             return clean
         except Exception:

@@ -9,6 +9,7 @@ RawExtract into semantic text for IngestedDocuments.
 Ingestors (image_ingest.py, video_ingest.py) call classify_and_caption /
 generate_caption from here via a lazy import.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -18,16 +19,16 @@ import re
 import time
 import unicodedata
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from PIL import Image, ImageOps
+from prometheus_client import Counter
 
 from app.chunking.base_chunker import BaseChunker
 from app.chunking.finance_numbers import deterministic_chunk_id, extract_finance_entities
 from app.core.config import settings
 from app.ingestion.schema import EmptyContentError, IngestedDocument, RawExtract, UniversalMetadata
 from app.utils.logger import get_logger, modality_var
-from prometheus_client import Counter, Histogram
 
 try:
     import torch
@@ -62,8 +63,7 @@ _TIME_PERIOD_RE = re.compile(
     r'|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)'
     r'\s+\d{1,2},?\s*\d{4}\b'
     # Stock-performance-graph date axes: "9/27/19" ... "9/28/24"
-    r'|\b\d{1,2}/\d{1,2}/\d{2,4}\b'
-    r'|\b\d+[\s-]*[Yy]ear\b',
+    r'|\b\d{1,2}/\d{1,2}/\d{2,4}\b' r'|\b\d+[\s-]*[Yy]ear\b',
     re.IGNORECASE,
 )
 _DATA_SERIES_RE = re.compile(
@@ -77,20 +77,27 @@ _DATA_SERIES_RE = re.compile(
     r'|\b(?!(?:Among|The|And|For|With|From|This|That|These|Those|A|An)\b)'
     r'[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?\s+Inc\.?\b',
 )
-_WATERMARK_KW = frozenset({
-    "CONFIDENTIAL", "DRAFT", "WATERMARK", "DO NOT DISTRIBUTE",
-    "PROPRIETARY", "INTERNAL USE ONLY", "NOT FOR DISTRIBUTION",
-})
+_WATERMARK_KW = frozenset(
+    {
+        "CONFIDENTIAL",
+        "DRAFT",
+        "WATERMARK",
+        "DO NOT DISTRIBUTE",
+        "PROPRIETARY",
+        "INTERNAL USE ONLY",
+        "NOT FOR DISTRIBUTION",
+    }
+)
 
 
-def _extract_time_period(text: str) -> Optional[str]:
+def _extract_time_period(text: str) -> str | None:
     m = _TIME_PERIOD_RE.search(text)
     return m.group(0).strip() if m else None
 
 
-def _extract_data_series(text: str) -> List[str]:
+def _extract_data_series(text: str) -> list[str]:
     seen: set = set()
-    result: List[str] = []
+    result: list[str] = []
     for m in _DATA_SERIES_RE.finditer(text):
         label = m.group(0).strip()
         lk = label.lower()
@@ -101,7 +108,8 @@ def _extract_data_series(text: str) -> List[str]:
     # index name recurs across caption + OCR text and can be re-matched
     # starting mid-phrase (e.g. "P 500 Index" inside "S&P 500 Index").
     result = [
-        label for label in result
+        label
+        for label in result
         if not any(label.lower() in other.lower() and label != other for other in result)
     ]
     return result[:8]
@@ -130,8 +138,14 @@ def _check_mismatch(ocr_text: str, caption: str) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 _IMAGE_TYPES = (
-    "bar_chart", "line_chart", "pie_chart", "candlestick",
-    "table_image", "org_chart", "flow_diagram", "infographic",
+    "bar_chart",
+    "line_chart",
+    "pie_chart",
+    "candlestick",
+    "table_image",
+    "org_chart",
+    "flow_diagram",
+    "infographic",
 )
 
 _FIN_NUMBER_RE = re.compile(
@@ -145,15 +159,14 @@ _FIN_NUMBER_RE = re.compile(
 )
 
 
-def _classify_image_type(image: "Image.Image", ocr_text: str = "") -> str:
+def _classify_image_type(image: Image.Image, ocr_text: str = "") -> str:
     """Heuristic image type classification for finance images."""
     import numpy as np
 
     if ocr_text:
         nums = _FIN_NUMBER_RE.findall(ocr_text)
         lines_with_nums = [
-            line for line in ocr_text.split("\n")
-            if len(re.findall(r'\d', line)) >= 3
+            line for line in ocr_text.split("\n") if len(re.findall(r'\d', line)) >= 3
         ]
         if len(nums) >= 5 and len(lines_with_nums) >= 3:
             return "table_image"
@@ -208,17 +221,17 @@ def _classify_image_type(image: "Image.Image", ocr_text: str = "") -> str:
 # back to the VLM caption alone) if that calibration can't be established.
 
 _DOLLAR_LABEL_RE = re.compile(r'^[$S]\s*([\d,]+)\.?0*$', re.IGNORECASE)
-_DATE_LABEL_RE   = re.compile(r'^(\d{1,2})/(\d{1,2})/(\d{2,4})$')
+_DATE_LABEL_RE = re.compile(r'^(\d{1,2})/(\d{1,2})/(\d{2,4})$')
 _CHART_DARK_THRESH = 100
-_CHART_MIN_RUN_PX  = 2
+_CHART_MIN_RUN_PX = 2
 _CHART_MAX_JUMP_PX = 14
 _CHART_REACQUIRE_GAP = 4
 _CHART_REACQUIRE_MAX_JUMP = 60
 
 
-def _chart_run_lengths(mask_1d) -> List[Tuple[int, int]]:
+def _chart_run_lengths(mask_1d) -> list[tuple[int, int]]:
     """Contiguous True-run (start, length) pairs in a 1D boolean array."""
-    runs: List[Tuple[int, int]] = []
+    runs: list[tuple[int, int]] = []
     in_run, start = False, 0
     for i, v in enumerate(mask_1d):
         if v and not in_run:
@@ -231,7 +244,7 @@ def _chart_run_lengths(mask_1d) -> List[Tuple[int, int]]:
     return runs
 
 
-def _digitize_line_chart(image: "Image.Image", ocr_boxes: list) -> Optional[Dict[str, Any]]:
+def _digitize_line_chart(image: Image.Image, ocr_boxes: list) -> dict[str, Any] | None:
     """Extract exact per-series values at each x-axis tick from a line chart.
 
     Returns {"series": [...], "ticks": [...], "values_by_tick": {tick: {name: value}}}
@@ -241,6 +254,7 @@ def _digitize_line_chart(image: "Image.Image", ocr_boxes: list) -> Optional[Dict
         return None
     try:
         import numpy as np
+
         arr = np.array(image.convert("L"))
         h, w = arr.shape
         dark = arr < _CHART_DARK_THRESH
@@ -259,7 +273,7 @@ def _digitize_line_chart(image: "Image.Image", ocr_boxes: list) -> Optional[Dict
             y_points.append(((min(ys) + max(ys)) / 2, value))
         if len(y_points) < 2:
             return None
-        ys_arr   = np.array([p[0] for p in y_points])
+        ys_arr = np.array([p[0] for p in y_points])
         vals_arr = np.array([p[1] for p in y_points])
         A = np.vstack([ys_arr, np.ones_like(ys_arr)]).T
         slope, intercept = np.linalg.lstsq(A, vals_arr, rcond=None)[0]
@@ -280,8 +294,10 @@ def _digitize_line_chart(image: "Image.Image", ocr_boxes: list) -> Optional[Dict
         # Legend: series names sit in the bottom band of the image; the dash
         # swatch for each sits immediately to its left.
         legend = [
-            (bbox, text.strip()) for bbox, text, conf in ocr_boxes
-            if min(p[1] for p in bbox) > h * 0.85 and conf > 0.5
+            (bbox, text.strip())
+            for bbox, text, conf in ocr_boxes
+            if min(p[1] for p in bbox) > h * 0.85
+            and conf > 0.5
             and len(text.strip()) > 3
             and not _DATE_LABEL_RE.match(text.strip())
             and not _DOLLAR_LABEL_RE.match(text.strip())
@@ -290,17 +306,19 @@ def _digitize_line_chart(image: "Image.Image", ocr_boxes: list) -> Optional[Dict
         if len(legend) < 2:
             return None
 
-        series_signatures: Dict[str, float] = {}
+        series_signatures: dict[str, float] = {}
         for i, (bbox, name) in enumerate(legend):
             text_x0 = min(p[0] for p in bbox)
-            text_y  = int(sum(p[1] for p in bbox) / len(bbox))
-            prev_end = (min(p[0] for p in legend[i - 1][0]) - 20) if i > 0 else max(0, text_x0 - 130)
+            text_y = int(sum(p[1] for p in bbox) / len(bbox))
+            prev_end = (
+                (min(p[0] for p in legend[i - 1][0]) - 20) if i > 0 else max(0, text_x0 - 130)
+            )
             sx0, sx1 = int(max(prev_end, text_x0 - 130)), int(text_x0 - 8)
             if sx1 <= sx0:
                 continue
-            row = dark[max(0, text_y - 6):text_y + 7, sx0:sx1].any(axis=0)
+            row = dark[max(0, text_y - 6) : text_y + 7, sx0:sx1].any(axis=0)
             total = sx1 - sx0
-            duty  = sum(l for _, l in _chart_run_lengths(row)) / total if total else 0.0
+            duty = sum(l for _, l in _chart_run_lengths(row)) / total if total else 0.0
             series_signatures[name] = duty
         if len(series_signatures) < 2:
             return None
@@ -309,15 +327,14 @@ def _digitize_line_chart(image: "Image.Image", ocr_boxes: list) -> Optional[Dict
         # nearest-y proximity from a seed column where all N are separated.
         y_top = max(0, int(min(y for y, _ in y_points)) - 20)
         y_bot = min(h, int(max(y for y, _ in y_points)) + 60)
-        x_left  = max(0, int(x_points[0][0]) - 20)
+        x_left = max(0, int(x_points[0][0]) - 20)
         x_right = min(w, int(x_points[-1][0]) + 20)
         n_lines = len(series_signatures)
 
-        def col_centers(x: int) -> List[float]:
+        def col_centers(x: int) -> list[float]:
             col = dark[y_top:y_bot, x]
             return sorted(
-                y_top + s + l / 2
-                for s, l in _chart_run_lengths(col) if l >= _CHART_MIN_RUN_PX
+                y_top + s + l / 2 for s, l in _chart_run_lengths(col) if l >= _CHART_MIN_RUN_PX
             )
 
         cols = [(x, col_centers(x)) for x in range(x_left, x_right, 2)]
@@ -333,16 +350,14 @@ def _digitize_line_chart(image: "Image.Image", ocr_boxes: list) -> Optional[Dict
 
         seed_x, seed_centers = cols[seed_idx]
         track_ids = [f"line{i}" for i in range(n_lines)]
-        tracks    = {k: {seed_x: seed_centers[i]} for i, k in enumerate(track_ids)}
+        tracks = {k: {seed_x: seed_centers[i]} for i, k in enumerate(track_ids)}
 
         def _trace(cols_slice, seed_centers):
-            last_y    = {k: seed_centers[i] for i, k in enumerate(track_ids)}
+            last_y = {k: seed_centers[i] for i, k in enumerate(track_ids)}
             gap_count = {k: 0 for k in track_ids}
             for x, centers in cols_slice:
                 avail = list(centers)
-                candidates = sorted(
-                    (abs(c - last_y[k]), k, c) for k in track_ids for c in avail
-                )
+                candidates = sorted((abs(c - last_y[k]), k, c) for k in track_ids for c in avail)
                 assigned_t, assigned_c = set(), set()
                 for dist, k, c in candidates:
                     if k in assigned_t or c in assigned_c or dist > _CHART_MAX_JUMP_PX:
@@ -356,8 +371,12 @@ def _digitize_line_chart(image: "Image.Image", ocr_boxes: list) -> Optional[Dict
                 leftover_c = [c for c in avail if c not in assigned_c]
                 for k in leftover_t:
                     gap_count[k] += 1
-                if (leftover_t and leftover_c and len(leftover_t) == len(leftover_c)
-                        and all(gap_count[k] >= _CHART_REACQUIRE_GAP for k in leftover_t)):
+                if (
+                    leftover_t
+                    and leftover_c
+                    and len(leftover_t) == len(leftover_c)
+                    and all(gap_count[k] >= _CHART_REACQUIRE_GAP for k in leftover_t)
+                ):
                     cand2 = sorted(
                         (abs(c - last_y[k]), k, c) for k in leftover_t for c in leftover_c
                     )
@@ -371,7 +390,7 @@ def _digitize_line_chart(image: "Image.Image", ocr_boxes: list) -> Optional[Dict
                         ut.add(k)
                         uc.add(c)
 
-        _trace(cols[seed_idx + 1:], seed_centers)
+        _trace(cols[seed_idx + 1 :], seed_centers)
         _trace(list(reversed(cols[:seed_idx])), seed_centers)
 
         # Classify each traced line against a legend name via duty-cycle match
@@ -386,7 +405,8 @@ def _digitize_line_chart(image: "Image.Image", ocr_boxes: list) -> Optional[Dict
 
         name_cands = sorted(
             (abs(traj_sig[k] - sig), name, k)
-            for name, sig in series_signatures.items() for k in track_ids
+            for name, sig in series_signatures.items()
+            for k in track_ids
         )
         used_names, used_tracks, name_by_track = set(), set(), {}
         for _diff, name, k in name_cands:
@@ -397,9 +417,9 @@ def _digitize_line_chart(image: "Image.Image", ocr_boxes: list) -> Optional[Dict
             used_tracks.add(k)
 
         edge_labels = {x_points[0][1], x_points[-1][1]}
-        values_by_tick: Dict[str, Dict[str, float]] = {}
+        values_by_tick: dict[str, dict[str, float]] = {}
         for tx, label in x_points:
-            row: Dict[str, float] = {}
+            row: dict[str, float] = {}
             for k in track_ids:
                 xs = sorted(tracks[k].keys())
                 if not xs:
@@ -436,8 +456,8 @@ def _digitize_line_chart(image: "Image.Image", ocr_boxes: list) -> Optional[Dict
                     first_row[name] = round(base)
 
         return {
-            "series":         list(series_signatures.keys()),
-            "ticks":          [lbl for _, lbl in x_points],
+            "series": list(series_signatures.keys()),
+            "ticks": [lbl for _, lbl in x_points],
             "values_by_tick": values_by_tick,
         }
     except Exception as exc:
@@ -445,9 +465,9 @@ def _digitize_line_chart(image: "Image.Image", ocr_boxes: list) -> Optional[Dict
         return None
 
 
-def _series_trajectory(digitized: Dict[str, Any], name: str) -> List[Tuple[str, float]]:
+def _series_trajectory(digitized: dict[str, Any], name: str) -> list[tuple[str, float]]:
     """Ordered (tick, value) pairs for one series, skipping ticks it's absent from."""
-    out: List[Tuple[str, float]] = []
+    out: list[tuple[str, float]] = []
     for tick in digitized["ticks"]:
         row = digitized["values_by_tick"].get(tick, {})
         if name in row:
@@ -455,7 +475,7 @@ def _series_trajectory(digitized: Dict[str, Any], name: str) -> List[Tuple[str, 
     return out
 
 
-def _describe_series_trends(digitized: Dict[str, Any]) -> str:
+def _describe_series_trends(digitized: dict[str, Any]) -> str:
     """Deterministic natural-language trend statements per series, computed
     only from the verified pixel values. This is what lets the generation LLM
     answer 'what happened between period A and B' (drawdown) and 'when did it
@@ -474,7 +494,7 @@ def _describe_series_trends(digitized: Dict[str, Any]) -> str:
     the unit out and labelling it removes the ambiguity at the source instead
     of hoping every generation gets it right.
     """
-    lines: List[str] = [
+    lines: list[str] = [
         "CHART TRENDS (per series, computed from the pixel-read values above — "
         "state every dollar figure below with a leading '~', e.g. '~$429', since "
         "chart-reading is an approximation, not an exact-to-the-dollar figure. "
@@ -515,7 +535,7 @@ def _describe_series_trends(digitized: Dict[str, Any]) -> str:
         best_run, best_spread = None, None
         for i in range(len(traj)):
             for j in range(i + 1, len(traj)):
-                window = [v for _, v in traj[i:j + 1]]
+                window = [v for _, v in traj[i : j + 1]]
                 mean = sum(window) / len(window)
                 spread = (max(window) - min(window)) / mean if mean else 1.0
                 # prefer longer runs; only consider genuinely-flat (<12% spread) windows
@@ -523,8 +543,8 @@ def _describe_series_trends(digitized: Dict[str, Any]) -> str:
                     best_run, best_spread = (i, j), spread
         if best_run and (best_run[1] - best_run[0]) >= 1:
             i, j = best_run
-            lo = min(v for _, v in traj[i:j + 1])
-            hi = max(v for _, v in traj[i:j + 1])
+            lo = min(v for _, v in traj[i : j + 1])
+            hi = max(v for _, v in traj[i : j + 1])
             parts.append(
                 f"was roughly flat (a plateau) between ~${lo:.0f} and ~${hi:.0f} "
                 f"from {traj[i][0]} to {traj[j][0]}"
@@ -534,7 +554,7 @@ def _describe_series_trends(digitized: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _format_digitized_chart(digitized: Dict[str, Any]) -> str:
+def _format_digitized_chart(digitized: dict[str, Any]) -> str:
     """Render the digitized series/tick table + deterministic trend statements
     as plain text for the caption and for retrieval — these pixel-calibrated
     values take precedence over anything the VLM guessed (it fabricates chart
@@ -542,7 +562,9 @@ def _format_digitized_chart(digitized: Dict[str, Any]) -> str:
     an approximation, not an exact-to-the-dollar figure, so every value here
     is prefixed with '~' and downstream generation is told to keep that prefix
     rather than state a bare, falsely-precise number."""
-    lines = ["CHART VALUES — pixel-calibrated reads (state every figure with a leading '~', e.g. '~$429'):"]
+    lines = [
+        "CHART VALUES — pixel-calibrated reads (state every figure with a leading '~', e.g. '~$429'):"
+    ]
     for tick in digitized["ticks"]:
         row = digitized["values_by_tick"].get(tick, {})
         if not row:
@@ -562,7 +584,7 @@ _CAPTION_TRENDS_CUT_RE = re.compile(r'\n\s*5\)\s')
 _DOLLAR_CLAIM_RE = re.compile(r'\s*:?\s*\$\s?[\d,]+(?:\.\d+)?(?:\s*,\s*\$\s?[\d,]+(?:\.\d+)?)*')
 
 
-def _replace_vlm_trends_with_verified(caption_text: str, digitized: Dict[str, Any]) -> str:
+def _replace_vlm_trends_with_verified(caption_text: str, digitized: dict[str, Any]) -> str:
     """Reconcile the VLM caption with verified pixel data for a digitized chart.
 
     The VLM (even the 7B) cannot read exact chart values — it lists axis
@@ -586,7 +608,7 @@ def _replace_vlm_trends_with_verified(caption_text: str, digitized: Dict[str, An
         return caption_text
 
     m = _CAPTION_TRENDS_CUT_RE.search(caption_text)
-    kept = caption_text[:m.start()].rstrip() if m else caption_text.rstrip()
+    kept = caption_text[: m.start()].rstrip() if m else caption_text.rstrip()
     # Remove the VLM's fabricated dollar figures from the kept prose.
     kept = _DOLLAR_CLAIM_RE.sub("", kept)
 
@@ -598,14 +620,14 @@ def _replace_vlm_trends_with_verified(caption_text: str, digitized: Dict[str, An
 
 def _finance_caption_prompt(image_type: str) -> str:
     _PROMPTS = {
-        "bar_chart":    "a financial bar chart showing",
-        "line_chart":   "a financial line chart showing",
-        "pie_chart":    "a pie chart showing portfolio or segment allocation",
-        "candlestick":  "a candlestick stock price chart showing",
-        "table_image":  "a financial table with exact numeric values showing",
-        "org_chart":    "a corporate structure or organizational chart showing",
+        "bar_chart": "a financial bar chart showing",
+        "line_chart": "a financial line chart showing",
+        "pie_chart": "a pie chart showing portfolio or segment allocation",
+        "candlestick": "a candlestick stock price chart showing",
+        "table_image": "a financial table with exact numeric values showing",
+        "org_chart": "a corporate structure or organizational chart showing",
         "flow_diagram": "a business process or financial flow diagram showing",
-        "infographic":  "a financial infographic or dashboard showing",
+        "infographic": "a financial infographic or dashboard showing",
     }
     return _PROMPTS.get(image_type, "a financial document showing")
 
@@ -615,9 +637,17 @@ def _finance_caption_prompt(image_type: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 _WEAK_PREFIXES = [
-    "a blurry image of", "a close up of", "an image of", "a picture of",
-    "a photo of", "photo of", "image of", "this is a", "this is an",
-    "a view of", "a shot of",
+    "a blurry image of",
+    "a close up of",
+    "an image of",
+    "a picture of",
+    "a photo of",
+    "photo of",
+    "image of",
+    "this is a",
+    "this is an",
+    "a view of",
+    "a shot of",
 ]
 
 _CAPTION_MAX_WORDS = 50
@@ -630,9 +660,10 @@ def _cache_key(image_path: str) -> str:
     return hashlib.sha256(image_path.encode("utf-8")).hexdigest()
 
 
-def _caption_cache_get(key: str) -> Optional[str]:
+def _caption_cache_get(key: str) -> str | None:
     try:
         from app.core.infra_registry import infra
+
         mem = infra.get_memory()
         if mem:
             val = mem.cache_get(f"caption:{key}")
@@ -645,6 +676,7 @@ def _caption_cache_get(key: str) -> Optional[str]:
 def _caption_cache_set(key: str, caption: str) -> None:
     try:
         from app.core.infra_registry import infra
+
         mem = infra.get_memory()
         if mem:
             mem.cache_set(f"caption:{key}", caption, ttl=settings.REDIS_EMBEDDING_CACHE_TTL)
@@ -668,7 +700,7 @@ def _remove_repetition(text: str) -> str:
         run = 1
         i = n
         while i + n <= len(words):
-            if tuple(words[i:i + n]) == ngram:
+            if tuple(words[i : i + n]) == ngram:
                 run += 1
                 i += n
             else:
@@ -681,12 +713,13 @@ def _remove_repetition(text: str) -> str:
 def _sanitize_caption(text: str) -> str:
     try:
         from app.guardrails.input_guard import sanitize as _guard_sanitize
+
         return _guard_sanitize(text, surface="frame_captioner")
     except Exception:
         return text
 
 
-def _clean_caption(text: str) -> Optional[str]:
+def _clean_caption(text: str) -> str | None:
     if not text:
         return None
     text = text.strip()
@@ -694,7 +727,7 @@ def _clean_caption(text: str) -> Optional[str]:
     lower = text.lower()
     for pattern in _WEAK_PREFIXES:
         if lower.startswith(pattern):
-            text = text[len(pattern):].strip()
+            text = text[len(pattern) :].strip()
             lower = text.lower()
             break
     if "\x00" in text:
@@ -721,9 +754,10 @@ def _caption_confidence(caption: str) -> float:
     return round((diversity + length_score) / 2.0, 3)
 
 
-def _is_solid_color(image: "Image.Image") -> bool:
+def _is_solid_color(image: Image.Image) -> bool:
     try:
         import numpy as np
+
         arr = np.array(image.convert("RGB"), dtype=float)
         return float(arr.var()) < _SOLID_COLOR_VARIANCE_THRESHOLD
     except Exception:
@@ -734,7 +768,8 @@ def _is_solid_color(image: "Image.Image") -> bool:
 # IMAGE LOADING UTILITIES
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _load_image(image_path: str) -> "Image.Image":
+
+def _load_image(image_path: str) -> Image.Image:
     path = Path(image_path)
     if not path.exists():
         raise FileNotFoundError(f"IMAGE_NOT_FOUND: {image_path}")
@@ -775,7 +810,7 @@ def _load_image(image_path: str) -> "Image.Image":
         raise ValueError(f"IMAGE_LOAD_FAILED: {exc}") from exc
 
 
-def _generate_thumbnail(image: "Image.Image", output_path: Path) -> Optional[str]:
+def _generate_thumbnail(image: Image.Image, output_path: Path) -> str | None:
     try:
         thumb = image.copy()
         thumb.thumbnail((settings.THUMBNAIL_WIDTH, settings.THUMBNAIL_HEIGHT), Image.LANCZOS)
@@ -787,8 +822,8 @@ def _generate_thumbnail(image: "Image.Image", output_path: Path) -> Optional[str
         return None
 
 
-def _extract_tiff_frames(image_path: str) -> List["Image.Image"]:
-    frames: List["Image.Image"] = []
+def _extract_tiff_frames(image_path: str) -> list[Image.Image]:
+    frames: list[Image.Image] = []
     try:
         with Image.open(image_path) as img:
             if not hasattr(img, "n_frames") or img.n_frames <= 1:
@@ -801,9 +836,10 @@ def _extract_tiff_frames(image_path: str) -> List["Image.Image"]:
     return frames
 
 
-def _rasterize_svg(svg_path: str) -> Optional["Image.Image"]:
+def _rasterize_svg(svg_path: str) -> Image.Image | None:
     try:
         import cairosvg
+
         png_bytes = cairosvg.svg2png(url=svg_path)
         return Image.open(io.BytesIO(png_bytes)).convert("RGB")
     except ImportError:
@@ -815,16 +851,19 @@ def _rasterize_svg(svg_path: str) -> Optional["Image.Image"]:
 
 
 def _build_quality_metadata(
-    caption: str, confidence: float, is_solid: bool,
-    infer_ms: float, source: str,
-) -> Dict[str, Any]:
+    caption: str,
+    confidence: float,
+    is_solid: bool,
+    infer_ms: float,
+    source: str,
+) -> dict[str, Any]:
     return {
         "caption_confidence": confidence,
         "caption_word_count": len(caption.split()),
         "caption_char_count": len(caption),
-        "is_solid_color":     is_solid,
-        "inference_ms":       infer_ms,
-        "caption_source":     source,
+        "is_solid_color": is_solid,
+        "inference_ms": infer_ms,
+        "caption_source": source,
     }
 
 
@@ -844,22 +883,31 @@ _FINANCE_CAPTION_PROMPT = (
 )
 
 _SIGLIP_IMAGE_TYPES = [
-    "bar_chart", "line_chart", "pie_chart", "candlestick_chart",
-    "table_image", "org_chart", "flow_diagram", "infographic",
-    "scanned_document", "dashboard_screenshot",
+    "bar_chart",
+    "line_chart",
+    "pie_chart",
+    "candlestick_chart",
+    "table_image",
+    "org_chart",
+    "flow_diagram",
+    "infographic",
+    "scanned_document",
+    "dashboard_screenshot",
 ]
 
 
-def blip_caption(image: "Image.Image", prompt: Optional[str] = None) -> str:
+def blip_caption(image: Image.Image, prompt: str | None = None) -> str:
     """Generate a finance-aware caption using BLIP. Returns '' on failure."""
     try:
         from app.core.model_loader import model_loader
+
         processor, model, device = model_loader.get_blip()
     except Exception as exc:
         logger.warning(event="blip_unavailable", error=str(exc))
         return ""
     try:
         import torch as _torch
+
         # BLIP-1 cannot follow instruction prompts — it echoes them. So unless a
         # short caller-supplied prefix is given, caption UNCONDITIONALLY (no text),
         # which is what blip-image-captioning-large is actually trained for.
@@ -877,22 +925,26 @@ def blip_caption(image: "Image.Image", prompt: Optional[str] = None) -> str:
         result = processor.decode(out[0], skip_special_tokens=True).strip()
         # Strip any echoed prompt (case-insensitive — BLIP often lowercases it).
         if text_prompt and result.lower().startswith(text_prompt.lower()):
-            result = result[len(text_prompt):].strip()
+            result = result[len(text_prompt) :].strip()
         return result
     except Exception as exc:
         logger.warning(event="blip_caption_failed", error=str(exc))
         return ""
 
 
-def classify_image_type(image: "Image.Image", ocr_text: str = "") -> str:
+def classify_image_type(image: Image.Image, ocr_text: str = "") -> str:
     """Zero-shot image type classification via SigLIP; falls back to heuristic."""
     try:
-        from app.core.model_loader import model_loader
         import torch as _torch
+
+        from app.core.model_loader import model_loader
+
         processor, clip_model, device = model_loader.get_siglip()
         inputs = processor(
-            text=_SIGLIP_IMAGE_TYPES, images=image,
-            return_tensors="pt", padding=True,
+            text=_SIGLIP_IMAGE_TYPES,
+            images=image,
+            return_tensors="pt",
+            padding=True,
         ).to(device)
         with _torch.no_grad():
             outputs = clip_model(**inputs)
@@ -904,13 +956,14 @@ def classify_image_type(image: "Image.Image", ocr_text: str = "") -> str:
 
 
 # EasyOCR singleton — loaded once per process; avoids repeated ~2 s init cost.
-_easyocr_reader: Optional[Any] = None
+_easyocr_reader: Any | None = None
 
 
 def _get_easyocr() -> Any:
     global _easyocr_reader
     if _easyocr_reader is None:
         import easyocr
+
         _easyocr_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
     return _easyocr_reader
 
@@ -928,7 +981,7 @@ def _normalize_ocr_text(text: str) -> str:
     return _DOLLAR_MISREAD_RE.sub(r"$\1", text)
 
 
-def ocr(image: "Image.Image") -> str:
+def ocr(image: Image.Image) -> str:
     """Run EasyOCR → TrOCR fallback on a PIL Image. Returns '' on failure.
 
     EasyOCR handles charts, axis labels, tables, and mixed-layout images —
@@ -943,6 +996,7 @@ def ocr(image: "Image.Image") -> str:
     # EasyOCR (preferred — handles multi-region chart/table layouts)
     try:
         import numpy as np
+
         reader = _get_easyocr()
         results = reader.readtext(np.array(img_rgb))
         easy_text = " ".join(r[1] for r in results if r[2] > 0.3).strip()
@@ -956,8 +1010,10 @@ def ocr(image: "Image.Image") -> str:
     # TrOCR fallback — for simple single-line printed text only
     try:
         from app.core.model_loader import model_loader
+
         processor, model, device = model_loader.get_trocr()
         import torch as _torch
+
         pixel_values = processor(images=img_rgb, return_tensors="pt").pixel_values.to(device)
         with _torch.no_grad():
             generated_ids = model.generate(pixel_values)
@@ -971,13 +1027,14 @@ def ocr(image: "Image.Image") -> str:
     return ""
 
 
-def _get_ocr_boxes(image: "Image.Image") -> list:
+def _get_ocr_boxes(image: Image.Image) -> list:
     """EasyOCR results with bounding boxes, for chart digitization (which
     needs pixel positions, not just joined text). Returns [] on failure —
     caller treats that as "can't digitize", not an error.
     """
     try:
         import numpy as np
+
         reader = _get_easyocr()
         return reader.readtext(np.array(image.convert("RGB")))
     except Exception as exc:
@@ -994,7 +1051,7 @@ def _ocr_text_from_boxes(ocr_boxes: list) -> str:
     return _normalize_ocr_text(text) if text else ""
 
 
-def _extract_title_from_ocr_boxes(ocr_boxes: list, image_height: int) -> Optional[str]:
+def _extract_title_from_ocr_boxes(ocr_boxes: list, image_height: int) -> str | None:
     """Extract the chart/figure title from OCR — the text lines in the top
     band of the image (above the plot area), which for finance charts is the
     human-readable title/subtitle (e.g. "Comparison of 5-Year Cumulative Total
@@ -1008,8 +1065,13 @@ def _extract_title_from_ocr_boxes(ocr_boxes: list, image_height: int) -> Optiona
     for bbox, text, conf in ocr_boxes:
         top_y = min(p[1] for p in bbox)
         t = text.strip()
-        if (top_y < image_height * 0.13 and conf > 0.5 and len(t) >= 8
-                and not _DATE_LABEL_RE.match(t) and not _DOLLAR_LABEL_RE.match(t)):
+        if (
+            top_y < image_height * 0.13
+            and conf > 0.5
+            and len(t) >= 8
+            and not _DATE_LABEL_RE.match(t)
+            and not _DOLLAR_LABEL_RE.match(t)
+        ):
             title_lines.append((top_y, min(p[0] for p in bbox), t))
     if not title_lines:
         return None
@@ -1045,11 +1107,12 @@ def _extract_title_from_ocr_boxes(ocr_boxes: list, image_height: int) -> Optiona
 # BLIP CAPTION  (BLIP → Qwen2-VL fallback for empty/failed captions)
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def _blip_caption(
-    image: "Image.Image",
+    image: Image.Image,
     session_id: str,
-    text_prompt: Optional[str] = None,
-) -> Optional[str]:
+    text_prompt: str | None = None,
+) -> str | None:
     if torch is None:
         logger.warning(event="torch_unavailable_blip_skipped", session_id=session_id)
         return None
@@ -1076,7 +1139,7 @@ _IMAGE_QWEN2VL_PROMPT = (
 )
 
 
-def _qwen2vl_caption_for_image(image: "Image.Image") -> str:
+def _qwen2vl_caption_for_image(image: Image.Image) -> str:
     """Qwen2-VL captioning for images when BLIP produces empty output.
 
     Qwen2-VL-2B-Instruct handles dense numeric chart layouts and mixed text+visual
@@ -1092,23 +1155,28 @@ def _qwen2vl_caption_for_image(image: "Image.Image") -> str:
     """
     try:
         from app.core.model_loader import model_loader
+
         processor, model, device = model_loader.get_qwen2_vl()
     except Exception as exc:
         logger.warning(event="qwen2vl_unavailable_for_image", error=str(exc))
         return ""
     try:
         import torch as _torch
+
         messages = [
-            {"role": "user", "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": _IMAGE_QWEN2VL_PROMPT},
-            ]}
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": _IMAGE_QWEN2VL_PROMPT},
+                ],
+            }
         ]
         text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = processor(text=[text], images=[image], return_tensors="pt").to(device)
         with _torch.no_grad():
             out = model.generate(**inputs, max_new_tokens=settings.QWEN2_VL_MAX_TOKENS)
-        generated_ids = [o[len(i):] for i, o in zip(inputs.input_ids, out)]
+        generated_ids = [o[len(i) :] for i, o in zip(inputs.input_ids, out)]
         decoded = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
         logger.debug(event="qwen2vl_fallback_caption_used")
         return decoded
@@ -1121,17 +1189,18 @@ def _qwen2vl_caption_for_image(image: "Image.Image") -> str:
 # PUBLIC CAPTION API  (called by image_ingest.py and video_ingest.py via lazy import)
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def generate_caption(
     image_path: str,
     session_id: str,
     use_cache: bool = True,
-) -> Optional[str]:
+) -> str | None:
     """Generate a plain BLIP caption for an image file."""
     if not session_id:
         raise ValueError("SESSION_ID_REQUIRED")
 
     start = time.time()
-    path  = Path(image_path)
+    path = Path(image_path)
 
     try:
         logger.debug(event="caption_start", image=path.name, session_id=session_id)
@@ -1155,13 +1224,14 @@ def generate_caption(
 
         try:
             from app.utils.paths import resolved_temp_dir
+
             thumb_path = resolved_temp_dir() / "thumbs" / f"{_cache_key(image_path)}.jpg"
             _generate_thumbnail(image, thumb_path)
         except Exception:
             pass
 
-        image_hash   = _cache_key(image_path)
-        raw_caption: Optional[str] = None
+        image_hash = _cache_key(image_path)
+        raw_caption: str | None = None
         caption_source = "blip"
         infer_ms = 0.0
 
@@ -1171,9 +1241,9 @@ def generate_caption(
                 caption_source = "cache"
 
         if raw_caption is None:
-            t_infer     = time.time()
+            t_infer = time.time()
             raw_caption = _blip_caption(image, session_id)
-            infer_ms    = round((time.time() - t_infer) * 1000, 1)
+            infer_ms = round((time.time() - t_infer) * 1000, 1)
             if use_cache and raw_caption:
                 _caption_cache_set(image_hash, raw_caption)
 
@@ -1189,25 +1259,37 @@ def generate_caption(
 
         confidence = _caption_confidence(caption)
         _build_quality_metadata(
-            caption=caption, confidence=confidence, is_solid=is_solid,
-            infer_ms=infer_ms, source=caption_source,
+            caption=caption,
+            confidence=confidence,
+            is_solid=is_solid,
+            infer_ms=infer_ms,
+            source=caption_source,
         )
 
         logger.debug(
             event="caption_success",
-            length=len(caption), words=len(caption.split()),
-            confidence=confidence, source=caption_source,
+            length=len(caption),
+            words=len(caption.split()),
+            confidence=confidence,
+            source=caption_source,
             latency_ms=round((time.time() - start) * 1000, 1),
             session_id=session_id,
         )
         return caption
 
     except (FileNotFoundError, EmptyContentError, ValueError) as exc:
-        logger.warning(event="caption_image_error", image=path.name, error=str(exc), session_id=session_id)
+        logger.warning(
+            event="caption_image_error", image=path.name, error=str(exc), session_id=session_id
+        )
         return None
     except Exception as exc:
-        logger.error(event="caption_failed", image=path.name, session_id=session_id, error=str(exc),
-                     latency=round(time.time() - start, 3))
+        logger.error(
+            event="caption_failed",
+            image=path.name,
+            session_id=session_id,
+            error=str(exc),
+            latency=round(time.time() - start, 3),
+        )
         return None
 
 
@@ -1216,16 +1298,16 @@ def classify_and_caption(
     session_id: str,
     ocr_text: str = "",
     use_cache: bool = True,
-) -> Tuple[Optional[str], str, List[str]]:
+) -> tuple[str | None, str, list[str]]:
     """Generate a finance-specific caption with image type classification.
 
     Returns:
         (caption, image_type, extracted_numbers)
     """
     start = time.time()
-    path  = Path(image_path)
+    path = Path(image_path)
     image_type = "infographic"
-    extracted_numbers: List[str] = []
+    extracted_numbers: list[str] = []
 
     try:
         if path.suffix.lower() == ".svg":
@@ -1239,11 +1321,11 @@ def classify_and_caption(
         if ocr_text:
             extracted_numbers = _FIN_NUMBER_RE.findall(ocr_text)[:20]
 
-        image_type  = _classify_image_type(image, ocr_text)
+        image_type = _classify_image_type(image, ocr_text)
         text_prompt = _finance_caption_prompt(image_type)
 
         image_hash = hashlib.sha256((image_path + "|" + text_prompt).encode()).hexdigest()
-        raw_caption: Optional[str] = None
+        raw_caption: str | None = None
 
         if use_cache:
             raw_caption = _caption_cache_get(image_hash)
@@ -1266,7 +1348,8 @@ def classify_and_caption(
         if caption and extracted_numbers:
             caption_lower = caption.lower()
             missing = [
-                n for n in extracted_numbers
+                n
+                for n in extracted_numbers
                 if re.sub(r"[\s,]", "", n.lower()) not in re.sub(r"[\s,]", "", caption_lower)
             ]
             if missing:
@@ -1274,7 +1357,8 @@ def classify_and_caption(
 
         logger.debug(
             event="classify_and_caption_done",
-            image=path.name, image_type=image_type,
+            image=path.name,
+            image_type=image_type,
             numbers=len(extracted_numbers),
             latency_ms=round((time.time() - start) * 1000, 1),
             session_id=session_id,
@@ -1283,8 +1367,10 @@ def classify_and_caption(
 
     except Exception as exc:
         logger.warning(
-            event="classify_and_caption_failed", image=path.name,
-            error=str(exc), session_id=session_id,
+            event="classify_and_caption_failed",
+            image=path.name,
+            error=str(exc),
+            session_id=session_id,
         )
         return None, image_type, extracted_numbers
 
@@ -1294,7 +1380,7 @@ async def classify_and_caption_async(
     session_id: str,
     ocr_text: str = "",
     use_cache: bool = True,
-) -> Tuple[Optional[str], str, List[str]]:
+) -> tuple[str | None, str, list[str]]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
@@ -1306,7 +1392,7 @@ async def generate_caption_async(
     image_path: str,
     session_id: str,
     use_cache: bool = True,
-) -> Optional[str]:
+) -> str | None:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
@@ -1315,12 +1401,12 @@ async def generate_caption_async(
 
 
 async def generate_captions_batch(
-    image_paths: List[str],
+    image_paths: list[str],
     session_id: str,
-) -> List[Optional[str]]:
+) -> list[str | None]:
     sem = asyncio.Semaphore(settings.ASYNC_SEMAPHORE_WORKERS)
 
-    async def _cap(path: str) -> Optional[str]:
+    async def _cap(path: str) -> str | None:
         async with sem:
             return await generate_caption_async(path, session_id)
 
@@ -1331,6 +1417,7 @@ async def generate_captions_batch(
 # IMAGE CHUNKER
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 class ImageChunker(BaseChunker):
     """Finance-grade chunker for image files (charts, infographics, scanned docs).
 
@@ -1340,10 +1427,10 @@ class ImageChunker(BaseChunker):
 
     def chunk(
         self,
-        extracts: List[RawExtract],
+        extracts: list[RawExtract],
         meta: UniversalMetadata,
-    ) -> List[IngestedDocument]:
-        source  = Path(meta.source_path).name or "unknown.jpg"
+    ) -> list[IngestedDocument]:
+        source = Path(meta.source_path).name or "unknown.jpg"
         surface = "image_chunker"
         modality_var.set("image")
         _t0 = time.time()
@@ -1352,7 +1439,7 @@ class ImageChunker(BaseChunker):
             logger.warning(event="no_extracts_received", modality="image", source=source)
             return []
         try:
-            docs: List[IngestedDocument] = []
+            docs: list[IngestedDocument] = []
 
             for chunk_idx, ext in enumerate(extracts):
                 if ext.extract_type != "image_raw":
@@ -1432,8 +1519,11 @@ class ImageChunker(BaseChunker):
                         digitized = _digitize_line_chart(img, ocr_boxes)
                         if digitized:
                             digitized_text = _format_digitized_chart(digitized)
-                            logger.info(event="chart_digitized", source=source,
-                                        series=len(digitized["series"]))
+                            logger.info(
+                                event="chart_digitized",
+                                source=source,
+                                series=len(digitized["series"]),
+                            )
                     except Exception as exc:
                         logger.warning(event="chart_digitize_error", error=str(exc))
 
@@ -1480,15 +1570,17 @@ class ImageChunker(BaseChunker):
                 # drop values from BM25 with no error. Putting them here too
                 # makes retrieval of the actual answer values robust
                 # regardless of doc.text length.
-                digitized_numbers: List[str] = []
+                digitized_numbers: list[str] = []
                 if digitized:
                     for row in digitized["values_by_tick"].values():
                         for val in row.values():
                             digitized_numbers.append(f"${val:.0f}")
-                extracted_numbers = list(dict.fromkeys(
-                    digitized_numbers + _NUMBER_RE.findall(f"{ocr_text} {caption_text}")
-                ))[:20]
-                chunk_hash        = deterministic_chunk_id(source, "image_raw_0", chunk_idx)
+                extracted_numbers = list(
+                    dict.fromkeys(
+                        digitized_numbers + _NUMBER_RE.findall(f"{ocr_text} {caption_text}")
+                    )
+                )[:20]
+                chunk_hash = deterministic_chunk_id(source, "image_raw_0", chunk_idx)
 
                 # Extract image_title (the human-readable caption shown in
                 # citations, for ALL images). Priority:
@@ -1509,14 +1601,8 @@ class ImageChunker(BaseChunker):
 
                 # Time period and data series from text (regex-based)
                 full_text = f"{caption_text} {ocr_text}".strip()
-                time_period = (
-                    ext.extra.get("time_period")
-                    or _extract_time_period(full_text)
-                )
-                data_series = (
-                    ext.extra.get("data_series")
-                    or _extract_data_series(full_text)
-                )
+                time_period = ext.extra.get("time_period") or _extract_time_period(full_text)
+                data_series = ext.extra.get("data_series") or _extract_data_series(full_text)
 
                 # Watermark detection from OCR+caption
                 watermark_detected = _detect_watermark(full_text)
@@ -1527,7 +1613,7 @@ class ImageChunker(BaseChunker):
                 # Quality score from ingestor signals
                 blur_score = ext.extra.get("blur_score")
                 solid_color = ext.extra.get("solid_color", False)
-                quality_score: Optional[float] = None
+                quality_score: float | None = None
                 if blur_score is not None:
                     qs = float(blur_score)
                     if img_width * img_height > 500_000:
@@ -1545,34 +1631,34 @@ class ImageChunker(BaseChunker):
                 source_path = str(getattr(meta, "source_path", "") or "")
 
                 structure = {
-                    "chunk_hash_id":         chunk_hash,
-                    "source_file":           source,
-                    "source_path":           source_path,
-                    "asset_path":            source_path,
-                    "chunk_index":           chunk_idx,
-                    "image_type":            image_type,
-                    "image_title":           image_title,
-                    "caption":               caption_text,
-                    "caption_confidence":    caption_confidence,
-                    "ocr_text":              ocr_text,
-                    "extracted_numbers":     extracted_numbers,
-                    "time_period":           time_period,
-                    "data_series":           data_series,
-                    "ocr_caption_mismatch":  mismatch,
-                    "parent_document":       ext.extra.get("parent_document"),
-                    "parent_page":           ext.extra.get("parent_page"),
-                    "finance_entities":      fin_entities,
-                    "image_width":           img_width,
-                    "image_height":          img_height,
+                    "chunk_hash_id": chunk_hash,
+                    "source_file": source,
+                    "source_path": source_path,
+                    "asset_path": source_path,
+                    "chunk_index": chunk_idx,
+                    "image_type": image_type,
+                    "image_title": image_title,
+                    "caption": caption_text,
+                    "caption_confidence": caption_confidence,
+                    "ocr_text": ocr_text,
+                    "extracted_numbers": extracted_numbers,
+                    "time_period": time_period,
+                    "data_series": data_series,
+                    "ocr_caption_mismatch": mismatch,
+                    "parent_document": ext.extra.get("parent_document"),
+                    "parent_page": ext.extra.get("parent_page"),
+                    "finance_entities": fin_entities,
+                    "image_width": img_width,
+                    "image_height": img_height,
                     # Phase 1.5 quality signals from ingestor
-                    "blur_score":            blur_score,
-                    "quality_score":         quality_score,
-                    "solid_color":           solid_color,
-                    "watermark_detected":    watermark_detected,
-                    "face_count":            ext.extra.get("face_count"),
-                    "dominant_colors":       ext.extra.get("dominant_colors", []),
-                    "perceptual_hash":       ext.extra.get("phash"),
-                    "thumbnail_path":        ext.extra.get("thumbnail_path"),
+                    "blur_score": blur_score,
+                    "quality_score": quality_score,
+                    "solid_color": solid_color,
+                    "watermark_detected": watermark_detected,
+                    "face_count": ext.extra.get("face_count"),
+                    "dominant_colors": ext.extra.get("dominant_colors", []),
+                    "perceptual_hash": ext.extra.get("phash"),
+                    "thumbnail_path": ext.extra.get("thumbnail_path"),
                     "digitized_chart_values": digitized_text or None,
                 }
 
@@ -1598,7 +1684,7 @@ class ImageChunker(BaseChunker):
                 if source_path and Path(source_path).exists():
                     vis_structure = dict(structure)
                     vis_structure["embedding_space"] = "vision"
-                    vis_structure["chunk_index"]     = chunk_idx + 1_000_000
+                    vis_structure["chunk_index"] = chunk_idx + 1_000_000
                     vis_doc = self._make_doc(
                         text=combined or image_title or caption_text or "image",
                         modality="image",

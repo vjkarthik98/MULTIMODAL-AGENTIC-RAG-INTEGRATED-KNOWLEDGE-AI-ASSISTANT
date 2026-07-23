@@ -1,7 +1,8 @@
 """docx_bm25.py — BM25 index for Word document chunks."""
+
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from prometheus_client import Counter
 
@@ -38,16 +39,16 @@ class DocxBM25(BaseBM25):
     def __init__(self) -> None:
         super().__init__()
         # Separate small BM25 for definition chunks only
-        self._def_docs: List[Any] = []
-        self._def_index: Optional[Any] = None
+        self._def_docs: list[Any] = []
+        self._def_index: Any | None = None
 
     def _build_indexed_text(self, doc: Any) -> str:
         try:
             s = getattr(doc, "structure", {}) or {}
-            parts: List[str] = list(self._base_text(doc))
+            parts: list[str] = list(self._base_text(doc))
 
             # Full heading hierarchy
-            hierarchy: List[str] = s.get("heading_hierarchy") or []
+            hierarchy: list[str] = s.get("heading_hierarchy") or []
             if hierarchy:
                 parts.append(" ".join(str(h) for h in hierarchy))
 
@@ -57,27 +58,28 @@ class DocxBM25(BaseBM25):
                 parts.append(f"heading level {heading_level}")
 
             # Defined terms: "adjusted ebitda" → indexed as defined term for retrieval
-            defined_terms: Dict[str, str] = s.get("defined_terms") or {}
+            defined_terms: dict[str, str] = s.get("defined_terms") or {}
             for term in list(defined_terms.keys())[:10]:
                 parts.append(str(term))
                 parts.append(str(term))  # amplify ×2 — defined terms are retrieval anchors
 
             # Clause number indexing: "Section 4.3(b)(ii)" → "section 4 3 b ii"
-            clause_numbers: List[str] = s.get("clause_numbers") or []
+            clause_numbers: list[str] = s.get("clause_numbers") or []
             for cn in clause_numbers[:5]:
                 clause_tokens = cn.replace(".", " ").replace("(", " ").replace(")", " ").lower()
                 parts.append(clause_tokens)
 
             # Finance entities amplification (List[str] from extract_finance_entities)
-            fin_entities: List[str] = s.get("finance_entities") or []
+            fin_entities: list[str] = s.get("finance_entities") or []
             if isinstance(fin_entities, list):
                 parts.extend(str(x) for x in fin_entities[:5])
 
             # Table heading if table chunk
             chunk_type = (s.get("chunk_type") or "").lower()
             if "table" in chunk_type:
-                table_title = (s.get("table_title") or s.get("section_title") or
-                               s.get("heading") or "").strip()
+                table_title = (
+                    s.get("table_title") or s.get("section_title") or s.get("heading") or ""
+                ).strip()
                 if table_title:
                     parts.append(table_title)
                     parts.append(table_title)
@@ -93,17 +95,20 @@ class DocxBM25(BaseBM25):
             )
             return getattr(doc, "text", "") or ""
 
-    def add_documents(self, docs: List[Any], user_id: Optional[str] = None) -> None:
+    def add_documents(self, docs: list[Any], user_id: str | None = None) -> None:
         """Index documents; route definition chunks to the definitions sub-index too."""
         super().add_documents(docs, user_id=user_id)
         def_docs = [
-            d for d in docs
-            if (getattr(d, "structure", {}) or {}).get("chunk_type") in ("definitions", "definition")
+            d
+            for d in docs
+            if (getattr(d, "structure", {}) or {}).get("chunk_type")
+            in ("definitions", "definition")
         ]
         if def_docs:
             self._def_docs.extend(def_docs)
             try:
                 from rank_bm25 import BM25Okapi
+
                 tokenized = [self.tokenize(self._build_definitions_text(d)) for d in self._def_docs]
                 self._def_index = BM25Okapi(tokenized) if tokenized else None
             except Exception as exc:
@@ -112,13 +117,13 @@ class DocxBM25(BaseBM25):
     def _build_definitions_text(self, doc: Any) -> str:
         """Build indexed text for a definition chunk: term keys + definition text."""
         s = getattr(doc, "structure", {}) or {}
-        defined_terms: Dict[str, str] = s.get("defined_terms") or {}
+        defined_terms: dict[str, str] = s.get("defined_terms") or {}
         parts = [getattr(doc, "text", "") or ""]
         for term, meaning in list(defined_terms.items())[:20]:
             parts.append(f"{term} means {meaning}")
         return " ".join(parts)
 
-    def search_definitions(self, query: str, top_k: int = 5) -> List[Any]:
+    def search_definitions(self, query: str, top_k: int = 5) -> list[Any]:
         """Search the definitions sub-index. Falls back to main index if empty."""
         if self._def_index is None or not self._def_docs:
             return self.search(query, top_k=top_k)
@@ -126,6 +131,7 @@ class DocxBM25(BaseBM25):
             tokens = self.tokenize(query)
             scores = self._def_index.get_scores(tokens)
             import heapq
+
             top_indices = heapq.nlargest(top_k, range(len(scores)), key=lambda i: scores[i])
             return [self._def_docs[i] for i in top_indices if scores[i] > 0]
         except Exception as exc:

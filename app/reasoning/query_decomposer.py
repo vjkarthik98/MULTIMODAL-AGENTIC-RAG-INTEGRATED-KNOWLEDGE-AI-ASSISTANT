@@ -3,7 +3,7 @@ import hashlib
 import re
 import time
 import unicodedata
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import structlog
 from opentelemetry import trace
@@ -36,47 +36,86 @@ _subquery_count = Histogram(
 _semaphore = asyncio.Semaphore(5)
 
 # QUERY TYPE LABELS
-QUERY_TYPE_FACTUAL      = "factual"
-QUERY_TYPE_COMPARATIVE  = "comparative"
-QUERY_TYPE_TEMPORAL     = "temporal"
-QUERY_TYPE_AGGREGATION  = "aggregation"
-QUERY_TYPE_MULTIHOP     = "multihop"
-QUERY_TYPE_SIMPLE       = "simple"
+QUERY_TYPE_FACTUAL = "factual"
+QUERY_TYPE_COMPARATIVE = "comparative"
+QUERY_TYPE_TEMPORAL = "temporal"
+QUERY_TYPE_AGGREGATION = "aggregation"
+QUERY_TYPE_MULTIHOP = "multihop"
+QUERY_TYPE_SIMPLE = "simple"
 
 # COMPARATIVE KEYWORDS
 _COMPARATIVE_KEYWORDS = {
-    "compare", "difference", "vs", "versus", "contrast",
-    "better", "worse", "pros", "cons", "advantages", "disadvantages",
-    "similar", "unlike", "whereas",
+    "compare",
+    "difference",
+    "vs",
+    "versus",
+    "contrast",
+    "better",
+    "worse",
+    "pros",
+    "cons",
+    "advantages",
+    "disadvantages",
+    "similar",
+    "unlike",
+    "whereas",
 }
 
 # TEMPORAL KEYWORDS
 _TEMPORAL_KEYWORDS = {
-    "when", "before", "after", "during", "since", "until",
-    "latest", "recent", "current", "today", "yesterday",
-    "history", "timeline", "trend", "evolution",
+    "when",
+    "before",
+    "after",
+    "during",
+    "since",
+    "until",
+    "latest",
+    "recent",
+    "current",
+    "today",
+    "yesterday",
+    "history",
+    "timeline",
+    "trend",
+    "evolution",
 }
 
 # AGGREGATION KEYWORDS
 _AGGREGATION_KEYWORDS = {
-    "how many", "count", "total", "sum", "average", "list all",
-    "enumerate", "all the", "every", "each",
+    "how many",
+    "count",
+    "total",
+    "sum",
+    "average",
+    "list all",
+    "enumerate",
+    "all the",
+    "every",
+    "each",
 }
 
 # MULTIHOP INDICATORS
 _MULTIHOP_KEYWORDS = {
-    "and then", "subsequently", "after which", "as a result",
-    "therefore", "because of", "due to", "leading to",
+    "and then",
+    "subsequently",
+    "after which",
+    "as a result",
+    "therefore",
+    "because of",
+    "due to",
+    "leading to",
 }
 
 
 # SHA-256 HASH FOR DEDUP
+
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.lower().strip().encode("utf-8")).hexdigest()
 
 
 # NORMALIZE QUERY
+
 
 def _normalize(q: str) -> str:
     q = unicodedata.normalize("NFC", str(q or ""))
@@ -85,8 +124,9 @@ def _normalize(q: str) -> str:
 
 # QUERY TYPE DETECTION
 
+
 def detect_query_type(query: str) -> str:
-    q      = query.lower()
+    q = query.lower()
     tokens = set(q.split())
 
     if bool(tokens & _COMPARATIVE_KEYWORDS):
@@ -114,8 +154,9 @@ def detect_query_type(query: str) -> str:
 
 # COMPLEXITY CHECK
 
+
 def _is_complex(query: str) -> bool:
-    ql    = query.lower()
+    ql = query.lower()
     words = ql.split()
 
     if len(words) > settings.DECOMPOSITION_MIN_WORDS:
@@ -140,9 +181,10 @@ def _is_complex(query: str) -> bool:
 
 # SUBQUERY CONFIDENCE SCORING
 
+
 def _confidence(query: str) -> float:
     words = query.split()
-    n     = len(words)
+    n = len(words)
 
     if n < 4:
         return 0.2
@@ -158,6 +200,7 @@ def _confidence(query: str) -> float:
 
 # PROMPT BUILDER — QUERY-TYPE AWARE
 
+
 def _build_prompt(query: str, query_type: str, max_subqueries: int) -> str:
 
     type_hint = {
@@ -166,8 +209,7 @@ def _build_prompt(query: str, query_type: str, max_subqueries: int) -> str:
             "Create separate queries for each entity being compared."
         ),
         QUERY_TYPE_TEMPORAL: (
-            "This is a TEMPORAL query. "
-            "Create queries for each time period or event sequence."
+            "This is a TEMPORAL query. " "Create queries for each time period or event sequence."
         ),
         QUERY_TYPE_AGGREGATION: (
             "This is an AGGREGATION query. "
@@ -178,8 +220,7 @@ def _build_prompt(query: str, query_type: str, max_subqueries: int) -> str:
             "Create sequential queries where each builds on the previous."
         ),
         QUERY_TYPE_FACTUAL: (
-            "This is a FACTUAL query. "
-            "Create focused sub-queries targeting different aspects."
+            "This is a FACTUAL query. " "Create focused sub-queries targeting different aspects."
         ),
     }.get(query_type, "")
 
@@ -194,25 +235,26 @@ def _build_prompt(query: str, query_type: str, max_subqueries: int) -> str:
 
     format_block = "\n".join(f"{i + 1}. <query>" for i in range(max_subqueries)) + "\n\n"
 
-    max_chars  = settings.MAX_PROMPT_CHARS
+    max_chars = settings.MAX_PROMPT_CHARS
     body_limit = max_chars - len(instruction) - len(format_block) - 50
-    query_trunc = query[:max(body_limit, 0)]
+    query_trunc = query[: max(body_limit, 0)]
 
     return f"{instruction}{format_block}Query:\n{query_trunc}"
 
 
 # PARSE LLM RESPONSE INTO SUBQUERY LIST
 
-def _parse(text: str) -> List[str]:
+
+def _parse(text: str) -> list[str]:
     if not text:
         return []
 
-    lines: List[str] = []
+    lines: list[str] = []
 
     for line in text.split("\n"):
         line = line.strip()
         line = re.sub(r"^\d+[\.\)]\s*", "", line)
-        line = re.sub(r"^[-•]\s*",       "", line)
+        line = re.sub(r"^[-•]\s*", "", line)
         line = line.strip()
 
         if len(line) < 5:
@@ -228,13 +270,14 @@ def _parse(text: str) -> List[str]:
 
 # FILTER SUBQUERIES — DEDUP + CONFIDENCE THRESHOLD
 
+
 def _filter(
-    queries: List[str],
+    queries: list[str],
     min_confidence: float,
     max_subqueries: int,
-) -> List[str]:
-    seen: set        = set()
-    out:  List[str]  = []
+) -> list[str]:
+    seen: set = set()
+    out: list[str] = []
 
     for q in queries:
         norm = q.lower().strip()
@@ -258,11 +301,12 @@ def _filter(
 
 # RULE-BASED FALLBACK — NO LLM NEEDED
 
-def _rule_based_fallback(query: str, max_subqueries: int) -> List[str]:
+
+def _rule_based_fallback(query: str, max_subqueries: int) -> list[str]:
     # SPLIT ON CONJUNCTIONS
     pattern = r"\band\b|\bthen\b|\balso\b|\bbut also\b|\bas well as\b|\bin addition to\b"
-    parts   = re.split(pattern, query, flags=re.IGNORECASE)
-    parts   = [p.strip() for p in parts if len(p.strip()) > 5]
+    parts = re.split(pattern, query, flags=re.IGNORECASE)
+    parts = [p.strip() for p in parts if len(p.strip()) > 5]
 
     if len(parts) > 1:
         result = []
@@ -275,10 +319,10 @@ def _rule_based_fallback(query: str, max_subqueries: int) -> List[str]:
     # COMPARATIVE SPLIT
     for kw in ("vs", "versus", "compared to", "difference between"):
         if kw in query.lower():
-            idx   = query.lower().find(kw)
-            left  = query[:idx].strip()
-            right = query[idx + len(kw):].strip()
-            subs  = []
+            idx = query.lower().find(kw)
+            left = query[:idx].strip()
+            right = query[idx + len(kw) :].strip()
+            subs = []
             if left:
                 subs.append(f"What is {left}?")
             if right:
@@ -301,7 +345,7 @@ _CEO_AND_FINANCIALS = re.compile(
 )
 
 
-def _finance_decompose(query: str, max_subqueries: int) -> Optional[List[str]]:
+def _finance_decompose(query: str, max_subqueries: int) -> list[str] | None:
     """
     Detect finance-specific patterns and produce targeted sub-queries.
     Returns a list when a pattern matched, or None to fall through to LLM.
@@ -311,8 +355,8 @@ def _finance_decompose(query: str, max_subqueries: int) -> Optional[List[str]]:
     # "Compare Q3 vs Q4 revenue" → ["Q3 revenue?", "Q4 revenue?", "Q3 vs Q4 revenue change?"]
     m = _QQ_PATTERN.search(q)
     if m:
-        q1, q2  = m.group(1), m.group(2)
-        topic   = q[m.end():].strip(" ?.,") or "results"
+        q1, q2 = m.group(1), m.group(2)
+        topic = q[m.end() :].strip(" ?.,") or "results"
         subs = [
             f"Q{q1} {topic}?",
             f"Q{q2} {topic}?",
@@ -323,7 +367,7 @@ def _finance_decompose(query: str, max_subqueries: int) -> Optional[List[str]]:
     # "CEO said X AND financials show Y" → ["CEO statement about X?", "Y financials?"]
     m2 = _CEO_AND_FINANCIALS.match(q)
     if m2:
-        speaker_part   = m2.group(1).strip()
+        speaker_part = m2.group(1).strip()
         statement_part = m2.group(2).strip()
         financial_part = m2.group(3).strip()
         subs = [
@@ -337,7 +381,7 @@ def _finance_decompose(query: str, max_subqueries: int) -> Optional[List[str]]:
         base = re.sub(r'\byoy\b|year[- ]over[- ]year', '', q, flags=re.IGNORECASE).strip(" ?.,")
         year_m = re.search(r'\b(20\d{2})\b', q)
         if year_m:
-            yr   = int(year_m.group(1))
+            yr = int(year_m.group(1))
             subs = [f"{base} {yr}?", f"{base} {yr - 1}?", f"{base} YoY change {yr}?"]
             return subs[:max_subqueries]
 
@@ -346,21 +390,19 @@ def _finance_decompose(query: str, max_subqueries: int) -> Optional[List[str]]:
 
 # DEDUPLICATE AGAINST ORIGINAL QUERY
 
+
 def _dedup_against_original(
-    subqueries: List[str],
+    subqueries: list[str],
     original: str,
-) -> List[str]:
+) -> list[str]:
     orig_hash = _hash(original)
-    return [
-        q for q in subqueries
-        if _hash(q) != orig_hash
-    ]
+    return [q for q in subqueries if _hash(q) != orig_hash]
 
 
 class QueryDecomposer:
 
     def __init__(self, llm: Any) -> None:
-        self.llm            = llm
+        self.llm = llm
         self.max_subqueries = settings.MAX_SUBQUERIES
         self.min_confidence = settings.DECOMPOSITION_CONFIDENCE_THRESHOLD
 
@@ -371,9 +413,9 @@ class QueryDecomposer:
         wait=wait_exponential(multiplier=1, min=1, max=4),
         reraise=False,
     )
-    def _call_llm(self, prompt: str, session_id: str) -> Optional[str]:
+    def _call_llm(self, prompt: str, session_id: str) -> str | None:
         try:
-            t_start  = time.time()
+            t_start = time.time()
             response = self.llm.generate(
                 prompt,
                 max_tokens=settings.SUBQUERY_MAX_TOKENS,
@@ -406,7 +448,7 @@ class QueryDecomposer:
         self,
         query: str,
         session_id: str = "default",
-    ) -> List[str]:
+    ) -> list[str]:
 
         if not query:
             return []
@@ -440,7 +482,7 @@ class QueryDecomposer:
                 query_type = detect_query_type(query)
                 span.set_attribute("query.type", query_type)
 
-                prompt   = _build_prompt(query, query_type, self.max_subqueries)
+                prompt = _build_prompt(query, query_type, self.max_subqueries)
                 response = self._call_llm(prompt, session_id)
 
                 if not response:
@@ -453,7 +495,7 @@ class QueryDecomposer:
                     span.set_status(Status(StatusCode.OK))
                     return fallback
 
-                parsed   = _parse(response)
+                parsed = _parse(response)
                 filtered = _filter(parsed, self.min_confidence, self.max_subqueries)
 
                 if not filtered:
@@ -496,7 +538,7 @@ class QueryDecomposer:
                 return filtered
 
             except Exception as exc:
-                latency    = round(time.time() - start, 2)
+                latency = round(time.time() - start, 2)
                 error_type = type(exc).__name__
 
                 _decompose_duration.labels(status="error").observe(latency)
@@ -519,12 +561,10 @@ class QueryDecomposer:
         self,
         query: str,
         session_id: str = "default",
-    ) -> List[str]:
+    ) -> list[str]:
 
         async with _semaphore:
             return await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self.decompose(query, session_id),
             )
-
-

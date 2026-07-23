@@ -5,7 +5,7 @@ import hashlib
 import json
 import time
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from tenacity import (
     retry,
@@ -21,6 +21,7 @@ logger = get_logger(__name__)
 
 try:
     import pybreaker
+
     _redis_breaker = pybreaker.CircuitBreaker(
         fail_max=settings.CIRCUIT_BREAKER_MAX_FAILURES,
         reset_timeout=settings.CIRCUIT_BREAKER_RESET_TIMEOUT,
@@ -44,6 +45,7 @@ _VALID_MODALITIES = {"text", "image", "audio", "video", "table", "document"}
 
 
 # IN-MEMORY LRU FALLBACK STORE
+
 
 class _InMemoryStore:
 
@@ -69,15 +71,15 @@ class _InMemoryStore:
         if end == -1:
             self._store[key] = lst[start:]
         else:
-            self._store[key] = lst[start: end + 1]
+            self._store[key] = lst[start : end + 1]
 
-    def lrange(self, key: str, start: int, end: int) -> List[str]:
+    def lrange(self, key: str, start: int, end: int) -> list[str]:
         lst = self._store.get(key, [])
         if not isinstance(lst, list):
             return []
         if end == -1:
             return lst[start:]
-        return lst[start: end + 1]
+        return lst[start : end + 1]
 
     def llen(self, key: str) -> int:
         lst = self._store.get(key, [])
@@ -91,14 +93,14 @@ class _InMemoryStore:
         self._store.move_to_end(key)
         self._evict()
 
-    def get(self, key: str) -> Optional[str]:
+    def get(self, key: str) -> str | None:
         val = self._store.get(key)
         if isinstance(val, str):
             self._store.move_to_end(key)
             return val
         return None
 
-    def keys_with_prefix(self, prefix: str) -> List[str]:
+    def keys_with_prefix(self, prefix: str) -> list[str]:
         return [k for k in self._store.keys() if str(k).startswith(prefix)]
 
     def flush(self) -> None:
@@ -133,6 +135,7 @@ class RedisMemory:
         if settings.REDIS_URL and settings.REDIS_TOKEN:
             try:
                 from upstash_redis import Redis as UpstashRedis
+
                 self.client = UpstashRedis(
                     url=settings.REDIS_URL,
                     token=settings.REDIS_TOKEN,
@@ -214,6 +217,7 @@ class RedisMemory:
 
     def _clean(self, text: str) -> str:
         import unicodedata
+
         text = unicodedata.normalize("NFC", str(text or ""))
         return " ".join(text.strip().split())
 
@@ -225,20 +229,26 @@ class RedisMemory:
         m = str(modality or "text").lower().strip()
         return m if m in _VALID_MODALITIES else "text"
 
-    def _key(self, session_id: str, user_id: Optional[str] = None) -> str:
+    def _key(self, session_id: str, user_id: str | None = None) -> str:
         if not user_id:
-            logger.error(event="redis_key_missing_user_id", msg="user_id is required — refusing an unscoped key", session_id=session_id)
-            raise ValueError("TENANT_ISOLATION_VIOLATION: user_id is required to build a Redis memory key")
+            logger.error(
+                event="redis_key_missing_user_id",
+                msg="user_id is required — refusing an unscoped key",
+                session_id=session_id,
+            )
+            raise ValueError(
+                "TENANT_ISOLATION_VIOLATION: user_id is required to build a Redis memory key"
+            )
         return f"{self.prefix}:{user_id}:{session_id}:history"
 
-    def _hash_msg(self, msg: Dict) -> str:
+    def _hash_msg(self, msg: dict) -> str:
         base = f"{msg.get('role')}|{str(msg.get('content', ''))[:200]}"
         return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
     def _valid_embedding(self, emb: Any) -> bool:
-        return (
-            isinstance(emb, list)
-            and len(emb) in (settings.TEXT_EMBEDDING_DIM, settings.VISION_EMBEDDING_DIM)
+        return isinstance(emb, list) and len(emb) in (
+            settings.TEXT_EMBEDDING_DIM,
+            settings.VISION_EMBEDDING_DIM,
         )
 
     # PIPELINE WRITE — RPUSH + LTRIM + EXPIRE
@@ -268,11 +278,11 @@ class RedisMemory:
         session_id: str,
         role: str,
         content: str,
-        embedding: Optional[List[float]] = None,
+        embedding: list[float] | None = None,
         modality: str = "text",
         importance: float = 1.0,
-        extra: Optional[Dict[str, Any]] = None,
-        user_id: Optional[str] = None,
+        extra: dict[str, Any] | None = None,
+        user_id: str | None = None,
     ) -> None:
         if not self._enabled:
             return
@@ -283,13 +293,13 @@ class RedisMemory:
         if len(content) < 2:
             return
 
-        content = content[:settings.MAX_PROMPT_CHARS]
+        content = content[: settings.MAX_PROMPT_CHARS]
         try:
             key = self._key(session_id, user_id)
         except ValueError:
             return
 
-        message: Dict[str, Any] = {
+        message: dict[str, Any] = {
             "role": self._role(role),
             "content": content,
             "timestamp": time.time(),
@@ -323,7 +333,7 @@ class RedisMemory:
 
     # APPEND ALIAS — USED BY MEMORY MANAGER
 
-    def append(self, session_id: str, message: Dict[str, Any], user_id: Optional[str] = None) -> None:
+    def append(self, session_id: str, message: dict[str, Any], user_id: str | None = None) -> None:
         if not self._enabled:
             return
         self.add_message(
@@ -337,7 +347,7 @@ class RedisMemory:
 
     # GET HISTORY
 
-    def get_history(self, session_id: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_history(self, session_id: str, user_id: str | None = None) -> list[dict[str, Any]]:
         if not self._enabled:
             return []
         try:
@@ -347,6 +357,7 @@ class RedisMemory:
 
         if self._is_available():
             try:
+
                 def _do():
                     return self.client.lrange(key, 0, -1)
 
@@ -365,7 +376,7 @@ class RedisMemory:
 
     # GET ALIAS — USED BY MEMORY MANAGER
 
-    def get(self, session_id: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get(self, session_id: str, user_id: str | None = None) -> list[dict[str, Any]]:
         return self.get_history(session_id, user_id)
 
     # GET LAST K MESSAGES
@@ -373,9 +384,9 @@ class RedisMemory:
     def get_last_k(
         self,
         session_id: str,
-        k: Optional[int] = None,
-        user_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        k: int | None = None,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         if not self._enabled:
             return []
         k = k or settings.MEMORY_TOP_K
@@ -386,6 +397,7 @@ class RedisMemory:
 
         if self._is_available():
             try:
+
                 def _do():
                     return self.client.lrange(key, -k, -1)
 
@@ -403,8 +415,8 @@ class RedisMemory:
 
     # PARSE MESSAGES — DEDUP + VALIDATE
 
-    def _parse_messages(self, data: List[Any]) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
+    def _parse_messages(self, data: list[Any]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
         seen: set = set()
 
         for item in data:
@@ -435,7 +447,7 @@ class RedisMemory:
 
     # MEMORY SIZE
 
-    def get_memory_size(self, session_id: str, user_id: Optional[str] = None) -> int:
+    def get_memory_size(self, session_id: str, user_id: str | None = None) -> int:
         if not self._enabled:
             return 0
         try:
@@ -445,6 +457,7 @@ class RedisMemory:
 
         if self._is_available():
             try:
+
                 def _do():
                     return self.client.llen(key)
 
@@ -456,7 +469,7 @@ class RedisMemory:
 
     # CLEAR MEMORY
 
-    def clear_memory(self, session_id: str, user_id: Optional[str] = None) -> None:
+    def clear_memory(self, session_id: str, user_id: str | None = None) -> None:
         if not self._enabled:
             return
         try:
@@ -466,6 +479,7 @@ class RedisMemory:
 
         if self._is_available():
             try:
+
                 def _do():
                     return self.client.delete(key)
 
@@ -486,7 +500,7 @@ class RedisMemory:
 
     # DELETE ALIAS — USED BY MEMORY MANAGER
 
-    def delete(self, session_id: str, user_id: Optional[str] = None) -> None:
+    def delete(self, session_id: str, user_id: str | None = None) -> None:
         self.clear_memory(session_id, user_id)
 
     # GDPR PURGE — ALL DATA FOR USER_ID PREFIX
@@ -500,14 +514,17 @@ class RedisMemory:
 
         if self._is_available():
             try:
+
                 def _scan():
                     return list(self.client.scan_iter(f"{prefix}*"))
 
                 keys = self._retry(_scan)
                 for key in keys:
                     try:
+
                         def _del(k=key):
                             return self.client.delete(k)
+
                         self._retry(_del)
                         purged += 1
                     except Exception as exc:
@@ -541,7 +558,7 @@ class RedisMemory:
         self,
         cache_key: str,
         value: Any,
-        ttl: Optional[int] = None,
+        ttl: int | None = None,
     ) -> None:
         if not self._enabled:
             return
@@ -555,6 +572,7 @@ class RedisMemory:
 
         if self._is_available():
             try:
+
                 def _do():
                     return self.client.setex(cache_key, ttl, payload)
 
@@ -565,11 +583,12 @@ class RedisMemory:
 
         self._fallback.setex(cache_key, ttl, payload)
 
-    def cache_get(self, cache_key: str) -> Optional[Any]:
+    def cache_get(self, cache_key: str) -> Any | None:
         if not self._enabled:
             return None
         if self._is_available():
             try:
+
                 def _do():
                     return self.client.get(cache_key)
 
@@ -593,8 +612,10 @@ class RedisMemory:
             return
         if self._is_available():
             try:
+
                 def _do():
                     return self.client.delete(cache_key)
+
                 self._retry(_do)
             except Exception as exc:
                 logger.warning(event="redis_cache_delete_failed", error=str(exc))
@@ -637,7 +658,7 @@ class RedisMemory:
     def embedding_cache_set(
         self,
         text_hash: str,
-        embedding: List[float],
+        embedding: list[float],
     ) -> None:
         if not self._enabled:
             return
@@ -646,7 +667,7 @@ class RedisMemory:
         key = f"{self.prefix}:emb:{text_hash}"
         self.cache_set(key, embedding, ttl=self.embed_cache_ttl)
 
-    def embedding_cache_get(self, text_hash: str) -> Optional[List[float]]:
+    def embedding_cache_get(self, text_hash: str) -> list[float] | None:
         if not self._enabled:
             return None
         key = f"{self.prefix}:emb:{text_hash}"
@@ -664,17 +685,26 @@ class RedisMemory:
         content: str,
         modality: str = "text",
         importance: float = 1.0,
-        user_id: Optional[str] = None,
+        user_id: str | None = None,
     ) -> None:
         await asyncio.to_thread(
             self.add_message,
-            session_id, role, content, None, modality, importance, None, user_id,
+            session_id,
+            role,
+            content,
+            None,
+            modality,
+            importance,
+            None,
+            user_id,
         )
 
-    async def async_get_history(self, session_id: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def async_get_history(
+        self, session_id: str, user_id: str | None = None
+    ) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self.get_history, session_id, user_id)
 
-    async def async_clear_memory(self, session_id: str, user_id: Optional[str] = None) -> None:
+    async def async_clear_memory(self, session_id: str, user_id: str | None = None) -> None:
         await asyncio.to_thread(self.clear_memory, session_id, user_id)
 
     async def async_purge_user(self, user_id: str) -> None:
@@ -682,13 +712,12 @@ class RedisMemory:
 
     # HEALTH CHECK
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(self) -> dict[str, Any]:
         return {
             "redis_ok": self._redis_ok,
             "use_upstash": self._use_upstash,
             "client_type": (
-                "upstash" if self._use_upstash
-                else ("redis" if self._redis_ok else "fallback")
+                "upstash" if self._use_upstash else ("redis" if self._redis_ok else "fallback")
             ),
             "fallback_active": not self._redis_ok,
             "fallback_size": len(self._fallback._store),
@@ -696,4 +725,3 @@ class RedisMemory:
             "max_messages": self.max_messages,
             "ttl_seconds": self.ttl,
         }
-

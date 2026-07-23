@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import io
 import re
+import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+
+from prometheus_client import Counter
 
 from app.chunking.base_chunker import BaseChunker
 from app.chunking.finance_numbers import (
-    approx_tokens,
     deterministic_chunk_id,
     extract_finance_entities,
     protect,
@@ -15,9 +16,6 @@ from app.chunking.finance_numbers import (
 )
 from app.ingestion.schema import IngestedDocument, RawExtract, UniversalMetadata
 from app.utils.logger import get_logger, modality_var
-
-import time
-from prometheus_client import Counter, Histogram
 
 logger = get_logger(__name__)
 
@@ -47,7 +45,9 @@ _OVERLAP_ROWS = 0
 def _caption_bytes(raw_bytes: bytes) -> str:
     try:
         from PIL import Image
+
         from app.chunking.image_chunker import blip_caption
+
         img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
         return blip_caption(img)
     except Exception as exc:
@@ -55,7 +55,7 @@ def _caption_bytes(raw_bytes: bytes) -> str:
         return ""
 
 
-def _explode_batch(blob: str) -> List[str]:
+def _explode_batch(blob: str) -> list[str]:
     """Split an ingest-level batch (`[Sheet: X, Rows N-M]` + one spreadsheet row
     per line, cells pipe-joined) back into individual row-lines. Without this,
     naively splitting the whole multi-line blob on "|" merges every row in the
@@ -66,11 +66,11 @@ def _explode_batch(blob: str) -> List[str]:
     return [ln for ln in lines if not _HEADER_TAG_RE.match(ln.strip())]
 
 
-def _rows_to_nl(rows: List[str], headers: List[str], unit_scale: str, sheet_name: str) -> str:
+def _rows_to_nl(rows: list[str], headers: list[str], unit_scale: str, sheet_name: str) -> str:
     """Serialize a row group to natural language for embedding."""
     lines = [f"Sheet: {sheet_name}" + (f" (in {unit_scale})" if unit_scale else "")]
 
-    row_lines: List[str] = []
+    row_lines: list[str] = []
     for blob in rows:
         row_lines.extend(_explode_batch(blob))
 
@@ -99,9 +99,9 @@ def _rows_to_nl(rows: List[str], headers: List[str], unit_scale: str, sheet_name
     return "\n".join(lines)
 
 
-def _rows_to_markdown(rows: List[str], headers: List[str]) -> str:
+def _rows_to_markdown(rows: list[str], headers: list[str]) -> str:
     """Serialize a row group to a markdown table for display."""
-    row_lines: List[str] = []
+    row_lines: list[str] = []
     for blob in rows:
         row_lines.extend(_explode_batch(blob))
 
@@ -109,7 +109,7 @@ def _rows_to_markdown(rows: List[str], headers: List[str]) -> str:
     if not local_headers and row_lines and not re.search(r"\d", row_lines[0]):
         local_headers = [c.strip() for c in row_lines[0].split("|") if c.strip()]
 
-    parts: List[str] = []
+    parts: list[str] = []
     if local_headers:
         parts.append("| " + " | ".join(local_headers) + " |")
         parts.append("|" + "|".join([" --- "] * len(local_headers)) + "|")
@@ -126,9 +126,9 @@ class XlsxChunker(BaseChunker):
 
     def chunk(
         self,
-        extracts: List[RawExtract],
+        extracts: list[RawExtract],
         meta: UniversalMetadata,
-    ) -> List[IngestedDocument]:
+    ) -> list[IngestedDocument]:
         source = Path(meta.source_path).name or "unknown.xlsx"
         surface = "xlsx_chunker"
         modality_var.set("xlsx")
@@ -138,16 +138,16 @@ class XlsxChunker(BaseChunker):
             logger.warning(event="no_extracts_received", modality="xlsx", source=source)
             return []
         try:
-            docs: List[IngestedDocument] = []
+            docs: list[IngestedDocument] = []
             chunk_idx = [0]
 
             # State per sheet
-            current_sheet: Optional[str] = None
-            sheet_index = [0]        # sequential sheet number (MD Phase 1.4)
+            current_sheet: str | None = None
+            sheet_index = [0]  # sequential sheet number (MD Phase 1.4)
             unit_scale: str = ""
             currency: str = "USD"
-            column_headers: List[str] = []
-            pending_rows: List[RawExtract] = []
+            column_headers: list[str] = []
+            pending_rows: list[RawExtract] = []
             seen_hashes: set = set()
 
             _SHEET_TYPE_MAP = {
@@ -164,7 +164,7 @@ class XlsxChunker(BaseChunker):
                 "data": "data",
             }
 
-            def _infer_sheet_type(name: Optional[str]) -> str:
+            def _infer_sheet_type(name: str | None) -> str:
                 if not name:
                     return "unknown"
                 nl = name.lower()
@@ -180,9 +180,9 @@ class XlsxChunker(BaseChunker):
                     return
                 _emit_row_group(pending_rows[:], column_headers[:])
                 # Slide window with overlap
-                pending_rows[:] = pending_rows[_TARGET_ROWS - _OVERLAP_ROWS:]
+                pending_rows[:] = pending_rows[_TARGET_ROWS - _OVERLAP_ROWS :]
 
-            def _emit_row_group(rows: List[RawExtract], headers: List[str]) -> None:
+            def _emit_row_group(rows: list[RawExtract], headers: list[str]) -> None:
                 row_texts = [r.text for r in rows]
                 nl_text = _rows_to_nl(row_texts, headers, unit_scale, current_sheet or "")
                 md_text = _rows_to_markdown(row_texts, headers)
@@ -206,32 +206,34 @@ class XlsxChunker(BaseChunker):
                     source, f"sheet_{current_sheet}_r{row_nums[0]}_{chunk_idx[0]}", chunk_idx[0]
                 )
                 first_row_ref = rows[0].extra.get("cell_ref", "")
-                last_row_ref  = rows[-1].extra.get("cell_ref", "")
-                table_region  = f"{first_row_ref}:{last_row_ref}" if first_row_ref and last_row_ref else ""
+                last_row_ref = rows[-1].extra.get("cell_ref", "")
+                table_region = (
+                    f"{first_row_ref}:{last_row_ref}" if first_row_ref and last_row_ref else ""
+                )
                 is_hidden_group = any(r.extra.get("is_hidden", False) for r in rows)
                 sem_group = rows[0].extra.get("semantic_group", "")
                 display_fmt = rows[0].extra.get("display_format", "standard")
                 _smeta = sheet_meta_map.get(current_sheet or "", {})
                 structure = {
-                    "chunk_hash_id":         chunk_hash,
-                    "source_file":           source,
-                    "chunk_index":           chunk_idx[0],
-                    "sheet_name":            current_sheet,
-                    "sheet_index":           sheet_index[0],
-                    "sheet_type":            _smeta.get("sheet_type") or _infer_sheet_type(current_sheet),
-                    "table_region":          table_region,
+                    "chunk_hash_id": chunk_hash,
+                    "source_file": source,
+                    "chunk_index": chunk_idx[0],
+                    "sheet_name": current_sheet,
+                    "sheet_index": sheet_index[0],
+                    "sheet_type": _smeta.get("sheet_type") or _infer_sheet_type(current_sheet),
+                    "table_region": table_region,
                     "named_ranges_in_chunk": [],
-                    "chunk_type":            "table_row_group",
-                    "row_range":             row_nums,
-                    "column_headers":        headers,
-                    "semantic_group":        sem_group,
-                    "unit_scale":            unit_scale,
-                    "currency":              currency,
-                    "display_format":        display_fmt,
-                    "is_hidden":             is_hidden_group,
+                    "chunk_type": "table_row_group",
+                    "row_range": row_nums,
+                    "column_headers": headers,
+                    "semantic_group": sem_group,
+                    "unit_scale": unit_scale,
+                    "currency": currency,
+                    "display_format": display_fmt,
+                    "is_hidden": is_hidden_group,
                     "has_formulas_resolved": True,
-                    "markdown_repr":         md_text,
-                    "finance_entities":      fin_entities,
+                    "markdown_repr": md_text,
+                    "finance_entities": fin_entities,
                 }
                 doc = self._make_doc(
                     text=nl_text,
@@ -249,7 +251,7 @@ class XlsxChunker(BaseChunker):
                     chunk_idx[0] += 1
 
             # Track sheet-level metadata from sheet_metadata extracts
-            sheet_meta_map: Dict[str, Dict] = {}
+            sheet_meta_map: dict[str, dict] = {}
 
             for ext in extracts:
                 etype = ext.extract_type
@@ -289,27 +291,29 @@ class XlsxChunker(BaseChunker):
                         continue
                     fin_entities = extract_finance_entities(nr_text)
                     # Named-range keys from the raw dict (workbook-level)
-                    _raw_nr: Dict = ext.extra.get("named_ranges") or {}
+                    _raw_nr: dict = ext.extra.get("named_ranges") or {}
                     if _raw_nr:
                         nr_keys = list(_raw_nr.keys())
                     elif ext.extra.get("is_stats_summary"):
                         nr_keys = []  # stats summary is not a named-range block
                     else:
                         nr_keys = [nr_text.split("=")[0].strip()] if "=" in nr_text else []
-                    chunk_hash = deterministic_chunk_id(source, f"named_range_{chunk_idx[0]}", chunk_idx[0])
+                    chunk_hash = deterministic_chunk_id(
+                        source, f"named_range_{chunk_idx[0]}", chunk_idx[0]
+                    )
                     structure = {
-                        "chunk_hash_id":         chunk_hash,
-                        "source_file":           source,
-                        "chunk_index":           chunk_idx[0],
-                        "sheet_name":            current_sheet,
-                        "sheet_index":           sheet_index[0],
-                        "sheet_type":            _infer_sheet_type(current_sheet),
-                        "table_region":          "",
+                        "chunk_hash_id": chunk_hash,
+                        "source_file": source,
+                        "chunk_index": chunk_idx[0],
+                        "sheet_name": current_sheet,
+                        "sheet_index": sheet_index[0],
+                        "sheet_type": _infer_sheet_type(current_sheet),
+                        "table_region": "",
                         "named_ranges_in_chunk": nr_keys[:20],
-                        "chunk_type":            "named_ranges",
-                        "unit_scale":            unit_scale,
+                        "chunk_type": "named_ranges",
+                        "unit_scale": unit_scale,
                         "has_formulas_resolved": True,
-                        "finance_entities":      fin_entities,
+                        "finance_entities": fin_entities,
                     }
                     doc = self._make_doc(
                         text=nr_text,
@@ -355,19 +359,21 @@ class XlsxChunker(BaseChunker):
                     if not cap:
                         continue
                     fin_entities = extract_finance_entities(cap)
-                    chunk_hash = deterministic_chunk_id(source, f"chart_{chunk_idx[0]}", chunk_idx[0])
+                    chunk_hash = deterministic_chunk_id(
+                        source, f"chart_{chunk_idx[0]}", chunk_idx[0]
+                    )
                     structure = {
-                        "chunk_hash_id":         chunk_hash,
-                        "source_file":           source,
-                        "chunk_index":           chunk_idx[0],
-                        "sheet_name":            current_sheet,
-                        "sheet_index":           sheet_index[0],
-                        "sheet_type":            _infer_sheet_type(current_sheet),
-                        "table_region":          "",
+                        "chunk_hash_id": chunk_hash,
+                        "source_file": source,
+                        "chunk_index": chunk_idx[0],
+                        "sheet_name": current_sheet,
+                        "sheet_index": sheet_index[0],
+                        "sheet_type": _infer_sheet_type(current_sheet),
+                        "table_region": "",
                         "named_ranges_in_chunk": [],
-                        "chunk_type":            "chart_caption",
-                        "caption":               cap,
-                        "finance_entities":      fin_entities,
+                        "chunk_type": "chart_caption",
+                        "caption": cap,
+                        "finance_entities": fin_entities,
                     }
                     doc = self._make_doc(
                         text=cap,

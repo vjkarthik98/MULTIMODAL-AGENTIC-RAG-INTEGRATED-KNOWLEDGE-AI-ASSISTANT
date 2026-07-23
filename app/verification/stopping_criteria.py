@@ -11,7 +11,6 @@ Terminate the verification loop on ANY of:
 from __future__ import annotations
 
 import time
-from typing import List, Optional, Tuple
 
 from app.core.config import settings
 from app.verification.verification_schema import RetryAttempt
@@ -23,7 +22,7 @@ class StoppingCriteria:
         self.timeout_sec = settings.AGENT_VERIFY_TIMEOUT_SEC
         self.min_improvement_pct = settings.AGENT_VERIFY_MIN_IMPROVEMENT_PCT
 
-    def should_stop(self, attempts: List[RetryAttempt], start_time: float) -> Tuple[bool, str]:
+    def should_stop(self, attempts: list[RetryAttempt], start_time: float) -> tuple[bool, str]:
         if not attempts:
             return False, ""
 
@@ -47,11 +46,14 @@ class StoppingCriteria:
                 (last.scores.overall - prev.scores.overall) / max(prev.scores.overall, 1.0) * 100.0
             )
             if improvement_pct < self.min_improvement_pct:
-                return True, f"overall_improvement_below_threshold ({improvement_pct:.1f}% < {self.min_improvement_pct}%)"
+                return (
+                    True,
+                    f"overall_improvement_below_threshold ({improvement_pct:.1f}% < {self.min_improvement_pct}%)",
+                )
 
         return False, ""
 
-    def best_attempt(self, attempts: List[RetryAttempt]) -> Optional[RetryAttempt]:
+    def best_attempt(self, attempts: list[RetryAttempt]) -> RetryAttempt | None:
         if not attempts:
             return None
         return max(attempts, key=lambda a: a.scores.overall)

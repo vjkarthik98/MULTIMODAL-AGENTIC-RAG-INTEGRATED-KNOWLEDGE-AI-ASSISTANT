@@ -1,8 +1,0 @@
-artifact_location: /home/ubuntu/multimodal-rag-assistant-1/mlruns/101106892306504793
-creation_time: 1779758635033
-experiment_id: '101106892306504793'
-last_update_time: 1779758635033
-lifecycle_stage: active
-name: multimodal-rag-eval
-trace_location: null
-workspace: default

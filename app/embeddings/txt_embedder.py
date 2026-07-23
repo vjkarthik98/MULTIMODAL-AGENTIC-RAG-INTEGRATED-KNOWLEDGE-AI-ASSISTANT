@@ -1,12 +1,14 @@
 """txt_embedder.py — Finance-grade embedder for plain-text / transcript chunks."""
+
 from __future__ import annotations
 
 from typing import Any
 
-from app.embeddings.base_embedder import BaseEmbedder
-from app.core.config import settings
-from app.utils.logger import get_logger
 from prometheus_client import Counter
+
+from app.core.config import settings
+from app.embeddings.base_embedder import BaseEmbedder
+from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -41,10 +43,7 @@ class TxtEmbedder(BaseEmbedder):
                 parts.append(f"[CALL: {call_section}]")
 
             speaker = (
-                s.get("speaker_name")
-                or s.get("speaker")
-                or s.get("speaker_role")
-                or ""
+                s.get("speaker_name") or s.get("speaker") or s.get("speaker_role") or ""
             ).strip()
             if speaker:
                 parts.append(f"[Speaker: {speaker}]")
@@ -54,7 +53,7 @@ class TxtEmbedder(BaseEmbedder):
                 parts.append(f"[Section: {section}]")
 
             prefix = (" ".join(parts) + " ") if parts else ""
-            text   = prefix + cleaned_text
+            text = prefix + cleaned_text
 
             if s.get("is_forward_looking"):
                 text += _FLS_SUFFIX
@@ -74,7 +73,7 @@ class TxtEmbedder(BaseEmbedder):
             if fin_entities:
                 text += " " + " ".join(str(e) for e in fin_entities[:12])
 
-            result = text[:settings.MAX_PROMPT_CHARS]
+            result = text[: settings.MAX_PROMPT_CHARS]
             logger.debug(event="embed_text_built", modality="txt", chars=len(result))
             _EMBED_BUILT.inc()
             return result

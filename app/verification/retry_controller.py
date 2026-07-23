@@ -12,7 +12,7 @@ Never repeats a strategy within one request — tracked in `self.used`.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -31,9 +31,9 @@ _REWRITE_PROMPT = (
 
 class RetryController:
     def __init__(self) -> None:
-        self.used: List[str] = []
+        self.used: list[str] = []
 
-    def next_strategy(self) -> Optional[str]:
+    def next_strategy(self) -> str | None:
         for s in STRATEGY_ORDER:
             if s not in self.used:
                 return s
@@ -44,29 +44,32 @@ class RetryController:
         strategy: str,
         query: str,
         session_id: str,
-        user_id: Optional[str],
+        user_id: str | None,
         retriever: Any,
         llm: Any,
-        filters: Optional[Dict[str, Any]],
-        prior_docs: List[Dict[str, Any]],
-    ) -> Tuple[List[Dict[str, Any]], str]:
+        filters: dict[str, Any] | None,
+        prior_docs: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], str]:
         """Returns (new_doc_pool, effective_query_used_for_generation)."""
         self.used.append(strategy)
 
         if strategy == "expand_retrieval":
-            docs = self._search(retriever, query, session_id, user_id, filters,
-                                 top_k=settings.DEFAULT_TOP_K * 2)
+            docs = self._search(
+                retriever, query, session_id, user_id, filters, top_k=settings.DEFAULT_TOP_K * 2
+            )
             return self._merge(prior_docs, docs), query
 
         if strategy == "query_rewrite":
             rewritten = self._rewrite_query(query, llm, session_id)
-            docs = self._search(retriever, rewritten, session_id, user_id, filters,
-                                 top_k=settings.DEFAULT_TOP_K)
+            docs = self._search(
+                retriever, rewritten, session_id, user_id, filters, top_k=settings.DEFAULT_TOP_K
+            )
             return self._merge(prior_docs, docs), rewritten
 
         if strategy == "increase_depth":
-            docs = self._search(retriever, query, session_id, user_id, filters,
-                                 top_k=settings.DEFAULT_TOP_K * 3)
+            docs = self._search(
+                retriever, query, session_id, user_id, filters, top_k=settings.DEFAULT_TOP_K * 3
+            )
             return self._merge(prior_docs, docs), query
 
         if strategy == "decomposition":
@@ -76,14 +79,29 @@ class RetryController:
         return prior_docs, query
 
     @staticmethod
-    def _search(retriever: Any, query: str, session_id: str, user_id: Optional[str],
-                filters: Optional[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
+    def _search(
+        retriever: Any,
+        query: str,
+        session_id: str,
+        user_id: str | None,
+        filters: dict[str, Any] | None,
+        top_k: int,
+    ) -> list[dict[str, Any]]:
         try:
-            return retriever.search(query=query, session_id=session_id, top_k=top_k,
-                                     user_id=user_id, filters=filters) or []
+            return (
+                retriever.search(
+                    query=query,
+                    session_id=session_id,
+                    top_k=top_k,
+                    user_id=user_id,
+                    filters=filters,
+                )
+                or []
+            )
         except Exception as exc:
-            logger.warning(event="verify_retry_search_failed", error=str(exc),
-                            session_id=session_id)
+            logger.warning(
+                event="verify_retry_search_failed", error=str(exc), session_id=session_id
+            )
             return []
 
     @staticmethod
@@ -110,16 +128,23 @@ class RetryController:
             # _sanitize_query) before reaching this loop, but that guarantee
             # does not extend to text an LLM call generates mid-loop.
             from app.guardrails.input_guard import sanitize as _guard_sanitize
+
             rewritten = _guard_sanitize(rewritten, surface="verification_query_rewrite")
             return rewritten if rewritten else query
         except Exception as exc:
-            logger.warning(event="verify_retry_rewrite_failed", error=str(exc),
-                            session_id=session_id)
+            logger.warning(
+                event="verify_retry_rewrite_failed", error=str(exc), session_id=session_id
+            )
             return query
 
     @staticmethod
-    def _decompose_and_retrieve(query: str, session_id: str, user_id: Optional[str],
-                                 retriever: Any, filters: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _decompose_and_retrieve(
+        query: str,
+        session_id: str,
+        user_id: str | None,
+        retriever: Any,
+        filters: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
         try:
             from app.pipeline.rag_pipeline import _split_query_aspects
         except Exception:
@@ -127,16 +152,18 @@ class RetryController:
         aspects = _split_query_aspects(query)
         if len(aspects) < 2:
             return []
-        merged: List[Dict[str, Any]] = []
+        merged: list[dict[str, Any]] = []
         for asp in aspects[:5]:
-            merged.extend(RetryController._search(
-                retriever, asp, session_id, user_id, filters, top_k=4))
+            merged.extend(
+                RetryController._search(retriever, asp, session_id, user_id, filters, top_k=4)
+            )
         return merged
 
     @staticmethod
-    def _merge(prior: List[Dict[str, Any]], fresh: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _merge(prior: list[dict[str, Any]], fresh: list[dict[str, Any]]) -> list[dict[str, Any]]:
         try:
             from app.pipeline.rag_pipeline import _dedup_docs, _normalize_docs
+
             return _dedup_docs(_normalize_docs(list(prior) + list(fresh)))
         except Exception:
             return list(prior) + list(fresh)

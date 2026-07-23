@@ -6,9 +6,7 @@ import math
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
-import numpy as np
+from typing import Any
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -16,6 +14,7 @@ from app.utils.logger import get_logger
 try:
     import torch
     import torch.nn.functional as F
+
     TORCH_AVAILABLE = True
 except ImportError:
     torch = None
@@ -24,6 +23,7 @@ except ImportError:
 
 try:
     from PIL import Image, ImageOps, UnidentifiedImageError
+
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
@@ -33,16 +33,25 @@ logger = get_logger(__name__)
 
 # PROMETHEUS METRICS
 
+
 def _make_metrics():
     if not settings.PROMETHEUS_ENABLED:
+
         class _Noop:
-            def observe(self, *a, **kw): pass
-            def inc(self, *a, **kw): pass
-            def labels(self, **kw): return self
+            def observe(self, *a, **kw):
+                pass
+
+            def inc(self, *a, **kw):
+                pass
+
+            def labels(self, **kw):
+                return self
+
         n = _Noop()
         return n, n, n, n
     try:
         from prometheus_client import Counter, Histogram
+
         embed_latency = Histogram(
             "image_embedding_latency_seconds",
             "Image embedding batch latency",
@@ -63,10 +72,17 @@ def _make_metrics():
         )
         return embed_latency, embed_errors, embed_total, cache_hits
     except Exception:
+
         class _Noop:
-            def observe(self, *a, **kw): pass
-            def inc(self, *a, **kw): pass
-            def labels(self, **kw): return self
+            def observe(self, *a, **kw):
+                pass
+
+            def inc(self, *a, **kw):
+                pass
+
+            def labels(self, **kw):
+                return self
+
         n = _Noop()
         return n, n, n, n
 
@@ -76,7 +92,7 @@ _EMBED_LATENCY, _EMBED_ERRORS, _EMBED_TOTAL, _CACHE_HITS = _make_metrics()
 
 # SEMAPHORE
 
-_SEMAPHORE: Optional[asyncio.Semaphore] = None
+_SEMAPHORE: asyncio.Semaphore | None = None
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -87,6 +103,7 @@ def _get_semaphore() -> asyncio.Semaphore:
 
 
 # CUSTOM EXCEPTIONS
+
 
 class ImageEmbedderError(Exception):
     """Base exception for image embedding errors."""
@@ -106,13 +123,14 @@ class NoValidImagesError(ImageEmbedderError):
 
 # EMBEDDING RESULT MODEL
 
+
 class ImageEmbeddingResult:
     """Structured result for a single image embedding."""
 
     def __init__(
         self,
         path: str,
-        embedding: List[float],
+        embedding: list[float],
         embedding_dim: int,
         model_name: str,
         checksum_sha256: str,
@@ -124,37 +142,38 @@ class ImageEmbeddingResult:
         cache_hit: bool,
         session_id: str,
     ) -> None:
-        self.path             = path
-        self.embedding        = embedding
-        self.embedding_dim    = embedding_dim
-        self.model_name       = model_name
-        self.checksum_sha256  = checksum_sha256
-        self.width            = width
-        self.height           = height
-        self.mode             = mode
-        self.embedding_id     = embedding_id
-        self.latency_ms       = latency_ms
-        self.cache_hit        = cache_hit
-        self.session_id       = session_id
+        self.path = path
+        self.embedding = embedding
+        self.embedding_dim = embedding_dim
+        self.model_name = model_name
+        self.checksum_sha256 = checksum_sha256
+        self.width = width
+        self.height = height
+        self.mode = mode
+        self.embedding_id = embedding_id
+        self.latency_ms = latency_ms
+        self.cache_hit = cache_hit
+        self.session_id = session_id
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "path":            self.path,
-            "embedding":       self.embedding,
-            "embedding_dim":   self.embedding_dim,
-            "model_name":      self.model_name,
+            "path": self.path,
+            "embedding": self.embedding,
+            "embedding_dim": self.embedding_dim,
+            "model_name": self.model_name,
             "checksum_sha256": self.checksum_sha256,
-            "width":           self.width,
-            "height":          self.height,
-            "mode":            self.mode,
-            "embedding_id":    self.embedding_id,
-            "latency_ms":      self.latency_ms,
-            "cache_hit":       self.cache_hit,
-            "session_id":      self.session_id,
+            "width": self.width,
+            "height": self.height,
+            "mode": self.mode,
+            "embedding_id": self.embedding_id,
+            "latency_ms": self.latency_ms,
+            "cache_hit": self.cache_hit,
+            "session_id": self.session_id,
         }
 
 
 # FILE HASH
+
 
 def _sha256_path(path: str) -> str:
     """SHA-256 hash of the file content for dedup and cache keying."""
@@ -174,7 +193,8 @@ def _sha256_text(text: str) -> str:
 
 # EMBEDDING VALIDATION
 
-def _valid_embedding(emb: List[float], expected_dim: int) -> bool:
+
+def _valid_embedding(emb: list[float], expected_dim: int) -> bool:
     if not isinstance(emb, list):
         return False
     if len(emb) != expected_dim:
@@ -186,13 +206,15 @@ def _valid_embedding(emb: List[float], expected_dim: int) -> bool:
 
 # REDIS CACHE HELPERS
 
+
 def _cache_key(checksum: str) -> str:
     return f"img_emb:{checksum}"
 
 
-def _cache_get(checksum: str) -> Optional[List[float]]:
+def _cache_get(checksum: str) -> list[float] | None:
     try:
         from app.core.infra_registry import infra
+
         mem = infra.get_memory()
         if mem is None:
             return None
@@ -204,9 +226,10 @@ def _cache_get(checksum: str) -> Optional[List[float]]:
     return None
 
 
-def _cache_set(checksum: str, embedding: List[float]) -> None:
+def _cache_set(checksum: str, embedding: list[float]) -> None:
     try:
         from app.core.infra_registry import infra
+
         mem = infra.get_memory()
         if mem is None:
             return
@@ -221,11 +244,12 @@ def _cache_set(checksum: str, embedding: List[float]) -> None:
 
 # IMAGE LOADING AND VALIDATION
 
+
 def _load_image(
     path: str,
     max_dim: int,
     session_id: str,
-) -> Tuple[Optional["Image.Image"], int, int, str]:
+) -> tuple[Image.Image | None, int, int, str]:
     """
     Load, validate, orient, convert, and resize an image.
 
@@ -287,7 +311,7 @@ def _load_image(
                 scale = math.sqrt(settings.MAX_IMAGE_SIZE_MP / mp)
                 new_w = max(int(w * scale), 1)
                 new_h = max(int(h * scale), 1)
-                img   = img.resize((new_w, new_h), Image.LANCZOS)
+                img = img.resize((new_w, new_h), Image.LANCZOS)
                 logger.info(
                     event="image_resized_mp_limit",
                     path=p.name,
@@ -321,12 +345,15 @@ def _load_image(
         return None, 0, 0, ""
 
     except Exception as exc:
-        logger.warning(event="image_load_failed", path=p.name, error=str(exc), session_id=session_id)
+        logger.warning(
+            event="image_load_failed", path=p.name, error=str(exc), session_id=session_id
+        )
         _EMBED_ERRORS.labels(reason="load_exception").inc()
         return None, 0, 0, ""
 
 
 # IMAGE EMBEDDER CLASS
+
 
 class ImageEmbedder:
     """
@@ -344,13 +371,13 @@ class ImageEmbedder:
         if not TORCH_AVAILABLE:
             raise ImportError("TORCH_REQUIRED_FOR_IMAGE_EMBEDDER")
 
-        self.model        = model
-        self.processor    = processor
-        self.device       = device
-        self.model_name   = settings.SIGLIP_MODEL
+        self.model = model
+        self.processor = processor
+        self.device = device
+        self.model_name = settings.SIGLIP_MODEL
         self.expected_dim = settings.VISION_EMBEDDING_DIM
-        self.batch_size   = settings.EMBEDDING_BATCH_SIZE
-        self.max_dim      = settings.MAX_IMAGE_DIM
+        self.batch_size = settings.EMBEDDING_BATCH_SIZE
+        self.max_dim = settings.MAX_IMAGE_DIM
 
         logger.info(
             event="image_embedder_initialized",
@@ -366,7 +393,7 @@ class ImageEmbedder:
         self,
         image_path: str,
         session_id: str = "default",
-    ) -> List[float]:
+    ) -> list[float]:
         """Embed a single image. Returns embedding vector."""
         results = self.embed_batch([image_path], session_id=session_id)
         if not results:
@@ -377,9 +404,9 @@ class ImageEmbedder:
 
     def embed_batch(
         self,
-        image_paths: List[str],
+        image_paths: list[str],
         session_id: str = "default",
-    ) -> List[ImageEmbeddingResult]:
+    ) -> list[ImageEmbeddingResult]:
         """
         Embed a batch of image paths.
 
@@ -401,17 +428,17 @@ class ImageEmbedder:
         start_total = time.time()
 
         # DEDUP INPUT PATHS
-        seen_paths: Dict[str, bool] = {}
-        unique_paths: List[str]     = []
+        seen_paths: dict[str, bool] = {}
+        unique_paths: list[str] = []
         for p in image_paths:
             if str(p) not in seen_paths:
                 seen_paths[str(p)] = True
                 unique_paths.append(str(p))
 
         # LOAD + VALIDATE + CACHE CHECK
-        loaded_images: List[Image.Image]          = []
-        loaded_meta:   List[Dict[str, Any]]       = []
-        cached_results: List[ImageEmbeddingResult] = []
+        loaded_images: list[Image.Image] = []
+        loaded_meta: list[dict[str, Any]] = []
+        cached_results: list[ImageEmbeddingResult] = []
 
         for path in unique_paths:
             checksum = _sha256_path(path)
@@ -421,20 +448,22 @@ class ImageEmbedder:
             if cached_emb and _valid_embedding(cached_emb, self.expected_dim):
                 _CACHE_HITS.inc()
                 p = Path(path)
-                cached_results.append(ImageEmbeddingResult(
-                    path            = path,
-                    embedding       = cached_emb,
-                    embedding_dim   = self.expected_dim,
-                    model_name      = self.model_name,
-                    checksum_sha256 = checksum,
-                    width           = 0,
-                    height          = 0,
-                    mode            = "cached",
-                    embedding_id    = str(uuid.uuid4()),
-                    latency_ms      = 0.0,
-                    cache_hit       = True,
-                    session_id      = session_id,
-                ))
+                cached_results.append(
+                    ImageEmbeddingResult(
+                        path=path,
+                        embedding=cached_emb,
+                        embedding_dim=self.expected_dim,
+                        model_name=self.model_name,
+                        checksum_sha256=checksum,
+                        width=0,
+                        height=0,
+                        mode="cached",
+                        embedding_id=str(uuid.uuid4()),
+                        latency_ms=0.0,
+                        cache_hit=True,
+                        session_id=session_id,
+                    )
+                )
                 continue
 
             # LOAD IMAGE
@@ -443,26 +472,26 @@ class ImageEmbedder:
                 continue
 
             loaded_images.append(img)
-            loaded_meta.append({
-                "path":     path,
-                "checksum": checksum,
-                "width":    w,
-                "height":   h,
-                "mode":     mode,
-            })
-
-        if not loaded_images and not cached_results:
-            raise NoValidImagesError(
-                f"NO_VALID_IMAGES from {len(unique_paths)} input paths"
+            loaded_meta.append(
+                {
+                    "path": path,
+                    "checksum": checksum,
+                    "width": w,
+                    "height": h,
+                    "mode": mode,
+                }
             )
 
+        if not loaded_images and not cached_results:
+            raise NoValidImagesError(f"NO_VALID_IMAGES from {len(unique_paths)} input paths")
+
         # BATCH INFERENCE
-        fresh_results: List[ImageEmbeddingResult] = []
+        fresh_results: list[ImageEmbeddingResult] = []
 
         for i in range(0, len(loaded_images), self.batch_size):
-            batch_imgs = loaded_images[i:i + self.batch_size]
-            batch_meta = loaded_meta[i:i + self.batch_size]
-            t_batch    = time.time()
+            batch_imgs = loaded_images[i : i + self.batch_size]
+            batch_meta = loaded_meta[i : i + self.batch_size]
+            t_batch = time.time()
 
             try:
                 inputs = self.processor(
@@ -477,7 +506,7 @@ class ImageEmbedder:
                         features = features.pooler_output
                     features = F.normalize(features.float(), p=2, dim=-1)
 
-                embeddings    = features.detach().cpu().numpy().tolist()
+                embeddings = features.detach().cpu().numpy().tolist()
                 batch_latency = round((time.time() - t_batch) * 1000, 1)
 
                 # LATENCY WARNING
@@ -527,20 +556,22 @@ class ImageEmbedder:
                     _cache_set(meta["checksum"], emb_list)
                     _EMBED_TOTAL.inc()
 
-                    fresh_results.append(ImageEmbeddingResult(
-                        path            = meta["path"],
-                        embedding       = emb_list,
-                        embedding_dim   = self.expected_dim,
-                        model_name      = self.model_name,
-                        checksum_sha256 = meta["checksum"],
-                        width           = meta["width"],
-                        height          = meta["height"],
-                        mode            = meta["mode"],
-                        embedding_id    = str(uuid.uuid4()),
-                        latency_ms      = batch_latency,
-                        cache_hit       = False,
-                        session_id      = session_id,
-                    ))
+                    fresh_results.append(
+                        ImageEmbeddingResult(
+                            path=meta["path"],
+                            embedding=emb_list,
+                            embedding_dim=self.expected_dim,
+                            model_name=self.model_name,
+                            checksum_sha256=meta["checksum"],
+                            width=meta["width"],
+                            height=meta["height"],
+                            mode=meta["mode"],
+                            embedding_id=str(uuid.uuid4()),
+                            latency_ms=batch_latency,
+                            cache_hit=False,
+                            session_id=session_id,
+                        )
+                    )
 
             except DimensionMismatchError:
                 raise
@@ -560,7 +591,7 @@ class ImageEmbedder:
             raise NoValidImagesError("NO_IMAGE_EMBEDDINGS_PRODUCED")
 
         total_latency = round(time.time() - start_total, 3)
-        throughput    = round(len(all_results) / max(total_latency, 1e-6), 1)
+        throughput = round(len(all_results) / max(total_latency, 1e-6), 1)
 
         logger.info(
             event="image_embed_batch_success",
@@ -580,7 +611,7 @@ class ImageEmbedder:
         self,
         image_path: str,
         session_id: str = "default",
-    ) -> List[float]:
+    ) -> list[float]:
         async with _get_semaphore():
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(
@@ -590,9 +621,9 @@ class ImageEmbedder:
 
     async def embed_batch_async(
         self,
-        image_paths: List[str],
+        image_paths: list[str],
         session_id: str = "default",
-    ) -> List[ImageEmbeddingResult]:
+    ) -> list[ImageEmbeddingResult]:
         async with _get_semaphore():
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(
@@ -602,16 +633,16 @@ class ImageEmbedder:
 
     # HEALTH CHECK
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(self) -> dict[str, Any]:
         return {
-            "model_loaded":    self.model is not None,
+            "model_loaded": self.model is not None,
             "processor_loaded": self.processor is not None,
-            "device":          self.device,
-            "model_name":      self.model_name,
-            "expected_dim":    self.expected_dim,
-            "batch_size":      self.batch_size,
+            "device": self.device,
+            "model_name": self.model_name,
+            "expected_dim": self.expected_dim,
+            "batch_size": self.batch_size,
             "torch_available": TORCH_AVAILABLE,
-            "pil_available":   PIL_AVAILABLE,
+            "pil_available": PIL_AVAILABLE,
         }
 
 
@@ -631,14 +662,22 @@ _SIGLIP_MAX_TOKEN_LENGTH: int = 64
 
 def _make_siglip_text_metrics():
     if not settings.PROMETHEUS_ENABLED:
+
         class _Noop:
-            def observe(self, *a, **kw): pass
-            def inc(self, *a, **kw): pass
-            def labels(self, **kw): return self
+            def observe(self, *a, **kw):
+                pass
+
+            def inc(self, *a, **kw):
+                pass
+
+            def labels(self, **kw):
+                return self
+
         n = _Noop()
         return n, n, n, n
     try:
         from prometheus_client import Counter, Histogram
+
         _sl = Histogram(
             "siglip_text_embedding_latency_seconds",
             "SigLIP text embedding batch latency",
@@ -659,17 +698,24 @@ def _make_siglip_text_metrics():
         )
         return _sl, _se, _st, _sc
     except Exception:
+
         class _Noop:
-            def observe(self, *a, **kw): pass
-            def inc(self, *a, **kw): pass
-            def labels(self, **kw): return self
+            def observe(self, *a, **kw):
+                pass
+
+            def inc(self, *a, **kw):
+                pass
+
+            def labels(self, **kw):
+                return self
+
         n = _Noop()
         return n, n, n, n
 
 
 _ST_EMBED_LATENCY, _ST_EMBED_ERRORS, _ST_EMBED_TOTAL, _ST_CACHE_HITS = _make_siglip_text_metrics()
 
-_SIGLIP_TEXT_SEMAPHORE: Optional[asyncio.Semaphore] = None
+_SIGLIP_TEXT_SEMAPHORE: asyncio.Semaphore | None = None
 
 
 def _get_siglip_text_semaphore() -> asyncio.Semaphore:
@@ -681,6 +727,7 @@ def _get_siglip_text_semaphore() -> asyncio.Semaphore:
 
 class SiglipTextEmbedderError(Exception):
     pass
+
 
 ClipTextEmbedderError = SiglipTextEmbedderError
 
@@ -701,7 +748,7 @@ class SiglipTextEmbeddingResult:
     def __init__(
         self,
         text_preview: str,
-        embedding: List[float],
+        embedding: list[float],
         embedding_dim: int,
         model_name: str,
         checksum_sha256: str,
@@ -711,35 +758,35 @@ class SiglipTextEmbeddingResult:
         latency_ms: float,
         cache_hit: bool,
         session_id: str,
-        language: Optional[str] = None,
+        language: str | None = None,
     ) -> None:
-        self.text_preview          = text_preview
-        self.embedding             = embedding
-        self.embedding_dim         = embedding_dim
-        self.model_name            = model_name
-        self.checksum_sha256       = checksum_sha256
-        self.token_count_estimate  = token_count_estimate
-        self.was_truncated         = was_truncated
-        self.embedding_id          = embedding_id
-        self.latency_ms            = latency_ms
-        self.cache_hit             = cache_hit
-        self.session_id            = session_id
-        self.language              = language
+        self.text_preview = text_preview
+        self.embedding = embedding
+        self.embedding_dim = embedding_dim
+        self.model_name = model_name
+        self.checksum_sha256 = checksum_sha256
+        self.token_count_estimate = token_count_estimate
+        self.was_truncated = was_truncated
+        self.embedding_id = embedding_id
+        self.latency_ms = latency_ms
+        self.cache_hit = cache_hit
+        self.session_id = session_id
+        self.language = language
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "text_preview":         self.text_preview,
-            "embedding":            self.embedding,
-            "embedding_dim":        self.embedding_dim,
-            "model_name":           self.model_name,
-            "checksum_sha256":      self.checksum_sha256,
+            "text_preview": self.text_preview,
+            "embedding": self.embedding,
+            "embedding_dim": self.embedding_dim,
+            "model_name": self.model_name,
+            "checksum_sha256": self.checksum_sha256,
             "token_count_estimate": self.token_count_estimate,
-            "was_truncated":        self.was_truncated,
-            "embedding_id":         self.embedding_id,
-            "latency_ms":           self.latency_ms,
-            "cache_hit":            self.cache_hit,
-            "session_id":           self.session_id,
-            "language":             self.language,
+            "was_truncated": self.was_truncated,
+            "embedding_id": self.embedding_id,
+            "latency_ms": self.latency_ms,
+            "cache_hit": self.cache_hit,
+            "session_id": self.session_id,
+            "language": self.language,
         }
 
 
@@ -757,6 +804,7 @@ def _sanitize_siglip_text(text: str) -> str:
 
 def _sanitize_siglip_injection(text: str) -> str:
     from app.guardrails.input_guard import sanitize as _guard_sanitize
+
     cleaned = _guard_sanitize(text, surface="clip_text_embedder")
     if cleaned != text:
         logger.warning(
@@ -774,7 +822,7 @@ def _estimate_siglip_tokens(text: str) -> int:
 def _truncate_to_siglip_limit(text: str, max_chars: int) -> tuple:
     if len(text) <= max_chars:
         return text, False
-    words     = text.split()
+    words = text.split()
     truncated = ""
     for word in words:
         candidate = (truncated + " " + word).strip()
@@ -790,9 +838,10 @@ def _siglip_text_cache_key(checksum: str) -> str:
     return f"siglip_txt_emb:{checksum}"
 
 
-def _siglip_text_cache_get(checksum: str) -> Optional[List[float]]:
+def _siglip_text_cache_get(checksum: str) -> list[float] | None:
     try:
         from app.core.infra_registry import infra
+
         mem = infra.get_memory()
         if mem is None:
             return None
@@ -804,9 +853,10 @@ def _siglip_text_cache_get(checksum: str) -> Optional[List[float]]:
     return None
 
 
-def _siglip_text_cache_set(checksum: str, embedding: List[float]) -> None:
+def _siglip_text_cache_set(checksum: str, embedding: list[float]) -> None:
     try:
         from app.core.infra_registry import infra
+
         mem = infra.get_memory()
         if mem is None:
             return
@@ -830,14 +880,14 @@ class SiglipTextEmbedder:
     def __init__(self, processor, model, device: str) -> None:
         if not TORCH_AVAILABLE:
             raise TorchNotAvailableError("TORCH_REQUIRED_FOR_SIGLIP_TEXT_EMBEDDER")
-        self.processor    = processor
-        self.model        = model
-        self.device       = device
-        self.model_name   = settings.SIGLIP_MODEL
+        self.processor = processor
+        self.model = model
+        self.device = device
+        self.model_name = settings.SIGLIP_MODEL
         self.expected_dim = settings.VISION_EMBEDDING_DIM
-        self.batch_size   = settings.EMBEDDING_BATCH_SIZE
-        tokenizer  = getattr(processor, "tokenizer", None)
-        model_max  = getattr(tokenizer, "model_max_length", _SIGLIP_MAX_TOKEN_LENGTH)
+        self.batch_size = settings.EMBEDDING_BATCH_SIZE
+        tokenizer = getattr(processor, "tokenizer", None)
+        model_max = getattr(tokenizer, "model_max_length", _SIGLIP_MAX_TOKEN_LENGTH)
         if model_max > 10_000:
             model_max = _SIGLIP_MAX_TOKEN_LENGTH
         self.max_length = model_max
@@ -851,11 +901,11 @@ class SiglipTextEmbedder:
             batch_size=self.batch_size,
         )
 
-    def _prepare_texts(self, texts) -> List[Dict[str, Any]]:
+    def _prepare_texts(self, texts) -> list[dict[str, Any]]:
         if isinstance(texts, str):
             texts = [texts]
-        prepared: List[Dict[str, Any]] = []
-        seen: Dict[str, bool] = {}
+        prepared: list[dict[str, Any]] = []
+        seen: dict[str, bool] = {}
         for raw in texts:
             text = _normalize_siglip_text(_sanitize_siglip_text(str(raw or "")))
             text = _sanitize_siglip_injection(text)
@@ -863,7 +913,7 @@ class SiglipTextEmbedder:
                 _ST_EMBED_ERRORS.labels(reason="empty_text").inc()
                 continue
             if len(text) > settings.MAX_PROMPT_CHARS:
-                text = text[:settings.MAX_PROMPT_CHARS]
+                text = text[: settings.MAX_PROMPT_CHARS]
             text, was_truncated = _truncate_to_siglip_limit(text, self._max_chars)
             if not text:
                 _ST_EMBED_ERRORS.labels(reason="empty_after_truncation").inc()
@@ -872,56 +922,60 @@ class SiglipTextEmbedder:
             if checksum in seen:
                 continue
             seen[checksum] = True
-            prepared.append({
-                "text":           text,
-                "checksum":       checksum,
-                "token_estimate": _estimate_siglip_tokens(text),
-                "was_truncated":  was_truncated,
-                "text_preview":   text[:80],
-                "language":       None,
-            })
+            prepared.append(
+                {
+                    "text": text,
+                    "checksum": checksum,
+                    "token_estimate": _estimate_siglip_tokens(text),
+                    "was_truncated": was_truncated,
+                    "text_preview": text[:80],
+                    "language": None,
+                }
+            )
         return prepared
 
-    def embed_single(self, text: str, session_id: str = "default") -> List[float]:
+    def embed_single(self, text: str, session_id: str = "default") -> list[float]:
         results = self.embed(text, session_id=session_id)
         if not results:
             raise NoValidTextsError(f"NO_EMBEDDING_PRODUCED for text: {text[:80]}")
         return results[0].embedding
 
-    def embed(self, texts, session_id: str = "default") -> List[SiglipTextEmbeddingResult]:
+    def embed(self, texts, session_id: str = "default") -> list[SiglipTextEmbeddingResult]:
         if not session_id:
             raise ValueError("SESSION_ID_REQUIRED")
         prepared = self._prepare_texts(texts)
         if not prepared:
             raise NoValidTextsError("NO_VALID_TEXTS_AFTER_PREPARATION")
-        start_total    = time.time()
-        cached_results: List[SiglipTextEmbeddingResult] = []
-        miss_items:     List[Dict[str, Any]]             = []
+        start_total = time.time()
+        cached_results: list[SiglipTextEmbeddingResult] = []
+        miss_items: list[dict[str, Any]] = []
         for item in prepared:
             cached_emb = _siglip_text_cache_get(item["checksum"])
             if cached_emb and _valid_embedding(cached_emb, self.expected_dim):
                 _ST_CACHE_HITS.inc()
-                cached_results.append(SiglipTextEmbeddingResult(
-                    text_preview=item["text_preview"],
-                    embedding=cached_emb,
-                    embedding_dim=self.expected_dim,
-                    model_name=self.model_name,
-                    checksum_sha256=item["checksum"],
-                    token_count_estimate=item["token_estimate"],
-                    was_truncated=item["was_truncated"],
-                    embedding_id=str(_uuid.uuid4()),
-                    latency_ms=0.0,
-                    cache_hit=True,
-                    session_id=session_id,
-                    language=item["language"],
-                ))
+                cached_results.append(
+                    SiglipTextEmbeddingResult(
+                        text_preview=item["text_preview"],
+                        embedding=cached_emb,
+                        embedding_dim=self.expected_dim,
+                        model_name=self.model_name,
+                        checksum_sha256=item["checksum"],
+                        token_count_estimate=item["token_estimate"],
+                        was_truncated=item["was_truncated"],
+                        embedding_id=str(_uuid.uuid4()),
+                        latency_ms=0.0,
+                        cache_hit=True,
+                        session_id=session_id,
+                        language=item["language"],
+                    )
+                )
             else:
                 miss_items.append(item)
-        fresh_results: List[SiglipTextEmbeddingResult] = []
+        fresh_results: list[SiglipTextEmbeddingResult] = []
         for i in range(0, len(miss_items), self.batch_size):
-            batch       = miss_items[i:i + self.batch_size]
+            batch = miss_items[i : i + self.batch_size]
             batch_texts = [item["text"] for item in batch]
-            t_batch     = time.time()
+            t_batch = time.time()
             try:
                 inputs = self.processor(
                     text=batch_texts,
@@ -935,7 +989,7 @@ class SiglipTextEmbedder:
                     if hasattr(features, "pooler_output"):
                         features = features.pooler_output
                     features = F.normalize(features.float(), p=2, dim=-1)
-                embeddings    = features.detach().cpu().numpy().tolist()
+                embeddings = features.detach().cpu().numpy().tolist()
                 batch_latency = round((time.time() - t_batch) * 1000, 1)
                 if batch_latency > settings.LATENCY_TARGET_IMAGE_MS:
                     logger.warning(
@@ -945,7 +999,9 @@ class SiglipTextEmbedder:
                         batch_size=len(batch_texts),
                         session_id=session_id,
                     )
-                _ST_EMBED_LATENCY.labels(batch_size=str(len(batch_texts))).observe(batch_latency / 1000.0)
+                _ST_EMBED_LATENCY.labels(batch_size=str(len(batch_texts))).observe(
+                    batch_latency / 1000.0
+                )
                 for emb, item in zip(embeddings, batch):
                     emb_list = emb if isinstance(emb, list) else list(emb)
                     if len(emb_list) != self.expected_dim:
@@ -970,20 +1026,22 @@ class SiglipTextEmbedder:
                         continue
                     _siglip_text_cache_set(item["checksum"], emb_list)
                     _ST_EMBED_TOTAL.inc()
-                    fresh_results.append(SiglipTextEmbeddingResult(
-                        text_preview=item["text_preview"],
-                        embedding=emb_list,
-                        embedding_dim=self.expected_dim,
-                        model_name=self.model_name,
-                        checksum_sha256=item["checksum"],
-                        token_count_estimate=item["token_estimate"],
-                        was_truncated=item["was_truncated"],
-                        embedding_id=str(_uuid.uuid4()),
-                        latency_ms=batch_latency,
-                        cache_hit=False,
-                        session_id=session_id,
-                        language=item["language"],
-                    ))
+                    fresh_results.append(
+                        SiglipTextEmbeddingResult(
+                            text_preview=item["text_preview"],
+                            embedding=emb_list,
+                            embedding_dim=self.expected_dim,
+                            model_name=self.model_name,
+                            checksum_sha256=item["checksum"],
+                            token_count_estimate=item["token_estimate"],
+                            was_truncated=item["was_truncated"],
+                            embedding_id=str(_uuid.uuid4()),
+                            latency_ms=batch_latency,
+                            cache_hit=False,
+                            session_id=session_id,
+                            language=item["language"],
+                        )
+                    )
             except SiglipDimensionMismatchError:
                 raise
             except Exception as exc:
@@ -1009,29 +1067,31 @@ class SiglipTextEmbedder:
         )
         return all_results
 
-    def embed_query(self, query: str, session_id: str = "default") -> List[float]:
+    def embed_query(self, query: str, session_id: str = "default") -> list[float]:
         return self.embed_single(query, session_id=session_id)
 
-    async def embed_async(self, texts, session_id: str = "default") -> List[SiglipTextEmbeddingResult]:
+    async def embed_async(
+        self, texts, session_id: str = "default"
+    ) -> list[SiglipTextEmbeddingResult]:
         async with _get_siglip_text_semaphore():
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(None, lambda: self.embed(texts, session_id))
 
-    async def embed_query_async(self, query: str, session_id: str = "default") -> List[float]:
+    async def embed_query_async(self, query: str, session_id: str = "default") -> list[float]:
         async with _get_siglip_text_semaphore():
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(None, lambda: self.embed_query(query, session_id))
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(self) -> dict[str, Any]:
         return {
-            "model_loaded":     self.model is not None,
+            "model_loaded": self.model is not None,
             "processor_loaded": self.processor is not None,
-            "device":           self.device,
-            "model_name":       self.model_name,
-            "expected_dim":     self.expected_dim,
-            "max_length":       self.max_length,
-            "batch_size":       self.batch_size,
-            "torch_available":  TORCH_AVAILABLE,
+            "device": self.device,
+            "model_name": self.model_name,
+            "expected_dim": self.expected_dim,
+            "max_length": self.max_length,
+            "batch_size": self.batch_size,
+            "torch_available": TORCH_AVAILABLE,
         }
 
 
@@ -1047,10 +1107,10 @@ ClipTextEmbedder = SiglipTextEmbedder
 # remains the vision-collection path.
 # ══════════════════════════════════════════════════════════════════════════════
 
+import re as _re
+
 from app.embeddings.base_embedder import BaseEmbedder as _BaseEmbedder  # noqa: E402
 
-
-import re as _re
 _NUMBERS_ONLY_RE = _re.compile(r'[$€£¥₹]?[\d,]+\.?\d*\s*(?:[BMKTbmkt]n?|%|bps|x)?\b')
 
 
@@ -1071,13 +1131,14 @@ class ImageDocEmbedder(_BaseEmbedder):
 
     def _build_embed_text(self, doc: Any, cleaned_text: str) -> str:
         from app.core.config import settings as _s
-        s          = getattr(doc, "structure", {}) or {}
+
+        s = getattr(doc, "structure", {}) or {}
         image_type = (s.get("image_type") or "").replace("_", " ").strip()
-        caption    = (s.get("caption")    or "").strip()
-        ocr_text   = (s.get("ocr_text")   or "").strip()
+        caption = (s.get("caption") or "").strip()
+        ocr_text = (s.get("ocr_text") or "").strip()
 
         nums: list = s.get("extracted_numbers") or []
-        num_str    = " ".join(str(n) for n in nums[:10])
+        num_str = " ".join(str(n) for n in nums[:10])
 
         # Build from structure fields (richer than cleaned_text which is the
         # combined caption+ocr string already, so use it as fallback)
@@ -1091,14 +1152,15 @@ class ImageDocEmbedder(_BaseEmbedder):
         if num_str:
             base += f" {num_str}"
 
-        return base[:_s.MAX_PROMPT_CHARS]
+        return base[: _s.MAX_PROMPT_CHARS]
 
     def _build_numbers_only_text(self, doc: Any) -> str:
         """Build numbers-only embed text for embedding_alt (Phase 2.5)."""
         from app.core.config import settings as _s
-        s        = getattr(doc, "structure", {}) or {}
+
+        s = getattr(doc, "structure", {}) or {}
         ocr_text = (s.get("ocr_text") or "").strip()
-        caption  = (s.get("caption")  or "").strip()
+        caption = (s.get("caption") or "").strip()
         combined = f"{ocr_text} {caption}".strip()
 
         # Extract all numeric tokens (dollar amounts, percentages, bps, etc.)
@@ -1107,9 +1169,9 @@ class ImageDocEmbedder(_BaseEmbedder):
             # Fall back to extracted_numbers list from structure
             nums = [str(n) for n in (s.get("extracted_numbers") or [])]
 
-        return " ".join(nums)[:_s.MAX_PROMPT_CHARS] if nums else ""
+        return " ".join(nums)[: _s.MAX_PROMPT_CHARS] if nums else ""
 
-    def embed_documents(self, docs: List[Any], session_id: str = "default") -> List[Any]:
+    def embed_documents(self, docs: list[Any], session_id: str = "default") -> list[Any]:
         """Embed image docs with dual vectors: primary (full caption) + alt (numbers-only).
 
         Calls the parent embed_documents for the primary vector, then computes
@@ -1120,9 +1182,9 @@ class ImageDocEmbedder(_BaseEmbedder):
             return results
 
         # Phase 2.5: compute numbers-only secondary embedding for each result
-        embedder   = self._get_model()
-        alt_texts  = []
-        alt_docs   = []
+        embedder = self._get_model()
+        alt_texts = []
+        alt_docs = []
         for doc in results:
             alt_text = self._build_numbers_only_text(doc)
             if alt_text:
@@ -1131,9 +1193,10 @@ class ImageDocEmbedder(_BaseEmbedder):
 
         if alt_texts:
             from app.embeddings.base_embedder import valid_embedding
+
             for i in range(0, len(alt_texts), embedder.batch_size):
-                batch_texts = alt_texts[i:i + embedder.batch_size]
-                batch_docs  = alt_docs[i:i + embedder.batch_size]
+                batch_texts = alt_texts[i : i + embedder.batch_size]
+                batch_docs = alt_docs[i : i + embedder.batch_size]
                 try:
                     embs = embedder._encode_with_retry(embedder.model, batch_texts)
                     for doc, emb in zip(batch_docs, embs):

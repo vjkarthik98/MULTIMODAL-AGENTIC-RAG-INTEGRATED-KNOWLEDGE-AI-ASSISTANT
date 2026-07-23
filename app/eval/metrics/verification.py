@@ -13,12 +13,12 @@ presence.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 from app.eval.metrics.base import MetricResult
 
 
-def _percentile(values: List[float], pct: float) -> float:
+def _percentile(values: list[float], pct: float) -> float:
     if not values:
         return float("nan")
     s = sorted(values)
@@ -26,7 +26,7 @@ def _percentile(values: List[float], pct: float) -> float:
     return s[idx]
 
 
-def compute_verification_metrics(reports: List[Dict[str, Any]]) -> Dict[str, MetricResult]:
+def compute_verification_metrics(reports: list[dict[str, Any]]) -> dict[str, MetricResult]:
     """reports: [VerificationReport.to_dict()] collected over the eval run —
     one per query, from actually invoking the verification loop/dispatch.
     """
@@ -36,8 +36,12 @@ def compute_verification_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Met
             "citation_accuracy_v2": MetricResult.empty("citation_accuracy_v2", "no reports"),
             "retry_success_rate": MetricResult.empty("retry_success_rate", "no reports"),
             "avg_retry_count": MetricResult.empty("avg_retry_count", "no reports"),
-            "verification_latency_p50": MetricResult.empty("verification_latency_p50", "no reports"),
-            "verification_latency_p95": MetricResult.empty("verification_latency_p95", "no reports"),
+            "verification_latency_p50": MetricResult.empty(
+                "verification_latency_p50", "no reports"
+            ),
+            "verification_latency_p95": MetricResult.empty(
+                "verification_latency_p95", "no reports"
+            ),
         }
 
     n = len(reports)
@@ -47,34 +51,45 @@ def compute_verification_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Met
     retried = [r for r in reports if len(r.get("attempts") or []) > 1]
     retry_passed = sum(1 for r in retried if r.get("verified"))
     retry_counts = [max(len(r.get("attempts") or []) - 1, 0) for r in reports]
-    latencies_sec = [
-        (r.get("total_duration_ms") or 0.0) / 1000.0 for r in reports
-    ]
+    latencies_sec = [(r.get("total_duration_ms") or 0.0) / 1000.0 for r in reports]
 
     return {
         "grounding_success_rate": MetricResult(
-            name="grounding_success_rate", value=grounded / n, n=n,
+            name="grounding_success_rate",
+            value=grounded / n,
+            n=n,
             notes=f"{grounded}/{n} answers had zero unsupported claims/numbers",
         ),
         "citation_accuracy_v2": MetricResult(
-            name="citation_accuracy_v2", value=cited_ok / n, n=n,
+            name="citation_accuracy_v2",
+            value=cited_ok / n,
+            n=n,
             notes=f"{cited_ok}/{n} answers had zero bad citations (CitationVerifier)",
         ),
         "retry_success_rate": MetricResult(
             name="retry_success_rate",
             value=(retry_passed / len(retried)) if retried else float("nan"),
             n=len(retried),
-            notes=f"{retry_passed}/{len(retried)} retried queries eventually PASSed"
-                  if retried else "no queries needed a retry",
+            notes=(
+                f"{retry_passed}/{len(retried)} retried queries eventually PASSed"
+                if retried
+                else "no queries needed a retry"
+            ),
         ),
         "avg_retry_count": MetricResult(
-            name="avg_retry_count", value=sum(retry_counts) / n, n=n,
+            name="avg_retry_count",
+            value=sum(retry_counts) / n,
+            n=n,
             notes=f"mean retries per query, max={max(retry_counts) if retry_counts else 0}",
         ),
         "verification_latency_p50": MetricResult(
-            name="verification_latency_p50", value=_percentile(latencies_sec, 50), n=n,
+            name="verification_latency_p50",
+            value=_percentile(latencies_sec, 50),
+            n=n,
         ),
         "verification_latency_p95": MetricResult(
-            name="verification_latency_p95", value=_percentile(latencies_sec, 95), n=n,
+            name="verification_latency_p95",
+            value=_percentile(latencies_sec, 95),
+            n=n,
         ),
     }

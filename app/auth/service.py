@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional
 
 from passlib.context import CryptContext
 
@@ -34,6 +33,7 @@ def _check_password_strength(password: str, email: str) -> None:
     """Raise ValueError if password is too weak."""
     try:
         from zxcvbn import zxcvbn
+
         result = zxcvbn(password, user_inputs=[email])
         score = result.get("score", 0)
         if score < settings.PASSWORD_MIN_ZXCVBN_SCORE:
@@ -46,6 +46,7 @@ def _check_password_strength(password: str, email: str) -> None:
 
 def _get_mongo_collection():
     from app.core.infra_registry import infra
+
     mongo = infra.get_mongo()
     if mongo is None:
         raise RuntimeError("MongoDB is not available")
@@ -97,9 +98,9 @@ class AuthService:
                 col.update_one(
                     {"email": req.email},
                     {
-                        "$set":      {"hashed_password": _hash_password(req.password)},
+                        "$set": {"hashed_password": _hash_password(req.password)},
                         "$addToSet": {"auth_providers": "email"},
-                        "$unset":    {"oauth_only": ""},
+                        "$unset": {"oauth_only": ""},
                     },
                 )
                 logger.info(event="auth_email_linked_to_google_account", email=req.email)
@@ -190,7 +191,9 @@ class AuthService:
             raise ValueError("Incorrect password. Please try again.")
 
         if not doc.get("is_active", True):
-            raise ValueError("Email not verified. Please complete registration to activate your account.")
+            raise ValueError(
+                "Email not verified. Please complete registration to activate your account."
+            )
 
         col.update_one(
             {"email": email},
@@ -208,18 +211,18 @@ class AuthService:
             {"email": email},
             {
                 "$addToSet": {"auth_providers": "google"},
-                "$set":      {"oauth_only": True},   # keep for old readers
+                "$set": {"oauth_only": True},  # keep for old readers
             },
         )
 
     # ── Lookups ────────────────────────────────────────────────────────────────
 
-    def get_by_id(self, user_id: str) -> Optional[UserPublic]:
+    def get_by_id(self, user_id: str) -> UserPublic | None:
         col = _get_mongo_collection()
         doc = col.find_one({"user_id": user_id})
         return _doc_to_public(doc) if doc else None
 
-    def get_by_email(self, email: str) -> Optional[UserPublic]:
+    def get_by_email(self, email: str) -> UserPublic | None:
         col = _get_mongo_collection()
         doc = col.find_one({"email": email})
         return _doc_to_public(doc) if doc else None
@@ -246,7 +249,7 @@ class AuthService:
         col.update_one(
             {"user_id": user_id},
             {
-                "$set":      {"hashed_password": _hash_password(new_password)},
+                "$set": {"hashed_password": _hash_password(new_password)},
                 "$addToSet": {"auth_providers": "email"},
             },
         )
@@ -263,7 +266,7 @@ class AuthService:
         col.update_one(
             {"user_id": user_id},
             {
-                "$set":      {"hashed_password": _hash_password(new_password)},
+                "$set": {"hashed_password": _hash_password(new_password)},
                 "$addToSet": {"auth_providers": "email"},
             },
         )

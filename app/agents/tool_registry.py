@@ -1,13 +1,13 @@
 import asyncio
 import time
 import unicodedata
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from typing import Any
 
 import structlog
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 from prometheus_client import Counter, Histogram
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
 from app.core.infra_registry import infra
@@ -43,6 +43,7 @@ _semaphore = asyncio.Semaphore(5)
 
 # NORMALIZE QUERY
 
+
 def _normalize(text: str) -> str:
     text = unicodedata.normalize("NFC", str(text or ""))
     return " ".join(text.strip().split())
@@ -50,9 +51,10 @@ def _normalize(text: str) -> str:
 
 # TOOL SCHEMA VALIDATION
 
+
 def _validate_tool_input(
     query: str,
-    context: Optional[Dict],
+    context: dict | None,
     session_id: str,
 ) -> bool:
     if not query or not query.strip():
@@ -73,23 +75,23 @@ class Tool:
         handler: Callable,
         tool_type: str = "generic",
         cost: str = "medium",
-        schema: Optional[Dict[str, Any]] = None,
+        schema: dict[str, Any] | None = None,
     ) -> None:
-        self.name        = name
+        self.name = name
         self.description = description
-        self.handler     = handler
-        self.tool_type   = tool_type
-        self.cost        = cost
-        self.schema      = schema or {}
+        self.handler = handler
+        self.tool_type = tool_type
+        self.cost = cost
+        self.schema = schema or {}
 
     # EXECUTE WITH RETRY AND CIRCUIT BREAKER
 
     def execute(
         self,
         query: str,
-        context: Optional[Dict] = None,
+        context: dict | None = None,
         session_id: str = "default",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
 
         start = time.time()
 
@@ -100,7 +102,7 @@ class Tool:
 
             try:
                 query = _normalize(query)
-                query = query[:settings.MAX_PROMPT_CHARS]
+                query = query[: settings.MAX_PROMPT_CHARS]
 
                 if not query:
                     return self._error("empty_query")
@@ -111,7 +113,7 @@ class Tool:
                 if not _validate_tool_input(query, context, session_id):
                     return self._error("invalid_input")
 
-                result  = None
+                result = None
                 last_ex = None
 
                 for attempt in range(settings.AGENT_MAX_RETRIES + 1):
@@ -153,14 +155,14 @@ class Tool:
                 )
 
                 return {
-                    "tool":    self.name,
-                    "result":  result,
-                    "status":  "success",
+                    "tool": self.name,
+                    "result": result,
+                    "status": "success",
                     "latency": latency,
                 }
 
             except Exception as exc:
-                latency    = round(time.time() - start, 3)
+                latency = round(time.time() - start, 3)
                 error_type = type(exc).__name__
 
                 _tool_duration.labels(tool=self.name, status="error").observe(latency)
@@ -179,32 +181,33 @@ class Tool:
 
                 return self._error(str(exc))
 
-    def _error(self, msg: str) -> Dict[str, Any]:
+    def _error(self, msg: str) -> dict[str, Any]:
         return {
-            "tool":   self.name,
+            "tool": self.name,
             "result": None,
             "status": "error",
-            "error":  msg,
+            "error": msg,
         }
 
-    def to_dict(self) -> Dict[str, str]:
+    def to_dict(self) -> dict[str, str]:
         return {
-            "name":        self.name,
+            "name": self.name,
             "description": self.description,
-            "type":        self.tool_type,
-            "cost":        self.cost,
-            "schema":      str(self.schema),
+            "type": self.tool_type,
+            "cost": self.cost,
+            "schema": str(self.schema),
         }
 
 
 class ToolRegistry:
 
     def __init__(self) -> None:
-        self.tools: Dict[str, Tool] = {}
+        self.tools: dict[str, Tool] = {}
 
         # RAG PIPELINE
         try:
             from app.pipeline.rag_pipeline import RAGPipeline
+
             self.rag_pipeline = RAGPipeline()
         except Exception as exc:
             logger.warning("rag_pipeline_init_failed", error=str(exc))
@@ -215,6 +218,7 @@ class ToolRegistry:
         if settings.TAVILY_API_KEY:
             try:
                 from app.tools.web_search import WebSearchTool
+
                 self.web_search = WebSearchTool()
             except Exception as exc:
                 logger.warning("web_search_init_failed", error=str(exc))
@@ -222,14 +226,14 @@ class ToolRegistry:
             logger.warning("web_search_disabled", reason="TAVILY_API_KEY not set")
 
         # MEMORY
-        self.memory   = infra.get_memory()
+        self.memory = infra.get_memory()
         self.embedder = model_loader.get_embedder()
-        self.llm      = model_loader.get_llm()
+        self.llm = model_loader.get_llm()
 
         # REASONING COMPONENTS
-        self.decomposer       = QueryDecomposer(self.llm)
+        self.decomposer = QueryDecomposer(self.llm)
         self.reasoning_engine = ReasoningEngine(self.llm)
-        self.fusion           = ResultFusion()
+        self.fusion = ResultFusion()
 
         self._register()
 
@@ -253,12 +257,12 @@ class ToolRegistry:
 
     # GET OPTIONAL — RETURNS NONE IF NOT FOUND
 
-    def get_optional(self, tool_name: str) -> Optional[Tool]:
+    def get_optional(self, tool_name: str) -> Tool | None:
         return self.tools.get(tool_name)
 
     # LIST ALL TOOLS
 
-    def list_tools(self) -> List[Dict[str, str]]:
+    def list_tools(self) -> list[dict[str, str]]:
         return [
             {"name": t.name, "type": t.tool_type, "cost": t.cost, "description": t.description}
             for t in self.tools.values()
@@ -276,7 +280,7 @@ class ToolRegistry:
     def _register(self) -> None:
 
         # RAG TOOL
-        def rag_tool(query: str, context: Dict, session_id: str, user_id: Optional[str] = None):
+        def rag_tool(query: str, context: dict, session_id: str, user_id: str | None = None):
             if not self.rag_pipeline:
                 return []
             try:
@@ -291,41 +295,45 @@ class ToolRegistry:
                 logger.warning("rag_tool_failed", error=str(exc), session_id=session_id)
                 return []
 
-        self.register(Tool(
-            name="rag",
-            description="Retrieve relevant knowledge from vector store",
-            handler=rag_tool,
-            tool_type="retrieval",
-            cost="medium",
-            schema={
-                "input":  {"query": "str", "context": "dict", "session_id": "str"},
-                "output": "list[dict]",
-            },
-        ))
+        self.register(
+            Tool(
+                name="rag",
+                description="Retrieve relevant knowledge from vector store",
+                handler=rag_tool,
+                tool_type="retrieval",
+                cost="medium",
+                schema={
+                    "input": {"query": "str", "context": "dict", "session_id": "str"},
+                    "output": "list[dict]",
+                },
+            )
+        )
 
         # SEARCH TOOL
-        def search_tool(query: str, context: Dict, session_id: str):
+        def search_tool(query: str, context: dict, session_id: str):
             if not self.web_search:
                 return {
-                    "answer":  "Web search unavailable.",
+                    "answer": "Web search unavailable.",
                     "sources": [],
                 }
             return self.web_search.execute(query, context, session_id)
 
-        self.register(Tool(
-            name="search",
-            description="External web search for recent information",
-            handler=search_tool,
-            tool_type="external",
-            cost="high",
-            schema={
-                "input":  {"query": "str", "context": "dict", "session_id": "str"},
-                "output": "dict[answer, sources, confidence]",
-            },
-        ))
+        self.register(
+            Tool(
+                name="search",
+                description="External web search for recent information",
+                handler=search_tool,
+                tool_type="external",
+                cost="high",
+                schema={
+                    "input": {"query": "str", "context": "dict", "session_id": "str"},
+                    "output": "dict[answer, sources, confidence]",
+                },
+            )
+        )
 
         # MEMORY TOOL
-        def memory_tool(query: str, context: Dict, session_id: str):
+        def memory_tool(query: str, context: dict, session_id: str):
             if not self.memory:
                 return []
             try:
@@ -342,53 +350,59 @@ class ToolRegistry:
                 logger.warning("memory_tool_failed", error=str(exc), session_id=session_id)
                 return []
 
-        self.register(Tool(
-            name="memory",
-            description="Fetch relevant session memory",
-            handler=memory_tool,
-            tool_type="memory",
-            cost="low",
-            schema={
-                "input":  {"query": "str", "context": "dict", "session_id": "str"},
-                "output": "list[dict]",
-            },
-        ))
+        self.register(
+            Tool(
+                name="memory",
+                description="Fetch relevant session memory",
+                handler=memory_tool,
+                tool_type="memory",
+                cost="low",
+                schema={
+                    "input": {"query": "str", "context": "dict", "session_id": "str"},
+                    "output": "list[dict]",
+                },
+            )
+        )
 
         # DECOMPOSE TOOL
-        def decompose_tool(query: str, context: Dict, session_id: str):
+        def decompose_tool(query: str, context: dict, session_id: str):
             return self.decomposer.decompose(query, session_id=session_id)
 
-        self.register(Tool(
-            name="decompose",
-            description="Decompose complex query into sub-queries",
-            handler=decompose_tool,
-            tool_type="reasoning",
-            cost="medium",
-            schema={
-                "input":  {"query": "str", "context": "dict", "session_id": "str"},
-                "output": "list[str]",
-            },
-        ))
+        self.register(
+            Tool(
+                name="decompose",
+                description="Decompose complex query into sub-queries",
+                handler=decompose_tool,
+                tool_type="reasoning",
+                cost="medium",
+                schema={
+                    "input": {"query": "str", "context": "dict", "session_id": "str"},
+                    "output": "list[str]",
+                },
+            )
+        )
 
         # FUSION TOOL
-        def fusion_tool(query: str, context: Dict, session_id: str):
+        def fusion_tool(query: str, context: dict, session_id: str):
             results = context.get("results") or context.get("docs") or []
             return self.fusion.fuse(results, session_id=session_id)
 
-        self.register(Tool(
-            name="fusion",
-            description="Merge and rank retrieved results",
-            handler=fusion_tool,
-            tool_type="reasoning",
-            cost="medium",
-            schema={
-                "input":  {"query": "str", "context": "dict[docs|results]", "session_id": "str"},
-                "output": "list[dict]",
-            },
-        ))
+        self.register(
+            Tool(
+                name="fusion",
+                description="Merge and rank retrieved results",
+                handler=fusion_tool,
+                tool_type="reasoning",
+                cost="medium",
+                schema={
+                    "input": {"query": "str", "context": "dict[docs|results]", "session_id": "str"},
+                    "output": "list[dict]",
+                },
+            )
+        )
 
         # REASON TOOL
-        def reasoning_tool(query: str, context: Dict, session_id: str):
+        def reasoning_tool(query: str, context: dict, session_id: str):
             # DETECT QUERY TYPE FROM CONTEXT IF AVAILABLE
             query_type = context.get("query_type", "factual")
 
@@ -400,17 +414,19 @@ class ToolRegistry:
                 query_type=query_type,
             )
 
-        self.register(Tool(
-            name="reason",
-            description="Generate final grounded answer",
-            handler=reasoning_tool,
-            tool_type="reasoning",
-            cost="high",
-            schema={
-                "input":  {"query": "str", "context": "dict[docs, memory]", "session_id": "str"},
-                "output": "dict[answer, confidence, sources_used]",
-            },
-        ))
+        self.register(
+            Tool(
+                name="reason",
+                description="Generate final grounded answer",
+                handler=reasoning_tool,
+                tool_type="reasoning",
+                cost="high",
+                schema={
+                    "input": {"query": "str", "context": "dict[docs, memory]", "session_id": "str"},
+                    "output": "dict[answer, confidence, sources_used]",
+                },
+            )
+        )
 
         logger.info(
             "tools_registered",
@@ -424,9 +440,9 @@ class ToolRegistry:
         self,
         tool_name: str,
         query: str,
-        context: Optional[Dict] = None,
+        context: dict | None = None,
         session_id: str = "default",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
 
         tool = self.get(tool_name)
 
@@ -440,11 +456,11 @@ class ToolRegistry:
 
     async def execute_parallel(
         self,
-        tool_names: List[str],
+        tool_names: list[str],
         query: str,
-        context: Optional[Dict] = None,
+        context: dict | None = None,
         session_id: str = "default",
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> dict[str, dict[str, Any]]:
 
         tasks = {
             name: self.execute_async(name, query, context, session_id)
@@ -452,7 +468,7 @@ class ToolRegistry:
             if name in self.tools
         }
 
-        results: Dict[str, Dict[str, Any]] = {}
+        results: dict[str, dict[str, Any]] = {}
 
         if not tasks:
             return results
@@ -471,13 +487,12 @@ class ToolRegistry:
                     session_id=session_id,
                 )
                 results[name] = {
-                    "tool":   name,
+                    "tool": name,
                     "result": None,
                     "status": "error",
-                    "error":  str(result),
+                    "error": str(result),
                 }
             else:
                 results[name] = result
 
         return results
-

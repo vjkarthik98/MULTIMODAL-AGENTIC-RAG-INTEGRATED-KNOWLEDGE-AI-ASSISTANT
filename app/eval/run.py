@@ -11,6 +11,7 @@ Exit codes:
     1 — one or more thresholds breached
     2 — infrastructure / data error (Qdrant down, gold file missing, etc.)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -41,8 +42,20 @@ Examples:
     parser.add_argument(
         "--suite",
         required=True,
-        choices=["retrieval", "generation", "hallucination", "behavioral", "ocr", "audio",
-                 "video", "routing", "e2e", "multimodal", "regression", "full"],
+        choices=[
+            "retrieval",
+            "generation",
+            "hallucination",
+            "behavioral",
+            "ocr",
+            "audio",
+            "video",
+            "routing",
+            "e2e",
+            "multimodal",
+            "regression",
+            "full",
+        ],
         help="Eval suite to run",
     )
     parser.add_argument(
@@ -74,7 +87,8 @@ Examples:
     args = parser.parse_args()
 
     # Build config
-    from app.eval.config import EvalConfig, WeakenSpec, load_config
+    from app.eval.config import WeakenSpec, load_config
+
     cfg = load_config()
 
     if args.weaken:
@@ -93,6 +107,7 @@ Examples:
 
     # Run
     from app.eval.runner import EvalRunner
+
     runner = EvalRunner(cfg)
 
     suites = [args.suite]
@@ -106,6 +121,7 @@ Examples:
     if not args.no_report:
         try:
             from app.eval.report import write_reports
+
             write_reports(results, cfg=cfg, weaken_spec=args.weaken)
         except Exception as exc:
             print(f"[WARN] Could not write report: {exc}")
@@ -117,6 +133,7 @@ Examples:
     if not args.no_report:
         try:
             from app.eval.tracking.mlflow_logger import log_eval_run
+
             run_id = log_eval_run(
                 suite_results=results,
                 cfg=cfg,

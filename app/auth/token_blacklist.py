@@ -16,10 +16,10 @@ in-process entry immediately; cross-instance revocations propagate within the TT
 Falls back gracefully if Redis is unavailable (logs warning, allows token).
 This is intentional: a Redis outage should not lock all users out.
 """
+
 from __future__ import annotations
 
 import time
-from typing import Dict, Optional, Tuple
 
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -29,8 +29,8 @@ logger = get_logger(__name__)
 _REVOKED_PREFIX = "REVOKED_TOKEN:"
 
 # IN-PROCESS TTL CACHES — {key: (value, expires_at_monotonic)}
-_revoked_cache: Dict[str, Tuple[bool, float]] = {}
-_gen_cache:     Dict[str, Tuple[int, float]]  = {}
+_revoked_cache: dict[str, tuple[bool, float]] = {}
+_gen_cache: dict[str, tuple[int, float]] = {}
 
 
 def _ttl() -> int:
@@ -41,6 +41,7 @@ def _redis():
     """Local Redis cache handle (NOT Upstash) — hot-path, ~0.5ms/call."""
     try:
         from app.core.infra_registry import infra
+
         return infra.get_cache()
     except Exception:
         return None
@@ -87,17 +88,17 @@ def is_revoked(jti: str) -> bool:
     r = _redis()
     if r is None:
         logger.warning(event="token_blacklist_check_redis_unavailable", jti=jti[:8])
-        return False   # fail-open: Redis outage ≠ lock-out
+        return False  # fail-open: Redis outage ≠ lock-out
 
     key = f"{_REVOKED_PREFIX}{jti}"
     try:
-        revoked = (r.exists(key) == 1)
+        revoked = r.exists(key) == 1
         if _ttl() > 0:
             _revoked_cache[jti] = (revoked, now + _ttl())
         return revoked
     except Exception as exc:
         logger.warning(event="token_blacklist_check_failed", jti=jti[:8], error=str(exc))
-        return False   # fail-open
+        return False  # fail-open
 
 
 def revoke_all_user_tokens(user_id: str) -> int:
@@ -116,7 +117,7 @@ def revoke_all_user_tokens(user_id: str) -> int:
     gen_key = f"TOKEN_GEN:{user_id}"
     try:
         new_gen = r.incr(gen_key)
-        r.expire(gen_key, 60 * 60 * 24 * 8)   # 8 days — covers max refresh TTL
+        r.expire(gen_key, 60 * 60 * 24 * 8)  # 8 days — covers max refresh TTL
         # Invalidate cached generation so the new value takes effect immediately.
         _gen_cache[user_id] = (int(new_gen), time.monotonic() + _ttl())
         logger.info(event="user_tokens_revoked_via_generation", user_id=user_id, generation=new_gen)

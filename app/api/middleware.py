@@ -11,16 +11,15 @@ It also:
 - Stamps request.state.request_id for correlation
 - Logs the authenticated user_id on every request for auditing
 """
+
 from __future__ import annotations
 
 import time
 import uuid
-from typing import Optional
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.core.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -40,10 +39,12 @@ _PUBLIC_PREFIXES = (
 # short interval). They carry no diagnostic value and flood the access log, so
 # they are logged at DEBUG instead of INFO — the request is still handled and
 # still traced, just not surfaced at the default log level.
-_QUIET_PATHS = frozenset((
-    "/health",
-    "/metrics",
-))
+_QUIET_PATHS = frozenset(
+    (
+        "/health",
+        "/metrics",
+    )
+)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -60,9 +61,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         token = _extract_bearer(request)
         if token:
             try:
+                from datetime import datetime, timezone
+
                 from app.auth.jwt_handler import verify_token
                 from app.auth.models import UserPublic, UserRole
-                from datetime import datetime, timezone
 
                 payload = verify_token(token, expected_type="access")
                 request.state.user = UserPublic(
@@ -97,7 +99,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         return response
 
 
-def _extract_bearer(request: Request) -> Optional[str]:
+def _extract_bearer(request: Request) -> str | None:
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         token = auth[7:].strip()

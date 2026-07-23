@@ -2,29 +2,30 @@
 
 Used by run.py after every eval run.
 """
+
 from __future__ import annotations
 
 import json
 import math
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from app.eval.config import EvalConfig, load_config
 from app.eval.metrics.base import SuiteResult
 
 
 def write_reports(
-    results: Dict[str, SuiteResult],
-    cfg: Optional[EvalConfig] = None,
-    weaken_spec: Optional[str] = None,
-    git_sha: Optional[str] = None,
+    results: dict[str, SuiteResult],
+    cfg: EvalConfig | None = None,
+    weaken_spec: str | None = None,
+    git_sha: str | None = None,
 ) -> tuple[Path, Path]:
     """Write rag_report.json and rag_report.md. Returns (json_path, md_path)."""
     cfg = cfg or load_config()
     cfg.reports_dir.mkdir(parents=True, exist_ok=True)
 
-    report: Dict[str, Any] = {
+    report: dict[str, Any] = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "git_sha": git_sha or _get_git_sha(),
         "weaken_spec": weaken_spec,
@@ -45,8 +46,8 @@ def write_reports(
 
 
 def _write_markdown(
-    report: Dict[str, Any],
-    results: Dict[str, SuiteResult],
+    report: dict[str, Any],
+    results: dict[str, SuiteResult],
     md_path: Path,
 ) -> None:
     lines = [
@@ -59,7 +60,7 @@ def _write_markdown(
         lines += [f"**⚠ Weakened pipeline:** `{report['weaken_spec']}`  ", ""]
 
     for suite_name, sr in results.items():
-        lines += [f"", f"## Suite: `{suite_name}`", ""]
+        lines += ["", f"## Suite: `{suite_name}`", ""]
         lines += [f"Duration: {sr.duration_sec:.1f}s", ""]
 
         if sr.metrics:
@@ -82,9 +83,14 @@ def _write_markdown(
 def _get_git_sha() -> str:
     try:
         import subprocess
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            stderr=subprocess.DEVNULL,
-        ).decode().strip()
+
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
     except Exception:
         return "unknown"

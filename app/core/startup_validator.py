@@ -9,16 +9,16 @@ to run `python app/bin/models/download_all_models.py` before restarting.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
-from typing import Set
 
 from app.core.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-REQUIRED_MODELS: Set[str] = {
+REQUIRED_MODELS: set[str] = {
     "BAAI/bge-large-en-v1.5",
     "BAAI/bge-reranker-large",
     "Salesforce/blip-image-captioning-large",
@@ -58,7 +58,7 @@ def validate_model_manifest() -> None:
 
     try:
         entries = json.loads(manifest_path.read_text(encoding="utf-8"))
-        cached: Set[str] = {e["model_id"] for e in entries if "model_id" in e}
+        cached: set[str] = {e["model_id"] for e in entries if "model_id" in e}
     except Exception as exc:
         raise RuntimeError(f"Failed to parse download_manifest.json: {exc}") from exc
 
@@ -75,3 +75,50 @@ def validate_model_manifest() -> None:
         cached=len(cached),
         required=len(REQUIRED_MODELS),
     )
+
+    _validate_gguf_checksum(entries)
+
+
+def _validate_gguf_checksum(manifest_entries: list[dict]) -> None:
+    """Fail fast if the on-disk GGUF file no longer matches the SHA-256
+    recorded at download time (app/bin/models/download_all_models.py).
+    Presence-checking alone (above) only proves a model_id was ever
+    downloaded, not that the file is still the same bytes — this is the
+    other half of "pinned model file + checksum" (System Design v2.0 §2.2).
+    Scoped to the GGUF only (not all 11 models): it's the single highest-
+    stakes file (the actual generation model) and the cheapest to verify —
+    hashing every multimodal model's full snapshot dir on every boot would
+    add real startup latency for comparatively low incremental safety, since
+    download_all_models.py already re-verifies all of them on every re-run.
+    """
+    gguf_entry = next((e for e in manifest_entries if e.get("type") == "gguf"), None)
+    if gguf_entry is None:
+        return  # no GGUF entry yet — validate_model_manifest()'s presence check already covers this
+    expected = gguf_entry.get("sha256")
+    if not expected:
+        logger.warning(
+            event="gguf_checksum_not_recorded",
+            hint="Model was downloaded before checksum recording existed. "
+            "Re-run download_all_models.py to backfill it.",
+        )
+        return
+
+    gguf_path = Path(settings.LLM_MODEL_PATH)
+    if not gguf_path.exists():
+        raise RuntimeError(f"GGUF model file missing on disk: {gguf_path}")
+
+    h = hashlib.sha256()
+    with open(gguf_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    actual = h.hexdigest()
+
+    if actual != expected:
+        raise RuntimeError(
+            f"GGUF_CHECKSUM_MISMATCH: {gguf_path} does not match the SHA-256 recorded "
+            f"at last download (expected {expected[:16]}..., got {actual[:16]}...). "
+            "Possible corruption or an unexpected file swap — re-download before serving "
+            "traffic:  python app/bin/models/download_all_models.py --only gguf"
+        )
+
+    logger.info(event="gguf_checksum_ok", sha256=actual[:16])

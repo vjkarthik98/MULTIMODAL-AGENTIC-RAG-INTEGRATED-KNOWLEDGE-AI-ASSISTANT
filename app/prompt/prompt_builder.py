@@ -2,7 +2,6 @@ import asyncio
 import hashlib
 import time
 import unicodedata
-from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
 from opentelemetry import trace
@@ -13,6 +12,14 @@ from app.core.config import settings
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
+
+# PROMPT VERSION — bump on any meaningful change to the instruction text
+# below (grounding/abstention rules, citation format, answer-format rules,
+# etc.), not on pure refactors. This has no runtime effect on its own; it
+# exists so app/eval/tracking/mlflow_logger.py can log it alongside every
+# eval run's metrics — otherwise a prompt edit that shifts eval scores is
+# indistinguishable from a genuine model/retrieval regression after the fact.
+PROMPT_VERSION = "1.0.0"
 
 # PROMETHEUS METRICS
 _prompt_duration = Histogram(
@@ -40,8 +47,8 @@ _semaphore = asyncio.Semaphore(5)
 
 # BUDGET RATIOS — applied to the REMAINING capacity after fixed components
 # (system prompt + query block + format block) are reserved.
-_MEM_RATIO   = 0.25  # memory share of the variable budget
-_CTX_RATIO   = 0.75  # context share of the variable budget
+_MEM_RATIO = 0.25  # memory share of the variable budget
+_CTX_RATIO = 0.75  # context share of the variable budget
 
 # Appended to every prompt's output-format block. Keeps inline [n] citations
 # (needed to map the answer to source chips) but forbids the trailing
@@ -89,55 +96,163 @@ _ANSWER_ONLY_RULE = (
 
 # STRUCTURED KEYWORDS
 _STRUCTURED_KEYWORDS = [
-    "table", "row", "column", "page number",
-    "which page", "toc", "section", "cell",
-    "extract", "list all", "enumerate",
+    "table",
+    "row",
+    "column",
+    "page number",
+    "which page",
+    "toc",
+    "section",
+    "cell",
+    "extract",
+    "list all",
+    "enumerate",
 ]
 
 # FINANCIAL KEYWORDS — for detecting numeric-comparison / accounting queries.
 # Two or more of these in the query triggers the financial-specific system prompt
 # that includes arithmetic direction rules and a CoT worked example.
-_FINANCIAL_EXACT_PHRASES = frozenset({
-    "net sales", "net revenue", "gross revenue", "total revenue",
-    "cash flow", "year over year", "year-over-year", "yoy", "fiscal year",
-    "operating income", "cost of goods", "gross margin", "operating margin",
-    "balance sheet", "earnings per share", "annual report", "compared to",
-})
-_FINANCIAL_TOKENS = frozenset({
-    "revenue", "profit", "loss", "income", "earnings", "margin", "eps",
-    "ebitda", "ebit", "dividend", "shares", "fiscal", "quarter", "fy",
-    "compare", "versus", "vs", "increased", "decreased", "change", "growth",
-    "decline", "assets", "liabilities", "equity", "capex", "depreciation",
-    "amortization", "goodwill", "impairment", "acquisition", "segment",
-    "guidance", "outlook", "forecast",
-    # Investment-research vocabulary — a question like "what are the three
-    # pillars of the investment thesis" has none of the above tokens, so it
-    # fell through to the "general" catch-all template ("one or two
-    # sentences"), which this small model does not reliably follow — observed
-    # it ignoring the instruction and dumping an unfocused numbered list of
-    # every fact in context instead. The "financial" template's explicit
-    # RULES block is what actually keeps this model grounded and complete.
-    "thesis", "pillars", "pillar", "rating", "recommendation", "upside",
-    "downside", "valuation", "consensus", "analyst", "target",
-    "risk", "risks", "exposure", "concentration", "headwind", "tailwind",
-})
+_FINANCIAL_EXACT_PHRASES = frozenset(
+    {
+        "net sales",
+        "net revenue",
+        "gross revenue",
+        "total revenue",
+        "cash flow",
+        "year over year",
+        "year-over-year",
+        "yoy",
+        "fiscal year",
+        "operating income",
+        "cost of goods",
+        "gross margin",
+        "operating margin",
+        "balance sheet",
+        "earnings per share",
+        "annual report",
+        "compared to",
+    }
+)
+_FINANCIAL_TOKENS = frozenset(
+    {
+        "revenue",
+        "profit",
+        "loss",
+        "income",
+        "earnings",
+        "margin",
+        "eps",
+        "ebitda",
+        "ebit",
+        "dividend",
+        "shares",
+        "fiscal",
+        "quarter",
+        "fy",
+        "compare",
+        "versus",
+        "vs",
+        "increased",
+        "decreased",
+        "change",
+        "growth",
+        "decline",
+        "assets",
+        "liabilities",
+        "equity",
+        "capex",
+        "depreciation",
+        "amortization",
+        "goodwill",
+        "impairment",
+        "acquisition",
+        "segment",
+        "guidance",
+        "outlook",
+        "forecast",
+        # Investment-research vocabulary — a question like "what are the three
+        # pillars of the investment thesis" has none of the above tokens, so it
+        # fell through to the "general" catch-all template ("one or two
+        # sentences"), which this small model does not reliably follow — observed
+        # it ignoring the instruction and dumping an unfocused numbered list of
+        # every fact in context instead. The "financial" template's explicit
+        # RULES block is what actually keeps this model grounded and complete.
+        "thesis",
+        "pillars",
+        "pillar",
+        "rating",
+        "recommendation",
+        "upside",
+        "downside",
+        "valuation",
+        "consensus",
+        "analyst",
+        "target",
+        "risk",
+        "risks",
+        "exposure",
+        "concentration",
+        "headwind",
+        "tailwind",
+    }
+)
 
 # MULTIMODAL KEYWORDS
-_IMAGE_KEYWORDS = {"image", "photo", "diagram", "figure", "chart", "screenshot", "picture", "visual"}
+_IMAGE_KEYWORDS = {
+    "image",
+    "photo",
+    "diagram",
+    "figure",
+    "chart",
+    "screenshot",
+    "picture",
+    "visual",
+}
 _AUDIO_KEYWORDS = {"audio", "sound", "speech", "transcript", "recording", "voice", "spoken"}
 _VIDEO_KEYWORDS = {"video", "clip", "footage", "scene", "frame", "watch", "recording"}
 
 # CODE KEYWORDS
-_CODE_KEYWORDS = {"code", "function", "class", "implement", "script", "snippet", "syntax", "debug", "algorithm"}
+_CODE_KEYWORDS = {
+    "code",
+    "function",
+    "class",
+    "implement",
+    "script",
+    "snippet",
+    "syntax",
+    "debug",
+    "algorithm",
+}
 
 # COMPARATIVE KEYWORDS
-_COMPARATIVE_KEYWORDS = {"compare", "difference", "vs", "versus", "contrast", "better", "worse", "pros", "cons"}
+_COMPARATIVE_KEYWORDS = {
+    "compare",
+    "difference",
+    "vs",
+    "versus",
+    "contrast",
+    "better",
+    "worse",
+    "pros",
+    "cons",
+}
 
 # TEMPORAL KEYWORDS
-_TEMPORAL_KEYWORDS = {"when", "before", "after", "since", "latest", "recent", "current", "timeline", "history"}
+_TEMPORAL_KEYWORDS = {
+    "when",
+    "before",
+    "after",
+    "since",
+    "latest",
+    "recent",
+    "current",
+    "timeline",
+    "history",
+}
 
 
 # NORMALIZE TEXT
+
 
 def _clean(text: str) -> str:
     text = unicodedata.normalize("NFC", str(text or ""))
@@ -146,13 +261,15 @@ def _clean(text: str) -> str:
 
 # TRUNCATE WITH LIMIT
 
+
 def _truncate(text: str, limit: int) -> str:
     if not text:
         return ""
-    return text[:max(limit, 0)]
+    return text[: max(limit, 0)]
 
 
 # SHA-256 HASH
+
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -160,9 +277,11 @@ def _hash(text: str) -> str:
 
 # PROMPT INJECTION DETECTION AND SANITIZATION — delegates to unified guardrail (Phase 26)
 
-def _sanitize_query(query: str) -> Tuple[str, bool]:
+
+def _sanitize_query(query: str) -> tuple[str, bool]:
     """Returns (sanitized_query, was_injection_detected)."""
     from app.guardrails.input_guard import sanitize as _guard_sanitize
+
     original = query
     query = _guard_sanitize(query, surface="prompt_builder")
     detected = query != original
@@ -173,6 +292,7 @@ def _sanitize_query(query: str) -> Tuple[str, bool]:
 
 
 # QUERY MODE DETECTION
+
 
 def _is_structured(query: str) -> bool:
     q = query.lower()
@@ -214,7 +334,7 @@ def _is_financial(query: str) -> bool:
     return len(tokens & _FINANCIAL_TOKENS) >= 2
 
 
-def _detect_modality(query: str, context: str) -> Optional[str]:
+def _detect_modality(query: str, context: str) -> str | None:
     # DOCX chunks are cited by section (e.g. "[report.docx 4.1 DCF Model Key
     # Assumptions]"), never by page — checked first so the financial/comparative
     # templates below can swap their PDF-style "(Page N)" citation instruction
@@ -229,7 +349,7 @@ def _detect_modality(query: str, context: str) -> Optional[str]:
     if any(ext in context.lower() for ext in (".txt", ".md", ".rst", ".csv", ".log")):
         return "text"
     combined = (query + " " + context).lower()
-    tokens   = set(combined.split())
+    tokens = set(combined.split())
     if tokens & _IMAGE_KEYWORDS:
         return "image"
     if tokens & _AUDIO_KEYWORDS:
@@ -243,6 +363,7 @@ def _detect_modality(query: str, context: str) -> Optional[str]:
 # Financial is checked before comparative/temporal because many financial
 # queries ("compare FY2023 to FY2022") would otherwise fall into "comparative"
 # and miss the arithmetic direction rules.
+
 
 def _detect_query_type(query: str) -> str:
     if _is_code(query):
@@ -269,7 +390,7 @@ def _detect_query_type(query: str) -> str:
 # Factual / extraction tasks need low temperature (deterministic, accurate).
 # Generative / analytical tasks benefit from slightly higher temperature.
 
-_FACTUAL_QUERY_TYPES    = frozenset({"financial", "structured", "code", "temporal"})
+_FACTUAL_QUERY_TYPES = frozenset({"financial", "structured", "code", "temporal"})
 _GENERATIVE_QUERY_TYPES = frozenset({"comparative", "image", "audio", "video"})
 
 
@@ -284,7 +405,8 @@ def get_generation_temperature(query_type: str) -> float:
 
 # DEDUP OVERLAP — REMOVE MEMORY CONTENT ALREADY IN CONTEXT
 
-def _deduplicate_context(memory: str, context: str) -> Tuple[str, str]:
+
+def _deduplicate_context(memory: str, context: str) -> tuple[str, str]:
     if not memory or not context:
         return memory, context
     key = memory[:200].strip()
@@ -295,19 +417,30 @@ def _deduplicate_context(memory: str, context: str) -> Tuple[str, str]:
 
 # PII SCRUB BEFORE PROMPT INJECTION
 
+
 def _scrub_pii(text: str) -> str:
     if not settings.PII_DETECTION_ENABLED:
         return text
     try:
         from presidio_analyzer import AnalyzerEngine
         from presidio_anonymizer import AnonymizerEngine
-        entities   = getattr(settings, "PII_ENTITIES", [
-            "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER",
-            "US_SSN", "CREDIT_CARD", "LOCATION", "IP_ADDRESS",
-        ])
-        analyzer   = AnalyzerEngine()
+
+        entities = getattr(
+            settings,
+            "PII_ENTITIES",
+            [
+                "PERSON",
+                "EMAIL_ADDRESS",
+                "PHONE_NUMBER",
+                "US_SSN",
+                "CREDIT_CARD",
+                "LOCATION",
+                "IP_ADDRESS",
+            ],
+        )
+        analyzer = AnalyzerEngine()
         anonymizer = AnonymizerEngine()
-        results    = analyzer.analyze(text=text, entities=entities, language="en")
+        results = analyzer.analyze(text=text, entities=entities, language="en")
         if results:
             text = anonymizer.anonymize(text=text, analyzer_results=results).text
     except ImportError:
@@ -319,11 +452,12 @@ def _scrub_pii(text: str) -> str:
 
 # SYSTEM PROMPT SELECTION — QUERY TYPE AWARE
 
+
 def _system_prompt(
     query_type: str,
     structured: bool,
     is_code: bool,
-    modality: Optional[str],
+    modality: str | None,
 ) -> str:
 
     if structured:
@@ -656,6 +790,7 @@ def _system_prompt(
 
 # OUTPUT FORMAT SELECTION
 
+
 def _output_format(
     structured: bool,
     is_code: bool,
@@ -723,9 +858,9 @@ class PromptBuilder:
 
             try:
                 # CLEAN INPUTS
-                query   = _clean(query)
+                query = _clean(query)
                 context = _clean(context)
-                memory  = _clean(memory)
+                memory = _clean(memory)
 
                 if not query:
                     raise ValueError("EMPTY_QUERY")
@@ -747,13 +882,13 @@ class PromptBuilder:
                 # PII SCRUB BEFORE PROMPT INJECTION
                 if scrub_pii:
                     context = _scrub_pii(context)
-                    memory  = _scrub_pii(memory)
+                    memory = _scrub_pii(memory)
 
                 # QUERY TYPE AND MODALITY DETECTION
                 query_type = _detect_query_type(query)
                 structured = _is_structured(query)
-                is_code    = _is_code(query)
-                modality   = _detect_modality(query, modality_context)
+                is_code = _is_code(query)
+                modality = _detect_modality(query, modality_context)
 
                 span.set_attribute("query.type", query_type)
                 span.set_attribute("query.modality", modality or "text")
@@ -766,16 +901,14 @@ class PromptBuilder:
                 memory, context = _deduplicate_context(memory, context)
 
                 # SYSTEM PROMPT + FORMAT BLOCK (fixed overhead — computed first)
-                system     = _system_prompt(query_type, structured, is_code, modality)
+                system = _system_prompt(query_type, structured, is_code, modality)
                 output_fmt = _output_format(structured, is_code, query_type) + _ANSWER_ONLY_RULE
 
                 # QUERY BLOCK — hard cap at 15% of total budget
                 query_budget = int(self.max_chars * 0.15)
-                query_text   = _truncate(query, query_budget)
-                query_block  = (
-                    f"TASK:\n{query_text}\n\n"
-                    if structured
-                    else f"QUERY:\n{query_text}\n\n"
+                query_text = _truncate(query, query_budget)
+                query_block = (
+                    f"TASK:\n{query_text}\n\n" if structured else f"QUERY:\n{query_text}\n\n"
                 )
 
                 # RESIDUAL BUDGET — everything left after fixed components.
@@ -787,33 +920,26 @@ class PromptBuilder:
                 mem_budget = int(remaining * _MEM_RATIO)
                 ctx_budget = remaining - mem_budget
 
-                memory  = _truncate(memory,  mem_budget)
+                memory = _truncate(memory, mem_budget)
                 context = _truncate(context, ctx_budget)
 
                 # BLOCK ASSEMBLY
                 mem_block = f"MEMORY:\n{memory}\n\n" if memory else ""
                 ctx_block = f"CONTEXT:\n{context}\n\n" if context else ""
 
-                prompt = (
-                    system
-                    + mem_block
-                    + ctx_block
-                    + query_block
-                    + output_fmt
-                )
+                prompt = system + mem_block + ctx_block + query_block + output_fmt
 
                 # OVERFLOW GUARD — PRESERVE SYSTEM + QUERY + FORMAT
                 if len(prompt) > self.max_chars:
-                    fixed   = system + query_block + output_fmt
+                    fixed = system + query_block + output_fmt
                     allowed = self.max_chars - len(fixed) - 20
-                    middle  = _truncate(mem_block + ctx_block, allowed)
-                    prompt  = system + middle + query_block + output_fmt
+                    middle = _truncate(mem_block + ctx_block, allowed)
+                    prompt = system + middle + query_block + output_fmt
 
                     logger.warning(
                         "prompt_truncated",
                         original_size=len(
-                            system + mem_block
-                            + ctx_block + query_block + output_fmt
+                            system + mem_block + ctx_block + query_block + output_fmt
                         ),
                         final_size=len(prompt),
                         session_id=session_id,
@@ -848,7 +974,7 @@ class PromptBuilder:
                 return prompt
 
             except Exception as exc:
-                latency    = round(time.time() - start, 3)
+                latency = round(time.time() - start, 3)
                 error_type = type(exc).__name__
 
                 _prompt_duration.labels(status="error").observe(latency)
@@ -869,12 +995,12 @@ class PromptBuilder:
 
     def build_batch(
         self,
-        queries: List[str],
+        queries: list[str],
         context: str,
         memory: str = "",
         session_id: str = "default",
-    ) -> List[str]:
-        prompts: List[str] = []
+    ) -> list[str]:
+        prompts: list[str] = []
         for q in queries:
             try:
                 prompt = self.build_prompt(q, context, memory, session_id)

@@ -3,13 +3,14 @@ import threading
 import time
 import unicodedata
 import uuid
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from typing import Any, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from typing import Any
 
 import structlog
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
-from prometheus_client import Counter, Histogram, Gauge
+from prometheus_client import Counter, Gauge, Histogram
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
@@ -41,18 +42,18 @@ _active_requests = Gauge(
 )
 
 # CONFIDENCE MAP BY DECISION TYPE
-_CONFIDENCE_MAP: Dict[str, float] = {
-    "rag":      0.80,
-    "search":   0.85,
-    "direct":   0.70,
-    "memory":   0.75,
-    "hybrid":   0.85,
+_CONFIDENCE_MAP: dict[str, float] = {
+    "rag": 0.80,
+    "search": 0.85,
+    "direct": 0.70,
+    "memory": 0.75,
+    "hybrid": 0.85,
     "fallback": 0.30,
-    "reject":   0.00,
+    "reject": 0.00,
 }
 
 # SEMAPHORE — created lazily inside async context to avoid missing event loop
-_semaphore: Optional[asyncio.Semaphore] = None
+_semaphore: asyncio.Semaphore | None = None
 _semaphore_lock = threading.Lock()
 
 
@@ -67,6 +68,7 @@ def _get_semaphore() -> asyncio.Semaphore:
 
 # NORMALIZE QUERY
 
+
 def _normalize(q: str) -> str:
     q = unicodedata.normalize("NFC", str(q or ""))
     return " ".join(q.strip().split())
@@ -74,11 +76,14 @@ def _normalize(q: str) -> str:
 
 # INPUT GUARD — blocking check (raises GuardrailBlocked on injection/jailbreak/SSRF)
 
+
 def _guard_input(query: str, session_id: str = "", correlation_id: str = "") -> str:
     """Full blocking input check. Returns safe query text or raises GuardrailBlocked."""
     from app.guardrails.input_guard import check as _input_check
-    from app.guardrails.exceptions import GuardrailBlocked
-    guarded = _input_check(query, surface="agent_controller", session_id=session_id, correlation_id=correlation_id)
+
+    guarded = _input_check(
+        query, surface="agent_controller", session_id=session_id, correlation_id=correlation_id
+    )
     return guarded.text
 
 
@@ -87,16 +92,20 @@ def _sanitize(text: str, surface: str = "agent_controller") -> str:
     Backward-compatible alias used by unit tests and legacy callers."""
     try:
         from app.guardrails.input_guard import sanitize as _ig_sanitize
+
         return _ig_sanitize(text, surface=surface)
     except Exception:
         return text
 
+
 # OUTPUT GUARD — scrubs template artifacts, PII, fabricated citations before return
+
 
 def _guard_output(response: str, session_id: str = "", correlation_id: str = "") -> str:
     """Non-blocking output scrub. Returns cleaned response text."""
     try:
         from app.guardrails.output_guard import check as _output_check
+
         og = _output_check(
             response,
             context_chunks=[],
@@ -118,16 +127,29 @@ class AgentExecutor:
 
     # Whole-word greeting tokens. Substring matching previously caused "hi"
     # to match "which", "this", "while" — routing factual questions to direct.
-    _CONVERSATIONAL_TOKENS = frozenset({
-        "hello", "hi", "hey", "thanks", "bye", "goodbye",
-    })
-    _CONVERSATIONAL_PHRASES = frozenset({
-        "thank you", "how are you", "good morning",
-        "good afternoon", "good evening",
-    })
+    _CONVERSATIONAL_TOKENS = frozenset(
+        {
+            "hello",
+            "hi",
+            "hey",
+            "thanks",
+            "bye",
+            "goodbye",
+        }
+    )
+    _CONVERSATIONAL_PHRASES = frozenset(
+        {
+            "thank you",
+            "how are you",
+            "good morning",
+            "good afternoon",
+            "good evening",
+        }
+    )
 
     def __init__(self) -> None:
         from app.agents.agent_router import AgentRouter
+
         self._router = AgentRouter()
 
     def _is_conversational(self, query: str) -> bool:
@@ -139,7 +161,7 @@ class AgentExecutor:
             return True
         return False
 
-    def run(self, query: str, session_id: str = "default") -> Dict[str, Any]:
+    def run(self, query: str, session_id: str = "default") -> dict[str, Any]:
         # Cheap fast-path for genuine greetings (whole-word, short query only)
         if self._is_conversational(query):
             return self._direct(query, session_id, "greeting")
@@ -156,7 +178,7 @@ class AgentExecutor:
             action, reason, confidence = "rag", "router_exception", 0.5
 
         # Collect finance filter hints from decision (Phase 7)
-        finance_filters: Dict[str, Any] = {}
+        finance_filters: dict[str, Any] = {}
         try:
             if hasattr(decision, "modality_hint") and decision.modality_hint:
                 finance_filters["modality_hint"] = decision.modality_hint
@@ -173,9 +195,9 @@ class AgentExecutor:
         if action in {"rag", "hybrid"}:
             return {
                 "response": "Routing to knowledge base.",
-                "source":   "rag",
+                "source": "rag",
                 "decision": action,
-                "reason":   reason or "knowledge_query",
+                "reason": reason or "knowledge_query",
                 "metadata": {"confidence": max(confidence, 0.6), **finance_filters},
             }
 
@@ -183,18 +205,18 @@ class AgentExecutor:
         if action in {"search", "memory"}:
             return {
                 "response": f"Routing to {action}.",
-                "source":   action,
+                "source": action,
                 "decision": action,
-                "reason":   reason or f"{action}_route",
+                "reason": reason or f"{action}_route",
                 "metadata": {"confidence": confidence, **finance_filters},
             }
 
         # direct → only safe when router is confident this is NOT a doc question.
         return self._direct(query, session_id, reason or "router_direct")
 
-    def _direct(self, query: str, session_id: str, reason: str) -> Dict[str, Any]:
+    def _direct(self, query: str, session_id: str, reason: str) -> dict[str, Any]:
         try:
-            llm      = model_loader.get_llm()
+            llm = model_loader.get_llm()
             response = llm.generate(
                 f"Answer briefly and helpfully:\n{query}",
                 max_tokens=min(256, settings.AGENT_TOKEN_BUDGET),
@@ -209,9 +231,9 @@ class AgentExecutor:
         response = _guard_output(response, session_id=session_id)
         return {
             "response": response,
-            "source":   "llm",
+            "source": "llm",
             "decision": "direct",
-            "reason":   reason,
+            "reason": reason,
             "metadata": {"confidence": 0.70},
         }
 
@@ -219,8 +241,8 @@ class AgentExecutor:
 class AgentController:
 
     def __init__(self) -> None:
-        self.executor     = AgentExecutor()
-        self.timeout      = max(settings.AGENT_TIMEOUT_SEC, 1)
+        self.executor = AgentExecutor()
+        self.timeout = max(settings.AGENT_TIMEOUT_SEC, 1)
         self.token_budget = settings.AGENT_TOKEN_BUDGET
 
         if settings.AGENT_TIMEOUT_SEC <= 0:
@@ -237,31 +259,35 @@ class AgentController:
 
     # MAIN SYNC HANDLE
 
-    def handle(self, query: str, session_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+    def handle(self, query: str, session_id: str, user_id: str | None = None) -> dict[str, Any]:
 
         if not query or not query.strip():
             return self._reject("empty_query")
 
-        start      = time.time()
+        start = time.time()
         request_id = str(uuid.uuid4())
-        query      = self._normalize(query)[:settings.MAX_PROMPT_CHARS]
+        query = self._normalize(query)[: settings.MAX_PROMPT_CHARS]
 
         # RATE LIMIT CHECK — reject banned sessions before any processing
         try:
             from app.guardrails.exceptions import GuardrailBlocked
             from app.guardrails.output_guard import safe_refusal
-            from app.guardrails.rate_limiter import enforce as _rl_enforce, check_and_record as _rl_record
-            _rl_enforce(session_id=session_id, surface="agent_controller", correlation_id=request_id)
+            from app.guardrails.rate_limiter import check_and_record as _rl_record
+            from app.guardrails.rate_limiter import enforce as _rl_enforce
+
+            _rl_enforce(
+                session_id=session_id, surface="agent_controller", correlation_id=request_id
+            )
         except GuardrailBlocked as gb:
             return {
-                "response":   "Too many blocked requests. Please wait before retrying.",
-                "source":     "guardrail",
-                "decision":   "reject",
-                "reason":     gb.reason,
+                "response": "Too many blocked requests. Please wait before retrying.",
+                "source": "guardrail",
+                "decision": "reject",
+                "reason": gb.reason,
                 "confidence": 0.0,
                 "request_id": request_id,
-                "latency":    round(time.time() - start, 3),
-                "metadata":   {"guard_type": gb.guard_type},
+                "latency": round(time.time() - start, 3),
+                "metadata": {"guard_type": gb.guard_type},
             }
 
         # INPUT GUARD — blocking: raises GuardrailBlocked on injection/jailbreak/SSRF
@@ -270,14 +296,14 @@ class AgentController:
         except GuardrailBlocked as gb:
             _rl_record(session_id=session_id, surface="agent_controller", correlation_id=request_id)
             return {
-                "response":   safe_refusal(gb.reason),
-                "source":     "guardrail",
-                "decision":   "reject",
-                "reason":     gb.reason,
+                "response": safe_refusal(gb.reason),
+                "source": "guardrail",
+                "decision": "reject",
+                "reason": gb.reason,
                 "confidence": 0.0,
                 "request_id": request_id,
-                "latency":    round(time.time() - start, 3),
-                "metadata":   {"guard_type": gb.guard_type},
+                "latency": round(time.time() - start, 3),
+                "metadata": {"guard_type": gb.guard_type},
             }
         if not query.strip():
             return self._reject("empty_after_normalization")
@@ -297,8 +323,8 @@ class AgentController:
                     session_id=session_id,
                 )
 
-                t_agent       = time.time()
-                result        = self._execute_with_timeout(query, session_id)
+                t_agent = time.time()
+                result = self._execute_with_timeout(query, session_id)
                 agent_latency = round(time.time() - t_agent, 3)
 
                 # TOKEN BUDGET — the real cap is applied BEFORE generation: _direct()
@@ -318,17 +344,19 @@ class AgentController:
                 if not self._validate(result):
                     raise ValueError("INVALID_AGENT_OUTPUT")
 
-                response   = self._format(result)
+                response = self._format(result)
                 confidence = self._confidence(result)
-                decision   = response.get("decision", "unknown")
+                decision = response.get("decision", "unknown")
 
-                response.update({
-                    "request_id":       request_id,
-                    "latency":          round(time.time() - start, 3),
-                    "agent_latency":    agent_latency,
-                    "agent_latency_ms": round(agent_latency * 1000, 1),
-                    "confidence":       confidence,
-                })
+                response.update(
+                    {
+                        "request_id": request_id,
+                        "latency": round(time.time() - start, 3),
+                        "agent_latency": agent_latency,
+                        "agent_latency_ms": round(agent_latency * 1000, 1),
+                        "confidence": confidence,
+                    }
+                )
 
                 _controller_duration.labels(
                     decision=decision,
@@ -351,7 +379,7 @@ class AgentController:
                 return response
 
             except Exception as exc:
-                latency    = round(time.time() - start, 3)
+                latency = round(time.time() - start, 3)
                 error_type = type(exc).__name__
 
                 _controller_errors.labels(error_type=error_type).inc()
@@ -375,14 +403,14 @@ class AgentController:
                     return self._fallback(query, start, session_id, request_id)
                 except Exception:
                     return {
-                        "response":   "Unable to process your request at this time.",
-                        "source":     "fallback",
-                        "decision":   "direct",
-                        "reason":     "all_retries_exhausted",
+                        "response": "Unable to process your request at this time.",
+                        "source": "fallback",
+                        "decision": "direct",
+                        "reason": "all_retries_exhausted",
                         "confidence": 0.1,
                         "request_id": request_id,
-                        "latency":    round(time.time() - start, 3),
-                        "metadata":   {},
+                        "latency": round(time.time() - start, 3),
+                        "metadata": {},
                     }
 
             finally:
@@ -394,19 +422,17 @@ class AgentController:
         self,
         query: str,
         session_id: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         future = _executor.submit(self.executor.run, query, session_id)
         try:
             return future.result(timeout=self.timeout)
         except FuturesTimeoutError:
             future.cancel()
-            raise TimeoutError(
-                f"AGENT_TIMEOUT: executor did not finish within {self.timeout}s"
-            )
+            raise TimeoutError(f"AGENT_TIMEOUT: executor did not finish within {self.timeout}s")
 
     # VALIDATION
 
-    def _validate(self, result: Dict[str, Any]) -> bool:
+    def _validate(self, result: dict[str, Any]) -> bool:
         if not isinstance(result, dict):
             return False
 
@@ -422,9 +448,9 @@ class AgentController:
 
     # CONFIDENCE SCORING
 
-    def _confidence(self, result: Dict[str, Any]) -> float:
+    def _confidence(self, result: dict[str, Any]) -> float:
         # PREFER EXECUTOR-PROVIDED CONFIDENCE FROM METADATA
-        metadata  = result.get("metadata", {}) or {}
+        metadata = result.get("metadata", {}) or {}
         meta_conf = metadata.get("confidence")
 
         if meta_conf is not None:
@@ -441,26 +467,26 @@ class AgentController:
 
     # FORMAT RESULT
 
-    def _format(self, result: Dict[str, Any]) -> Dict[str, Any]:
+    def _format(self, result: dict[str, Any]) -> dict[str, Any]:
         return {
             "response": result.get("response", ""),
-            "source":   result.get("source", "unknown"),
+            "source": result.get("source", "unknown"),
             "decision": result.get("decision", "unknown"),
-            "reason":   result.get("reason", ""),
+            "reason": result.get("reason", ""),
             "metadata": result.get("metadata", {}),
         }
 
     # REJECT
 
-    def _reject(self, reason: str) -> Dict[str, Any]:
+    def _reject(self, reason: str) -> dict[str, Any]:
         return {
-            "response":   "Invalid query.",
-            "source":     "validation",
-            "decision":   "reject",
-            "reason":     reason,
+            "response": "Invalid query.",
+            "source": "validation",
+            "decision": "reject",
+            "reason": reason,
             "confidence": 0.0,
-            "latency":    0.0,
-            "metadata":   {},
+            "latency": 0.0,
+            "metadata": {},
         }
 
     # FALLBACK — LLM DIRECT GENERATION
@@ -476,13 +502,13 @@ class AgentController:
         start_time: float,
         session_id: str = "default",
         request_id: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
 
         _fallback_invocations.inc()
 
         try:
-            llm      = model_loader.get_llm()
-            prompt   = f"Answer clearly and concisely:\n{query}"
+            llm = model_loader.get_llm()
+            prompt = f"Answer clearly and concisely:\n{query}"
             # Cap by AGENT_TOKEN_BUDGET so the budget is enforced BEFORE
             # generation spends tokens, not just audited after the fact.
             response = llm.generate(
@@ -504,14 +530,14 @@ class AgentController:
 
         response = _guard_output(response, session_id=session_id, correlation_id=request_id)
         return {
-            "response":    response,
-            "source":      "fallback",
-            "decision":    "direct",
-            "reason":      "controller_failure",
-            "confidence":  0.3,
-            "request_id":  request_id,
-            "latency":     round(time.time() - start_time, 3),
-            "metadata":    {},
+            "response": response,
+            "source": "fallback",
+            "decision": "direct",
+            "reason": "controller_failure",
+            "confidence": 0.3,
+            "request_id": request_id,
+            "latency": round(time.time() - start_time, 3),
+            "metadata": {},
         }
 
     # ASYNC HANDLE
@@ -520,12 +546,11 @@ class AgentController:
         self,
         query: str,
         session_id: str,
-        user_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
 
         async with _get_semaphore():
             return await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: self.handle(query, session_id, user_id=user_id),
             )
-

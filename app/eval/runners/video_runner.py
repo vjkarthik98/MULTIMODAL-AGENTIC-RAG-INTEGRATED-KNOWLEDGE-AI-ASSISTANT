@@ -6,10 +6,11 @@ Extracts frame captions and transcript from ingested video documents and scores:
   - caption_repetition_rate: BLIP repetition loop detection (P1-9 measurement)
   - audio_wer: WER of Whisper transcript vs gold (when gold transcript available)
 """
+
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 from app.eval.config import EvalConfig
 from app.eval.datasets.gold_loader import load_gold
@@ -18,10 +19,10 @@ from app.eval.metrics.base import MetricResult, SuiteResult
 from app.eval.metrics.video_metrics import caption_repetition_rate, frame_caption_recall
 
 
-def _split_by_subtype(documents: List[Any]) -> Tuple[List[str], List[str]]:
+def _split_by_subtype(documents: list[Any]) -> tuple[list[str], list[str]]:
     """Return (frame_captions, transcript_parts) from ingested video documents."""
-    captions: List[str] = []
-    transcript_parts: List[str] = []
+    captions: list[str] = []
+    transcript_parts: list[str] = []
     for doc in documents:
         meta = getattr(doc, "metadata", {}) or {}
         subtype = getattr(doc, "subtype", "") or meta.get("subtype", "")
@@ -49,15 +50,20 @@ def run_video_suite(cfg: EvalConfig) -> SuiteResult:
 
     gold_rows = load_gold("video", gold_dir=cfg.gold_dir, include_todos=False)
     if not gold_rows:
-        result.add(MetricResult.empty("frame_caption_recall", "no curated video gold rows; run download_eval_corpus.sh first"))
+        result.add(
+            MetricResult.empty(
+                "frame_caption_recall",
+                "no curated video gold rows; run download_eval_corpus.sh first",
+            )
+        )
         result.add(MetricResult.empty("caption_repetition_rate", "no curated video gold rows"))
         result.duration_sec = time.time() - t0
         return result
 
-    all_generated_captions: List[str] = []
-    all_gold_captions: List[str] = []
-    all_generated_transcripts: List[str] = []
-    all_gold_transcripts: List[str] = []
+    all_generated_captions: list[str] = []
+    all_gold_captions: list[str] = []
+    all_generated_transcripts: list[str] = []
+    all_gold_transcripts: list[str] = []
 
     raw_corpus_dir = cfg.raw_corpus_dir / "video"
 
@@ -65,7 +71,10 @@ def run_video_suite(cfg: EvalConfig) -> SuiteResult:
         gold_frame_caps = row.get("gold_frame_captions", [])
         gold_transcript = row.get("gold_transcript_excerpt", "")
         has_gold_caps = bool(gold_frame_caps) and gold_frame_caps != ["TODO_fill_after_processing"]
-        has_gold_transcript = bool(gold_transcript) and gold_transcript not in ("TODO_fill_after_processing", "TODO")
+        has_gold_transcript = bool(gold_transcript) and gold_transcript not in (
+            "TODO_fill_after_processing",
+            "TODO",
+        )
 
         if not has_gold_caps and not has_gold_transcript:
             continue
@@ -80,7 +89,8 @@ def run_video_suite(cfg: EvalConfig) -> SuiteResult:
 
         session_id = f"{cfg.session_prefix}_video_{row['id']}"
         try:
-            from app.utils.paths import set_current_user, reset_current_user
+            from app.utils.paths import reset_current_user, set_current_user
+
             _token = set_current_user(cfg.user_id)
             try:
                 docs = video_ingest.ingest(
@@ -113,7 +123,7 @@ def run_video_suite(cfg: EvalConfig) -> SuiteResult:
         result.add(MetricResult.empty("frame_caption_recall", "no frame caption pairs available"))
 
     # BLIP repetition detection (P1-9) — run on ALL captions regardless of gold
-    all_captions_flat: List[str] = []
+    all_captions_flat: list[str] = []
     for row in gold_rows:
         source_file = row.get("source_file") or ""
         if not source_file:
@@ -122,7 +132,8 @@ def run_video_suite(cfg: EvalConfig) -> SuiteResult:
         if video_path.exists():
             session_id = f"{cfg.session_prefix}_video_rep_{row['id']}"
             try:
-                from app.utils.paths import set_current_user, reset_current_user
+                from app.utils.paths import reset_current_user, set_current_user
+
                 _tok = set_current_user(cfg.user_id)
                 try:
                     docs = video_ingest.ingest(str(video_path), session_id=session_id)

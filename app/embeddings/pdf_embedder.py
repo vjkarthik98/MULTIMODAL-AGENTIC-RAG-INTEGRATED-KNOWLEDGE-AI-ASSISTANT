@@ -1,13 +1,15 @@
 """pdf_embedder.py — Finance-grade embedder for PDF chunks."""
+
 from __future__ import annotations
 
 import re
 from typing import Any
 
-from app.embeddings.base_embedder import BaseEmbedder
-from app.core.config import settings
-from app.utils.logger import get_logger
 from prometheus_client import Counter
+
+from app.core.config import settings
+from app.embeddings.base_embedder import BaseEmbedder
+from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -23,30 +25,30 @@ _EMBED_ERRORS = Counter(
 # Known filename → company name map for common filings.
 # Keeps embedding context short and precise without loading a full NER model here.
 _SOURCE_TO_COMPANY: dict[str, str] = {
-    "apple":     "Apple Inc.",
+    "apple": "Apple Inc.",
     "microsoft": "Microsoft Corporation",
-    "google":    "Alphabet Inc.",
-    "alphabet":  "Alphabet Inc.",
-    "amazon":    "Amazon.com Inc.",
-    "meta":      "Meta Platforms Inc.",
-    "nvidia":    "NVIDIA Corporation",
-    "tesla":     "Tesla Inc.",
+    "google": "Alphabet Inc.",
+    "alphabet": "Alphabet Inc.",
+    "amazon": "Amazon.com Inc.",
+    "meta": "Meta Platforms Inc.",
+    "nvidia": "NVIDIA Corporation",
+    "tesla": "Tesla Inc.",
     "berkshire": "Berkshire Hathaway Inc.",
-    "jpmorgan":  "JPMorgan Chase & Co.",
+    "jpmorgan": "JPMorgan Chase & Co.",
 }
 
 # Canonical table-type labels for the embedding prefix, keyed by table_title keyword
 _TABLE_TYPE_LABELS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"statement.{0,10}operation|income statement", re.I), "Income Statement"),
-    (re.compile(r"balance sheet|financial position",          re.I), "Balance Sheet"),
-    (re.compile(r"cash flow",                                 re.I), "Cash Flow Statement"),
-    (re.compile(r"comprehensive income",                      re.I), "Comprehensive Income"),
-    (re.compile(r"shareholders?.{0,6}equity",                re.I), "Shareholders Equity"),
-    (re.compile(r"net sales|revenue.{0,10}product",          re.I), "Net Sales by Product"),
-    (re.compile(r"gross margin",                              re.I), "Gross Margin"),
-    (re.compile(r"income tax|tax provision",                  re.I), "Income Tax"),
-    (re.compile(r"capital return|repurchase|dividend",        re.I), "Capital Return"),
-    (re.compile(r"segment",                                   re.I), "Segment Results"),
+    (re.compile(r"balance sheet|financial position", re.I), "Balance Sheet"),
+    (re.compile(r"cash flow", re.I), "Cash Flow Statement"),
+    (re.compile(r"comprehensive income", re.I), "Comprehensive Income"),
+    (re.compile(r"shareholders?.{0,6}equity", re.I), "Shareholders Equity"),
+    (re.compile(r"net sales|revenue.{0,10}product", re.I), "Net Sales by Product"),
+    (re.compile(r"gross margin", re.I), "Gross Margin"),
+    (re.compile(r"income tax|tax provision", re.I), "Income Tax"),
+    (re.compile(r"capital return|repurchase|dividend", re.I), "Capital Return"),
+    (re.compile(r"segment", re.I), "Segment Results"),
 ]
 
 
@@ -83,7 +85,7 @@ class PdfEmbedder(BaseEmbedder):
 
     def _build_embed_text(self, doc: Any, cleaned_text: str) -> str:
         try:
-            s    = getattr(doc, "structure", {}) or {}
+            s = getattr(doc, "structure", {}) or {}
             page = getattr(doc, "page", None) or s.get("page_number")
             source = getattr(doc, "source", "") or ""
             chunk_type = (s.get("chunk_type") or getattr(doc, "subtype", "") or "").lower()
@@ -112,7 +114,7 @@ class PdfEmbedder(BaseEmbedder):
                     parts.append(f"[{label}]")
 
                 prefix = (" ".join(parts) + " ") if parts else ""
-                result = (prefix + cleaned_text)[:settings.MAX_PROMPT_CHARS]
+                result = (prefix + cleaned_text)[: settings.MAX_PROMPT_CHARS]
                 _EMBED_BUILT.inc()
                 return result
 
@@ -133,13 +135,13 @@ class PdfEmbedder(BaseEmbedder):
 
             # Sub-chunk position within a split page — prevents adjacent chunks
             # from collapsing to the same vector.
-            sub_idx   = s.get("sub_chunk_index")
+            sub_idx = s.get("sub_chunk_index")
             sub_total = s.get("total_sub_chunks")
             if sub_idx is not None and sub_total and int(sub_total) > 1:
                 parts.append(f"[Part {int(sub_idx)+1}/{int(sub_total)}]")
 
             prefix = (" ".join(parts) + " ") if parts else ""
-            result = (prefix + cleaned_text)[:settings.MAX_PROMPT_CHARS]
+            result = (prefix + cleaned_text)[: settings.MAX_PROMPT_CHARS]
             logger.debug(event="embed_text_built", modality="pdf", chars=len(result))
             _EMBED_BUILT.inc()
             return result

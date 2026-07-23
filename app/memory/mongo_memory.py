@@ -4,7 +4,7 @@ import asyncio
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from tenacity import (
     retry,
@@ -27,6 +27,7 @@ try:
         OperationFailure,
         ServerSelectionTimeoutError,
     )
+
     _PYMONGO_AVAILABLE = True
 except ImportError:
     _PYMONGO_AVAILABLE = False
@@ -49,8 +50,10 @@ except ImportError:
     class BulkWriteError(Exception):  # type: ignore[no-redef]
         pass
 
+
 try:
     import pybreaker
+
     _mongo_breaker = pybreaker.CircuitBreaker(
         fail_max=settings.CIRCUIT_BREAKER_MAX_FAILURES,
         reset_timeout=settings.CIRCUIT_BREAKER_RESET_TIMEOUT,
@@ -174,6 +177,7 @@ class MongoMemory:
 
     def _clean(self, text: str) -> str:
         import unicodedata
+
         text = unicodedata.normalize("NFC", str(text or ""))
         return " ".join(text.strip().split())
 
@@ -192,9 +196,9 @@ class MongoMemory:
             return 0.5
 
     def _valid_embedding(self, emb: Any) -> bool:
-        return (
-            isinstance(emb, list)
-            and len(emb) in (settings.TEXT_EMBEDDING_DIM, settings.VISION_EMBEDDING_DIM)
+        return isinstance(emb, list) and len(emb) in (
+            settings.TEXT_EMBEDDING_DIM,
+            settings.VISION_EMBEDDING_DIM,
         )
 
     def _utcnow(self) -> datetime:
@@ -299,11 +303,11 @@ class MongoMemory:
         session_id: str,
         role: str,
         content: str,
-        embedding: Optional[List[float]] = None,
+        embedding: list[float] | None = None,
         modality: str = "text",
         importance: float = 1.0,
-        user_id: Optional[str] = None,
-        extra: Optional[Dict[str, Any]] = None,
+        user_id: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         if not session_id or not content:
             return
@@ -331,7 +335,7 @@ class MongoMemory:
             if len(content) < 2:
                 return
 
-            content = content[:settings.MAX_PROMPT_CHARS]
+            content = content[: settings.MAX_PROMPT_CHARS]
             now = self._utcnow()
 
             # COMPUTE TTL EXPIRY
@@ -341,7 +345,7 @@ class MongoMemory:
                 tz=timezone.utc,
             )
 
-            doc: Dict[str, Any] = {
+            doc: dict[str, Any] = {
                 "session_id": session_id,
                 "user_id": user_id,
                 "role": self._role(role),
@@ -372,7 +376,7 @@ class MongoMemory:
 
     # INSERT ALIAS — USED BY MEMORY MANAGER
 
-    def insert(self, session_id: str, message: Dict[str, Any]) -> None:
+    def insert(self, session_id: str, message: dict[str, Any]) -> None:
         self.store_message(
             session_id=session_id,
             role=message.get("role", "user"),
@@ -388,8 +392,8 @@ class MongoMemory:
         self,
         session_id: str,
         summary: str,
-        embedding: Optional[List[float]] = None,
-        user_id: Optional[str] = None,
+        embedding: list[float] | None = None,
+        user_id: str | None = None,
     ) -> None:
         if not session_id or not summary:
             return
@@ -410,10 +414,10 @@ class MongoMemory:
             if len(summary) < settings.MIN_SUMMARY_LENGTH:
                 return
 
-            summary = summary[:settings.MEMORY_SUMMARY_MAX_CHARS]
+            summary = summary[: settings.MEMORY_SUMMARY_MAX_CHARS]
             now = self._utcnow()
 
-            doc: Dict[str, Any] = {
+            doc: dict[str, Any] = {
                 "session_id": session_id,
                 "user_id": user_id,
                 "summary": summary,
@@ -446,11 +450,11 @@ class MongoMemory:
     def get_recent_history(
         self,
         session_id: str,
-        limit: Optional[int] = None,
-        role_filter: Optional[str] = None,
-        modality_filter: Optional[str] = None,
-        user_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        limit: int | None = None,
+        role_filter: str | None = None,
+        modality_filter: str | None = None,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         if not self._is_available():
             return []
 
@@ -465,7 +469,7 @@ class MongoMemory:
         limit = min(limit or settings.MAX_HISTORY_MESSAGES, settings.MAX_HISTORY_MESSAGES)
 
         try:
-            query: Dict[str, Any] = {"session_id": session_id, "user_id": user_id}
+            query: dict[str, Any] = {"session_id": session_id, "user_id": user_id}
 
             if role_filter and role_filter in _VALID_ROLES:
                 query["role"] = role_filter
@@ -484,23 +488,25 @@ class MongoMemory:
                 )
 
             raw = self._retry(_do)
-            result: List[Dict[str, Any]] = []
+            result: list[dict[str, Any]] = []
 
             for doc in reversed(raw):
                 ts = doc.get("timestamp")
-                unix_ts: Optional[float] = None
+                unix_ts: float | None = None
                 if isinstance(ts, datetime):
                     unix_ts = ts.timestamp()
 
-                result.append({
-                    "role": doc.get("role"),
-                    "content": self._clean(doc.get("content", "")),
-                    "embedding": doc.get("embedding"),
-                    "modality": doc.get("modality", "text"),
-                    "importance": doc.get("importance", 1.0),
-                    "timestamp": unix_ts,
-                    "user_id": doc.get("user_id"),
-                })
+                result.append(
+                    {
+                        "role": doc.get("role"),
+                        "content": self._clean(doc.get("content", "")),
+                        "embedding": doc.get("embedding"),
+                        "modality": doc.get("modality", "text"),
+                        "importance": doc.get("importance", 1.0),
+                        "timestamp": unix_ts,
+                        "user_id": doc.get("user_id"),
+                    }
+                )
 
             logger.debug(
                 event="mongo_history_fetched",
@@ -520,12 +526,12 @@ class MongoMemory:
 
     # GET ALIAS — USED BY MEMORY MANAGER
 
-    def get(self, session_id: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get(self, session_id: str, user_id: str | None = None) -> list[dict[str, Any]]:
         return self.get_recent_history(session_id, user_id=user_id)
 
     # GET LATEST SUMMARY — USED BY MEMORY FUSION
 
-    def get_latest_summary(self, session_id: str, user_id: Optional[str] = None) -> str:
+    def get_latest_summary(self, session_id: str, user_id: str | None = None) -> str:
         if not self._is_available():
             return ""
 
@@ -538,7 +544,7 @@ class MongoMemory:
             return ""
 
         try:
-            _q: Dict[str, Any] = {"session_id": session_id, "user_id": user_id}
+            _q: dict[str, Any] = {"session_id": session_id, "user_id": user_id}
 
             def _do():
                 return self.summaries.find_one(
@@ -564,8 +570,8 @@ class MongoMemory:
         self,
         session_id: str,
         limit: int = 5,
-        user_id: Optional[str] = None,
-    ) -> List[str]:
+        user_id: str | None = None,
+    ) -> list[str]:
         if not self._is_available():
             return []
 
@@ -578,7 +584,7 @@ class MongoMemory:
             return []
 
         try:
-            _q: Dict[str, Any] = {"session_id": session_id, "user_id": user_id}
+            _q: dict[str, Any] = {"session_id": session_id, "user_id": user_id}
 
             def _do():
                 return list(
@@ -603,7 +609,7 @@ class MongoMemory:
 
     # CLEAR SESSION MEMORY
 
-    def clear_memory(self, session_id: str, user_id: Optional[str] = None) -> None:
+    def clear_memory(self, session_id: str, user_id: str | None = None) -> None:
         if not self._is_available():
             return
 
@@ -616,7 +622,7 @@ class MongoMemory:
             return
 
         try:
-            _q: Dict[str, Any] = {"session_id": session_id, "user_id": user_id}
+            _q: dict[str, Any] = {"session_id": session_id, "user_id": user_id}
 
             def _del_msgs():
                 return self.messages.delete_many(_q)
@@ -643,7 +649,7 @@ class MongoMemory:
 
     # DELETE ALIAS — USED BY MEMORY MANAGER
 
-    def delete(self, session_id: str, user_id: Optional[str] = None) -> None:
+    def delete(self, session_id: str, user_id: str | None = None) -> None:
         self.clear_memory(session_id, user_id)
 
     # GDPR PURGE — ALL DATA FOR USER
@@ -653,6 +659,7 @@ class MongoMemory:
             return
 
         try:
+
             def _del_msgs():
                 return self.messages.delete_many({"user_id": user_id})
 
@@ -697,10 +704,10 @@ class MongoMemory:
     def save_chat_turn(
         self,
         session_id: str,
-        user_id: Optional[str],
+        user_id: str | None,
         query: str,
         answer: str,
-        sources: Optional[list] = None,
+        sources: list | None = None,
     ) -> None:
         if not session_id or not query.strip() or not answer.strip():
             return
@@ -716,8 +723,8 @@ class MongoMemory:
 
         try:
             now = self._utcnow()
-            q = self._clean(query)[:settings.MAX_PROMPT_CHARS]
-            a = self._clean(answer)[:settings.MAX_PROMPT_CHARS]
+            q = self._clean(query)[: settings.MAX_PROMPT_CHARS]
+            a = self._clean(answer)[: settings.MAX_PROMPT_CHARS]
             src = sources if isinstance(sources, list) else []
 
             def _do():
@@ -735,8 +742,20 @@ class MongoMemory:
                         "$push": {
                             "messages": {
                                 "$each": [
-                                    {"role": "user",      "content": q, "timestamp": now, "msg_id": str(uuid.uuid4())},
-                                    {"role": "assistant", "content": a, "timestamp": now, "sources": src, "msg_id": str(uuid.uuid4()), "vote": None},
+                                    {
+                                        "role": "user",
+                                        "content": q,
+                                        "timestamp": now,
+                                        "msg_id": str(uuid.uuid4()),
+                                    },
+                                    {
+                                        "role": "assistant",
+                                        "content": a,
+                                        "timestamp": now,
+                                        "sources": src,
+                                        "msg_id": str(uuid.uuid4()),
+                                        "vote": None,
+                                    },
                                 ],
                                 "$slice": -_MAX_SESSION_MESSAGES,
                             }
@@ -754,10 +773,11 @@ class MongoMemory:
                 error=str(exc),
             )
 
-    def list_chat_sessions(self, user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    def list_chat_sessions(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
         if not user_id or not self._is_available():
             return []
         try:
+
             def _do():
                 cursor = (
                     self.sessions.find({"user_id": user_id}, {"messages": 0, "_id": 0})
@@ -769,13 +789,13 @@ class MongoMemory:
             docs = self._retry(_do)
             return [
                 {
-                    "session_id":    d.get("session_id"),
-                    "title":         d.get("title") or "New chat",
-                    "created_at":    d.get("created_at"),
-                    "updated_at":    d.get("updated_at"),
+                    "session_id": d.get("session_id"),
+                    "title": d.get("title") or "New chat",
+                    "created_at": d.get("created_at"),
+                    "updated_at": d.get("updated_at"),
                     "message_count": d.get("message_count", 0),
-                    "pinned":        bool(d.get("pinned", False)),
-                    "archived":      bool(d.get("archived", False)),
+                    "pinned": bool(d.get("pinned", False)),
+                    "archived": bool(d.get("archived", False)),
                 }
                 for d in docs
             ]
@@ -784,10 +804,11 @@ class MongoMemory:
             logger.warning(event="chat_sessions_list_failed", user_id=user_id, error=str(exc))
             return []
 
-    def get_chat_session(self, user_id: str, session_id: str) -> Optional[Dict[str, Any]]:
+    def get_chat_session(self, user_id: str, session_id: str) -> dict[str, Any] | None:
         if not user_id or not session_id or not self._is_available():
             return None
         try:
+
             def _do():
                 return self.sessions.find_one(
                     {"user_id": user_id, "session_id": session_id}, {"_id": 0}
@@ -799,17 +820,17 @@ class MongoMemory:
 
             return {
                 "session_id": doc.get("session_id"),
-                "title":      doc.get("title") or "New chat",
+                "title": doc.get("title") or "New chat",
                 "created_at": doc.get("created_at"),
                 "updated_at": doc.get("updated_at"),
                 "messages": [
                     {
-                        "role":      m.get("role"),
-                        "content":   m.get("content", ""),
+                        "role": m.get("role"),
+                        "content": m.get("content", ""),
                         "timestamp": m.get("timestamp"),
-                        "sources":   m.get("sources") or [],
-                        "msg_id":    m.get("msg_id"),
-                        "vote":      m.get("vote"),
+                        "sources": m.get("sources") or [],
+                        "msg_id": m.get("msg_id"),
+                        "vote": m.get("vote"),
                     }
                     for m in doc.get("messages", [])
                 ],
@@ -822,10 +843,10 @@ class MongoMemory:
     def patch_last_assistant_message(
         self,
         session_id: str,
-        user_id: Optional[str],
+        user_id: str | None,
         content: str,
-        sources: Optional[list] = None,
-        msg_id: Optional[str] = None,
+        sources: list | None = None,
+        msg_id: str | None = None,
     ) -> bool:
         """Overwrite the last assistant message in the session transcript.
         Called after streaming completes so reload shows the exact streamed answer.
@@ -841,6 +862,7 @@ class MongoMemory:
             )
             return False
         try:
+
             def _do():
                 doc = self.sessions.find_one(
                     {"session_id": session_id, "user_id": user_id},
@@ -854,7 +876,7 @@ class MongoMemory:
                     if messages[i].get("role") == "assistant":
                         patch = {
                             **messages[i],
-                            "content": str(content)[:settings.MAX_PROMPT_CHARS],
+                            "content": str(content)[: settings.MAX_PROMPT_CHARS],
                             "sources": sources if isinstance(sources, list) else [],
                         }
                         if msg_id:
@@ -893,13 +915,15 @@ class MongoMemory:
             q = {"user_id": user_id, "session_id": session_id}
 
             def _do():
-                session_result   = self.sessions.delete_one(q)
-                messages_result  = self.messages.delete_many(q)
-                summaries_result = self.summaries.delete_many(q) if self.summaries is not None else None
+                session_result = self.sessions.delete_one(q)
+                messages_result = self.messages.delete_many(q)
+                summaries_result = (
+                    self.summaries.delete_many(q) if self.summaries is not None else None
+                )
                 return session_result, messages_result, summaries_result
 
             session_r, msg_r, sum_r = self._retry(_do)
-            found = (session_r is not None and session_r.deleted_count > 0)
+            found = session_r is not None and session_r.deleted_count > 0
             logger.info(
                 event="chat_session_deleted",
                 session_id=session_id,
@@ -910,7 +934,9 @@ class MongoMemory:
             return found
 
         except Exception as exc:
-            logger.warning(event="chat_session_delete_failed", session_id=session_id, error=str(exc))
+            logger.warning(
+                event="chat_session_delete_failed", session_id=session_id, error=str(exc)
+            )
             return False
 
     def delete_chat_session_all(self, user_id: str, session_id: str) -> None:
@@ -940,7 +966,9 @@ class MongoMemory:
                 summaries_deleted=sum_r.deleted_count if sum_r else 0,
             )
         except Exception as exc:
-            logger.warning(event="chat_session_delete_failed", session_id=session_id, error=str(exc))
+            logger.warning(
+                event="chat_session_delete_failed", session_id=session_id, error=str(exc)
+            )
 
     def delete_all_chat_sessions(self, user_id: str) -> int:
         """Delete every chat session (and associated messages/summaries) for a user.
@@ -948,7 +976,7 @@ class MongoMemory:
         if not user_id or not self._is_available():
             return 0
         try:
-            s_r   = self.sessions.delete_many({"user_id": user_id})
+            s_r = self.sessions.delete_many({"user_id": user_id})
             self.messages.delete_many({"user_id": user_id})
             self.summaries.delete_many({"user_id": user_id})
             count = s_r.deleted_count if s_r else 0
@@ -960,7 +988,7 @@ class MongoMemory:
 
     _SESSION_UPDATABLE_FIELDS = {"title", "pinned", "archived"}
 
-    def update_chat_session(self, user_id: str, session_id: str, fields: Dict[str, Any]) -> bool:
+    def update_chat_session(self, user_id: str, session_id: str, fields: dict[str, Any]) -> bool:
         """Rename / pin / archive a chat. Does not touch updated_at so the
         Recents ordering by recency is preserved (pinned sorts separately)."""
         if not user_id or not session_id or not self._is_available():
@@ -971,6 +999,7 @@ class MongoMemory:
             return False
 
         try:
+
             def _do():
                 return self.sessions.update_one(
                     {"user_id": user_id, "session_id": session_id},
@@ -981,7 +1010,9 @@ class MongoMemory:
             return bool(result and result.matched_count)
 
         except Exception as exc:
-            logger.warning(event="chat_session_update_failed", session_id=session_id, error=str(exc))
+            logger.warning(
+                event="chat_session_update_failed", session_id=session_id, error=str(exc)
+            )
             return False
 
     def patch_message_vote(
@@ -989,17 +1020,19 @@ class MongoMemory:
         user_id: str,
         session_id: str,
         msg_id: str,
-        vote: Optional[str],
+        vote: str | None,
     ) -> bool:
         """Write the vote ('up'/'down'/None) onto the specific message in the session transcript."""
         if not user_id or not session_id or not msg_id or not self._is_available():
             return False
         try:
+
             def _do():
                 return self.sessions.update_one(
                     {"user_id": user_id, "session_id": session_id, "messages.msg_id": msg_id},
                     {"$set": {"messages.$.vote": vote}},
                 )
+
             result = self._retry(_do)
             return bool(result and result.matched_count)
         except Exception as exc:
@@ -1011,9 +1044,9 @@ class MongoMemory:
         user_id: str,
         session_id: str,
         vote: str,
-        message_id: Optional[str],
-        query: Optional[str],
-        response_snippet: Optional[str],
+        message_id: str | None,
+        query: str | None,
+        response_snippet: str | None,
     ) -> bool:
         """Persist a thumbs-up / thumbs-down rating for a single assistant message."""
         if not self._is_available() or self.feedback is None:
@@ -1044,23 +1077,31 @@ class MongoMemory:
         session_id: str,
         role: str,
         content: str,
-        embedding: Optional[List[float]] = None,
+        embedding: list[float] | None = None,
         modality: str = "text",
         importance: float = 1.0,
-        user_id: Optional[str] = None,
+        user_id: str | None = None,
     ) -> None:
         await asyncio.to_thread(
             self.store_message,
-            session_id, role, content, embedding, modality, importance, user_id,
+            session_id,
+            role,
+            content,
+            embedding,
+            modality,
+            importance,
+            user_id,
         )
 
     async def async_get_recent_history(
         self,
         session_id: str,
-        limit: Optional[int] = None,
-        user_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        return await asyncio.to_thread(self.get_recent_history, session_id, limit, None, None, user_id)
+        limit: int | None = None,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(
+            self.get_recent_history, session_id, limit, None, None, user_id
+        )
 
     async def async_purge_user(self, user_id: str) -> None:
         await asyncio.to_thread(self.purge_user, user_id)
@@ -1071,16 +1112,18 @@ class MongoMemory:
         if not self._is_available():
             return 0
         try:
+
             def _do():
                 return self.messages.count_documents({"session_id": session_id})
+
             return int(self._retry(_do))
         except Exception:
             return 0
 
     # HEALTH CHECK
 
-    def health_check(self) -> Dict[str, Any]:
-        status: Dict[str, Any] = {
+    def health_check(self) -> dict[str, Any]:
+        status: dict[str, Any] = {
             "mongo_ok": self._mongo_ok,
             "pymongo_available": _PYMONGO_AVAILABLE,
             "circuit_breaker": _PYBREAKER_AVAILABLE,
@@ -1096,5 +1139,3 @@ class MongoMemory:
                 status["count_error"] = True
 
         return status
-
-

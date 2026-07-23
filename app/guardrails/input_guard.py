@@ -18,19 +18,18 @@ Contract:
     → str   cleaned text (for embedder/captioner paths that must not block)
     Logs detections but never raises — keeps ingestion pipeline running.
 """
+
 from __future__ import annotations
 
 import re
 import time
 import unicodedata
 from dataclasses import dataclass, field
-from typing import List, Optional
-
-import structlog
 
 from app.guardrails.audit import audit_decision
 from app.guardrails.exceptions import GuardrailBlocked
-from app.guardrails.jailbreak import JailbreakResult, check as jailbreak_check
+from app.guardrails.jailbreak import JailbreakResult
+from app.guardrails.jailbreak import check as jailbreak_check
 from app.guardrails.metrics import record_allow, record_block
 from app.guardrails.ssrf import is_ssrf_risk
 from app.utils.logger import get_logger
@@ -41,7 +40,7 @@ logger = get_logger(__name__)
 # Policy cache (loaded once)
 # ---------------------------------------------------------------------------
 _policy: dict = {}
-_injection_patterns: List[re.Pattern] = []
+_injection_patterns: list[re.Pattern] = []
 _max_query_chars: int = 8000
 _warn_query_chars: int = 4000
 _repeat_token_limit: int = 500
@@ -55,6 +54,7 @@ def _load_policy() -> None:
         return
     try:
         from app.guardrails._policy_loader import get_policy
+
         _policy = get_policy()
         inj = _policy.get("injection", {})
         length = _policy.get("length", {})
@@ -84,6 +84,7 @@ def _load_policy() -> None:
 # Result type
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class GuardedInput:
     text: str
@@ -92,14 +93,15 @@ class GuardedInput:
     reason: str = ""
     guard_type: str = ""
     pii_detected: bool = False
-    pii_entities: List[dict] = field(default_factory=list)
-    jailbreak_result: Optional[JailbreakResult] = None
+    pii_entities: list[dict] = field(default_factory=list)
+    jailbreak_result: JailbreakResult | None = None
     latency_ms: float = 0.0
 
 
 # ---------------------------------------------------------------------------
 # Internal checks
 # ---------------------------------------------------------------------------
+
 
 def _normalize_encoding(text: str) -> str:
     """NFKC normalize + confusables map + strip null bytes, RTL overrides, zero-width chars.
@@ -123,13 +125,14 @@ def _normalize_encoding(text: str) -> str:
     # 3+4. Confusables map (Latin-extended, modifier letters, Cyrillic/Greek) + re-NFKC
     try:
         from app.guardrails.confusables import normalize_confusables
+
         text = normalize_confusables(text)
     except Exception:
         pass
     return text
 
 
-def _check_length(text: str, correlation_id: str) -> Optional[str]:
+def _check_length(text: str, correlation_id: str) -> str | None:
     """Return truncated text if over limit, None if under warn threshold."""
     if len(text) > _max_query_chars:
         logger.warning(
@@ -162,7 +165,7 @@ def _check_repeat_token(text: str) -> bool:
     return False
 
 
-def _check_injection(text: str) -> Optional[tuple[str, str]]:
+def _check_injection(text: str) -> tuple[str, str] | None:
     """Return (matched_description, severity) if injection detected, else None."""
     _load_policy()
     lower = text.lower()
@@ -181,7 +184,7 @@ def _check_ssrf_in_text(text: str) -> bool:
     return False
 
 
-def _check_scope_violation(text: str) -> Optional[str]:
+def _check_scope_violation(text: str) -> str | None:
     """Detect clear scope violations (calendar, malware, network scanning)."""
     _load_policy()
     lower = text.lower()
@@ -195,6 +198,7 @@ def _check_scope_violation(text: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def check(
     query: str,
@@ -234,7 +238,9 @@ def check(
     inj_hit = _check_injection(query)
     if inj_hit:
         desc, severity = inj_hit
-        _emit_block("injection", f"injection_detected:{desc}", surface, correlation_id, session_id, query)
+        _emit_block(
+            "injection", f"injection_detected:{desc}", surface, correlation_id, session_id, query
+        )
         raise GuardrailBlocked(
             reason="injection_detected",
             surface=surface,
@@ -266,11 +272,12 @@ def check(
         )
 
     # 7. PII ingress detection (log only, don't block — policy: "log")
-    pii_entities: List[dict] = []
+    pii_entities: list[dict] = []
     pii_detected = False
     try:
-        from app.guardrails.pii import detect_pii
         from app.guardrails._policy_loader import get_policy
+        from app.guardrails.pii import detect_pii
+
         ingress_action = get_policy().get("pii", {}).get("ingress_action", "log")
         if ingress_action in ("log", "strip"):
             pii_entities = detect_pii(query)
@@ -309,11 +316,19 @@ def check(
     )
 
 
-_INGEST_SURFACES = frozenset({
-    "txt_ingest", "excel_ingest", "excel_chart_ingest",
-    "document_ingest", "pdf_ingest", "audio_ingest",
-    "text_embedder", "embedder",
-})
+_INGEST_SURFACES = frozenset(
+    {
+        "txt_ingest",
+        "excel_ingest",
+        "excel_chart_ingest",
+        "document_ingest",
+        "pdf_ingest",
+        "audio_ingest",
+        "text_embedder",
+        "embedder",
+    }
+)
+
 
 def sanitize(
     text: str,
@@ -340,7 +355,7 @@ def sanitize(
     for pattern, severity, description in _injection_patterns:
         match = pattern.search(lower)
         if match:
-            text = text[:match.start()].strip()
+            text = text[: match.start()].strip()
             logger.warning(
                 "input_guard_sanitize_stripped",
                 surface=surface,

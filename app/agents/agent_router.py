@@ -4,7 +4,6 @@ import re
 import threading
 import time
 import unicodedata
-from typing import Dict, Optional
 
 import structlog
 from opentelemetry import trace
@@ -37,7 +36,7 @@ _router_decisions = Counter(
 )
 
 # SEMAPHORE — lazy init to avoid missing event loop at import time
-_semaphore: Optional[asyncio.Semaphore] = None
+_semaphore: asyncio.Semaphore | None = None
 _semaphore_lock = threading.Lock()
 
 
@@ -49,40 +48,88 @@ def _get_semaphore() -> asyncio.Semaphore:
                 _semaphore = asyncio.Semaphore(5)
     return _semaphore
 
+
 # HARD RULE KEYWORD SETS
-_RECENT_WORDS     = {"latest", "today", "news", "recent", "update", "current", "now", "live"}
+_RECENT_WORDS = {"latest", "today", "news", "recent", "update", "current", "now", "live"}
 # Web/market-data signals — queries mentioning these almost certainly need live external
 # data that won't be inside an ingested document (stock prices, analyst ratings, etc.).
 # NOTE: "stock" alone is intentionally excluded — "stock price reaction mentioned in the
 # CNBC video" asks about KB content, not live data. Only include terms that ALWAYS imply
 # live external data when not paired with a media-reference phrase.
-_WEB_WORDS        = {"stocks", "analyst", "analysts", "consensus", "sentiment",
-                     "market cap", "ticker", "earnings reaction", "post-earnings"}
+_WEB_WORDS = {
+    "stocks",
+    "analyst",
+    "analysts",
+    "consensus",
+    "sentiment",
+    "market cap",
+    "ticker",
+    "earnings reaction",
+    "post-earnings",
+}
 
 # If any of these phrases appears, the query is asking about content inside an ingested
 # media file — force RAG regardless of other signals (e.g. "stock" keyword).
-_MEDIA_REFERENCE_PHRASES = frozenset({
-    "mentioned in the", "mentioned in", "in the video", "in the audio",
-    "in the clip", "from the video", "from the audio", "shown in the",
-    "in the cnbc", "in the earnings video", "in the highlight",
-    "according to the video", "according to the audio",
-})
+_MEDIA_REFERENCE_PHRASES = frozenset(
+    {
+        "mentioned in the",
+        "mentioned in",
+        "in the video",
+        "in the audio",
+        "in the clip",
+        "from the video",
+        "from the audio",
+        "shown in the",
+        "in the cnbc",
+        "in the earnings video",
+        "in the highlight",
+        "according to the video",
+        "according to the audio",
+    }
+)
 # Explicit web-request phrases — user directly asked to fetch from the internet.
 # These force a pure "search" route (not hybrid) so file citations never mix in.
-_EXPLICIT_WEB_PHRASES = frozenset({
-    "from web", "from the web", "search web", "search the web",
-    "get from web", "get it from web", "web search", "find online",
-    "search online", "look online", "from internet", "from the internet",
-    "find on the internet", "look it up",
-    "search the internet", "search internet", "search for current",
-    "search for historical", "search for recent", "search for latest",
-})
-_MEMORY_WORDS     = {
-    "last time", "we discussed", "you said",
-    "you mentioned", "earlier you", "last conversation", "what did we",
-    "you told me", "earlier you said", "what did we talk", "we talked about",
-    "our conversation", "you mentioned earlier", "remember when",
-    "previously you", "in our last",
+_EXPLICIT_WEB_PHRASES = frozenset(
+    {
+        "from web",
+        "from the web",
+        "search web",
+        "search the web",
+        "get from web",
+        "get it from web",
+        "web search",
+        "find online",
+        "search online",
+        "look online",
+        "from internet",
+        "from the internet",
+        "find on the internet",
+        "look it up",
+        "search the internet",
+        "search internet",
+        "search for current",
+        "search for historical",
+        "search for recent",
+        "search for latest",
+    }
+)
+_MEMORY_WORDS = {
+    "last time",
+    "we discussed",
+    "you said",
+    "you mentioned",
+    "earlier you",
+    "last conversation",
+    "what did we",
+    "you told me",
+    "earlier you said",
+    "what did we talk",
+    "we talked about",
+    "our conversation",
+    "you mentioned earlier",
+    "remember when",
+    "previously you",
+    "in our last",
 }
 # NOTE: bare "before", "earlier", "previous", "recall" were REMOVED — they
 # match ordinary document questions ("before FY2024 acceleration", "the
@@ -91,45 +138,110 @@ _MEMORY_WORDS     = {
 # that"). Genuine conversation references use the multi-word phrases kept
 # above ("you said", "we discussed", "earlier you", ...).
 _COMPLEX_KEYWORDS = {"compare", "difference", "process", "steps", "vs", "versus", "explain"}
-_REASONING_WORDS  = {"why", "how", "explain", "reason", "cause", "because"}
+_REASONING_WORDS = {"why", "how", "explain", "reason", "cause", "because"}
 _MULTIMODAL_WORDS = {"image", "video", "diagram", "chart", "audio", "photo", "picture", "figure"}
-_CODE_WORDS       = {"code", "function", "implement", "script", "syntax", "class", "debug"}
-_GREETING_WORDS   = {"hello", "hi", "hey", "thanks", "thank you", "bye", "goodbye", "good morning", "good evening", "how are you", "how r you"}
-_MATH_WORDS       = {"calculate", "compute", "solve", "equation", "formula", "integral", "derivative"}
+_CODE_WORDS = {"code", "function", "implement", "script", "syntax", "class", "debug"}
+_GREETING_WORDS = {
+    "hello",
+    "hi",
+    "hey",
+    "thanks",
+    "thank you",
+    "bye",
+    "goodbye",
+    "good morning",
+    "good evening",
+    "how are you",
+    "how r you",
+}
+_MATH_WORDS = {"calculate", "compute", "solve", "equation", "formula", "integral", "derivative"}
 # Arithmetic pattern: digits with operators e.g. "2+2", "10 * 5", "100/4"
-_ARITHMETIC_RE    = re.compile(r"^\s*\d[\d\s]*[+\-*/^%]\s*\d[\d\s]*[=?]?\s*$")
-_SECURITY_WORDS   = {"password", "credential", "secret", "token", "api key", "hack", "exploit"}
+_ARITHMETIC_RE = re.compile(r"^\s*\d[\d\s]*[+\-*/^%]\s*\d[\d\s]*[=?]?\s*$")
+_SECURITY_WORDS = {"password", "credential", "secret", "token", "api key", "hack", "exploit"}
 
 # Finance domain routing keyword sets (Phase 7)
-_MARKET_DATA: frozenset = frozenset({
-    "stock price", "market cap", "p/e", "pe ratio", "analyst target",
-    "price target", "consensus", "52-week", "trading at", "share price",
-})
-_EARNINGS_CALL: frozenset = frozenset({
-    "earnings call", "conference call", "transcript", "said about",
-    "cfo said", "ceo said", "management said", "what did the cfo",
-    "what did the ceo", "prepared remarks",
-})
-_REGULATORY: frozenset = frozenset({
-    "10-k", "10-q", "8-k", "sec filing", "annual report", "proxy",
-    "form 10", "10k", "10q", "regulatory filing", "disclosure",
-})
-_FINANCIAL_MODEL: frozenset = frozenset({
-    "dcf", "lbo", "valuation", "projection", "sensitivity",
-    "wacc", "financial model", "assumptions", "model output",
-})
+_MARKET_DATA: frozenset = frozenset(
+    {
+        "stock price",
+        "market cap",
+        "p/e",
+        "pe ratio",
+        "analyst target",
+        "price target",
+        "consensus",
+        "52-week",
+        "trading at",
+        "share price",
+    }
+)
+_EARNINGS_CALL: frozenset = frozenset(
+    {
+        "earnings call",
+        "conference call",
+        "transcript",
+        "said about",
+        "cfo said",
+        "ceo said",
+        "management said",
+        "what did the cfo",
+        "what did the ceo",
+        "prepared remarks",
+    }
+)
+_REGULATORY: frozenset = frozenset(
+    {
+        "10-k",
+        "10-q",
+        "8-k",
+        "sec filing",
+        "annual report",
+        "proxy",
+        "form 10",
+        "10k",
+        "10q",
+        "regulatory filing",
+        "disclosure",
+    }
+)
+_FINANCIAL_MODEL: frozenset = frozenset(
+    {
+        "dcf",
+        "lbo",
+        "valuation",
+        "projection",
+        "sensitivity",
+        "wacc",
+        "financial model",
+        "assumptions",
+        "model output",
+    }
+)
 # Financial-STATEMENT metrics that live inside the ingested 10-K / annual report.
 # A question about these for a company + fiscal year is document-grounded (RAG),
 # NOT a live-web lookup — even when it references a real-world event like the EU
 # State Aid Decision. Without this the LLM router non-deterministically sent
 # "EU State Aid Decision ... Apple's tax provision ... FY2024" to pure web search.
-_FINANCIAL_STATEMENT: frozenset = frozenset({
-    "tax provision", "provision for income taxes", "effective tax rate",
-    "state aid", "deferred tax", "gross margin", "operating margin",
-    "operating income", "net sales", "cost of sales", "capital return",
-    "share repurchase", "shareholders' equity", "shareholders equity",
-    "cash flow from operations", "income tax charge", "provision for income tax",
-})
+_FINANCIAL_STATEMENT: frozenset = frozenset(
+    {
+        "tax provision",
+        "provision for income taxes",
+        "effective tax rate",
+        "state aid",
+        "deferred tax",
+        "gross margin",
+        "operating margin",
+        "operating income",
+        "net sales",
+        "cost of sales",
+        "capital return",
+        "share repurchase",
+        "shareholders' equity",
+        "shareholders equity",
+        "cash flow from operations",
+        "income tax charge",
+        "provision for income tax",
+    }
+)
 # "...did these REPORTED results beat analyst estimates?" — this asks about the
 # figure a company just reported vs. a pre-existing estimate that management
 # states verbatim on the call itself (e.g. an earnings-call ticker overlay:
@@ -140,19 +252,42 @@ _FINANCIAL_STATEMENT: frozenset = frozenset({
 # a BEAT phrase *and* reported-results vocabulary together, so a genuinely
 # live/forward-looking ask ("current analyst consensus heading into FY2026",
 # no "beat" phrase present) still falls through to the is_web hard rule.
-_REPORTED_RESULTS_BEAT_PHRASES: frozenset = frozenset({
-    "beat analyst estimate", "beat analyst estimates", "beat the estimate",
-    "beat the estimates", "beat estimates", "beating analyst estimate",
-    "beating analyst estimates", "beat expectations", "beating expectations",
-    "exceeded estimates", "exceeded analyst estimates", "results beat",
-})
-_REPORTED_RESULTS_WORDS: frozenset = frozenset({
-    "revenue", "eps", "earnings per share", "results", "quarter", "reported",
-    "year-over-year", "year over year", "q1", "q2", "q3", "q4",
-})
+_REPORTED_RESULTS_BEAT_PHRASES: frozenset = frozenset(
+    {
+        "beat analyst estimate",
+        "beat analyst estimates",
+        "beat the estimate",
+        "beat the estimates",
+        "beat estimates",
+        "beating analyst estimate",
+        "beating analyst estimates",
+        "beat expectations",
+        "beating expectations",
+        "exceeded estimates",
+        "exceeded analyst estimates",
+        "results beat",
+    }
+)
+_REPORTED_RESULTS_WORDS: frozenset = frozenset(
+    {
+        "revenue",
+        "eps",
+        "earnings per share",
+        "results",
+        "quarter",
+        "reported",
+        "year-over-year",
+        "year over year",
+        "q1",
+        "q2",
+        "q3",
+        "q4",
+    }
+)
 
 
 # NORMALIZE QUERY
+
 
 def _normalize(query: str) -> str:
     query = unicodedata.normalize("NFC", str(query or ""))
@@ -161,8 +296,10 @@ def _normalize(query: str) -> str:
 
 # INJECTION PATTERN DETECTION — delegates to unified guardrail (Issue A fix)
 
+
 def _detect_injection(query: str) -> bool:
     from app.guardrails.input_guard import _check_injection, _load_policy
+
     _load_policy()
     return _check_injection(query) is not None
 
@@ -262,8 +399,9 @@ class AgentRouter:
                 # this "...did results beat analyst estimates?" would force
                 # hybrid/web before ever reaching a KB-grounded route.
                 _ql = query.lower()
-                if (any(p in _ql for p in _REPORTED_RESULTS_BEAT_PHRASES)
-                        and any(w in _ql for w in _REPORTED_RESULTS_WORDS)):
+                if any(p in _ql for p in _REPORTED_RESULTS_BEAT_PHRASES) and any(
+                    w in _ql for w in _REPORTED_RESULTS_WORDS
+                ):
                     d = self._decision("rag", "reported_results_beat_kb", 0.93, session_id)
                     _router_decisions.labels(action="rag", method="hard_rule").inc()
                     self._log_decision(d, signals, start, session_id)
@@ -288,7 +426,11 @@ class AgentRouter:
                 # web search and never see the KB table that actually answers them.
                 if signals.is_financial_model_query:
                     d = self._finance_decision(
-                        "rag", "financial_model_kb", 0.90, session_id, signals,
+                        "rag",
+                        "financial_model_kb",
+                        0.90,
+                        session_id,
+                        signals,
                         subtype_filter=["table", "assumptions"],
                     )
                     _router_decisions.labels(action="rag", method="finance_hard_rule").inc()
@@ -297,7 +439,11 @@ class AgentRouter:
 
                 if signals.is_market_data_query:
                     d = self._finance_decision(
-                        "search", "market_data_live", 0.93, session_id, signals,
+                        "search",
+                        "market_data_live",
+                        0.93,
+                        session_id,
+                        signals,
                     )
                     _router_decisions.labels(action="search", method="finance_hard_rule").inc()
                     self._log_decision(d, signals, start, session_id)
@@ -305,7 +451,11 @@ class AgentRouter:
 
                 if signals.is_earnings_call_query:
                     d = self._finance_decision(
-                        "rag", "earnings_call_kb", 0.92, session_id, signals,
+                        "rag",
+                        "earnings_call_kb",
+                        0.92,
+                        session_id,
+                        signals,
                         modality_hint="mp3",
                     )
                     _router_decisions.labels(action="rag", method="finance_hard_rule").inc()
@@ -314,7 +464,11 @@ class AgentRouter:
 
                 if signals.is_regulatory_query:
                     d = self._finance_decision(
-                        "rag", "regulatory_filing_kb", 0.91, session_id, signals,
+                        "rag",
+                        "regulatory_filing_kb",
+                        0.91,
+                        session_id,
+                        signals,
                         source_type_filter=["pdf", "docx"],
                     )
                     _router_decisions.labels(action="rag", method="finance_hard_rule").inc()
@@ -329,7 +483,11 @@ class AgentRouter:
                 # metric questions reach here.
                 if any(kw in query.lower() for kw in _FINANCIAL_STATEMENT):
                     d = self._finance_decision(
-                        "rag", "financial_statement_kb", 0.90, session_id, signals,
+                        "rag",
+                        "financial_statement_kb",
+                        0.90,
+                        session_id,
+                        signals,
                         source_type_filter=["pdf", "docx"],
                     )
                     _router_decisions.labels(action="rag", method="finance_hard_rule").inc()
@@ -367,7 +525,7 @@ class AgentRouter:
                 return validated
 
             except Exception as exc:
-                latency    = round(time.time() - start, 3)
+                latency = round(time.time() - start, 3)
                 error_type = type(exc).__name__
 
                 _router_errors.labels(error_type=error_type).inc()
@@ -407,24 +565,22 @@ class AgentRouter:
     # SIGNAL ANALYSIS
 
     def _analyze(self, query: str) -> AgentSignals:
-        q      = query.lower()
+        q = query.lower()
         tokens = set(q.split())
 
-        is_market_data      = any(phrase in q for phrase in _MARKET_DATA)
-        is_earnings_call    = any(phrase in q for phrase in _EARNINGS_CALL)
-        is_regulatory       = any(phrase in q for phrase in _REGULATORY)
-        is_financial_model  = any(phrase in q for phrase in _FINANCIAL_MODEL)
+        is_market_data = any(phrase in q for phrase in _MARKET_DATA)
+        is_earnings_call = any(phrase in q for phrase in _EARNINGS_CALL)
+        is_regulatory = any(phrase in q for phrase in _REGULATORY)
+        is_financial_model = any(phrase in q for phrase in _FINANCIAL_MODEL)
 
         return AgentSignals(
             is_recent=bool(tokens & _RECENT_WORDS),
             is_web=bool(tokens & _WEB_WORDS),
             is_memory=any(
-                re.search(r"\b" + re.escape(w) + r"\b", q, re.IGNORECASE)
-                for w in _MEMORY_WORDS
+                re.search(r"\b" + re.escape(w) + r"\b", q, re.IGNORECASE) for w in _MEMORY_WORDS
             ),
             is_complex=(
-                len(tokens) > settings.DECOMPOSITION_MIN_WORDS or
-                bool(tokens & _COMPLEX_KEYWORDS)
+                len(tokens) > settings.DECOMPOSITION_MIN_WORDS or bool(tokens & _COMPLEX_KEYWORDS)
             ),
             is_reasoning=bool(tokens & _REASONING_WORDS),
             has_multimodal_hint=bool(tokens & _MULTIMODAL_WORDS),
@@ -466,14 +622,14 @@ class AgentRouter:
             "When uncertain, choose rag. Return JSON only. No explanation.\n\n"
         )
 
-        signal_str   = str({k: v for k, v in signals.model_dump().items() if v})
-        body         = f"Signals: {signal_str}\nQuery: {query}\n"
+        signal_str = str({k: v for k, v in signals.model_dump().items() if v})
+        body = f"Signals: {signal_str}\nQuery: {query}\n"
         format_block = '{"action":"<route>", "reason":"<brief reason>"}'
 
-        max_chars  = settings.MAX_PROMPT_CHARS
-        available  = max_chars - len(instruction) - len(format_block) - 50
+        max_chars = settings.MAX_PROMPT_CHARS
+        available = max_chars - len(instruction) - len(format_block) - 50
 
-        return instruction + body[:max(available, 0)] + "\n" + format_block
+        return instruction + body[: max(available, 0)] + "\n" + format_block
 
     # LLM ROUTING WITH RETRY
 
@@ -497,7 +653,7 @@ class AgentRouter:
         prompt = self._build_prompt(query, signals)
 
         try:
-            t_start  = time.time()
+            t_start = time.time()
             response = llm.generate(
                 prompt,
                 max_tokens=80,
@@ -532,7 +688,7 @@ class AgentRouter:
 
         if "```" in text:
             parts = text.split("```")
-            text  = next((p for p in parts if "{" in p), text)
+            text = next((p for p in parts if "{" in p), text)
 
         match = re.search(r"\{.*?\}", text, re.DOTALL)
         if match:
@@ -550,9 +706,11 @@ class AgentRouter:
     ) -> AgentDecision:
         try:
             if isinstance(signals, dict):
-                signals = AgentSignals(**{k: v for k, v in signals.items() if k in AgentSignals.model_fields})
+                signals = AgentSignals(
+                    **{k: v for k, v in signals.items() if k in AgentSignals.model_fields}
+                )
             cleaned = self._extract_json(text)
-            data    = json.loads(cleaned)
+            data = json.loads(cleaned)
 
             action = str(data.get("action", "")).lower().strip()
             reason = str(data.get("reason", ""))
@@ -574,7 +732,9 @@ class AgentRouter:
 
     def _score_confidence(self, action: str, signals) -> float:
         if isinstance(signals, dict):
-            signals = AgentSignals(**{k: v for k, v in signals.items() if k in AgentSignals.model_fields})
+            signals = AgentSignals(
+                **{k: v for k, v in signals.items() if k in AgentSignals.model_fields}
+            )
         score = 0.6
 
         if signals.is_recent and action in {"search", "hybrid"}:
@@ -608,7 +768,9 @@ class AgentRouter:
         session_id: str,
     ) -> AgentDecision:
         if isinstance(signals, dict):
-            signals = AgentSignals(**{k: v for k, v in signals.items() if k in AgentSignals.model_fields})
+            signals = AgentSignals(
+                **{k: v for k, v in signals.items() if k in AgentSignals.model_fields}
+            )
 
         if decision.action not in {"rag", "search", "direct", "memory", "hybrid"}:
             return self._decision("rag", "invalid_action_fallback", 0.5, session_id)
@@ -646,7 +808,10 @@ class AgentRouter:
             and signals.token_count >= 5
         ):
             return self._decision(
-                "rag", "override_factual_lookup", 0.8, session_id,
+                "rag",
+                "override_factual_lookup",
+                0.8,
+                session_id,
             )
 
         return decision
@@ -677,12 +842,11 @@ class AgentRouter:
         confidence: float,
         session_id: str,
         signals: AgentSignals,
-        modality_hint: Optional[str] = None,
-        source_type_filter: Optional[list] = None,
-        subtype_filter: Optional[list] = None,
-        call_section_filter: Optional[str] = None,
+        modality_hint: str | None = None,
+        source_type_filter: list | None = None,
+        subtype_filter: list | None = None,
+        call_section_filter: str | None = None,
     ) -> AgentDecision:
-        from app.agents.agent_schema import AgentSignals
         return AgentDecision(
             action=action,
             reason=reason,
@@ -708,4 +872,3 @@ class AgentRouter:
                 None,
                 lambda: self.route(query, session_id),
             )
-

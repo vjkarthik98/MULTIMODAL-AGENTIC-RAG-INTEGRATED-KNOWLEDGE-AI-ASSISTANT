@@ -4,7 +4,7 @@ import os
 import re
 import time
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.utils.logger import get_logger
 
@@ -13,189 +13,196 @@ logger = get_logger(__name__)
 
 # ERROR CODES
 
+
 class ErrorCode(str, Enum):
 
     # VALIDATION
-    EMPTY_FILE               = "EMPTY_FILE"
-    FILE_TOO_LARGE           = "FILE_TOO_LARGE"
-    UNSUPPORTED_TYPE         = "UNSUPPORTED_TYPE"
-    INVALID_MIME             = "INVALID_MIME"
-    CORRUPTED_FILE           = "CORRUPTED_FILE"
-    INVALID_DIMENSIONS       = "INVALID_DIMENSIONS"
-    IMAGE_TOO_SMALL          = "IMAGE_TOO_SMALL"
-    INVALID_AUDIO_DURATION   = "INVALID_AUDIO_DURATION"
-    INVALID_SAMPLE_RATE      = "INVALID_SAMPLE_RATE"
-    INVALID_WAV_HEADER       = "INVALID_WAV_HEADER"
-    INVALID_PDF_STRUCTURE    = "INVALID_PDF_STRUCTURE"
-    INVALID_EXCEL_STRUCTURE  = "INVALID_EXCEL_STRUCTURE"
-    EMPTY_DOCUMENT           = "EMPTY_DOCUMENT"
-    SESSION_ID_REQUIRED      = "SESSION_ID_REQUIRED"
-    EMPTY_QUERY              = "EMPTY_QUERY"
-    EMPTY_CONTENT            = "EMPTY_CONTENT"
-    PASSWORD_PROTECTED       = "PASSWORD_PROTECTED"
-    DRM_PROTECTED            = "DRM_PROTECTED"
-    DISK_SPACE_INSUFFICIENT  = "DISK_SPACE_INSUFFICIENT"
-    DUPLICATE_FILE           = "DUPLICATE_FILE"
+    EMPTY_FILE = "EMPTY_FILE"
+    FILE_TOO_LARGE = "FILE_TOO_LARGE"
+    UNSUPPORTED_TYPE = "UNSUPPORTED_TYPE"
+    INVALID_MIME = "INVALID_MIME"
+    CORRUPTED_FILE = "CORRUPTED_FILE"
+    INVALID_DIMENSIONS = "INVALID_DIMENSIONS"
+    IMAGE_TOO_SMALL = "IMAGE_TOO_SMALL"
+    INVALID_AUDIO_DURATION = "INVALID_AUDIO_DURATION"
+    INVALID_SAMPLE_RATE = "INVALID_SAMPLE_RATE"
+    INVALID_WAV_HEADER = "INVALID_WAV_HEADER"
+    INVALID_PDF_STRUCTURE = "INVALID_PDF_STRUCTURE"
+    INVALID_EXCEL_STRUCTURE = "INVALID_EXCEL_STRUCTURE"
+    EMPTY_DOCUMENT = "EMPTY_DOCUMENT"
+    SESSION_ID_REQUIRED = "SESSION_ID_REQUIRED"
+    EMPTY_QUERY = "EMPTY_QUERY"
+    EMPTY_CONTENT = "EMPTY_CONTENT"
+    PASSWORD_PROTECTED = "PASSWORD_PROTECTED"
+    DRM_PROTECTED = "DRM_PROTECTED"
+    DISK_SPACE_INSUFFICIENT = "DISK_SPACE_INSUFFICIENT"
+    DUPLICATE_FILE = "DUPLICATE_FILE"
 
     # PROCESSING
-    OCR_FAILED               = "OCR_FAILED"
-    CAPTION_FAILED           = "CAPTION_FAILED"
-    TRANSCRIPTION_FAILED     = "TRANSCRIPTION_FAILED"
-    FRAME_EXTRACTION_FAILED  = "FRAME_EXTRACTION_FAILED"
-    EMBEDDING_FAILED         = "EMBEDDING_FAILED"
-    INGESTION_FAILED         = "INGESTION_FAILED"
-    CHUNKING_FAILED          = "CHUNKING_FAILED"
-    VECTOR_INSERT_FAILED     = "VECTOR_INSERT_FAILED"
-    LIBREOFFICE_FAILED       = "LIBREOFFICE_FAILED"
-    DIARIZATION_FAILED       = "DIARIZATION_FAILED"
+    OCR_FAILED = "OCR_FAILED"
+    CAPTION_FAILED = "CAPTION_FAILED"
+    TRANSCRIPTION_FAILED = "TRANSCRIPTION_FAILED"
+    FRAME_EXTRACTION_FAILED = "FRAME_EXTRACTION_FAILED"
+    EMBEDDING_FAILED = "EMBEDDING_FAILED"
+    INGESTION_FAILED = "INGESTION_FAILED"
+    CHUNKING_FAILED = "CHUNKING_FAILED"
+    VECTOR_INSERT_FAILED = "VECTOR_INSERT_FAILED"
+    LIBREOFFICE_FAILED = "LIBREOFFICE_FAILED"
+    DIARIZATION_FAILED = "DIARIZATION_FAILED"
     SUBTITLE_EXTRACTION_FAILED = "SUBTITLE_EXTRACTION_FAILED"
-    PII_REDACTION_FAILED     = "PII_REDACTION_FAILED"
-    MALWARE_DETECTED         = "MALWARE_DETECTED"
+    PII_REDACTION_FAILED = "PII_REDACTION_FAILED"
+    MALWARE_DETECTED = "MALWARE_DETECTED"
 
     # RETRIEVAL
-    NO_RESULTS_FOUND         = "NO_RESULTS_FOUND"
-    RETRIEVAL_FAILED         = "RETRIEVAL_FAILED"
-    RERANK_FAILED            = "RERANK_FAILED"
+    NO_RESULTS_FOUND = "NO_RESULTS_FOUND"
+    RETRIEVAL_FAILED = "RETRIEVAL_FAILED"
+    RERANK_FAILED = "RERANK_FAILED"
 
     # AGENT
-    AGENT_TIMEOUT            = "AGENT_TIMEOUT"
-    AGENT_FAILED             = "AGENT_FAILED"
-    INVALID_PLAN             = "INVALID_PLAN"
-    TOOL_NOT_FOUND           = "TOOL_NOT_FOUND"
+    AGENT_TIMEOUT = "AGENT_TIMEOUT"
+    AGENT_FAILED = "AGENT_FAILED"
+    INVALID_PLAN = "INVALID_PLAN"
+    TOOL_NOT_FOUND = "TOOL_NOT_FOUND"
 
     # INFRASTRUCTURE
     VECTOR_STORE_UNAVAILABLE = "VECTOR_STORE_UNAVAILABLE"
-    REDIS_UNAVAILABLE        = "REDIS_UNAVAILABLE"
-    MONGO_UNAVAILABLE        = "MONGO_UNAVAILABLE"
-    LLM_UNAVAILABLE          = "LLM_UNAVAILABLE"
-    MODEL_TIMEOUT            = "MODEL_TIMEOUT"
-    CIRCUIT_BREAKER_OPEN     = "CIRCUIT_BREAKER_OPEN"
+    REDIS_UNAVAILABLE = "REDIS_UNAVAILABLE"
+    MONGO_UNAVAILABLE = "MONGO_UNAVAILABLE"
+    LLM_UNAVAILABLE = "LLM_UNAVAILABLE"
+    MODEL_TIMEOUT = "MODEL_TIMEOUT"
+    CIRCUIT_BREAKER_OPEN = "CIRCUIT_BREAKER_OPEN"
 
     # SECURITY
     PROMPT_INJECTION_DETECTED = "PROMPT_INJECTION_DETECTED"
-    RATE_LIMIT_EXCEEDED       = "RATE_LIMIT_EXCEEDED"
-    UNAUTHORIZED              = "UNAUTHORIZED"
-    SSRF_BLOCKED              = "SSRF_BLOCKED"
-    PATH_TRAVERSAL_BLOCKED    = "PATH_TRAVERSAL_BLOCKED"
+    RATE_LIMIT_EXCEEDED = "RATE_LIMIT_EXCEEDED"
+    UNAUTHORIZED = "UNAUTHORIZED"
+    SSRF_BLOCKED = "SSRF_BLOCKED"
+    PATH_TRAVERSAL_BLOCKED = "PATH_TRAVERSAL_BLOCKED"
 
     # GENERIC
-    INTERNAL_ERROR           = "INTERNAL_ERROR"
-    NOT_IMPLEMENTED          = "NOT_IMPLEMENTED"
-    UNKNOWN_ERROR            = "UNKNOWN_ERROR"
-    TIMEOUT                  = "TIMEOUT"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+    NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
+    UNKNOWN_ERROR = "UNKNOWN_ERROR"
+    TIMEOUT = "TIMEOUT"
 
 
 # SEVERITY
 
+
 class Severity(str, Enum):
-    LOW      = "low"
-    MEDIUM   = "medium"
-    HIGH     = "high"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
     CRITICAL = "critical"
 
 
 # MODALITY
 
+
 class Modality(str, Enum):
-    TEXT     = "text"
-    PDF      = "pdf"
-    WORD     = "word"
-    EXCEL    = "excel"
-    IMAGE    = "image"
-    AUDIO    = "audio"
-    VIDEO    = "video"
-    UNKNOWN  = "unknown"
+    TEXT = "text"
+    PDF = "pdf"
+    WORD = "word"
+    EXCEL = "excel"
+    IMAGE = "image"
+    AUDIO = "audio"
+    VIDEO = "video"
+    UNKNOWN = "unknown"
 
 
 # PROCESSING STATUS
 
+
 class ProcessingStatus(str, Enum):
-    PENDING    = "pending"
+    PENDING = "pending"
     PROCESSING = "processing"
-    SUCCESS    = "success"
-    FAILED     = "failed"
-    SKIPPED    = "skipped"
-    DUPLICATE  = "duplicate"
+    SUCCESS = "success"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    DUPLICATE = "duplicate"
 
 
 # ERROR DETAIL
+
 
 class ErrorDetail:
 
     def __init__(
         self,
-        code:     ErrorCode,
-        message:  str,
-        severity: Severity              = Severity.MEDIUM,
-        field:    Optional[str]         = None,
-        context:  Optional[Dict[str, Any]] = None,
+        code: ErrorCode,
+        message: str,
+        severity: Severity = Severity.MEDIUM,
+        field: str | None = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
-        self.code     = code
-        self.message  = message
+        self.code = code
+        self.message = message
         self.severity = severity
-        self.field    = field
-        self.context  = context or {}
+        self.field = field
+        self.context = context or {}
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "code":     self.code,
-            "message":  self.message,
+            "code": self.code,
+            "message": self.message,
             "severity": self.severity,
-            "field":    self.field,
-            "context":  self.context,
+            "field": self.field,
+            "context": self.context,
         }
 
 
 # BASE RESPONSE
 
+
 class BaseResponse:
 
     def __init__(
         self,
-        success:    bool,
-        modality:   str                    = Modality.UNKNOWN,
-        session_id: str                    = "default",
-        latency:    float                  = 0.0,
-        metadata:   Optional[Dict[str, Any]] = None,
-        trace_id:   Optional[str]          = None,
+        success: bool,
+        modality: str = Modality.UNKNOWN,
+        session_id: str = "default",
+        latency: float = 0.0,
+        metadata: dict[str, Any] | None = None,
+        trace_id: str | None = None,
     ) -> None:
-        self.success    = success
-        self.modality   = modality
+        self.success = success
+        self.modality = modality
         self.session_id = session_id
-        self.latency    = latency
-        self.metadata   = metadata or {}
-        self.timestamp  = time.time()
-        self.trace_id   = trace_id
+        self.latency = latency
+        self.metadata = metadata or {}
+        self.timestamp = time.time()
+        self.trace_id = trace_id
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "success":    self.success,
-            "modality":   self.modality,
+            "success": self.success,
+            "modality": self.modality,
             "session_id": self.session_id,
-            "latency":    self.latency,
-            "metadata":   self.metadata,
-            "timestamp":  self.timestamp,
-            "trace_id":   self.trace_id,
+            "latency": self.latency,
+            "metadata": self.metadata,
+            "timestamp": self.timestamp,
+            "trace_id": self.trace_id,
         }
 
 
 # SUCCESS RESPONSE
 
+
 class ProcessingResult(BaseResponse):
 
     def __init__(
         self,
-        modality:   str,
+        modality: str,
         session_id: str,
-        latency:    float,
-        chunks:     int                    = 0,
-        stored:     int                    = 0,
-        source:     str                    = "",
-        metadata:   Optional[Dict[str, Any]] = None,
-        warnings:   Optional[List[str]]    = None,
-        trace_id:   Optional[str]          = None,
-        file_hash:  Optional[str]          = None,
-        status:     str                    = ProcessingStatus.SUCCESS,
+        latency: float,
+        chunks: int = 0,
+        stored: int = 0,
+        source: str = "",
+        metadata: dict[str, Any] | None = None,
+        warnings: list[str] | None = None,
+        trace_id: str | None = None,
+        file_hash: str | None = None,
+        status: str = ProcessingStatus.SUCCESS,
     ) -> None:
         super().__init__(
             success=True,
@@ -205,42 +212,45 @@ class ProcessingResult(BaseResponse):
             metadata=metadata,
             trace_id=trace_id,
         )
-        self.chunks    = chunks
-        self.stored    = stored
-        self.source    = source
-        self.warnings  = warnings or []
+        self.chunks = chunks
+        self.stored = stored
+        self.source = source
+        self.warnings = warnings or []
         self.file_hash = file_hash
-        self.status    = status
+        self.status = status
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         base = super().to_dict()
-        base.update({
-            "chunks":    self.chunks,
-            "stored":    self.stored,
-            "source":    self.source,
-            "warnings":  self.warnings,
-            "file_hash": self.file_hash,
-            "status":    self.status,
-        })
+        base.update(
+            {
+                "chunks": self.chunks,
+                "stored": self.stored,
+                "source": self.source,
+                "warnings": self.warnings,
+                "file_hash": self.file_hash,
+                "status": self.status,
+            }
+        )
         return base
 
 
 # UNIVERSAL ERROR RESPONSE
 
+
 class UniversalErrorResponse(BaseResponse):
 
     def __init__(
         self,
-        code:       ErrorCode,
-        message:    str,
-        modality:   str                    = Modality.UNKNOWN,
-        session_id: str                    = "default",
-        latency:    float                  = 0.0,
-        severity:   Severity               = Severity.MEDIUM,
-        field:      Optional[str]          = None,
-        context:    Optional[Dict[str, Any]] = None,
-        metadata:   Optional[Dict[str, Any]] = None,
-        trace_id:   Optional[str]          = None,
+        code: ErrorCode,
+        message: str,
+        modality: str = Modality.UNKNOWN,
+        session_id: str = "default",
+        latency: float = 0.0,
+        severity: Severity = Severity.MEDIUM,
+        field: str | None = None,
+        context: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        trace_id: str | None = None,
     ) -> None:
         super().__init__(
             success=False,
@@ -267,7 +277,7 @@ class UniversalErrorResponse(BaseResponse):
             trace_id=trace_id,
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         base = super().to_dict()
         base["error"] = self.error.to_dict()
         return base
@@ -300,17 +310,17 @@ class QueryResponse(BaseResponse):
 
     def __init__(
         self,
-        answer:       str,
-        session_id:   str,
-        latency:      float,
-        confidence:   float                  = 0.5,
-        sources_used: int                    = 0,
-        decision:     str                    = "unknown",
-        source:       str                    = "agent",
-        metadata:     Optional[Dict[str, Any]] = None,
-        trace_id:     Optional[str]          = None,
-        cache_hit:    bool                   = False,
-        sources:      Optional[List[Dict[str, Any]]] = None,
+        answer: str,
+        session_id: str,
+        latency: float,
+        confidence: float = 0.5,
+        sources_used: int = 0,
+        decision: str = "unknown",
+        source: str = "agent",
+        metadata: dict[str, Any] | None = None,
+        trace_id: str | None = None,
+        cache_hit: bool = False,
+        sources: list[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__(
             success=True,
@@ -320,51 +330,54 @@ class QueryResponse(BaseResponse):
             metadata=metadata,
             trace_id=trace_id,
         )
-        self.answer       = answer
-        self.confidence   = max(0.0, min(float(confidence), 1.0))
-        self.sources      = list(sources) if sources else []
+        self.answer = answer
+        self.confidence = max(0.0, min(float(confidence), 1.0))
+        self.sources = list(sources) if sources else []
         self.sources_used = sources_used if sources_used else len(self.sources)
-        self.decision     = decision
-        self.source       = source
-        self.cache_hit    = cache_hit
+        self.decision = decision
+        self.source = source
+        self.cache_hit = cache_hit
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         base = super().to_dict()
-        base.update({
-            "answer":       self.answer,
-            "confidence":   self.confidence,
-            "sources_used": self.sources_used,
-            "sources":      self.sources,
-            "decision":     self.decision,
-            "source":       self.source,
-            "cache_hit":    self.cache_hit,
-        })
+        base.update(
+            {
+                "answer": self.answer,
+                "confidence": self.confidence,
+                "sources_used": self.sources_used,
+                "sources": self.sources,
+                "decision": self.decision,
+                "source": self.source,
+                "cache_hit": self.cache_hit,
+            }
+        )
         return base
 
 
 # VALIDATION RESULT
 
+
 class ValidationResult:
 
     def __init__(
         self,
-        valid:     bool,
-        modality:  str               = Modality.UNKNOWN,
-        file_size: int               = 0,
-        mime_type: str               = "",
-        errors:    Optional[List[ErrorDetail]] = None,
-        warnings:  Optional[List[str]]         = None,
-        latency:   float             = 0.0,
-        trace_id:  Optional[str]     = None,
+        valid: bool,
+        modality: str = Modality.UNKNOWN,
+        file_size: int = 0,
+        mime_type: str = "",
+        errors: list[ErrorDetail] | None = None,
+        warnings: list[str] | None = None,
+        latency: float = 0.0,
+        trace_id: str | None = None,
     ) -> None:
-        self.valid     = valid
-        self.modality  = modality
+        self.valid = valid
+        self.modality = modality
         self.file_size = file_size
         self.mime_type = mime_type
-        self.errors    = errors or []
-        self.warnings  = warnings or []
-        self.latency   = latency
-        self.trace_id  = trace_id
+        self.errors = errors or []
+        self.warnings = warnings or []
+        self.latency = latency
+        self.trace_id = trace_id
 
     @property
     def has_errors(self) -> bool:
@@ -376,178 +389,181 @@ class ValidationResult:
 
     def add_error(
         self,
-        code:     ErrorCode,
-        message:  str,
-        severity: Severity          = Severity.HIGH,
-        field:    Optional[str]     = None,
+        code: ErrorCode,
+        message: str,
+        severity: Severity = Severity.HIGH,
+        field: str | None = None,
     ) -> None:
-        self.errors.append(
-            ErrorDetail(code=code, message=message, severity=severity, field=field)
-        )
+        self.errors.append(ErrorDetail(code=code, message=message, severity=severity, field=field))
         self.valid = False
 
     def add_warning(self, message: str) -> None:
         self.warnings.append(message)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "valid":     self.valid,
-            "modality":  self.modality,
+            "valid": self.valid,
+            "modality": self.modality,
             "file_size": self.file_size,
             "mime_type": self.mime_type,
-            "errors":    [e.to_dict() for e in self.errors],
-            "warnings":  self.warnings,
-            "latency":   self.latency,
-            "trace_id":  self.trace_id,
+            "errors": [e.to_dict() for e in self.errors],
+            "warnings": self.warnings,
+            "latency": self.latency,
+            "trace_id": self.trace_id,
         }
 
 
 # STREAMING CHUNK RESPONSE — SECTION 4.6
 
+
 class StreamChunk:
 
     def __init__(
         self,
-        token:      str,
-        session_id: str               = "default",
-        trace_id:   Optional[str]     = None,
-        done:       bool              = False,
+        token: str,
+        session_id: str = "default",
+        trace_id: str | None = None,
+        done: bool = False,
     ) -> None:
-        self.token      = token
+        self.token = token
         self.session_id = session_id
-        self.trace_id   = trace_id
-        self.done       = done
-        self.timestamp  = time.time()
+        self.trace_id = trace_id
+        self.done = done
+        self.timestamp = time.time()
 
     def to_sse(self) -> str:
         if self.done:
             return "data: [DONE]\n\n"
         return f"data: {self.token}\n\n"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "token":      self.token,
+            "token": self.token,
             "session_id": self.session_id,
-            "trace_id":   self.trace_id,
-            "done":       self.done,
-            "timestamp":  self.timestamp,
+            "trace_id": self.trace_id,
+            "done": self.done,
+            "timestamp": self.timestamp,
         }
 
 
 # INGESTION PROGRESS EVENT — SECTION 4.6
 
+
 class IngestionProgressEvent:
 
     def __init__(
         self,
-        file_name:  str,
-        stage:      str,
-        status:     str,
-        session_id: str               = "default",
-        trace_id:   Optional[str]     = None,
-        details:    Optional[Dict[str, Any]] = None,
+        file_name: str,
+        stage: str,
+        status: str,
+        session_id: str = "default",
+        trace_id: str | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
-        self.file_name  = file_name
-        self.stage      = stage
-        self.status     = status
+        self.file_name = file_name
+        self.stage = stage
+        self.status = status
         self.session_id = session_id
-        self.trace_id   = trace_id
-        self.details    = details or {}
-        self.timestamp  = time.time()
+        self.trace_id = trace_id
+        self.details = details or {}
+        self.timestamp = time.time()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "file_name":  self.file_name,
-            "stage":      self.stage,
-            "status":     self.status,
+            "file_name": self.file_name,
+            "stage": self.stage,
+            "status": self.status,
             "session_id": self.session_id,
-            "trace_id":   self.trace_id,
-            "details":    self.details,
-            "timestamp":  self.timestamp,
+            "trace_id": self.trace_id,
+            "details": self.details,
+            "timestamp": self.timestamp,
         }
 
 
 # HEALTH RESPONSE
 
+
 class HealthResponse:
 
     def __init__(
         self,
-        status:   str,
-        service:  str,
-        version:  str,
-        models:   Optional[Dict[str, Any]] = None,
-        infra:    Optional[Dict[str, Any]] = None,
-        latency:  float                    = 0.0,
+        status: str,
+        service: str,
+        version: str,
+        models: dict[str, Any] | None = None,
+        infra: dict[str, Any] | None = None,
+        latency: float = 0.0,
     ) -> None:
-        self.status    = status
-        self.service   = service
-        self.version   = version
-        self.models    = models or {}
-        self.infra     = infra or {}
-        self.latency   = latency
+        self.status = status
+        self.service = service
+        self.version = version
+        self.models = models or {}
+        self.infra = infra or {}
+        self.latency = latency
         self.timestamp = time.time()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "status":    self.status,
-            "service":   self.service,
-            "version":   self.version,
-            "models":    self.models,
-            "infra":     self.infra,
-            "latency":   self.latency,
+            "status": self.status,
+            "service": self.service,
+            "version": self.version,
+            "models": self.models,
+            "infra": self.infra,
+            "latency": self.latency,
             "timestamp": self.timestamp,
         }
 
 
 # GDPR PURGE RESPONSE — SECTION 5
 
+
 class GdprPurgeResponse:
 
     def __init__(
         self,
-        user_id:   str,
-        redis:     bool              = False,
-        mongo:     bool              = False,
-        qdrant:    bool              = False,
-        errors:    Optional[List[str]] = None,
-        trace_id:  Optional[str]    = None,
+        user_id: str,
+        redis: bool = False,
+        mongo: bool = False,
+        qdrant: bool = False,
+        errors: list[str] | None = None,
+        trace_id: str | None = None,
     ) -> None:
-        self.user_id   = user_id
-        self.redis     = redis
-        self.mongo     = mongo
-        self.qdrant    = qdrant
-        self.errors    = errors or []
-        self.trace_id  = trace_id
+        self.user_id = user_id
+        self.redis = redis
+        self.mongo = mongo
+        self.qdrant = qdrant
+        self.errors = errors or []
+        self.trace_id = trace_id
         self.purged_at = time.time()
-        self.success   = len(self.errors) == 0
+        self.success = len(self.errors) == 0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "user_id":   self.user_id,
-            "success":   self.success,
-            "redis":     self.redis,
-            "mongo":     self.mongo,
-            "qdrant":    self.qdrant,
-            "errors":    self.errors,
-            "trace_id":  self.trace_id,
+            "user_id": self.user_id,
+            "success": self.success,
+            "redis": self.redis,
+            "mongo": self.mongo,
+            "qdrant": self.qdrant,
+            "errors": self.errors,
+            "trace_id": self.trace_id,
             "purged_at": self.purged_at,
         }
 
 
 # FACTORY HELPERS
 
+
 def ok(
-    modality:   str,
+    modality: str,
     session_id: str,
-    latency:    float,
-    chunks:     int                    = 0,
-    stored:     int                    = 0,
-    source:     str                    = "",
-    metadata:   Optional[Dict[str, Any]] = None,
-    warnings:   Optional[List[str]]    = None,
-    trace_id:   Optional[str]          = None,
-    file_hash:  Optional[str]          = None,
+    latency: float,
+    chunks: int = 0,
+    stored: int = 0,
+    source: str = "",
+    metadata: dict[str, Any] | None = None,
+    warnings: list[str] | None = None,
+    trace_id: str | None = None,
+    file_hash: str | None = None,
 ) -> ProcessingResult:
     return ProcessingResult(
         modality=modality,
@@ -564,15 +580,15 @@ def ok(
 
 
 def err(
-    code:       ErrorCode,
-    message:    str,
-    modality:   str                    = Modality.UNKNOWN,
-    session_id: str                    = "default",
-    latency:    float                  = 0.0,
-    severity:   Severity               = Severity.MEDIUM,
-    field:      Optional[str]          = None,
-    context:    Optional[Dict[str, Any]] = None,
-    trace_id:   Optional[str]          = None,
+    code: ErrorCode,
+    message: str,
+    modality: str = Modality.UNKNOWN,
+    session_id: str = "default",
+    latency: float = 0.0,
+    severity: Severity = Severity.MEDIUM,
+    field: str | None = None,
+    context: dict[str, Any] | None = None,
+    trace_id: str | None = None,
 ) -> UniversalErrorResponse:
     return UniversalErrorResponse(
         code=code,
@@ -588,12 +604,12 @@ def err(
 
 
 def validation_ok(
-    modality:  str,
+    modality: str,
     file_size: int,
     mime_type: str,
-    latency:   float                  = 0.0,
-    warnings:  Optional[List[str]]    = None,
-    trace_id:  Optional[str]          = None,
+    latency: float = 0.0,
+    warnings: list[str] | None = None,
+    trace_id: str | None = None,
 ) -> ValidationResult:
     return ValidationResult(
         valid=True,
@@ -607,14 +623,14 @@ def validation_ok(
 
 
 def validation_err(
-    code:      ErrorCode,
-    message:   str,
-    modality:  str               = Modality.UNKNOWN,
-    file_size: int               = 0,
-    mime_type: str               = "",
-    latency:   float             = 0.0,
-    field:     Optional[str]     = None,
-    trace_id:  Optional[str]     = None,
+    code: ErrorCode,
+    message: str,
+    modality: str = Modality.UNKNOWN,
+    file_size: int = 0,
+    mime_type: str = "",
+    latency: float = 0.0,
+    field: str | None = None,
+    trace_id: str | None = None,
 ) -> ValidationResult:
     result = ValidationResult(
         valid=False,
@@ -633,7 +649,7 @@ def validation_err(
 _CITE_KEY_RE = re.compile(r"[^A-Za-z0-9._\- =:]+")
 
 
-def _format_ts(seconds: Optional[float]) -> Optional[str]:
+def _format_ts(seconds: float | None) -> str | None:
     if seconds is None:
         return None
     try:
@@ -643,7 +659,7 @@ def _format_ts(seconds: Optional[float]) -> Optional[str]:
     if s < 0:
         return None
     m, sec = divmod(int(round(s)), 60)
-    h, m   = divmod(m, 60)
+    h, m = divmod(m, 60)
     if h:
         return f"{h:02d}:{m:02d}:{sec:02d}"
     return f"{m:02d}:{sec:02d}"
@@ -659,11 +675,11 @@ def _safe_basename(path: Any) -> str:
 
 
 def _make_cite_key(
-    source:          str,
-    page:            Optional[int]   = None,
-    sheet:           Optional[str]   = None,
-    timestamp_start: Optional[float] = None,
-    section_id:      Optional[str]   = None,
+    source: str,
+    page: int | None = None,
+    sheet: str | None = None,
+    timestamp_start: float | None = None,
+    section_id: str | None = None,
 ) -> str:
     """Build the bracket tag the LLM must emit verbatim. Stable & sanitized.
 
@@ -694,31 +710,31 @@ def _make_cite_key(
 
 
 def build_retrieved_source(
-    doc:       Dict[str, Any],
-    rank:      int = 0,
+    doc: dict[str, Any],
+    rank: int = 0,
     snippet_chars: int = 240,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Map one retrieved doc (text + metadata + score) to the canonical RetrievedSource shape."""
     meta = doc.get("metadata") or {}
     text = doc.get("text") or ""
 
-    raw_source     = meta.get("source") or meta.get("file_path") or meta.get("doc_id") or ""
-    source_name    = _safe_basename(raw_source)
-    modality       = str(meta.get("modality") or "text")
-    subtype        = meta.get("subtype")
-    page           = meta.get("page")
-    sheet          = meta.get("sheet")
-    ts_start       = meta.get("timestamp_start")
-    ts_end         = meta.get("timestamp_end")
-    speaker        = meta.get("speaker")
-    asset_path     = meta.get("asset_path")
-    chunk_id       = meta.get("chunk_id") or f"r{rank}"
-    doc_id         = meta.get("doc_id")
+    raw_source = meta.get("source") or meta.get("file_path") or meta.get("doc_id") or ""
+    source_name = _safe_basename(raw_source)
+    modality = str(meta.get("modality") or "text")
+    subtype = meta.get("subtype")
+    page = meta.get("page")
+    sheet = meta.get("sheet")
+    ts_start = meta.get("timestamp_start")
+    ts_end = meta.get("timestamp_end")
+    speaker = meta.get("speaker")
+    asset_path = meta.get("asset_path")
+    chunk_id = meta.get("chunk_id") or f"r{rank}"
+    doc_id = meta.get("doc_id")
     parent_modality = meta.get("parent_modality")
-    parent_page    = meta.get("parent_page")
-    parent_sheet   = meta.get("parent_sheet")
-    section_id     = meta.get("section_id")
-    section_title  = meta.get("section_title")
+    parent_page = meta.get("parent_page")
+    parent_sheet = meta.get("parent_sheet")
+    section_id = meta.get("section_id")
+    section_title = meta.get("section_title")
 
     snippet = " ".join(str(text).split())[:snippet_chars]
 
@@ -731,25 +747,27 @@ def build_retrieved_source(
     )
 
     return {
-        "source":          source_name,
-        "modality":        modality,
-        "subtype":         subtype,
-        "page":            page if isinstance(page, int) else None,
-        "sheet":           sheet,
+        "source": source_name,
+        "modality": modality,
+        "subtype": subtype,
+        "page": page if isinstance(page, int) else None,
+        "sheet": sheet,
         "timestamp_start": float(ts_start) if isinstance(ts_start, (int, float)) else None,
-        "timestamp_end":   float(ts_end)   if isinstance(ts_end,   (int, float)) else None,
-        "speaker":         speaker,
-        "asset_path":      asset_path,
-        "score":           float(doc.get("score")) if isinstance(doc.get("score"), (int, float)) else None,
-        "chunk_id":        str(chunk_id),
-        "doc_id":          str(doc_id) if doc_id else None,
+        "timestamp_end": float(ts_end) if isinstance(ts_end, (int, float)) else None,
+        "speaker": speaker,
+        "asset_path": asset_path,
+        "score": float(doc.get("score")) if isinstance(doc.get("score"), (int, float)) else None,
+        "chunk_id": str(chunk_id),
+        "doc_id": str(doc_id) if doc_id else None,
         "parent_modality": parent_modality,
-        "parent_page":     parent_page if isinstance(parent_page, int) else None,
-        "parent_sheet":    parent_sheet,
-        "section_id":      section_id if isinstance(section_id, str) and section_id else None,
-        "section_title":   section_title if isinstance(section_title, str) and section_title else None,
-        "cite_key":        cite_key,
-        "snippet":         snippet,
+        "parent_page": parent_page if isinstance(parent_page, int) else None,
+        "parent_sheet": parent_sheet,
+        "section_id": section_id if isinstance(section_id, str) and section_id else None,
+        "section_title": (
+            section_title if isinstance(section_title, str) and section_title else None
+        ),
+        "cite_key": cite_key,
+        "snippet": snippet,
     }
 
 
@@ -819,34 +837,34 @@ _SPEAKER_CITATION_RE = re.compile(r'\s*\[[^\]\n]*?\.[A-Za-z0-9]{2,4}\s*[—–]\
 # bracketed or bare). A code-side guard (_TXT_DUMP_HAS_CITE_RE) ensures the
 # matched tail actually contains a filename or speaker token, so ordinary
 # trailing prose/punctuation is never stripped.
-_TXT_DUMP_FN     = r'[\w.\-]+\.(?:txt|md|rst|csv|log)'
-_TXT_DUMP_FN_RE  = re.compile(_TXT_DUMP_FN)
-_TXT_DUMP_NAME   = r"[A-Z][A-Za-z.'&-]*(?:[ ,]+[A-Z][A-Za-z.'&-]*){0,5}"
-_TXT_DUMP_FN_TOK = r'[\(\[]?\s*' + _TXT_DUMP_FN + r'\s*[\)\]]?(?:\s*[—–\-]\s*' + _TXT_DUMP_NAME + r')?'
+_TXT_DUMP_FN = r'[\w.\-]+\.(?:txt|md|rst|csv|log)'
+_TXT_DUMP_FN_RE = re.compile(_TXT_DUMP_FN)
+_TXT_DUMP_NAME = r"[A-Z][A-Za-z.'&-]*(?:[ ,]+[A-Z][A-Za-z.'&-]*){0,5}"
+_TXT_DUMP_FN_TOK = (
+    r'[\(\[]?\s*' + _TXT_DUMP_FN + r'\s*[\)\]]?(?:\s*[—–\-]\s*' + _TXT_DUMP_NAME + r')?'
+)
 # The speaker label must end in a COLON (the transcript turn format,
 # "CHAIR POWELL:"), never a bare period — a Title-Case phrase ending in a
 # period ("...under the Federal Reserve Act.") is ordinary prose and must not
 # be mistaken for a dumped speaker turn.
 _TXT_DUMP_SPK_TOK = (
-    r"[A-Z][A-Za-z.'&-]+(?:[ ][A-Z][A-Za-z.'&-]+){0,4}\s*:\s*"
-    r'(?:"[^"]*"|“[^”]*”|[^\n]*?)'
+    r"[A-Z][A-Za-z.'&-]+(?:[ ][A-Z][A-Za-z.'&-]+){0,4}\s*:\s*" r'(?:"[^"]*"|“[^”]*”|[^\n]*?)'
 )
 _TXT_DUMP_FIELD_TOK = r'(?:Answer Tags?|Sources? Used|Tags?|Sources?|References?)\s*:\s*[^\n]*?'
 # Bracketed numeric reference list, e.g. "[References: 1, 2, 3, 4, 5]".
-_TXT_DUMP_BRACKET_REFLIST_RE = re.compile(
-    r'\s*\[\s*References?\s*:\s*[\d,\s]+\]', re.IGNORECASE
-)
-_TXT_DUMP_SEP       = r'[\s.:;,()\[\]—–\-]*'
+_TXT_DUMP_BRACKET_REFLIST_RE = re.compile(r'\s*\[\s*References?\s*:\s*[\d,\s]+\]', re.IGNORECASE)
+_TXT_DUMP_SEP = r'[\s.:;,()\[\]—–\-]*'
 _TXT_DUMP_UNIT = (
-    r'(?:' + _TXT_DUMP_FN_TOK + r'|' + _TXT_DUMP_SPK_TOK + r'|'
-    + _TXT_DUMP_FIELD_TOK + r'|\(incomplete\))'
+    r'(?:'
+    + _TXT_DUMP_FN_TOK
+    + r'|'
+    + _TXT_DUMP_SPK_TOK
+    + r'|'
+    + _TXT_DUMP_FIELD_TOK
+    + r'|\(incomplete\))'
 )
-_TXT_DUMP_TAIL_RE = re.compile(
-    _TXT_DUMP_SEP + r'(?:' + _TXT_DUMP_UNIT + _TXT_DUMP_SEP + r')+$'
-)
-_TXT_DUMP_HAS_CITE_RE = re.compile(
-    _TXT_DUMP_FN + r"|[A-Z][A-Za-z.'&-]+[ ][A-Z][A-Za-z.'&-]+\s*:"
-)
+_TXT_DUMP_TAIL_RE = re.compile(_TXT_DUMP_SEP + r'(?:' + _TXT_DUMP_UNIT + _TXT_DUMP_SEP + r')+$')
+_TXT_DUMP_HAS_CITE_RE = re.compile(_TXT_DUMP_FN + r"|[A-Z][A-Za-z.'&-]+[ ][A-Z][A-Za-z.'&-]+\s*:")
 # Fabricated web citation — a trailing "Author, \"Title,\" Publication, Date,
 # <https://...>" bibliography the model invents. A local plain-text/transcript
 # answer never legitimately contains a URL, and an angle-bracketed URL / the
@@ -876,12 +894,12 @@ def _strip_txt_citation_dump(text: str) -> str:
     # one, whatever text follows each mention.
     fn_hits = list(_TXT_DUMP_FN_RE.finditer(text))
     if len(fn_hits) >= 2:
-        cut = text[:fn_hits[0].start()].rstrip()
+        cut = text[: fn_hits[0].start()].rstrip()
         if cut:
             text = cut
     m = _TXT_DUMP_TAIL_RE.search(text)
     if m and _TXT_DUMP_HAS_CITE_RE.search(m.group(0)):
-        cut = text[:m.start()].rstrip()
+        cut = text[: m.start()].rstrip()
         # If stripping would delete essentially the whole answer, the "prose"
         # was itself a dump — keep the original so we never return empty.
         if cut:
@@ -891,10 +909,12 @@ def _strip_txt_citation_dump(text: str) -> str:
     um = _TXT_DUMP_ANGLE_URL_RE.search(text)
     if um:
         boundary = text.rfind('. ', 0, um.start())
-        cut = text[:boundary + 1].rstrip() if boundary != -1 else text[:um.start()].rstrip()
+        cut = text[: boundary + 1].rstrip() if boundary != -1 else text[: um.start()].rstrip()
         if cut:
             text = cut
     return text.rstrip()
+
+
 # Filename/doc-id stem citation with no clean extension, e.g. [aapl_def14a_2023]
 # or the PII-mangled [aapl_def14a_<URL>cx] (the scrubber ate the ".docx"). Any
 # bracketed token that has no spaces and contains an underscore or a <PLACEHOLDER>
@@ -907,8 +927,7 @@ _STEM_CITATION_RE = re.compile(r'\s*\[[^\]\s]*(?:_[^\]\s]*|<[A-Za-z_]{2,20}>[^\]
 # leftover noise, never intentional prose. The first alternative requires a
 # decimal point so a legitimate bare "[1]" numeric citation isn't touched.
 _SECTION_CITATION_RE = re.compile(
-    r'\s*\[\s*§?\s*\d+(?:\.\d+)+\s*\]'
-    r'|\s*\[\s*§?\s*\d+\s*:\s*\d+(?:\.\d+)*\s*\]'
+    r'\s*\[\s*§?\s*\d+(?:\.\d+)+\s*\]' r'|\s*\[\s*§?\s*\d+\s*:\s*\d+(?:\.\d+)*\s*\]'
 )
 
 
@@ -944,13 +963,12 @@ def strip_inline_citations(text: str) -> str:
     cleaned = re.sub(r'([.!?])\s*[,;](?:\s*[,;])*', r'\1', cleaned)
     cleaned = re.sub(r',\s*(?=[,;])', '', cleaned)
     cleaned = re.sub(r'[,;]\s*([.!?])', r'\1', cleaned)
-    cleaned = re.sub(r'\(\s*\)', '', cleaned)            # empty parens
+    cleaned = re.sub(r'\(\s*\)', '', cleaned)  # empty parens
     cleaned = re.sub(r'[ \t]+\n', '\n', cleaned)
     # An orphaned "Sources:"/"Tags:" label left after the [n] tokens it referenced
     # were removed (e.g. "Sources: [1],[2],[3]" → "Sources:,,," → ""). Drop the
     # bare label and its leftover separators wherever it now trails the text.
-    cleaned = re.sub(r'\s*\b(?:Sources?|Tags?)\s*:\s*[,;\s]*$', '', cleaned,
-                     flags=re.IGNORECASE)
+    cleaned = re.sub(r'\s*\b(?:Sources?|Tags?)\s*:\s*[,;\s]*$', '', cleaned, flags=re.IGNORECASE)
     # A sentence-final colon left behind when _TXT_SOURCE_CITE_DUMP_RE removed
     # everything after it (the colon introduced the now-deleted dump) — collapse
     # ".:"/" :" at end of string down to the sentence's own terminal period.
@@ -963,12 +981,12 @@ def strip_inline_citations(text: str) -> str:
 
 
 def build_sources(
-    docs:          List[Dict[str, Any]],
+    docs: list[dict[str, Any]],
     snippet_chars: int = 240,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Deterministic list of RetrievedSource records from final retrieved docs."""
-    out: List[Dict[str, Any]] = []
-    seen_cite: Dict[str, int] = {}
+    out: list[dict[str, Any]] = []
+    seen_cite: dict[str, int] = {}
     for rank, d in enumerate(docs or []):
         rec = build_retrieved_source(d, rank=rank, snippet_chars=snippet_chars)
         key = rec["cite_key"]
@@ -982,17 +1000,17 @@ def build_sources(
 
 
 def query_ok(
-    answer:       str,
-    session_id:   str,
-    latency:      float,
-    confidence:   float                  = 0.5,
-    sources_used: int                    = 0,
-    decision:     str                    = "rag",
-    source:       str                    = "agent",
-    metadata:     Optional[Dict[str, Any]] = None,
-    trace_id:     Optional[str]          = None,
-    cache_hit:    bool                   = False,
-    sources:      Optional[List[Dict[str, Any]]] = None,
+    answer: str,
+    session_id: str,
+    latency: float,
+    confidence: float = 0.5,
+    sources_used: int = 0,
+    decision: str = "rag",
+    source: str = "agent",
+    metadata: dict[str, Any] | None = None,
+    trace_id: str | None = None,
+    cache_hit: bool = False,
+    sources: list[dict[str, Any]] | None = None,
 ) -> QueryResponse:
     return QueryResponse(
         answer=answer,

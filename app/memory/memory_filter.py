@@ -5,7 +5,7 @@ import math
 import threading
 import time
 import unicodedata
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import structlog
@@ -35,9 +35,9 @@ _filter_results = Histogram(
 )
 
 # SCORE WEIGHTS
-_W_SIM        = 0.5
-_W_RECENCY    = 0.2
-_W_ROLE       = 0.2
+_W_SIM = 0.5
+_W_RECENCY = 0.2
+_W_ROLE = 0.2
 _W_IMPORTANCE = 0.1
 
 # SEMAPHORE
@@ -46,6 +46,7 @@ _semaphore = asyncio.Semaphore(5)
 
 # NORMALIZE QUERY
 
+
 def _normalize(query: str) -> str:
     query = unicodedata.normalize("NFC", str(query or ""))
     return " ".join(query.strip().split())
@@ -53,18 +54,20 @@ def _normalize(query: str) -> str:
 
 # SHA-256 HASH FOR DEDUP
 
-def _hash(msg: Dict) -> str:
+
+def _hash(msg: dict) -> str:
     base = f"{msg.get('role')}|{str(msg.get('content'))[:200]}"
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 
 # COSINE SIMILARITY
 
-def _cosine(v1: List[float], v2: List[float]) -> float:
-    a     = np.nan_to_num(np.array(v1, dtype=float))
-    b     = np.nan_to_num(np.array(v2, dtype=float))
+
+def _cosine(v1: list[float], v2: list[float]) -> float:
+    a = np.nan_to_num(np.array(v1, dtype=float))
+    b = np.nan_to_num(np.array(v2, dtype=float))
     denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-10
-    val   = float(np.dot(a, b) / denom)
+    val = float(np.dot(a, b) / denom)
     if math.isnan(val) or math.isinf(val):
         return 0.0
     return val
@@ -72,14 +75,16 @@ def _cosine(v1: List[float], v2: List[float]) -> float:
 
 # EMBEDDING VALID CHECK
 
+
 def _valid_embedding(vec: Any) -> bool:
-    return (
-        isinstance(vec, list) and
-        len(vec) in (settings.TEXT_EMBEDDING_DIM, settings.VISION_EMBEDDING_DIM)
+    return isinstance(vec, list) and len(vec) in (
+        settings.TEXT_EMBEDDING_DIM,
+        settings.VISION_EMBEDDING_DIM,
     )
 
 
 # RECENCY SCORE — EXPONENTIAL DECAY
+
 
 def _recency(ts: Any, now: float) -> float:
     try:
@@ -93,13 +98,15 @@ def _recency(ts: Any, now: float) -> float:
 
 # ROLE WEIGHT
 
+
 def _role_weight(role: str) -> float:
     return settings.MEMORY_ROLE_WEIGHTS.get(role, 1.0)
 
 
 # IMPORTANCE SCORE
 
-def _importance(msg: Dict) -> float:
+
+def _importance(msg: dict) -> float:
     try:
         return max(0.0, min(float(msg.get("importance", 1.0)), 1.0))
     except Exception:
@@ -108,10 +115,11 @@ def _importance(msg: Dict) -> float:
 
 # MODALITY WEIGHT
 
-def _modality_weight(msg: Dict) -> float:
+
+def _modality_weight(msg: dict) -> float:
     modality = msg.get("modality", "text")
-    weights  = {
-        "text":  1.0,
+    weights = {
+        "text": 1.0,
         "image": 1.05,
         "audio": 1.1,
         "video": 1.1,
@@ -122,9 +130,10 @@ def _modality_weight(msg: Dict) -> float:
 
 # DEDUP BY CONTENT HASH
 
-def _dedup(history: List[Dict]) -> List[Dict]:
-    seen: set        = set()
-    out:  List[Dict] = []
+
+def _dedup(history: list[dict]) -> list[dict]:
+    seen: set = set()
+    out: list[dict] = []
     for m in history:
         try:
             h = _hash(m)
@@ -139,19 +148,30 @@ def _dedup(history: List[Dict]) -> List[Dict]:
 
 # PII SCRUB — STRIP SENSITIVE CONTENT BEFORE SCORING
 
+
 def _scrub_pii(text: str) -> str:
     if not settings.PII_DETECTION_ENABLED:
         return text
     try:
         from presidio_analyzer import AnalyzerEngine
         from presidio_anonymizer import AnonymizerEngine
-        entities   = getattr(settings, "PII_ENTITIES", [
-            "PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER",
-            "US_SSN", "CREDIT_CARD", "LOCATION", "IP_ADDRESS",
-        ])
-        analyzer   = AnalyzerEngine()
+
+        entities = getattr(
+            settings,
+            "PII_ENTITIES",
+            [
+                "PERSON",
+                "EMAIL_ADDRESS",
+                "PHONE_NUMBER",
+                "US_SSN",
+                "CREDIT_CARD",
+                "LOCATION",
+                "IP_ADDRESS",
+            ],
+        )
+        analyzer = AnalyzerEngine()
         anonymizer = AnonymizerEngine()
-        results    = analyzer.analyze(text=text, entities=entities, language="en")
+        results = analyzer.analyze(text=text, entities=entities, language="en")
         if results:
             text = anonymizer.anonymize(text=text, analyzer_results=results).text
     except ImportError:
@@ -163,6 +183,7 @@ def _scrub_pii(text: str) -> str:
 
 # ADAPTIVE THRESHOLD — LOWER THRESHOLD WHEN FEW CANDIDATES
 
+
 def _adaptive_threshold(base: float, scored_count: int) -> float:
     if scored_count < 5:
         return base * 0.7
@@ -173,24 +194,25 @@ def _adaptive_threshold(base: float, scored_count: int) -> float:
 
 # SCORE NORMALIZATION — MIN-MAX
 
-def _normalize_scores(scored: List[Tuple[float, Dict]]) -> List[Tuple[float, Dict]]:
+
+def _normalize_scores(scored: list[tuple[float, dict]]) -> list[tuple[float, dict]]:
     if not scored:
         return scored
-    raw    = np.array([s for s, _ in scored], dtype=float)
-    raw    = np.nan_to_num(raw, nan=0.0, posinf=1.0, neginf=0.0)
-    max_s  = max(float(raw.max()), 1e-6)
+    raw = np.array([s for s, _ in scored], dtype=float)
+    raw = np.nan_to_num(raw, nan=0.0, posinf=1.0, neginf=0.0)
+    max_s = max(float(raw.max()), 1e-6)
     normed = raw / max_s
     return [(float(normed[i]), m) for i, (_, m) in enumerate(scored)]
 
 
 # EMBED WITH CACHE — thread-safe LRU, bounded at _MAX_CACHE entries
 
-_embed_cache: Dict[str, List[float]] = {}
+_embed_cache: dict[str, list[float]] = {}
 _embed_cache_lock = threading.Lock()
 _MAX_CACHE = 500
 
 
-def _embed_text(text: str, embedder: Any, session_id: str) -> Optional[List[float]]:
+def _embed_text(text: str, embedder: Any, session_id: str) -> list[float] | None:
     cache_key = hashlib.sha256(text[:500].encode()).hexdigest()
     with _embed_cache_lock:
         if cache_key in _embed_cache:
@@ -212,22 +234,23 @@ def _embed_text(text: str, embedder: Any, session_id: str) -> Optional[List[floa
 
 # MAIN SYNC FILTER
 
+
 def filter_relevant_history(
     query: str,
-    history: List[Dict],
+    history: list[dict],
     embedder: Any,
-    top_k: Optional[int] = None,
-    threshold: Optional[float] = None,
+    top_k: int | None = None,
+    threshold: float | None = None,
     session_id: str = "default",
-    modality: Optional[str] = None,
-) -> List[Dict]:
+    modality: str | None = None,
+) -> list[dict]:
 
     if not history:
         return []
 
-    start     = time.time()
-    query     = _normalize(query)
-    top_k     = top_k     or settings.MEMORY_TOP_K
+    start = time.time()
+    query = _normalize(query)
+    top_k = top_k or settings.MEMORY_TOP_K
     threshold = threshold or settings.MEMORY_SIM_THRESHOLD
 
     with tracer.start_as_current_span("memory_filter") as span:
@@ -236,7 +259,7 @@ def filter_relevant_history(
 
         try:
             # DEDUP AND WINDOW
-            history = _dedup(history[-settings.MAX_HISTORY_MESSAGES:])
+            history = _dedup(history[-settings.MAX_HISTORY_MESSAGES :])
 
             # EMBED QUERY
             query_vec = _embed_text(query, embedder, session_id)
@@ -247,14 +270,14 @@ def filter_relevant_history(
                 )
                 return history[:top_k]
 
-            now          = time.time()
+            now = time.time()
             # Min-heap of (score, msg_id, msg) capped at top_k entries.
             # O(n log k) vs O(n log n) sort-then-slice. id(msg) breaks
             # comparison ties without comparing dicts (which would error).
-            _heap: List[Tuple[float, int, Dict]] = []
-            scored_count  = 0
+            _heap: list[tuple[float, int, dict]] = []
+            scored_count = 0
             filtered_count = 0
-            embed_failed  = 0
+            embed_failed = 0
 
             for msg in history:
                 try:
@@ -267,7 +290,7 @@ def filter_relevant_history(
                         continue
 
                     role = msg.get("role", "user")
-                    text = text[:settings.MAX_PROMPT_CHARS]
+                    text = text[: settings.MAX_PROMPT_CHARS]
 
                     # PII SCRUB BEFORE EMBEDDING
                     clean_text = _scrub_pii(text)
@@ -294,10 +317,10 @@ def filter_relevant_history(
                     modality_boost = _modality_weight(msg)
 
                     score = (
-                        _W_SIM        * sim +
-                        _W_RECENCY    * _recency(msg.get("timestamp"), now) +
-                        _W_ROLE       * _role_weight(role) +
-                        _W_IMPORTANCE * _importance(msg)
+                        _W_SIM * sim
+                        + _W_RECENCY * _recency(msg.get("timestamp"), now)
+                        + _W_ROLE * _role_weight(role)
+                        + _W_IMPORTANCE * _importance(msg)
                     ) * modality_boost
 
                     if math.isnan(score) or math.isinf(score):
@@ -335,7 +358,7 @@ def filter_relevant_history(
             scored = _normalize_scores(scored)
             scored.sort(key=lambda x: x[0], reverse=True)
 
-            result  = [m for _, m in scored]
+            result = [m for _, m in scored]
             latency = round(time.time() - start, 3)
 
             _filter_duration.labels(status="success").observe(latency)
@@ -359,7 +382,7 @@ def filter_relevant_history(
             return result
 
         except Exception as exc:
-            latency    = round(time.time() - start, 3)
+            latency = round(time.time() - start, 3)
             error_type = type(exc).__name__
 
             _filter_duration.labels(status="error").observe(latency)
@@ -379,15 +402,16 @@ def filter_relevant_history(
 
 # ASYNC WRAPPER
 
+
 async def filter_relevant_history_async(
     query: str,
-    history: List[Dict],
+    history: list[dict],
     embedder: Any,
-    top_k: Optional[int] = None,
-    threshold: Optional[float] = None,
+    top_k: int | None = None,
+    threshold: float | None = None,
     session_id: str = "default",
-    modality: Optional[str] = None,
-) -> List[Dict]:
+    modality: str | None = None,
+) -> list[dict]:
 
     async with _semaphore:
         return await asyncio.get_running_loop().run_in_executor(
@@ -402,5 +426,3 @@ async def filter_relevant_history_async(
                 modality,
             ),
         )
-
-
