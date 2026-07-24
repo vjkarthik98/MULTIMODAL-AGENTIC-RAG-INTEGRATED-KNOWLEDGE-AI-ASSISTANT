@@ -76,6 +76,9 @@ class Settings:
     HF_HOME: str = _str("HF_HOME", str(Path(__file__).resolve().parents[2] / ".hf_cache"))
     MODEL_CACHE_REQUIRE_MANIFEST: bool = _bool("MODEL_CACHE_REQUIRE_MANIFEST", False)
 
+    # torch.hub cache (separate mechanism from HF_HOME above; used by Detoxify)
+    TORCH_HOME: str = _str("TORCH_HOME", str(Path(__file__).resolve().parents[2] / ".torch_cache"))
+
     # CORE APPLICATION
     APP_NAME: str = _str("APP_NAME", "Multimodal Agentic RAG Integrated Knowledge AI Assistant")
     APP_VERSION: str = _str("APP_VERSION", "0.25.0")

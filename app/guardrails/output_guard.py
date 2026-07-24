@@ -15,11 +15,13 @@ block). All other checks result in warnings or in-place scrubbing.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.core.config import settings
 from app.guardrails.audit import audit_decision
 from app.guardrails.exceptions import GuardrailBlocked
 from app.guardrails.metrics import record_allow, record_block, record_scrub
@@ -197,6 +199,16 @@ def _get_detoxify():
         return _detoxify_model
     _detoxify_checked = True
     try:
+        # Detoxify fetches its checkpoint via torch.hub, which reads
+        # TORCH_HOME (not HF_HOME — a separate cache mechanism from Hugging
+        # Face Hub). start_server.py and download_all_models.py already set
+        # this, but neither runs for a plain `pytest`/script/notebook
+        # invocation, so torch.hub would otherwise fall back to its own
+        # default cache dir, miss the checkpoint download_all_models.py
+        # already fetched into .torch_cache/, and attempt a live re-download
+        # — setdefault so an already-set TORCH_HOME (e.g. from
+        # start_server.py) is never overridden.
+        os.environ.setdefault("TORCH_HOME", settings.TORCH_HOME)
         from detoxify import Detoxify
 
         _detoxify_model = Detoxify("original")

@@ -234,11 +234,25 @@ class QdrantVectorStore:
                 vconf = info.config.params.vectors
                 existing_dim = getattr(vconf, "size", None)
                 if existing_dim is not None and existing_dim != dim:
-                    logger.info(
+                    # CRITICAL, not info: this branch DELETES every vector in
+                    # `name` and recreates the collection empty. Intentional
+                    # (an embedding-model upgrade must not leave stale-dim
+                    # vectors corrupting the new index — see comment above),
+                    # but data loss from a config/env mistake (wrong
+                    # TEXT_EMBEDDING_DIM, wrong collection name reused) would
+                    # look identical to a real upgrade at this log level, and
+                    # was previously logged at INFO — easy to miss until the
+                    # data is already gone. Loud on purpose; still auto-
+                    # recreates rather than refusing to boot, since blocking
+                    # startup here would fight main.py's deliberately
+                    # non-blocking Qdrant init (see phase29-plan.md workstream A).
+                    logger.critical(
                         "qdrant_recreate_collection_dim_mismatch",
                         name=name,
                         existing_dim=existing_dim,
                         new_dim=dim,
+                        action="DELETING_AND_RECREATING_COLLECTION",
+                        data_loss=True,
                     )
                     self.client.delete_collection(name)
                     self.client.create_collection(

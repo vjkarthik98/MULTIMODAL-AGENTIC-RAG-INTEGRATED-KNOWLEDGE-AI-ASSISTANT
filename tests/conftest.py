@@ -10,6 +10,24 @@ already used in tests/integration/) are unaffected; this only *adds* markers.
 """
 from __future__ import annotations
 
+import os
+
+# Must run before ANYTHING imports app.core.config (settings is a singleton
+# baked in at first import — setting this later has no effect). Root cause
+# of a real, reproduced bug: tests/auth/test_admin.py's `client` fixture
+# creates a real TestClient(app), which fires the real FastAPI lifespan,
+# which — since WARMUP_AT_STARTUP defaults to True with no test-mode
+# override anywhere — kicks off preload_gpu_models() as a background task.
+# That function runs synchronous, uninterruptible model loading on a
+# dedicated executor thread that (per its own docstring) "never times out" —
+# asyncio.Task.cancel() does not stop it mid-flight, it only marks the
+# wrapping Task cancelled while the OS thread keeps running. TestClient's
+# __exit__ (anyio's blocking-portal thread join) then waits for that thread,
+# hanging until pytest-timeout's 120s cap kills it. setdefault, not
+# overwrite, so a developer who explicitly wants to test real warmup
+# behavior can still set WARMUP_AT_STARTUP=true themselves.
+os.environ.setdefault("WARMUP_AT_STARTUP", "false")
+
 from pathlib import Path
 
 import pytest

@@ -76,6 +76,13 @@ RUN python3.12 -c "import llama_cpp; assert llama_cpp.llama_supports_gpu_offload
 # ---------------------------------------------------------------------------
 FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04 AS runtime
 
+# Build-time identity, surfaced at runtime by GET /version (Phase 29 §A —
+# lets a running instance prove exactly what it's serving without shell/log
+# access). Defaults to "unknown" for anyone building locally without
+# --build-arg — cd.yml passes the real values on every tagged build.
+ARG GIT_SHA=unknown
+ARG IMAGE_TAG=unknown
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:${PATH}" \
@@ -83,7 +90,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     DATA_DIR=/app/data \
     LOG_DIR=/app/logs \
     HOST=0.0.0.0 \
-    PORT=8000
+    PORT=8000 \
+    GIT_SHA=${GIT_SHA} \
+    IMAGE_TAG=${IMAGE_TAG}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         software-properties-common \

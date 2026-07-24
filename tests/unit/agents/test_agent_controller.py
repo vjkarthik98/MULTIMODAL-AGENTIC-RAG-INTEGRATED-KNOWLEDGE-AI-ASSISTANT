@@ -11,6 +11,52 @@ from app.agents.agent_controller import (
 
 
 # ---------------------------------------------------------------------------
+# Autouse: block the real guard calls from ever running heavy/networked
+# dependencies in this file. Two separate landmines, found by actually
+# running this file (not by inspection) — both trigger real, unmocked
+# machinery that has no place in a test marked "unit" (per pyproject.toml:
+# "fast unit tests with no external dependencies"). Real guard behavior is
+# exercised for real under tests/guardrails/ (marked `guardrails`, not
+# `unit`), where those dependencies are an accepted tradeoff.
+# ---------------------------------------------------------------------------
+#
+# 1. _guard_output() (AgentExecutor._direct, AgentController._fallback)
+#    lazily imports output_guard.check(), whose toxicity check lazily
+#    instantiates Detoxify("original") on first use — which downloads a
+#    model checkpoint over the network via torch.hub. Passthrough is a
+#    faithful mock: it matches _guard_output's own documented fail-open
+#    behavior on error, and this file only tests control flow, not
+#    output-guard correctness.
+#
+# 2. _guard_input() (AgentController.handle) is BLOCKING — it raises
+#    GuardrailBlocked on a real detection, which test_injection_query_rejected
+#    depends on to verify handle() actually reacts to that exception. A pure
+#    passthrough would silently break that test's real intent (it would stop
+#    testing anything). The real check reaches jailbreak_check(), which loads
+#    a full BGE-large embedder to semantically compare against a jailbreak
+#    corpus — too heavy for a unit test. Reusing the already-fast, already
+#    directly-tested _sanitize() (see TestSanitize above) to decide when to
+#    raise keeps the same observable behavior (blocks the same jailbreak/
+#    injection phrases TestSanitize proves _sanitize strips to empty) without
+#    ever touching the embedder.
+@pytest.fixture(autouse=True)
+def _mock_guards():
+    def _fake_guard_output(response, **kwargs):
+        return response
+
+    def _fake_guard_input(query, **kwargs):
+        from app.guardrails.exceptions import GuardrailBlocked
+
+        if not _sanitize(query).strip():
+            raise GuardrailBlocked(reason="injection_detected", guard_type="injection")
+        return query
+
+    with patch("app.agents.agent_controller._guard_output", side_effect=_fake_guard_output), \
+         patch("app.agents.agent_controller._guard_input", side_effect=_fake_guard_input):
+        yield
+
+
+# ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
 

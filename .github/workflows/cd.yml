@@ -62,6 +62,9 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
             ${{ env.IMAGE }}:latest
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            IMAGE_TAG=${{ steps.meta.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

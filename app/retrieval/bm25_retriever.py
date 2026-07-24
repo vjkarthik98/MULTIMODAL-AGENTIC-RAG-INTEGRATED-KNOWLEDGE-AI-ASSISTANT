@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import pickle
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -526,6 +527,18 @@ class BM25Retriever:
         self.max_docs: int = settings.BM25_MAX_DOCS
         self._index_loaded: bool = False
         self._loaded_user_id: str | None = None
+        # Guards load-modify-save on self.documents/tokenized_corpus. This
+        # instance is a process-wide singleton (app.core.infra_registry
+        # .get_bm25()) shared across every request/user, and writes were
+        # previously fired via a fresh, unsynchronized background thread per
+        # ingestion call (see ingestion_pipeline.py's _bm25_task). Without
+        # this lock, two interleaved writes — or a write racing a read's
+        # _load_index() swap to a different user — silently lose updates:
+        # whichever save() runs last wins and clobbers the other's additions
+        # on disk. Confirmed in production data: the eval user's on-disk
+        # index had only 3 of 7 ingested sources; the other 4 were appended
+        # to the wrong in-memory state and overwritten.
+        self._write_lock = threading.Lock()
 
     # ── Index file path ───────────────────────────────────────────────────────
 
@@ -922,6 +935,14 @@ class BM25Retriever:
     def add_document(self, text: str, metadata: dict[str, Any], user_id: str | None = None) -> None:
         if not text or not text.strip():
             return
+
+        with self._write_lock:
+            self._load_index(user_id)
+            self._add_document_locked(text, metadata, user_id)
+
+    def _add_document_locked(
+        self, text: str, metadata: dict[str, Any], user_id: str | None
+    ) -> None:
         h = self._hash(text[: settings.BM25_MAX_TEXT_CHARS])
         seen_existing: set[str] = {
             self._hash(getattr(d, "text", "")[: settings.BM25_MAX_TEXT_CHARS])
@@ -978,6 +999,16 @@ class BM25Retriever:
         if not documents:
             return
 
+        with self._write_lock:
+            self._load_index(user_id)
+            self._add_documents_locked(documents, session_id, user_id)
+
+    def _add_documents_locked(
+        self,
+        documents: list[Any],
+        session_id: str,
+        user_id: str | None,
+    ) -> None:
         start = time.time()
         added = 0
 
@@ -1111,7 +1142,15 @@ class BM25Retriever:
         user_id: str | None = None,
     ) -> list[dict[str, Any]]:
 
-        if not self.bm25:
+        # This retriever is a process-wide singleton (infra.get_bm25()) shared
+        # across every user's requests. `_load_index` is cheap to call every
+        # time — it no-ops immediately if `_loaded_user_id` already matches —
+        # but the old `if not self.bm25` guard only loaded ONCE per process
+        # lifetime: after the first user's query populated self.bm25, every
+        # other user's search silently ran against that first user's private
+        # index for the rest of the process's life. Always delegate to
+        # _load_index so the per-user swap in there actually runs.
+        with self._write_lock:
             self._load_index(user_id)
 
         if not self.bm25:
@@ -1214,22 +1253,25 @@ class BM25Retriever:
     # ── Delete by source file ─────────────────────────────────────────────────
 
     def delete_by_source(self, filename: str, user_id: str | None = None) -> int:
-        before = len(self.documents)
-        filtered_docs = []
-        filtered_corp = []
-        for doc, tokens in zip(self.documents, self.tokenized_corpus):
-            source = getattr(doc, "source", "") or ""
-            if filename not in source:
-                filtered_docs.append(doc)
-                filtered_corp.append(tokens)
-        self.documents = filtered_docs
-        self.tokenized_corpus = filtered_corp
-        removed = before - len(self.documents)
-        if removed > 0:
-            self.bm25 = BM25Plus(self.tokenized_corpus) if self.tokenized_corpus else None
-            self._save_index(user_id)
-            logger.info(event="bm25_delete_by_source", filename=filename, removed=removed)
-        return removed
+        with self._write_lock:
+            self._load_index(user_id)
+
+            before = len(self.documents)
+            filtered_docs = []
+            filtered_corp = []
+            for doc, tokens in zip(self.documents, self.tokenized_corpus):
+                source = getattr(doc, "source", "") or ""
+                if filename not in source:
+                    filtered_docs.append(doc)
+                    filtered_corp.append(tokens)
+            self.documents = filtered_docs
+            self.tokenized_corpus = filtered_corp
+            removed = before - len(self.documents)
+            if removed > 0:
+                self.bm25 = BM25Plus(self.tokenized_corpus) if self.tokenized_corpus else None
+                self._save_index(user_id)
+                logger.info(event="bm25_delete_by_source", filename=filename, removed=removed)
+            return removed
 
     # ── GDPR session purge ────────────────────────────────────────────────────
 

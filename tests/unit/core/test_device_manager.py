@@ -6,26 +6,40 @@ from app.core.device_manager import DeviceManager
 
 
 def _make_manager(cuda=False, mps=False, vram=0.0, profile="auto"):
-    """Build a DeviceManager with torch probing fully mocked."""
-    with patch("app.core.device_manager.settings") as mock_cfg:
-        mock_cfg.MODELS_DEVICE_PROFILE = profile
-        mock_cfg.VRAM_BUDGET_GB = 8.0
-        mock_cfg.LLM_DEVICE_HINT = ""
-        mock_cfg.EMBEDDER_DEVICE = ""
-        mock_cfg.RERANKER_DEVICE = ""
-        mock_cfg.SIGLIP_DEVICE = ""
-        mock_cfg.BLIP_DEVICE = ""
-        mock_cfg.WHISPER_DEVICE = ""
+    """Build a DeviceManager with torch probing fully mocked.
 
-        dm = DeviceManager.__new__(DeviceManager)
-        import threading
-        dm._lock = threading.Lock()
-        dm._torch = None
-        dm._cuda_ok = cuda
-        dm._mps_ok = mps
-        dm._vram_total_gb = vram
-        dm._profile = dm._resolve_profile(profile)
+    The settings patch is intentionally left running (started, not used as a
+    `with` block) so that it still applies to every later call the test makes
+    against the returned `dm` (device_for/decision_for/llm_gpu_layers all read
+    `app.core.device_manager.settings` live, well after construction returns).
+    The autouse `_stop_patches` fixture below tears it down after each test.
+    """
+    patcher = patch("app.core.device_manager.settings")
+    mock_cfg = patcher.start()
+    mock_cfg.MODELS_DEVICE_PROFILE = profile
+    mock_cfg.VRAM_BUDGET_GB = 8.0
+    mock_cfg.LLM_DEVICE_HINT = ""
+    mock_cfg.EMBEDDER_DEVICE = ""
+    mock_cfg.RERANKER_DEVICE = ""
+    mock_cfg.SIGLIP_DEVICE = ""
+    mock_cfg.BLIP_DEVICE = ""
+    mock_cfg.WHISPER_DEVICE = ""
+
+    dm = DeviceManager.__new__(DeviceManager)
+    import threading
+    dm._lock = threading.Lock()
+    dm._torch = None
+    dm._cuda_ok = cuda
+    dm._mps_ok = mps
+    dm._vram_total_gb = vram
+    dm._profile = dm._resolve_profile(profile)
     return dm
+
+
+@pytest.fixture(autouse=True)
+def _stop_patches():
+    yield
+    patch.stopall()
 
 
 class TestResolveProfile:

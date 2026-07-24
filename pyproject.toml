@@ -229,7 +229,13 @@ minversion = "8.0"
 # after 2 minutes instead of hanging CI indefinitely. Generous on purpose —
 # raise it if a genuinely slow (not hung) test needs more, don't lower it
 # blindly.
-addopts    = "--strict-markers --strict-config -q --tb=short --timeout=120"
+# -p no:randomly: pytest-randomly (added for order-dependence auditing)
+# auto-activates for EVERY run the moment it's installed — pytest loads all
+# installed plugins by default, there is no "available but inactive" state.
+# Disabled here so normal runs stay deterministic; `make test-randomized`
+# re-enables it explicitly with `-p randomly` when you actually want to
+# audit for hidden test-order dependencies.
+addopts    = "--strict-markers --strict-config -q --tb=short --timeout=120 -p no:randomly"
 testpaths  = ["tests"]
 
 markers = [

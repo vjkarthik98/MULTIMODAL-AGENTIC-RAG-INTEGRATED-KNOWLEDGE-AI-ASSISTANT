@@ -26,6 +26,18 @@ from typing import Any
 
 import yaml
 
+# Windows' default console codepage (cp1252) can't encode every character
+# this script prints (e.g. the "→" arrow in ingest_corpus()'s progress
+# line) — reconfigure to UTF-8 so a stray unicode character never crashes a
+# real ingestion run over a cosmetic character. Same fix already proven in
+# start_server.py; this script never got it. No-op on Linux/Mac (already
+# UTF-8). Root cause of a real bug: --ingest crashed on the FIRST file, every
+# time, on Windows — which is why the eval corpus was never actually
+# populated here despite the script appearing to "work."
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 # Project root so we can import app.*
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 

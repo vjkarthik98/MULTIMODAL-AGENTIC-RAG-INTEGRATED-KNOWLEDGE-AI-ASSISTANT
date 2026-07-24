@@ -30,6 +30,14 @@ import pytest
 # ---------------------------------------------------------------------------
 pytest.importorskip("app.pipeline.query_pipeline")
 
+# query_pipeline() calls model_registry.ensure_for_query(), which blocks
+# waiting for a real llama-server — without one running this doesn't just
+# fail, it can hang past pytest-timeout's own kill mechanism (observed).
+# Skip cleanly instead, same pattern as test_llm_server_smoke.py.
+from conftest import requires_llama_server  # noqa: E402
+
+pytestmark = requires_llama_server
+
 
 HELIO_DOC = Path(__file__).parent.parent.parent / "data" / "benchmarks" / "heliosphere_energy_systems.txt"
 AQUAVOLT_DOC = Path(__file__).parent.parent.parent / "data" / "benchmarks" / "aquavolt.txt"

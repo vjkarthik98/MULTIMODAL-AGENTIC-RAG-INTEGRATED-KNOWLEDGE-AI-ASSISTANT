@@ -616,6 +616,40 @@ def health() -> dict[str, Any]:
     }
 
 
+# VERSION / BUILD INTROSPECTION — Phase 29 §A. GIT_SHA/IMAGE_TAG are build-time
+# env vars (set via Docker --build-arg in cd.yml, see Dockerfile's `runtime`
+# target) — "unknown" outside a CD-built image (e.g. local dev) is expected,
+# not a bug. Lets any running instance prove exactly what it's serving
+# without needing shell/log access.
+@app.get("/version", tags=["System"])
+def version() -> dict[str, Any]:
+    import json
+
+    from app.prompt.prompt_builder import PROMPT_VERSION
+
+    manifest_path = _Path(settings.HF_HOME) / "download_manifest.json"
+    models: list[dict[str, Any]] = []
+    if manifest_path.exists():
+        try:
+            entries = json.loads(manifest_path.read_text(encoding="utf-8"))
+            models = [
+                {"model_id": e.get("model_id"), "sha256": e.get("sha256"), "revision": e.get("revision")}
+                for e in entries
+            ]
+        except Exception:
+            pass
+
+    return {
+        "service": settings.APP_NAME,
+        "app_version": settings.APP_VERSION,
+        "git_sha": _os.environ.get("GIT_SHA", "unknown"),
+        "image_tag": _os.environ.get("IMAGE_TAG", "unknown"),
+        "prompt_version": PROMPT_VERSION,
+        "env": settings.ENV,
+        "models": models,
+    }
+
+
 # READINESS — SECTION 6
 
 

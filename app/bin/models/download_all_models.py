@@ -43,6 +43,15 @@ os.environ["HF_HUB_CACHE"] = _hf_home + "/hub"
 os.environ["TRANSFORMERS_CACHE"] = _hf_home + "/hub"
 os.environ["HF_DATASETS_CACHE"] = _hf_home + "/datasets"
 
+# torch.hub (used by detoxify's Detoxify("original")) is a SEPARATE cache
+# mechanism from Hugging Face Hub — it does not read HF_HOME. start_server.py
+# already sets TORCH_HOME=.torch_cache for the runtime path; mirrored here so
+# this standalone pre-download script's torch.hub fetches land in the same
+# place instead of torch's own default (~/.cache/torch), which would just
+# move the "first real request downloads it live" problem instead of fixing it.
+_torch_home = os.getenv("TORCH_HOME", str(_project_root / ".torch_cache"))
+os.environ["TORCH_HOME"] = _torch_home
+
 sys.path.insert(0, str(_project_root))
 
 try:
@@ -168,6 +177,23 @@ MODELS: list[dict] = [
         "gated": True,
         "optional": True,
     },
+    # ── Guardrails ────────────────────────────────────────────────────────────
+    {
+        "key": "detoxify",
+        # Not a real HF repo id — detoxify fetches via torch.hub, not
+        # huggingface_hub. Used only as this script's own manifest tracking
+        # key (see _write_manifest); TORCH_HOME above controls where the
+        # actual checkpoint lands.
+        "model_id": "detoxify/original",
+        "type": "detoxify",
+        "size_gb": 0.42,
+        "gated": False,
+        # output_guard._get_detoxify() already fails open (falls back to the
+        # pattern-based harmful-content heuristic) if Detoxify can't load —
+        # matches that same non-critical severity here rather than making a
+        # missing toxicity-scoring layer block the whole download run.
+        "optional": True,
+    },
     # ── LLM (GGUF single-file) — handled separately below ────────────────────
     # key "gguf" is injected into the run loop, not listed here
 ]
@@ -261,6 +287,18 @@ def _dl_faster_whisper(model_id: str) -> None:
 
     size = model_id.split("faster-whisper-", 1)[-1]
     WhisperModel(size, device="cpu", compute_type="int8", download_root=None)
+
+
+def _dl_detoxify() -> None:
+    # No revision pinning — detoxify's own package version selects the
+    # checkpoint via torch.hub, not a raw HF revision this script could pin.
+    # torch.hub.load_state_dict_from_url() no-ops on a re-run if the
+    # checkpoint is already present under TORCH_HOME, so this is safe and
+    # fast to call unconditionally (see the missing _is_detoxify_cached
+    # fast-path note in main()'s cache-check).
+    from detoxify import Detoxify
+
+    Detoxify("original")
 
 
 def _dl_vision_encoder_decoder(model_id: str, token: str, revision: str | None = None) -> None:
@@ -378,7 +416,12 @@ def _sha256_dir(path: Path) -> str:
 
 def _model_checksum(model_id: str, mtype: str) -> str | None:
     """Compute the current on-disk checksum for a model, or None if its
-    layout doesn't support a clean single hash (rare loader types)."""
+    layout doesn't support a clean single hash (rare loader types).
+
+    "detoxify" always falls through to the generic .hf_cache-shaped path
+    below, which won't exist (it's cached under TORCH_HOME instead) — this
+    correctly returns None (no checksum available) rather than a wrong hash.
+    """
     if mtype == "gguf":
         path = _gguf_dir / _gguf_file
         return _sha256_file(path) if path.exists() else None
@@ -474,6 +517,9 @@ def _dispatch_download(mtype: str, model_id: str, gated: bool, revision: str | N
     if mtype == "pyannote":
         _dl_pyannote(model_id, HF_TOKEN, revision=revision)
         return bool(HF_TOKEN)
+    if mtype == "detoxify":
+        _dl_detoxify()
+        return True
 
     downloader = _TOKEN_GATED_DOWNLOADERS.get(mtype, _dl_transformers)
     downloader(model_id, HF_TOKEN if gated else "", revision=revision)
@@ -560,6 +606,14 @@ def main() -> None:
             continue
 
         # fast local cache check
+        # NOTE — "detoxify" always reports uncached here (falls through to
+        # _is_hub_cached, whose .hf_cache-shaped path never exists for a
+        # torch.hub-fetched model) and always re-attempts _dl_detoxify().
+        # That's a fast no-op, not a bug: torch.hub.load_state_dict_from_url
+        # skips the actual download itself if the file already exists under
+        # TORCH_HOME. Not worth a bespoke torch.hub cache-path check against
+        # a directory layout that's a detoxify-package internal, not a
+        # documented contract.
         cached = _is_gguf_cached() if mtype == "gguf" else _is_hub_cached(model_id)
         if cached:
             result = _handle_cached(model_id, mtype, optional)

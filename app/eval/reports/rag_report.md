@@ -1,23 +1,21 @@
-# RAG Eval Report â€” Phase 25
+# RAG Eval Report — Phase 25
 
-**Generated:** 2026-07-19T15:21:07Z  
-**Git SHA:** 5e28e55  
+**Generated:** 2026-07-24T17:13:00Z  
+**Git SHA:** 0546d5e  
 
-## Suite: `generation`
+## Suite: `retrieval`
 
-Duration: 932.2s
+Duration: 189.9s
 
 | Metric | Value | n | Notes |
 |--------|-------|---|-------|
-| `answer_correctness` | 0.3274 | 42 | judge=prometheus_2_7b |
-| `answer_relevancy` | 0.3452 | 42 | judge=prometheus_2_7b |
-| `citation_accuracy` | 1.0000 | 15 | judge=heuristic |
-| `context_recall` | 0.0655 | 42 | judge=prometheus_2_7b |
-| `faithfulness` | 0.3988 | 42 | judge=prometheus_2_7b |
-| `finance_fidelity` | 0.8794 | 42 | avg over 42 queries (strict 0.5% tol, no scale bridging) |
-| `generation_p50_sec` | 11.2928 | 42 | min=0.48s max=23.44s |
-| `generation_p95_sec` | 19.4658 | 42 |  |
-| `generation_p99_sec` | 21.9195 | 42 |  |
-| `hallucination_rate` | 0.7619 | 42 | flagged=32/42 | examples:   'By how much did the FOMC lower  |
-| `template_leak_rate` | 0.0000 | 42 | leaky=0/42 |
+| `context_precision` | 0.0304 | 56 |  |
+| `hit_rate` | 0.8393 | 56 |  |
+| `mrr` | 0.4660 | 56 |  |
+| `ndcg_at_10` | 0.5322 | 56 |  |
+| `recall_at_10` | 0.7589 | 56 |  |
+| `recall_at_5` | 0.6786 | 56 |  |
+| `retrieval_p50_sec` | 2.1667 | 56 | min=1.09s max=56.60s |
+| `retrieval_p95_sec` | 3.6717 | 56 |  |
+| `retrieval_p99_sec` | 28.1417 | 56 |  |
 

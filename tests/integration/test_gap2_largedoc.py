@@ -30,6 +30,12 @@ import pytest
 
 pytest.importorskip("app.pipeline.query_pipeline")
 
+# See test_gap1_multidoc.py — query_pipeline() blocks on a real llama-server
+# that may hang past pytest's own timeout without one running. Skip cleanly.
+from conftest import requires_llama_server  # noqa: E402
+
+pytestmark = requires_llama_server
+
 
 MERIDIAN_DOC = Path(__file__).parent.parent.parent / "data" / "benchmarks" / "meridian_grid_report.txt"
 
