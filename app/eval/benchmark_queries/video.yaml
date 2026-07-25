@@ -1,0 +1,29 @@
+# Video benchmark queries — tests frame extraction, captioning, and transcript fusion.
+
+metrics_to_measure:
+  - frame_caption_recall (BLEU-1 vs gold captions)
+  - caption_repetition_rate (BLIP repetition loop detection — P1-9)
+  - transcript_wer (Whisper on video audio)
+
+test_cases:
+  earnings_highlight_clip:
+    description: "CNBC earnings highlight — 2-5 minute clip"
+    queries:
+      - "What financial figures are displayed in this video?"
+      - "What charts or graphs are shown?"
+      - "What company is being discussed in this video?"
+    key_frames_to_extract:
+      - "Revenue chart frame"
+      - "EPS graphic frame"
+      - "Anchor/reporter shot with ticker overlay"
+
+  ir_presentation:
+    description: "Company IR video presentation"
+    queries:
+      - "What are the key financial metrics presented?"
+      - "What is the main message of this presentation?"
+
+blip_repetition_check:
+  description: "Catches P1-9 BLIP caption repetition loop"
+  expected: "No frame caption should repeat the same word more than 3 times"
+  threshold_note: "caption_repetition_rate_max: 0.10 — if 10%+ of frame captions have repetition loops, gate fails"

@@ -1,0 +1,178 @@
+name: CD
+
+# Tag-triggered: build the production image, push to GHCR, wake/deploy to the
+# real EC2 GPU box, smoke test, roll back automatically on failure, then
+# dispatch the Tier-2 full eval suite (see eval-gate.yml).
+#
+# PREREQUISITES NOT YET PROVISIONED (documented here, not silently assumed —
+# see docs/runbooks/ci-cd.md "Phase 30 handoff"). This workflow is correct
+# but CANNOT succeed end-to-end until these exist:
+#   1. The EC2 instance itself (user has AWS quota, hasn't launched it yet).
+#   2. An IAM role for GitHub OIDC (`vars.AWS_DEPLOY_ROLE_ARN`) with least-
+#      privilege ec2:StartInstances/DescribeInstances + ssm:SendCommand
+#      scoped to that one instance — no long-lived AWS keys in GH secrets.
+#   3. The instance tagged `Name=${{ vars.EC2_INSTANCE_TAG }}` (default
+#      "magik-prod") so this workflow can look it up without a hardcoded ID.
+#   4. SSM Agent running on the box (default on AWS Deep Learning AMI /
+#      standard Ubuntu AMI + amazon-ssm-agent package) and an instance
+#      profile granting it ssm:UpdateInstanceInformation etc.
+#   5. A GHCR read PAT stored in SSM Parameter Store
+#      (`/magik/ghcr_pat`) so the box can `docker pull` without the token
+#      ever touching a GH Actions log.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write   # OIDC — no static AWS credentials
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Compiling the CUDA wheel is a build-time step (nvcc cross-compiles
+      # for sm_86) — does not need a physical GPU, works fine on this
+      # hosted runner. See Dockerfile's `cuda-builder` stage.
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          target: runtime
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+            ${{ env.IMAGE }}:latest
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            IMAGE_TAG=${{ steps.meta.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-push
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Resolve instance ID by tag
+        id: instance
+        run: |
+          ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${{ vars.EC2_INSTANCE_TAG || 'magik-prod' }}" \
+                      "Name=instance-state-name,Values=stopped,running,stopping" \
+            --query "Reservations[0].Instances[0].InstanceId" --output text)
+          if [ "$ID" = "None" ] || [ -z "$ID" ]; then
+            echo "::error::No instance tagged Name=${{ vars.EC2_INSTANCE_TAG || 'magik-prod' }} found. See docs/runbooks/ci-cd.md prerequisites."
+            exit 1
+          fi
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+
+      # ADR-5 (Phase 30 scale-to-zero): the box is stopped-by-default for
+      # cost reasons — this must not assume it's already running.
+      # start-instances on an already-running instance is a harmless no-op.
+      - name: Wake instance (idempotent)
+        run: aws ec2 start-instances --instance-ids ${{ steps.instance.outputs.id }} || true
+
+      - name: Wait until running + SSM-reachable
+        run: |
+          aws ec2 wait instance-running --instance-ids ${{ steps.instance.outputs.id }}
+          for i in $(seq 1 30); do
+            STATUS=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=${{ steps.instance.outputs.id }}" \
+              --query "InstanceInformationList[0].PingStatus" --output text 2>/dev/null || echo "None")
+            [ "$STATUS" = "Online" ] && break
+            sleep 10
+          done
+          [ "$STATUS" = "Online" ] || { echo "::error::SSM agent not reachable after 5 min"; exit 1; }
+
+      # Keeps the previous container renamed (not removed) so failure can
+      # roll back instantly instead of re-pulling an old image.
+      - name: Deploy via SSM (pull, swap, health check, auto-rollback)
+        run: |
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids ${{ steps.instance.outputs.id }} \
+            --document-name "AWS-RunShellScript" \
+            --comment "magik deploy ${{ needs.build-push.outputs.image_tag }}" \
+            --parameters commands="[
+              \"set -e\",
+              \"GHCR_PAT=\\$(aws ssm get-parameter --name /magik/ghcr_pat --with-decryption --query Parameter.Value --output text)\",
+              \"echo \\$GHCR_PAT | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin\",
+              \"docker pull ${{ env.IMAGE }}:${{ needs.build-push.outputs.image_tag }}\",
+              \"docker rm -f magik-previous 2>/dev/null || true\",
+              \"docker rename magik-current magik-previous 2>/dev/null || true\",
+              \"docker run -d --name magik-current --gpus all --restart unless-stopped -p 8000:8000 --env-file /opt/magik/.env -v /opt/magik/.hf_cache:/app/.hf_cache -v /opt/magik/data:/app/data -v /opt/magik/logs:/app/logs ${{ env.IMAGE }}:${{ needs.build-push.outputs.image_tag }}\",
+              \"for i in \\$(seq 1 30); do curl -sf http://127.0.0.1:8000/health && exit 0; sleep 10; done\",
+              \"echo DEPLOY_HEALTHCHECK_FAILED; docker rm -f magik-current; docker rename magik-previous magik-current 2>/dev/null || true; docker start magik-current 2>/dev/null || true; exit 1\"
+            ]" \
+            --query "Command.CommandId" --output text)
+          aws ssm wait command-executed --command-id "$CMD_ID" --instance-id ${{ steps.instance.outputs.id }}
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id ${{ steps.instance.outputs.id }} \
+            --query "Status" --output text | grep -q Success
+
+      - name: Post deploy summary
+        if: always()
+        run: |
+          echo "## Deploy — ${{ needs.build-push.outputs.image_tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Instance: ${{ steps.instance.outputs.id }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+
+      # A failed deploy here may already have auto-rolled-back on the box
+      # (see the SSM script's own rollback branch) — either way this is the
+      # signal that something needs a human look, and unlike a PR's Tier-1
+      # gate, nobody is watching this run live when it's triggered by a tag
+      # push. No-op until SLACK_WEBHOOK_URL is set — see docs/runbooks/ci-cd.md.
+      - name: Notify on failure (Slack, optional)
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        run: |
+          curl -sf -X POST -H "Content-Type: application/json" \
+            -d "{\"text\": \"MAGIK deploy of ${{ needs.build-push.outputs.image_tag }} FAILED — may have auto-rolled-back to the previous image. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "$SLACK_WEBHOOK_URL"
+
+  post-deploy-eval:
+    needs: deploy
+    runs-on: ubuntu-latest
+    # Job-level override: the workflow-level default above is `contents:
+    # read`. repository_dispatch's underlying REST call (POST /repos/{owner}/
+    # {repo}/dispatches) needs `contents: write` on the token even for a
+    # same-repo dispatch (confirmed against GitHub's own docs/community
+    # guidance, 2026-07-25 — see docs/runbooks/ci-cd.md) — without this the
+    # dispatch call 403s and Tier-2 silently never fires. GITHUB_TOKEN itself
+    # is fine here (no PAT needed): the "GITHUB_TOKEN can't trigger other
+    # workflows" restriction has an explicit exception for repository_dispatch
+    # and workflow_dispatch, and a same-repo dispatch doesn't need the
+    # cross-repo `repo`-scoped PAT that a remote-repo dispatch would.
+    permissions:
+      contents: write
+    steps:
+      - name: Dispatch Tier-2 full eval suite
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          event-type: post-deploy-eval

@@ -1,0 +1,38 @@
+# Retrieval benchmark query templates — Finance domain
+# Instantiate with real {ticker}, {fiscal_year}, {metric} values from gold corpus.
+
+templates:
+  fact_extraction:
+    - "What was {ticker}'s {metric} in {fiscal_year}?"
+    - "What were {ticker}'s total net sales in {fiscal_year}?"
+    - "What is {ticker}'s {segment} revenue for {fiscal_year}?"
+
+  comparative:
+    - "How did {ticker}'s {metric} change from {year1} to {year2}?"
+    - "Compare {ticker1} and {ticker2} {metric} in {fiscal_year}"
+
+  multi_hop:
+    - "What was {ticker}'s {metric} as a percentage of total revenue in {fiscal_year}?"
+    - "How much did {ticker} spend on {expense_type} relative to revenue in {fiscal_year}?"
+
+  geographic:
+    - "What were {ticker}'s {region} net sales in {fiscal_year}?"
+    - "Which geographic region had the highest revenue growth for {ticker}?"
+
+  trend:
+    - "Show {ticker}'s {metric} trend from {start_year} to {end_year}"
+    - "What is the 3-year CAGR of {ticker}'s {metric}?"
+
+  risk:
+    - "What are the main risk factors {ticker} disclosed in their 10-K?"
+    - "What credit risk metrics did {ticker} report?"
+
+fixed_queries:
+  - "What was Apple's Services revenue in FY2023?"
+  - "What was JPMorgan's return on equity in 2023?"
+  - "What was Apple's gross margin percentage in FY2023?"
+  - "What were Apple's total capital returns to shareholders in FY2023?"
+  - "What is JPMorgan's CET1 capital ratio?"
+  - "What did Apple say about competition in their 10-K?"
+  - "What was JPMorgan's net interest income in 2023?"
+  - "What revenue guidance did JPMorgan provide for 2024?"
