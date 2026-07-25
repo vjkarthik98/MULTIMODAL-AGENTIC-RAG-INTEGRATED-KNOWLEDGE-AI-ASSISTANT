@@ -29,6 +29,7 @@ from app.core.config import settings
 from app.core.infra_registry import infra
 from app.retrieval.bm25_retriever import BM25AggregatorRetriever
 from app.utils.logger import get_logger
+from app.utils.net import resolve_client_ip as _client_ip
 from app.utils.paths import user_knowledge_base_dir, user_staging_dir
 
 logger = get_logger(__name__)
@@ -310,9 +311,6 @@ def _size_limit(ext: str) -> int:
 
 def _request_id() -> str:
     return str(uuid.uuid4())
-
-
-from app.utils.net import resolve_client_ip as _client_ip
 
 
 def _check_disk_space(path: Path) -> None:
@@ -742,7 +740,7 @@ async def ingest_document(
             error=str(exc),
             session_id=session_id,
         )
-        raise HTTPException(status_code=500, detail="Ingestion failed")
+        raise HTTPException(status_code=500, detail="Ingestion failed") from exc
 
     finally:
         # Only cleans up when file_path is still set (i.e. an error occurred before
@@ -786,7 +784,7 @@ async def llm_generate(
         logger.error(event="llm_generate_failed", error=str(exc), request_id=request_id)
         raise HTTPException(
             status_code=500, detail={"message": "Internal server error", "request_id": request_id}
-        )
+        ) from exc
 
 
 # HEALTH
@@ -817,7 +815,7 @@ def infra_health(current_user=Depends(get_current_user)) -> dict[str, Any]:
         logger.error(event="infra_health_failed", error=str(exc), request_id=request_id)
         raise HTTPException(
             status_code=500, detail={"message": "Internal server error", "request_id": request_id}
-        )
+        ) from exc
 
 
 # TOOLS LIST
@@ -838,7 +836,7 @@ def list_tools(current_user=Depends(get_current_user)) -> dict[str, Any]:
         logger.error(event="list_tools_failed", error=str(exc), request_id=request_id)
         raise HTTPException(
             status_code=500, detail={"message": "Internal server error", "request_id": request_id}
-        )
+        ) from exc
 
 
 # QUERY
@@ -1053,7 +1051,7 @@ async def query_rag(
             error=str(exc),
             session_id=session_id,
         )
-        raise HTTPException(status_code=500, detail="Query processing failed")
+        raise HTTPException(status_code=500, detail="Query processing failed") from exc
 
 
 # STREAM
@@ -1576,7 +1574,7 @@ async def stream_query(
             request_id=request_id,
             error=str(exc),
         )
-        raise HTTPException(status_code=500, detail="Streaming failed")
+        raise HTTPException(status_code=500, detail="Streaming failed") from exc
 
 
 # UPLOAD
@@ -1781,7 +1779,7 @@ async def upload_file(
             error=str(exc),
             session_id=session_id,
         )
-        raise HTTPException(status_code=500, detail="File upload failed")
+        raise HTTPException(status_code=500, detail="File upload failed") from exc
 
     finally:
         background_tasks.add_task(_cleanup_file, file_path)
@@ -1798,7 +1796,6 @@ async def clear_memory(
 ) -> dict[str, Any]:
     request_id = _request_id()
     session_id = request_body.session_id
-    user_id = current_user.user_id
 
     try:
         from app.memory.memory_manager import MemoryManager
@@ -1833,7 +1830,7 @@ async def clear_memory(
             error=str(exc),
             session_id=session_id,
         )
-        raise HTTPException(status_code=500, detail="Memory clear failed")
+        raise HTTPException(status_code=500, detail="Memory clear failed") from exc
 
 
 # CLEAR QUERY RESPONSE CACHE
@@ -1875,7 +1872,7 @@ async def clear_query_cache(
             request_id=request_id,
             error=str(exc),
         )
-        raise HTTPException(status_code=500, detail="Cache clear failed")
+        raise HTTPException(status_code=500, detail="Cache clear failed") from exc
 
 
 # GDPR PURGE
@@ -1940,7 +1937,7 @@ async def gdpr_purge(
             error=str(exc),
             user_id=user_id,
         )
-        raise HTTPException(status_code=500, detail="GDPR purge failed")
+        raise HTTPException(status_code=500, detail="GDPR purge failed") from exc
 
 
 # SESSION HISTORY
@@ -1982,7 +1979,7 @@ async def get_history(
             error=str(exc),
             session_id=session_id,
         )
-        raise HTTPException(status_code=500, detail="History fetch failed")
+        raise HTTPException(status_code=500, detail="History fetch failed") from exc
 
 
 # METRICS
@@ -2025,7 +2022,7 @@ def model_health(current_user=Depends(get_current_user)) -> dict[str, Any]:
         logger.error(event="model_health_failed", error=str(exc), request_id=request_id)
         raise HTTPException(
             status_code=500, detail={"message": "Internal server error", "request_id": request_id}
-        )
+        ) from exc
 
 
 # ─── KNOWLEDGE BASE ───────────────────────────────────────────────────────────
@@ -2173,7 +2170,7 @@ async def delete_knowledge_base_file(
         raise HTTPException(
             status_code=500,
             detail="Failed to purge vectors from the knowledge base index. File was NOT deleted. Please try again.",
-        )
+        ) from exc
 
     # PURGE FROM BM25 — best-effort; missing BM25 index entry does not block deletion.
     # Use BM25AggregatorRetriever so all per-modality pkl files (txt, pdf, docx, xlsx,
@@ -2260,7 +2257,7 @@ async def list_chat_sessions(
         }
     except Exception as exc:
         logger.error(event="api_sessions_list_failed", request_id=request_id, error=str(exc))
-        raise HTTPException(status_code=500, detail="Failed to load chat history")
+        raise HTTPException(status_code=500, detail="Failed to load chat history") from exc
 
 
 @router.get("/sessions/{session_id}")
@@ -2289,7 +2286,7 @@ async def get_chat_session(
             session_id=session_id,
             error=str(exc),
         )
-        raise HTTPException(status_code=500, detail="Failed to load chat")
+        raise HTTPException(status_code=500, detail="Failed to load chat") from exc
 
 
 @router.delete("/sessions/{session_id}")
@@ -2339,7 +2336,7 @@ async def delete_chat_session(
             session_id=session_id,
             error=str(exc),
         )
-        raise HTTPException(status_code=500, detail="Failed to delete chat")
+        raise HTTPException(status_code=500, detail="Failed to delete chat") from exc
 
 
 @router.delete("/sessions")
@@ -2377,7 +2374,7 @@ async def delete_all_chat_sessions(
         return {"request_id": request_id, "status": "ok", "deleted": count}
     except Exception as exc:
         logger.error(event="api_delete_all_sessions_failed", request_id=request_id, error=str(exc))
-        raise HTTPException(status_code=500, detail="Failed to delete history")
+        raise HTTPException(status_code=500, detail="Failed to delete history") from exc
 
 
 class LastMessagePatchRequest(BaseModel):
@@ -2456,7 +2453,7 @@ async def update_chat_session(
             session_id=session_id,
             error=str(exc),
         )
-        raise HTTPException(status_code=500, detail="Failed to update chat")
+        raise HTTPException(status_code=500, detail="Failed to update chat") from exc
 
 
 @router.post("/feedback")
@@ -2515,7 +2512,7 @@ async def submit_feedback(
 
     except Exception as exc:
         logger.error(event="api_feedback_failed", request_id=request_id, error=str(exc))
-        raise HTTPException(status_code=500, detail="Failed to save feedback")
+        raise HTTPException(status_code=500, detail="Failed to save feedback") from exc
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -2596,7 +2593,7 @@ async def get_source_chunk(
         raise
     except Exception as exc:
         logger.error(event="api_source_chunk_failed", chunk_id=chunk_id, error=str(exc))
-        raise HTTPException(status_code=500, detail="Failed to fetch chunk")
+        raise HTTPException(status_code=500, detail="Failed to fetch chunk") from exc
 
 
 # GET /api/kb/files — list all files in user's KB
@@ -2639,7 +2636,7 @@ async def list_kb_files(
         return {"files": files, "count": len(files)}
     except Exception as exc:
         logger.error(event="api_kb_files_failed", user_id=user_id, error=str(exc))
-        raise HTTPException(status_code=500, detail="Failed to list KB files")
+        raise HTTPException(status_code=500, detail="Failed to list KB files") from exc
 
 
 # DELETE /api/kb/files/{file_hash} — delete a specific file from KB
@@ -2681,7 +2678,7 @@ async def delete_kb_file(
         raise
     except Exception as exc:
         logger.error(event="api_kb_delete_failed", file_hash=file_hash, error=str(exc))
-        raise HTTPException(status_code=500, detail="Failed to delete file")
+        raise HTTPException(status_code=500, detail="Failed to delete file") from exc
 
 
 # GET /api/transcript/{file_hash} — full ordered transcript for audio/video
@@ -2732,4 +2729,4 @@ async def get_transcript(
         raise
     except Exception as exc:
         logger.error(event="api_transcript_failed", file_hash=file_hash, error=str(exc))
-        raise HTTPException(status_code=500, detail="Failed to fetch transcript")
+        raise HTTPException(status_code=500, detail="Failed to fetch transcript") from exc

@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import settings
+from app.core.response import ProcessingResult  # noqa: F401  (re-exported for ingestion callers)
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -609,8 +610,6 @@ def sha256_file(file_path: str) -> str:
 
     return h.hexdigest()
 
-
-from app.core.response import ProcessingResult  # noqa: F401  (re-exported for ingestion callers)
 
 # ERROR DETAIL
 

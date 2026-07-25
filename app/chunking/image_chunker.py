@@ -318,7 +318,7 @@ def _digitize_line_chart(image: Image.Image, ocr_boxes: list) -> dict[str, Any] 
                 continue
             row = dark[max(0, text_y - 6) : text_y + 7, sx0:sx1].any(axis=0)
             total = sx1 - sx0
-            duty = sum(l for _, l in _chart_run_lengths(row)) / total if total else 0.0
+            duty = sum(run_len for _, run_len in _chart_run_lengths(row)) / total if total else 0.0
             series_signatures[name] = duty
         if len(series_signatures) < 2:
             return None
@@ -334,7 +334,9 @@ def _digitize_line_chart(image: Image.Image, ocr_boxes: list) -> dict[str, Any] 
         def col_centers(x: int) -> list[float]:
             col = dark[y_top:y_bot, x]
             return sorted(
-                y_top + s + l / 2 for s, l in _chart_run_lengths(col) if l >= _CHART_MIN_RUN_PX
+                y_top + s + run_len / 2
+                for s, run_len in _chart_run_lengths(col)
+                if run_len >= _CHART_MIN_RUN_PX
             )
 
         cols = [(x, col_centers(x)) for x in range(x_left, x_right, 2)]
@@ -532,7 +534,7 @@ def _describe_series_trends(digitized: dict[str, Any]) -> str:
 
         # Flattest consecutive run of >=2 ticks (plateau/consolidation): the
         # window whose max/min spread relative to its mean is smallest.
-        best_run, best_spread = None, None
+        best_run, _best_spread = None, None
         for i in range(len(traj)):
             for j in range(i + 1, len(traj)):
                 window = [v for _, v in traj[i : j + 1]]
@@ -540,7 +542,7 @@ def _describe_series_trends(digitized: dict[str, Any]) -> str:
                 spread = (max(window) - min(window)) / mean if mean else 1.0
                 # prefer longer runs; only consider genuinely-flat (<12% spread) windows
                 if spread < 0.12 and (best_run is None or (j - i) > (best_run[1] - best_run[0])):
-                    best_run, best_spread = (i, j), spread
+                    best_run, _best_spread = (i, j), spread
         if best_run and (best_run[1] - best_run[0]) >= 1:
             i, j = best_run
             lo = min(v for _, v in traj[i : j + 1])
@@ -1176,7 +1178,7 @@ def _qwen2vl_caption_for_image(image: Image.Image) -> str:
         inputs = processor(text=[text], images=[image], return_tensors="pt").to(device)
         with _torch.no_grad():
             out = model.generate(**inputs, max_new_tokens=settings.QWEN2_VL_MAX_TOKENS)
-        generated_ids = [o[len(i) :] for i, o in zip(inputs.input_ids, out)]
+        generated_ids = [o[len(i) :] for i, o in zip(inputs.input_ids, out, strict=False)]
         decoded = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
         logger.debug(event="qwen2vl_fallback_caption_used")
         return decoded

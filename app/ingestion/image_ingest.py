@@ -13,13 +13,17 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageOps, UnidentifiedImageError
+from prometheus_client import Counter
 
 from app.core.config import settings
+from app.ingestion.base_ingest import BaseIngestor
 from app.ingestion.schema import (
     EmptyFileError,
     FileTooLargeError,
     IngestedDocument,
     Modality,
+    RawExtract,
+    UniversalMetadata,
     UnsupportedMimeError,
     build_universal_metadata,
     normalize_text,
@@ -152,7 +156,7 @@ def _safe_resolve(file_path: str) -> Path:
     try:
         path.relative_to(chroot)
     except ValueError:
-        raise ValueError(f"PATH_TRAVERSAL_BLOCKED: {path} is outside chroot {chroot}")
+        raise ValueError(f"PATH_TRAVERSAL_BLOCKED: {path} is outside chroot {chroot}") from None
     return path
 
 
@@ -200,13 +204,12 @@ def _load_image(path: Path, session_id: str) -> Image.Image:
 
             with rawpy.imread(str(path)) as raw:
                 rgb = raw.postprocess(use_camera_wb=True, output_bps=8)
-            import numpy as np
 
             return Image.fromarray(rgb, "RGB")
         except ImportError:
-            raise ImportError("RAWPY_REQUIRED for RAW image formats (.cr2, .nef, .arw)")
+            raise ImportError("RAWPY_REQUIRED for RAW image formats (.cr2, .nef, .arw)") from None
         except Exception as exc:
-            raise ValueError(f"RAW_DECODE_FAILED: {exc}")
+            raise ValueError(f"RAW_DECODE_FAILED: {exc}") from exc
 
     # HEIC FORMAT
     if suffix in HEIC_FORMATS:
@@ -215,7 +218,7 @@ def _load_image(path: Path, session_id: str) -> Image.Image:
 
             register_heif_opener()
         except ImportError:
-            raise UnsupportedMimeError("Install pillow-heif for HEIC support")
+            raise UnsupportedMimeError("Install pillow-heif for HEIC support") from None
 
     # SVG FORMAT
     if suffix == ".svg":
@@ -233,7 +236,7 @@ def _load_image(path: Path, session_id: str) -> Image.Image:
                 file=path.name,
                 session_id=session_id,
             )
-            raise UnsupportedMimeError("SVG_RASTERIZATION_FAILED_CAIROSVG_MISSING")
+            raise UnsupportedMimeError("SVG_RASTERIZATION_FAILED_CAIROSVG_MISSING") from None
 
     # ANIMATED GIF — USE FIRST FRAME
     try:
@@ -276,9 +279,9 @@ def _load_image(path: Path, session_id: str) -> Image.Image:
             return img.copy()
 
     except UnidentifiedImageError as exc:
-        raise ValueError(f"CORRUPT_IMAGE: {exc}")
+        raise ValueError(f"CORRUPT_IMAGE: {exc}") from exc
     except Exception as exc:
-        raise ValueError(f"IMAGE_LOAD_FAILED: {exc}")
+        raise ValueError(f"IMAGE_LOAD_FAILED: {exc}") from exc
 
 
 # DIMENSION VALIDATION
@@ -703,7 +706,7 @@ def ingest(
     try:
         path = _safe_resolve(file_path)
     except ValueError as exc:
-        raise ValueError(str(exc))
+        raise ValueError(str(exc)) from exc
 
     _validate_image_file(path)
     _check_disk_space(path)
@@ -1107,11 +1110,6 @@ async def async_ingest(file_path: str, session_id: str) -> list[IngestedDocument
 
 
 # ─── Phase 1: ImageIngestor ────────────────────────────────────────────────────
-
-from prometheus_client import Counter
-
-from app.ingestion.base_ingest import BaseIngestor
-from app.ingestion.schema import RawExtract, UniversalMetadata
 
 _EXTRACTS_TOTAL = Counter("magik_image_extracts_total", "Total extracts produced by image ingestor")
 _EXTRACT_ERRORS = Counter("magik_image_extract_errors_total", "Errors in image ingestor")

@@ -9,6 +9,8 @@ from prometheus_client import Counter, Gauge, Histogram
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
+from app.core.metrics import circuit_breaker_failures as _circuit_breaker_failures
+from app.core.metrics import circuit_breaker_state as _circuit_breaker_state
 from app.memory.mongo_memory import MongoMemory
 from app.memory.redis_memory import RedisMemory
 from app.retrieval.bm25_retriever import BM25Retriever
@@ -28,8 +30,6 @@ _infra_init_errors = Counter(
     "Infrastructure initialization errors by service",
     ["service", "error_type"],
 )
-from app.core.metrics import circuit_breaker_failures as _circuit_breaker_failures
-from app.core.metrics import circuit_breaker_state as _circuit_breaker_state
 
 _infra_available = Gauge(
     "infra_service_available",

@@ -96,12 +96,12 @@ def _nli_statements(prompt_text: str) -> str:
     if not statements:
         # Try to parse from plain text
         lines = [
-            l.strip().strip("-").strip()
-            for l in prompt_text.split("\n")
-            if len(l.strip()) > 15
-            and not l.strip().startswith("{")
-            and "task" not in l.lower()
-            and "context" not in l.lower()[:10]
+            ln.strip().strip("-").strip()
+            for ln in prompt_text.split("\n")
+            if len(ln.strip()) > 15
+            and not ln.strip().startswith("{")
+            and "task" not in ln.lower()
+            and "context" not in ln.lower()[:10]
         ]
         statements = lines[:6]
 
@@ -115,7 +115,7 @@ def _nli_statements(prompt_text: str) -> str:
     scores = _ce_score(pairs)
 
     results = []
-    for stmt, score in zip(statements, scores):
+    for stmt, score in zip(statements, scores, strict=False):
         verdict = 1 if score > 0.45 else 0
         results.append(
             {

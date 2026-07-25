@@ -1,6 +1,7 @@
 """
 Generation eval via HTTP for XLSX, image, audio, video modalities.
 """
+
 from __future__ import annotations
 
 import json
@@ -36,7 +37,12 @@ def load_gold(path):
                 continue
             row = json.loads(line)
             ref = row.get("reference_answer", "")
-            if not ref or ref in ("TODO", "") or "SEARCH_REQUIRED" in ref or "INJECTION_PROBE" in ref:
+            if (
+                not ref
+                or ref in ("TODO", "")
+                or "SEARCH_REQUIRED" in ref
+                or "INJECTION_PROBE" in ref
+            ):
                 continue
             rows.append(row)
     return rows
@@ -103,17 +109,24 @@ def run_modality(modality: str):
 
         answer = resp.get("answer") or resp.get("response") or ""
         sources = resp.get("sources") or []
-        context_texts = [s.get("text") or s.get("content") or "" for s in sources if isinstance(s, dict)]
+        context_texts = [
+            s.get("text") or s.get("content") or "" for s in sources if isinstance(s, dict)
+        ]
 
         scores = lexical_score(answer, reference, context_texts)
         results.append({"id": qid, "scores": scores, "latency": elapsed})
-        print(f"  [{qid}] done in {elapsed:.1f}s | faith={scores['faithfulness']:.3f} rel={scores['answer_relevancy']:.3f}")
+        print(
+            f"  [{qid}] done in {elapsed:.1f}s | faith={scores['faithfulness']:.3f} rel={scores['answer_relevancy']:.3f}"
+        )
 
     if not results:
         return None
 
     n = len(results)
-    avg = lambda key: sum(r["scores"][key] for r in results) / n
+
+    def avg(key):
+        return sum(r["scores"][key] for r in results) / n
+
     faithfulness = avg("faithfulness")
     answer_relevancy = avg("answer_relevancy")
     context_recall = avg("context_recall")
@@ -122,9 +135,11 @@ def run_modality(modality: str):
 
     sorted_lat = sorted(latencies)
     p50 = sorted_lat[int(len(sorted_lat) * 0.50)] if sorted_lat else 0
-    p95 = sorted_lat[min(int(len(sorted_lat) * 0.95), len(sorted_lat)-1)] if sorted_lat else 0
+    p95 = sorted_lat[min(int(len(sorted_lat) * 0.95), len(sorted_lat) - 1)] if sorted_lat else 0
 
-    print(f"\n[{modality.upper()} GEN] faith={faithfulness:.4f} rel={answer_relevancy:.4f} ctx_recall={context_recall:.4f} halluc={hallucination_rate:.4f}")
+    print(
+        f"\n[{modality.upper()} GEN] faith={faithfulness:.4f} rel={answer_relevancy:.4f} ctx_recall={context_recall:.4f} halluc={hallucination_rate:.4f}"
+    )
 
     def metric(name, value, n_, notes=""):
         return {"name": name, "value": value, "n": n_, "notes": notes, "sub": {}}

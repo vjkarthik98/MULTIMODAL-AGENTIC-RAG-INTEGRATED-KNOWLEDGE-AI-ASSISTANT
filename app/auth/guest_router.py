@@ -29,6 +29,7 @@ from app.auth.guest_service import (
 from app.auth.jwt_handler import issue_guest_token, issue_tokens, verify_token
 from app.auth.models import GuestConvertRequest, GuestSessionResponse, UserPublic, UserRole
 from app.utils.logger import get_logger
+from app.utils.net import resolve_client_ip as _client_ip
 
 logger = get_logger(__name__)
 
@@ -120,8 +121,8 @@ async def convert_guest(req: GuestConvertRequest) -> dict:
     except ValueError as exc:
         msg = str(exc)
         if "already exists" in msg.lower():
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=msg)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=msg) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg) from exc
 
     # Migrate guest data to real user
     stats = await asyncio.to_thread(migrate_guest_to_user, guest_id, real_user.user_id)
@@ -188,7 +189,7 @@ def _validate_guest_token(token: str) -> str:
     try:
         payload = verify_token(token, expected_type="access")
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 
     if payload.get("role") != "guest":
         raise HTTPException(
@@ -214,6 +215,3 @@ def _revoke_guest_jwt(token: str) -> None:
             revoke_token(jti, exp)
     except Exception:
         pass
-
-
-from app.utils.net import resolve_client_ip as _client_ip

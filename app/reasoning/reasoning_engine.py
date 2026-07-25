@@ -328,12 +328,12 @@ def _verify_numeric_citations(
 
     context_full = " ".join(str(d.get("text", "") or "") for d in docs)
     context_lower = context_full.lower()
-    query_nums = set(_extract_numbers(query)) if query else set()
+    set(_extract_numbers(query)) if query else set()
     results = []
     seen = set()
 
     for m in _SCALE_NUM_RE.finditer(answer):
-        currency, num_str, scale = m.group(1), m.group(2), m.group(3)
+        _currency, num_str, scale = m.group(1), m.group(2), m.group(3)
         token = m.group(0).strip()
         if token in seen:
             continue
@@ -596,7 +596,7 @@ def _xlsx_countries_in_query(q: str, candidate_texts: list[str], limit: int = 3)
     return matched
 
 
-def _prepend_key_facts_knowledge(
+def _prepend_key_facts_knowledge(  # noqa: C901 -- known complexity debt (184), the largest outlier in the codebase; tracked follow-up refactor, not fixed inline to avoid changing tuned finance-fact extraction behavior
     docs: list[dict], query: str, knowledge: str, user_id: str = ""
 ) -> str:
     """Prepend high-signal facts to the knowledge block for specific query types."""
@@ -1727,7 +1727,7 @@ def _build_cot_prompt(
         ),
     }
 
-    type_instruction = type_instructions.get(query_type, type_instructions["factual"])
+    type_instructions.get(query_type, type_instructions["factual"])
 
     instruction = (
         "You are a strict, grounded AI assistant. Use ONLY the provided KNOWLEDGE chunks.\n"

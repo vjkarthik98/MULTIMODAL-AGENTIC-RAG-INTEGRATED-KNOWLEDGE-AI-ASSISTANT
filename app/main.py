@@ -633,7 +633,11 @@ def version() -> dict[str, Any]:
         try:
             entries = json.loads(manifest_path.read_text(encoding="utf-8"))
             models = [
-                {"model_id": e.get("model_id"), "sha256": e.get("sha256"), "revision": e.get("revision")}
+                {
+                    "model_id": e.get("model_id"),
+                    "sha256": e.get("sha256"),
+                    "revision": e.get("revision"),
+                }
                 for e in entries
             ]
         except Exception:

@@ -7,6 +7,7 @@ import urllib.parse
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
+from pydantic import BaseModel, Field
 
 from app.auth.dependencies import get_current_user
 from app.auth.jwt_handler import issue_tokens, refresh_access_token, verify_token
@@ -56,7 +57,7 @@ async def register(req: RegisterRequest):
     try:
         user = await asyncio.to_thread(_svc.register, req)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     otp = generate_otp()
     try:
@@ -71,7 +72,7 @@ async def register(req: RegisterRequest):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Could not send verification email. Please try again.",
-        )
+        ) from exc
 
     otp_token = await asyncio.to_thread(_issue_mfa_token, user.user_id)
     logger.info(event="register_otp_sent", user_id=user.user_id)
@@ -95,7 +96,7 @@ async def login(req: LoginRequest):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(exc),
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from exc
 
     # Check for a trusted device token — skip OTP if valid
     from app.auth.email_service import send_otp_email
@@ -121,7 +122,7 @@ async def login(req: LoginRequest):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Could not send verification email. Please try again.",
-        )
+        ) from exc
 
     otp_token = await asyncio.to_thread(_issue_mfa_token, user.user_id)
     logger.info(event="otp_challenge_issued", user_id=user.user_id)
@@ -157,12 +158,12 @@ async def verify_otp(req: OTPVerifyRequest):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="OTP session expired. Please sign in again.",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from None
 
     try:
         ok = await asyncio.to_thread(_verify_otp, user_id, req.code)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 
     if not ok:
         raise HTTPException(
@@ -207,7 +208,7 @@ async def login_form(form: OAuth2PasswordRequestForm = Depends()) -> TokenPair:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(exc),
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from exc
     tokens = issue_tokens(user.user_id, user.email, user.role.value)
     return TokenPair(**tokens)
 
@@ -225,7 +226,7 @@ async def refresh(req: RefreshRequest) -> TokenPair:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(exc),
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from exc
     return TokenPair(**tokens)
 
 
@@ -255,7 +256,7 @@ async def google_login() -> RedirectResponse:
     try:
         url, _ = build_google_auth_url()
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return RedirectResponse(url=url)
 
@@ -360,12 +361,12 @@ async def reset_password(req: ResetPasswordRequest) -> dict:
     try:
         user_id = await asyncio.to_thread(consume_reset_token, req.token)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     try:
         await asyncio.to_thread(_svc.reset_password, user_id, req.new_password)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     revoke_all_user_tokens(user_id)
     # Revoke trusted devices so all remembered browsers must re-verify after a reset
@@ -432,13 +433,10 @@ async def logout_all(
 
 # ── Password change ───────────────────────────────────────────────────────────
 
-from pydantic import BaseModel as _BM
-from pydantic import Field as _F
 
-
-class PasswordChangeRequest(_BM):
-    current_password: str = _F(..., min_length=1, max_length=128)
-    new_password: str = _F(..., min_length=8, max_length=128)
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=8, max_length=128)
 
 
 @router.post("/password", status_code=status.HTTP_200_OK)
@@ -458,7 +456,7 @@ async def change_password(
             req.new_password,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     # Invalidate all tokens — user must log in again
     revoke_all_user_tokens(current_user.user_id)
@@ -469,13 +467,13 @@ async def change_password(
 # ── MFA — Enrol ───────────────────────────────────────────────────────────────
 
 
-class MFACodeRequest(_BM):
-    code: str = _F(..., min_length=6, max_length=10)
+class MFACodeRequest(BaseModel):
+    code: str = Field(..., min_length=6, max_length=10)
 
 
-class MFAVerifyLoginRequest(_BM):
-    mfa_token: str = _F(..., min_length=10)
-    code: str = _F(..., min_length=6, max_length=10)
+class MFAVerifyLoginRequest(BaseModel):
+    mfa_token: str = Field(..., min_length=10)
+    code: str = Field(..., min_length=6, max_length=10)
 
 
 @router.post("/mfa/enroll", status_code=status.HTTP_200_OK)
@@ -490,7 +488,7 @@ async def mfa_enroll(
     try:
         data = await asyncio.to_thread(_mfa.enroll_start, current_user.user_id, current_user.email)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return data
 
 
@@ -506,7 +504,7 @@ async def mfa_verify_enroll(
     try:
         backup_codes = await asyncio.to_thread(_mfa.verify_enroll, current_user.user_id, req.code)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return {
         "status": "ok",
         "message": "MFA enabled successfully",
@@ -527,7 +525,7 @@ async def mfa_verify_login(req: MFAVerifyLoginRequest) -> TokenPair:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(exc),
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from exc
 
     user = _svc.get_by_id(user_id)
     if not user:
@@ -546,7 +544,7 @@ async def mfa_disable(
     try:
         await asyncio.to_thread(_mfa.disable, current_user.user_id, req.code)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return {"status": "ok", "message": "MFA disabled"}
 
 

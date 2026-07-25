@@ -73,7 +73,7 @@ def _merge_fragmented_hosts(
     if len(host_candidates) < 2:
         return diarization
 
-    canonical = max(host_candidates, key=lambda l: total_dur[l])
+    canonical = max(host_candidates, key=lambda lbl: total_dur[lbl])
     remap = {label: canonical for label in host_candidates if label != canonical}
     if not remap:
         return diarization

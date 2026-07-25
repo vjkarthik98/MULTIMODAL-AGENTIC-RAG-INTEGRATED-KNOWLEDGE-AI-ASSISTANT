@@ -32,7 +32,7 @@ def audio_wer_batch(
         return MetricResult.empty("audio_wer", "no transcript pairs")
 
     wers = []
-    for hyp, ref in zip(transcripts, gold_transcripts):
+    for hyp, ref in zip(transcripts, gold_transcripts, strict=False):
         if not ref or ref in ("TODO_fill_from_official_transcript", "TODO"):
             continue
         wer = compute_wer(hyp, ref)

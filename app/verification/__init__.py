@@ -13,7 +13,7 @@ Two entry points:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.verification.citation_verifier import CitationVerifier
 from app.verification.completeness_verifier import CompletenessVerifier

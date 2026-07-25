@@ -342,7 +342,7 @@ async def compute_generation_metrics_ragas(
 
         # Phi-3-mini-4k-instruct judge — dedicated eval judge, outputs strict JSON.
         # Loads ~2.3GB alongside Mistral 7B on GPU.
-        run_config = RunConfig(max_workers=1, timeout=300)
+        RunConfig(max_workers=1, timeout=300)
         judge = get_judge()
         embeddings = HuggingfaceEmbeddings(model_name=app_settings.EMBEDDING_MODEL)
 

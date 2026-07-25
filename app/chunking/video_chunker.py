@@ -261,7 +261,7 @@ def caption_frame(image: PILImage.Image, prompt: str | None = None) -> str:
         inputs = processor(text=[text], images=[image], return_tensors="pt").to(device)
         with _torch.no_grad():
             out = model.generate(**inputs, max_new_tokens=settings.VIDEO_CAPTION_MAX_TOKENS)
-        generated_ids = [o[len(i) :] for i, o in zip(inputs.input_ids, out)]
+        generated_ids = [o[len(i) :] for i, o in zip(inputs.input_ids, out, strict=False)]
         return processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
     except Exception as exc:
         logger.warning(event="qwen2vl_caption_failed", error=str(exc))
@@ -288,9 +288,9 @@ def _caption_and_ocr_frame(frame_dict: dict) -> dict:
         return result
 
     try:
-        from PIL import Image as _PIL
+        from PIL import Image
 
-        img = _PIL.open(frame_path).convert("RGB")
+        img = Image.open(frame_path).convert("RGB")
     except Exception:
         return result
 

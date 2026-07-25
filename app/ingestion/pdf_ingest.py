@@ -157,10 +157,10 @@ def _content_hash(text: str) -> str:
 
 
 def _quality(text: str) -> float:
-    l = len(text)
-    if l < 50:
+    length = len(text)
+    if length < 50:
         return 0.2
-    if l < 200:
+    if length < 200:
         return 0.5
     return 1.0
 
@@ -591,7 +591,7 @@ def _table_to_nl_summary(md: str, page: int, table_title: str, doc_name: str = "
     """
     import re as _re_nl
 
-    lines = [l.strip() for l in md.strip().split("\n") if l.strip()]
+    lines = [ln.strip() for ln in md.strip().split("\n") if ln.strip()]
     if not lines:
         return ""
 
@@ -640,7 +640,7 @@ def _table_to_nl_summary(md: str, page: int, table_title: str, doc_name: str = "
         if not segment or not any(ch.isalpha() for ch in segment) or len(segment) > 70:
             continue
         val_parts: list[str] = []
-        for yr, idx in zip(year_cols, year_idxs):
+        for yr, idx in zip(year_cols, year_idxs, strict=False):
             if idx < len(cells):
                 v = cells[idx]
                 if not v or v in ("---", "—", ""):
@@ -742,7 +742,7 @@ class PdfIngestor(BaseIngestor):
             "class": self.__class__.__name__,
         }
 
-    async def extract(
+    async def extract(  # noqa: C901 -- known complexity debt (91), tracked follow-up refactor, not fixed inline to avoid changing tuned PDF extraction behavior
         self,
         path: Path,
         metadata: UniversalMetadata,
@@ -775,7 +775,7 @@ class PdfIngestor(BaseIngestor):
                 try:
                     pdf = fitz.open(repaired_path)
                 except Exception as exc:
-                    raise ValueError(f"PDF_CORRUPT_UNRECOVERABLE: {exc}")
+                    raise ValueError(f"PDF_CORRUPT_UNRECOVERABLE: {exc}") from exc
 
             total_pages = len(pdf)
             extracts: list[RawExtract] = []
@@ -1413,7 +1413,7 @@ async def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
                 doc_id = str(uuid.uuid4())
                 source_name = path.name
                 source_path_str = str(path.resolve())
-                fhash = _file_hash(file_path)
+                _file_hash(file_path)
 
                 # Security
                 if _is_pdf_encrypted(file_path):
@@ -1438,7 +1438,7 @@ async def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
                     try:
                         pdf = fitz.open(active_path)
                     except Exception as exc:
-                        raise ValueError(f"PDF_CORRUPT_UNRECOVERABLE: {exc}")
+                        raise ValueError(f"PDF_CORRUPT_UNRECOVERABLE: {exc}") from exc
 
                 total_pages = len(pdf)
                 documents: list[IngestedDocument] = []

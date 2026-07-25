@@ -11,12 +11,17 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from prometheus_client import Counter
+
 from app.core.config import settings
+from app.ingestion.base_ingest import BaseIngestor
 from app.ingestion.schema import (
     EmptyFileError,
     FileTooLargeError,
     IngestedDocument,
     Modality,
+    RawExtract,
+    UniversalMetadata,
     UnsupportedMimeError,
     build_universal_metadata,
     normalize_text,
@@ -156,7 +161,7 @@ def _safe_resolve(file_path: str) -> Path:
     try:
         path.relative_to(chroot)
     except ValueError:
-        raise ValueError(f"PATH_TRAVERSAL_BLOCKED: {path} is outside chroot {chroot}")
+        raise ValueError(f"PATH_TRAVERSAL_BLOCKED: {path} is outside chroot {chroot}") from None
     return path
 
 
@@ -245,7 +250,7 @@ def _load_audio(file_path: str) -> Any:
                 file=os.path.basename(file_path),
                 error=str(repair_exc),
             )
-        raise ValueError(f"CORRUPTED_FILE: {exc}")
+        raise ValueError(f"CORRUPTED_FILE: {exc}") from exc
     return audio
 
 
@@ -692,7 +697,7 @@ def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
     try:
         path = _safe_resolve(file_path)
     except ValueError as exc:
-        raise ValueError(str(exc))
+        raise ValueError(str(exc)) from exc
 
     _validate_audio_file(path)
     _check_disk_space(path)
@@ -1113,11 +1118,6 @@ async def async_ingest(file_path: str, session_id: str) -> list[IngestedDocument
 
 # ─── Phase 1: AudioIngestor ────────────────────────────────────────────────────
 
-from prometheus_client import Counter
-
-from app.ingestion.base_ingest import BaseIngestor
-from app.ingestion.schema import RawExtract, UniversalMetadata
-
 _EXTRACTS_TOTAL = Counter("magik_audio_extracts_total", "Total extracts produced by audio ingestor")
 _EXTRACT_ERRORS = Counter("magik_audio_extract_errors_total", "Errors in audio ingestor")
 
@@ -1166,7 +1166,7 @@ class AudioIngestor(BaseIngestor):
                 duration_s = len(audio) / 1000.0
             except Exception as exc:
                 if "DRM" in str(exc).upper() or "encrypted" in str(exc).lower():
-                    raise ValueError(f"DRM_PROTECTED_AUDIO: {path.name}")
+                    raise ValueError(f"DRM_PROTECTED_AUDIO: {path.name}") from exc
                 # Try ffmpeg repair path
                 try:
                     import subprocess
@@ -1179,13 +1179,13 @@ class AudioIngestor(BaseIngestor):
                         timeout=120,
                     )
                     if not Path(tmp).exists() or Path(tmp).stat().st_size == 0:
-                        raise ValueError(f"AUDIO_REPAIR_FAILED: {path.name}")
+                        raise ValueError(f"AUDIO_REPAIR_FAILED: {path.name}") from exc
                     from pydub import AudioSegment
 
                     audio = AudioSegment.from_wav(tmp)
                     duration_s = len(audio) / 1000.0
                 except Exception as repair_exc:
-                    raise ValueError(f"AUDIO_LOAD_FAILED: {repair_exc}")
+                    raise ValueError(f"AUDIO_LOAD_FAILED: {repair_exc}") from repair_exc
 
             if duration_s < 0.5:
                 raise ValueError(f"AUDIO_TOO_SHORT: {duration_s:.2f}s")

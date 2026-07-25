@@ -11,6 +11,7 @@ text_embedder.py (legacy pipeline path) is kept untouched alongside this.
 
 from __future__ import annotations
 
+import asyncio as _asyncio
 import hashlib
 import json
 import math
@@ -18,6 +19,7 @@ import re
 import time
 import unicodedata
 from abc import ABC, abstractmethod
+from pathlib import Path as _Path
 from typing import Any
 
 from app.core.config import settings
@@ -275,7 +277,7 @@ class BaseEmbedder(ABC):
             batch_docs = valid_docs[i : i + embedder.batch_size]
             try:
                 embs = embedder._encode_with_retry(embedder.model, batch_texts)
-                for doc, emb, txt in zip(batch_docs, embs, batch_texts):
+                for doc, emb, txt in zip(batch_docs, embs, batch_texts, strict=False):
                     if not valid_embedding(emb, embedder.expected_dim):
                         continue
                     doc.embedding = emb
@@ -338,7 +340,7 @@ class BaseEmbedder(ABC):
                 texts.append(t[:512])  # FinBERT max 512 tokens
             try:
                 preds = finbert(texts, truncation=True, max_length=512)
-                for doc, pred in zip(batch, preds):
+                for doc, pred in zip(batch, preds, strict=False):
                     struct = dict(getattr(doc, "structure", {}) or {})
                     struct["finance_tone"] = pred["label"].lower()
                     struct["finance_tone_score"] = round(float(pred["score"]), 4)
@@ -633,10 +635,10 @@ class TextEmbedder:
             to_encode = [(idx, t) for idx, t in enumerate(clean_batch) if t]
             encoded: dict[str, list[float]] = {}
             if to_encode:
-                indices, batch_texts = zip(*to_encode)
+                indices, batch_texts = zip(*to_encode, strict=False)
                 try:
                     embs = self._encode_with_retry(self.model, list(batch_texts))
-                    for idx, emb in zip(indices, embs):
+                    for idx, emb in zip(indices, embs, strict=False):
                         if valid_embedding(emb, self.expected_dim):
                             encoded[idx] = emb
                             _shared_cache.set(
@@ -690,7 +692,7 @@ class TextEmbedder:
             batch_docs = valid_docs[i : i + self.batch_size]
             try:
                 embs = self._encode_with_retry(self.model, batch_texts)
-                for doc, emb in zip(batch_docs, embs):
+                for doc, emb in zip(batch_docs, embs, strict=False):
                     if not valid_embedding(emb, self.expected_dim):
                         continue
                     doc.embedding = emb
@@ -756,9 +758,6 @@ class TextEmbedder:
 # MULTIMODAL EMBEDDER — text + vision orchestration
 # Moved from multimodal_embedder.py (now deleted).
 # ══════════════════════════════════════════════════════════════════════════════
-
-import asyncio as _asyncio
-from pathlib import Path as _Path
 
 
 class MultimodalEmbedderError(Exception):
@@ -964,7 +963,7 @@ class MultimodalEmbedder:
                 continue
             try:
                 emb_results = self.image_embedder.embed_batch(paths, session_id=session_id)
-                for doc, emb_result in zip(valid_docs, emb_results):
+                for doc, emb_result in zip(valid_docs, emb_results, strict=False):
                     emb_list = (
                         emb_result.embedding if hasattr(emb_result, "embedding") else emb_result
                     )

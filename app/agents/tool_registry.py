@@ -478,7 +478,7 @@ class ToolRegistry:
             return_exceptions=True,
         )
 
-        for name, result in zip(tasks.keys(), gathered):
+        for name, result in zip(tasks.keys(), gathered, strict=False):
             if isinstance(result, Exception):
                 logger.error(
                     "parallel_tool_failed",

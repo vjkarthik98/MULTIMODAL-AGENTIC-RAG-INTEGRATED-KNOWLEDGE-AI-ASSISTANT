@@ -962,7 +962,7 @@ class BaseBM25(ABC):
             self._load(user_id)
             before = len(self.documents)
             keep_d, keep_t = [], []
-            for doc, toks in zip(self.documents, self.tokenized_corpus):
+            for doc, toks in zip(self.documents, self.tokenized_corpus, strict=False):
                 if filename not in (getattr(doc, "source", "") or ""):
                     keep_d.append(doc)
                     keep_t.append(toks)
@@ -971,7 +971,9 @@ class BaseBM25(ABC):
             removed = before - len(self.documents)
             if removed:
                 self.bm25 = (
-                    BM25Plus(self.tokenized_corpus, k1=1.5, b=0.75) if self.tokenized_corpus else None
+                    BM25Plus(self.tokenized_corpus, k1=1.5, b=0.75)
+                    if self.tokenized_corpus
+                    else None
                 )
                 self._save(user_id)
             return removed
@@ -981,7 +983,7 @@ class BaseBM25(ABC):
             self._load(self.user_id)
             before = len(self.documents)
             keep_d, keep_t = [], []
-            for doc, toks in zip(self.documents, self.tokenized_corpus):
+            for doc, toks in zip(self.documents, self.tokenized_corpus, strict=False):
                 s = getattr(doc, "structure", {}) or {}
                 if s.get("session_id") != session_id:
                     keep_d.append(doc)
@@ -991,7 +993,9 @@ class BaseBM25(ABC):
             removed = before - len(self.documents)
             if removed:
                 self.bm25 = (
-                    BM25Plus(self.tokenized_corpus, k1=1.5, b=0.75) if self.tokenized_corpus else None
+                    BM25Plus(self.tokenized_corpus, k1=1.5, b=0.75)
+                    if self.tokenized_corpus
+                    else None
                 )
                 self._save(self.user_id)
             return removed

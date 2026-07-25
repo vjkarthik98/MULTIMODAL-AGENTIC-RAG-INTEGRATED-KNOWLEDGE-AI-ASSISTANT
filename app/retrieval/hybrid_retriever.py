@@ -789,7 +789,7 @@ class HybridRetriever:
 
     # MAIN SEARCH
 
-    def search(
+    def search(  # noqa: C901 -- known complexity debt (66), tracked follow-up refactor, not fixed inline to avoid changing tuned hybrid-retrieval behavior
         self,
         query: str,
         session_id: str,
@@ -836,7 +836,6 @@ class HybridRetriever:
             # +1 BM25 lookup at worst). Dense lane uses the original query
             # only — sentence-transformers already paraphrase well.
             bm25_res: list[dict] = []
-            seen_bm25_keys: set = set()
 
             # FINANCIAL TABLE EXPANSION — for financial queries, add NL-summary
             # targeted BM25 variants so financial_table_summary chunks surface
@@ -1438,7 +1437,7 @@ def _mmr(
 
     def _cos_sim(ea: list[float], eb: list[float]) -> float:
         try:
-            dot = sum(x * y for x, y in zip(ea, eb))
+            dot = sum(x * y for x, y in zip(ea, eb, strict=False))
             na = math.sqrt(sum(x * x for x in ea))
             nb = math.sqrt(sum(x * x for x in eb))
             return dot / (na * nb + 1e-9)

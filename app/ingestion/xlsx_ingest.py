@@ -239,10 +239,10 @@ def _file_hash(path: str) -> str:
 
 
 def _quality(text: str) -> float:
-    l = len(text)
-    if l < 50:
+    length = len(text)
+    if length < 50:
         return 0.2
-    if l < 200:
+    if length < 200:
         return 0.5
     return 1.0
 
@@ -441,7 +441,7 @@ def _build_stats_summary(sheet_name: str, non_empty: list[list[str]]) -> str | N
 def _extract_chart_text(ws: Any, sheet_name: str) -> list[str]:
     chart_texts: list[str] = []
     try:
-        for chart_idx, chart in enumerate(getattr(ws, "_charts", []) or []):
+        for _chart_idx, chart in enumerate(getattr(ws, "_charts", []) or []):
             try:
 
                 def _safe_str(v: Any) -> str:
@@ -551,7 +551,7 @@ class XlsxIngestor(BaseIngestor):
 
                 wb = openpyxl.load_workbook(file_path, data_only=True)
             except Exception as exc:
-                raise ValueError(f"CORRUPTED_FILE: {exc}")
+                raise ValueError(f"CORRUPTED_FILE: {exc}") from exc
 
             extracts: list[RawExtract] = []
 
@@ -923,7 +923,7 @@ async def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
 
                     wb = openpyxl.load_workbook(file_path, data_only=True)
                 except Exception as exc:
-                    raise ValueError(f"CORRUPTED_FILE: {exc}")
+                    raise ValueError(f"CORRUPTED_FILE: {exc}") from exc
 
                 documents: list[IngestedDocument] = []
                 doc_warnings: list[str] = []

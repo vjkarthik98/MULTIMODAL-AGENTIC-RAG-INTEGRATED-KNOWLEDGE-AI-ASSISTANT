@@ -5,6 +5,7 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
+import pytest
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -658,8 +659,10 @@ class Settings:
     MAX_FILE_SIZE_MB: int = _int("MAX_FILE_SIZE_MB", 500)
     UPLOAD_CHUNK_SIZE: int = _int("UPLOAD_CHUNK_SIZE", 1_048_576)
 
+    # Matches this Settings class's UPPER_CASE field convention (MAX_FILE_SIZE_*),
+    # not a function-naming mistake.
     @property
-    def FILE_SIZE_LIMITS(self) -> dict[str, int]:
+    def FILE_SIZE_LIMITS(self) -> dict[str, int]:  # noqa: N802
         return {
             "text": self.MAX_FILE_SIZE_TEXT,
             "pdf": self.MAX_FILE_SIZE_PDF,
@@ -979,8 +982,6 @@ def get_settings() -> Settings:
 # TESTS — Phase 24 Upgrade
 # Run: pytest app/core/config.py -v
 # ============================================================
-
-import pytest
 
 
 class TestSettings:

@@ -538,7 +538,7 @@ class WebSearchTool:
             pairs = [(query, doc[:512]) for doc in documents]
             scores = reranker.predict(pairs)
             ranked = sorted(
-                zip(scores, documents, sources + [""] * len(documents)),
+                zip(scores, documents, sources + [""] * len(documents), strict=False),
                 key=lambda x: x[0],
                 reverse=True,
             )

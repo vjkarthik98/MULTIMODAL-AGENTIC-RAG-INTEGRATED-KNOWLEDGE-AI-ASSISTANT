@@ -2,6 +2,7 @@
 PDF and DOCX retrieval eval — runs HybridRetriever.search() on PDF and DOCX gold rows,
 scores retrieval metrics, and merges results into rag_report.json.
 """
+
 from __future__ import annotations
 
 import json
@@ -26,6 +27,7 @@ def run_retrieval_for_modality(modality: str, cfg: EvalConfig):
     from app.core.infra_registry import infra
     from app.core.model_loader import model_loader
     from app.retrieval.hybrid_retriever import HybridRetriever
+
     retriever = HybridRetriever(
         bm25=infra.get_bm25(),
         vector_store=infra.get_vector_store(),
@@ -34,7 +36,11 @@ def run_retrieval_for_modality(modality: str, cfg: EvalConfig):
 
     gold_rows = load_gold(modality, gold_dir=cfg.gold_dir)
     # Filter: only rows with relevant_chunk_ids (not search-required)
-    gold_rows = [r for r in gold_rows if r.get("relevant_chunk_ids") and "SEARCH_REQUIRED" not in r.get("reference_answer", "")]
+    gold_rows = [
+        r
+        for r in gold_rows
+        if r.get("relevant_chunk_ids") and "SEARCH_REQUIRED" not in r.get("reference_answer", "")
+    ]
 
     if not gold_rows:
         print(f"[{modality.upper()}] No rows with relevant_chunk_ids — skipping retrieval.")
@@ -73,14 +79,18 @@ def run_retrieval_for_modality(modality: str, cfg: EvalConfig):
             if source and cid is not None:
                 retrieved_ids.append(f"{source}::chunk_{cid}")
 
-        eval_results.append({
-            "query_id": row["id"],
-            "relevant_ids": relevant_ids,
-            "retrieved_ids": retrieved_ids,
-            "latency": elapsed,
-        })
+        eval_results.append(
+            {
+                "query_id": row["id"],
+                "relevant_ids": relevant_ids,
+                "retrieved_ids": retrieved_ids,
+                "latency": elapsed,
+            }
+        )
         n_hit = len(set(retrieved_ids) & set(relevant_ids))
-        print(f"  [{row['id']}] retrieved={len(retrieved_ids)} relevant_hit={n_hit}/{len(relevant_ids)} latency={elapsed:.2f}s")
+        print(
+            f"  [{row['id']}] retrieved={len(retrieved_ids)} relevant_hit={n_hit}/{len(relevant_ids)} latency={elapsed:.2f}s"
+        )
 
     if not eval_results:
         return None
@@ -111,7 +121,7 @@ def main():
     for modality in ["pdf", "docx"]:
         print(f"\n{'='*50}")
         print(f"Running retrieval for: {modality.upper()}")
-        print('='*50)
+        print('=' * 50)
         result = run_retrieval_for_modality(modality, cfg)
         if result is None:
             print(f"[{modality.upper()}] No retrieval results.")

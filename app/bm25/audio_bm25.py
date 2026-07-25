@@ -97,7 +97,7 @@ class AudioBM25(BaseBM25):
             # Finance entity amplification
             fin_entities: dict = s.get("finance_entities") or {}
             if isinstance(fin_entities, dict):
-                for key, vals in fin_entities.items():
+                for _key, vals in fin_entities.items():
                     if isinstance(vals, list):
                         for v in vals[:4]:
                             parts.append(str(v))
