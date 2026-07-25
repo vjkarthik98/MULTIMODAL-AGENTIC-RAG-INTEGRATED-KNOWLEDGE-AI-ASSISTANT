@@ -80,6 +80,12 @@ jobs:
       # JWT_SECRET_KEY just to satisfy Settings.validate() at import time.
       ENV: test
       AUTH_ENABLED: "false"
+      # Settings.validate() also rejects the "CHANGE_ME_IN_PRODUCTION"
+      # default for SECRET_KEY/JWT_SECRET_KEY whenever ENV != "development",
+      # independent of AUTH_ENABLED above. Placeholder values only, never
+      # used to sign anything real.
+      SECRET_KEY: "ci-test-only-placeholder-secret-not-a-real-credential"
+      JWT_SECRET_KEY: "ci-test-only-placeholder-jwt-secret-not-a-real-credential"
     steps:
       - uses: actions/checkout@v4
 
