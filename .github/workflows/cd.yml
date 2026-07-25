@@ -52,8 +52,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Compiling the CUDA wheel is a build-time step (nvcc cross-compiles
-      # for sm_86) — does not need a physical GPU, works fine on this
-      # hosted runner. See Dockerfile's `cuda-builder` stage.
+      # for sm_89, L40S/g6e.xlarge) — does not need a physical GPU, works
+      # fine on this hosted runner. See Dockerfile's `cuda-builder` stage.
       - uses: docker/build-push-action@v5
         with:
           context: .

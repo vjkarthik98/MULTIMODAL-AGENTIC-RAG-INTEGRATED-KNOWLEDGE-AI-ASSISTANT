@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install_cuda.sh — Create rag_env and install all dependencies with CUDA support.
-# Target: AWS g5.xlarge (NVIDIA A10G 24 GB VRAM, CUDA 13.0 driver, Python 3.12)
+# Target: AWS g6e.xlarge (NVIDIA L40S 48 GB VRAM, CUDA 13.0 driver, Python 3.12)
 #
 # Key findings from installation:
 #   - Python 3.12 (system) is required — numba does not support Python 3.13 yet

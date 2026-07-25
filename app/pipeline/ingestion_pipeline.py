@@ -551,7 +551,10 @@ class _ProgressEmitter:
 # GPU SEMAPHORE — module-level, shared across all IngestionPipeline instances.
 # Prevents OOM when multiple users upload simultaneously — each concurrent GPU job
 # (embedding batch_size=128, Whisper 1.55GB, Qwen2-VL 2.2GB) adds to VRAM pressure.
-# Max 3 concurrent jobs leaves headroom on A10G 24GB with ~14GB resident models.
+# Max 3 concurrent jobs leaves headroom on the 24GB A10G card with ~14GB
+# resident models. Deliberately left unchanged on the g6e.xlarge/L40S (48GB)
+# migration pending real headroom measurement, per
+# docs/runbooks/phase-30-aws-deployment.md.
 _GPU_SEMAPHORE: asyncio.Semaphore | None = None
 
 

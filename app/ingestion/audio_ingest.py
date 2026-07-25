@@ -840,7 +840,10 @@ def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
         all_segments: list[dict[str, Any]] = []
 
         # Submit all chunks concurrently; CTranslate2 releases GIL during CUDA ops,
-        # so two Whisper large-v3 instances (×1.55 GB each) fit safely on A10G 24 GB.
+        # so two Whisper large-v3 instances (×1.55 GB each) fit safely within the
+        # VRAM budget. See AUDIO_TRANSCRIPTION_WORKERS in config.py — deliberately
+        # left unchanged on the g6e.xlarge/L40S (48GB) migration pending real
+        # headroom measurement, per docs/runbooks/phase-30-aws-deployment.md.
         chunk_results: list[tuple[int, list[Any], Any, float, float]] = []
         with ThreadPoolExecutor(max_workers=settings.AUDIO_TRANSCRIPTION_WORKERS) as pool:
             futures = {

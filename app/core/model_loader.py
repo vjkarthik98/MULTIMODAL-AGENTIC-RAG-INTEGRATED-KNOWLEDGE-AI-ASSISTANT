@@ -594,6 +594,12 @@ class ModelLoader:
         TrOCR, so the VLM only needs a short scene summary — the 2B model is more than
         enough and frees ~6 GB. Image modality keeps the 7B model (chart digitisation
         needs the accuracy); this is a separate singleton so the two never conflict.
+
+        NOTE re: the g6e.xlarge/L40S (48GB) migration — this VRAM constraint likely
+        no longer binds on the new card, but VIDEO_QWEN2_VL_MODEL is deliberately
+        left at 2B pending real hardware measurement (also needs re-validating the
+        separate, latency-motivated 180-token video caption budget alongside any
+        model-size change). See docs/runbooks/phase-30-aws-deployment.md.
         """
         if self._qwen2vl_v_model:
             return self._qwen2vl_v_processor, self._qwen2vl_v_model, self._qwen2vl_v_device
