@@ -1,7 +1,7 @@
 """
 Central device + dtype policy for the model layer.
 
-A10G 24 GB VRAM deploy target.
+L40S 48 GB VRAM deploy target (AWS g6e.xlarge).
 
 GPU models (all_gpu profile) — ALL models run on GPU:
   - Mistral 7B Q4_K_M          ~4.10 GB  (llama-cpp n_gpu_layers=-1)
@@ -12,8 +12,11 @@ GPU models (all_gpu profile) — ALL models run on GPU:
   - BGE-large-en-v1.5          ~1.35 GB  (float16)
   - BGE-reranker-large         ~1.34 GB  (float16)
   - TrOCR large-printed        ~1.40 GB  (float16)
-  Total static ≈ 15.3 GB  — fits in 24 GB with ~8.7 GB headroom
+  Total static ≈ 15.3 GB  — fits in 48 GB with ~32.7 GB headroom
   Peak (LLM KV cache 8192 ctx): ~18 GB
+  (figures above predate the Qwen2.5-14B/Qwen2-VL-7B upgrades documented in
+  CHANGELOG.md — kept as originally measured; the 48 GB budget has enough
+  margin that the exact static total isn't the binding constraint here.)
 
 CPU services (no VRAM needed — not models):
   - FastAPI / Uvicorn

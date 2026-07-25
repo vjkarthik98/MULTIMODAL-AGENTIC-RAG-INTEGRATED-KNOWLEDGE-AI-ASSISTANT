@@ -3,8 +3,8 @@
 # MAGIK image — multi-target build, select explicitly with `docker build --target <name>`
 # (Docker's implicit "last stage" default is NOT relied on here):
 #   `runtime`      — production, CUDA 12.8 + GPU-compiled llama-cpp-python,
-#                   matches the validated AWS g5.xlarge (A10G) setup in install_cuda.sh.
-#                   Used by `make docker-build` and cd.yml.
+#                   matches the validated AWS g6e.xlarge (L40S, 48GB) setup in
+#                   install_cuda.sh. Used by `make docker-build` and cd.yml.
 #   `dev-runtime`  — local contributor use via docker-compose: CPU-only, no CUDA base
 #                   image, no from-source compile — fast to build, matches the default
 #                   PyPI llama-cpp-python wheel's documented CPU (BLAS) behavior.
@@ -15,7 +15,7 @@
 # cache's manifest is incomplete, so a missing/wrong mount fails loudly.
 #
 # Building the CUDA wheel is a COMPILE-time step (nvcc cross-compiles for
-# sm_86) — it does not require a physical GPU, so `runtime` builds fine on
+# sm_89) — it does not require a physical GPU, so `runtime` builds fine on
 # ordinary GitHub-hosted runners. Only *running* it with real GPU inference
 # needs an actual NVIDIA GPU + nvidia-container-toolkit.
 
@@ -52,9 +52,10 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 FROM base-deps AS cuda-builder
 
 # Flags copied verbatim from requirements.txt's comment block / install_cuda.sh
-# (A10G = compute capability 8.6).
+# (L40S = compute capability 8.9, Ada Lovelace — was 86/A10G before the
+# g6e.xlarge migration).
 RUN CMAKE_ARGS="-DGGML_CUDA=on -DGGML_BACKEND_DL=OFF -DGGML_NATIVE=OFF \
-        -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc" \
+        -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc" \
     CUDACXX=/usr/local/cuda/bin/nvcc \
     CUDA_HOME=/usr/local/cuda \
     pip install "llama-cpp-python==0.3.30" --no-binary llama-cpp-python \

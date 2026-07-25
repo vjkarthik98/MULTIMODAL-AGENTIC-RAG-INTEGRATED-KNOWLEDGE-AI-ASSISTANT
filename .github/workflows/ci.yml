@@ -67,6 +67,17 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # requirements.txt's own header documents this: torch/torchvision/
+          # torchaudio must be installed explicitly BEFORE the rest, with the
+          # index matching the target hardware, because `pip install -r
+          # requirements.txt` alone resolves torch>=2.6 from PyPI's default
+          # index — which is a CUDA build pulling in triton + nvidia-cuda-*
+          # bindings. This hosted runner has no GPU/driver, and those CUDA
+          # bindings segfault (not a clean Python exception) the moment
+          # `import torch` touches torch._dynamo/triton at collection time.
+          # This step was simply missing here — invisible until now because
+          # `ruff` always failed first and the job never reached `pytest`.
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
           pip install -e ".[dev]"
 

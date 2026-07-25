@@ -3,7 +3,7 @@
 
 Single canonical launcher for both targets this project runs on:
   - Local CPU box (Windows/Mac/Linux laptop, no GPU)
-  - AWS g5.xlarge (Linux, NVIDIA A10G CUDA)
+  - AWS g6e.xlarge (Linux, NVIDIA L40S 48 GB CUDA)
 
 Device/OS branching happens INSIDE this script (mirrors the pattern already
 used by app/core/device_manager.py — detect, don't duplicate config), so
