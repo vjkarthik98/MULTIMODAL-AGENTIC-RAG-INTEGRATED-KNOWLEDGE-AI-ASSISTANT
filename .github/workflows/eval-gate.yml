@@ -97,6 +97,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # Same reasoning as ci.yml's lint-type-test job: this hosted runner
+          # has no GPU/driver, and a bare `pip install -r requirements.txt`
+          # resolves torch>=2.6 as a CUDA build from PyPI's default index —
+          # pin the CPU wheel explicitly first per requirements.txt's own
+          # header, since HybridRetriever here loads the BGE embedder
+          # in-process (torch import at collection/call time either way).
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
 
       # BM25 index for EVAL_USER_ID is gitignored local state (data/), not

@@ -19,11 +19,12 @@ python-dotenv>=1.0
 #    CPU-only box; device_manager.llm_gpu_layers() returns 0 automatically
 #    when torch.cuda.is_available() is False, so gguf_model.py runs Mistral-7B
 #    Q4_K_M on CPU with no code changes needed.
-# ── On a CUDA box (AWS g5.xlarge), the prebuilt wheel's dynamic backend
-#    registers 0 GPU devices → silent CPU fallback at ~5 tok/s. Rebuild from
-#    source against the system CUDA toolkit — see install_cuda.sh, or:
+# ── On a CUDA box (AWS g6e.xlarge / L40S), the prebuilt wheel's dynamic
+#    backend registers 0 GPU devices → silent CPU fallback at ~5 tok/s.
+#    Rebuild from source against the system CUDA toolkit — see
+#    install_cuda.sh, or:
 #   CMAKE_ARGS="-DGGML_CUDA=on -DGGML_BACKEND_DL=OFF -DGGML_NATIVE=OFF \
-#     -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc" \
+#     -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc" \
 #   CUDACXX=/usr/local/cuda-12.8/bin/nvcc CUDA_HOME=/usr/local/cuda-12.8 \
 #   pip install "llama-cpp-python==0.3.30" --no-binary llama-cpp-python --force-reinstall --no-cache-dir
 #
@@ -44,7 +45,7 @@ huggingface_hub>=0.22
 #
 #   CPU (local, no GPU):
 #     pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-#   CUDA (AWS g5.xlarge / A10G):
+#   CUDA (AWS g6e.xlarge / L40S):
 #     pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 \
 #       --index-url https://download.pytorch.org/whl/cu124
 #

@@ -47,7 +47,9 @@ _CHUNK_ERRORS = Counter(
 # Each table_row / table_summary RawExtract represents one complete table;
 # no row-batching is needed — we emit exactly one chunk per extract.
 
-# BLIP semaphore limits concurrent caption calls to stay within A10G 24 GB budget.
+# BLIP semaphore limits concurrent caption calls to stay within VRAM budget.
+# Deliberately left unchanged on the g6e.xlarge/L40S (48GB) migration pending
+# real headroom measurement, per docs/runbooks/phase-30-aws-deployment.md.
 _BLIP_SEMAPHORE = threading.Semaphore(2)
 
 

@@ -132,7 +132,7 @@ class Settings:
     PROMETHEUS_PORT: int = _int("PROMETHEUS_PORT", 9090)
     PROMETHEUS_METRICS_PATH: str = _str("PROMETHEUS_METRICS_PATH", "/metrics")
 
-    # PERFORMANCE — defaults tuned for AWS g5.xlarge A10G GPU deployment
+    # PERFORMANCE — defaults tuned for AWS g6e.xlarge L40S (48 GB) GPU deployment
     THREAD_POOL_SIZE: int = _int("THREAD_POOL_SIZE", 8)
     ASYNC_SEMAPHORE_WORKERS: int = _int("ASYNC_SEMAPHORE_WORKERS", 10)
     MAX_PARALLEL_REQUESTS: int = _int("MAX_PARALLEL_REQUESTS", 32)
@@ -203,10 +203,14 @@ class Settings:
     # Clear CUDA cache every N micro-batches during ingestion (OOM guard
     # without the per-chunk empty_cache+gc tax that dominated embed latency).
     INGESTION_CACHE_CLEAR_EVERY: int = _int("INGESTION_CACHE_CLEAR_EVERY", 25)
-    # Parallelism caps for heavy ML operations — keep within A10G VRAM budget
+    # Parallelism caps for heavy ML operations — keep within VRAM budget
     VIDEO_CAPTION_CONCURRENCY: int = _int("VIDEO_CAPTION_CONCURRENCY", 3)
     # Shared GPU semaphore — max concurrent ingestion jobs using GPU (embed/Whisper/Qwen2-VL).
-    # 3 jobs × peak ~3GB each = ~9GB working memory + ~14GB resident models = ~23GB on A10G.
+    # 3 jobs × peak ~3GB each = ~9GB working memory + ~14GB resident models = ~23GB.
+    # Tuned for the original 24GB A10G card. Left unchanged on the migration to the
+    # 48GB L40S (see docs/runbooks/phase-30-aws-deployment.md Stage 1 item 5) —
+    # deliberately NOT raised blind; raise only after watching real VRAM headroom on
+    # the actual box, then set the override in the box's .env (not this default).
     MAX_CONCURRENT_GPU_JOBS: int = _int("MAX_CONCURRENT_GPU_JOBS", 3)
     AUDIO_TRANSCRIPTION_WORKERS: int = _int("AUDIO_TRANSCRIPTION_WORKERS", 2)
     PDF_OCR_WORKERS: int = _int("PDF_OCR_WORKERS", 8)
@@ -236,9 +240,14 @@ class Settings:
     EXCEL_SEMANTIC_GROUP: bool = _bool("EXCEL_SEMANTIC_GROUP", True)
     AUDIO_SPEAKER_SUBINDEX_ENABLED: bool = _bool("AUDIO_SPEAKER_SUBINDEX_ENABLED", True)
 
-    # MODEL DEVICE / WARMUP — A10G 24 GB all_gpu profile (AWS g5.xlarge)
+    # MODEL DEVICE / WARMUP — target deploy is L40S 48 GB (AWS g6e.xlarge)
     # Profiles: "auto" (CUDA → all_gpu, else cpu), "hybrid", "all_gpu", "all_cpu"
     MODELS_DEVICE_PROFILE: str = _str("MODELS_DEVICE_PROFILE", "all_gpu")
+    # 22.0 was sized for the original 24GB A10G card (2GB safety margin).
+    # Per docs/runbooks/phase-30-aws-deployment.md Stage 1 item 4, the 48GB
+    # L40S value (46.0) is a box-level `.env` override, not a code default —
+    # this default merely caps usage (safe either way), so it's left as-is
+    # here rather than baked into a shared default that isn't hardware-pinned.
     VRAM_BUDGET_GB: float = _float("VRAM_BUDGET_GB", 22.0)
     WARMUP_AT_STARTUP: bool = _bool("WARMUP_AT_STARTUP", True)
     # LATENCY: eager-load ONLY the text query/ingest essentials at startup
@@ -287,6 +296,13 @@ class Settings:
     # total VRAM past the 24GB card → every later GPU alloc OOMs and the upload
     # fails before reaching Qdrant. Frames are a chart + ticker (verbatim text
     # already captured by TrOCR), so 2B is ample and frees ~6GB. Image keeps 7B.
+    # NOTE re: the g6e.xlarge/L40S (48GB) migration — this VRAM constraint likely
+    # no longer binds on the new card, but is deliberately left as 2B here rather
+    # than reverted blind: doing so also needs re-validating the separate,
+    # latency-motivated VIDEO_CAPTION_MAX_TOKENS=180 cut below (a 7B model at the
+    # 400-token still-image budget measured ~80s/frame — unworkable at ~20 frames
+    # for a 54-min call). Revisit both together once real hardware is available,
+    # per docs/runbooks/phase-30-aws-deployment.md's "don't tune blind" guidance.
     VIDEO_QWEN2_VL_MODEL: str = _str("VIDEO_QWEN2_VL_MODEL", "Qwen/Qwen2-VL-2B-Instruct")
     QWEN2_VL_LOAD_IN_8BIT: bool = _bool("QWEN2_VL_LOAD_IN_8BIT", False)
     QWEN2_VL_MAX_TOKENS: int = _int("QWEN2_VL_MAX_TOKENS", 400)
