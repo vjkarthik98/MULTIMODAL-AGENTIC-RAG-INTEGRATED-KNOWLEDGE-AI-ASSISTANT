@@ -111,7 +111,10 @@ class RedisMemory:
 
     def __init__(self) -> None:
         self._enabled: bool = settings.USE_REDIS
-        self.client = None
+        # Any: holds either an UpstashRedis or a redis.Redis client depending
+        # on config (see _connect() below) — genuinely runtime-determined,
+        # not a case a Union type would make more honest than Any.
+        self.client: Any = None
         self._use_upstash: bool = False
         self._redis_ok: bool = False
         self._fallback = _InMemoryStore(maxsize=settings.LRU_CACHE_MAXSIZE)

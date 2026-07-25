@@ -450,6 +450,30 @@ class BM25Document:
         "caption",
     ]
 
+    # See app/bm25/base_bm25.py's BM25Document for why these annotations
+    # exist (mypy needs class-level annotations to recognize __slots__
+    # attributes at all) and why `Any` (genuinely dynamic per-field content
+    # from from_payload(), not a case a narrower type would honestly capture).
+    text: Any
+    structure: Any
+    modality: Any
+    subtype: Any
+    source: Any
+    source_type: Any
+    chunk_id: Any
+    page: Any
+    sub_chunk_index: Any
+    total_sub_chunks: Any
+    heading_level: Any
+    sheet_name: Any
+    row_start: Any
+    row_end: Any
+    timestamp_start: Any
+    timestamp_end: Any
+    speaker: Any
+    frame_index: Any
+    caption: Any
+
     def __init__(self) -> None:
         # Initialise all slots to None so pickling never fails.
         for slot in self.__slots__:

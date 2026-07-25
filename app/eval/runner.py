@@ -188,28 +188,36 @@ class EvalRunner:
         if not thresholds:
             print("[WARN] thresholds.yaml not found or empty — skipping threshold check")
             return 0
-        if thresholds.get("gate_enabled") is False:
-            print(
-                "[GATE] gate_enabled: false — thresholds are informational only "
-                "(pending baseline v4). Skipping gate. Exit code 0."
-            )
-            return 0
+
+        global_gate = thresholds.get("gate_enabled", True)
+
+        def _section_gate(section_name: str) -> bool:
+            # A section's own `gate_enabled` overrides the global default —
+            # lets an individually re-baselined suite (retrieval — v4, real
+            # numbers) gate for real while suites still on a stale baseline
+            # (generation, e2e, behavioral, ... — see header) stay
+            # informational-only until each is re-baselined on its own.
+            section = thresholds.get(section_name)
+            if isinstance(section, dict) and "gate_enabled" in section:
+                return bool(section["gate_enabled"])
+            return bool(global_gate)
 
         breaches: list[str] = []
         errors: list[str] = []
+        any_gated = False
 
         for suite_name, suite_result in results.items():
-            if suite_result.breached:
-                for k, v in suite_result.breached.items():
-                    if "error" in k.lower():
-                        errors.append(f"{suite_name}.{k}: {v}")
-                    else:
-                        breaches.append(f"{suite_name}.{k}: {v}")
-
             for metric_name, m in suite_result.metrics.items():
                 if math.isnan(m.value):
                     continue  # skip uncomputed metrics
-                # Strip suite prefix for threshold lookup (e.g. "full.retrieval.recall_at_5")
+                # For the combined "full" suite, metric names are prefixed
+                # with their sub-suite ("retrieval.recall_at_5") — gate per
+                # sub-suite, not the umbrella "full" run.
+                section_name = metric_name.split(".")[0] if suite_name == "full" else suite_name
+                if not _section_gate(section_name):
+                    continue
+                any_gated = True
+
                 bare_name = metric_name.split(".")[-1]
                 threshold = self._find_threshold(thresholds, bare_name)
                 if not threshold:
@@ -231,6 +239,23 @@ class EvalRunner:
                     breaches.append(msg)
                     print(msg)
 
+            if suite_result.breached:
+                for k, v in suite_result.breached.items():
+                    section_name = k.split(".")[0] if suite_name == "full" else suite_name
+                    if not _section_gate(section_name):
+                        continue
+                    any_gated = True
+                    if "error" in k.lower():
+                        errors.append(f"{suite_name}.{k}: {v}")
+                    else:
+                        breaches.append(f"{suite_name}.{k}: {v}")
+
+        if not any_gated:
+            print(
+                "[GATE] gate_enabled: false for every evaluated suite/section — "
+                "thresholds are informational only. Skipping gate. Exit code 0."
+            )
+            return 0
         if errors:
             print(f"\n[GATE] Infrastructure/data errors: {len(errors)}")
             return 2

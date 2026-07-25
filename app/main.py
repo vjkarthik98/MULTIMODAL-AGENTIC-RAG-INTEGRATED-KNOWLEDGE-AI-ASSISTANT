@@ -720,8 +720,8 @@ def infra_health() -> dict[str, Any]:
 # TOOLS LIST — SECTION 4.9
 
 
-@app.get("/tools", tags=["Agents"])
-def list_tools() -> dict[str, Any]:
+@app.get("/tools", tags=["Agents"], response_model=None)
+def list_tools() -> dict[str, Any] | JSONResponse:
     try:
         from app.agents.tool_registry import ToolRegistry
 

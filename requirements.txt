@@ -242,6 +242,24 @@ PyYAML>=6.0
 
 
 
+# OPTIONAL — enhanced audio/image metadata, deliberately NOT hard requirements.
+# Both are already used behind `try: import X / except ImportError:` with a
+# graceful degraded fallback (app/ingestion/audio_ingest.py's mutagen-based
+# duration read; app/chunking/image_chunker.py + app/ingestion/image_ingest.py's
+# cairosvg SVG→PNG conversion) — this project ships under MIT (see LICENSE),
+# and mutagen (GPL-2.0-or-later) / CairoSVG (LGPL-3.0-or-later) are copyleft.
+# Neither is statically linked into anything distributed — they're used via
+# normal Python import, and installing them is an explicit opt-in a deployer
+# makes for themselves, not something this project bundles or redistributes.
+# Left uninstalled by default (uncomment to enable): a deployer with GPL/LGPL
+# license concerns gets full graceful degradation for free; one who wants the
+# extra fidelity opts in explicitly. See docs/runbooks/ci-cd.md's license-scan
+# section for the full reasoning (2026-07-25 review).
+# mutagen>=1.47      # GPL-2.0-or-later — audio duration fallback
+# cairosvg>=2.7       # LGPL-3.0-or-later — SVG chart/image → PNG conversion
+
+
+
 # DEV / TEST (install with: pip install -r requirements-dev.txt)
 # Listed here for reference only — not installed in production
 pytest>=8.1

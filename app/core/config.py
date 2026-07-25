@@ -211,6 +211,15 @@ class Settings:
     PDF_OCR_WORKERS: int = _int("PDF_OCR_WORKERS", 8)
     EMBEDDING_CACHE_TTL: int = _int("EMBEDDING_CACHE_TTL", 2_592_000)
     TEXT_EMBEDDING_DIM: int = _int("TEXT_EMBEDDING_DIM", 1024)
+    # Matryoshka Representation Learning truncation length for
+    # TextEmbedder.embed_matryoshka() (app/embeddings/base_embedder.py) — BGE-
+    # large-en-v1.5 supports MRL, so the first N dims of the full 1024-d
+    # vector are themselves a valid (lower-fidelity) embedding. 256 is BGE's
+    # own commonly-cited MRL truncation point (~4x smaller, modest recall
+    # loss) for a fast first-pass ANN search re-ranked with the full vector.
+    # Was previously referenced with no setting defined at all — an
+    # AttributeError waiting to happen the first time this method was called.
+    MATRYOSHKA_SHORT_DIM: int = _int("MATRYOSHKA_SHORT_DIM", 256)
     # BGE-large requires instruction prefix on queries only (not documents)
     BGE_QUERY_INSTRUCTION: str = _str(
         "BGE_QUERY_INSTRUCTION", "Represent this sentence for searching relevant passages: "

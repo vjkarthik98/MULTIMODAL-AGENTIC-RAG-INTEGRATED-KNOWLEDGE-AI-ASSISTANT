@@ -137,10 +137,10 @@ class TxtBM25(BaseBM25):
     # ── Sub-index path helpers ────────────────────────────────────────────────
 
     def _sub_path(self, role_tag: str, user_id: str | None = None) -> Path:
-        from app.utils.paths import user_data_dir
+        from app.utils.paths import user_dir
 
         uid = user_id or self._loaded_user_id or "default"
-        return user_data_dir(uid) / "bm25_index" / f"txt_{role_tag}.pkl"
+        return user_dir(uid) / "bm25_index" / f"txt_{role_tag}.pkl"
 
     # ── Override add_documents to also populate sub-indexes ──────────────────
 

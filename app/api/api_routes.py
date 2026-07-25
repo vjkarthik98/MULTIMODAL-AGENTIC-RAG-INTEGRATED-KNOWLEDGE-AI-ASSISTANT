@@ -1582,14 +1582,14 @@ async def stream_query(
 # UPLOAD
 
 
-@router.post("/upload")
+@router.post("/upload", response_model=None)
 async def upload_file(
     request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     session_id: str = Form("default"),
     current_user: UserPublic = Depends(get_current_user),
-) -> dict[str, Any]:
+) -> dict[str, Any] | JSONResponse:
     start = time.time()
     request_id = _request_id()
     file_path: Path | None = None
@@ -2354,11 +2354,16 @@ async def delete_all_chat_sessions(
         mongo = infra.get_mongo()
         count = await asyncio.to_thread(mongo.delete_all_chat_sessions, user_id) if mongo else 0
 
-        # Also flush Redis short-term memory for this user
+        # Also flush Redis short-term memory for this user. Was previously
+        # calling infra.get_redis_memory() (doesn't exist — InfraRegistry
+        # only has get_memory()) and RedisMemory.delete_all_user_sessions()
+        # (doesn't exist either — purge_user() is the real method) — silently
+        # swallowed by the except below, so this had never actually flushed
+        # Redis on session deletion; a real privacy/data-hygiene gap.
         try:
-            redis_mem = infra.get_redis_memory()
+            redis_mem = infra.get_memory()
             if redis_mem:
-                await asyncio.to_thread(redis_mem.delete_all_user_sessions, user_id)
+                await asyncio.to_thread(redis_mem.purge_user, user_id)
         except Exception:
             pass
 

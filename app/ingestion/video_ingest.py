@@ -182,7 +182,7 @@ def _sha256(file_path: str) -> str:
 
 
 def _frame_hash(path: str) -> str:
-    h = hashlib.md5()
+    h = hashlib.md5(usedforsecurity=False)  # duplicate-frame detection, not a security hash
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
@@ -1423,7 +1423,7 @@ class VideoIngestor(BaseIngestor):
             try:
                 probe_result = subprocess.run(
                     [
-                        "ffprobe",
+                        _resolve_ffprobe(),
                         "-v",
                         "error",
                         "-print_format",

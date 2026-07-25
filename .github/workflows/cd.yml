@@ -158,6 +158,18 @@ jobs:
   post-deploy-eval:
     needs: deploy
     runs-on: ubuntu-latest
+    # Job-level override: the workflow-level default above is `contents:
+    # read`. repository_dispatch's underlying REST call (POST /repos/{owner}/
+    # {repo}/dispatches) needs `contents: write` on the token even for a
+    # same-repo dispatch (confirmed against GitHub's own docs/community
+    # guidance, 2026-07-25 — see docs/runbooks/ci-cd.md) — without this the
+    # dispatch call 403s and Tier-2 silently never fires. GITHUB_TOKEN itself
+    # is fine here (no PAT needed): the "GITHUB_TOKEN can't trigger other
+    # workflows" restriction has an explicit exception for repository_dispatch
+    # and workflow_dispatch, and a same-repo dispatch doesn't need the
+    # cross-repo `repo`-scoped PAT that a remote-repo dispatch would.
+    permissions:
+      contents: write
     steps:
       - name: Dispatch Tier-2 full eval suite
         uses: peter-evans/repository-dispatch@v3

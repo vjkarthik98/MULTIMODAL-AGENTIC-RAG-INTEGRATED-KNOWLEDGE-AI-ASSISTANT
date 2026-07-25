@@ -105,6 +105,14 @@ jobs:
         # Exit code IS the gate (runner.check_thresholds()) — no separate
         # --gate flag exists in app/eval/run.py. Non-zero fails this job,
         # which GitHub branch protection should mark as a required check.
+        #
+        # thresholds.yaml's `gate_enabled` is per-section, not just a single
+        # global switch: `retrieval.gate_enabled: true` (baseline v4, real
+        # n=56 run, 2026-07-24) is what actually makes this job block — the
+        # top-level `gate_enabled: false` is the default for every OTHER
+        # suite (generation/e2e/behavioral/...), which are still on a stale
+        # pre-Prometheus baseline and stay informational until each is
+        # re-baselined on its own. See thresholds.yaml's header comment.
 
       # Pipeline observability, not RAG-quality dashboards (that's Phase 31 /
       # Grafana): surfaces pass/fail + metrics directly on the PR's Actions
@@ -167,12 +175,17 @@ jobs:
       - name: Full suite (retrieval + generation + behavioral + routing + e2e + ocr/audio/video + regression)
         id: full_suite
         run: python -m app.eval.run --suite full
-        # thresholds.yaml currently has gate_enabled: false (stale v3 baseline
-        # retired — judge changed to Prometheus-2-7B, gold set 14->164 rows).
-        # Until baseline v4 is recorded and gate_enabled flips true, this
-        # step's exit code is always 0 (informational only) — see
-        # docs/runbooks/ci-cd.md for the re-baseline procedure. Once enabled,
-        # a non-zero exit here should trigger the rollback path in cd.yml.
+        # The `full` suite includes retrieval, which IS gated now
+        # (retrieval.gate_enabled: true, baseline v4 — see eval-gate.yml's
+        # tier1 job comment). Every other sub-suite here (generation, e2e,
+        # behavioral, ocr, audio, video, routing) is still on the stale v3
+        # baseline (pre-Prometheus-2-7B judge, pre-164-row gold set) and
+        # stays informational-only via thresholds.yaml's own per-section
+        # gate_enabled — this step can still fail today, but only on a real
+        # retrieval regression, not on unverified generation-suite numbers.
+        # See docs/runbooks/ci-cd.md for the re-baseline procedure for the
+        # remaining sections. Once each is enabled, a non-zero exit here
+        # should trigger the rollback path in cd.yml.
 
       - name: Post report to job summary
         if: always()

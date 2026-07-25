@@ -90,11 +90,11 @@ def _get_easyocr_reader() -> Any:
     return _easyocr_reader
 
 
-# SHA256 FILE HASH
+# MD5 FILE HASH
 
 
 def _file_hash(file_path: str) -> str:
-    h = hashlib.md5()
+    h = hashlib.md5(usedforsecurity=False)  # content dedup key, not a security hash
     with open(file_path, "rb") as f:
         for chunk in iter(lambda: f.read(8192), b""):
             h.update(chunk)

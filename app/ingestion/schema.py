@@ -705,49 +705,13 @@ class QueryResponse(BaseModel):
         }
 
 
-# FACTORY HELPERS
-
-
-def ok(
-    modality: str,
-    session_id: str,
-    latency: float,
-    chunks: int = 0,
-    stored: int = 0,
-    source: str = "",
-    metadata: UniversalMetadata | None = None,
-    warnings: list[str] | None = None,
-) -> ProcessingResult:
-    return ProcessingResult(
-        success=True,
-        modality=modality,
-        session_id=session_id,
-        latency=latency,
-        chunks=chunks,
-        stored=stored,
-        source=source,
-        metadata=metadata,
-        warnings=warnings or [],
-    )
-
-
-def err(
-    code: str,
-    message: str,
-    modality: str = "unknown",
-    session_id: str = "default",
-    latency: float = 0.0,
-    severity: str = "medium",
-    field: str | None = None,
-) -> ProcessingResult:
-    result = ProcessingResult(
-        success=False,
-        modality=modality,
-        session_id=session_id,
-        latency=latency,
-    )
-    result.errors.append(ErrorDetail(code=code, message=message, severity=severity, field=field))
-    return result
+# Note: this module previously had its own `ok()`/`err()` "factory helpers"
+# for ProcessingResult here. Both were dead (zero callers anywhere in app/)
+# and both broken — ProcessingResult (app/core/response.py) doesn't accept a
+# `success` kwarg (it's hardcoded True) and has no `.errors` attribute, so
+# either would have raised immediately if ever called. Removed rather than
+# fixed: they duplicated app/core/response.py's own working
+# validation_ok()/validation_err(), which is what real ingestion callers use.
 
 
 def validation_ok(

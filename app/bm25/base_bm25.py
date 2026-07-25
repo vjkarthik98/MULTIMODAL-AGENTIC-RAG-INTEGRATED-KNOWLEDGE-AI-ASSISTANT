@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import pickle
 import re
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections import Counter
@@ -386,6 +387,34 @@ class BM25Document:
         "caption",
     ]
 
+    # __slots__ (above) is what actually governs instance attribute storage,
+    # but mypy only recognizes slotted attributes it can also see as class-
+    # level annotations — without these, every access anywhere in the
+    # codebase (from_payload, _metadata, search results, ...) was flagged
+    # "BM25Document has no attribute X". `Any` (not e.g. `str | None`)
+    # because __init__ sets every slot to None generically and from_payload()
+    # assigns whatever the source payload dict happens to contain per field
+    # — genuinely dynamic, not a case where a narrower type would be honest.
+    text: Any
+    structure: Any
+    modality: Any
+    subtype: Any
+    source: Any
+    source_type: Any
+    chunk_id: Any
+    page: Any
+    sub_chunk_index: Any
+    total_sub_chunks: Any
+    heading_level: Any
+    sheet_name: Any
+    row_start: Any
+    row_end: Any
+    timestamp_start: Any
+    timestamp_end: Any
+    speaker: Any
+    frame_index: Any
+    caption: Any
+
     def __init__(self) -> None:
         for slot in self.__slots__:
             setattr(self, slot, None)
@@ -462,6 +491,18 @@ class BaseBM25(ABC):
         self.max_docs: int = settings.BM25_MAX_DOCS
         self._index_loaded: bool = False
         self._loaded_user_id: str | None = None
+        # Guards load-modify-save on self.documents/tokenized_corpus. Today's
+        # only production callers (api_routes.py) instantiate a fresh
+        # BM25AggregatorRetriever per request, so this class-level bug never
+        # manifested live — but it is the exact same latent defect that was
+        # found and fixed in app/retrieval/bm25_retriever.py's BM25Retriever
+        # (the process-wide infra.get_bm25() singleton): without a lock,
+        # concurrent add_documents() calls interleave their load-append-save
+        # cycles and silently lose each other's writes. Fixed here too so any
+        # future caller that reuses/pools instances (e.g. wiring this into
+        # infra_registry as a singleton) doesn't reintroduce the same bug
+        # class in a second file.
+        self._write_lock = threading.Lock()
 
     # ── Index file path ───────────────────────────────────────────────────────
 
@@ -679,39 +720,43 @@ class BaseBM25(ABC):
     def build_index(self, documents: list[Any], user_id: str | None = None) -> None:
         if not documents:
             return
-        start = time.time()
-        self.documents = []
-        self.tokenized_corpus = []
-        self.bm25 = None
-        seen: set[str] = set()
+        with self._write_lock:
+            start = time.time()
+            self.documents = []
+            self.tokenized_corpus = []
+            self.bm25 = None
+            self._index_loaded = False
+            seen: set[str] = set()
 
-        for doc in documents[: self.max_docs]:
-            try:
-                text = getattr(doc, "text", "")
-                if not text:
-                    continue
-                h = self._hash(text[: settings.BM25_MAX_TEXT_CHARS])
-                if h in seen:
-                    continue
-                seen.add(h)
-                tokens = self.tokenize(self._build_indexed_text(doc))
-                if not tokens:
-                    continue
-                self.documents.append(doc)
-                self.tokenized_corpus.append(tokens)
-            except Exception as exc:
-                logger.warning(event="bm25_doc_skip", modality=self.modality, error=str(exc))
+            for doc in documents[: self.max_docs]:
+                try:
+                    text = getattr(doc, "text", "")
+                    if not text:
+                        continue
+                    h = self._hash(text[: settings.BM25_MAX_TEXT_CHARS])
+                    if h in seen:
+                        continue
+                    seen.add(h)
+                    tokens = self.tokenize(self._build_indexed_text(doc))
+                    if not tokens:
+                        continue
+                    self.documents.append(doc)
+                    self.tokenized_corpus.append(tokens)
+                except Exception as exc:
+                    logger.warning(event="bm25_doc_skip", modality=self.modality, error=str(exc))
 
-        if not self.tokenized_corpus:
-            return
-        self.bm25 = BM25Plus(self.tokenized_corpus, k1=1.5, b=0.75)
-        self._save(user_id)
-        logger.info(
-            event="bm25_index_built",
-            modality=self.modality,
-            docs=len(self.documents),
-            latency=round(time.time() - start, 2),
-        )
+            if not self.tokenized_corpus:
+                return
+            self.bm25 = BM25Plus(self.tokenized_corpus, k1=1.5, b=0.75)
+            self._save(user_id)
+            self._index_loaded = True
+            self._loaded_user_id = user_id or self.user_id
+            logger.info(
+                event="bm25_index_built",
+                modality=self.modality,
+                docs=len(self.documents),
+                latency=round(time.time() - start, 2),
+            )
 
     # ── Incremental add ───────────────────────────────────────────────────────
 
@@ -723,6 +768,23 @@ class BaseBM25(ABC):
     ) -> None:
         if not documents:
             return
+        with self._write_lock:
+            # Every caller today (BM25AggregatorRetriever) constructs a fresh
+            # per-modality instance per request, so self.documents starts
+            # empty. Without loading the existing on-disk index first, this
+            # save() would overwrite it with just the new batch — silently
+            # discarding every previously indexed document for this user +
+            # modality. Same class of bug as BM25Retriever.add_documents()
+            # (app/retrieval/bm25_retriever.py), fixed the same way here.
+            self._load(user_id)
+            self._add_documents_locked(documents, session_id, user_id)
+
+    def _add_documents_locked(
+        self,
+        documents: list[Any],
+        session_id: str,
+        user_id: str | None,
+    ) -> None:
         start = time.time()
         added = 0
         seen: set[str] = {
@@ -800,7 +862,14 @@ class BaseBM25(ABC):
         filters: dict[str, Any] | None = None,
         user_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        if not self.bm25:
+        # Always delegate to _load(), not `if not self.bm25:` — the latter
+        # only loads once per instance lifetime, so if this instance is ever
+        # reused/pooled across users (unlike today's fresh-per-request
+        # BM25AggregatorRetriever), every user after the first would
+        # silently search the first user's private index. _load() itself
+        # no-ops cheaply when _loaded_user_id already matches. Same fix as
+        # BM25Retriever.search() (app/retrieval/bm25_retriever.py).
+        with self._write_lock:
             self._load(user_id)
         if not self.bm25 or not query:
             return []
@@ -886,39 +955,46 @@ class BaseBM25(ABC):
     # ── Delete / purge / clear ────────────────────────────────────────────────
 
     def delete_by_source(self, filename: str, user_id: str | None = None) -> int:
-        before = len(self.documents)
-        keep_d, keep_t = [], []
-        for doc, toks in zip(self.documents, self.tokenized_corpus):
-            if filename not in (getattr(doc, "source", "") or ""):
-                keep_d.append(doc)
-                keep_t.append(toks)
-        self.documents = keep_d
-        self.tokenized_corpus = keep_t
-        removed = before - len(self.documents)
-        if removed:
-            self.bm25 = (
-                BM25Plus(self.tokenized_corpus, k1=1.5, b=0.75) if self.tokenized_corpus else None
-            )
-            self._save(user_id)
-        return removed
+        with self._write_lock:
+            # Same fresh-instance gap as add_documents(): without loading
+            # first, self.documents is empty and this always finds nothing
+            # to remove — a silent no-op masquerading as success.
+            self._load(user_id)
+            before = len(self.documents)
+            keep_d, keep_t = [], []
+            for doc, toks in zip(self.documents, self.tokenized_corpus):
+                if filename not in (getattr(doc, "source", "") or ""):
+                    keep_d.append(doc)
+                    keep_t.append(toks)
+            self.documents = keep_d
+            self.tokenized_corpus = keep_t
+            removed = before - len(self.documents)
+            if removed:
+                self.bm25 = (
+                    BM25Plus(self.tokenized_corpus, k1=1.5, b=0.75) if self.tokenized_corpus else None
+                )
+                self._save(user_id)
+            return removed
 
     def purge_by_session(self, session_id: str) -> int:
-        before = len(self.documents)
-        keep_d, keep_t = [], []
-        for doc, toks in zip(self.documents, self.tokenized_corpus):
-            s = getattr(doc, "structure", {}) or {}
-            if s.get("session_id") != session_id:
-                keep_d.append(doc)
-                keep_t.append(toks)
-        self.documents = keep_d
-        self.tokenized_corpus = keep_t
-        removed = before - len(self.documents)
-        if removed:
-            self.bm25 = (
-                BM25Plus(self.tokenized_corpus, k1=1.5, b=0.75) if self.tokenized_corpus else None
-            )
-            self._save()
-        return removed
+        with self._write_lock:
+            self._load(self.user_id)
+            before = len(self.documents)
+            keep_d, keep_t = [], []
+            for doc, toks in zip(self.documents, self.tokenized_corpus):
+                s = getattr(doc, "structure", {}) or {}
+                if s.get("session_id") != session_id:
+                    keep_d.append(doc)
+                    keep_t.append(toks)
+            self.documents = keep_d
+            self.tokenized_corpus = keep_t
+            removed = before - len(self.documents)
+            if removed:
+                self.bm25 = (
+                    BM25Plus(self.tokenized_corpus, k1=1.5, b=0.75) if self.tokenized_corpus else None
+                )
+                self._save(self.user_id)
+            return removed
 
     def clear(self, user_id: str | None = None) -> None:
         self.documents = []

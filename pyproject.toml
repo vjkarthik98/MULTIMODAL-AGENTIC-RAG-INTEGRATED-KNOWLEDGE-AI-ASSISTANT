@@ -135,8 +135,14 @@ typecheck = [
     "mypy>=1.9",
 ]
 
+security = [
+    "pip-audit>=2.7",    # dependency CVE scan (requirements.txt) — see .github/workflows/security.yml
+    "bandit>=1.7",       # SAST — common Python vulnerability patterns in app/
+    "pip-licenses>=4.4", # dependency license scan — flags copyleft/unknown licenses
+]
+
 dev = [
-    "multimodal-rag-assistant[test,lint,typecheck]",
+    "multimodal-rag-assistant[test,lint,typecheck,security]",
     "pre-commit>=3.7",
     "detect-secrets>=1.5",
 ]
@@ -307,3 +313,15 @@ exclude_lines = [
     "raise NotImplementedError",
     "if __name__ == .__main__.:",
 ]
+
+
+# BANDIT — SAST, see .github/workflows/security.yml
+# Scope matches ruff/black/isort: app/ only (ui/ is JS, tests/ is test code
+# where e.g. B101 assert-usage and hardcoded dummy passwords are expected).
+[tool.bandit]
+exclude_dirs = ["tests", "ui", ".venv", "rag_env"]
+# B104 (bind-all-interfaces) and B108 (hardcoded tmp path) are noisy in a
+# containerized app that's deliberately meant to bind 0.0.0.0 inside Docker
+# and use predictable paths under a controlled /app tree — skip only these
+# two, keep everything else (injection, weak crypto, eval/exec, etc.) live.
+skips = ["B104", "B108"]

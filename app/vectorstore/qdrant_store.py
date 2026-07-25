@@ -1,7 +1,7 @@
 import math
 import time
 import uuid
-from typing import Any, Optional
+from typing import Any, Optional, TypeGuard
 
 import numpy as np
 from opentelemetry import trace
@@ -9,6 +9,7 @@ from opentelemetry.trace import Status, StatusCode
 from prometheus_client import Counter, Gauge, Histogram
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
+    Condition,
     Distance,
     FieldCondition,
     Filter,
@@ -279,7 +280,13 @@ class QdrantVectorStore:
 
     # EMBEDDING VALIDATION
 
-    def _valid_vector(self, emb: list[float], expected_dim: int) -> bool:
+    def _valid_vector(self, emb: Any, expected_dim: int) -> "TypeGuard[list[float]]":
+        # TypeGuard, not just bool: both call sites use `if not
+        # self._valid_vector(emb, dim): continue`, and emb's actual runtime
+        # type is Any | None (from getattr(d, "embedding", None)) — this
+        # lets mypy narrow emb to list[float] for the PointStruct(vector=emb)
+        # call right after, matching what the isinstance check below already
+        # guarantees at runtime.
         if not isinstance(emb, list):
             return False
         if len(emb) != expected_dim:
@@ -1008,13 +1015,46 @@ class QdrantVectorStore:
                     error=str(exc),
                 )
 
+    def delete_by_ids(self, point_ids: list[str]) -> None:
+        """Delete specific points by their Qdrant point ID (not doc_id/payload
+        field) — for a caller that already resolved exact point IDs via a
+        prior search (e.g. api_routes.py's KB-delete-by-file-hash endpoint,
+        which filters search results down to a specific user's chunks first).
+        Was previously called with no such method existing on this class at
+        all — every call site crashed with AttributeError, always caught by
+        a broad except and surfaced as a generic 500."""
+        if not point_ids:
+            return
+
+        for collection in (self.text_collection, self.vision_collection):
+            if collection not in self._collection_cache:
+                continue
+            try:
+                self._retry(
+                    self.client.delete,
+                    collection_name=collection,
+                    points_selector=point_ids,
+                )
+                logger.info(
+                    "qdrant_points_deleted",
+                    count=len(point_ids),
+                    collection=collection,
+                )
+            except Exception as exc:
+                logger.error(
+                    "qdrant_delete_by_ids_failed",
+                    count=len(point_ids),
+                    collection=collection,
+                    error=str(exc),
+                )
+
     # GDPR PURGE — DELETE ALL CHUNKS BY USER_ID OR SESSION_ID
 
     def gdpr_purge(self, user_id: str | None = None, session_id: str | None = None) -> None:
         if not user_id and not session_id:
             raise ValueError("GDPR_PURGE_REQUIRES_USER_ID_OR_SESSION_ID")
 
-        conditions = []
+        conditions: list[Condition] = []
         if session_id:
             conditions.append(FieldCondition(key="session_id", match=MatchValue(value=session_id)))
         if user_id:
@@ -1062,7 +1102,9 @@ class QdrantVectorStore:
                 "TENANT_ISOLATION_VIOLATION: user_id is required to search or filter Qdrant"
             )
 
-        conditions = [FieldCondition(key="user_id", match=MatchValue(value=user_id))]
+        conditions: list[Condition] = [
+            FieldCondition(key="user_id", match=MatchValue(value=user_id))
+        ]
 
         # session_id is a correlation/tracing field stored in the payload; it is
         # NOT used as a retrieval filter. Documents are ingested with session_id
@@ -1115,7 +1157,9 @@ class QdrantVectorStore:
             try:
                 base_filter = self._build_filter(session_id, exclude_deleted, user_id)
                 if extra_filter is not None and base_filter is not None:
-                    merged_must = list(base_filter.must or []) + list(extra_filter.must or [])
+                    merged_must: list[Condition] = list(base_filter.must or []) + list(
+                        extra_filter.must or []
+                    )
                     from qdrant_client.models import Filter as _Filter
 
                     query_filter = _Filter(must=merged_must) if merged_must else None
@@ -1198,7 +1242,7 @@ class QdrantVectorStore:
     def search_text(
         self,
         query_vector: list[float],
-        limit: int = None,
+        limit: int | None = None,
         session_id: str | None = None,
         score_threshold: float = 0.0,
         user_id: str | None = None,
@@ -1221,7 +1265,7 @@ class QdrantVectorStore:
     def search_text_alt(
         self,
         query_vector: list[float],
-        limit: int = None,
+        limit: int | None = None,
         session_id: str | None = None,
         user_id: str | None = None,
         extra_filter: Optional["Filter"] = None,
@@ -1244,7 +1288,7 @@ class QdrantVectorStore:
         limit = limit or settings.RAG_TOP_K
         try:
             base_filter = self._build_filter(session_id, True, user_id)
-            conditions = list(base_filter.must) if base_filter else []
+            conditions: list[Condition] = list(base_filter.must) if base_filter and base_filter.must else []
             if extra_filter is not None:
                 conditions += list(extra_filter.must or [])
             scroll_filter = Filter(must=conditions) if conditions else None
@@ -1289,7 +1333,7 @@ class QdrantVectorStore:
     def search_vision(
         self,
         query_vector: list[float],
-        limit: int = None,
+        limit: int | None = None,
         session_id: str | None = None,
         score_threshold: float = 0.0,
         user_id: str | None = None,
@@ -1350,7 +1394,12 @@ class QdrantVectorStore:
         field: str,
         value: str,
         user_id: str = "",
-        session_id: str = "",
+        # Accepted for API-shape symmetry with other search_* methods but not
+        # currently wired into the scroll filter below — some callers
+        # legitimately pass None (no session scoping wanted), which a `str`
+        # annotation didn't actually permit even though the body never reads
+        # this value either way.
+        session_id: str | None = "",
         limit: int = 1,
     ) -> list[Any]:
         if not user_id:
@@ -1404,7 +1453,11 @@ class QdrantVectorStore:
                 info = self.client.get_collection(name)
                 stats[name] = {
                     "points_count": info.points_count,
-                    "vectors_count": info.vectors_count,
+                    # `vectors_count` was removed from qdrant-client's
+                    # CollectionInfo model (this call previously always threw,
+                    # silently swallowed by the except below and reported as
+                    # {"error": ...} instead of real stats).
+                    "indexed_vectors_count": info.indexed_vectors_count,
                     "status": str(info.status),
                 }
             except Exception as exc:
@@ -1428,6 +1481,14 @@ def initialize_qdrant() -> None:
     from app.core.infra_registry import infra
 
     store = infra.get_vector_store()
+    if store is None:
+        # get_vector_store() returns None on a construction failure or an
+        # open circuit breaker — this is explicit startup init, so surface
+        # that clearly instead of a confusing NoneType AttributeError.
+        raise RuntimeError(
+            "QDRANT_UNAVAILABLE: could not obtain a QdrantVectorStore instance "
+            "during startup init (see preceding qdrant_init_failed/circuit-breaker logs)"
+        )
     store._ensure_collection(settings.TEXT_COLLECTION_NAME, settings.TEXT_EMBEDDING_DIM)
     store._ensure_collection(settings.VISION_COLLECTION_NAME, settings.VISION_EMBEDDING_DIM)
     logger.info("qdrant_init_complete")

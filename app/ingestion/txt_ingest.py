@@ -479,7 +479,7 @@ def _simhash(text: str) -> int:
     tokens = text.lower().split()
     v = [0] * 64
     for token in tokens:
-        h = int(hashlib.md5(token.encode()).hexdigest(), 16)
+        h = int(hashlib.md5(token.encode(), usedforsecurity=False).hexdigest(), 16)  # simhash bucket, not security
         for i in range(64):
             if h & (1 << i):
                 v[i] += 1

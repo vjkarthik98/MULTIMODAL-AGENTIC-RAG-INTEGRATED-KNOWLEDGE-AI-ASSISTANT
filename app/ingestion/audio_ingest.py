@@ -93,7 +93,7 @@ def _sha256_check(path: Path) -> str:
 
 
 def _file_hash(path: Path) -> str:
-    h = hashlib.md5()
+    h = hashlib.md5(usedforsecurity=False)  # content dedup key, not a security hash
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(8192), b""):
             h.update(chunk)

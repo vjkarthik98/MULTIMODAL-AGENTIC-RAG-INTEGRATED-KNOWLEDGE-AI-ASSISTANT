@@ -1,26 +1,36 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# GATE STATUS (2026-07-18): DISABLED pending baseline v4.
+# GATE STATUS (2026-07-24): retrieval section re-baselined to v4 and GATED
+# (see `retrieval.gate_enabled: true` below). Every other section (generation,
+# hallucination, behavioral, ocr, audio, video, routing, e2e) is still on the
+# stale pre-Prometheus/pre-v1.0.0-gold-set v3 baseline and stays informational
+# — the global `gate_enabled: false` below is their effective default.
+# `check_thresholds()` (app/eval/runner.py) now honors a per-section
+# `gate_enabled` override, so a suite can gate independently of the rest.
 #
-# Both inputs to every baseline changed: (1) judge gguf_mistral → Prometheus-2-7B,
-# (2) gold set 14 rows → v1.0.0 (164 rows, new slices + citation ground truth).
-# The v3 numbers below are therefore STALE and kept only as historical reference.
+# Why retrieval could be re-baselined now and the others can't yet: retrieval
+# needs only BM25 + Qdrant + the embedder (no LLM judge), so it's cheap and
+# was already re-measured for real this session (n=56, 2026-07-24) once a
+# real ingestion bug (BM25 index missing a source file, see
+# docs/runbooks/phase29-plan.md Workstream D) was fixed and corpus verified
+# correct. generation/e2e/behavioral/etc. all route through the Prometheus-2-7B
+# judge over HTTP against a live server — re-baselining those is a Tier-2 /
+# AWS-GPU-box exercise, deliberately out of scope here.
 #
-# Procedure to re-enable the gate:
+# Procedure to re-enable a still-informational section:
 #   1. Run un-gated:  EVAL_USER_ID=<owner> python -m app.eval.run --suite full
-#   2. Record the Prometheus/v1.0.0 numbers as baseline v4.
+#   2. Record the Prometheus/v1.0.0 numbers as that section's baseline v4.
 #   3. Set each metric's min/max at baseline_v4 * 0.9 (safety-critical) / 0.95 (rest).
-#   4. Flip gate_enabled: true.
+#   4. Add `gate_enabled: true` inside that section (not the global flag).
 #
-# New metrics to baseline in v4 (targets shown; no gate until measured):
+# New metrics to baseline before gating (targets shown; no gate until measured):
 #   generation.answer_correctness   target ~0.75   (Prometheus rubric)
 #   generation.citation_locator_accuracy  target ~0.80 (per-modality page/sheet/ts/frame)
 #   behavioral.refusal_accuracy     target ~0.90   (abstains when answer not in KB)
 #   behavioral.adversarial_pass     target ~0.90   (ignores injection / corrects false premise)
-#   retrieval.precision_at_5 / recall_at_5  re-measure with distractors present
 gate_enabled: false
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# Phase 25 — Eval thresholds (v3, RETIRED).
+# Phase 25 — Eval thresholds (v3, RETIRED except where superseded by v4 below).
 #
 # Thresholds set from THIRD REAL BASELINE RUN (2026-05-26T06:11:45Z) at baseline * 0.95.
 # This run uses the real Ragas+GGUF Mistral judge (GPU, n_gpu_layers=-1).
@@ -33,30 +43,43 @@ gate_enabled: false
 # `min` = value must be >= this. `max` = value must be <= this.
 # Missing metric = no threshold (informational only).
 #
-# Baseline v3 (retrieval suite, 2026-05-26, n=14 gold rows):
+# Baseline v3 (retrieval suite, 2026-05-26, n=14 gold rows) — RETIRED, kept for history:
 #   recall@5=0.440  recall@10=0.655  mrr=0.813  ndcg@10=0.605
 #   context_precision=0.196  hit_rate=1.000
 #   p50=1.51s  p95=2.94s  p99=3.96s
+#
+# Baseline v4 (retrieval suite, 2026-07-24, n=56 gold rows, real BM25+Qdrant+BGE run
+# against the corrected/verified eval corpus — GATE_ENABLED):
+#   recall@5=0.6786  recall@10=0.7589  mrr=0.4660  ndcg@10=0.5322
+#   context_precision=0.0304  hit_rate=0.8393
+#   p50=1.64s  p95=2.77s  p99=29.57s (single cold-start outlier; see latency section — well
+#   under the existing 60s/20s p95/p50 ceilings regardless)
+# n went 14→56 with the v1.0.0 gold set's harder, more realistic distractor-laden queries,
+# so mrr/ndcg/hit_rate/context_precision reading lower than v3 is not a regression — v3 was
+# measured on a small, easy hand-picked set. v4 is the new honest floor. context_precision
+# in particular is low in absolute terms (0.03) — worth a real look in a future retrieval-
+# quality pass, but re-baselining means "gate on what's true now," not "the numbers are good."
 
 retrieval:
+  gate_enabled: true  # v4 baseline (n=56, 2026-07-24) — see note above. First section gated.
   recall_at_5:
-    min: 0.418  # baseline 0.440 * 0.95 — catches chunking/embedding regressions
-    why: "Regression gate: 5% below v3 baseline (0.440). Below this retrieval has degraded."
+    min: 0.6447  # baseline 0.6786 * 0.95
+    why: "Regression gate: 5% below v4 baseline (0.6786, n=56, 2026-07-24)."
   recall_at_10:
-    min: 0.622  # baseline 0.655 * 0.95
-    why: "Regression gate: 5% below v3 baseline (0.655). Top-10 breadth floor."
+    min: 0.7210  # baseline 0.7589 * 0.95
+    why: "Regression gate: 5% below v4 baseline (0.7589, n=56, 2026-07-24)."
   mrr:
-    min: 0.772  # baseline 0.813 * 0.95
-    why: "Regression gate: 5% below v3 baseline (0.813). Rerank order degradation signal."
+    min: 0.4427  # baseline 0.4660 * 0.95
+    why: "Regression gate: 5% below v4 baseline (0.4660, n=56, 2026-07-24). Rerank order degradation signal."
   ndcg_at_10:
-    min: 0.575  # baseline 0.605 * 0.95
-    why: "Regression gate: 5% below v3 baseline (0.605). Ordering quality floor."
+    min: 0.5056  # baseline 0.5322 * 0.95
+    why: "Regression gate: 5% below v4 baseline (0.5322, n=56, 2026-07-24). Ordering quality floor."
   context_precision:
-    min: 0.186  # baseline 0.196 * 0.95 (tied to gold-set composition; improves with more gold)
-    why: "Regression gate: 5% below v3 baseline (0.196). On-topic chunk rate floor."
+    min: 0.0289  # baseline 0.0304 * 0.95 — already low in absolute terms; this only catches further drift
+    why: "Regression gate: 5% below v4 baseline (0.0304, n=56, 2026-07-24). On-topic chunk rate floor; absolute value flagged for a future retrieval-quality pass, not this gate."
   hit_rate:
-    min: 0.950  # baseline 1.000 * 0.95 — 14/14 queries have a relevant hit in top-10
-    why: "Regression gate: 5% below v3 baseline (1.000). Any hit_rate drop is a critical retrieval failure."
+    min: 0.7973  # baseline 0.8393 * 0.95
+    why: "Regression gate: 5% below v4 baseline (0.8393, n=56, 2026-07-24). Any further hit_rate drop is a critical retrieval failure."
 
 # Baseline v3 (generation suite, 2026-05-26T06:11Z, judge=gguf_mistral, n=14):
 #   faithfulness=0.539  answer_relevancy=0.523  context_recall=1.000

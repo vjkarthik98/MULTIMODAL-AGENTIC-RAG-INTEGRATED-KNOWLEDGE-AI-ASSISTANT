@@ -220,6 +220,14 @@ def _is_gguf_cached() -> bool:
 
 
 # ── per-type downloaders ──────────────────────────────────────────────────────
+# Bandit B615 (huggingface_unsafe_download) flags every from_pretrained() call
+# below — it can't trace `revision` through the **kw dict these functions
+# build, so it doesn't see that _dispatch_download() (below) already threads
+# a `revision` through to every one of them. The real remaining gap is
+# structural, not a missing kwarg: on the very FIRST download of a model
+# there is no revision to pin to yet — that's inherent to this project's
+# TOFU (Trust-On-First-Use) checksum model (download_manifest.json), not an
+# oversight. Every download after the first is pinned. Reviewed 2026-07-25.
 
 
 def _dl_transformers(model_id: str, token: str, revision: str | None = None) -> None:

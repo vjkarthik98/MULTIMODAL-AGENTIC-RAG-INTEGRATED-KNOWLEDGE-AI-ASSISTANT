@@ -207,6 +207,17 @@ class MongoMemory:
     # ENSURE INDEXES
 
     def _ensure_indexes(self) -> None:
+        # Only ever called from _connect(), immediately after the 4
+        # collections below are assigned from a live self.db — guaranteed
+        # non-None here, but that invariant crosses a method boundary mypy
+        # can't see on its own, hence the assert (also a real, cheap safety
+        # net if that call-order invariant is ever broken by a future edit).
+        assert (
+            self.messages is not None
+            and self.summaries is not None
+            and self.sessions is not None
+            and self.feedback is not None
+        )
         try:
             # PRIMARY QUERY INDEX
             self.messages.create_index(
@@ -975,6 +986,7 @@ class MongoMemory:
         Returns the number of sessions deleted."""
         if not user_id or not self._is_available():
             return 0
+        assert self.sessions is not None and self.messages is not None and self.summaries is not None
         try:
             s_r = self.sessions.delete_many({"user_id": user_id})
             self.messages.delete_many({"user_id": user_id})
@@ -1130,6 +1142,7 @@ class MongoMemory:
         }
 
         if self._is_available():
+            assert self.messages is not None and self.summaries is not None and self.sessions is not None
             try:
                 status["messages_count"] = self.messages.estimated_document_count()
                 status["summaries_count"] = self.summaries.estimated_document_count()

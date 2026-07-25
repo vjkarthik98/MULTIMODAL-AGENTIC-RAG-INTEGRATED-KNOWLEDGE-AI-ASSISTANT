@@ -114,8 +114,11 @@ def _normalize_encoding(text: str) -> str:
     """
     # 1. Strip null bytes
     text = text.replace("\x00", "")
-    # Strip RTL/LTR override chars (U+202E, U+202D, U+202C, U+202B, U+202A)
-    for cp in ("‮", "‭", "‬", "‫", "‪"):
+    # Strip RTL/LTR override chars (U+202E, U+202D, U+202C, U+202B, U+202A).
+    # These literal bidi-override characters ARE the injection-defense
+    # signature this function exists to strip (Trojan Source attack chars),
+    # not an accidental/vulnerable occurrence. Reviewed 2026-07-25.
+    for cp in ("‮", "‭", "‬", "‫", "‪"):  # nosec B613
         text = text.replace(cp, "")
     # Strip zero-width chars (ZWSP, ZWNJ, ZWJ, BOM, WORD-JOINER)
     for cp in ("​", "‌", "‍", "﻿", "⁠"):
