@@ -67,10 +67,10 @@ def _file_hash(path: str) -> str:
 
 
 def _quality(text: str) -> float:
-    l = len(text)
-    if l < 50:
+    length = len(text)
+    if length < 50:
         return 0.2
-    if l < 200:
+    if length < 200:
         return 0.5
     return 1.0
 
@@ -286,7 +286,7 @@ class DocxIngestor(BaseIngestor):
 
                     doc = python_docx.Document(repaired)
                 except Exception as exc:
-                    raise ValueError(f"DOCX_CORRUPT_UNRECOVERABLE: {exc}")
+                    raise ValueError(f"DOCX_CORRUPT_UNRECOVERABLE: {exc}") from exc
 
             has_content = any((p.text or "").strip() for p in doc.paragraphs) or bool(doc.tables)
             if not has_content:
@@ -473,7 +473,7 @@ class DocxIngestor(BaseIngestor):
                 related = getattr(doc.part, "related_parts", {}) or {}
                 seen_blobs: set = set()
                 img_idx = 0
-                for rel_id, part in related.items():
+                for _rel_id, part in related.items():
                     try:
                         ct = getattr(part, "content_type", "") or ""
                         if not ct.startswith("image/"):
@@ -633,7 +633,7 @@ async def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
 
                         doc = python_docx.Document(repaired)
                     except Exception as exc:
-                        raise ValueError(f"DOCX_CORRUPT_UNRECOVERABLE: {exc}")
+                        raise ValueError(f"DOCX_CORRUPT_UNRECOVERABLE: {exc}") from exc
 
                 has_content = any((p.text or "").strip() for p in doc.paragraphs) or bool(
                     doc.tables
@@ -694,7 +694,6 @@ async def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
                     level = _heading_level(para)
                     if level is None and _looks_like_heading(text, para):
                         level = 2
-                    subtype = "heading" if level else "paragraph"
                     try:
                         from app.guardrails.input_guard import sanitize as _guard_sanitize
 

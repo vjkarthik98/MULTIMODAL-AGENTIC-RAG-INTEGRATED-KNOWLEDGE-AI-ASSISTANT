@@ -53,7 +53,6 @@ def run_retrieval_suite(cfg: EvalConfig) -> SuiteResult:
     # query_pipeline. The END-TO-END reranked retrieval quality is therefore read
     # from the generation suite's deterministic `context_recall` (reference facts
     # recoverable from the ACTUAL post-rerank context) — 0.94 for PDF.
-    reranker = None  # fusion-component metric by design
 
     # Load gold rows from all text-based modalities (or a single one if filtered)
     _mods = [cfg.modality] if getattr(cfg, "modality", None) else _RETRIEVAL_MODALITIES

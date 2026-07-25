@@ -74,6 +74,12 @@ jobs:
       QDRANT_URL: ${{ secrets.QDRANT_URL }}
       QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
       DATA_DIR: ${{ github.workspace }}/data
+      # Same reasoning as ci.yml's lint-type-test job: this is an in-process
+      # retrieval-only eval (HybridRetriever called directly, no HTTP, no
+      # auth flow), so AUTH_ENABLED=false avoids requiring a real
+      # JWT_SECRET_KEY just to satisfy Settings.validate() at import time.
+      ENV: test
+      AUTH_ENABLED: "false"
     steps:
       - uses: actions/checkout@v4
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Any
 
 from app.utils.logger import get_logger
 
@@ -55,4 +55,4 @@ def chunk_raw_extracts(extracts: list[Any], meta: Any, modality: str) -> list[An
 
 # Re-export legacy function so any existing caller of
 # `from app.chunking import chunk_documents` keeps working.
-from app.chunking.base_chunker import chunk_documents  # noqa: E402
+from app.chunking.base_chunker import chunk_documents  # noqa: E402,F401

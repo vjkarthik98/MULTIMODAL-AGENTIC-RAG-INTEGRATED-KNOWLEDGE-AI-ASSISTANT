@@ -50,7 +50,7 @@ def frame_caption_recall(
 
     valid_pairs = [
         (g, r)
-        for g, r in zip(generated_captions, gold_captions)
+        for g, r in zip(generated_captions, gold_captions, strict=False)
         if r and r not in ("TODO_fill_after_processing", "TODO")
     ]
     if not valid_pairs:

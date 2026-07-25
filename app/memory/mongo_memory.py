@@ -35,13 +35,13 @@ except ImportError:
     DESCENDING = -1
     MongoClient = None  # type: ignore[assignment]
 
-    class ConnectionFailure(Exception):  # type: ignore[no-redef]
+    class ConnectionFailure(Exception):  # type: ignore[no-redef]  # noqa: N818 -- name deliberately matches pymongo.errors.ConnectionFailure so except clauses work identically whether pymongo is installed or not
         pass
 
     class ServerSelectionTimeoutError(Exception):  # type: ignore[no-redef]
         pass
 
-    class OperationFailure(Exception):  # type: ignore[no-redef]
+    class OperationFailure(Exception):  # type: ignore[no-redef]  # noqa: N818 -- name deliberately matches pymongo.errors.OperationFailure, same fallback-shim reasoning as ConnectionFailure above
         pass
 
     class DuplicateKeyError(Exception):  # type: ignore[no-redef]
@@ -986,7 +986,9 @@ class MongoMemory:
         Returns the number of sessions deleted."""
         if not user_id or not self._is_available():
             return 0
-        assert self.sessions is not None and self.messages is not None and self.summaries is not None
+        assert (
+            self.sessions is not None and self.messages is not None and self.summaries is not None
+        )
         try:
             s_r = self.sessions.delete_many({"user_id": user_id})
             self.messages.delete_many({"user_id": user_id})
@@ -1142,7 +1144,11 @@ class MongoMemory:
         }
 
         if self._is_available():
-            assert self.messages is not None and self.summaries is not None and self.sessions is not None
+            assert (
+                self.messages is not None
+                and self.summaries is not None
+                and self.sessions is not None
+            )
             try:
                 status["messages_count"] = self.messages.estimated_document_count()
                 status["summaries_count"] = self.summaries.estimated_document_count()

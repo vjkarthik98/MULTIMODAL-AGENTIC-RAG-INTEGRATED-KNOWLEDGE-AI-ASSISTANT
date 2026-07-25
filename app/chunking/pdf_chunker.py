@@ -3,8 +3,11 @@ from __future__ import annotations
 import io
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+from prometheus_client import Counter
 
 from app.chunking.base_chunker import BaseChunker
 from app.chunking.finance_numbers import (
@@ -29,10 +32,6 @@ def _classify_sec_heading(text: str) -> str | None:
         return "item"
     return None
 
-
-import time
-
-from prometheus_client import Counter
 
 logger = get_logger(__name__)
 

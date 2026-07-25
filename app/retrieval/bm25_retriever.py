@@ -9,6 +9,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from app.bm25.audio_bm25 import AudioBM25
+from app.bm25.docx_bm25 import DocxBM25
+from app.bm25.image_bm25 import ImageBM25
+from app.bm25.pdf_bm25 import PdfBM25
+from app.bm25.txt_bm25 import TxtBM25
+from app.bm25.video_bm25 import VideoBM25
+from app.bm25.xlsx_bm25 import XlsxBM25
 from app.core.config import settings
 from app.utils.logger import get_logger
 from app.utils.paths import user_bm25_path
@@ -1283,7 +1290,7 @@ class BM25Retriever:
             before = len(self.documents)
             filtered_docs = []
             filtered_corp = []
-            for doc, tokens in zip(self.documents, self.tokenized_corpus):
+            for doc, tokens in zip(self.documents, self.tokenized_corpus, strict=False):
                 source = getattr(doc, "source", "") or ""
                 if filename not in source:
                     filtered_docs.append(doc)
@@ -1303,7 +1310,7 @@ class BM25Retriever:
         before = len(self.documents)
         filtered_docs = []
         filtered_corp = []
-        for doc, tokens in zip(self.documents, self.tokenized_corpus):
+        for doc, tokens in zip(self.documents, self.tokenized_corpus, strict=False):
             s = getattr(doc, "structure", {}) or {}
             if s.get("session_id") != session_id:
                 filtered_docs.append(doc)
@@ -1360,14 +1367,6 @@ class BM25Retriever:
 # Routes documents to the correct per-modality index, then fuses search results
 # from all 7 indexes using Reciprocal Rank Fusion (RRF).  Exposes the same
 # public API as BM25Retriever for backward-compatible hot-swap.
-
-from app.bm25.audio_bm25 import AudioBM25
-from app.bm25.docx_bm25 import DocxBM25
-from app.bm25.image_bm25 import ImageBM25
-from app.bm25.pdf_bm25 import PdfBM25
-from app.bm25.txt_bm25 import TxtBM25
-from app.bm25.video_bm25 import VideoBM25
-from app.bm25.xlsx_bm25 import XlsxBM25
 
 # Map modality string → index class
 _MODALITY_TO_CLASS = {

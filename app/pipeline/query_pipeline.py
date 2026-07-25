@@ -1158,7 +1158,7 @@ async def stream_query(
 # MAIN QUERY PIPELINE
 
 
-def query_pipeline(
+def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-up refactor, not fixed inline to avoid changing tuned RAG query behavior
     query: str,
     session_id: str = "default",
     sources: list[str] | None = None,
@@ -1169,7 +1169,6 @@ def query_pipeline(
     start = time.time()
     trace_id = str(uuid.uuid4())
     # OTEL SPAN STUB
-    span_ctx = {"trace_id": trace_id}
 
     if not query or not query.strip():
         return {

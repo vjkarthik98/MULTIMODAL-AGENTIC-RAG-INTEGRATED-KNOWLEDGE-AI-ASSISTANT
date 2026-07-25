@@ -22,6 +22,7 @@ from qdrant_client.models import (
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
+from app.core.metrics import circuit_breaker_state as _circuit_breaker_state
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -48,7 +49,6 @@ _search_errors = Counter(
     "Qdrant search errors",
     ["collection", "error_type"],
 )
-from app.core.metrics import circuit_breaker_state as _circuit_breaker_state
 
 _vectors_stored = Gauge(
     "qdrant_vectors_stored_total",
@@ -303,7 +303,9 @@ class QdrantVectorStore:
 
     # PAYLOAD BUILDER
 
-    def _payload(self, d: Any, user_id: str | None = None) -> dict[str, Any]:
+    # Known complexity debt (125), tracked follow-up refactor, not fixed
+    # inline to avoid changing tuned Qdrant payload construction.
+    def _payload(self, d: Any, user_id: str | None = None) -> dict[str, Any]:  # noqa: C901
         s = dict(getattr(d, "structure", {}) or {})
         modality = getattr(d, "modality", "text")
 
@@ -1288,7 +1290,9 @@ class QdrantVectorStore:
         limit = limit or settings.RAG_TOP_K
         try:
             base_filter = self._build_filter(session_id, True, user_id)
-            conditions: list[Condition] = list(base_filter.must) if base_filter and base_filter.must else []
+            conditions: list[Condition] = (
+                list(base_filter.must) if base_filter and base_filter.must else []
+            )
             if extra_filter is not None:
                 conditions += list(extra_filter.must or [])
             scroll_filter = Filter(must=conditions) if conditions else None

@@ -3,17 +3,21 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import re as _re
 import time
+import unicodedata as _unicodedata
 import uuid
+import uuid as _uuid
 from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
+from app.embeddings.base_embedder import BaseEmbedder as _BaseEmbedder
 from app.utils.logger import get_logger
 
 try:
     import torch
-    import torch.nn.functional as F
+    import torch.nn.functional as F  # noqa: N812 -- `F` is the universal PyTorch convention for torch.nn.functional
 
     TORCH_AVAILABLE = True
 except ImportError:
@@ -524,7 +528,7 @@ class ImageEmbedder:
                     batch_latency / 1000.0
                 )
 
-                for emb, meta in zip(embeddings, batch_meta):
+                for emb, meta in zip(embeddings, batch_meta, strict=False):
                     emb_list = emb if isinstance(emb, list) else list(emb)
 
                     # DIMENSION CONSISTENCY CHECK
@@ -652,9 +656,6 @@ class ImageEmbedder:
 # (now deleted). Helper functions renamed to avoid conflicts with ImageEmbedder
 # helpers above (_cache_key → _siglip_text_cache_key, etc.)
 # ══════════════════════════════════════════════════════════════════════════════
-
-import unicodedata as _unicodedata
-import uuid as _uuid
 
 # SigLIP 64-token hard limit.
 _SIGLIP_MAX_TOKEN_LENGTH: int = 64
@@ -1002,7 +1003,7 @@ class SiglipTextEmbedder:
                 _ST_EMBED_LATENCY.labels(batch_size=str(len(batch_texts))).observe(
                     batch_latency / 1000.0
                 )
-                for emb, item in zip(embeddings, batch):
+                for emb, item in zip(embeddings, batch, strict=False):
                     emb_list = emb if isinstance(emb, list) else list(emb)
                     if len(emb_list) != self.expected_dim:
                         logger.error(
@@ -1107,10 +1108,6 @@ ClipTextEmbedder = SiglipTextEmbedder
 # remains the vision-collection path.
 # ══════════════════════════════════════════════════════════════════════════════
 
-import re as _re
-
-from app.embeddings.base_embedder import BaseEmbedder as _BaseEmbedder  # noqa: E402
-
 _NUMBERS_ONLY_RE = _re.compile(r'[$€£¥₹]?[\d,]+\.?\d*\s*(?:[BMKTbmkt]n?|%|bps|x)?\b')
 
 
@@ -1199,7 +1196,7 @@ class ImageDocEmbedder(_BaseEmbedder):
                 batch_docs = alt_docs[i : i + embedder.batch_size]
                 try:
                     embs = embedder._encode_with_retry(embedder.model, batch_texts)
-                    for doc, emb in zip(batch_docs, embs):
+                    for doc, emb in zip(batch_docs, embs, strict=False):
                         if valid_embedding(emb, embedder.expected_dim):
                             doc.embedding_alt = emb
                             struct = dict(getattr(doc, "structure", {}) or {})

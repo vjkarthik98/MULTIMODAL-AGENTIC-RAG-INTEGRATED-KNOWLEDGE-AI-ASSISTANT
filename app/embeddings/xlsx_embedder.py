@@ -164,7 +164,7 @@ class XlsxEmbedder(BaseEmbedder):
                     batch_texts = alt_texts[i : i + embedder.batch_size]
                     batch_docs = alt_docs[i : i + embedder.batch_size]
                     embs = embedder._encode_with_retry(embedder.model, batch_texts)
-                    for doc, emb in zip(batch_docs, embs):
+                    for doc, emb in zip(batch_docs, embs, strict=False):
                         if valid_embedding(emb, embedder.expected_dim):
                             doc.embedding_alt = emb
                 logger.info(

@@ -100,7 +100,7 @@ class RetrievalEvaluator:
                 except ValueError:
                     continue
                 seen.setdefault(label, set()).add(val)
-        for label, vals in seen.items():
+        for vals in seen.values():
             if len(vals) > 1:
                 lo, hi = min(vals), max(vals)
                 if lo > 0 and (hi / lo) > 1.5:

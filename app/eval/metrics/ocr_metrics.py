@@ -84,7 +84,7 @@ def ocr_metrics_batch(
         }
 
     cers, wers, exacts = [], [], []
-    for hyp, ref in zip(hypotheses, references):
+    for hyp, ref in zip(hypotheses, references, strict=False):
         if not ref or ref == "TODO_fill_after_ocr":
             continue
         cer = character_error_rate(hyp, ref)
