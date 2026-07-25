@@ -1,0 +1,84 @@
+# Local CPU-only dev stack — API + local Qdrant/Redis/Mongo, no GPU, no
+# 17GB+ multimodal model download required to bring the API up and exercise
+# non-model-dependent endpoints (health, auth, routing logic). Uses the
+# `dev-runtime` Dockerfile target (python:3.12-slim, no CUDA base image) for
+# fast local builds — see Dockerfile's top-of-file comment for the target list.
+#
+# NOTE: the long-term conversation-memory feature uses Upstash's REST Redis
+# client (app/memory/) against real Upstash Cloud credentials in production;
+# this compose file's `redis` service only backs the LOCAL hot-path cache
+# (settings.LOCAL_CACHE_HOST/PORT — job status, embedding cache, rate limits),
+# not the Upstash-backed long-term store. Set REDIS_URL in .env to point at a
+# real Upstash instance if you need to exercise that path locally.
+#
+# `python -m app.eval.run --suite retrieval` will NOT work against this local
+# Qdrant out of the box — it needs the eval corpus already ingested under
+# EVAL_USER_ID, which this compose file does not seed. See eval-gate.yml and
+# docs/runbooks/ci-cd.md for how that's provisioned.
+
+services:
+  api:
+    build:
+      context: .
+      target: dev-runtime
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ENV: development
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: "6333"
+      MONGO_URI: mongodb://mongo:27017
+      LOCAL_CACHE_HOST: redis
+      LOCAL_CACHE_PORT: "6379"
+    volumes:
+      - ./.hf_cache:/app/.hf_cache
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+
+  qdrant:
+    image: qdrant/qdrant:v1.9.7
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  qdrant_data:
+  mongo_data:

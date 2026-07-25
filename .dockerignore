@@ -1,0 +1,57 @@
+# Version control / CI / editor
+.git/
+.github/
+.claude/
+.vscode/
+.idea/
+
+# Never bake secrets or local env into the image
+.env
+.env.*
+!.env.example
+
+# Models, user data, indexes — always volume-mounted, never baked in
+.hf_cache/
+.torch_cache/
+data/
+mlruns/
+logs/
+
+# Frontend — this image is API-only (no StaticFiles mount in app/main.py)
+ui/
+node_modules/
+
+# Docs, notebooks, scripts not needed at runtime
+docs/
+notebooks/
+scripts/
+deploy/
+monitoring/
+*.md
+CHANGELOG.md
+README.md
+
+# Tests — not shipped in the runtime image
+tests/
+
+# Python / tooling caches
+__pycache__/
+*.py[codz]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+
+# Virtualenvs
+rag_env/
+.venv/
+venv/
+
+# Host-only provisioning scripts — Dockerfile replicates the needed flags directly
+install_cuda.sh
+.cuda_compat/

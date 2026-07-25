@@ -1,0 +1,206 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# GATE STATUS (2026-07-24): retrieval section re-baselined to v4 and GATED
+# (see `retrieval.gate_enabled: true` below). Every other section (generation,
+# hallucination, behavioral, ocr, audio, video, routing, e2e) is still on the
+# stale pre-Prometheus/pre-v1.0.0-gold-set v3 baseline and stays informational
+# — the global `gate_enabled: false` below is their effective default.
+# `check_thresholds()` (app/eval/runner.py) now honors a per-section
+# `gate_enabled` override, so a suite can gate independently of the rest.
+#
+# Why retrieval could be re-baselined now and the others can't yet: retrieval
+# needs only BM25 + Qdrant + the embedder (no LLM judge), so it's cheap and
+# was already re-measured for real this session (n=56, 2026-07-24) once a
+# real ingestion bug (BM25 index missing a source file, see
+# docs/runbooks/phase29-plan.md Workstream D) was fixed and corpus verified
+# correct. generation/e2e/behavioral/etc. all route through the Prometheus-2-7B
+# judge over HTTP against a live server — re-baselining those is a Tier-2 /
+# AWS-GPU-box exercise, deliberately out of scope here.
+#
+# Procedure to re-enable a still-informational section:
+#   1. Run un-gated:  EVAL_USER_ID=<owner> python -m app.eval.run --suite full
+#   2. Record the Prometheus/v1.0.0 numbers as that section's baseline v4.
+#   3. Set each metric's min/max at baseline_v4 * 0.9 (safety-critical) / 0.95 (rest).
+#   4. Add `gate_enabled: true` inside that section (not the global flag).
+#
+# New metrics to baseline before gating (targets shown; no gate until measured):
+#   generation.answer_correctness   target ~0.75   (Prometheus rubric)
+#   generation.citation_locator_accuracy  target ~0.80 (per-modality page/sheet/ts/frame)
+#   behavioral.refusal_accuracy     target ~0.90   (abstains when answer not in KB)
+#   behavioral.adversarial_pass     target ~0.90   (ignores injection / corrects false premise)
+gate_enabled: false
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Phase 25 — Eval thresholds (v3, RETIRED except where superseded by v4 below).
+#
+# Thresholds set from THIRD REAL BASELINE RUN (2026-05-26T06:11:45Z) at baseline * 0.95.
+# This run uses the real Ragas+GGUF Mistral judge (GPU, n_gpu_layers=-1).
+# Major improvements vs v2: Apple 10-K excerpt rewritten (plain headers, CrossEncoder now
+# scores correctly), modality weights corrected (image/video=0.75 prevents OCR noise),
+# BM25 index rebuilt. Result: hit_rate 0.857→1.000, mrr 0.471→0.813, faithfulness 0.464→0.539.
+# Every line carries a one-line rationale per engineering-standards.md.
+#
+# Format: <metric>: { min: <float> | max: <float>, why: <string> }
+# `min` = value must be >= this. `max` = value must be <= this.
+# Missing metric = no threshold (informational only).
+#
+# Baseline v3 (retrieval suite, 2026-05-26, n=14 gold rows) — RETIRED, kept for history:
+#   recall@5=0.440  recall@10=0.655  mrr=0.813  ndcg@10=0.605
+#   context_precision=0.196  hit_rate=1.000
+#   p50=1.51s  p95=2.94s  p99=3.96s
+#
+# Baseline v4 (retrieval suite, 2026-07-24, n=56 gold rows, real BM25+Qdrant+BGE run
+# against the corrected/verified eval corpus — GATE_ENABLED):
+#   recall@5=0.6786  recall@10=0.7589  mrr=0.4660  ndcg@10=0.5322
+#   context_precision=0.0304  hit_rate=0.8393
+#   p50=1.64s  p95=2.77s  p99=29.57s (single cold-start outlier; see latency section — well
+#   under the existing 60s/20s p95/p50 ceilings regardless)
+# n went 14→56 with the v1.0.0 gold set's harder, more realistic distractor-laden queries,
+# so mrr/ndcg/hit_rate/context_precision reading lower than v3 is not a regression — v3 was
+# measured on a small, easy hand-picked set. v4 is the new honest floor. context_precision
+# in particular is low in absolute terms (0.03) — worth a real look in a future retrieval-
+# quality pass, but re-baselining means "gate on what's true now," not "the numbers are good."
+
+retrieval:
+  gate_enabled: true  # v4 baseline (n=56, 2026-07-24) — see note above. First section gated.
+  recall_at_5:
+    min: 0.6447  # baseline 0.6786 * 0.95
+    why: "Regression gate: 5% below v4 baseline (0.6786, n=56, 2026-07-24)."
+  recall_at_10:
+    min: 0.7210  # baseline 0.7589 * 0.95
+    why: "Regression gate: 5% below v4 baseline (0.7589, n=56, 2026-07-24)."
+  mrr:
+    min: 0.4427  # baseline 0.4660 * 0.95
+    why: "Regression gate: 5% below v4 baseline (0.4660, n=56, 2026-07-24). Rerank order degradation signal."
+  ndcg_at_10:
+    min: 0.5056  # baseline 0.5322 * 0.95
+    why: "Regression gate: 5% below v4 baseline (0.5322, n=56, 2026-07-24). Ordering quality floor."
+  context_precision:
+    min: 0.0289  # baseline 0.0304 * 0.95 — already low in absolute terms; this only catches further drift
+    why: "Regression gate: 5% below v4 baseline (0.0304, n=56, 2026-07-24). On-topic chunk rate floor; absolute value flagged for a future retrieval-quality pass, not this gate."
+  hit_rate:
+    min: 0.7973  # baseline 0.8393 * 0.95
+    why: "Regression gate: 5% below v4 baseline (0.8393, n=56, 2026-07-24). Any further hit_rate drop is a critical retrieval failure."
+
+# Baseline v3 (generation suite, 2026-05-26T06:11Z, judge=gguf_mistral, n=14):
+#   faithfulness=0.539  answer_relevancy=0.523  context_recall=1.000
+#   context_precision=0.964  citation_accuracy=1.0
+#   hallucination_rate=0.571 (numeric guard fires on truncated context snippets)
+#   template_leak_rate=0.0
+#
+# Note: generation metrics improved significantly vs v2 due to better retrieval.
+# context_recall=1.000 (perfect) — all answers have supporting context.
+# context_precision=0.964 — 96% of retrieved chunks are on-topic.
+# faithfulness=0.539 — GGUF judge; limited by 200-char context snippet truncation.
+# hallucination_rate reflects numeric guard sensitivity; tightens in Phase 26.
+
+generation:
+  faithfulness:
+    min: 0.250  # CrossEncoder+GGUF hybrid judge baseline 0.2905 * 0.90 — CrossEncoder NLI
+    why: "Regression gate: CrossEncoder semantic judge (not GPT-4 NLI). Lower range expected."
+  answer_relevancy:
+    min: 0.496  # baseline 0.523 * 0.95
+    why: "Regression gate: 5% below v3 baseline (0.523). Off-topic drift signal."
+  context_recall:
+    min: 0.950  # baseline 1.000 * 0.95 — perfect context recall achieved
+    why: "Regression gate: 5% below v3 baseline (1.000). Any drop signals retrieval regression."
+  context_precision:
+    min: 0.750  # CrossEncoder+GGUF hybrid judge baseline 0.8373 * 0.90
+    why: "Regression gate: CrossEncoder semantic judge baseline 0.8373."
+  citation_accuracy:
+    min: 0.95   # baseline 1.0 * 0.95 — citations always point to retrieved chunks
+    why: "Regression gate: 5% below v3 baseline (1.0). Phase-26 citation-integrity check."
+  template_leak_rate:
+    max: 0.05
+    why: "Prompt-template artifacts (e.g. '[sic]', 'Sources Used: 1') in answers (P1-7)"
+
+hallucination:
+  hallucination_rate:
+    max: 0.72   # numeric guard threshold raised to >6 unsupported numbers; financial docs
+    why: "Regression gate: numeric guard on financial docs; numbers appear in multiple formats."
+
+finance:
+  numeric_fidelity:
+    min: 0.95
+    why: "Regression gate: at least 95% of finance numbers cited in answers must appear verbatim in retrieved context (strict 0.5% tolerance, no scale bridging)."
+
+ocr:
+  ocr_cer:
+    max: 3.0
+    why: "OCR on AI-rendered chart images (bar/pie charts); Tesseract/EasyOCR reads axis labels+numbers accurately but gold text is rich prose — high absolute CER expected. Tightened in Phase 26 with scanned-doc baseline."
+  ocr_wer:
+    max: 4.0
+    why: "Word-error rate on chart images; same rationale as ocr_cer. Informational until Phase 26 scanned-doc corpus added."
+
+audio:
+  audio_wer:
+    max: 0.25
+    why: "Whisper WER on finance jargon; no v3 baseline yet (audio gold TODO)"
+
+video:
+  frame_caption_recall:
+    min: 0.50
+    why: "Half of gold key-frames should produce a matching caption; no v3 baseline yet"
+  caption_repetition_rate:
+    max: 0.10
+    why: "Catches BLIP repetition loop (P1-9); no v3 baseline yet"
+
+# Baseline v3 (routing suite, 2026-05-26T06:11Z):
+#   route_accuracy=1.0  hybrid_with_web_rate=0.0 (P1-4 open bug — hybrid routes not executing web)
+
+routing:
+  route_accuracy:
+    min: 0.917  # baseline 1.0 * 0.95 — 12/12 correct
+    why: "Regression gate: 5% below v3 baseline (1.0). Router degradation signal."
+  hybrid_with_web_rate:
+    min: 0.0    # baseline 0.0 — P1-4 open bug: hybrid routes don't execute web search
+    why: "No gate yet: P1-4 (hybrid-without-web) is an open bug. Threshold = 0 until fixed."
+
+# Baseline v3 (e2e suite, 2026-05-26T06:11Z, judge=gguf_mistral, n=29):
+#   faithfulness=0.623  answer_relevancy=0.562  context_recall=0.750
+#   context_precision=0.619  hallucination_rate=0.379  template_leak_rate=0.0
+#   p50=8.7s  p95=26.3s  p99=29.5s
+# NOTE: e2e.route_accuracy=0.000 is a known measurement bug (e2e runner reads wrong
+# API response field — fixed in e2e_runner.py, takes effect in next eval run).
+# e2e.recall_at_* = 0.0 because _resolve_chunk_ids fix was applied after run started.
+
+e2e:
+  faithfulness:
+    min: 0.592  # baseline 0.623 * 0.95
+    why: "Regression gate: 5% below v3 e2e baseline (0.623)."
+  answer_relevancy:
+    min: 0.534  # baseline 0.562 * 0.95
+    why: "Regression gate: 5% below v3 e2e baseline (0.562)."
+  context_recall:
+    min: 0.713  # baseline 0.750 * 0.95
+    why: "Regression gate: 5% below v3 e2e baseline (0.750)."
+  hallucination_rate:
+    max: 0.425  # baseline 0.379 + 12% buffer — e2e guard fires on dates/numbers
+    why: "Regression gate: e2e baseline 0.379. Buffer for numeric guard sensitivity."
+
+latency:
+  p95_sec:
+    max: 60.0
+    why: "Current production-observed ceiling on this hardware (project_perf_baselines.md)"
+  p50_sec:
+    max: 20.0
+    why: "Median should be well below ceiling — degradation signal before p95 breaches"
+
+# Phase 32 — Agentic Answer Verification (docs/Phase_32_Agentic_Answer_Verification.md).
+# No gate yet: these metrics require a baseline run of the verification loop
+# itself (python -m app.eval.run --suite all, once VerificationLoop is wired
+# into the runners) before a regression threshold can be set. Informational
+# only until then — same pattern as the video/audio metrics above before
+# their first baseline.
+verification:
+  grounding_success_rate:
+    why: "Fraction of answers with zero unsupported claims/numbers (GroundednessChecker). No baseline yet."
+  citation_accuracy_v2:
+    why: "Fraction of answers with zero bad citations (CitationVerifier, chunk-content-aware — not the lexical [filename] check above). No baseline yet."
+  retry_success_rate:
+    why: "Fraction of retried queries that eventually PASS. No baseline yet."
+  avg_retry_count:
+    why: "Mean verification retries per query — cost signal for the accuracy/latency tradeoff. No baseline yet."
+  verification_latency_p50:
+    why: "Median verification loop duration (retrieval+generate+verify, all attempts). No baseline yet."
+  verification_latency_p95:
+    why: "Tail verification loop duration — bounded by AGENT_VERIFY_TIMEOUT_SEC=30s. No baseline yet."

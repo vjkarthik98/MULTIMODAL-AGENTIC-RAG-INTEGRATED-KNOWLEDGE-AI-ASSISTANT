@@ -1,0 +1,127 @@
+name: Release
+
+# Manual, human-triggered release automation. This does NOT run on every
+# merge to main — cutting a release (what to call it, what belongs in the
+# changelog) is a judgment call, not something to infer from raw commit
+# messages (this repo's own history has entries like "ci.yml related
+# fixation" that would make a poor auto-generated changelog line). What this
+# DOES automate is everything mechanical and error-prone about doing it by
+# hand: keeping VERSION/pyproject.toml/CHANGELOG.md in sync, tagging
+# correctly, and publishing a GitHub Release — run via the Actions tab
+# ("Run workflow"), never automatically.
+#
+# Tagging here (`vX.Y.Z`) is what actually kicks off cd.yml's build/push/
+# deploy pipeline (cd.yml triggers on `push: tags: ["v*"]") — this workflow
+# is the deliberate front door to that, not a replacement for it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'New version, e.g. "0.29.0" (no leading "v" — added automatically). Must be greater than the current VERSION.'
+        required: true
+        type: string
+      title:
+        description: "Short release title, e.g. \"MLOps, LLMOps & CI/CD Foundation\" — becomes the CHANGELOG.md section heading and GitHub Release title."
+        required: true
+        type: string
+      changelog_notes:
+        description: "Changelog body in Markdown (### Added / ### Improved / ### Fixed subsections + bullets — see CHANGELOG.md for the established format). Used verbatim in both CHANGELOG.md and the GitHub Release notes."
+        required: true
+        type: string
+      prerelease:
+        description: "Mark this as a pre-release on GitHub (does not affect versioning or cd.yml — that still fires on any vX.Y.Z tag push)."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history to check the tag doesn't already exist
+
+      - name: Validate version
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+        run: |
+          if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must be plain X.Y.Z (no 'v' prefix, no suffix) — got '$NEW_VERSION'"
+            exit 1
+          fi
+          if git rev-parse "v$NEW_VERSION" >/dev/null 2>&1; then
+            echo "::error::tag v$NEW_VERSION already exists"
+            exit 1
+          fi
+          CURRENT=$(cat VERSION)
+          # Simple lexicographic-of-tuples comparison, good enough for X.Y.Z.
+          HIGHEST=$(printf '%s\n%s\n' "$CURRENT" "$NEW_VERSION" | sort -V | tail -1)
+          if [ "$HIGHEST" != "$NEW_VERSION" ] || [ "$CURRENT" == "$NEW_VERSION" ]; then
+            echo "::error::$NEW_VERSION is not greater than the current VERSION ($CURRENT)"
+            exit 1
+          fi
+
+      - name: Bump VERSION and pyproject.toml
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+        run: |
+          echo "$NEW_VERSION" > VERSION
+          # pyproject.toml's version line is `version         = "X.Y.Z"` — match
+          # loosely on whitespace since the file uses aligned `=` columns.
+          python - <<'PYEOF'
+          import re, os
+          v = os.environ["NEW_VERSION"]
+          path = "pyproject.toml"
+          text = open(path, encoding="utf-8").read()
+          new_text = re.sub(r'(?m)^(version\s*=\s*)"[^"]+"', rf'\1"{v}"', text, count=1)
+          if new_text == text:
+              raise SystemExit("pyproject.toml version line not found/updated")
+          open(path, "w", encoding="utf-8").write(new_text)
+          PYEOF
+
+      - name: Append CHANGELOG.md section
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+          TITLE: ${{ inputs.title }}
+          NOTES: ${{ inputs.changelog_notes }}
+        run: |
+          {
+            echo ""
+            echo "# [v${NEW_VERSION}] — ${TITLE}"
+            echo ""
+            echo "$NOTES"
+          } >> CHANGELOG.md
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add VERSION pyproject.toml CHANGELOG.md
+          git commit -m "chore(release): v${{ inputs.version }}"
+          git push origin HEAD:${{ github.ref_name }}
+
+      - name: Tag
+        run: |
+          git tag -a "v${{ inputs.version }}" -m "${{ inputs.title }}"
+          git push origin "v${{ inputs.version }}"
+        # Pushing this tag is what triggers cd.yml's build-push/deploy pipeline
+        # (on: push: tags: ["v*"]) — that happens automatically from here.
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ inputs.version }}" \
+            --title "v${{ inputs.version }} — ${{ inputs.title }}" \
+            --notes "${{ inputs.changelog_notes }}" \
+            ${{ inputs.prerelease && '--prerelease' || '' }}

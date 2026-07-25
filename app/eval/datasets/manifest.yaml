@@ -1,0 +1,41 @@
+dataset_version: 1.0.0
+created_at: '2026-07-18'
+schema: startup-grade (difficulty x question_type, refusal + adversarial slices, Prometheus rubric-anchored references); see docs/GOLDEN_DATASET_REBUILD_PLAN.md
+note: machine-authored rewrite (human_verified=false on all rows) pending human sign-off; no multi-hop (single-retrieval answers).
+gold_files:
+  text_gold.jsonl:
+    sha256: e1f554fe0e335e1eb76c1703f96267311a1eaba5faf0859be4477025b4d45a0f
+    rows_total: 20
+    breakdown: {"total": 20, "rewritten": 15, "refusal": 3, "adversarial": 2}
+  pdf_gold.jsonl:
+    sha256: ec0752e58bc1140c8648109dac3afd157bd4ace2208cf7023452447ba9782af9
+    rows_total: 20
+    breakdown: {"total": 20, "rewritten": 15, "refusal": 3, "adversarial": 2}
+  docx_gold.jsonl:
+    sha256: 02eaf97f4fdfc43af5ed3fbb6c8d6d57237d5d318cd7e1953b5e7417bec707d4
+    rows_total: 20
+    breakdown: {"total": 20, "rewritten": 15, "refusal": 3, "adversarial": 2}
+  xlsx_gold.jsonl:
+    sha256: d663394f20ccf00d8c656d518f288fdec131a7ef1d4f456ce281dcb2d6c6b045
+    rows_total: 20
+    breakdown: {"total": 20, "rewritten": 15, "refusal": 3, "adversarial": 2}
+  image_gold.jsonl:
+    sha256: 5dbe445c221a83a71f2b6ab1ef081cd690256706c601155316d7954f91bfdd98
+    rows_total: 20
+    breakdown: {"total": 20, "rewritten": 15, "refusal": 3, "adversarial": 2}
+  audio_gold.jsonl:
+    sha256: f95fbfc62964a254377a608af179e8f3ea08ac64f52a20e96b5f45f768f709aa
+    rows_total: 20
+    breakdown: {"total": 20, "rewritten": 15, "refusal": 3, "adversarial": 2}
+  video_gold.jsonl:
+    sha256: 3ab16e5733639a8bd52c77de772e6e8f5800cd5138812d2eae8a70eb18e0d7d0
+    rows_total: 20
+    breakdown: {"total": 20, "rewritten": 15, "refusal": 3, "adversarial": 2}
+  e2e_gold.jsonl:
+    sha256: b72b8ec2ec2c36e13b32b36744ded944044e8aa5faecdad2eacbfde573021546
+    rows_total: 4
+    breakdown: {"total": 4, "authored": 3, "search": 1}
+  routing_gold.jsonl:
+    sha256: f40625caffae0cdd9f0fc688e9929f7be686b2da6e04e83eec8162eabda0a43d
+    rows_total: 20
+    breakdown: {"total": 20, "rewritten": 12, "added": 8}
