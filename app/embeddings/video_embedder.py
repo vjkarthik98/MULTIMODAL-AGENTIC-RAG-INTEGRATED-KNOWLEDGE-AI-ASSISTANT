@@ -227,7 +227,7 @@ class VideoEmbedder(BaseEmbedder):
                     batch_docs = rdocs[i : i + embedder.batch_size]
                     try:
                         embs = embedder._encode_with_retry(embedder.model, batch_texts)
-                        for doc, emb in zip(batch_docs, embs):
+                        for doc, emb in zip(batch_docs, embs, strict=False):
                             if valid_embedding(emb, embedder.expected_dim):
                                 setattr(doc, attr, emb)
                                 struct = dict(getattr(doc, "structure", {}) or {})
@@ -247,7 +247,7 @@ class VideoEmbedder(BaseEmbedder):
 
         return text_results + vision_results
 
-    def _embed_vision_frames(self, docs: list[Any], session_id: str, _Path: Any) -> list[Any]:
+    def _embed_vision_frames(self, docs: list[Any], session_id: str, path_cls: Any) -> list[Any]:
         """Embed video frame images with SigLIP → vision_collection (1152-dim).
 
         Docs without a valid asset_path or where SigLIP is unavailable are
@@ -272,7 +272,7 @@ class VideoEmbedder(BaseEmbedder):
         for doc in docs:
             s = getattr(doc, "structure", {}) or {}
             asset_path = s.get("asset_path", "")
-            if not asset_path or not _Path(asset_path).exists():
+            if not asset_path or not path_cls(asset_path).exists():
                 continue
             try:
                 emb = ie.embed(str(asset_path), session_id=session_id)

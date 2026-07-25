@@ -15,11 +15,15 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from prometheus_client import Counter as _Counter
+
 from app.core.config import settings
+from app.ingestion.base_ingest import BaseIngestor
 from app.ingestion.schema import (
     EmptyFileError,
     FileTooLargeError,
     IngestedDocument,
+    RawExtract,
     UniversalMetadata,
     UnsupportedMimeError,
 )
@@ -927,7 +931,9 @@ def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
     try:
         _resolve_ffmpeg()
     except FileNotFoundError:
-        raise ValueError("FFMPEG_NOT_FOUND: ffmpeg binary not found, please install ffmpeg")
+        raise ValueError(
+            "FFMPEG_NOT_FOUND: ffmpeg binary not found, please install ffmpeg"
+        ) from None
 
     logger.info(
         event="video_ingest_start",
@@ -1367,11 +1373,6 @@ def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
 
 
 # ─── Phase 1: VideoIngestor ────────────────────────────────────────────────────
-
-from prometheus_client import Counter as _Counter
-
-from app.ingestion.base_ingest import BaseIngestor
-from app.ingestion.schema import RawExtract
 
 _EXTRACTS_TOTAL = _Counter(
     "magik_video_extracts_total", "Total extracts produced by video ingestor"

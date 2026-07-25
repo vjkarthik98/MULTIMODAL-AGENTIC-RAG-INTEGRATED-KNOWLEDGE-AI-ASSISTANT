@@ -8,7 +8,10 @@ catches it and converts it to the appropriate HTTP / response shape.
 from __future__ import annotations
 
 
-class GuardrailBlocked(Exception):
+# Established public exception name used across 15+ files (app/guardrails,
+# app/agents, app/ingestion, tests, CHANGELOG) -- renaming to GuardrailBlockedError
+# is a real API break, not a lint fix.
+class GuardrailBlocked(Exception):  # noqa: N818
     """Raised when a guardrail blocks a request or response.
 
     Attributes:

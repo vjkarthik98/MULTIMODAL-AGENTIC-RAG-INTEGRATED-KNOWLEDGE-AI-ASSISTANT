@@ -513,7 +513,7 @@ class Reranker:
         # Computed once per query: is this query explicitly ABOUT the Q&A?
         query_is_meta = bool(_META_QUERY_RE.search(query or ""))
 
-        for i, (d, s) in enumerate(zip(valid_docs, model_scores)):
+        for i, (d, s) in enumerate(zip(valid_docs, model_scores, strict=False)):
             meta = dict(d.get("metadata", {}) or {})
 
             modality = meta.get("modality", "text")

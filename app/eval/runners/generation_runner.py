@@ -12,6 +12,7 @@ template_leak_rate, and hallucination_rate.
 from __future__ import annotations
 
 import os
+import re as _re
 import time
 from typing import Any
 
@@ -111,8 +112,6 @@ def _load_eval_rows(cfg: EvalConfig) -> list[dict[str, Any]]:
                 rows.append(r)
     return rows
 
-
-import re as _re
 
 # The verification loop (app/verification/verification_loop.py) appends this hedge
 # to answers it can't fully auto-verify. It's a product warning, but graded as an

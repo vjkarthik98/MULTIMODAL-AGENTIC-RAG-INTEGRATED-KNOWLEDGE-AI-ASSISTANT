@@ -25,6 +25,7 @@ from app.chunking.finance_numbers import approx_tokens, extract_finance_entities
 from app.core.config import settings
 from app.ingestion.base_ingest import BaseIngestor
 from app.ingestion.schema import IngestedDocument, RawExtract, UniversalMetadata
+from app.utils.logger import get_logger
 
 # ── TEXT REPAIR PASSES ────────────────────────────────────────────────────────
 
@@ -36,7 +37,9 @@ def repair_mojibake(text: str) -> tuple[str, int]:
         import ftfy
 
         fixed = ftfy.fix_text(text)
-        diff = sum(1 for a, b in zip(text, fixed) if a != b) + abs(len(text) - len(fixed))
+        diff = sum(1 for a, b in zip(text, fixed, strict=False) if a != b) + abs(
+            len(text) - len(fixed)
+        )
         return fixed, diff
     except ImportError:
         return text, 0
@@ -353,8 +356,6 @@ def repair_text(raw: str) -> tuple[str, dict[str, int]]:
     return text, stats
 
 
-from app.utils.logger import get_logger
-
 logger = get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
@@ -479,7 +480,9 @@ def _simhash(text: str) -> int:
     tokens = text.lower().split()
     v = [0] * 64
     for token in tokens:
-        h = int(hashlib.md5(token.encode(), usedforsecurity=False).hexdigest(), 16)  # simhash bucket, not security
+        h = int(
+            hashlib.md5(token.encode(), usedforsecurity=False).hexdigest(), 16
+        )  # simhash bucket, not security
         for i in range(64):
             if h & (1 << i):
                 v[i] += 1
@@ -676,7 +679,7 @@ def _redact_pii(text: str) -> tuple[str, dict[str, int]]:
 
 
 def _detect_subtype(chunk: str) -> str:
-    lines = [l.strip() for l in chunk.split("\n") if l.strip()]
+    lines = [ln.strip() for ln in chunk.split("\n") if ln.strip()]
     if not lines:
         return "paragraph"
     first = lines[0]
@@ -797,7 +800,6 @@ def _extract_table_blocks(text: str) -> list[tuple[int, int, str, list[str]]]:
         if not _looks_like_data_row(lines[i]):
             i += 1
             continue
-        run_start = i
         run_lines: list[int] = [i]
         j = i + 1
         while j < len(lines):

@@ -128,8 +128,6 @@ _CONFUSABLES: dict[str, str] = {
     "ᵂ": "W",
     # Modifier letters used in enc-006 test case
     "ᴻ": "N",
-    "ᵁ": "U",
-    "ᴴ": "H",
     # Greek lookalikes
     "α": "a",
     "β": "b",

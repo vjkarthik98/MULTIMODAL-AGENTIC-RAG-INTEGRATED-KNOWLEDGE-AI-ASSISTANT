@@ -92,7 +92,7 @@ def _rows_to_nl(rows: list[str], headers: list[str], unit_scale: str, sheet_name
         if local_headers and cells == local_headers:
             continue
         if local_headers and len(cells) == len(local_headers):
-            parts = [f"{h}: {v}" for h, v in zip(local_headers, cells)]
+            parts = [f"{h}: {v}" for h, v in zip(local_headers, cells, strict=False)]
             lines.append(", ".join(parts))
         else:
             lines.append(" | ".join(cells))

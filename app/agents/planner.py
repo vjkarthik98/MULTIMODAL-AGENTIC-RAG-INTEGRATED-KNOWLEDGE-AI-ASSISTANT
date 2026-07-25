@@ -450,7 +450,7 @@ class Planner:
         TOPOLOGICAL SORT — STEPS THAT DEPEND ON OTHERS
         ARE PLACED AFTER THEIR DEPENDENCIES.
         """
-        tool_names = {s.tool for s in steps}
+        {s.tool for s in steps}
         ordered: list[ExecutionStep] = []
         placed: set = set()
 

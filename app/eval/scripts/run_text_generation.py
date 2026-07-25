@@ -5,6 +5,7 @@ Calls POST /rag/query for each text gold row, collects answers + sources,
 computes generation metrics using the lexical judge, then merges results
 into the existing rag_report.json.
 """
+
 from __future__ import annotations
 
 import json
@@ -36,7 +37,12 @@ def load_text_gold():
             row = json.loads(line)
             ref = row.get("reference_answer", "")
             # Skip TODO, injection probe, search-required
-            if not ref or ref in ("TODO", "") or "SEARCH_REQUIRED" in ref or "INJECTION_PROBE" in ref:
+            if (
+                not ref
+                or ref in ("TODO", "")
+                or "SEARCH_REQUIRED" in ref
+                or "INJECTION_PROBE" in ref
+            ):
                 continue
             rows.append(row)
     return rows
@@ -83,7 +89,6 @@ def lexical_score(answer: str, reference: str, context_texts: list[str]) -> dict
 
     # Template leak: look for common prompt artifacts
     leak_patterns = [r"\[sic\]", r"Sources Used:", r"<\|im_end\|>", r"\[INST\]", r"\[\/INST\]"]
-    import re
     template_leak = any(re.search(p, answer) for p in leak_patterns)
 
     return {
@@ -128,14 +133,18 @@ def main():
                 context_texts.append(s.get("text") or s.get("content") or "")
 
         scores = lexical_score(answer, reference, context_texts)
-        results.append({
-            "id": qid,
-            "query": query,
-            "answer": answer[:200],
-            "scores": scores,
-            "latency": elapsed,
-        })
-        print(f"  [{qid}] done in {elapsed:.1f}s | faith={scores['faithfulness']:.3f} rel={scores['answer_relevancy']:.3f}")
+        results.append(
+            {
+                "id": qid,
+                "query": query,
+                "answer": answer[:200],
+                "scores": scores,
+                "latency": elapsed,
+            }
+        )
+        print(
+            f"  [{qid}] done in {elapsed:.1f}s | faith={scores['faithfulness']:.3f} rel={scores['answer_relevancy']:.3f}"
+        )
 
     if not results:
         print("[TEXT GEN EVAL] No results — all queries failed.")
@@ -143,7 +152,10 @@ def main():
 
     # Aggregate
     n = len(results)
-    avg = lambda key: sum(r["scores"][key] for r in results) / n
+
+    def avg(key):
+        return sum(r["scores"][key] for r in results) / n
+
     faithfulness = avg("faithfulness")
     answer_relevancy = avg("answer_relevancy")
     context_recall = avg("context_recall")

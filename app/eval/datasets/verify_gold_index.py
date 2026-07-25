@@ -140,7 +140,7 @@ def verify(dry: bool = False) -> None:
         "repaired": [],
     }
 
-    for modality, fname in MODALITY_FILES.items():
+    for _modality, fname in MODALITY_FILES.items():
         path = GOLD / fname
         rows = read_jsonl(path)
         changed = False

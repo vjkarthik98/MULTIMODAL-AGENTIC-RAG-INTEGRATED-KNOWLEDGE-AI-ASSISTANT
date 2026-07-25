@@ -47,7 +47,7 @@ _CALL_SECTION_KEYWORDS = {
 
 
 def _detect_chunk_type(text: str) -> str:
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if not lines:
         return "paragraph"
     first = lines[0]
@@ -55,7 +55,7 @@ def _detect_chunk_type(text: str) -> str:
         return "speaker_turn"
     if _ALL_CAPS_HEADING.match(first) or _NUMBERED_HEADING.match(first):
         return "section"
-    if all(_LIST_ITEM.match(l) for l in lines[:3] if l):
+    if all(_LIST_ITEM.match(ln) for ln in lines[:3] if ln):
         return "list"
     return "paragraph"
 
@@ -102,7 +102,7 @@ def _split_on_speaker_turns(text: str) -> list[tuple]:
         if prefix_text:
             segments.append((None, prefix_text))
 
-    for i, (start, end, speaker) in enumerate(positions):
+    for i, (start, _end, speaker) in enumerate(positions):
         seg_end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
         seg_text = text[start:seg_end].strip()
         if seg_text:

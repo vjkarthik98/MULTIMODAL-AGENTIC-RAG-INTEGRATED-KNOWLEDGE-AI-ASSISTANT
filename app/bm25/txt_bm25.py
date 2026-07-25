@@ -176,7 +176,7 @@ class TxtBM25(BaseBM25):
         self._rebuild_sub_indexes(user_id)
 
     def _rebuild_sub_indexes(self, user_id: str | None = None) -> None:
-        for tag, corpus, docs, attr_bm25, attr_docs, attr_sub in [
+        for tag, corpus, _docs, attr_bm25, attr_docs, _attr_sub in [
             ("ceo", self._sub_ceo, self._sub_docs_ceo, "_bm25_ceo", "_sub_docs_ceo", "_sub_ceo"),
             ("cfo", self._sub_cfo, self._sub_docs_cfo, "_bm25_cfo", "_sub_docs_cfo", "_sub_cfo"),
             ("qa", self._sub_qa, self._sub_docs_qa, "_bm25_qa", "_sub_docs_qa", "_sub_qa"),

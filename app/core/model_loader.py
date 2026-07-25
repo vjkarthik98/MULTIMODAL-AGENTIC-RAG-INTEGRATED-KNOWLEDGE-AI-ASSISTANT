@@ -39,6 +39,9 @@ from tenacity import (
     wait_exponential,
 )
 
+from app.core.config import settings
+from app.core.device_manager import device_manager
+
 
 def _is_retryable_load_error(exc: BaseException) -> bool:
     """Retry on timeout or transient RuntimeError, but not on interpreter shutdown."""
@@ -48,9 +51,6 @@ def _is_retryable_load_error(exc: BaseException) -> bool:
         return "interpreter shutdown" not in str(exc) and "shutdown" not in str(exc).lower()
     return False
 
-
-from app.core.config import settings
-from app.core.device_manager import device_manager
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)

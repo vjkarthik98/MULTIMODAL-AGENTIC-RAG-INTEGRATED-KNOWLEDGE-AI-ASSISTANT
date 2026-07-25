@@ -253,7 +253,7 @@ def validate_and_update_manifest() -> None:
     gold_files = manifest.get("gold_files", {})
     errors = 0
 
-    for modality, fname in MODALITY_TO_GOLD.items():
+    for _modality, fname in MODALITY_TO_GOLD.items():
         gold_path = GOLD_DIR / fname
         rows = _load_jsonl(gold_path)
 

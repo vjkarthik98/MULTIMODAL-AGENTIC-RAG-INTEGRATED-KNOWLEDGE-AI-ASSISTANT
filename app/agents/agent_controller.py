@@ -428,7 +428,9 @@ class AgentController:
             return future.result(timeout=self.timeout)
         except FuturesTimeoutError:
             future.cancel()
-            raise TimeoutError(f"AGENT_TIMEOUT: executor did not finish within {self.timeout}s")
+            raise TimeoutError(
+                f"AGENT_TIMEOUT: executor did not finish within {self.timeout}s"
+            ) from None
 
     # VALIDATION
 

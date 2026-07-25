@@ -469,9 +469,9 @@ def _warmup_qwen2_vl() -> None:
         if device != "cuda":
             return
         import torch
-        from PIL import Image as _PIL
+        from PIL import Image
 
-        dummy_img = _PIL.new("RGB", (224, 224), color=128)
+        dummy_img = Image.new("RGB", (224, 224), color=128)
         messages = [
             {
                 "role": "user",
