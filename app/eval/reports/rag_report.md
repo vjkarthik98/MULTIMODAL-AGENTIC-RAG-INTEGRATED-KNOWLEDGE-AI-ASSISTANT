@@ -1,11 +1,11 @@
 # RAG Eval Report — Phase 25
 
-**Generated:** 2026-07-25T03:45:56Z  
-**Git SHA:** f5c2a19  
+**Generated:** 2026-07-26T17:08:27Z  
+**Git SHA:** 50d1afc  
 
 ## Suite: `retrieval`
 
-Duration: 188.0s
+Duration: 219.3s
 
 | Metric | Value | n | Notes |
 |--------|-------|---|-------|
@@ -15,7 +15,7 @@ Duration: 188.0s
 | `ndcg_at_10` | 0.5322 | 56 |  |
 | `recall_at_10` | 0.7589 | 56 |  |
 | `recall_at_5` | 0.6786 | 56 |  |
-| `retrieval_p50_sec` | 1.9524 | 56 | min=1.07s max=56.81s |
-| `retrieval_p95_sec` | 3.6471 | 56 |  |
-| `retrieval_p99_sec` | 28.3828 | 56 |  |
+| `retrieval_p50_sec` | 2.4736 | 56 | min=1.05s max=58.02s |
+| `retrieval_p95_sec` | 5.9204 | 56 |  |
+| `retrieval_p99_sec` | 31.9935 | 56 |  |
 
