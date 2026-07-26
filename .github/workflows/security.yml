@@ -1,0 +1,212 @@
+name: Security
+
+# Supply-chain and code-security scanning, separate from ci.yml (lint/type/
+# unit — trust signal for correctness) and eval-gate.yml (RAG-quality gate).
+# Four checks, each independently scoped to blocking vs informational based
+# on a REAL run against this codebase (2026-07-25), same principle as
+# ci.yml's mypy step: a brand-new gate that's red on day one from pre-
+# existing debt trains people to ignore it. Each step below states what a
+# real run found and why it landed where it did.
+#
+# Dependabot (.github/dependabot.yml) is the complementary standing watch —
+# it opens PRs on its own schedule; pip-audit here is the point-in-time gate
+# on whatever a PR is introducing right now.
+
+on:
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+  schedule:
+    - cron: "0 4 * * 1"  # weekly Monday — catches newly-disclosed CVEs against unchanged pins
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  secrets-scan:
+    name: detect-secrets (baseline diff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install detect-secrets>=1.5
+
+      # Same entrypoint the local pre-commit hook uses (.pre-commit-config.yaml)
+      # — CI enforcement was a real gap before this: detect-secrets only ran
+      # locally, so a contributor who skipped or bypassed pre-commit had
+      # nothing else in the pipeline to catch a leaked credential. Blocking
+      # by default: verified clean against the current baseline (2026-07-25).
+      - name: detect-secrets vs baseline
+        run: detect-secrets-hook --baseline .secrets.baseline $(git ls-files)
+
+  sast-bandit:
+    name: Bandit SAST
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install "multimodal-rag-assistant[security] @ ." || pip install bandit>=1.7
+
+      # BLOCKING, high-severity only (-lll = report severity HIGH and above).
+      # A real run (2026-07-25) found 5 HIGH findings: 1 confirmed false
+      # positive (app/guardrails/input_guard.py's bidi-control-char strings
+      # ARE the injection-defense signature it's built to strip, not a
+      # vulnerability) and 4 real MD5-for-dedup findings, all fixed
+      # (usedforsecurity=False — these hash file/frame/token content for
+      # dedup keys, never anything security-sensitive). Zero HIGH findings
+      # remain, so this can gate for real from day one — a regression here
+      # means a genuinely new, severe finding, not pre-existing debt.
+      - name: Bandit — HIGH severity (blocking)
+        run: bandit -r app/ -x tests,ui,.venv,rag_env -s B104,B108 -lll -q
+
+      # INFORMATIONAL, full severity range. A real run found 297 Low + 25
+      # Medium pre-existing findings (mostly B110 try/except/pass — a broad
+      # pattern, not inherently wrong, used throughout for deliberately
+      # non-fatal fallback paths). Same call as ci.yml's mypy step: visible
+      # (uploaded as an artifact every run) without blocking every future PR
+      # on a backlog that predates this workflow. Revisit as a dedicated
+      # code-review pass, not folded into this gate.
+      - name: Bandit — full report (informational)
+        if: always()
+        continue-on-error: true
+        run: bandit -r app/ -x tests,ui,.venv,rag_env -s B104,B108 -f json -o bandit-report.json
+
+      - name: Upload full Bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
+          retention-days: 30
+
+  dependency-audit:
+    name: pip-audit (dependency CVEs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install pip-audit>=2.7
+
+      # INFORMATIONAL for now, not continue-on-error-free: a real run
+      # (2026-07-25) surfaced dependency CVEs, several genuinely serious
+      # (SSRF/XXE/pickle-RCE class) — but each traced back to a specific,
+      # bounded reason it isn't live exposure here, not a blanket "probably
+      # fine":
+      #   - The whole langchain/langchain-community/langchain-openai/
+      #     langsmith CVE chain (SSRF, XXE, prompt-manifest RCE) comes from
+      #     `ragas==0.1.21` (requirements.txt), which is EVAL-HARNESS-ONLY —
+      #     it runs against a curated, developer-authored gold set
+      #     (app/eval/datasets/gold/*.jsonl), never live/untrusted user input.
+      #     langchain-core/langchain-text-splitters (the packages actually
+      #     declared as app dependencies) aren't the source. A fix means
+      #     bumping ragas to a version built against patched langchain —
+      #     real, nontrivial API-compat work for the eval harness re-baselined
+      #     this session, deliberately not rushed through here.
+      #   - `ecdsa` (Minerva timing attack, python-ecdsa's own maintainers
+      #     have stated no fix is planned) requires the vulnerable
+      #     ECDSA-signing code path to be reachable. Confirmed NOT reachable:
+      #     this app's JWT signing defaults to HS256 (HMAC, not ECDSA) —
+      #     `JWT_ALGORITHM` in app/core/config.py — so ecdsa's SigningKey.
+      #     sign_digest() is never called regardless of the installed version.
+      #   - `keras` (via tensorflow) and `diskcache` (via llama-cpp-python)
+      #     are both pinned by their parent package, not independently
+      #     upgradable without touching that parent's own compatibility range.
+      # Dependabot (.github/dependabot.yml) is the standing mechanism that
+      # actually drives fixes over time as compatible patched versions land.
+      # Flip continue-on-error to false once the ragas upgrade (the one item
+      # here needing real work, not just risk acceptance) lands.
+      - name: pip-audit
+        continue-on-error: true
+        run: pip-audit -r requirements.txt --desc -f json -o pip-audit-report.json
+
+      - name: pip-audit — human-readable summary in job log
+        if: always()
+        continue-on-error: true
+        run: pip-audit -r requirements.txt || true
+
+      - name: Upload pip-audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-report
+          path: pip-audit-report.json
+          retention-days: 30
+
+  license-scan:
+    name: Dependency license scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install project + license scanner
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pip-licenses>=4.4
+
+      - name: Full license report (informational)
+        if: always()
+        continue-on-error: true
+        run: pip-licenses --format=json --with-urls > licenses-report.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: licenses-report
+          path: licenses-report.json
+          retention-days: 30
+
+      # BLOCKING, but only on network-copyleft licenses (AGPL-3.0, SSPL) —
+      # the two license families that would force source disclosure of this
+      # whole hosted service if triggered, an unambiguous hard-no for a
+      # project shipped under MIT (see LICENSE). A real scan (2026-07-25)
+      # found GPL-2.0-or-later (mutagen, audio tag reading) and
+      # LGPL-3.0-or-later (CairoSVG) — real, worth knowing about (surfaced in
+      # the uploaded report above), but not blocked here: neither is network
+      # copyleft, both are standalone-tool-style usage (not linked into
+      # MAGIK's own distributed code), and deciding whether a specific
+      # GPL/LGPL dependency is acceptable is a legal call this workflow
+      # shouldn't make unilaterally. AGPL/SSPL have no such ambiguity.
+      - name: Fail on network-copyleft licenses (AGPL/SSPL)
+        run: |
+          pip-licenses --format=json | python -c "
+          import json, sys
+          pkgs = json.load(sys.stdin)
+          banned = ('AGPL', 'SSPL', 'Server Side Public License')
+          hits = [p for p in pkgs if any(b in (p.get('License') or '') for b in banned)]
+          if hits:
+              for p in hits:
+                  print(f\"[BANNED LICENSE] {p['Name']} {p['Version']}: {p['License']}\")
+              sys.exit(1)
+          print('No AGPL/SSPL dependencies found.')
+          "

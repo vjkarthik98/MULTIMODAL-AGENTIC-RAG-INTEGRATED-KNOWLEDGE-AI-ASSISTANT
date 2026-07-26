@@ -1,0 +1,27 @@
+# End-to-end benchmark queries — calls FastAPI /query and scores all metrics together.
+
+categories:
+  cross_document_multi_hop:
+    description: "Requires reasoning across multiple ingested documents"
+    examples:
+      - "Compare Apple and JPMorgan's net income growth from 2022 to 2023"
+      - "Which of the two companies had higher profit margin in FY2023?"
+
+  routing_correctness:
+    description: "Verifies the correct route is taken end-to-end"
+    examples:
+      - query: "What is Apple's current stock price?"
+        expected_route: "search"
+      - query: "What was Apple's FY2023 revenue?"
+        expected_route: "rag"
+
+  grounding_and_citation:
+    description: "Answer must be grounded in retrieved context with correct citations"
+    examples:
+      - "According to Apple's 10-K, what was their iPhone revenue in FY2023?"
+      - "What does JPMorgan's annual report say about their capital ratio?"
+
+  latency:
+    description: "End-to-end latency must be within threshold"
+    threshold_p95_sec: 60
+    threshold_p50_sec: 20

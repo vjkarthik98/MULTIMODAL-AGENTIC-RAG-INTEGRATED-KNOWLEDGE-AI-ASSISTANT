@@ -1,0 +1,144 @@
+name: CI
+
+# Fast, hermetic checks — lint, types, unit tests. No models, no GPU, no
+# external services. This is the trust signal that gates every PR; the
+# RAG-quality gate lives in eval-gate.yml (needs real data/infra — see there).
+#
+# paths-ignore: a doc-only PR (README/CHANGELOG/*.md) can't affect lint,
+# types, or test results, so skip the run entirely rather than burning a
+# few minutes proving nothing changed. NOTE for whenever branch protection
+# gets configured (not yet, per docs/runbooks/ci-cd.md): if this job is set
+# as a "required" status check, a PR that ONLY touches an ignored path will
+# never get a check result and can get stuck permanently pending, not
+# auto-passed — see docs/runbooks/ci-cd.md for the fix (a companion
+# always-succeeds job with the same name, GitHub's documented workaround).
+on:
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint-type-test:
+    name: lint + typecheck + unit (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    # Defense in depth alongside pytest's own --timeout=120 per-test cap:
+    # this bounds the WHOLE job (a hung `pip install`, not just a hung
+    # test), so a stuck run fails within minutes instead of running until
+    # GitHub's default 6-hour ceiling.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
+    env:
+      ENV: test
+      AUTH_ENABLED: "false"
+      # Settings.validate() rejects the "CHANGE_ME_IN_PRODUCTION" default for
+      # SECRET_KEY/JWT_SECRET_KEY whenever ENV != "development" (independent
+      # of AUTH_ENABLED above) — a pre-existing gap that only surfaced once
+      # `ruff` stopped failing first and the job actually reached the pytest
+      # step. Placeholder values only, never used to sign anything real.
+      SECRET_KEY: "ci-test-only-placeholder-secret-not-a-real-credential"
+      JWT_SECRET_KEY: "ci-test-only-placeholder-jwt-secret-not-a-real-credential"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # Runtime deps are needed for import-time collection (app/core/config.py
+      # etc. are plain `os.getenv(..., default)` — no required secrets — but
+      # the modules themselves still need fastapi/pydantic/etc. importable).
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # requirements.txt's own header documents this: torch/torchvision/
+          # torchaudio must be installed explicitly BEFORE the rest, with the
+          # index matching the target hardware, because `pip install -r
+          # requirements.txt` alone resolves torch>=2.6 from PyPI's default
+          # index — which is a CUDA build pulling in triton + nvidia-cuda-*
+          # bindings. This hosted runner has no GPU/driver, and those CUDA
+          # bindings segfault (not a clean Python exception) the moment
+          # `import torch` touches torch._dynamo/triton at collection time.
+          # This step was simply missing here — invisible until now because
+          # `ruff` always failed first and the job never reached `pytest`.
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+          pip install -e ".[dev]"
+
+      # ui/ is a Vite/React/JS project (no .py files) — Python lint scope is
+      # app/ only, matching pyproject.toml's own [tool.setuptools] package scope.
+      - name: ruff
+        run: ruff check app/
+
+      - name: black --check
+        run: black --check app/
+
+      - name: isort --check
+        run: isort --check app/
+
+      # Non-blocking by deliberate decision, not oversight: a real run against
+      # this codebase found 311 pre-existing errors across 65 files (type
+      # debt from before this workflow existed, not introduced by it). A gate
+      # that's red on day one trains people to ignore it — this stays
+      # visible (the step still shows failed/red in the Actions UI) without
+      # blocking merges until a dedicated type-debt paydown pass (architect/
+      # code-review scope, not devops) gets the baseline clean. Flip
+      # continue-on-error to false once that lands. See
+      # docs/runbooks/phase29-plan.md workstream B.
+      - name: mypy
+        continue-on-error: true
+        run: mypy app/
+
+      # Scoped to tests/unit/ directly, not `pytest tests/ -m unit` — the
+      # latter still COLLECTS (imports) every file under tests/ before
+      # filtering by marker, including tests/auth, tests/eval,
+      # tests/guardrails, tests/integration. CONFIRMED root cause (not just
+      # suspected): 27 of tests/integration/'s 42 files fail to import —
+      # stale APIs, some reference a pre-refactor `src.rag_system.*` package
+      # that no longer exists — so a bare `tests/ -m unit` run hits
+      # "Interrupted: N errors during collection" and runs ZERO tests,
+      # presenting as an unpredictable hang rather than a fast clear
+      # failure. Full writeup: docs/runbooks/ci-cd.md and
+      # docs/runbooks/phase29-plan.md workstream D. Scoping the path here is
+      # a real fix, not a workaround: nothing outside tests/unit/ can ever
+      # match `-m unit` anyway.
+      # pyproject.toml's [tool.coverage.report] fail_under=70 is measured
+      # against the FULL app/ package, but this step only runs tests/unit/
+      # (by design — see the comment above). tests/unit/ alone can never
+      # reach 70% of app/'s total surface; that number only becomes
+      # meaningful once the full suite (unit+integration+guardrails+auth+eval)
+      # runs together, which isn't possible today given the collection
+      # failures documented above. --cov-fail-under=0 overrides just this
+      # invocation so a coverage percentage doesn't fail the build — actual
+      # test failures/errors above still do, this only affects the coverage
+      # threshold. fail_under=70 stays in pyproject.toml as the real target
+      # for whenever a combined full-suite run exists; this is the same
+      # "visible but non-blocking until paid down" precedent as mypy above,
+      # applied surgically instead of via continue-on-error (which would
+      # also silence genuine test failures, not just the coverage number).
+      - name: pytest -m unit
+        run: pytest tests/unit/ -m unit -q --cov=app --cov-report=xml --cov-report=term-missing --cov-fail-under=0
+
+      - name: Upload coverage
+        if: matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 14

@@ -1,0 +1,364 @@
+# Phase 26 — Guardrails Policy Configuration
+# Single source of truth for ALL patterns, thresholds, and refusal templates.
+# Changing a threshold or pattern NEVER requires a code change.
+#
+# Format guidance:
+#   injection.regex_patterns[].pattern — Python re pattern string (re.IGNORECASE applied)
+#   injection.regex_patterns[].severity — critical | high | medium
+#   All thresholds are floats in [0, 1] unless noted.
+
+# ---------------------------------------------------------------------------
+# INPUT GUARDRAILS
+# ---------------------------------------------------------------------------
+
+injection:
+  # Regex patterns that tolerate intervening modifiers (Issue A fix).
+  # All compiled with re.IGNORECASE | re.DOTALL at startup.
+  regex_patterns:
+    # --- Ignore / disregard variants ---
+    - pattern: '\bignore\b.{0,40}?\b(?:previous|prior|above|all|your)\b.{0,40}?\b(?:instructions?|rules?|prompt|directives?|context|guidelines?|constraints?|policies|settings?)\b'
+      severity: critical
+      description: "ignore * previous/prior/above/your instructions/guidelines (Issue A fix, Unicode-tolerant)"
+
+    - pattern: '\bignore\b.{0,60}?\bignore\b.{0,40}?\b(?:prior|previous|all|context)\b'
+      severity: critical
+      description: "repeated ignore ... ignore ... prior (em-dash modifier bypass)"
+
+    - pattern: '\b(?:disregard|dismiss|forget|overlook)\b.{0,40}?\b(?:above|previous|prior|all|the|your|every(?:thing)?|current)\b.{0,40}?\b(?:instructions?|rules?|prompt|directives?|context|guidelines?|said)\b'
+      severity: critical
+      description: "disregard/forget/overlook * previous/your/current instructions (Unicode-tolerant)"
+
+    - pattern: '\b(?:forget|disregard|dismiss)\b.{0,60}?\b(?:instructions?|rules?|prompt|directives?|guidelines?|constraints?)\b'
+      severity: critical
+      description: "forget/disregard ... instructions (direct, no middle keyword required)"
+
+    # --- Standalone short-form injection keywords (agent-level, aggressive) ---
+    - pattern: '\bignore\s+previous\b'
+      severity: high
+      description: "ignore previous (standalone — common prompt injection opener)"
+
+    - pattern: '\bforget\s+everything\b'
+      severity: high
+      description: "forget everything (standalone injection pattern)"
+
+    - pattern: '\bact\s+as\b'
+      severity: medium
+      description: "act as (standalone — common jailbreak opener)"
+
+    # --- Override / bypass ---
+    - pattern: '\b(?:override|bypass|circumvent|subvert|neutralize)\b[\s\w]{0,15}?\b(?:instructions?|rules?|prompt|safety|filters?|guardrail|restriction|constraint)\b'
+      severity: critical
+      description: "override/bypass instructions/safety (filters? matches both filter and filters)"
+
+    # --- You are now / act as ---
+    - pattern: '\byou\s+are\s+now\b'
+      severity: high
+      description: "you are now [persona]"
+
+    - pattern: '\byou\s+are\b.{0,40}?\b(?:no\s+restrictions?|without\s+(?:limits?|rules?|safety|filters?|restrictions?|guidelines?)|unrestricted|unfiltered|general.purpose\s+ai)\b'
+      severity: high
+      description: "you are [AI] with no restrictions"
+
+    - pattern: '\byou\s+are\s+no\s+longer\b'
+      severity: high
+      description: "you are no longer [identity]"
+
+    - pattern: '\bact\s+as\b.{0,20}?\b(?:if|though|an?\s+unrestricted|an?\s+unfiltered|dan|gpt|without|no\s+(?:content|safety|filter|restriction|rule|limit))\b'
+      severity: high
+      description: "act as [unrestricted persona] or act as AI with no filters"
+
+    - pattern: '\bact\s+as\b.{0,30}?\bno\s+(?:content|safety|filter|restrictions?|rules?|limits?|guidelines?|policies|policy)\b'
+      severity: high
+      description: "act as [AI] with no content/safety/filters"
+
+    # --- Forget training / reset identity ---
+    - pattern: '\b(?:forget|abandon|discard|drop)\b.{0,30}?\b(?:training|your\s+training|all\s+(?:your|the)?\s*training|guidelines?|constraints?|limits?)\b'
+      severity: high
+      description: "forget/abandon training or constraints"
+
+    - pattern: '\bforget\s+(?:everything|all|what)\b.{0,40}?\b(?:safety|told|know|learned|start\s+fresh)\b'
+      severity: critical
+      description: "forget everything/all/what + safety/start fresh"
+
+    - pattern: '\bstart\s+fresh\b'
+      severity: high
+      description: "start fresh (identity reset)"
+
+    - pattern: '\bdo\s+(?:what|as|whatever)\s+(?:i\s+say|you\s+(?:are\s+)?told|i\s+tell\s+you)\b'
+      severity: high
+      description: "do what I say / do as you are told"
+
+    - pattern: '\b(?:disregard|dismiss|ignore)\b.{0,30}?\b(?:the\s+above|what\s+(?:i|you)\s+(?:said|told|wrote))\b'
+      severity: critical
+      description: "disregard/ignore the above"
+
+    - pattern: '\b(?:discard|dismiss)\b.{0,30}?\b(?:previous|prior|all|any|current)\b.{0,30}?\b(?:instructions?|rules?|prompt|directives?|guidelines?)\b'
+      severity: critical
+      description: "discard/dismiss previous instructions"
+
+    - pattern: '\b(?:released?|freed?)\b.{0,30}?\b(?:from\s+(?:your|previous|prior|all)\b.{0,30}?\b(?:instructions?|rules?|guidelines?|constraints?)|from\s+safety)\b'
+      severity: critical
+      description: "released/freed from your instructions"
+
+    # --- Instruction exfiltration variants ---
+    - pattern: '\b(?:original|initial|first|starting)\b.{0,20}?\b(?:system\s+)?instructions?\b'
+      severity: critical
+      description: "original/initial/first system instructions exfiltration"
+
+    - pattern: '\b(?:transcribe|repeat|recite|copy|write\s+out)\b.{0,30}?\b(?:instructions?|prompt|rules?|directives?|guidelines?)\b.{0,20}?\b(?:given|provided|received|told)\b'
+      severity: critical
+      description: "transcribe/repeat instructions you were given"
+
+    # --- PII mass-exfiltration ---
+    - pattern: '\b(?:show|output|list|dump|print|reveal|expose)\b.{0,30}?\b(?:all\s+)?(?:email|phone(?:\s+number)?|ssn|social\s+security|credit\s+card|address(?:es)?)\b.{0,40}?\b(?:from\s+(?:the|uploaded|the\s+uploaded)|without\s+redact)\b'
+      severity: critical
+      description: "mass PII exfiltration request"
+
+    # --- New system instructions / override from document ---
+    - pattern: '\bNEW\s+SYSTEM\s+(?:INSTRUCTIONS?|PROMPT|RULES?)\b'
+      severity: critical
+      description: "NEW SYSTEM INSTRUCTIONS injected via document"
+
+    - pattern: '\b(?:note\s+(?:from|by|to)|p\.?s\.?:?)\b.{0,40}?\b(?:forget|ignore|disregard|override)\b.{0,30}?\b(?:safety|rules?|instructions?|guidelines?|everything)\b'
+      severity: critical
+      description: "P.S./note injection pattern — instruction embedded as afterthought in document"
+
+    - pattern: '\bignore\b.{0,30}?\bsecurity\s+(?:guidelines?|rules?|policies|measures|protocol)\b'
+      severity: critical
+      description: "ignore security guidelines/policies"
+
+    - pattern: '\boutput\b.{0,40}?\b(?:session\s+(?:token|data|id)|uploaded\s+files?\s+list|user\s+(?:data|files?|token))\b'
+      severity: critical
+      description: "output session tokens/uploaded files — data exfiltration via document"
+
+    - pattern: '\[MODEL\b.{0,60}?\b(?:stop|ignore|forget|override|disregard)\b'
+      severity: critical
+      description: "[MODEL:] bracket injection tag — attacker spoofs model-level instruction"
+
+    - pattern: '\b(?:stop\s+following|stop\s+obeying)\b.{0,30}?\b(?:previous|prior|your|the)\b.{0,20}?\b(?:instructions?|rules?|guidelines?|constraints?)\b'
+      severity: critical
+      description: "stop following previous instructions"
+
+    # --- System prompt / config exfil ---
+    - pattern: '\b(?:system\s+(?:prompt|message|instruction|config)|your\s+(?:system|instructions?|prompt|rules?))\b'
+      severity: critical
+      description: "system prompt/config exfiltration"
+
+    - pattern: '\b(?:reveal|show|print|output|repeat|display|return|expose|leak)\b[\s\w]{0,20}?\b(?:system\s+)?(?:prompt|instructions?|rules?|config|directives?)\b'
+      severity: critical
+      description: "reveal/show your instructions"
+
+    - pattern: '\binstructions?\s+(?:above|before|previously|prior)\b'
+      severity: high
+      description: "instructions above/before"
+
+    # --- Developer / admin / DAN mode ---
+    - pattern: '\b(?:developer|admin|god|super|debug|maintenance|privileged|root)\s+mode\b'
+      severity: high
+      description: "developer/admin/root/debug mode"
+
+    - pattern: '\b(?:unlock|enable|activate)\b.{0,20}?\b(?:all|unrestricted|restricted|hidden|privileged)\b.{0,20}?\b(?:capabilit|feature|function|access|mode)\w*\b'
+      severity: high
+      description: "unlock/enable all capabilities"
+
+    - pattern: '\bdan\s*(?:mode|prompt)?\b'
+      severity: high
+      description: "DAN jailbreak mode"
+
+    - pattern: '\badmin\s+override\b'
+      severity: high
+      description: "admin override"
+
+    # --- Jailbreak direct mention ---
+    - pattern: '\bjailbreak\b'
+      severity: high
+      description: "explicit jailbreak mention"
+
+    # --- New instructions injection ---
+    - pattern: '\bnew\s+instructions?\s*[:=\-]'
+      severity: high
+      description: "new instructions: [payload]"
+
+    - pattern: '\b(?:your\s+)?new\s+instructions?\b.{0,30}?\b(?:are|is|will)\b.{0,30}?\b(?:ignore|forget|disregard|bypass|override)\b'
+      severity: critical
+      description: "your new instructions are to ignore/forget [old instructions]"
+
+    - pattern: '\bfrom\s+now\s+on\b.{0,40}?\b(?:ignore|disregard|forget|bypass|follow)\b.{0,30}?\b(?:rules?|instructions?|guidelines?|above|everything)\b'
+      severity: critical
+      description: "from now on ignore/disregard the rules/instructions"
+
+    # --- Pretend / simulate / roleplay no restrictions ---
+    - pattern: '\b(?:pretend|imagine|roleplay|simulate|being)\b.{0,30}?\b(?:no\s+(?:safety|content|restrictions?|filters?|rules?|limits?|guidelines?)|without\s+(?:limits?|rules?|safety|filters?|restrictions?|guidelines?)|unrestricted|unfiltered)\b'
+      severity: high
+      description: "pretend/simulate/roleplay you have no restrictions/filters"
+
+    - pattern: '\b(?:roleplay|simulate)\b.{0,25}?\ban?\s+ai\b'
+      severity: high
+      description: "roleplay/simulate as AI (persona hijack)"
+
+    # --- Token manipulation ---
+    - pattern: '\b(?:token\s+limit|max\s+token|context\s+window)\b[\s\w]{0,15}?\b(?:bypass|ignore|remove|lift)\b'
+      severity: medium
+      description: "token/context limit bypass"
+
+    # --- Scope violations ---
+    - pattern: '\b(?:book\s+(?:a\s+)?(?:meeting|calendar|appointment)|send\s+(?:an?\s+)?(?:email|invite|calendar)|schedule\s+(?:a\s+)?meeting)\b'
+      severity: medium
+      description: "calendar/email action outside RAG scope"
+
+    - pattern: '\binstall\s+(?:a\s+)?(?:backdoor|keylogger|malware|trojan|rootkit|ransomware)\b'
+      severity: critical
+      description: "malware installation request"
+
+    - pattern: '\b(?:scan\s+for\s+(?:open\s+)?ports?|port\s+scan|nmap|network\s+scan)\b'
+      severity: high
+      description: "network scanning request"
+
+length:
+  max_query_chars: 8000       # hard limit; truncate silently
+  max_output_chars: 16000     # hard limit on generated answer length
+  warn_query_chars: 4000      # log warning but allow
+  repeat_token_limit: 500     # if same 5-char token repeats > this → block
+
+encoding:
+  strip_null_bytes: true
+  strip_rtl_override: true    # U+202E and similar bidi override chars
+  strip_zero_width: true      # U+200B, U+FEFF etc.
+  normalize_unicode: NFC
+  max_homoglyph_ratio: 0.15   # fraction of chars that are confusables
+
+# ---------------------------------------------------------------------------
+# SSRF GUARDRAILS
+# ---------------------------------------------------------------------------
+
+ssrf:
+  blocked_cidrs:
+    - "127.0.0.0/8"       # loopback
+    - "10.0.0.0/8"        # RFC 1918
+    - "172.16.0.0/12"     # RFC 1918
+    - "192.168.0.0/16"    # RFC 1918
+    - "169.254.0.0/16"    # link-local / AWS metadata
+    - "100.64.0.0/10"     # CGNAT
+    - "0.0.0.0/8"         # "this" network
+    - "::1/128"            # IPv6 loopback
+    - "fc00::/7"           # IPv6 ULA
+    - "fe80::/10"          # IPv6 link-local
+  blocked_schemes:
+    - "file"
+    - "ftp"
+    - "gopher"
+    - "dict"
+    - "ldap"
+    - "ldaps"
+    - "sftp"
+    - "tftp"
+  blocked_hostnames:
+    - "localhost"
+    - "metadata.google.internal"
+    - "169.254.169.254"
+    - "instance-data"
+
+# ---------------------------------------------------------------------------
+# PII GUARDRAILS
+# ---------------------------------------------------------------------------
+
+pii:
+  ingress_action: "log"          # log: detect and log only (don't block ingestion)
+  egress_action: "anonymize"     # anonymize: replace with <REDACTED_TYPE> in output
+  # Entity types from presidio-analyzer
+  entity_types:
+    - PERSON
+    - EMAIL_ADDRESS
+    - PHONE_NUMBER
+    - US_SSN
+    - IN_AADHAAR
+    - CREDIT_CARD
+    - IBAN_CODE
+    - IP_ADDRESS
+    - URL
+    - US_BANK_NUMBER
+    - US_PASSPORT
+    # US_DRIVER_LICENSE removed — Presidio's lowest-precision recognizer,
+    # false-positives on fiscal years (FY2023), quarters (Q4), ticker codes
+    # at score 0.3. No value for financial-document RAG.
+  # Regex patterns for additional PII not covered by Presidio
+  extra_regex_patterns:
+    - name: "indian_aadhaar"
+      pattern: '\b\d{4}\s\d{4}\s\d{4}\b'
+      replacement: "<AADHAAR>"
+    - name: "credit_card_visa_mc"
+      pattern: '\b(?:4\d{3}|5[1-5]\d{2})[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'
+      replacement: "<CREDIT_CARD>"
+    - name: "uk_nino"
+      pattern: '\b[A-CEGHJ-PR-TW-Z]{2}\d{6}[A-D]\b'
+      replacement: "<UK_NINO>"
+    - name: "us_ssn_all_formats"
+      pattern: '\b\d{3}-\d{2}-\d{4}\b'
+      replacement: "<US_SSN>"
+
+# ---------------------------------------------------------------------------
+# OUTPUT GUARDRAILS
+# ---------------------------------------------------------------------------
+
+output:
+  groundedness_threshold: 0.30   # hallucination confidence >= this → warning
+  toxicity_threshold: 0.75       # toxicity score >= this → block output
+  max_answer_chars: 16000
+
+  # Template artifact patterns (P1-7) — strip these from LLM output
+  template_artifact_patterns:
+    - '\[sic\]'
+    - 'Sources Used:\s*\d+'
+    - '\(Sources Used:'
+    - '\{[a-zA-Z_]+\}'           # unreplaced template variables like {query}
+    - '<\|(?:im_start|im_end|endoftext)\|>'  # llama.cpp chat tokens
+    - '\[/?INST\]'               # Mistral instruction tokens
+    - '<</?SYS>>'                # Mistral system tokens
+    - '</?s>'                    # Llama BOS/EOS tokens <s> and </s>
+    - '^\s*Answer:\s*'           # Mistral label prefix "Answer: ..."
+    - '^\s*Reasoning:\s*'        # Mistral label prefix "Reasoning: ..."
+    - '^\s*Confidence:\s*[0-9][^\n]*\n?'  # "Confidence: 0.9" trailer
+    - '\n\s*(?:Sources?|References?):\s*\n(?:[^\n]+\n?)+'  # trailing Sources/References block
+
+  citation_validation: true      # validate [filename] tokens against sources[]
+  citation_replacement: ""       # replace fabricated citations with empty string
+
+  # Refusal templates — never expose internals, always offer redirect
+  refusal_templates:
+    injection: "I can't process that request. How can I help you with your documents?"
+    jailbreak: "I can't do that. I'm here to help you with your knowledge base."
+    toxicity: "I can't generate that kind of content."
+    pii_egress: "That information is redacted per data protection policy."
+    scope_violation: "I can only help with your organization's documents and knowledge base."
+    groundedness: "I don't have reliable information to answer that from the available documents."
+    generic: "I'm unable to process that request."
+
+# ---------------------------------------------------------------------------
+# JAILBREAK CLASSIFIER
+# ---------------------------------------------------------------------------
+
+jailbreak:
+  semantic_similarity_threshold: 0.82  # cosine sim >= this → jailbreak flag
+  semantic_enabled: true               # false = regex-only (Tier 1)
+  # Known jailbreak corpus embedded at startup for Tier 2 similarity check
+  corpus_file: "adversarial/red_team_prompts.jsonl"
+  corpus_jailbreak_tag: "jailbreak"    # tag in JSONL to filter jailbreak entries
+  cuda_oom_fallback: true              # fall back to Tier 1 on OOM
+
+# ---------------------------------------------------------------------------
+# RATE LIMITING (block-event based, per session + per IP)
+# ---------------------------------------------------------------------------
+
+rate_limit:
+  block_threshold: 5        # consecutive blocks in window before temp-ban
+  window_sec: 60            # rolling window in seconds
+  ban_duration_sec: 300     # ban duration (5 minutes)
+
+# ---------------------------------------------------------------------------
+# AUDIT
+# ---------------------------------------------------------------------------
+
+audit:
+  enabled: true
+  hmac_algorithm: "sha256"       # uses settings.AUDIT_HMAC_SECRET env var
+  include_query_prefix_chars: 80 # log first 80 chars of query (not full text)

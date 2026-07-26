@@ -1,0 +1,260 @@
+"""Unit tests for app/retrieval/bm25_retriever.py — Phase 24.10."""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict, List
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from app.retrieval.bm25_retriever import BM25Retriever
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _make_retriever(user_id: str = "test_user", tmp_path: Path = None) -> BM25Retriever:
+    r = BM25Retriever(user_id=user_id)
+    return r
+
+
+class _FakeDoc:
+    """Minimal IngestedDocument-like object for BM25 tests."""
+    def __init__(self, text: str, session_id: str = "sess1", i: int = 0):
+        self.text = text
+        self.modality = "text"
+        self.subtype = None
+        self.source = f"doc_{i}.txt"
+        self.source_type = "file"
+        self.chunk_id = i
+        self.page = None
+        self.structure = {
+            "session_id": session_id,
+            "doc_id": f"doc_{i}",
+            "content_type": "text",
+            "embedding_space": "text",
+        }
+
+
+def _make_docs(n: int = 5, session_id: str = "sess1") -> List[_FakeDoc]:
+    return [
+        _FakeDoc(
+            text=f"Document number {i} about retrieval augmented generation.",
+            session_id=session_id,
+            i=i,
+        )
+        for i in range(n)
+    ]
+
+
+# ── Initialization ────────────────────────────────────────────────────────────
+
+class TestBM25RetrieverInit:
+
+    def test_init_without_user_id(self):
+        r = BM25Retriever()
+        assert r.user_id is None
+
+    def test_init_with_user_id(self):
+        r = BM25Retriever(user_id="alice")
+        assert r.user_id == "alice"
+
+    def test_bm25_none_at_cold_start(self):
+        r = BM25Retriever(user_id="fresh_user")
+        assert r.bm25 is None
+
+    def test_documents_empty_at_cold_start(self):
+        r = BM25Retriever(user_id="fresh_user")
+        assert r.documents == []
+
+    def test_tokenized_corpus_empty_at_cold_start(self):
+        r = BM25Retriever()
+        assert r.tokenized_corpus == []
+
+
+# ── search — cold start ───────────────────────────────────────────────────────
+
+class TestBM25RetrieverSearch:
+
+    def test_search_cold_start_returns_empty(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "nonexistent.pkl"):
+            r = BM25Retriever(user_id="cold_user")
+            result = r.search("test query", session_id="s1")
+        assert result == []
+
+    def test_search_returns_list(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "idx.pkl"):
+            r = BM25Retriever(user_id="u1")
+            docs = _make_docs(5)
+            r.build_index(docs, user_id="u1")
+            result = r.search("retrieval augmented generation", session_id="sess1")
+        assert isinstance(result, list)
+
+    def test_search_result_has_expected_keys(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "idx.pkl"):
+            r = BM25Retriever(user_id="u1")
+            r.build_index(_make_docs(5), user_id="u1")
+            result = r.search("document retrieval", session_id="sess1")
+        if result:
+            for hit in result:
+                assert "text" in hit
+                assert "score" in hit
+                assert "metadata" in hit
+
+    def test_search_top_k_limits_results(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "idx.pkl"):
+            r = BM25Retriever(user_id="u1")
+            docs = _make_docs(10)
+            r.build_index(docs, user_id="u1")
+            result = r.search("retrieval generation", session_id="sess1", top_k=3)
+        assert len(result) <= 3
+
+    def test_search_empty_query_returns_empty(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "idx.pkl"):
+            r = BM25Retriever(user_id="u1")
+            docs = _make_docs(5)
+            r.build_index(docs, user_id="u1")
+            result = r.search("", session_id="sess1")
+        assert result == []
+
+    def test_search_scores_are_non_negative(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "idx.pkl"):
+            r = BM25Retriever(user_id="u1")
+            docs = _make_docs(5)
+            r.build_index(docs, user_id="u1")
+            result = r.search("retrieval augmented generation", session_id="sess1")
+        for hit in result:
+            assert hit["score"] >= 0.0
+
+
+# ── build_index ───────────────────────────────────────────────────────────────
+
+class TestBM25RetrieverBuildIndex:
+
+    def test_build_index_populates_bm25(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "idx.pkl"):
+            r = BM25Retriever(user_id="u1")
+            r.build_index(_make_docs(3), user_id="u1")
+        assert r.bm25 is not None
+
+    def test_build_index_empty_docs_leaves_bm25_none(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "idx.pkl"):
+            r = BM25Retriever(user_id="u1")
+            r.build_index([], user_id="u1")
+        assert r.bm25 is None
+
+    def test_build_index_sets_documents(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "idx.pkl"):
+            r = BM25Retriever(user_id="u1")
+            docs = _make_docs(4)
+            r.build_index(docs, user_id="u1")
+        assert len(r.documents) == 4
+
+    def test_build_index_multiple_calls_replaces_index(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "idx.pkl"):
+            r = BM25Retriever(user_id="u1")
+            r.build_index(_make_docs(3), user_id="u1")
+            first_count = len(r.documents)
+            r.build_index(_make_docs(7), user_id="u1")
+            assert len(r.documents) == 7
+
+
+# ── add_document ──────────────────────────────────────────────────────────────
+
+class TestBM25RetrieverAddDocument:
+
+    def test_add_document_increments_doc_count(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "idx.pkl"):
+            r = BM25Retriever(user_id="u1")
+            r.add_document("First document text content here.", metadata={}, user_id="u1")
+            r.add_document("Second document text content here.", metadata={}, user_id="u1")
+        assert len(r.documents) == 2
+
+    def test_add_document_rebuilds_bm25(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "idx.pkl"):
+            r = BM25Retriever(user_id="u1")
+            r.add_document("Test document text content.", metadata={}, user_id="u1")
+        assert r.bm25 is not None
+
+    def test_add_empty_text_skipped(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "idx.pkl"):
+            r = BM25Retriever(user_id="u1")
+            r.add_document("", metadata={}, user_id="u1")
+        assert len(r.documents) == 0
+
+
+# ── clear ─────────────────────────────────────────────────────────────────────
+
+class TestBM25RetrieverClear:
+
+    def test_clear_resets_bm25_to_none(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "idx.pkl"):
+            r = BM25Retriever(user_id="u1")
+            r.build_index(_make_docs(3), user_id="u1")
+            assert r.bm25 is not None
+            r.clear(user_id="u1")
+        assert r.bm25 is None
+
+    def test_clear_resets_documents(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "idx.pkl"):
+            r = BM25Retriever(user_id="u1")
+            r.build_index(_make_docs(3), user_id="u1")
+            r.clear(user_id="u1")
+        assert r.documents == []
+
+
+# ── health_check ──────────────────────────────────────────────────────────────
+
+class TestBM25RetrieverHealthCheck:
+
+    def test_health_check_returns_dict(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "idx.pkl"):
+            r = BM25Retriever(user_id="u1")
+            result = r.health_check(user_id="u1")
+        assert isinstance(result, dict)
+
+    def test_health_check_cold_start_not_ready(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "nonexistent.pkl"):
+            r = BM25Retriever(user_id="u1")
+            result = r.health_check(user_id="u1")
+        assert result.get("ready") is False or result.get("bm25_ready") is False
+
+    def test_health_check_after_build_is_ready(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "idx.pkl"):
+            r = BM25Retriever(user_id="u1")
+            r.build_index(_make_docs(3), user_id="u1")
+            result = r.health_check(user_id="u1")
+        assert result.get("ready") is True or result.get("bm25_ready") is True
+
+
+# ── session filter ────────────────────────────────────────────────────────────
+
+class TestBM25RetrieverSessionFilter:
+
+    def test_results_respect_session_id(self, tmp_path):
+        with patch("app.retrieval.bm25_retriever.user_bm25_path",
+                   return_value=tmp_path / "idx.pkl"):
+            r = BM25Retriever(user_id="u1")
+            docs_a = _make_docs(3, session_id="sessA")
+            docs_b = _make_docs(3, session_id="sessB")
+            r.build_index(docs_a + docs_b, user_id="u1")
+            result = r.search("retrieval generation", session_id="sessA")
+        for hit in result:
+            assert hit["metadata"].get("session_id") == "sessA"
