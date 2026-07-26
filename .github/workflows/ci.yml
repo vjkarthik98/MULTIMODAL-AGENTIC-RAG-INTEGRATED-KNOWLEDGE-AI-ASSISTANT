@@ -4,19 +4,28 @@ name: CI
 # external services. This is the trust signal that gates every PR; the
 # RAG-quality gate lives in eval-gate.yml (needs real data/infra — see there).
 #
-# paths-ignore: a doc-only PR (README/CHANGELOG/*.md) can't affect lint,
-# types, or test results, so skip the run entirely rather than burning a
-# few minutes proving nothing changed. NOTE for whenever branch protection
-# gets configured (not yet, per docs/runbooks/ci-cd.md): if this job is set
-# as a "required" status check, a PR that ONLY touches an ignored path will
-# never get a check result and can get stuck permanently pending, not
-# auto-passed — see docs/runbooks/ci-cd.md for the fix (a companion
-# always-succeeds job with the same name, GitHub's documented workaround).
+# NO paths-ignore on pull_request — deliberate, and the reasoning matters.
+#
+# A doc-only PR genuinely can't change lint/type/test results, so skipping it
+# looks like free savings. It isn't: GitHub does NOT report a status for a
+# workflow that was filtered out, so the moment this job is a *required*
+# status check, a PR touching only `**.md` sits forever on "Expected —
+# waiting for status to be reported" and can never merge. The documented
+# workaround (a companion always-passes workflow declaring identical job
+# names) has its own flaw: on a PR touching BOTH a doc and code, real and
+# companion workflows both fire and both report the same check name, and
+# whichever lands last wins — an always-pass job racing a genuine failure.
+#
+# This repo is public, so Actions minutes are unlimited and free. The
+# "savings" were worth exactly nothing while the trap was real. Running CI
+# on doc-only PRs costs a few unlimited minutes and removes the failure mode
+# entirely — no companion workflow to keep in sync, no race. See
+# docs/runbooks/ci-cd.md.
+#
+# `push` keeps paths-ignore: post-merge re-verification of a doc-only commit
+# has no branch-protection semantics attached, so skipping is pure upside.
 on:
   pull_request:
-    paths-ignore:
-      - "**.md"
-      - "LICENSE"
   push:
     branches: [main]
     paths-ignore:

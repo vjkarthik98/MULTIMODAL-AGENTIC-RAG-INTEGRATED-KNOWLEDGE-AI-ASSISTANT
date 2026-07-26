@@ -874,7 +874,7 @@ def ingest(
                 subtype="caption",
                 source_type="image",
                 source=source_name,
-                metadata=metadata,
+                universal_metadata=metadata,
                 structure={
                     **base_structure,
                     "content_type": "image_caption",
@@ -915,7 +915,7 @@ def ingest(
                     subtype="ocr",
                     source_type="image",
                     source=source_name,
-                    metadata=metadata,
+                    universal_metadata=metadata,
                     structure={
                         **base_structure,
                         "content_type": "image_ocr",
@@ -944,7 +944,7 @@ def ingest(
                 subtype="image_frame",
                 source_type="image",
                 source=source_name,
-                metadata=metadata,
+                universal_metadata=metadata,
                 structure={
                     **base_structure,
                     "content_type": "image_semantic",
@@ -997,7 +997,7 @@ def ingest(
                         subtype="caption",
                         source_type="image",
                         source=source_name,
-                        metadata=metadata,
+                        universal_metadata=metadata,
                         structure={
                             **base_structure,
                             "content_type": "tiff_page_caption",
@@ -1032,7 +1032,7 @@ def ingest(
                             subtype="ocr",
                             source_type="image",
                             source=source_name,
-                            metadata=metadata,
+                            universal_metadata=metadata,
                             structure={
                                 **base_structure,
                                 "content_type": "tiff_page_ocr",

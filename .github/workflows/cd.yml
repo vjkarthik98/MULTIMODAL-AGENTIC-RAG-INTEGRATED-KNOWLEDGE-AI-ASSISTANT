@@ -35,6 +35,16 @@ env:
 jobs:
   build-push:
     runs-on: ubuntu-latest
+    # Job-level override — must restate what the workflow-level block grants,
+    # since a job-level `permissions:` replaces it wholesale rather than
+    # merging. `security-events: write` is the addition: it's what lets
+    # github/codeql-action/upload-sarif publish Trivy findings to the repo's
+    # Security tab.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      security-events: write
     outputs:
       image_tag: ${{ steps.meta.outputs.tag }}
     steps:
@@ -54,6 +64,13 @@ jobs:
       # Compiling the CUDA wheel is a build-time step (nvcc cross-compiles
       # for sm_89, L40S/g6e.xlarge) — does not need a physical GPU, works
       # fine on this hosted runner. See Dockerfile's `cuda-builder` stage.
+      #
+      # sbom/provenance: buildkit attaches an SPDX SBOM and a SLSA provenance
+      # attestation to the pushed image itself, so "what is actually inside
+      # the artifact running in prod" is answerable from the registry alone
+      # (`docker buildx imagetools inspect`), not reconstructed from the
+      # Dockerfile. The standalone Syft step below additionally emits a
+      # downloadable SBOM artifact for anyone without registry access.
       - uses: docker/build-push-action@v5
         with:
           context: .
@@ -67,6 +84,64 @@ jobs:
             IMAGE_TAG=${{ steps.meta.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          sbom: true
+          provenance: mode=max
+
+      # ── Supply-chain: SBOM artifact ──────────────────────────────────────
+      - name: Generate SBOM (SPDX JSON)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false   # uploaded explicitly below, with a stable name
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ steps.meta.outputs.tag }}
+          path: sbom.spdx.json
+          retention-days: 90
+
+      # ── Supply-chain: image vulnerability scan ───────────────────────────
+      # NON-BLOCKING, and unlike security.yml's Bandit gate this one is
+      # explicitly NOT calibrated against a measured baseline — the image has
+      # never been built (no Docker on the dev machine; a CUDA image is far
+      # too large/slow to build there just to count CVEs). Claiming a
+      # threshold here would be guessing.
+      #
+      # Expect the first real run to report a substantial count: the base is
+      # an nvidia/cuda image, and CUDA/Ubuntu bases habitually carry many
+      # OS-level CVEs that have no upstream fix available. `ignore-unfixed:
+      # true` already filters to *actionable* findings only (a CVE with a
+      # patched version published), which is the number worth reacting to.
+      #
+      # TO CALIBRATE (do this on the first tagged build, alongside the AWS
+      # bring-up): read the SARIF in the Security tab, confirm the CRITICAL
+      # findings are genuinely unfixable base-image noise rather than
+      # something we introduced, then set `exit-code: 1` with
+      # `severity: CRITICAL` to make it a real gate.
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@0.24.0
+        continue-on-error: true
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"   # informational until calibrated — see note above
+
+      # Public repo, so GitHub code scanning is free — findings land in the
+      # repo's Security tab with per-CVE history instead of being buried in
+      # a job log nobody re-reads.
+      - name: Upload Trivy results to code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-image
 
   deploy:
     needs: build-push

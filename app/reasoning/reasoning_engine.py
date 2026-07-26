@@ -121,7 +121,7 @@ def _extract_cite_tags(text: str, valid: list[str]) -> list[str]:
 def _hallucination_guard(
     answer: str,
     docs: list[dict],
-    threshold: float = None,
+    threshold: float | None = None,
 ) -> tuple[bool, float]:
     """
     RETURNS (IS_HALLUCINATED, SUPPORT_SCORE).
@@ -472,8 +472,8 @@ def _scrub_answer_pii(text: str) -> str:
 
 def _prepare_knowledge(
     docs: list[dict],
-    max_docs: int = None,
-    max_chars: int = None,
+    max_docs: int | None = None,
+    max_chars: int | None = None,
     sources: list[dict[str, Any]] | None = None,
 ) -> str:
     if not docs:
@@ -1803,7 +1803,10 @@ def _build_cot_prompt(
     # leak into the answer. Mistral-7B Q4 has been observed copying numeric
     # tokens from the example into the answer.
     example_tag = cite_keys[0] if cite_keys else "[source.txt]"
-    example_tag2 = cite_keys[1] if len(cite_keys) > 1 else example_tag
+    # `cite_keys` is Optional and defaults to None — the line above guards for
+    # that, this one previously did not (`len(None)` -> TypeError), so calling
+    # this builder with its own default argument crashed.
+    example_tag2 = cite_keys[1] if cite_keys and len(cite_keys) > 1 else example_tag
     example_block = (
         "EXAMPLE OUTPUT (structure only — never copy these words):\n"
         f"Answer: The subject performed the action. {example_tag} "

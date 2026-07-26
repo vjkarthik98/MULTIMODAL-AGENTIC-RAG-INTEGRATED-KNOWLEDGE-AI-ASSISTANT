@@ -138,7 +138,7 @@ class DeviceManager:
     @property
     def profile(self) -> str:
         if self._profile == "auto":
-            # On CUDA hosts default to all_gpu (Tesla T4 has plenty of VRAM)
+            # On CUDA hosts default to all_gpu (L40S 48GB has ample VRAM)
             return "all_gpu" if self._cuda_ok else "all_cpu"
         if self._profile in ("hybrid", "all_gpu") and not self._cuda_ok:
             return "all_cpu"

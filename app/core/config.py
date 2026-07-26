@@ -207,10 +207,10 @@ class Settings:
     VIDEO_CAPTION_CONCURRENCY: int = _int("VIDEO_CAPTION_CONCURRENCY", 3)
     # Shared GPU semaphore — max concurrent ingestion jobs using GPU (embed/Whisper/Qwen2-VL).
     # 3 jobs × peak ~3GB each = ~9GB working memory + ~14GB resident models = ~23GB.
-    # Tuned for the original 24GB A10G card. Left unchanged on the migration to the
-    # 48GB L40S (see docs/runbooks/phase-30-aws-deployment.md Stage 1 item 5) —
-    # deliberately NOT raised blind; raise only after watching real VRAM headroom on
-    # the actual box, then set the override in the box's .env (not this default).
+    # Conservative default for the 48GB L40S (g6e.xlarge) — see
+    # docs/runbooks/phase-30-aws-deployment.md Stage 1 item 5. Deliberately NOT
+    # raised blind; raise only after watching real VRAM headroom on the actual box,
+    # then set the override in the box's .env (not this default).
     MAX_CONCURRENT_GPU_JOBS: int = _int("MAX_CONCURRENT_GPU_JOBS", 3)
     AUDIO_TRANSCRIPTION_WORKERS: int = _int("AUDIO_TRANSCRIPTION_WORKERS", 2)
     PDF_OCR_WORKERS: int = _int("PDF_OCR_WORKERS", 8)
@@ -243,11 +243,11 @@ class Settings:
     # MODEL DEVICE / WARMUP — target deploy is L40S 48 GB (AWS g6e.xlarge)
     # Profiles: "auto" (CUDA → all_gpu, else cpu), "hybrid", "all_gpu", "all_cpu"
     MODELS_DEVICE_PROFILE: str = _str("MODELS_DEVICE_PROFILE", "all_gpu")
-    # 22.0 was sized for the original 24GB A10G card (2GB safety margin).
     # Per docs/runbooks/phase-30-aws-deployment.md Stage 1 item 4, the 48GB
     # L40S value (46.0) is a box-level `.env` override, not a code default —
-    # this default merely caps usage (safe either way), so it's left as-is
-    # here rather than baked into a shared default that isn't hardware-pinned.
+    # this conservative default merely caps usage (safe either way), so it's
+    # left as-is here rather than baked into a shared default that isn't
+    # hardware-pinned. Set VRAM_BUDGET_GB=46 in the box's .env on g6e.xlarge.
     VRAM_BUDGET_GB: float = _float("VRAM_BUDGET_GB", 22.0)
     WARMUP_AT_STARTUP: bool = _bool("WARMUP_AT_STARTUP", True)
     # LATENCY: eager-load ONLY the text query/ingest essentials at startup
@@ -292,13 +292,14 @@ class Settings:
     QWEN2_VL_MODEL: str = _str("QWEN2_VL_MODEL", "Qwen/Qwen2-VL-7B-Instruct")
     # Video frame captioning uses a smaller VLM than image chart digitisation: a
     # 1-hour video ingest loads Whisper+pyannote+SigLIP+TrOCR+BGE simultaneously
-    # next to the resident llama-server, and the 7B INT8 captioner (~8GB) pushes
-    # total VRAM past the 24GB card → every later GPU alloc OOMs and the upload
-    # fails before reaching Qdrant. Frames are a chart + ticker (verbatim text
-    # already captured by TrOCR), so 2B is ample and frees ~6GB. Image keeps 7B.
-    # NOTE re: the g6e.xlarge/L40S (48GB) migration — this VRAM constraint likely
-    # no longer binds on the new card, but is deliberately left as 2B here rather
-    # than reverted blind: doing so also needs re-validating the separate,
+    # next to the resident llama-server, and the 7B INT8 captioner (~8GB) adds
+    # substantial VRAM pressure under a tight budget → risks later GPU allocs
+    # OOMing and the upload failing before reaching Qdrant. Frames are a chart +
+    # ticker (verbatim text already captured by TrOCR), so 2B is ample and frees
+    # ~6GB. Image keeps 7B.
+    # NOTE: on the 48GB L40S (g6e.xlarge) this VRAM constraint likely no longer
+    # binds, but 2B is deliberately kept here rather than reverted blind: doing so
+    # also needs re-validating the separate,
     # latency-motivated VIDEO_CAPTION_MAX_TOKENS=180 cut below (a 7B model at the
     # 400-token still-image budget measured ~80s/frame — unworkable at ~20 frames
     # for a 54-min call). Revisit both together once real hardware is available,
