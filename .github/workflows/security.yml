@@ -12,11 +12,11 @@ name: Security
 # it opens PRs on its own schedule; pip-audit here is the point-in-time gate
 # on whatever a PR is introducing right now.
 
+# No paths-ignore on pull_request — same reasoning as ci.yml (a filtered-out
+# workflow reports no status, so a required check would hang a doc-only PR
+# forever; public repo = free unlimited minutes, so there was nothing to save).
 on:
   pull_request:
-    paths-ignore:
-      - "**.md"
-      - "LICENSE"
   push:
     branches: [main]
     paths-ignore:
@@ -122,11 +122,22 @@ jobs:
       #     `ragas==0.1.21` (requirements.txt), which is EVAL-HARNESS-ONLY —
       #     it runs against a curated, developer-authored gold set
       #     (app/eval/datasets/gold/*.jsonl), never live/untrusted user input.
-      #     langchain-core/langchain-text-splitters (the packages actually
-      #     declared as app dependencies) aren't the source. A fix means
-      #     bumping ragas to a version built against patched langchain —
-      #     real, nontrivial API-compat work for the eval harness re-baselined
-      #     this session, deliberately not rushed through here.
+      #     It is also currently UNPATCHABLE in place, and that's a hard
+      #     constraint rather than a preference: ragas 0.1.21's own metadata
+      #     pins `langchain <0.3`, `langchain-core <0.3`,
+      #     `langchain-community <0.3`, while EVERY advisory in this chain is
+      #     fixed only in >=0.3 (langchain >=0.3.30/1.3.9, community >=0.3.27,
+      #     text-splitters >=0.3.9/1.1.2, langsmith >=0.8.18). There is no
+      #     version of langchain that is both patched and installable
+      #     alongside ragas 0.1.21.
+      #     The migration target is concrete — ragas 0.2.0 drops the <0.3 cap
+      #     entirely — but getting there means porting three custom judges
+      #     that subclass ragas internals (`ragas.llms.base.BaseRagasLLM`,
+      #     `ragas.run_config.RunConfig` in app/eval/judges/{crossencoder,
+      #     gguf,phi3}_judge.py) across a major-version API break, then
+      #     re-baselining the generation suite to prove the judges still score
+      #     equivalently. That re-baseline is Tier-2 work (needs the GPU box +
+      #     a live server), so it belongs with the AWS bring-up, not here.
       #   - `ecdsa` (Minerva timing attack, python-ecdsa's own maintainers
       #     have stated no fix is planned) requires the vulnerable
       #     ECDSA-signing code path to be reachable. Confirmed NOT reachable:

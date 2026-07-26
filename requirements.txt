@@ -236,6 +236,15 @@ gradio>=6.0
 
 # EVALUATION — Phase 25 eval harness (ragas, jiwer, mlflow)
 # These ARE installed in production to allow `python -m app.eval.run` on any node.
+#
+# ragas is PINNED and currently blocks a set of langchain CVEs — see
+# .github/workflows/security.yml's pip-audit comment for the full analysis.
+# Short version: 0.1.21 requires langchain/-core/-community <0.3, but every
+# advisory in that chain is only fixed in >=0.3, so no patched langchain is
+# installable here. ragas 0.2.0+ removes the cap; migrating means porting the
+# three judges in app/eval/judges/ that subclass ragas internals, then
+# re-baselining the generation suite on the GPU box to prove judge parity.
+# Do NOT bump this pin casually — it silently changes every generation metric.
 ragas==0.1.21
 jiwer>=3.0.0
 mlflow>=2.10.0

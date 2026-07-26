@@ -52,8 +52,7 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 FROM base-deps AS cuda-builder
 
 # Flags copied verbatim from requirements.txt's comment block / install_cuda.sh
-# (L40S = compute capability 8.9, Ada Lovelace — was 86/A10G before the
-# g6e.xlarge migration).
+# (L40S = compute capability 8.9, Ada Lovelace — AWS g6e.xlarge target).
 RUN CMAKE_ARGS="-DGGML_CUDA=on -DGGML_BACKEND_DL=OFF -DGGML_NATIVE=OFF \
         -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc" \
     CUDACXX=/usr/local/cuda/bin/nvcc \

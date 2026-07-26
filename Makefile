@@ -1,6 +1,7 @@
 .DEFAULT_GOAL := help
 .PHONY: help install install-dev lint format typecheck test test-unit test-auth test-guardrails \
-        eval-retrieval eval-full docker-build docker-run compose-up compose-down clean
+        test-randomized integration eval-retrieval eval-full benchmark security-scan sbom \
+        release docker-build docker-run compose-up compose-down clean
 
 PYTHON ?= python
 
@@ -54,8 +55,33 @@ test-guardrails:  ## Red-team injection/guardrail suite. Scoped directly to test
 test-randomized:  ## Audit for hidden test-order dependencies (NOT run in CI by default - see pyproject.toml comment)
 	pytest tests/unit/ -m unit -p randomly -q
 
+# Unblocked as of the tests/integration/ cleanup (42 -> 13 files, all verified
+# — see the `test` target's comment above and docs/runbooks/ci-cd.md). The
+# llama-server-dependent files SKIP cleanly rather than hang when no server is
+# running, via tests/integration/conftest.py::requires_llama_server, so this is
+# safe to run with or without a live stack. NOT wired into ci.yml: these need
+# live Qdrant/Redis/Mongo, which hosted runners don't have.
+integration:  ## Integration suite (skips llama-server tests if no server; needs live Qdrant/Redis/Mongo)
+	pytest tests/integration/ --ignore=tests/integration/test_document_pipeline.py -v
+
 eval-retrieval:  ## Tier-1 gate: retrieval-only, no LLM, CPU-fine (~3GB RAM). Exit code IS the gate — no separate --gate flag exists.
 	$(PYTHON) -m app.eval.run --suite retrieval
+
+# Not a separate harness — deliberately the same Tier-1 run as eval-retrieval,
+# re-read through a latency lens. app/eval/run.py already records p50/p95/p99
+# per suite into rag_report.json; this surfaces those instead of the quality
+# metrics. Writing a second, parallel benchmark runner would mean two code
+# paths that could disagree about what "a retrieval call" costs.
+benchmark:  ## Latency percentiles (p50/p95/p99) from a real Tier-1 retrieval run
+	$(PYTHON) -m app.eval.run --suite retrieval
+	@$(PYTHON) -c "import json; \
+d = json.load(open('app/eval/reports/rag_report.json')); \
+s = d['suites']; \
+print(); \
+print('LATENCY  (git_sha=%s  generated_at=%s)' % (d.get('git_sha','?'), d.get('generated_at','?'))); \
+print('-' * 60); \
+[print('  %-34s %8.4f s  (n=%s)' % (k, v['value'], v['n'])) \
+ for suite in s.values() for k, v in sorted(suite.get('metrics', {}).items()) if '_sec' in k]"
 
 eval-full:  ## Tier-2: full generation + judge suite — needs a LIVE server (generation calls route via HTTP) + the resident 17GB+ model stack.
 	@echo "WARNING: this suite calls the running API's /rag/query over HTTP for"
@@ -63,6 +89,54 @@ eval-full:  ## Tier-2: full generation + judge suite — needs a LIVE server (ge
 	@echo "It also needs the full resident model stack. Will not fit on a laptop or"
 	@echo "a standard CI runner — run this only on the real GPU box. See docs/runbooks/ci-cd.md."
 	$(PYTHON) -m app.eval.run --suite full
+
+# Local mirror of .github/workflows/security.yml, minus the image scan (that
+# needs a built image — see `docker-build` + the Trivy step in cd.yml).
+# Same flags as CI so a local pass means a CI pass.
+security-scan:  ## detect-secrets + Bandit (HIGH blocks) + pip-audit + license check, as CI runs them
+	detect-secrets-hook --baseline .secrets.baseline $$(git ls-files)
+	bandit -r app/ -x tests,ui,.venv,rag_env -s B104,B108 -lll -q
+	-pip-audit -r requirements.txt
+	@$(PYTHON) -c "import json,subprocess,sys; \
+pkgs = json.loads(subprocess.run(['pip-licenses','--format=json'],capture_output=True,text=True).stdout); \
+banned = ('AGPL','SSPL','Server Side Public License'); \
+hits = [p for p in pkgs if any(b in (p.get('License') or '') for b in banned)]; \
+[print('[BANNED LICENSE] %s %s: %s' % (p['Name'],p['Version'],p['License'])) for p in hits]; \
+sys.exit(1 if hits else 0)"
+	@echo "Local security scan clean."
+
+# CycloneDX here (Python env), SPDX in cd.yml (container image via Syft) —
+# deliberately different scopes, not a mismatch: this answers "what's in my
+# venv right now", cd.yml's answers "what shipped in the artifact". Verified
+# locally: 400 components, CycloneDX 1.6.
+sbom:  ## CycloneDX SBOM of the current Python environment (cd.yml SBOMs the image separately)
+	$(PYTHON) -m pip install --quiet --upgrade cyclonedx-bom
+	$(PYTHON) -m cyclonedx_py environment -o sbom.local.json
+	@echo "Wrote sbom.local.json"
+
+# Preflight only — it deliberately does NOT cut the release. Tagging is done by
+# .github/workflows/release.yml (Actions tab -> Release -> Run workflow), which
+# owns bumping VERSION/pyproject.toml, appending CHANGELOG.md, tagging, and
+# publishing — all in one auditable place. A `make release` that pushed tags
+# from a laptop would be a second, divergent release path. What this DOES do is
+# catch the mistakes that make a release messy, before you trigger it.
+release:  ## Preflight the repo for a release (does not tag — release.yml does that)
+	@$(PYTHON) -c "import re,subprocess,sys; \
+fail=[]; \
+ver=open('VERSION').read().strip(); \
+pyproj=re.search(r'(?m)^version\s*=\s*\"([^\"]+)\"', open('pyproject.toml',encoding='utf-8').read()).group(1); \
+ver==pyproj or fail.append('VERSION (%s) != pyproject.toml version (%s)' % (ver,pyproj)); \
+dirty=subprocess.run(['git','status','--porcelain'],capture_output=True,text=True).stdout.strip(); \
+dirty and fail.append('working tree is dirty (%d files) - commit or stash first' % len(dirty.splitlines())); \
+tags=subprocess.run(['git','tag'],capture_output=True,text=True).stdout.split(); \
+('v'+ver) in tags and fail.append('tag v%s already exists - bump VERSION' % ver); \
+('v'+ver) in open('CHANGELOG.md',encoding='utf-8').read() or fail.append('CHANGELOG.md has no [v%s] section' % ver); \
+branch=subprocess.run(['git','branch','--show-current'],capture_output=True,text=True).stdout.strip(); \
+[print('  FAIL  '+f) for f in fail]; \
+print('  ok    version %s consistent, tree clean, tag free, changelog present' % ver) if not fail else None; \
+print(); \
+print('Next: GitHub -> Actions -> Release -> Run workflow (version=%s)' % ver) if not fail else None; \
+sys.exit(1 if fail else 0)"
 
 docker-build:  ## Build the production (CUDA) image explicitly — see Dockerfile stage comments
 	docker build --target runtime -t magik:local .
