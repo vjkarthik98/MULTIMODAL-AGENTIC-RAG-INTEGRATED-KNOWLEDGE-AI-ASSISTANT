@@ -49,10 +49,35 @@ jobs:
       # Same entrypoint the local pre-commit hook uses (.pre-commit-config.yaml)
       # — CI enforcement was a real gap before this: detect-secrets only ran
       # locally, so a contributor who skipped or bypassed pre-commit had
-      # nothing else in the pipeline to catch a leaked credential. Blocking
-      # by default: verified clean against the current baseline (2026-07-25).
-      - name: detect-secrets vs baseline
-        run: detect-secrets-hook --baseline .secrets.baseline $(git ls-files)
+      # nothing else in the pipeline to catch a leaked credential.
+      #
+      # Exit-code handling matters here, and is not a fudge:
+      #   1 -> NEW unaudited secret found        -> must fail the build
+      #   3 -> baseline file was REWRITTEN in place purely to refresh the line
+      #        numbers of ALREADY-KNOWN findings -> must NOT fail the build
+      #   0 -> clean
+      # Verified against detect_secrets/pre_commit_hook.py's own source: the
+      # `if new_secrets: ... return 1` branch is evaluated BEFORE the
+      # baseline-was-updated `return 3` branch, so exit 3 is only reachable
+      # when the new-secret set is empty. It therefore cannot mask a real
+      # finding. Treating 3 as fatal (the naive `set -e` default) would turn
+      # this gate red on any commit that merely shifts a line — which is what
+      # happened on the first real run of this workflow, where routine edits
+      # moved a known false positive in app/core/config.py by three lines.
+      # The inline pragma is required: detect-secrets' KeywordDetector matches
+      # the word "secret" in this step's NAME and treats the remainder as a
+      # credential value. It is a YAML label, not a secret.
+      - name: detect-secrets vs baseline  # pragma: allowlist secret
+        run: |
+          set +e
+          detect-secrets-hook --baseline .secrets.baseline $(git ls-files)
+          code=$?
+          set -e
+          case "$code" in
+            0) echo "detect-secrets: clean." ;;
+            3) echo "::notice title=detect-secrets::Baseline line numbers drifted (no new secrets). Not failing. Run 'detect-secrets scan --baseline .secrets.baseline' locally and commit the refreshed baseline to silence this." ;;
+            *) echo "::error title=detect-secrets::New unaudited secret detected (exit $code). Review the finding above; if it is a false positive, audit it into .secrets.baseline and commit."; exit "$code" ;;
+          esac
 
   sast-bandit:
     name: Bandit SAST

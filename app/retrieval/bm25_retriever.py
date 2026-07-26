@@ -1592,9 +1592,22 @@ if __name__ == "__main__":
 
     sys.path.insert(0, str(Path(__file__).parents[2]))
 
+    # NOTE on the self-import below: under `python -m
+    # app.retrieval.bm25_retriever` this file is loaded as `__main__`, so the
+    # classes defined above have `__module__ == "__main__"` — and that is the
+    # name pickle records. Any *other* process (e.g. `python -m app.eval.run`)
+    # then fails to unpickle with:
+    #   Can't get attribute 'BM25Document' on <module 'app.eval.run'>
+    # because it looks for the class inside ITS OWN __main__. Caught by the
+    # first real CI run of the Tier-1 gate: the index rebuilt fine (1200 docs)
+    # but every search returned bm25_count=0, silently degrading the gate to
+    # dense-only and reporting that as a retrieval regression.
+    # Re-importing binds these names to the properly-qualified module objects,
+    # so what gets pickled is `app.retrieval.bm25_retriever.BM25Document`.
     from qdrant_client.models import FieldCondition, Filter, MatchValue
 
     from app.core.config import settings
+    from app.retrieval.bm25_retriever import BM25Document, BM25Retriever  # noqa: F811
     from app.vectorstore.qdrant_store import QdrantVectorStore
 
     parser = argparse.ArgumentParser(description="Rebuild BM25 index from Qdrant data")
