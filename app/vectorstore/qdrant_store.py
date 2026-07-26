@@ -234,7 +234,36 @@ class QdrantVectorStore:
                 info = self.client.get_collection(name)
                 vconf = info.config.params.vectors
                 existing_dim = getattr(vconf, "size", None)
-                if existing_dim is not None and existing_dim != dim:
+                if (
+                    existing_dim is not None
+                    and existing_dim != dim
+                    and not settings.QDRANT_ALLOW_RECREATE
+                ):
+                    # `QDRANT_ALLOW_RECREATE` existed in config.py (and in the
+                    # pre-migration .env, set to true) but was read by NOTHING —
+                    # a setting whose name promises protection over the single
+                    # most destructive path in this file, that silently did
+                    # nothing. An operator setting it false to guard production
+                    # data got no guard at all. Now it guards: refuse the
+                    # delete, leave the collection intact, and surface the
+                    # mismatch loudly. Default stays True, so existing
+                    # auto-migration behaviour is unchanged unless explicitly
+                    # opted out of.
+                    logger.critical(
+                        "qdrant_dim_mismatch_recreate_blocked",
+                        name=name,
+                        existing_dim=existing_dim,
+                        new_dim=dim,
+                        action="REFUSING_TO_DELETE",
+                        hint=(
+                            "QDRANT_ALLOW_RECREATE=false. Searches against this "
+                            "collection will fail on dimension mismatch until you "
+                            "either migrate it deliberately or set "
+                            "QDRANT_ALLOW_RECREATE=true to allow the destructive "
+                            "auto-recreate."
+                        ),
+                    )
+                elif existing_dim is not None and existing_dim != dim:
                     # CRITICAL, not info: this branch DELETES every vector in
                     # `name` and recreates the collection empty. Intentional
                     # (an embedding-model upgrade must not leave stale-dim

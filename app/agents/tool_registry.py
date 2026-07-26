@@ -284,7 +284,18 @@ class ToolRegistry:
             if not self.rag_pipeline:
                 return []
             try:
-                result = self.rag_pipeline.retriever.retrieval(
+                # Was `self.rag_pipeline.retriever.retrieval(...)` — wrong on
+                # both halves: RAGPipeline exposes no public `retriever`
+                # (only `_retriever` + the lazy `_get_retriever()`), and
+                # HybridRetriever's method is `search()`, not `retrieval()`.
+                # Either mistake alone raises AttributeError, which the
+                # `except` below swallows into an empty result — so this tool
+                # could only ever have returned []. It is currently latent
+                # (the live path calls hybrid_retriever directly, and only the
+                # "search" tool handler is ever invoked), but it IS registered
+                # and advertised by GET /tools, so it's fixed rather than left
+                # as a trap for whoever wires it up next.
+                result = self.rag_pipeline._get_retriever().search(
                     query=query,
                     session_id=session_id,
                     top_k=settings.RAG_TOP_K,

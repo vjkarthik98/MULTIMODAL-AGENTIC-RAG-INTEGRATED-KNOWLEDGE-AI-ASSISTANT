@@ -104,6 +104,12 @@ class EvalConfig:
     # Optional single-modality filter (txt|pdf|docx|xlsx|image|audio|video).
     # When set, retrieval/generation/behavioral suites evaluate ONLY this modality.
     modality: str | None = None
+    # Set by `app/eval/run.py` from --baseline, read by
+    # app/eval/runners/regression_runner.py via getattr(). It worked (plain
+    # dataclass, so the attribute could be grafted on at runtime) but was an
+    # undeclared, invisible contract between two modules — declared here so
+    # the handshake is greppable and type-checked instead of implicit.
+    _baseline_path: Path | None = None
 
     def ensure_dirs(self) -> None:
         for p in (self.gold_dir, self.reports_dir, self.baselines_dir):

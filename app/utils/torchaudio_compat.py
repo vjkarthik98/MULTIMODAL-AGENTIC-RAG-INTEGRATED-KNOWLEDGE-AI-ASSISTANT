@@ -27,7 +27,7 @@ class _AudioMetaData:
     encoding: str = "PCM_S"
 
 
-def _info(path: str, backend: str = None) -> _AudioMetaData:
+def _info(path: str, backend: str | None = None) -> _AudioMetaData:
     """Drop-in for torchaudio.info() using soundfile → wave fallback."""
     try:
         import soundfile as sf
@@ -55,7 +55,7 @@ def _load(
     num_frames: int = -1,
     normalize: bool = True,
     channels_first: bool = True,
-    backend: str = None,
+    backend: str | None = None,
 ) -> tuple[torch.Tensor, int]:
     """Drop-in for torchaudio.load() using soundfile."""
     import soundfile as sf

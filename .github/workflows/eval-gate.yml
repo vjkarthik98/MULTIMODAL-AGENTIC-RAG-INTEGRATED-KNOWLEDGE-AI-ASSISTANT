@@ -34,21 +34,31 @@ name: Eval Gate
 #                       (cache key is keyed on the gold-set file hashes).
 
 on:
-  # Same doc-only-skip reasoning as ci.yml — see the note there. Only
-  # pull_request needs it; workflow_dispatch/schedule/repository_dispatch
-  # aren't file-change triggers, so paths-ignore doesn't apply to them.
+  # No paths-ignore on pull_request — same reasoning as ci.yml (see the note
+  # there): a filtered-out workflow reports NO status, so a required check
+  # would hang a doc-only PR on "waiting for status" forever. Public repo =
+  # unlimited free minutes, so the skip bought nothing. workflow_dispatch/
+  # schedule/repository_dispatch aren't file-change triggers, so path
+  # filtering never applied to them either way.
   pull_request:
-    paths-ignore:
-      - "**.md"
-      - "LICENSE"
   workflow_dispatch:
     inputs:
       seed:
         description: "Run seed-eval-fixtures instead of tier2 (re-ingest eval corpus, refresh BM25 cache)"
         type: boolean
         default: false
-  schedule:
-    - cron: "0 3 * * *"   # nightly tier2 run
+  # NIGHTLY TIER-2 — DISABLED until a self-hosted GPU runner is registered.
+  #
+  # tier2-full-suite is `runs-on: [self-hosted, gpu]`. With no such runner
+  # registered, a scheduled run does not fail fast — it sits QUEUED waiting
+  # for a matching runner that will never appear (observed: run 30190058393
+  # queued 3h+ and counting). That produces a permanently-yellow workflow and
+  # daily noise that means nothing.
+  #
+  # Re-enable by uncommenting, as part of the Phase 30 AWS bring-up, once
+  # `gh runner list` shows a runner with the `gpu` label online.
+  # schedule:
+  #   - cron: "0 3 * * *"   # nightly tier2 run
   repository_dispatch:
     types: [post-deploy-eval]   # triggered by cd.yml after a successful deploy
 
@@ -89,6 +99,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Fail in 5 seconds with the actual reason, instead of ~20 minutes of
+      # installing torch and then scoring an empty index as "recall regressed".
+      # That is exactly how this gate first failed for real (run 30185188038):
+      # no QDRANT_* secrets were configured, so retrieval had no data source at
+      # all, and the resulting red check read as a quality regression rather
+      # than "the gate is unconfigured". A gate that can't distinguish "broken"
+      # from "regressed" trains people to ignore it.
+      - name: Preflight — required eval configuration
+        env:
+          TRIGGERING_ACTOR: ${{ github.actor }}
+        run: |
+          missing=""
+          [ -z "${QDRANT_URL}" ] && missing="${missing} QDRANT_URL"
+          [ -z "${QDRANT_API_KEY}" ] && missing="${missing} QDRANT_API_KEY"
+          if [ -n "${missing}" ]; then
+            if [ "${TRIGGERING_ACTOR}" = "dependabot[bot]" ]; then
+              # Dependabot-triggered runs are DENIED repository Actions secrets
+              # by design (GitHub security model) — they read from a separate
+              # "Dependabot secrets" store instead. Every early failure of this
+              # gate was exactly this: the runs were all on dependabot/* branches,
+              # and the generic "add your secrets" message would have sent you to
+              # the wrong settings page. The same values must be added TWICE,
+              # under both stores, with identical names.
+              echo "::error title=Eval gate: missing Dependabot secrets::Missing:${missing}. This run was triggered by Dependabot, which cannot read repository Actions secrets. Add the SAME values under Settings -> Secrets and variables -> Dependabot (not Actions). See docs/runbooks/ci-cd.md."
+            else
+              echo "::error title=Eval gate not configured::Missing:${missing}. Tier-1 scores retrieval against the real Qdrant collection; without these it has no corpus and would report a false regression. Add them under Settings -> Secrets and variables -> Actions. See docs/runbooks/ci-cd.md."
+            fi
+            exit 1
+          fi
+          if [ "${EVAL_USER_ID}" = "eval_default" ]; then
+            echo "::warning title=EVAL_USER_ID is the fallback::Using 'eval_default'. If your ingested eval corpus lives under a different user_id, set the EVAL_USER_ID repository variable or this gate will score an empty tenant."
+          fi
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -107,17 +150,117 @@ jobs:
           pip install -r requirements.txt
 
       # BM25 index for EVAL_USER_ID is gitignored local state (data/), not
-      # reproducible from a bare checkout — restore it from the cache the
-      # seed-eval-fixtures job publishes. A cache miss here means the gate
-      # WILL fail with a clear "no_gold_data"/retrieval error, not a false
-      # pass — see docs/runbooks/ci-cd.md if that happens.
+      # reproducible from a bare checkout. Try the cache first (fast path).
+      #
+      # NOTE THE `-v2-` SALT. It is load-bearing, not cosmetic. The first run
+      # of this job saved an index pickled while
+      # app/retrieval/bm25_retriever.py was executing as `__main__`, so every
+      # BM25Document recorded its class as `__main__.BM25Document` and no
+      # other process could unpickle it. Fixing the source was not enough:
+      # the poisoned artifact was already in the cache, the cache then HIT on
+      # every later run, the rebuild step was skipped by its own
+      # `cache-hit != 'true'` guard, and the fix never executed. Cache keys are
+      # immutable, so the only way to publish a corrected artifact is a new
+      # key. Bump this salt whenever the pickled schema or the code that
+      # produces it changes incompatibly.
+      # `restore-keys` is salted too — a bare `bm25-eval-index-` prefix would
+      # happily fall back to the very poisoned entry we are escaping.
       - name: Restore eval BM25 index
+        id: bm25_cache
         uses: actions/cache/restore@v4
         with:
           path: data/users/${{ env.EVAL_USER_ID }}/bm25_index
-          key: bm25-eval-index-${{ hashFiles('app/eval/datasets/gold/**') }}
+          key: bm25-eval-index-v2-${{ hashFiles('app/eval/datasets/gold/**') }}
           restore-keys: |
-            bm25-eval-index-
+            bm25-eval-index-v2-
+
+      # A cache HIT is not proof of a USABLE index — that assumption is
+      # exactly what let a corrupt artifact silently degrade the gate to
+      # dense-only for two full runs while reporting it as a retrieval
+      # regression. Actually open it and check it loads with documents.
+      # Cheap (no models, no network) and turns a whole class of
+      # stale/corrupt-cache failures into an automatic rebuild.
+      - name: Validate restored BM25 index
+        id: bm25_check
+        if: steps.bm25_cache.outputs.cache-hit == 'true'
+        run: |
+          set +e
+          python - <<'PY'
+          import sys
+          from app.retrieval.bm25_retriever import BM25Retriever
+          import os
+          uid = os.environ["EVAL_USER_ID"]
+          try:
+              r = BM25Retriever(user_id=uid)
+              r._load_index(uid)
+              n = len(r.documents)
+          except Exception as exc:
+              print(f"restored index unusable: {exc}")
+              sys.exit(1)
+          if n == 0:
+              print("restored index loaded but contains 0 documents")
+              sys.exit(1)
+          print(f"restored index OK: {n} documents")
+          PY
+          if [ $? -eq 0 ]; then
+            echo "usable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "usable=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=BM25 cache unusable::Restored cache failed to load; rebuilding from Qdrant."
+          fi
+
+      # Self-heal on a cache miss instead of scoring an empty index.
+      #
+      # The original design expected `seed-eval-fixtures` to publish this
+      # cache — but that job is `runs-on: [self-hosted, gpu]` and
+      # workflow_dispatch-only, so on a repo with no self-hosted runner
+      # registered the cache could NEVER be populated, and every PR's Tier-1
+      # run scored recall against an empty BM25 index and failed. That is
+      # precisely what happened on every PR until now (see run 30185188038:
+      # "Cache not found" -> "bm25_no_saved_index" ->
+      # "bm25_empty_index_returning_empty_list").
+      #
+      # The rebuild needs NO GPU, NO models, and NO re-embedding: the chunk
+      # text is already stored in Qdrant payloads, so the index is rebuilt
+      # straight from `BM25Document.from_payload()` (the `__main__` block in
+      # app/retrieval/bm25_retriever.py). That makes Tier-1 self-sufficient on
+      # a hosted runner and removes the self-hosted dependency entirely.
+      # Rebuild on a cache miss OR on a cache hit that failed validation.
+      - name: Rebuild BM25 index from Qdrant
+        id: bm25_rebuild
+        if: steps.bm25_cache.outputs.cache-hit != 'true' || steps.bm25_check.outputs.usable != 'true'
+        run: |
+          echo "Rebuilding BM25 index from Qdrant payloads (no GPU/model needed)."
+          python -m app.retrieval.bm25_retriever --user_id "${EVAL_USER_ID}"
+
+      # Fail loudly if the rebuild itself produced something unloadable, rather
+      # than letting the gate run against a broken index and misreport the
+      # result as a quality regression — the exact failure mode this whole
+      # block exists to prevent.
+      - name: Verify rebuilt BM25 index
+        if: steps.bm25_rebuild.outcome == 'success'
+        run: |
+          python - <<'PY'
+          import os, sys
+          from app.retrieval.bm25_retriever import BM25Retriever
+          uid = os.environ["EVAL_USER_ID"]
+          r = BM25Retriever(user_id=uid)
+          r._load_index(uid)
+          n = len(r.documents)
+          print(f"rebuilt index: {n} documents")
+          if n == 0:
+              print("::error title=BM25 rebuild produced an empty index::Refusing to score retrieval against an empty index.")
+              sys.exit(1)
+          PY
+
+      # Persist the rebuilt index so subsequent runs take the fast path.
+      - name: Save rebuilt BM25 index to cache
+        if: steps.bm25_rebuild.outcome == 'success'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: data/users/${{ env.EVAL_USER_ID }}/bm25_index
+          key: bm25-eval-index-v2-${{ hashFiles('app/eval/datasets/gold/**') }}
 
       - name: Retrieval gate
         run: python -m app.eval.run --suite retrieval

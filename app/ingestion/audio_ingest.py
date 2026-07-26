@@ -1001,7 +1001,7 @@ def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
                 source_type="audio",
                 source=source_name,
                 chunk_id=global_idx,
-                metadata=metadata,
+                universal_metadata=metadata,
                 structure={
                     "doc_id": doc_id,
                     "session_id": session_id,
@@ -1171,13 +1171,31 @@ class AudioIngestor(BaseIngestor):
                 if "DRM" in str(exc).upper() or "encrypted" in str(exc).lower():
                     raise ValueError(f"DRM_PROTECTED_AUDIO: {path.name}") from exc
                 # Try ffmpeg repair path
+                tmp = None
                 try:
                     import subprocess
                     import tempfile
 
-                    tmp = tempfile.mktemp(suffix=".wav")
+                    # mkstemp, not mktemp: mktemp only *returns a name* without
+                    # creating the file, leaving a TOCTOU window in which
+                    # anything else on the box can pre-create that path (e.g. a
+                    # symlink to a file we then overwrite as this process).
+                    # mkstemp creates it atomically with 0600 first. ffmpeg's
+                    # -y overwrites the empty placeholder, which is fine.
+                    _fd, tmp = tempfile.mkstemp(suffix=".wav")
+                    os.close(_fd)
                     subprocess.run(
-                        ["ffmpeg", "-y", "-i", str(path), "-ar", "16000", "-ac", "1", tmp],
+                        [
+                            settings.FFMPEG_PATH,
+                            "-y",
+                            "-i",
+                            str(path),
+                            "-ar",
+                            "16000",
+                            "-ac",
+                            "1",
+                            tmp,
+                        ],
                         capture_output=True,
                         timeout=120,
                     )
@@ -1189,6 +1207,15 @@ class AudioIngestor(BaseIngestor):
                     duration_s = len(audio) / 1000.0
                 except Exception as repair_exc:
                     raise ValueError(f"AUDIO_LOAD_FAILED: {repair_exc}") from repair_exc
+                finally:
+                    # Previously leaked: the repaired .wav was never removed, so
+                    # every corrupt-audio upload left a full decoded copy behind
+                    # in the system temp dir.
+                    if tmp:
+                        try:
+                            Path(tmp).unlink(missing_ok=True)
+                        except OSError:
+                            pass
 
             if duration_s < 0.5:
                 raise ValueError(f"AUDIO_TOO_SHORT: {duration_s:.2f}s")

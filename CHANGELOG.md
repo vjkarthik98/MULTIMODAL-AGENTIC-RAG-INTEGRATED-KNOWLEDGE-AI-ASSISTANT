@@ -610,8 +610,7 @@ model, diagnosed, fixed, and re-measured until the numbers actually moved.
 - Swapped the resident LLM from Mistral-7B-Instruct to
   **Qwen2.5-14B-Instruct (Q4_K_M GGUF)** — still run as a separate
   `llama.cpp` process on its own CUDA context (never in-process with
-  PyTorch), now on a larger GPU with 48GB VRAM instead of the original
-  24GB A10G
+  PyTorch), on the 48GB VRAM GPU (AWS g6e.xlarge / L40S)
 - Added a dedicated evaluation judge, **Prometheus-2-7B v2.0 (Q8_0
   GGUF, ~7.7GB)** — a model purpose-built to be an LLM evaluator, not a
   repurposed instruct model, replacing the earlier Ragas + gguf-Mistral /

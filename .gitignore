@@ -153,6 +153,18 @@ Thumbs.db
 CLAUDE.md
 
 # -----------------------------------------------------------------------------
+# Generated security/supply-chain artifacts (`make sbom`, `make security-scan`)
+# Regenerated on demand and per-environment — CI publishes the authoritative
+# ones as workflow artifacts (see .github/workflows/cd.yml + security.yml).
+# -----------------------------------------------------------------------------
+sbom.local.json
+sbom.spdx.json
+trivy-results.sarif
+bandit-report.json
+pip-audit-report.json
+licenses-report.json
+
+# -----------------------------------------------------------------------------
 # Misc tooling
 # -----------------------------------------------------------------------------
 .pypirc

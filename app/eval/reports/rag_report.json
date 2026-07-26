@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-07-25T03:45:56Z",
-  "git_sha": "f5c2a19",
+  "generated_at": "2026-07-26T17:08:27Z",
+  "git_sha": "50d1afc",
   "weaken_spec": null,
   "suites": {
     "retrieval": {
@@ -50,28 +50,28 @@
         },
         "retrieval_p50_sec": {
           "name": "retrieval_p50_sec",
-          "value": 1.9523770809173584,
+          "value": 2.473613142967224,
           "n": 56,
-          "notes": "min=1.07s max=56.81s",
+          "notes": "min=1.05s max=58.02s",
           "sub": {}
         },
         "retrieval_p95_sec": {
           "name": "retrieval_p95_sec",
-          "value": 3.6470709443092346,
+          "value": 5.92040628194809,
           "n": 56,
           "notes": "",
           "sub": {}
         },
         "retrieval_p99_sec": {
           "name": "retrieval_p99_sec",
-          "value": 28.38276249170318,
+          "value": 31.993539416790142,
           "n": 56,
           "notes": "",
           "sub": {}
         }
       },
       "breached": {},
-      "duration_sec": 187.98898196220398,
+      "duration_sec": 219.30913043022156,
       "judge": null,
       "dataset_version": null
     }

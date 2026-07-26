@@ -466,9 +466,18 @@ def compute_generation_metrics(
       - anything else with prefer_ragas   → Ragas + phi3 judge (legacy path)
       - lexical fallback if the chosen judge fails.
     """
-    import os as _os
+    # Single source of truth — app/eval/config.py owns this env var's default.
+    # This previously re-read EVAL_JUDGE_MODEL directly with its own, DIFFERENT
+    # fallback ("gguf_mistral" here vs "prometheus_2_7b" there). While .env
+    # happened to set the variable explicitly the two agreed by luck; once the
+    # settings migration dropped it from .env, they silently diverged — the
+    # report's `judge` field (from EvalConfig) claimed prometheus_2_7b while
+    # this function actually dispatched the legacy Ragas/phi3 path. That makes
+    # every generation number attest to a judge that never ran, which is
+    # exactly the provenance thresholds.yaml's v3 retirement depends on.
+    from app.eval.config import EVAL_JUDGE_MODEL
 
-    judge_model = _os.getenv("EVAL_JUDGE_MODEL", "gguf_mistral").lower()
+    judge_model = EVAL_JUDGE_MODEL.lower()
 
     if judge_model.startswith("prometheus"):
         try:

@@ -587,9 +587,9 @@ class ModelLoader:
 
         A one-hour earnings/webcast ingest must load Whisper + pyannote + SigLIP +
         TrOCR + BGE at once, alongside the resident llama-server and query models.
-        The 7B INT8 captioner (~8 GB) pushes total VRAM past the 24 GB card and every
-        subsequent GPU allocation (diarization, Whisper cuBLAS, later captions) OOMs —
-        the upload fails and nothing reaches Qdrant. Video frames here are a stock
+        The 7B INT8 captioner (~8 GB) adds substantial VRAM pressure so that, under a
+        tight budget, a subsequent GPU allocation (diarization, Whisper cuBLAS, later
+        captions) can OOM — the upload fails and nothing reaches Qdrant. Video frames here are a stock
         chart + a ticker overlay whose exact text is already captured verbatim by
         TrOCR, so the VLM only needs a short scene summary — the 2B model is more than
         enough and frees ~6 GB. Image modality keeps the 7B model (chart digitisation

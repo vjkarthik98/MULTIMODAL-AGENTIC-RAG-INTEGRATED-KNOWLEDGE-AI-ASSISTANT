@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from contextvars import ContextVar
 from pathlib import Path
 
@@ -8,7 +7,27 @@ from pathlib import Path
 # In production (Phase 30) this switches to S3; for now we keep it local.
 DATA_ROOT = Path("data/users")
 
-IS_PRODUCTION = os.getenv("ENVIRONMENT", "development") == "production"
+
+def _is_production() -> bool:
+    """True when running against the production environment.
+
+    Reads `ENV` — the variable this project actually defines (app/core/config.py
+    `Settings.ENV`, and `.env`). This previously read `ENVIRONMENT`, a name
+    nothing in the codebase ever sets, so the old module-level
+    `IS_PRODUCTION` constant evaluated to False unconditionally — including in
+    production. Harmless so far only because nothing consumed it yet; it is a
+    Phase 30 placeholder for the local->S3 storage switch (see DATA_ROOT
+    above), and would have silently never fired the moment that switch was
+    wired up.
+
+    Also now a function rather than an import-time constant: the module-level
+    form froze the value at first import, before .env is necessarily loaded,
+    so even the correct variable name could have been read too early.
+    """
+    from app.core.config import settings
+
+    return str(getattr(settings, "ENV", "development")).lower() == "production"
+
 
 # CONTEXTVAR — set at pipeline entry by ingestion_pipeline.process_file().
 # Every storage helper reads from this so no signature changes are needed
