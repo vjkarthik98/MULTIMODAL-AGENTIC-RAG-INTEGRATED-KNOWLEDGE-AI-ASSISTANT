@@ -1,0 +1,39 @@
+# Local hooks call the exact same tools/config as `make lint` and ci.yml —
+# no separate pinned-version hook repos to drift out of sync with pyproject.toml.
+# Run `make install-dev` once (installs the [dev] extra + this hook) before committing.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check
+        entry: ruff check
+        language: system
+        types: [python]
+        require_serial: true
+
+      - id: black
+        name: black
+        entry: black
+        language: system
+        types: [python]
+
+      - id: isort
+        name: isort
+        entry: isort
+        language: system
+        types: [python]
+
+      - id: mypy
+        name: mypy (app/ only)
+        entry: mypy app/
+        language: system
+        types: [python]
+        pass_filenames: false
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        name: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: package-lock.json

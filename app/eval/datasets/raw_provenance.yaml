@@ -1,0 +1,98 @@
+# Raw corpus provenance — exact sources for reproducibility.
+# Update this file whenever you add a new document to data/raw/finance/.
+#
+# Schema per entry:
+#   file: relative path from data/raw/finance/
+#   source: URL or SEC accession number
+#   license: EDGAR public domain / CC0 / other
+#   downloaded_at: ISO date
+#   sha256: file hash (fill after download)
+
+corpus:
+  txt:
+    - file: "txt/10k_apple_2023.txt"
+      source: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000320193&type=10-K&dateb=&owner=include&count=10"
+      accession: "0000320193-23-000106"
+      license: "public domain (SEC EDGAR)"
+      downloaded_at: ""
+      sha256: ""
+    - file: "txt/10k_microsoft_2023.txt"
+      source: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000789019&type=10-K"
+      accession: "0000789019-23-000074"
+      license: "public domain (SEC EDGAR)"
+      downloaded_at: ""
+      sha256: ""
+    - file: "txt/10k_jpmorgan_2023.txt"
+      source: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000019617&type=10-K"
+      accession: "0000019617-24-000069"
+      license: "public domain (SEC EDGAR)"
+      downloaded_at: ""
+      sha256: ""
+    - file: "txt/10q_tesla_q3_2023.txt"
+      source: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001318605&type=10-Q"
+      accession: "0001318605-23-000020"
+      license: "public domain (SEC EDGAR)"
+      downloaded_at: ""
+      sha256: ""
+
+  pdf:
+    - file: "pdf/10k_apple_2023.pdf"
+      source: "https://www.sec.gov/Archives/edgar/data/320193/000032019323000106/aapl20230930.htm"
+      license: "public domain (SEC EDGAR)"
+      downloaded_at: ""
+      sha256: ""
+    - file: "pdf/10k_microsoft_2023.pdf"
+      source: "https://www.sec.gov/Archives/edgar/data/789019/000078901923000074/msft20230630.htm"
+      license: "public domain (SEC EDGAR)"
+      downloaded_at: ""
+      sha256: ""
+    - file: "pdf/10k_jpmorgan_2023.pdf"
+      source: "https://www.sec.gov/Archives/edgar/data/19617/000001961724000069/0000019617-24-000069-index.htm"
+      license: "public domain (SEC EDGAR)"
+      downloaded_at: ""
+      sha256: ""
+
+  docx:
+    - file: "docx/investor_presentation_sample.docx"
+      source: "Manually created from public IR slide decks"
+      license: "public domain"
+      downloaded_at: ""
+      sha256: ""
+
+  xlsx:
+    - file: "xlsx/apple_financials_macrotrends.xlsx"
+      source: "https://www.macrotrends.net/stocks/charts/AAPL/apple/revenue"
+      license: "public data (check macrotrends ToS for bulk download)"
+      downloaded_at: ""
+      sha256: ""
+    - file: "xlsx/sp500_financials.xlsx"
+      source: "https://github.com/datasets/s-and-p-500-companies-financials"
+      license: "CC0"
+      downloaded_at: ""
+      sha256: ""
+
+  image:
+    - file: "image/aapl_revenue_chart.jpg"
+      source: "Screenshot from Apple IR page — public"
+      license: "fair use / public IR"
+      downloaded_at: ""
+      sha256: ""
+    - file: "image/10k_cover_page_scan.jpg"
+      source: "Scanned from publicly filed 10-K"
+      license: "public domain (SEC EDGAR)"
+      downloaded_at: ""
+      sha256: ""
+
+  audio:
+    - file: "audio/apple_q4_2023_earnings_call.mp3"
+      source: "Apple IR: https://investor.apple.com/investor-relations/default.aspx"
+      license: "Public earnings call — fair use for research"
+      downloaded_at: ""
+      sha256: ""
+
+  video:
+    - file: "video/cnbc_earnings_highlight.mp4"
+      source: "CNBC public YouTube / IR page"
+      license: "Check CNBC ToS — for research/eval use"
+      downloaded_at: ""
+      sha256: ""

@@ -1,0 +1,40 @@
+# OCR benchmark queries — tests text extraction accuracy from images.
+# Gold OCR text must be hand-verified against the source image.
+
+metrics_to_measure:
+  - CER (Character Error Rate)
+  - WER (Word Error Rate)
+  - exact_match (for key financial figures)
+
+test_cases:
+  revenue_chart:
+    description: "Revenue bar chart with dollar amounts"
+    queries:
+      - "What revenue figure is shown in this chart?"
+      - "What year does this chart show revenue for?"
+    expected_ocr_elements:
+      - "Dollar amounts (e.g., $383.3B)"
+      - "Year labels (e.g., FY2023)"
+      - "Title text"
+
+  scanned_10k_cover:
+    description: "Scanned 10-K cover page"
+    queries:
+      - "What company filed this 10-K?"
+      - "What fiscal year is this annual report for?"
+    expected_ocr_elements:
+      - "Company name"
+      - "SEC form number (10-K)"
+      - "Fiscal year or date"
+
+  financial_table:
+    description: "Scanned financial statement table"
+    queries:
+      - "What numbers appear in this financial table?"
+      - "What line items are shown in this table?"
+    expected_ocr_elements:
+      - "Row labels"
+      - "Numeric values"
+      - "Year column headers"
+
+known_degradation: "P1-8: OCR quality known to be poor on dense rendered text at default DPI. CER threshold is intentionally loose for v1 (0.15)."

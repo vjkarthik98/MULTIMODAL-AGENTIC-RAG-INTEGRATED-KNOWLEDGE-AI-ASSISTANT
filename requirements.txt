@@ -1,0 +1,273 @@
+
+# WEB FRAMEWORK
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+aiofiles>=23.0
+
+
+
+# DATA VALIDATION
+pydantic>=2.6
+pydantic-settings>=2.0
+python-dotenv>=1.0
+
+
+
+# LLM — llama-cpp-python
+# ── This line installs the prebuilt CPU (BLAS) wheel — correct as-is for a
+#    CPU-only box; device_manager.llm_gpu_layers() returns 0 automatically
+#    when torch.cuda.is_available() is False, so gguf_model.py runs Mistral-7B
+#    Q4_K_M on CPU with no code changes needed.
+# ── On a CUDA box (AWS g6e.xlarge / L40S), the prebuilt wheel's dynamic
+#    backend registers 0 GPU devices → silent CPU fallback at ~5 tok/s.
+#    Rebuild from source against the system CUDA toolkit — see
+#    install_cuda.sh, or:
+#   CMAKE_ARGS="-DGGML_CUDA=on -DGGML_BACKEND_DL=OFF -DGGML_NATIVE=OFF \
+#     -DCMAKE_CUDA_ARCHITECTURES=89 -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc" \
+#   CUDACXX=/usr/local/cuda-12.8/bin/nvcc CUDA_HOME=/usr/local/cuda-12.8 \
+#   pip install "llama-cpp-python==0.3.30" --no-binary llama-cpp-python --force-reinstall --no-cache-dir
+#
+# llama.cpp runs as a SEPARATE process (llama-server, own CUDA context on GPU
+# boxes) — in-process it corrupts PyTorch's CUDA context on worker threads and
+# SIGSEGVs the embed stage. start_server.sh launches `python -m llama_cpp.server`;
+# the sse-starlette + starlette-context deps below are required by that server.
+llama-cpp-python>=0.2.60
+sse-starlette>=2.0
+starlette-context>=0.3
+huggingface_hub>=0.22
+
+
+
+# EMBEDDINGS & MODELS — hardware-agnostic pins; the actual CPU-vs-CUDA torch
+# BUILD is an index-URL choice pip requirements files can't express, so install
+# torch explicitly BEFORE this file with the index matching your target:
+#
+#   CPU (local, no GPU):
+#     pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+#   CUDA (AWS g6e.xlarge / L40S):
+#     pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 \
+#       --index-url https://download.pytorch.org/whl/cu124
+#
+# Either way, `pip install -r requirements.txt` afterward is a no-op for torch —
+# it only pulls a build if the >=2.6 constraint isn't already satisfied, so it
+# never overwrites your chosen CPU/CUDA build with the PyPI-default one.
+# device_manager.py (app/core/) then auto-detects torch.cuda.is_available() at
+# runtime and routes every model to the right device — no other code changes
+# needed between the two targets.
+torch>=2.6
+torchvision>=0.21
+torchaudio>=2.6
+sentence-transformers>=2.7
+transformers>=4.39
+sentencepiece>=0.2.0
+accelerate>=1.1.0
+# int8/int4 quant for Qwen2-VL — only invoked when device_manager reports
+# "cuda" (model_loader.py gates BitsAndBytesConfig behind that check), so it's
+# simply unused (not broken) on a CPU box. Ships Windows + Linux wheels either way.
+bitsandbytes>=0.46.1
+faster-whisper>=1.0
+qwen-vl-utils>=0.0.8             # image/video preprocessing helper for Qwen2-VL processor
+tiktoken>=0.7                   # tokenisation used in approx_tokens() / finance_numbers.py
+datasets>=2.20                  # HuggingFace datasets — eval harness + model download scripts
+pyannote.audio>=3.1             # speaker diarization (model_loader.get_diarizer)
+
+
+
+# VECTOR STORE
+qdrant-client>=1.9
+
+
+
+# MEMORY / STORAGE
+redis>=5.0
+upstash-redis>=1.0
+pymongo>=4.6
+
+
+
+# RETRIEVAL
+rank-bm25>=0.2
+PyStemmer>=2.0.1
+
+
+
+# AGENTS / CHAINS
+langchain-core>=0.2             # eval/judges — LLMResult, Generation, PromptValue
+langchain-text-splitters>=0.0.1
+
+
+
+# NUMERICAL / ML
+numpy>=1.26
+scikit-learn>=1.4
+pandas>=2.2
+
+
+
+# WEB SEARCH
+tavily-python>=0.3
+httpx>=0.27
+requests>=2.31
+
+
+
+# RESILIENCE
+tenacity>=8.2
+pybreaker>=1.0
+
+
+
+# IMAGE PROCESSING
+pillow>=10.2
+opencv-python>=4.9
+pytesseract>=0.3
+easyocr>=1.7
+imagehash>=4.3
+cairosvg>=2.7                   # SVG→PNG conversion — needs Cairo DLLs on Windows (GTK runtime);
+                                 # both call sites wrap the import in try/except ImportError, so
+                                 # missing Cairo just disables SVG rasterization, doesn't crash.
+rawpy>=0.21                     # RAW camera format support (CR2/NEF/ARW) in image_ingest.py
+mediapipe>=0.10                 # face detection / count in image_ingest.py
+# Optional: HEIC/HEIF support for iPhone photos. Safe to omit on systems
+# without libheif; image_ingest only uses it via a soft try/except.
+pillow-heif>=0.16
+
+
+
+# AUDIO PROCESSING
+pydub>=0.25
+numba>=0.59.0                   # pinned: Python 3.12 requires >=0.59.0
+llvmlite>=0.42.0                # pinned: paired with numba>=0.59.0
+librosa>=0.10                   # audio feature extraction / duration analysis in audio_ingest.py
+mutagen>=1.47                   # audio file metadata (bitrate, codec, tags) in audio_ingest.py
+# YAMNet noise/crowd classification — optional, imported inside try/except
+# (_classify_noise in audio_ingest.py); missing tensorflow just disables it.
+# The `[and-cuda]` extra (bundles CUDA 12 runtime as pip deps) only ships Linux
+# wheels — doesn't exist for Windows at all — so it's marker-gated to Linux;
+# everywhere else (Windows laptop, CPU) gets the plain CPU package.
+tensorflow[and-cuda]>=2.16; sys_platform == "linux"
+tensorflow>=2.16; sys_platform != "linux"
+tensorflow-hub>=0.16
+
+
+
+# VIDEO PROCESSING
+av>=12.0                        # PyAV — frame-accurate video reading in video_ingest.py
+imageio-ffmpeg>=0.4             # bundled FFmpeg binary fallback in video_ingest.py
+scenedetect[opencv]>=0.6        # PySceneDetect — adaptive scene detection in video_ingest.py
+
+
+
+# DOCUMENT PROCESSING
+pdfplumber>=0.10
+pymupdf>=1.23
+camelot-py[cv]>=0.11             # lattice-flavor tables need Ghostscript on PATH; guarded with
+                                  # try/except ImportError in pdf_ingest.py — pdfplumber covers
+                                  # standard tables if Ghostscript isn't installed.
+python-docx>=1.1
+openpyxl>=3.1
+chardet>=5.0
+
+
+
+# TEXT PROCESSING & NLP
+ftfy>=6.1
+wordsegment>=1.3
+wordfreq>=3.0
+textstat>=0.7                   # readability + lexical metrics in txt_ingest.py
+yake>=0.4                       # unsupervised keyword extraction in txt_ingest.py + summarizer.py
+keybert>=0.8                    # BERT-based keyword extraction in txt_ingest.py + summarizer.py
+lingua-language-detector>=2.0   # fast language detection in txt_ingest.py + pii.py
+
+
+
+# SERIALIZATION
+orjson>=3.9
+
+
+
+# OBSERVABILITY
+opentelemetry-api>=1.24
+opentelemetry-sdk>=1.24
+opentelemetry-exporter-otlp-proto-grpc>=1.24
+prometheus-client>=0.20
+structlog>=24.1
+
+
+
+# SECURITY / PII
+# router.py does `import magic` unguarded at module load — on Windows the
+# plain `python-magic` package has no libmagic DLL to bind to and raises
+# ImportError. python-magic-bin bundles the DLL. (Linux/Mac keep python-magic.)
+python-magic-bin>=0.4.14; sys_platform == "win32"
+python-magic>=0.4.14; sys_platform != "win32"
+bleach>=6.1
+presidio-analyzer>=2.2
+presidio-anonymizer>=2.2
+spacy>=3.7                  # Presidio NLP engine (Phase 26 — PII detection)
+# After install, download the model:  python -m spacy download en_core_web_lg
+pyclamd>=0.4.0
+detoxify>=0.5               # toxicity scoring in output_guard.py (_get_detoxify singleton)
+
+
+
+# AUTHENTICATION — Phase 27
+passlib[argon2]>=1.7.4      # Argon2 password hashing (OWASP recommended)
+python-jose[cryptography]>=3.3.0  # JWT access + refresh tokens
+zxcvbn-python>=4.4.1        # Offline password strength estimation
+authlib>=1.3.0               # OAuth2 / OIDC client (Google login)
+pyotp>=2.9.0                 # TOTP MFA (RFC 6238)
+qrcode[pil]>=7.4.2           # QR code for MFA enrolment
+google-auth>=2.29.0          # Google ID token verification
+resend>=2.0.0                # Transactional email — OTP + password-reset
+
+
+
+# SYSTEM
+psutil>=5.9
+
+
+
+# UI
+gradio>=6.0
+
+
+
+# EVALUATION — Phase 25 eval harness (ragas, jiwer, mlflow)
+# These ARE installed in production to allow `python -m app.eval.run` on any node.
+ragas==0.1.21
+jiwer>=3.0.0
+mlflow>=2.10.0
+PyYAML>=6.0
+
+
+
+# OPTIONAL — enhanced audio/image metadata, deliberately NOT hard requirements.
+# Both are already used behind `try: import X / except ImportError:` with a
+# graceful degraded fallback (app/ingestion/audio_ingest.py's mutagen-based
+# duration read; app/chunking/image_chunker.py + app/ingestion/image_ingest.py's
+# cairosvg SVG→PNG conversion) — this project ships under MIT (see LICENSE),
+# and mutagen (GPL-2.0-or-later) / CairoSVG (LGPL-3.0-or-later) are copyleft.
+# Neither is statically linked into anything distributed — they're used via
+# normal Python import, and installing them is an explicit opt-in a deployer
+# makes for themselves, not something this project bundles or redistributes.
+# Left uninstalled by default (uncomment to enable): a deployer with GPL/LGPL
+# license concerns gets full graceful degradation for free; one who wants the
+# extra fidelity opts in explicitly. See docs/runbooks/ci-cd.md's license-scan
+# section for the full reasoning (2026-07-25 review).
+# mutagen>=1.47      # GPL-2.0-or-later — audio duration fallback
+# cairosvg>=2.7       # LGPL-3.0-or-later — SVG chart/image → PNG conversion
+
+
+
+# DEV / TEST (install with: pip install -r requirements-dev.txt)
+# Listed here for reference only — not installed in production
+pytest>=8.1
+pytest-asyncio>=0.23       # Phase 26 guardrails test suite uses asyncio fixtures
+pytest-cov>=5.0
+black>=24.3
+ruff>=0.4
+isort>=5.13
+mypy>=1.9
+pre-commit>=3.7

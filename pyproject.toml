@@ -1,0 +1,359 @@
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name            = "multimodal-rag-assistant"
+version         = "0.25.0"
+description     = "Production Multimodal RAG + Agentic AI System — Phase 26"
+readme          = "README.md"
+requires-python = ">=3.10"
+
+authors = [
+    { name = "Your Name" }
+]
+
+keywords = [
+    "rag", "multimodal", "llm", "agents",
+    "retrieval", "embeddings", "qdrant", "mistral"
+]
+
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    # WEB FRAMEWORK
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",
+    "aiofiles>=23.0",
+
+    # VALIDATION
+    "pydantic>=2.6",
+    "pydantic-settings>=2.0",
+    "python-dotenv>=1.0",
+
+    # LLM
+    "llama-cpp-python>=0.2.60",
+    "huggingface_hub>=0.22",
+
+    # EMBEDDINGS
+    "torch>=2.2",
+    "sentence-transformers>=2.7",
+    "transformers>=4.39",
+    "faster-whisper>=1.0",
+
+    # VECTOR STORE
+    "qdrant-client>=1.9",
+
+    # MEMORY / STORAGE
+    "redis>=5.0",
+    "upstash-redis>=1.0",
+    "pymongo>=4.6",
+
+    # RETRIEVAL
+    "rank-bm25>=0.2",
+
+    # NUMERICAL
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+
+    # WEB SEARCH
+    "tavily-python>=0.3",
+    "httpx>=0.27",
+
+    # RESILIENCE
+    "tenacity>=8.2",
+
+    # IMAGE
+    "pillow>=10.2",
+    "opencv-python>=4.9",
+    "pytesseract>=0.3",
+    "imagehash>=4.3",
+
+    # AUDIO
+    "pydub>=0.25",
+
+    # DOCUMENT
+    "pdfplumber>=0.10",
+    "pymupdf>=1.23",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "pandas>=2.2",
+    "chardet>=5.0",
+
+    # TEXT PROCESSING
+    "langchain-text-splitters>=0.0.1",
+
+    # SERIALIZATION
+    "orjson>=3.9",
+
+    # OBSERVABILITY
+    "structlog>=24.1",
+    "prometheus-client>=0.20",
+    "opentelemetry-api>=1.24",
+    "opentelemetry-sdk>=1.24",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.24",
+
+    # SECURITY / GUARDRAILS — Phase 26
+    "presidio-analyzer>=2.2",
+    "presidio-anonymizer>=2.2",
+    "spacy>=3.7",               # Presidio NLP engine; run: python -m spacy download en_core_web_lg
+    "python-magic>=0.4.14",
+    "bleach>=6.1",
+    "PyYAML>=6.0",
+
+    # SYSTEM
+    "psutil>=5.9",
+]
+
+
+[project.optional-dependencies]
+
+test = [
+    "pytest>=8.1",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "pytest-timeout>=2.3",   # backs the --timeout=120 in [tool.pytest.ini_options]
+    "pytest-randomly>=3.15", # NOT enabled by default (see `make test-randomized`) —
+                             # available so order-dependence can be audited deliberately
+    "httpx>=0.27",
+]
+
+lint = [
+    "black>=24.3",
+    "ruff>=0.4",
+    "isort>=5.13",
+]
+
+typecheck = [
+    "mypy>=1.9",
+]
+
+security = [
+    "pip-audit>=2.7",    # dependency CVE scan (requirements.txt) — see .github/workflows/security.yml
+    "bandit>=1.7",       # SAST — common Python vulnerability patterns in app/
+    "pip-licenses>=4.4", # dependency license scan — flags copyleft/unknown licenses
+]
+
+dev = [
+    "multimodal-rag-assistant[test,lint,typecheck,security]",
+    "pre-commit>=3.7",
+    "detect-secrets>=1.5",
+]
+
+observability = [
+    "langfuse>=2.0",
+]
+
+
+[project.scripts]
+# NOTE: "start-api" used to live here as
+# start-api = "uvicorn app.main:app --reload" — invalid: [project.scripts]
+# entries must be a `module:callable` Python entry-point reference (PEP 621),
+# not a shell command with arguments, so `pip install -e .` failed to build
+# with "must be python-entrypoint-reference" the moment anything actually
+# tried to build this project as an editable install (nothing had, until
+# now). Removed rather than papered over with a wrapper function — no
+# documented workflow (see CLAUDE.md) ever invoked `start-api`; the real dev
+# command is `uvicorn app.main:app --reload --port 8000` directly.
+init-qdrant     = "app.vectorstore.qdrant_store:initialize_qdrant"
+download-model  = "app.bin.models.download_all_models:main"
+
+
+[tool.setuptools.packages.find]
+where   = ["."]
+include = ["app*"]
+exclude = ["tests*", "notebooks*"]
+
+
+# BLACK
+
+[tool.black]
+line-length             = 100
+target-version          = ["py310", "py311"]
+skip-string-normalization = true
+
+
+# RUFF
+
+[tool.ruff]
+line-length    = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "N",    # pep8-naming
+    "C90",  # mccabe complexity
+    "T20",  # flake8-print (flag stray print statements)
+]
+
+ignore = [
+    "E501",   # line length handled by black
+    "B008",   # function calls in default args (FastAPI Depends pattern)
+    "N806",   # variable in function should be lowercase (numpy convention)
+    "T201",   # print found (allowed in scripts)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**"   = ["S101", "T201", "B011"]
+"app/bin/**" = ["T201"]
+# Standalone scripts: deliberately do `sys.path.insert(0, ROOT)` (and, in some
+# cases, os.environ.setdefault(...) for an eval-only flag) before importing
+# app.* — required so the script works when run directly (not as `python -m`),
+# not movable to top-of-file without breaking that.
+"app/eval/scripts/**"           = ["E402"]
+"app/eval/datasets/build_gold_set.py" = ["E402"]
+# main.py deliberately interleaves imports with app.add_middleware()/
+# app.include_router() calls to control exact registration order, and sets
+# HF_HOME env vars before the first transformers/torch import anywhere in the
+# dependency chain — both real ordering requirements, not movable to the top.
+"app/main.py" = ["E402"]
+# ruff's isort port and the standalone `isort` tool (run separately in CI via
+# `isort --check`) disagree on this file's specific pattern -- two plain
+# imports from output_guard interleaved alphabetically with an aliased import
+# from the same module (`check as _output_check`, aliased to avoid colliding
+# with input_guard's own `check`). isort insists on splitting all three onto
+# separate lines; ruff's I001 insists on recombining the two plain names.
+# Deferring to isort's form (the actual CI-enforced formatter) and silencing
+# ruff's I001 here rather than chasing a config that satisfies both.
+"app/guardrails/__init__.py" = ["I001"]
+
+[tool.ruff.lint.mccabe]
+# Default is 10. Raised to 55 as a deliberate policy call: this codebase's
+# per-modality dispatch functions (ingest/chunk/extract across 7 formats)
+# are inherently branchy — one function orchestrating many format-specific
+# paths — and a blanket rewrite to satisfy a generic threshold risks
+# changing behavior in code with hard-won, eval-verified finance accuracy.
+# 55 clears that inherent-complexity class. A handful of true outliers
+# (66-184) remain above even this and are suppressed individually with
+# `# noqa: C901` at the function, not hidden here, so they stay visible as
+# known follow-up work instead of disappearing from view.
+max-complexity = 55
+
+
+# ISORT
+
+[tool.isort]
+profile     = "black"
+line_length = 100
+
+
+# PYTEST
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+minversion = "8.0"
+# --strict-config: fail loudly on any unrecognized ini option instead of
+# silently ignoring it — this is what would have caught "aysncio_mode" (a
+# typo'd, dead duplicate of asyncio_mode below) instead of it sitting there
+# doing nothing.
+# --disable-warnings intentionally removed: it was hiding ALL warnings
+# repo-wide, including real ones (resource leaks, deprecations in your own
+# code) mixed in with third-party noise. Warnings are visible again now —
+# if a specific third-party warning turns out to be pure noise, add it to
+# filterwarnings below by name rather than hiding everything again.
+# --timeout=120: a hung test (stray network call, infinite loop) now fails
+# after 2 minutes instead of hanging CI indefinitely. Generous on purpose —
+# raise it if a genuinely slow (not hung) test needs more, don't lower it
+# blindly.
+# -p no:randomly: pytest-randomly (added for order-dependence auditing)
+# auto-activates for EVERY run the moment it's installed — pytest loads all
+# installed plugins by default, there is no "available but inactive" state.
+# Disabled here so normal runs stay deterministic; `make test-randomized`
+# re-enables it explicitly with `-p randomly` when you actually want to
+# audit for hidden test-order dependencies.
+addopts    = "--strict-markers --strict-config -q --tb=short --timeout=120 -p no:randomly"
+testpaths  = ["tests"]
+
+markers = [
+    "unit: fast unit tests with no external dependencies",
+    "integration: tests requiring live services (Qdrant, Redis, Mongo)",
+    "slow: tests that take > 5 seconds",
+    "multimodal: tests covering image/audio/video pipelines",
+    "guardrails: Phase 26 security and injection defence tests",
+    "auth: Phase 27 authentication and tenant-isolation tests",
+]
+
+asyncio_mode = "auto"
+
+
+# MYPY
+
+[tool.mypy]
+python_version        = "3.10"
+ignore_missing_imports = true
+strict_optional       = true
+warn_unused_ignores   = true
+warn_redundant_casts  = true
+warn_unused_configs   = true
+no_implicit_optional  = true
+
+[[tool.mypy.overrides]]
+module = [
+    "llama_cpp.*",
+    "faster_whisper.*",
+    "sentence_transformers.*",
+    "rank_bm25.*",
+    "pydub.*",
+    "cv2.*",
+    "pytesseract.*",
+    "fitz.*",
+    "pdfplumber.*",
+    "docx.*",
+    "openpyxl.*",
+    "imagehash.*",
+    "tavily.*",
+    "upstash_redis.*",
+    "langfuse.*",
+    "presidio_analyzer.*",
+    "presidio_anonymizer.*",
+    "spacy.*",
+    "yaml.*",
+]
+ignore_missing_imports = true
+
+
+# COVERAGE
+
+[tool.coverage.run]
+branch  = true
+source  = ["app"]
+omit    = [
+    "app/core/config.py",
+    "tests/*",
+    "app/bin/*",
+]
+
+[tool.coverage.report]
+show_missing  = true
+skip_empty    = true
+fail_under    = 70
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+
+
+# BANDIT — SAST, see .github/workflows/security.yml
+# Scope matches ruff/black/isort: app/ only (ui/ is JS, tests/ is test code
+# where e.g. B101 assert-usage and hardcoded dummy passwords are expected).
+[tool.bandit]
+exclude_dirs = ["tests", "ui", ".venv", "rag_env"]
+# B104 (bind-all-interfaces) and B108 (hardcoded tmp path) are noisy in a
+# containerized app that's deliberately meant to bind 0.0.0.0 inside Docker
+# and use predictable paths under a controlled /app tree — skip only these
+# two, keep everything else (injection, weak crypto, eval/exec, etc.) live.
+skips = ["B104", "B108"]

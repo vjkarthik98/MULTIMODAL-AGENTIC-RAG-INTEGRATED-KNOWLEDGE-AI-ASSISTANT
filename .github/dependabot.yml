@@ -1,0 +1,57 @@
+version: 2
+
+# Dependabot vs. security.yml's pip-audit: Dependabot watches the manifest
+# (requirements.txt) and opens a PR the moment a pin has a KNOWN CVE, on its
+# own schedule — it doesn't need a PR to already be open. pip-audit in
+# security.yml is the point-in-time check that runs ON every PR, catching a
+# CVE disclosed for a version someone is introducing right now, before merge.
+# The two are complementary, not redundant: Dependabot is the standing watch,
+# pip-audit is the gate.
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "security"
+    # Group routine minor/patch bumps into one PR instead of one-per-package
+    # noise; a major bump (more likely to break an ML pipeline's pinned
+    # behavior — e.g. transformers/torch) stays its own PR for real review.
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: "npm"
+    directory: "/ui"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "security"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "deps(ui)"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "ci"
