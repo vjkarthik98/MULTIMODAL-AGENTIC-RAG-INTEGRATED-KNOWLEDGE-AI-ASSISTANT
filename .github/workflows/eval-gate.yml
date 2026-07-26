@@ -151,14 +151,63 @@ jobs:
 
       # BM25 index for EVAL_USER_ID is gitignored local state (data/), not
       # reproducible from a bare checkout. Try the cache first (fast path).
+      #
+      # NOTE THE `-v2-` SALT. It is load-bearing, not cosmetic. The first run
+      # of this job saved an index pickled while
+      # app/retrieval/bm25_retriever.py was executing as `__main__`, so every
+      # BM25Document recorded its class as `__main__.BM25Document` and no
+      # other process could unpickle it. Fixing the source was not enough:
+      # the poisoned artifact was already in the cache, the cache then HIT on
+      # every later run, the rebuild step was skipped by its own
+      # `cache-hit != 'true'` guard, and the fix never executed. Cache keys are
+      # immutable, so the only way to publish a corrected artifact is a new
+      # key. Bump this salt whenever the pickled schema or the code that
+      # produces it changes incompatibly.
+      # `restore-keys` is salted too — a bare `bm25-eval-index-` prefix would
+      # happily fall back to the very poisoned entry we are escaping.
       - name: Restore eval BM25 index
         id: bm25_cache
         uses: actions/cache/restore@v4
         with:
           path: data/users/${{ env.EVAL_USER_ID }}/bm25_index
-          key: bm25-eval-index-${{ hashFiles('app/eval/datasets/gold/**') }}
+          key: bm25-eval-index-v2-${{ hashFiles('app/eval/datasets/gold/**') }}
           restore-keys: |
-            bm25-eval-index-
+            bm25-eval-index-v2-
+
+      # A cache HIT is not proof of a USABLE index — that assumption is
+      # exactly what let a corrupt artifact silently degrade the gate to
+      # dense-only for two full runs while reporting it as a retrieval
+      # regression. Actually open it and check it loads with documents.
+      # Cheap (no models, no network) and turns a whole class of
+      # stale/corrupt-cache failures into an automatic rebuild.
+      - name: Validate restored BM25 index
+        id: bm25_check
+        if: steps.bm25_cache.outputs.cache-hit == 'true'
+        run: |
+          set +e
+          python - <<'PY'
+          import sys
+          from app.retrieval.bm25_retriever import BM25Retriever
+          import os
+          uid = os.environ["EVAL_USER_ID"]
+          try:
+              r = BM25Retriever(user_id=uid)
+              r._load_index(uid)
+              n = len(r.documents)
+          except Exception as exc:
+              print(f"restored index unusable: {exc}")
+              sys.exit(1)
+          if n == 0:
+              print("restored index loaded but contains 0 documents")
+              sys.exit(1)
+          print(f"restored index OK: {n} documents")
+          PY
+          if [ $? -eq 0 ]; then
+            echo "usable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "usable=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=BM25 cache unusable::Restored cache failed to load; rebuilding from Qdrant."
+          fi
 
       # Self-heal on a cache miss instead of scoring an empty index.
       #
@@ -176,20 +225,42 @@ jobs:
       # straight from `BM25Document.from_payload()` (the `__main__` block in
       # app/retrieval/bm25_retriever.py). That makes Tier-1 self-sufficient on
       # a hosted runner and removes the self-hosted dependency entirely.
-      - name: Rebuild BM25 index from Qdrant (cache miss)
-        if: steps.bm25_cache.outputs.cache-hit != 'true'
+      # Rebuild on a cache miss OR on a cache hit that failed validation.
+      - name: Rebuild BM25 index from Qdrant
+        id: bm25_rebuild
+        if: steps.bm25_cache.outputs.cache-hit != 'true' || steps.bm25_check.outputs.usable != 'true'
         run: |
-          echo "BM25 cache miss — rebuilding from Qdrant payloads (no GPU/model needed)."
+          echo "Rebuilding BM25 index from Qdrant payloads (no GPU/model needed)."
           python -m app.retrieval.bm25_retriever --user_id "${EVAL_USER_ID}"
+
+      # Fail loudly if the rebuild itself produced something unloadable, rather
+      # than letting the gate run against a broken index and misreport the
+      # result as a quality regression — the exact failure mode this whole
+      # block exists to prevent.
+      - name: Verify rebuilt BM25 index
+        if: steps.bm25_rebuild.outcome == 'success'
+        run: |
+          python - <<'PY'
+          import os, sys
+          from app.retrieval.bm25_retriever import BM25Retriever
+          uid = os.environ["EVAL_USER_ID"]
+          r = BM25Retriever(user_id=uid)
+          r._load_index(uid)
+          n = len(r.documents)
+          print(f"rebuilt index: {n} documents")
+          if n == 0:
+              print("::error title=BM25 rebuild produced an empty index::Refusing to score retrieval against an empty index.")
+              sys.exit(1)
+          PY
 
       # Persist the rebuilt index so subsequent runs take the fast path.
       - name: Save rebuilt BM25 index to cache
-        if: steps.bm25_cache.outputs.cache-hit != 'true'
+        if: steps.bm25_rebuild.outcome == 'success'
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: data/users/${{ env.EVAL_USER_ID }}/bm25_index
-          key: bm25-eval-index-${{ hashFiles('app/eval/datasets/gold/**') }}
+          key: bm25-eval-index-v2-${{ hashFiles('app/eval/datasets/gold/**') }}
 
       - name: Retrieval gate
         run: python -m app.eval.run --suite retrieval
