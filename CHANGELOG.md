@@ -817,3 +817,270 @@ model, diagnosed, fixed, and re-measured until the numbers actually moved.
   after the fix
 - A summarization trigger bug and a PII/prompt-corruption issue surfaced
   through the chat UI were both fixed at the API layer feeding it
+
+
+# [v0.26.0] — Production MLOps, LLMOps & CI/CD
+
+This release deliberately changes nothing about what the assistant *does*.
+No retrieval logic, no agent behaviour, no guardrail rules were touched.
+What it adds is the operational discipline around the system — the machinery
+that proves it still works after every future change.
+
+That machinery splits into three concerns, and it is worth naming them
+separately because they answer different questions:
+
+- **MLOps** — is the *model itself* reproducible and correct? Model
+  identity, checksums, revision pinning, cache layout, vector-index schema,
+  and a startup that refuses to serve the wrong artifact.
+- **LLMOps** — is what the model *produces* good and safe? Prompt
+  versioning, judge selection, generation and behavioural evaluation,
+  guardrails on every input and output.
+- **CI/CD** — does the automation *enforce* both of the above on every
+  change, without anyone having to remember to run it?
+
+The more interesting half of this release is what building those gates
+uncovered. A quality gate is only worth having if it can tell "this is
+broken" apart from "this got worse" — and on its first real run, the
+retrieval gate reported a 15% quality drop that turned out to be BM25
+silently returning zero results. Chasing that down surfaced a string of
+genuine bugs that every unit test had been passing straight over, because
+unit tests mock exactly the things that were broken.
+
+### Features
+
+**MLOps — model provenance, reproducibility and startup safety**
+
+- The model downloader now performs Trust-On-First-Use checksum
+  verification: the first trusted download records a SHA-256 per artifact
+  into `.hf_cache/download_manifest.json`, and every later run verifies
+  against it and fails loudly on drift. A pinned model file plus a checksum
+  does not require knowing the hash in advance — it requires refusing to
+  accept a *different* one later
+- Every model entry carries an explicit `revision`, so a HuggingFace repo
+  moving underneath us is a hard failure rather than a silent behaviour
+  change. The one genuinely unpinnable window is a model's first-ever
+  download, which is inherent to the TOFU model rather than an oversight
+- `startup_validator` aborts boot on an incomplete or mismatched manifest.
+  Combined with the pre-existing write-time embedding-dimension check, a
+  wrong model or a wrong vector width now fails at startup instead of
+  quietly degrading retrieval
+- `torch.hub` models (Detoxify) resolve their cache correctly from *any*
+  entry point rather than only from `start_server.py`. `TORCH_HOME` and
+  `HF_HOME` are separate, non-interchangeable caches, and only one of them
+  was being set outside the server launcher — so a guardrail check could
+  re-download a model that was already on disk
+- The BM25 index carries a schema version and discards a stale index rather
+  than mixing tokens from two different tokenizer generations
+- Qdrant's delete-and-recreate-on-dimension-mismatch path is now guarded by
+  `QDRANT_ALLOW_RECREATE` and logs at CRITICAL with an explicit
+  `data_loss=True` field instead of INFO. The behaviour itself is
+  intentional — an embedding-model upgrade must not leave stale-dimension
+  vectors corrupting a new index — but a config typo produced an identical,
+  easily-missed log line until the data was already gone
+
+**LLMOps — prompt versioning, judge provenance and generation quality**
+
+- `PROMPT_VERSION` is recorded as an MLflow parameter on every evaluation
+  run, so a metric can always be traced back to the exact prompt that
+  produced it. A generation score without a prompt version attached is not
+  a measurement, it is an anecdote
+- `GET /version` reports the running prompt version alongside the git SHA,
+  image tag and full model manifest — a deployed instance can now prove
+  exactly what it is serving
+- Judge selection is single-sourced. The harness previously resolved
+  `EVAL_JUDGE_MODEL` in two places with two different fallbacks, so reports
+  could claim the Prometheus-2-7B judge while the legacy Ragas path
+  actually ran
+- Evaluation thresholds are enforced per-suite. Retrieval gates for real
+  against a measured baseline, while generation, e2e and behavioural stay
+  explicitly informational until each is re-baselined against the
+  Prometheus judge on real GPU hardware — rather than a single global
+  switch forcing an all-or-nothing choice between gating on unverified
+  numbers and gating on nothing
+- The full generation and behavioural suites (answer correctness, citation
+  accuracy, hallucination rate, refusal accuracy, adversarial resistance)
+  are wired as Tier 2, GPU-only and post-deploy
+
+**Continuous integration — the always-on PR gate**
+
+- `ci.yml` runs ruff, black, isort, mypy and the full 1,372-test unit suite
+  on both Python 3.10 and 3.11 for every pull request, on hosted runners
+  with no GPU and no external services
+- mypy runs but does not block. This is a deliberate call, not an oversight:
+  a real run found 311 pre-existing type errors across 65 files, and a gate
+  that is red on the day it ships teaches everyone to ignore it. The step
+  still shows red in the Actions UI, so the debt stays visible
+- Every pytest invocation is scoped to a specific subdirectory rather than
+  `pytest tests/ -m <marker>`. pytest collects every file under `testpaths`
+  before applying any marker filter, so one broken file anywhere aborts the
+  entire run with zero tests executed — which presents as a silent hang,
+  not a clear failure
+
+**The two-tier retrieval quality gate**
+
+- `eval-gate.yml` Tier 1 scores 56 gold questions against the live Qdrant
+  collection plus BM25 on every pull request, and blocks the merge on any
+  regression. Thresholds sit 5% below a measured v4 baseline (recall@5
+  0.6786, recall@10 0.7589, MRR 0.4660, nDCG@10 0.5322, hit_rate 0.8393,
+  n=56)
+- Tier 1 is self-sufficient on a hosted runner. When its BM25 cache misses,
+  it rebuilds the index directly from Qdrant payloads — no GPU, no models,
+  no re-embedding, because the chunk text is already stored in the payload
+- A cache *hit* is no longer trusted on faith. The restored index is opened
+  and checked for loadability and document count before use; anything
+  unusable triggers a rebuild instead of silently degrading the gate
+- Thresholds are enforced per-suite rather than by a single global switch,
+  so retrieval can gate for real while generation, e2e and behavioral stay
+  informational until each is re-baselined against the Prometheus-2-7B
+  judge on real GPU hardware
+- Tier 2 (full generation plus judge) remains GPU-only and post-deploy. Its
+  nightly schedule is disabled until a self-hosted runner exists — a
+  scheduled job against a runner label that resolves to nothing does not
+  fail, it queues indefinitely
+
+**Supply-chain and code security**
+
+- New `security.yml` with four independent checks: detect-secrets, Bandit
+  SAST, pip-audit for dependency CVEs, and a dependency license scan
+- detect-secrets is now enforced in CI. It previously ran only as a local
+  pre-commit hook, so anyone who skipped or bypassed that hook had nothing
+  else in the pipeline catching a leaked credential
+- Bandit blocks on HIGH severity only, and that gate is genuinely clean: the
+  five HIGH findings from the first real run were triaged individually, four
+  fixed and one suppressed with a written justification
+- The license scan blocks only on AGPL and SSPL — the two families that
+  would force source disclosure of this hosted service. GPL-2.0 (`mutagen`)
+  and LGPL-3.0 (`CairoSVG`) dependencies were found, and rather than being
+  silently accepted or silently blocked they were moved to a commented-out
+  optional section of `requirements.txt`. Both are already used behind
+  `try/except ImportError` with graceful degradation, so leaving them
+  uninstalled costs a deployer nothing but the extra fidelity
+- Dependabot now watches pip, npm and GitHub Actions weekly
+
+**Deployment, releases and provenance**
+
+- `cd.yml` builds the CUDA image, pushes to GHCR, deploys to EC2 over SSM
+  using GitHub OIDC (no long-lived AWS keys anywhere), health-checks, and
+  rolls back automatically on failure
+- Every image now ships with an SBOM and a SLSA provenance attestation
+  attached in the registry, so "what is actually inside the artifact running
+  in production" is answerable from the registry alone rather than
+  reconstructed from the Dockerfile
+- Trivy scans each built image and publishes results to the repository's
+  Security tab. It is informational for now, and honestly so: the image has
+  never been built on a machine with Docker available, and setting a
+  threshold without a measured count would be guessing
+- New `release.yml` automates the mechanical half of cutting a release —
+  version bump, changelog section, tag, GitHub Release — while leaving the
+  judgement half (what to call it, what belongs in it) to a human. It is
+  manually triggered, never automatic
+- `GET /version` reports the running git SHA, image tag, prompt version and
+  full model manifest, so a deployed instance can prove what it is
+
+**Developer experience**
+
+- `Makefile` gained `integration`, `benchmark`, `security-scan`, `sbom` and
+  `release` targets. `release` is a preflight that deliberately does *not*
+  tag — it checks version consistency, a clean tree, an unused tag and a
+  changelog entry, then points at the workflow that owns the actual release
+- `.env` is down to 37 keys — secrets, per-environment values and hardware
+  pins only. Everything else now lives in `config.py` with a reviewable
+  default, and `.env.example` documents the device and timeout overrides
+  that were previously undiscoverable
+
+### Improved
+
+- mypy errors reduced from 311 to 188, every fix a real correction rather
+  than a suppression
+- Bandit HIGH-severity findings reduced from five to zero
+- `tests/integration/` cut from 42 files to 13. Twenty-seven referenced a
+  pre-refactor `src.rag_system.*` package that no longer exists; two more
+  tested APIs that had been renamed or removed. The three genuinely current
+  gap tests were missing the `skipif(llama-server unavailable)` guard their
+  sibling smoke test already had, so they hung instead of skipping
+- `main` is now a protected branch requiring all seven checks, blocking
+  force pushes and deletions
+
+### Fixed
+
+**Retrieval and tenant isolation**
+
+- BM25 search returned the *first* user's index to every subsequent user for
+  the lifetime of the process. The retriever is a process-wide singleton and
+  its `if not self.bm25` guard meant the per-user index swap ran exactly
+  once. This was a live cross-tenant data leak, confirmed by reproduction:
+  querying as a nonexistent user returned another user's documents
+- Concurrent BM25 writes silently lost each other's updates — whichever save
+  finished last overwrote the rest. Found in real data: the eval user's
+  on-disk index held three of seven ingested sources
+- The per-modality BM25 base class never loaded its existing index before
+  appending, so an incremental add would have overwritten a user's entire
+  index with just the new batch, and delete/purge always found nothing to
+  remove
+- BM25 documents built by the index-rebuild entry point were pickled with
+  their class recorded as `__main__.BM25Document`, so no other process could
+  ever unpickle them. The index built and saved cleanly; every subsequent
+  search just returned nothing, degrading hybrid retrieval to dense-only
+  while reporting the result as a quality regression
+
+**Settings that silently did nothing**
+
+- `QDRANT_ALLOW_RECREATE` was read by no code at all. A setting whose name
+  promises protection over the most destructive path in the codebase did
+  nothing whatsoever; an operator setting it to `false` to protect
+  production vectors got no protection. Now wired up and verified in both
+  directions
+- `app/utils/paths.py` read an `ENVIRONMENT` variable that nothing in the
+  project sets — the project defines `ENV` — so its production flag was
+  permanently false, including in production. Harmless only because nothing
+  consumed it yet; it is the Phase 30 placeholder for the local-to-S3
+  storage switch, and would have failed silently the moment that was wired
+- `MATRYOSHKA_SHORT_DIM` was referenced with no setting ever defined,
+  guaranteeing an `AttributeError` the first time that code path ran
+- The eval harness read `EVAL_JUDGE_MODEL` in two places with two different
+  fallbacks. While `.env` set the value explicitly they agreed by luck; once
+  the settings migration dropped the key they diverged, so reports claimed
+  the Prometheus judge while the legacy path actually ran — meaning every
+  generation metric would have attested to a judge that never executed
+
+**Crashes and silent data loss**
+
+- A prompt builder crashed on its own default argument: one line guarded an
+  optional list correctly, the next called `len()` on it unguarded
+- `UniversalMetadata` was silently discarded at six ingestion call sites,
+  which passed it as `metadata=` when the field is `universal_metadata=`.
+  Pydantic ignores unknown keyword arguments by default, so it vanished
+  without error
+- Deleting all chat sessions never actually purged Redis. The handler called
+  two methods that do not exist — one on the registry, one on the memory
+  class — and a broad `except` swallowed the `AttributeError`
+- The agent's RAG tool called both a non-existent attribute and a
+  non-existent method, so it could only ever have returned an empty list
+- Corrupt-audio repair used `tempfile.mktemp`, which returns a filename
+  without creating the file and leaves a symlink race open, and never
+  deleted the repaired file afterwards
+- `QdrantVectorStore.delete_by_ids` was called but never existed, so the
+  knowledge-base delete-by-file-hash endpoint always returned a 500
+- A renamed qdrant-client attribute meant collection stats always reported
+  an error instead of statistics
+
+**Tooling and pipeline**
+
+- `pyproject.toml` contained an invalid `[project.scripts]` entry that
+  silently broke `pip install -e .` for anyone who tried it
+- Any `TestClient(app)` instantiation fired real GPU model preloading on an
+  uncancellable executor thread, hanging test teardown indefinitely
+- The gold-set ingestion script crashed on its first file every run under
+  Windows' cp1252 console encoding, which is why the eval corpus was never
+  actually populated
+- Doc-only pull requests would have deadlocked permanently once checks
+  became required — a workflow filtered out by `paths-ignore` reports no
+  status at all, so the check waits forever. The filter was removed from
+  every pull-request trigger rather than papered over with a companion
+  workflow, which introduces its own race
+- The Tier-2 dispatch step lacked the `contents: write` permission its API
+  call requires, so it would have failed silently after every deploy
+- detect-secrets rewrites its own baseline when line numbers drift and exits
+  3 to say so; CI treated that as a failure. Exit 3 is now tolerated and
+  exit 1 still blocks, verified against the library's own source to confirm
+  a real finding can never be masked
