@@ -65,11 +65,15 @@ RUN CMAKE_ARGS="-DGGML_CUDA=on -DGGML_BACKEND_DL=OFF -DGGML_NATIVE=OFF \
 # pip dependency (unlike the GB-scale GGUF/embedding/vision models below).
 RUN python3.12 -m spacy download en_core_web_lg
 
-# Build-time smoke check: fail the image build (not just fail silently at
-# runtime) if the CUDA backend didn't actually compile in.
-RUN python3.12 -c "import llama_cpp; assert llama_cpp.llama_supports_gpu_offload(), \
-        'llama-cpp-python built WITHOUT CUDA offload support'; \
-        print('llama-cpp-python CUDA offload: OK')"
+# NOTE: a build-time `llama_supports_gpu_offload()` smoke check previously
+# lived here, but it doesn't just check compile flags — it probes for an
+# actual physical GPU, which GitHub-hosted CI runners never have. That made
+# this assertion fail unconditionally in CI regardless of build correctness
+# (confirmed: cd.yml build-push failed here with exit code 1 on a build that
+# used the exact same CMAKE_ARGS verified working on the real g6e.xlarge box).
+# The pip install above already fails loudly on a broken CUDA toolkit/path;
+# real GPU-offload verification happens where a GPU actually exists — on the
+# box itself (install_cuda.sh's own check, and the deploy health check).
 
 # ---------------------------------------------------------------------------
 # Stage 2 — runtime (default target): slim CUDA image, production
