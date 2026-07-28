@@ -218,7 +218,7 @@ detoxify>=0.5               # toxicity scoring in output_guard.py (_get_detoxify
 
 # AUTHENTICATION — Phase 27
 passlib[argon2]>=1.7.4      # Argon2 password hashing (OWASP recommended)
-python-jose[cryptography]>=3.3.0  # JWT access + refresh tokens
+python-jose[cryptography]>=3.5.0  # JWT access + refresh tokens
 zxcvbn-python>=4.4.1        # Offline password strength estimation
 authlib>=1.3.0               # OAuth2 / OIDC client (Google login)
 pyotp>=2.9.0                 # TOTP MFA (RFC 6238)
