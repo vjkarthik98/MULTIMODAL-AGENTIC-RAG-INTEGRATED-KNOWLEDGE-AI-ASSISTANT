@@ -126,7 +126,7 @@ pybreaker>=1.0
 pillow>=10.2
 opencv-python>=4.9
 pytesseract>=0.3
-easyocr>=1.7
+easyocr>=1.7.2
 imagehash>=4.3
 cairosvg>=2.7                   # SVG→PNG conversion — needs Cairo DLLs on Windows (GTK runtime);
                                  # both call sites wrap the import in try/except ImportError, so
