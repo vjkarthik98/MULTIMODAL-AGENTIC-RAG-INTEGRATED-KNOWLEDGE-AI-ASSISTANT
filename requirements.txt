@@ -69,7 +69,7 @@ accelerate>=1.1.0
 # int8/int4 quant for Qwen2-VL — only invoked when device_manager reports
 # "cuda" (model_loader.py gates BitsAndBytesConfig behind that check), so it's
 # simply unused (not broken) on a CPU box. Ships Windows + Linux wheels either way.
-bitsandbytes>=0.46.1
+bitsandbytes>=0.50.0
 faster-whisper>=1.0
 qwen-vl-utils>=0.0.8             # image/video preprocessing helper for Qwen2-VL processor
 tiktoken>=0.7                   # tokenisation used in approx_tokens() / finance_numbers.py
