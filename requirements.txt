@@ -59,7 +59,11 @@ torch>=2.6
 torchvision>=0.21
 torchaudio>=2.6
 sentence-transformers>=2.7
-transformers>=4.39
+# <5.0 is REQUIRED: transformers v5's TokenizersBackend refactor drops the
+# slow->fast tokenizer conversion path and breaks TrOCR (and other slow-tokenizer
+# models) with a misleading "need sentencepiece" error. Verified on AWS g6e.xlarge:
+# 5.14.1 breaks TrOCR, 4.57.6 works. >=4.45 keeps Qwen2-VL support.
+transformers>=4.45,<5.0
 sentencepiece>=0.2.0
 accelerate>=1.1.0
 # int8/int4 quant for Qwen2-VL — only invoked when device_manager reports
@@ -229,8 +233,11 @@ psutil>=5.9
 
 
 
-# UI
-gradio>=6.0
+# UI — the app UI is React/Vite (ui/), served separately; gradio is NOT imported
+# anywhere in app/. Removed because gradio 6.x pins huggingface-hub>=1.2.0, which
+# conflicts with transformers<5.0 (needs hub<1.0). Re-add only if a Python/Gradio
+# UI is reintroduced.
+# gradio>=6.0
 
 
 
