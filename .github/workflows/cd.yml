@@ -121,8 +121,11 @@ jobs:
       # findings are genuinely unfixable base-image noise rather than
       # something we introduced, then set `exit-code: 1` with
       # `severity: CRITICAL` to make it a real gate.
+      # Pinned to a v-prefixed tag: aquasecurity retired all non-"v" tags
+      # (e.g. the old "0.24.0") following a supply-chain incident, and now
+      # publishes only "vX.Y.Z" releases — an unprefixed tag no longer resolves.
       - name: Trivy image scan
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         continue-on-error: true
         with:
           image-ref: ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
