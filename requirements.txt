@@ -132,7 +132,7 @@ cairosvg>=2.7                   # SVG→PNG conversion — needs Cairo DLLs on W
                                  # both call sites wrap the import in try/except ImportError, so
                                  # missing Cairo just disables SVG rasterization, doesn't crash.
 rawpy>=0.21                     # RAW camera format support (CR2/NEF/ARW) in image_ingest.py
-mediapipe>=0.10                 # face detection / count in image_ingest.py
+mediapipe>=1.0.0                 # face detection / count in image_ingest.py
 # Optional: HEIC/HEIF support for iPhone photos. Safe to omit on systems
 # without libheif; image_ingest only uses it via a soft try/except.
 pillow-heif>=0.16
