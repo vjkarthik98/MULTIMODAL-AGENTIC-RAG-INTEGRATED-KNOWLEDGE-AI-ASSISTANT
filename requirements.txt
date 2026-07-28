@@ -57,7 +57,7 @@ huggingface_hub>=0.22
 # needed between the two targets.
 torch>=2.6
 torchvision>=0.21
-torchaudio>=2.6
+torchaudio>=2.11.0
 sentence-transformers>=2.7
 # <5.0 is REQUIRED: transformers v5's TokenizersBackend refactor drops the
 # slow->fast tokenizer conversion path and breaks TrOCR (and other slow-tokenizer
