@@ -73,7 +73,7 @@ bitsandbytes>=0.46.1
 faster-whisper>=1.0
 qwen-vl-utils>=0.0.8             # image/video preprocessing helper for Qwen2-VL processor
 tiktoken>=0.7                   # tokenisation used in approx_tokens() / finance_numbers.py
-datasets>=2.20                  # HuggingFace datasets — eval harness + model download scripts
+datasets>=5.0.0                  # HuggingFace datasets — eval harness + model download scripts
 pyannote.audio>=3.1             # speaker diarization (model_loader.get_diarizer)
 
 
