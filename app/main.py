@@ -590,17 +590,17 @@ from app.auth.admin_router import router as admin_router
 app.include_router(admin_router)  # mounts at /admin — requires role=admin JWT
 
 
-# ROOT
-
-
-@app.get("/", tags=["System"])
-def root() -> dict[str, Any]:
-    return {
-        "message": settings.APP_NAME,
-        "version": settings.APP_VERSION,
-        "env": settings.ENV,
-        "status": "running",
-    }
+# ROOT — see the STATIC SPA block at the end of this module.
+#
+# GET "/" is registered there instead of here, conditionally: the built UI
+# (production) or this same JSON banner (API-only / local dev without a UI
+# build). Two `@app.get("/")` handlers in one module is not two endpoints —
+# FastAPI/Starlette matches routes in registration order, so whichever is
+# registered FIRST wins and the second is permanently unreachable dead code.
+# That exact mistake shipped once already: this handler here, registered
+# before the static mount at the bottom of the file, silently shadowed the
+# new UI route and kept serving the JSON banner on a build that had the UI
+# fix merged in. Single source of truth now.
 
 
 # HEALTH — SECTION 6
@@ -811,3 +811,14 @@ if _UI_DIST.is_dir():
     logger.info(event="ui_static_mounted", path=str(_UI_DIST))
 else:
     logger.info(event="ui_static_absent", detail="API-only mode; no ui_dist directory")
+
+    @app.get("/", tags=["System"])
+    def _root_api_only() -> dict[str, Any]:
+        """API-only fallback: no ui_dist build present (e.g. `uvicorn app.main:app`
+        run directly against a source checkout without `npm run build` first)."""
+        return {
+            "message": settings.APP_NAME,
+            "version": settings.APP_VERSION,
+            "env": settings.ENV,
+            "status": "running",
+        }
