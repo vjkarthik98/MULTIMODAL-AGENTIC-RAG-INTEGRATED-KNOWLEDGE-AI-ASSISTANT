@@ -1142,3 +1142,72 @@ papers over. Every fix below was found by running, not by review.
   the exact gold chunk isn't rank-1 — which is precisely why a lower exact-chunk
   recall coexists with correct answers. Raw exact-chunk recall is logged as a
   candidate for a future retrieval-quality pass, not this gate.
+
+# [v0.26.1] — CD Pipeline Reliability
+
+Patch release. No application code changes — `app/` and `ui/` are untouched.
+This fixes the delivery pipeline itself, which had never been executed
+end-to-end before v0.26.0 was cut: `cd.yml` was written correctly in the
+abstract but had four defects that only surface on a real tagged run against
+real infrastructure.
+
+### Bug Fixed
+
+**Deploy could never succeed — a hard-coded 100-second ceiling**
+
+- `aws ssm wait command-executed` was used to wait for the remote deploy. That
+  waiter is fixed at 20 attempts × 5s = **100 seconds**, which cannot cover a
+  multi-GB CUDA image pull followed by ~18GB of model weights paging off EBS
+  (measured ~139 MB/s on this instance). The step was guaranteed to fail
+  regardless of whether the deploy itself worked. Replaced with an explicit
+  poll loop with a 40-minute cap.
+- The post-deploy health check allowed 5 minutes (30 × 10s) for the container
+  to answer `/health`. A cold start on this hardware needs longer; raised to
+  20 minutes (80 × 15s), and it now aborts early with container logs if the
+  container exits during startup rather than waiting out the full window.
+
+**A supply-chain artifact could veto a working release**
+
+- `anchore/sbom-action` (Syft) failed while scanning the freshly-pushed image
+  and, lacking `continue-on-error`, failed the entire `build-push` job — even
+  though `docker/build-push-action` had already succeeded and the image was
+  genuinely in GHCR. An SBOM is a compliance artifact, not a release gate;
+  it is now non-blocking, consistent with the Trivy scan beside it.
+- `aquasecurity/trivy-action@0.24.0` no longer resolved: aquasecurity retired
+  every non-`v`-prefixed tag following a supply-chain incident and now
+  publishes only `vX.Y.Z`. Pinned to `v0.36.0`.
+
+**Build-time check that could never pass in CI**
+
+- The Dockerfile asserted `llama_cpp.llama_supports_gpu_offload()` at build
+  time. That function probes for a *physical GPU*, which hosted CI runners do
+  not have — so the assertion failed unconditionally, independent of build
+  correctness. Removed; the CUDA build is verified where a GPU actually exists
+  (`install_cuda.sh` on the box, and the deploy health check).
+
+### Improved
+
+- The remote deploy script is now authored as an ordinary shell script and
+  base64-encoded into a single SSM command, replacing an inline JSON array
+  that required hand-escaping quotes and `$` through three layers
+  (YAML → JSON → shell).
+- Deploy failures are now diagnosable without SSH: preflight checks (docker
+  daemon, AWS CLI, `--gpus all`, required mount paths) fail fast with explicit
+  messages, and remote `stdout`/`stderr` plus the last 80 lines of
+  `docker logs` are streamed into the Actions log.
+- The image is pulled *before* the running container is touched, so a failed
+  pull can no longer take down a healthy service.
+- Container hardening: `--shm-size=2g` (torch multiprocessing outgrows the
+  64MB default) and log rotation (`max-size=50m`, `max-file=3`) — this box has
+  already filled its disk once.
+- `post-deploy-eval` is gated behind a `SELF_HOSTED_GPU_RUNNER` repository
+  variable. Tier-2 runs on `[self-hosted, gpu]`; with no such runner
+  registered it produced a run queued indefinitely against a runner that would
+  never appear. It now skips cleanly until the runner exists.
+
+### Known Issues
+
+- `APP_VERSION` in `app/core/config.py` still reads `0.25.0` and is asserted
+  against that literal by the config self-test, so it drifts from `VERSION`.
+  Deliberately not changed in a patch focused on the delivery pipeline —
+  reconciling the two (and the assert) is its own change.
