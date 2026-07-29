@@ -50,6 +50,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A hosted runner ships ~14GB free, but this is an nvidia/cuda image with
+      # the full ML stack. On CD run #6 that was enough to BUILD and PUSH, then
+      # Syft and Trivy both died with "no space left on device" trying to export
+      # the image locally to scan it. Reclaiming the preinstalled toolchains we
+      # never use frees ~25-30GB and costs about 30 seconds.
+      - name: Free disk space on runner
+        run: |
+          echo "before:"; df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/share/powershell \
+                      /usr/local/lib/node_modules "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+          sudo apt-get clean || true
+          docker image prune -af >/dev/null 2>&1 || true
+          echo "after:";  df -h / | tail -1
+
       - id: meta
         run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
@@ -82,8 +97,13 @@ jobs:
           build-args: |
             GIT_SHA=${{ github.sha }}
             IMAGE_TAG=${{ steps.meta.outputs.tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Explicit shared scope. The default gha cache scope is derived from
+          # the git ref, so a TAG build cannot read a cache written by a
+          # different tag or by a branch build — which is why v0.26.1 recompiled
+          # llama-cpp-python from source for 1h21m despite v0.26.0 having built
+          # the identical layer minutes earlier. A fixed scope pools them.
+          cache-from: type=gha,scope=magik-cuda-runtime
+          cache-to: type=gha,mode=max,scope=magik-cuda-runtime
           sbom: true
           provenance: mode=max
 
@@ -248,6 +268,36 @@ jobs:
           log "pulling $IMG (multi-GB, several minutes expected)"
           docker pull "$IMG" || { log "FATAL: docker pull failed"; exit 1; }
 
+          # ── Local cache sidecar ───────────────────────────────────────────
+          # app/core/infra_registry.py::get_cache() backs ingestion job status,
+          # the JWT blacklist, the embedding cache and per-user rate limits. It
+          # dials settings.LOCAL_CACHE_HOST, which defaults to "localhost" —
+          # and inside a container "localhost" is the CONTAINER, not the host.
+          # Without a reachable Redis, get_cache() returns None and every caller
+          # degrades: job-status polls 404 (breaking UI upload progress) and
+          # app/auth/rate_limit.py FAILS OPEN, which on a public demo removes
+          # the only guard against someone hammering a $1.86/hr GPU.
+          #
+          # A sidecar on a user-defined network fixes it without touching
+          # /opt/magik/.env — the -e below overrides the env-file, so running
+          # from source on the host (where localhost IS correct) still works.
+          docker network create magik-net >/dev/null 2>&1 || true
+          if ! docker ps --filter name=magik-redis --filter status=running -q | grep -q .; then
+            docker rm -f magik-redis >/dev/null 2>&1 || true
+            # Ephemeral by design: no persistence, bounded memory, LRU eviction.
+            docker run -d --name magik-redis \
+              --network magik-net --restart unless-stopped \
+              --log-opt max-size=10m --log-opt max-file=2 \
+              redis:7-alpine redis-server \
+                --save "" --appendonly no \
+                --maxmemory 512mb --maxmemory-policy allkeys-lru \
+              || { log "FATAL: could not start magik-redis sidecar"; exit 1; }
+            log "started magik-redis sidecar"
+          else
+            docker network connect magik-net magik-redis >/dev/null 2>&1 || true
+            log "magik-redis already running"
+          fi
+
           # ── Swap ──────────────────────────────────────────────────────────
           docker rm -f magik-previous >/dev/null 2>&1 || true
           docker rename magik-current magik-previous >/dev/null 2>&1 || true
@@ -256,10 +306,12 @@ jobs:
           # --log-opt:  cap container logs; this box has already hit a full disk once.
           docker run -d --name magik-current \
             --gpus all --restart unless-stopped \
+            --network magik-net \
             --shm-size=2g \
             --log-opt max-size=50m --log-opt max-file=3 \
             -p 8000:8000 \
             --env-file /opt/magik/.env \
+            -e LOCAL_CACHE_HOST=magik-redis \
             -v /opt/magik/.hf_cache:/app/.hf_cache \
             -v /opt/magik/data:/app/data \
             -v /opt/magik/logs:/app/logs \
