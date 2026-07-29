@@ -739,3 +739,75 @@ def list_tools() -> dict[str, Any] | JSONResponse:
             status_code=500,
             content={"status": "error", "message": str(e)},
         )
+
+
+# STATIC SPA — must stay LAST in this module
+#
+# The production image builds ui/ (Dockerfile stage `ui-builder`) into
+# /app/ui_dist. When that directory is present this serves the React app at /;
+# when it is absent — a plain source checkout, or `uvicorn app.main:app` during
+# backend development — nothing below registers and the API behaves exactly as
+# before. That conditional is deliberate: the deployed artifact must not require
+# a separate `npm run dev` process to be reachable, and a backend-only checkout
+# must not fail because a build output is missing.
+#
+# ui/src/api/client.js uses `const API = ''` (same-origin relative paths), so the
+# bundle needs no build-time API URL and works under any hostname.
+
+_UI_DIST = _Path(__file__).resolve().parents[1] / "ui_dist"
+
+# Prefixes owned by the API. The catch-all below refuses them so a typo like
+# /rag/quer returns a JSON 404 instead of silently handing back index.html —
+# which would otherwise surface to a client as an unparseable HTML "response".
+_API_PREFIXES = (
+    "auth",
+    "rag",
+    "admin",
+    "health",
+    "metrics",
+    "docs",
+    "redoc",
+    "openapi.json",
+    "tools",
+    "infra",
+    "models",
+)
+
+if _UI_DIST.is_dir():
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    _INDEX = _UI_DIST / "index.html"
+
+    # Vite emits hashed filenames under assets/ — immutable, so cache hard.
+    _assets = _UI_DIST / "assets"
+    if _assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(_assets)), name="ui-assets")
+
+    @app.get("/", include_in_schema=False)
+    def _ui_root() -> FileResponse:
+        return FileResponse(_INDEX)
+
+    @app.get("/{full_path:path}", include_in_schema=False, response_model=None)
+    def _ui_catch_all(full_path: str) -> FileResponse | JSONResponse:
+        """Serve real files; fall back to index.html for client-side routes.
+
+        A SPA owns its own routing, so /login and /chat are not server routes —
+        they must return index.html and let the router resolve them. Registered
+        last, after every include_router call, so API routes always win.
+        """
+        top = full_path.split("/", 1)[0]
+        if top in _API_PREFIXES:
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+        if full_path:
+            candidate = (_UI_DIST / full_path).resolve()
+            # Containment check — blocks ../ traversal out of the bundle.
+            if candidate.is_file() and _UI_DIST.resolve() in candidate.parents:
+                return FileResponse(candidate)
+
+        return FileResponse(_INDEX)
+
+    logger.info(event="ui_static_mounted", path=str(_UI_DIST))
+else:
+    logger.info(event="ui_static_absent", detail="API-only mode; no ui_dist directory")
