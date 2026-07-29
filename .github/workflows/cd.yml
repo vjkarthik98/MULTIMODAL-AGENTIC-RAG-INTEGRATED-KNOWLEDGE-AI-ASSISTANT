@@ -88,8 +88,17 @@ jobs:
           provenance: mode=max
 
       # ── Supply-chain: SBOM artifact ──────────────────────────────────────
+      # NON-BLOCKING, same treatment as the Trivy scan below: an SBOM is a
+      # supply-chain/compliance artifact, not a release gate. Confirmed by a
+      # real failure (2026-07-28): Syft errored scanning the freshly-pushed
+      # image (exit code 1, cause not yet root-caused) and, lacking
+      # continue-on-error, took down the ENTIRE job — deploy never ran even
+      # though docker/build-push-action above had already succeeded and the
+      # image was genuinely in GHCR. An SBOM generation hiccup must never
+      # block shipping a working, already-built image.
       - name: Generate SBOM (SPDX JSON)
         uses: anchore/sbom-action@v0
+        continue-on-error: true
         with:
           image: ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
           format: spdx-json
@@ -97,7 +106,11 @@ jobs:
           upload-artifact: false   # uploaded explicitly below, with a stable name
 
       - name: Upload SBOM
+        # Skip cleanly (grey) rather than fail-but-ignore (orange) when Syft
+        # produced no file — keeps a green run genuinely green.
+        if: hashFiles('sbom.spdx.json') != ''
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: sbom-${{ steps.meta.outputs.tag }}
           path: sbom.spdx.json
@@ -192,27 +205,135 @@ jobs:
 
       # Keeps the previous container renamed (not removed) so failure can
       # roll back instantly instead of re-pulling an old image.
+      #
+      # The remote script is authored as a normal shell script here, then
+      # base64-encoded into ONE SSM command. The previous inline JSON-array
+      # form required hand-escaping quotes and `$` through two layers (YAML →
+      # JSON → shell), which is a standing source of silent breakage; this
+      # form has exactly one quoting boundary.
       - name: Deploy via SSM (pull, swap, health check, auto-rollback)
+        env:
+          IMAGE_REF: ${{ env.IMAGE }}:${{ needs.build-push.outputs.image_tag }}
+          GH_OWNER: ${{ github.repository_owner }}
+          INSTANCE_ID: ${{ steps.instance.outputs.id }}
         run: |
+          set -euo pipefail
+
+          cat > /tmp/remote-deploy.sh <<'REMOTE_EOF'
+          set -uo pipefail
+          IMG="__IMAGE_REF__"
+          OWNER="__GH_OWNER__"
+          log(){ echo "[deploy] $*"; }
+
+          # ── Preflight: fail fast and legibly, BEFORE the multi-GB pull ─────
+          command -v docker >/dev/null 2>&1 || { log "FATAL: docker not installed"; exit 1; }
+          command -v aws    >/dev/null 2>&1 || { log "FATAL: aws cli not installed"; exit 1; }
+          docker info >/dev/null 2>&1       || { log "FATAL: docker daemon unreachable"; exit 1; }
+          for p in /opt/magik/.env /opt/magik/.hf_cache /opt/magik/data /opt/magik/logs; do
+            [ -e "$p" ] || { log "FATAL: missing required path $p"; exit 1; }
+          done
+          if ! docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
+            log "FATAL: '--gpus all' not functional — nvidia-container-toolkit missing/broken"
+            exit 1
+          fi
+          log "preflight OK"
+
+          # ── Pull BEFORE touching the running container, so a failed pull
+          #    never takes down a working service ───────────────────────────
+          GHCR_PAT="$(aws ssm get-parameter --name /magik/ghcr_pat \
+                        --with-decryption --query Parameter.Value --output text)" \
+            || { log "FATAL: could not read /magik/ghcr_pat from SSM"; exit 1; }
+          echo "$GHCR_PAT" | docker login ghcr.io -u "$OWNER" --password-stdin \
+            || { log "FATAL: docker login to ghcr.io failed"; exit 1; }
+          log "pulling $IMG (multi-GB, several minutes expected)"
+          docker pull "$IMG" || { log "FATAL: docker pull failed"; exit 1; }
+
+          # ── Swap ──────────────────────────────────────────────────────────
+          docker rm -f magik-previous >/dev/null 2>&1 || true
+          docker rename magik-current magik-previous >/dev/null 2>&1 || true
+
+          # --shm-size: torch dataloaders/multiprocessing outgrow the 64MB default.
+          # --log-opt:  cap container logs; this box has already hit a full disk once.
+          docker run -d --name magik-current \
+            --gpus all --restart unless-stopped \
+            --shm-size=2g \
+            --log-opt max-size=50m --log-opt max-file=3 \
+            -p 8000:8000 \
+            --env-file /opt/magik/.env \
+            -v /opt/magik/.hf_cache:/app/.hf_cache \
+            -v /opt/magik/data:/app/data \
+            -v /opt/magik/logs:/app/logs \
+            "$IMG"
+          if [ $? -ne 0 ]; then
+            log "FATAL: docker run failed (port 8000 already held by a non-container process?)"
+            docker rename magik-previous magik-current >/dev/null 2>&1 || true
+            docker start magik-current >/dev/null 2>&1 || true
+            exit 1
+          fi
+
+          # ── Health check ──────────────────────────────────────────────────
+          # 80 x 15s = 20 min. A cold start pages ~18GB of models off EBS
+          # (measured ~139 MB/s on this box) and warms llama-server on the GPU;
+          # the previous 5-minute window could not cover that.
+          log "waiting for /health (up to 20 min for cold model load)"
+          for i in $(seq 1 80); do
+            if curl -sf http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              log "HEALTHY after $(( i * 15 ))s"
+              docker ps --filter name=magik-current --format '{{.Names}} {{.Status}}'
+              exit 0
+            fi
+            if ! docker ps -q --filter name=magik-current --filter status=running | grep -q .; then
+              log "FATAL: container exited during startup — last 80 log lines:"
+              docker logs --tail 80 magik-current 2>&1 || true
+              break
+            fi
+            sleep 15
+          done
+
+          log "DEPLOY_HEALTHCHECK_FAILED — last 80 log lines:"
+          docker logs --tail 80 magik-current 2>&1 || true
+          docker rm -f magik-current >/dev/null 2>&1 || true
+          docker rename magik-previous magik-current >/dev/null 2>&1 || true
+          docker start magik-current >/dev/null 2>&1 || true
+          exit 1
+          REMOTE_EOF
+
+          sed -i "s|__IMAGE_REF__|${IMAGE_REF}|g; s|__GH_OWNER__|${GH_OWNER}|g" /tmp/remote-deploy.sh
+          SCRIPT_B64="$(base64 -w0 /tmp/remote-deploy.sh)"
+
           CMD_ID=$(aws ssm send-command \
-            --instance-ids ${{ steps.instance.outputs.id }} \
+            --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
             --comment "magik deploy ${{ needs.build-push.outputs.image_tag }}" \
-            --parameters commands="[
-              \"set -e\",
-              \"GHCR_PAT=\\$(aws ssm get-parameter --name /magik/ghcr_pat --with-decryption --query Parameter.Value --output text)\",
-              \"echo \\$GHCR_PAT | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin\",
-              \"docker pull ${{ env.IMAGE }}:${{ needs.build-push.outputs.image_tag }}\",
-              \"docker rm -f magik-previous 2>/dev/null || true\",
-              \"docker rename magik-current magik-previous 2>/dev/null || true\",
-              \"docker run -d --name magik-current --gpus all --restart unless-stopped -p 8000:8000 --env-file /opt/magik/.env -v /opt/magik/.hf_cache:/app/.hf_cache -v /opt/magik/data:/app/data -v /opt/magik/logs:/app/logs ${{ env.IMAGE }}:${{ needs.build-push.outputs.image_tag }}\",
-              \"for i in \\$(seq 1 30); do curl -sf http://127.0.0.1:8000/health && exit 0; sleep 10; done\",
-              \"echo DEPLOY_HEALTHCHECK_FAILED; docker rm -f magik-current; docker rename magik-previous magik-current 2>/dev/null || true; docker start magik-current 2>/dev/null || true; exit 1\"
-            ]" \
+            --timeout-seconds 600 \
+            --parameters "{\"commands\":[\"echo $SCRIPT_B64 | base64 -d > /tmp/md.sh\",\"bash /tmp/md.sh\"],\"executionTimeout\":[\"3600\"]}" \
             --query "Command.CommandId" --output text)
-          aws ssm wait command-executed --command-id "$CMD_ID" --instance-id ${{ steps.instance.outputs.id }}
-          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id ${{ steps.instance.outputs.id }} \
-            --query "Status" --output text | grep -q Success
+          echo "SSM command: $CMD_ID"
+
+          # Poll manually: the built-in `aws ssm wait command-executed` waiter
+          # is fixed at 20 attempts x 5s = 100s, which cannot cover a multi-GB
+          # pull plus cold model load. 40-minute cap here instead.
+          DEADLINE=$(( SECONDS + 2400 ))
+          STATUS="Pending"
+          while [ "$SECONDS" -lt "$DEADLINE" ]; do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+              --query Status --output text 2>/dev/null || echo "Pending")
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            echo "  ... $STATUS ($SECONDS s elapsed)"
+            sleep 15
+          done
+
+          echo "=== remote stdout ==="
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+            --query StandardOutputContent --output text 2>/dev/null || true
+          echo "=== remote stderr ==="
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+            --query StandardErrorContent --output text 2>/dev/null || true
+
+          [ "$STATUS" = "Success" ] || { echo "::error::SSM deploy finished with status: $STATUS"; exit 1; }
 
       - name: Post deploy summary
         if: always()
@@ -248,6 +369,13 @@ jobs:
     # cross-repo `repo`-scoped PAT that a remote-repo dispatch would.
     permissions:
       contents: write
+    # Tier-2 runs on `[self-hosted, gpu]`. Until that runner is registered on
+    # the box (Phase 30 Stage 5), dispatching only produces a run that sits
+    # QUEUED forever waiting for a runner that will never appear — noise, not
+    # signal. Set repo variable SELF_HOSTED_GPU_RUNNER=true once `gh runner
+    # list` shows an online `gpu` runner; until then this job skips cleanly
+    # (grey, not red) instead of queueing a phantom eval.
+    if: vars.SELF_HOSTED_GPU_RUNNER == 'true'
     steps:
       - name: Dispatch Tier-2 full eval suite
         uses: peter-evans/repository-dispatch@v3
