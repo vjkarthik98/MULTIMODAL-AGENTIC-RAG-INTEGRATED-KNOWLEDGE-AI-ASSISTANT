@@ -1,0 +1,30 @@
+{
+  "_comment": [
+    "Permissions for the magik-idle-stop Lambda role.",
+    "Attach ALONGSIDE the AWS-managed AWSLambdaBasicExecutionRole (CloudWatch Logs).",
+    "StopInstances is scoped to the single demo instance. CloudWatch and SSM reads",
+    "require a wildcard resource (neither GetMetricStatistics nor ListCommands",
+    "supports resource-level scoping), but both are read-only."
+  ],
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DescribeAnyInstanceTagLookupRequiresWildcard",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeInstances",
+      "Resource": "*"
+    },
+    {
+      "Sid": "StopOnlyTheDemoInstance",
+      "Effect": "Allow",
+      "Action": "ec2:StopInstances",
+      "Resource": "arn:aws:ec2:us-east-1:537557168406:instance/i-02efa81c8876a014e"
+    },
+    {
+      "Sid": "ReadIdleSignals",
+      "Effect": "Allow",
+      "Action": ["cloudwatch:GetMetricStatistics", "ssm:ListCommands"],
+      "Resource": "*"
+    }
+  ]
+}

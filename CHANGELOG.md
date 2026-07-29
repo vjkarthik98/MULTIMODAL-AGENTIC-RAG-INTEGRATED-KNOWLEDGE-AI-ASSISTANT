@@ -1143,15 +1143,27 @@ papers over. Every fix below was found by running, not by review.
   recall coexists with correct answers. Raw exact-chunk recall is logged as a
   candidate for a future retrieval-quality pass, not this gate.
 
-# [v0.26.1] — CD Pipeline Reliability
+# [v0.27.0] — AWS Deployment & Scale-to-Zero
 
-Patch release. No application code changes — `app/` and `ui/` are untouched.
-This fixes the delivery pipeline itself, which had never been executed
-end-to-end before v0.26.0 was cut: `cd.yml` was written correctly in the
-abstract but had four defects that only surface on a real tagged run against
-real infrastructure.
+MINOR, not a patch: this is Phase 30's deliverable. Everything here belongs to
+the deployment phase rather than to Phase 29 (v0.26.0) — the CD pipeline
+defects below were only *discovered* by running that pipeline for the first
+time against real infrastructure, which is Phase 30 work by definition.
 
-### Bug Fixed
+Two themes:
+
+1. **The delivery pipeline had never actually been executed.** `cd.yml` was
+   written correctly in the abstract, but a workflow that has never run against
+   real infrastructure is a hypothesis, not a pipeline. The first genuine tagged
+   run surfaced five defects in a row, each of which would have failed the
+   deploy on its own.
+2. **The deployed system is now genuinely reachable and survivable** — it serves
+   a user interface rather than a bare API, and it runs on a GPU box that is
+   stopped by default and wakes itself on a visit. That is the difference
+   between a demo that outlives a job search and one that burns a $200 credit
+   in under a week.
+
+### Bug Fixed — delivery pipeline
 
 **Deploy could never succeed — a hard-coded 100-second ceiling**
 
@@ -1185,7 +1197,7 @@ real infrastructure.
   correctness. Removed; the CUDA build is verified where a GPU actually exists
   (`install_cuda.sh` on the box, and the deploy health check).
 
-### Improved
+### Improved — delivery pipeline
 
 - The remote deploy script is now authored as an ordinary shell script and
   base64-encoded into a single SSM command, replacing an inline JSON array
@@ -1205,9 +1217,103 @@ real infrastructure.
   registered it produced a run queued indefinitely against a runner that would
   never appear. It now skips cleanly until the runner exists.
 
+### Features — scale-to-zero infrastructure
+
+**`deploy/aws/`**
+
+- **Wake gateway** (`lambda/wake_gateway/handler.py`) — an always-on Lambda
+  behind a public Function URL. Starts the stopped instance, holds the visitor
+  on a self-refreshing interstitial while ~18GB of models page off EBS, then
+  redirects once `/health` answers. Handles the states that actually occur:
+  `stopped`, `pending`, `stopping`, running-but-not-yet-healthy, and
+  `InsufficientInstanceCapacity` (which this account has hit before) each get a
+  correct response rather than a stack trace.
+- **Idle stop** (`lambda/idle_stop/handler.py`) — scheduled every 5 minutes,
+  stops the instance after 20 minutes of low `NetworkIn`. Two guards exist
+  because both failures are real: a **minimum-uptime guard**, without which the
+  first idle check would stop a box a visitor is actively waiting on (it is
+  loading models, so network traffic is near zero) and the gateway would
+  restart it — a wake/stop loop that bills continuously and serves nobody; and
+  an **in-flight SSM check**, because a `cd.yml` deploy runs 20+ minutes at low
+  network traffic and must never be interrupted. Both fail *safe*: unreadable
+  CloudWatch or SSM means "assume busy, do nothing."
+- **Caddy config** (`caddy/Caddyfile`) — HTTPS reverse proxy for the box.
+  `flush_interval -1` keeps SSE token streaming intact (without it answers
+  arrive in one chunk at the end), with timeouts sized for cold model loads and
+  multi-minute multimodal ingestion.
+- **`scripts/deploy_lambdas.sh`** — idempotent one-shot: IAM roles, both
+  Lambdas, the public Function URL (including the resource policy that a
+  `NONE`-auth URL still requires, absent which every request 403s), and the
+  EventBridge schedule.
+- Least-privilege IAM throughout: `StartInstances`/`StopInstances` are scoped
+  to the single instance ARN, never `*`. The wake gateway is reachable
+  unauthenticated from the internet, so it must not be able to start anything
+  else in the account.
+
+### Bug Fixed — deployed system
+
+- **`cd.yml` deploy could not authenticate to AWS.** The `deploy` job declares
+  `environment: production`, and the moment a job references a GitHub
+  Environment the OIDC subject claim changes format to
+  `repo:<owner>/<repo>:environment:<name>` — it no longer carries the ref. A
+  trust policy matching only `ref:refs/tags/*` therefore rejected it with
+  `Not authorized to perform sts:AssumeRoleWithWebIdentity`. The corrected
+  policy (`iam/github-oidc-trust-policy.json`) allows both forms.
+- **Supply-chain scans ran out of disk.** Syft and Trivy both failed with
+  `no space left on device` exporting the CUDA image on a hosted runner
+  (~14GB free). Reclaiming unused preinstalled toolchains frees ~25-30GB in
+  about 30 seconds. The scans were already non-blocking, so this restores the
+  artifacts rather than unblocking the build.
+- **Docker layer cache never hit across tags.** The default `type=gha` cache
+  scope derives from the git ref, so a tag build cannot read a cache written by
+  a different tag or by a branch build — `v0.26.1` recompiled
+  `llama-cpp-python` from source for 1h21m despite the identical layer having
+  been built minutes earlier. Pinned to a fixed `scope=magik-cuda-runtime`.
+- **The deployed image served no user interface.** The Dockerfile copied
+  `app/`, `start_server.py` and `pyproject.toml` but never `ui/`, and
+  `app/main.py` had no static mount — so `GET /` returned the JSON service
+  banner and a visitor never reached the chat interface. The UI had only ever
+  been served by `npm run dev` (Vite's dev server, proxying to :8000), which is
+  a development tool and not part of the deployed artifact. Added a
+  `ui-builder` Dockerfile stage that compiles the SPA into `/app/ui_dist`, and
+  a conditional static mount + SPA fallback in `app/main.py`. The mount is
+  conditional so an API-only source checkout still runs unchanged, and the
+  catch-all refuses known API prefixes so a mistyped endpoint returns a JSON
+  404 rather than HTML. No UI code changed: `client.js` already used
+  same-origin relative paths (`const API = ''`).
+- **Rate limiting failed open in the container, and job status 404'd.**
+  `infra_registry.get_cache()` dials `LOCAL_CACHE_HOST` (default `localhost`),
+  but inside a container `localhost` is the container — which runs no Redis. So
+  `get_cache()` returned `None` and every caller degraded: ingestion job-status
+  polls 404 (breaking upload progress in the UI) and, per its own docstring,
+  `app/auth/rate_limit.py` **fails open** — removing the only guard against a
+  public demo being hammered on a $1.86/hr GPU. `cd.yml` now runs a
+  `magik-redis` sidecar on a user-defined network and points the app at it with
+  `-e LOCAL_CACHE_HOST`, which overrides the env-file so running from source on
+  the host (where `localhost` is correct) is unaffected. The sidecar is
+  deliberately ephemeral — no persistence, 512MB cap, LRU eviction — because
+  everything in it is rebuildable cache.
+
+### Documentation
+
+- `deploy/aws/README.md` — architecture, deploy/verify commands, the
+  domain-attachment sequence, and the operational rules that are easy to get
+  wrong (never put the model cache on instance-store; close port 8000 once
+  Caddy owns 443).
+
 ### Known Issues
 
 - `APP_VERSION` in `app/core/config.py` still reads `0.25.0` and is asserted
   against that literal by the config self-test, so it drifts from `VERSION`.
-  Deliberately not changed in a patch focused on the delivery pipeline —
-  reconciling the two (and the assert) is its own change.
+  Reconciling the two (and the assert) is its own change, deliberately kept out
+  of a release already spanning the pipeline and the deployment substrate.
+- The self-hosted GPU runner is not yet registered, so `eval-gate.yml`'s Tier-2
+  suite cannot run. `post-deploy-eval` skips cleanly rather than queueing
+  against a runner that will never appear; set the `SELF_HOSTED_GPU_RUNNER`
+  repository variable to `true` once `gh runner list` shows an online `gpu`
+  runner.
+- Custom domain, ACM certificate and the Caddy TLS front end are configured but
+  not yet live — the demo is reachable through the wake gateway's Lambda
+  Function URL until DNS is attached. `CORS_ORIGINS` stays permissive and port
+  8000 stays publicly reachable until that lands; both tighten in the same
+  change.

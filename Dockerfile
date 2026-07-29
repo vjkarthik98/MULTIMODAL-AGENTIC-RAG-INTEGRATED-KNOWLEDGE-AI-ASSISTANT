@@ -76,6 +76,26 @@ RUN python3.12 -m spacy download en_core_web_lg
 # box itself (install_cuda.sh's own check, and the deploy health check).
 
 # ---------------------------------------------------------------------------
+# Stage 1b — ui-builder: compile the React/Vite SPA
+# ---------------------------------------------------------------------------
+# Without this the image serves the API only: GET / returns the JSON service
+# banner and a visitor never sees the chat interface. During development the UI
+# came from `npm run dev` (Vite's dev server on :5173, proxying to :8000) — that
+# is a dev tool, not something the deployed artifact can depend on.
+#
+# ui/src/api/client.js sets `const API = ''` (same-origin relative paths), so the
+# built bundle needs no rewriting: served from FastAPI it calls /auth/*, /rag/*
+# on its own origin and works unchanged.
+FROM node:22-alpine AS ui-builder
+
+WORKDIR /ui
+# package.json first so `npm ci` is cached independently of source edits.
+COPY ui/package.json ui/package-lock.json* ./
+RUN npm ci --no-audit --no-fund
+COPY ui/ ./
+RUN npm run build   # -> /ui/dist (vite.config.js: build.outDir = 'dist')
+
+# ---------------------------------------------------------------------------
 # Stage 2 — runtime (default target): slim CUDA image, production
 # ---------------------------------------------------------------------------
 FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04 AS runtime
@@ -115,6 +135,10 @@ WORKDIR /app
 COPY app/ app/
 COPY start_server.py .
 COPY pyproject.toml .
+
+# Built SPA. app/main.py serves this at / when the directory exists, so a
+# source checkout without a UI build still runs API-only, unchanged.
+COPY --from=ui-builder /ui/dist /app/ui_dist
 
 RUN mkdir -p /app/.hf_cache /app/data /app/logs \
     && chown -R appuser:appuser /app
