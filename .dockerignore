@@ -17,8 +17,13 @@ data/
 mlruns/
 logs/
 
-# Frontend — this image is API-only (no StaticFiles mount in app/main.py)
-ui/
+# Frontend source IS needed — the Dockerfile's `ui-builder` stage compiles it
+# into /app/ui_dist, which app/main.py serves at /. Only the generated/vendored
+# parts are excluded (node_modules/ and dist/ below are unprefixed patterns, so
+# they already match ui/node_modules/ and ui/dist/ at any depth — same rule
+# .gitignore uses). A blanket `ui/` line here was a leftover from before the
+# static mount existed; it silently emptied the ui-builder stage's COPY and
+# broke every build until caught by a real failed run (2026-07-29).
 node_modules/
 
 # Docs, notebooks, scripts not needed at runtime
