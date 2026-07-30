@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react'
 import { Loader2, Mail, ArrowLeft } from 'lucide-react'
-import MagikIcon from '../components/MagikIcon'
 import { forgotPassword } from '../api/client'
 
 export default function ForgotPasswordPage({ onBack }) {
@@ -44,9 +43,7 @@ export default function ForgotPasswordPage({ onBack }) {
       <div className="relative z-10 w-full flex flex-col items-center">
         {/* Brand */}
         <div className="flex flex-col items-center mb-8 gap-3">
-          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-violet-500 to-blue-500 flex items-center justify-center shadow-lg">
-            <MagikIcon size={28} strokeWidth={1.7} className="text-white" />
-          </div>
+          <img src="/logo.png" alt="MAGIK" className="w-14 h-14 rounded-2xl object-cover shadow-lg" />
           <h1 className="text-3xl font-bold tracking-tight" style={{
             background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)',
             WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text',

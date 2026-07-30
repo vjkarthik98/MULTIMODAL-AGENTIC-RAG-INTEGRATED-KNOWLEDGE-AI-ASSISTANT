@@ -1401,6 +1401,73 @@ Also fixed while in here:
   `true` is still a manual step — see `deploy/aws/README.md`'s "Runner
   busy-check token" section for the one-time PAT setup that must happen first.
 
+### Bug Fixed — first-deploy fallout
+
+Five defects that only a real deployment could surface. Every one was
+invisible locally and in CI, and each blocked the release outright.
+
+**The UI crashed on load for every visitor**
+
+- **`crypto.randomUUID is not a function`.** `ChatPage` called it in a
+  `useState` initialiser, so the exception fired during first render and the
+  error boundary replaced the entire app with "Something went wrong" — before
+  a single network request was made (confirmed: the Network tab was empty).
+  `crypto.randomUUID()` is only exposed in a **secure context** — HTTPS, or
+  `localhost`. The demo is served over plain `http://` on an Elastic IP, where
+  it is undefined. Development never caught it because `npm run dev` serves on
+  `localhost`, which browsers treat as secure, and CI never loads the built
+  bundle in a browser at all. Replaced with `ui/src/utils/uuid.js`, which
+  prefers `crypto.randomUUID()`, falls back to `crypto.getRandomValues()`
+  (available in insecure contexts, so still cryptographically sound), and only
+  then to `Math.random()`. Verified in the emitted bundle, not just the source.
+  This is the functional cost of shipping without TLS — dropping HTTPS removes
+  browser APIs, not just the padlock.
+
+**Deploy could only ever succeed once**
+
+- **`Bind for 0.0.0.0:8000 failed: port is already allocated`.** The SSM deploy
+  script renamed the running container (`docker rename magik-current
+  magik-previous`) and immediately started the new one. But `docker rename`
+  does **not** stop a container — the old one kept running and kept its port
+  binding, so the new container could never bind 8000. Invisible on the first
+  deploy (no `magik-current` existed, so the rename was a silent no-op) and
+  fatal on every deploy after it. Added `docker stop -t 30 magik-current`
+  before the rename; stopped rather than removed, so the existing rollback path
+  (`rename` back + `docker start`) still works.
+- **The box ran out of disk mid-pull.** `docker pull` died with `no space left
+  on device` after `build-push` had already spent an hour. Each release leaves
+  another ~20GB CUDA image behind and nothing collected them. The deploy script
+  now reclaims space *before* pulling — dangling layers and build cache
+  unconditionally, the rollback image only if that was not enough — and fails
+  in seconds with `df -h`/`du`/`docker system df` output if it still cannot
+  free enough, instead of eight minutes into a doomed pull.
+
+**Jailbreak guardrail shipped with an empty corpus**
+
+- The deployed image logged `jailbreak_corpus_not_found` and initialised with
+  `corpus_size=0`. `app/guardrails/jailbreak.py` resolves its semantic corpus
+  to `<root>/tests/guardrails/adversarial/red_team_prompts.jsonl`, and
+  `.dockerignore` excluded all of `tests/`. Pattern matching (46 patterns) was
+  unaffected, but the semantic tier had nothing to compare against — a real
+  weakening of defence-in-depth on a public demo, and silent apart from one
+  INFO line. Added a single `!` exception; Docker's last-match-wins evaluation
+  re-includes that one file while the rest of `tests/` stays out (verified
+  against the `pathspec` engine, not assumed). Found by reading container logs
+  on the first genuinely live deploy — no test or CI check would have caught
+  it, since the corpus is present in every non-container environment.
+
+**The Docker layer cache never existed**
+
+- **Every tagged build recompiled `llama-cpp-python` from source (~1h)** even
+  after the cache scope was pinned to `magik-cuda-runtime` in v0.27.0. The
+  scope fix was necessary but not sufficient: `gh cache list` showed **no
+  buildx entry at all**, because two `actions/setup-python` pip caches
+  (4.84 GiB each — torch and the CUDA wheels) were consuming 9.68 GiB of
+  GitHub's 10 GiB per-repository limit. There was never room for the layer
+  cache to be written. Removed `cache: pip` from `ci.yml` and `eval-gate.yml`:
+  it costs ~3 min of pip downloads per run and buys back ~60 min per release.
+  Confirmed populated afterwards (`index-magik-cuda-runtime` plus layer blobs).
+
 ### Known Issues
 
 - Full wake-cycle verification (cold start → interstitial → redirect →
