@@ -8,9 +8,9 @@
 #
 #     cd deploy/aws/scripts && bash deploy_lambdas.sh
 #
-# Requires APP_URL to be set to the app endpoint (the instance's Elastic IP).
-# Re-run this script after changing it — the value is baked into the Lambda's
-# environment, not read at request time.
+# Requires APP_URL to be set to the app endpoint. Re-run this script after
+# changing it — the value is baked into the Lambda's environment, not read at
+# request time.
 
 set -euo pipefail
 
@@ -20,11 +20,12 @@ REGION="${AWS_REGION:-us-east-1}"
 INSTANCE_ID="${INSTANCE_ID:-i-02efa81c8876a014e}"
 INSTANCE_TAG="${INSTANCE_TAG:-magik-prod}"
 
-# Where the wake gateway redirects to once /health answers — the instance's
-# Elastic IP over plain HTTP. No custom domain is used for this project; the
-# public link recruiters use is the portfolio site, which links directly to
-# the wake gateway's own HTTPS API Gateway endpoint.
-APP_URL="${APP_URL:-http://3.208.159.124:8000}"
+# Where the wake gateway redirects to once /health answers. HTTPS via Caddy
+# on magik.vk-ai.online — NOT the bare Elastic IP. The Lambda health-checks
+# this URL from outside AWS (it runs outside a VPC), so the domain must
+# resolve and the cert must be valid, both true since Caddy/Let's Encrypt were
+# set up in deploy/aws/README.md's Caddy section.
+APP_URL="${APP_URL:-https://magik.vk-ai.online}"
 
 IDLE_MINUTES="${IDLE_MINUTES:-20}"
 MIN_UPTIME_MINUTES="${MIN_UPTIME_MINUTES:-15}"
@@ -220,7 +221,9 @@ cat <<SUMMARY
    aws logs tail /aws/lambda/${WAKE_FN} --follow
    aws logs tail /aws/lambda/${IDLE_FN} --follow
 
- NOTE: the wake gateway health-checks APP_URL from outside AWS, so port 8000
- must stay open in the security group for that check to succeed.
+ NOTE: the wake gateway health-checks APP_URL from outside AWS. Now that
+ APP_URL is the HTTPS domain, that check goes through Caddy on 443, not
+ port 8000 directly — 8000 can stay closed to the internet, reachable only
+ from Caddy on localhost.
 ────────────────────────────────────────────────────────────────────────
 SUMMARY

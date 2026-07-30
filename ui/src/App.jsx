@@ -45,6 +45,12 @@ export default function App() {
     () => !document.documentElement.classList.contains('light')
   )
   const [showLoginModal, setShowLoginModal] = useState(false)
+  // Guards against overlapping silentRefresh() calls (the 20-min interval and
+  // the visibilitychange listener can both fire within moments of each other,
+  // e.g. tabbing away and back during a long upload) — refresh tokens rotate
+  // single-use server-side, so a second concurrent call would legitimately be
+  // rejected as reuse of an already-consumed token and wrongly end the session.
+  const refreshInFlight = useRef(false)
 
   const toggleTheme = () => {
     setDark(prev => {
@@ -75,12 +81,41 @@ export default function App() {
     localStorage.removeItem('magik_email')
     // device token intentionally kept — it lets this browser skip OTP on next login
   }
-  const clearGuestAuth = () => {
+  // keepPendingMigration: the Google OAuth conversion path needs to clear the
+  // now-stale guest session identity WITHOUT losing magik_pending_guest_token
+  // — that's the only handle a retry has on the guest's data if the migrate
+  // call fails, so it must survive until migration is actually confirmed.
+  const clearGuestAuth = (keepPendingMigration = false) => {
     sessionStorage.removeItem('magik_guest_token')
     sessionStorage.removeItem('magik_guest_id')
     sessionStorage.removeItem('magik_guest_queries')
     sessionStorage.removeItem('magik_guest_uploads')
-    sessionStorage.removeItem('magik_pending_guest_token')
+    if (!keepPendingMigration) sessionStorage.removeItem('magik_pending_guest_token')
+  }
+
+  // Retries the guest→real-account data migration call with backoff instead
+  // of firing once and silently giving up on a transient network/5xx blip —
+  // the guest token is the only way to reach that data, so losing it to a
+  // single failed attempt would strand the user's pre-signup uploads/chats
+  // with no recovery path. Only clears magik_pending_guest_token on success;
+  // a final failure leaves it in place so the next mount in this tab (or the
+  // catch-up check in the auth-check effect below) can pick up where this
+  // left off.
+  const _migrateGuestDataWithRetry = async (realToken, guestToken, attempts = 4) => {
+    for (let i = 0; i < attempts; i++) {
+      try {
+        // Live token, not the possibly-stale one captured when this chain
+        // started — the 20-min silent-refresh interval could rotate it
+        // mid-retry on a slow/unlucky attempt sequence.
+        const liveToken = localStorage.getItem('magik_token') || realToken
+        await migrateGuestData(liveToken, guestToken)
+        sessionStorage.removeItem('magik_pending_guest_token')
+        return true
+      } catch (err) {
+        if (i < attempts - 1) await new Promise(r => setTimeout(r, 1000 * 2 ** i))  // 1s, 2s, 4s
+      }
+    }
+    return false
   }
 
   useEffect(() => {
@@ -102,14 +137,13 @@ export default function App() {
     if (oauthToken && oauthEmail) {
       persistAuth({ token: oauthToken, refreshToken: oauthRefresh, email: oauthEmail })
       window.history.replaceState({}, '', '/')
-      // Google OAuth conversion path: if a pending guest token exists, migrate data
-      const pendingGuestToken = sessionStorage.getItem('magik_pending_guest_token')
-      if (pendingGuestToken) {
-        clearGuestAuth()
-        migrateGuestData(oauthToken, pendingGuestToken).catch(() => {
-          // Migration failure is non-fatal — user still gets their real account
-        })
-      }
+      // Clear the now-stale guest session identity, but keep
+      // magik_pending_guest_token (if any) — the migration-retry effect below
+      // picks it up once `auth` commits, and handles the actual migrate call
+      // (with retries) uniformly for this fresh-login case, a reload that
+      // interrupted a prior attempt, and any other path that lands on a real,
+      // non-guest `auth` while a pending token is still around.
+      clearGuestAuth(/* keepPendingMigration */ true)
       if (cancelled) return
       setAuth({ token: oauthToken, refreshToken: oauthRefresh, email: oauthEmail, isGuest: false })
       setChecking(false)
@@ -230,16 +264,26 @@ export default function App() {
     if (!auth?.refreshToken) return
 
     const silentRefresh = async () => {
+      if (refreshInFlight.current) return   // an overlapping call is already handling this
+      refreshInFlight.current = true
       try {
         const data = await refreshAccessToken(auth.refreshToken)
         persistAuth({ token: data.access_token, refreshToken: data.refresh_token, email: auth.email })
         setAuth(prev => prev && { ...prev, token: data.access_token, refreshToken: data.refresh_token })
-      } catch {
-        // Refresh token expired or was revoked (e.g. logged out elsewhere) —
-        // the session is truly over; return to the login page.
-        clearAuth()
-        setAuth(null)
-        setPageKey(k => k + 1)
+      } catch (err) {
+        // Only a genuine 401 (server actively rejected the refresh token —
+        // truly expired, revoked, or already consumed) means the session is
+        // over. A network blip or 5xx leaves the refresh token untouched
+        // server-side (rotation only happens on success), so the same token
+        // is still good — just let the next interval/visibility tick retry it
+        // instead of forcing the user back to the login page mid-upload.
+        if (err?.status === 401) {
+          clearAuth()
+          setAuth(null)
+          setPageKey(k => k + 1)
+        }
+      } finally {
+        refreshInFlight.current = false
       }
     }
 
@@ -252,6 +296,46 @@ export default function App() {
       document.removeEventListener('visibilitychange', onVisible)
     }
   }, [auth?.refreshToken])
+
+  // Finishes migrating a guest's data whenever a real (non-guest) session
+  // commits while a pending guest token is still sitting in sessionStorage —
+  // covers the fresh Google-OAuth-conversion login, a reload that interrupted
+  // an in-flight retry chain from a previous mount, and any other path that
+  // lands on a real `auth` with leftover migration work still to do. This is
+  // the single place that actually calls _migrateGuestDataWithRetry.
+  //
+  // If the initial 4-attempt burst still isn't enough (e.g. a sustained
+  // outage), keep retrying every 2 min for as long as this tab stays open —
+  // the toast ChatPage shows for guestMigrationWarning promises exactly this,
+  // so it needs to be true rather than a one-shot attempt that quietly gives
+  // up. Capped at 15 slow retries (~30 min); beyond that the guest session's
+  // own TTL is close enough to expiry that further attempts won't help.
+  useEffect(() => {
+    if (!auth || auth.isGuest || !auth.email) return
+    if (!sessionStorage.getItem('magik_pending_guest_token')) return
+    let cancelled = false
+    let slowRetryCount = 0
+    let slowRetryTimer = null
+
+    const attempt = async () => {
+      const pendingGuestToken = sessionStorage.getItem('magik_pending_guest_token')
+      if (!pendingGuestToken) return   // succeeded via some other path (e.g. another tab)
+      const ok = await _migrateGuestDataWithRetry(auth.token, pendingGuestToken)
+      if (cancelled) return
+      if (ok) {
+        setAuth(prev => (prev && prev.guestMigrationWarning ? { ...prev, guestMigrationWarning: false } : prev))
+        return
+      }
+      setAuth(prev => (prev && !prev.isGuest && !prev.guestMigrationWarning ? { ...prev, guestMigrationWarning: true } : prev))
+      if (slowRetryCount < 15) {
+        slowRetryCount++
+        slowRetryTimer = setTimeout(attempt, 2 * 60 * 1000)
+      }
+    }
+    attempt()
+
+    return () => { cancelled = true; if (slowRetryTimer) clearTimeout(slowRetryTimer) }
+  }, [auth?.email, auth?.isGuest])
 
   const handleLogin = ({ token, refreshToken, email }) => {
     clearGuestAuth()

@@ -360,6 +360,7 @@ jobs:
             -p 8000:8000 \
             --env-file /opt/magik/.env \
             -e LOCAL_CACHE_HOST=magik-redis \
+            -e TORCH_HOME=/app/.hf_cache/torch \
             -v /opt/magik/.hf_cache:/app/.hf_cache \
             -v /opt/magik/data:/app/data \
             -v /opt/magik/logs:/app/logs \
