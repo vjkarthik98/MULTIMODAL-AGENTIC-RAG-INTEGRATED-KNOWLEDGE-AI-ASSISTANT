@@ -1366,6 +1366,25 @@ git checkout beside it. The eval token is minted inside the container from its
 own `JWT_SECRET_KEY` and consumed within the same step, so no credential is
 stored in a secret, a step output, or a file.
 
+**A second bug in that same fix broke the very first live run.** The token
+was captured with `docker exec ... | tr -d '\r\n'` — which only strips
+newlines, so it blindly concatenates every line of output. Importing
+`jwt_handler` pulls in `app.core.config`, which logs a `logging_initialized`
+banner on first import — and `app/utils/logger.py`'s console handler writes
+to **stdout** (`StreamHandler(sys.stdout)`), not stderr. The banner printed
+before the token, `tr -d` mashed them into one string, and that garbled
+non-JWT was sent as the `Authorization: Bearer` header on every single
+request. Confirmed in the first real Tier-2 run (2026-07-30): every
+generation/e2e/behavioral/routing query failed instantly with a raw
+"invalid UTF-8 byte" header-decode error (retrieval was unaffected — it
+doesn't use HTTP/auth at all), the suite ended in ~15 minutes instead of the
+expected 1-3 hours, and the runner going idle afterward is what let idle-stop
+legitimately — if confusingly — stop the box shortly after. Fixed by
+extracting the token by **shape** instead of by line count: a JWT is exactly
+three base64url segments joined by dots; `grep -oE` for that pattern is
+immune to any banner, warning, or future log line printed before or after it,
+regardless of cause.
+
 Also fixed while in here:
 
 - **Preflight checks with legible failures.** Both jobs now verify the
@@ -1456,6 +1475,18 @@ invisible locally and in CI, and each blocked the release outright.
   on the first genuinely live deploy — no test or CI check would have caught
   it, since the corpus is present in every non-container environment.
 
+**Detoxify's weights re-downloaded on every cold start**
+
+- Detoxify fetches its checkpoint through `torch.hub`, not HuggingFace, so it
+  lands in `TORCH_HOME` (`/app/.torch_cache`) — which is **not** one of the
+  mounted volumes. 418MB was therefore written into the container's own
+  writable layer and discarded with the container on every replacement. On a
+  scale-to-zero box that wakes and redeploys constantly, that is a 418MB
+  download added to cold-start latency, and one more network dependency on the
+  critical path to `/health` answering. Now pointed at
+  `/app/.hf_cache/torch`, inside the persisted EBS mount. Spotted in the
+  download script's own output while recovering the model cache.
+
 **The Docker layer cache never existed**
 
 - **Every tagged build recompiled `llama-cpp-python` from source (~1h)** even
@@ -1468,13 +1499,224 @@ invisible locally and in CI, and each blocked the release outright.
   it costs ~3 min of pip downloads per run and buys back ~60 min per release.
   Confirmed populated afterwards (`index-magik-cuda-runtime` plus layer blobs).
 
+### Features — custom domain (`magik.vk-ai.online`)
+
+Live end to end, 2026-07-30: A record → Elastic IP, Caddy + Let's Encrypt on
+the box, `OAUTH_REDIRECT_URI`/`FRONTEND_URL`/`CORS_ORIGINS` updated to HTTPS,
+the new redirect URI added in Google Cloud Console, `deploy_lambdas.sh`'s
+`APP_URL` now defaults to the domain instead of the bare IP. Full details and
+the domain-attachment steps are in `deploy/aws/README.md`'s "Domain (done)"
+section rather than duplicated here. Port 8000 closes to the internet as part
+of this — Caddy is now the sole public entry point, reaching the app over
+localhost only.
+
+### Bug Fixed — Caddy silently never requested a certificate
+
+- The Caddyfile's site address was a bare hostname (`magik.vk-ai.online {`),
+  no scheme. Caddy logged `"listening only on the HTTP port, so no automatic
+  HTTPS will be applied to this server"` and never even attempted the Let's
+  Encrypt request — no error, port 443 simply never opened
+  (`ss -tlnp` showed only `:80`). No amount of retrying fixed it because
+  nothing was actually failing; the auto-HTTPS logic had already decided this
+  site didn't want a certificate. Fixed by making the scheme explicit
+  (`https://magik.vk-ai.online {`), which unambiguously signals TLS is wanted;
+  confirmed by the very next restart showing `certificate obtained
+  successfully` and port 443 listening. The repo's Caddyfile template
+  (`deploy/aws/caddy/Caddyfile`) had the same bug and would have reproduced
+  this for any future domain substituted into it — fixed there too.
+
+### Bug Fixed — `docker restart` does not re-read `--env-file`
+
+- Bit twice in the same night: once updating `OAUTH_REDIRECT_URI`/
+  `FRONTEND_URL` for the new domain, once flipping `DEV_OTP_LOG` off. Each
+  time, `docker restart magik-current` completed without error but the
+  container kept running with whatever environment it was originally created
+  with — `--env-file` is only read at `docker run`, not at `restart`. Both
+  incidents were caught by checking `docker exec magik-current printenv
+  <VAR>` against the actual `.env` on disk rather than assuming a clean
+  restart meant a clean reload. The fix is procedural, not code: any `.env`
+  change on the box requires `docker rm -f magik-current` followed by a fresh
+  `docker run` with the same flags — documented as such in
+  `deploy/aws/README.md`.
+
+### Bug Fixed — OTP codes were logged, not emailed
+
+- Registration/login OTPs never reached Gmail because `/opt/magik/.env` had
+  `DEV_OTP_LOG=true` — a dev-only flag (correctly documented as `false` in
+  `.env.example`, so this was a box-config mistake, not a repo gap) that
+  prints the code to the container log instead of calling SMTP. `SMTP_USER`/
+  `SMTP_PASSWORD`/`SMTP_HOST`/`SMTP_PORT` were all already correctly set.
+  Flipped to `false` and recreated the container (see the `docker restart`
+  bug above — a plain restart would not have picked this up either).
+
+### Bug Fixed — GPU admission control existed and protected nothing
+
+- `app/pipeline/ingestion_pipeline.py` already had a `MAX_CONCURRENT_GPU_JOBS`
+  semaphore, correctly designed, with a docstring explicitly noting its
+  conservative default was "pending real headroom measurement." But it only
+  guarded `IngestionPipeline.process_file_async()` — nothing in the live app
+  called it. The `/upload` route imported the bare module-level
+  `process_file()` (the synchronous path) and bypassed the semaphore
+  entirely. Discovered while reasoning through what happens if two users
+  upload concurrently: real measurement, 2026-07-30, showed a single full
+  multimodal ingestion (all 7 modalities) uses ~42GB of the L40S's 48GB,
+  leaving ~4GB headroom — enough context to finally act on the deferred
+  measurement the original comment was waiting for.
+- The query path (`/query`, `/query/stream`) had **no** admission control at
+  all — embedding, reranking, and LLM generation could run fully concurrent
+  across requests, competing for the same VRAM budget as any concurrent
+  upload, with nothing bounding it.
+
+**Fixed with one shared gate, not two independent ones** — new
+`app/core/gpu_admission.py`, a single semaphore covering both ingestion and
+query, since they compete for the same physical GPU regardless of which
+endpoint triggered the work (two separate limits could still sum past what
+the box can hold). `MAX_CONCURRENT_GPU_JOBS` changed from `3` → `1` using the
+new real measurement — 3 concurrent heavy jobs against ~4GB of headroom is a
+near-guaranteed OOM, not a conservative default. A request waits up to
+`GPU_ADMISSION_TIMEOUT_SEC` (45s) for a slot before getting a clean "server
+busy" response instead of queueing silently or hanging.
+
+**Also handles a CUDA OOM that happens anyway** (e.g. one request alone is
+just too large): catches `torch.cuda.OutOfMemoryError` specifically, calls
+`torch.cuda.empty_cache()` for best-effort recovery, and converts it to the
+same clean `GPUBusyError` → `503 Retry-After: 30` — never an opaque crash or
+generic 500. `/upload` switching to the now-actually-protected
+`process_file_async()` also fixed a second latent bug for free: it has its
+own per-modality timeout (media needs far longer than documents), which the
+route's old direct call did not.
+
+### Bug Fixed — chat input controls
+
+**`@` file-scope button was hard-locked whenever web search mode was on**
+
+- The button had `disabled={webSearchMode}`, so once a user turned on web
+  search there was no way back to scoping a query to a specific file short of
+  reloading — the globe toggle could clear file-scope state, but `@` couldn't
+  clear web-search state back. Removed the disable; clicking `@` while web
+  search is active now turns web search off and opens the file picker,
+  mirroring what the globe button already did in the other direction, so the
+  two modes stay mutually exclusive without either one locking the other out
+  (`ui/src/pages/ChatPage.jsx`).
+
+### Added — Knowledge base management
+
+- **Settings → Knowledge base now has a "Delete all" action.** Previously the
+  only way to clear a knowledge base was one-by-one from the sidebar. The new
+  button requires a confirm click (same pattern as "Clear all history"), then
+  deletes every file sequentially through the existing per-file `DELETE
+  /knowledge-base/{filename}` endpoint — reusing its full purge (Qdrant, BM25,
+  query-cache flush, dedup-entry cleanup) rather than duplicating that logic
+  in a new bulk endpoint — and reports partial failures instead of swallowing
+  them (`ui/src/components/SettingsModal.jsx`).
+- Fixed a latent bug in `GhostButton` surfaced while building the above: it
+  spread `{...rest}` *after* its own `style` prop, so any caller-supplied
+  `style` (both the pre-existing "Clear all history" button and the new
+  "Delete all" button pass one for the confirm-state color) silently wiped
+  out the button's base background/border instead of merging with it. Fixed
+  to merge.
+
+### Bug Fixed — long uploads lost their progress on a forced re-login
+
+A 1-hour video upload reached ~95%, the page abruptly reloaded to the login
+screen, and the sidebar's "uploading" indicator vanished — even though the
+backend ingestion job kept running unaffected and the file appeared normally
+in the knowledge base once it finished. Root cause was a session-refresh
+race, not an actual crash:
+
+- Access tokens expire every 30 minutes. `App.jsx` refreshes them via both a
+  20-minute interval **and** a tab-visibility listener, and refresh tokens
+  rotate single-use server-side. If both fired close together (e.g. tabbing
+  away and back during the upload), the first refresh succeeded and rotated
+  the token; the second, using the now-already-consumed token, was
+  legitimately rejected. The old handler treated *any* refresh failure —
+  network blip, 5xx, or genuine rejection — as "session is over," clearing
+  auth and force-remounting the whole app back to the login page. Since all
+  upload/poll state lived only in React memory, that remount wiped the
+  progress indicator entirely.
+- Fixed in `ui/src/App.jsx` / `ui/src/api/client.js`: an in-flight guard now
+  prevents overlapping refresh calls from racing each other, and a refresh
+  failure only forces logout on an actual `401` (token genuinely
+  invalid/expired/revoked) — a network error or 5xx leaves the still-valid
+  token alone and simply retries on the next tick.
+- Hardened `ui/src/components/Sidebar.jsx` regardless, so the indicator
+  survives even if a reload does happen for some other reason: the ingestion
+  status poll now re-reads the access token from storage every tick instead
+  of using the one captured when the upload started (a poll loop can now
+  easily outlive a token rotation); the poll ceiling was raised from 30
+  minutes to 4 hours, since large video transcription/diarization/embedding
+  can genuinely exceed 30 minutes; active upload jobs are persisted to
+  `localStorage`, so a reload mid-upload reattaches to the still-running
+  server job on remount instead of the file just disappearing; and a
+  status-record eviction (404) is now disambiguated from a real failure by
+  checking whether the file actually landed in the knowledge base before
+  reporting an error.
+
+### Bug Fixed — guest→account data migration could silently strand data
+
+Follow-up hardening after the above surfaced two related gaps in how a
+guest's uploads/chats move over when they sign up.
+
+**Google OAuth conversion**
+
+- The migration call (`POST /auth/guest/migrate`) previously fired once,
+  fire-and-forget, and discarded the guest token immediately regardless of
+  outcome — a single network blip meant the guest's pre-signup data was
+  permanently orphaned under its old `guest_id` with no recovery path and no
+  indication to the user that anything had gone wrong.
+- `ui/src/App.jsx` now keeps `magik_pending_guest_token` until migration is
+  *confirmed* successful, retries the call up to 4 times with backoff always
+  using the freshest access token, and — if that burst still isn't enough —
+  backs off to a retry every 2 minutes for up to ~30 minutes while the tab
+  stays open. The retry now runs from a single effect keyed on auth state
+  rather than only the OAuth-redirect branch, so it also recovers a migration
+  interrupted by a page reload. `ChatPage` surfaces a toast
+  (`guestMigrationWarning`) so a still-failing migration is visible instead of
+  silent.
+
+**Qdrant vector relabeling**
+
+- `migrate_guest_to_user()` relabels each guest-tagged vector's `user_id` to
+  the new account, but the step was independently try/excepted with no retry:
+  a transient Qdrant failure meant the file ended up under the real account
+  while its vectors stayed tagged with the old `guest_id` — present but
+  permanently unsearchable, with no other path to fix it.
+- `app/auth/guest_service.py` now retries the relabel 3× in-request (it's
+  idempotent — a retry only touches whatever's still mistagged from the last
+  attempt). If it's still failing after that, the `(guest_id, real_user_id)`
+  pair is persisted to Redis (`guest_migrate_pending_qdrant:*`, 7-day TTL)
+  instead of the error being dropped — the filesystem/Redis migration steps
+  proceed regardless, so this never blocks or fails the user's signup.
+  `retry_pending_guest_qdrant_migrations()` reconciles pending entries from
+  two places: the existing startup sweep in `app/main.py` (catches it on the
+  next deploy/restart) and a new 30-minute periodic background task added to
+  the app's `lifespan`, so a stuck migration self-heals within the same
+  server run instead of waiting on a restart.
+
 ### Known Issues
 
-- Full wake-cycle verification (cold start → interstitial → redirect →
-  healthy UI) and idle-stop verification (confirming the box actually stops
-  itself after ~20-25 min idle) are both still pending — not because of a bug,
-  but because `g6e.xlarge` capacity in `us-east-1` has been intermittently
-  unavailable (`InsufficientInstanceCapacity`) throughout this phase, most
-  recently confirmed by the wake gateway correctly rendering its own
-  capacity-error page end-to-end. Re-run the verification steps in
-  `deploy/aws/README.md` once a `StartInstances` call succeeds.
+- **Idle-stop is verified end to end** (2026-07-30): the instance stopped
+  itself unattended after the idle window, with no manual intervention. That
+  closes the cost half of scale-to-zero — an always-on `g6e.xlarge` is ~$1,340
+  a month, and the box is now demonstrably not always on.
+- The wake side is fully verified as of this release: cold start →
+  interstitial → `StartInstances` → healthy `/health` → 302 redirect →
+  working UI, now through the HTTPS domain rather than the bare IP.
+- **Tier-2 eval has still never completed a full run.** Two attempts so far:
+  the first hit `InsufficientInstanceCapacity` before the box could even
+  start; the second actually ran but a token-corruption bug (see the eval-gate
+  fix above) meant every authenticated request failed instantly, ending the
+  suite in ~15 minutes instead of the expected 1-3 hours. The bug is fixed and
+  the BM25 index the eval depends on is confirmed present
+  (`data/users/<id>/bm25_index/bm25.pkl`, verified directly, 2026-07-30), but
+  a genuinely clean end-to-end run has not yet been observed. Next tag push
+  will trigger one automatically via `post-deploy-eval`.
+- **Plaintext secrets on the box**: `/opt/magik/.env` holds `JWT_SECRET_KEY`,
+  `SECRET_KEY`, `GOOGLE_CLIENT_SECRET`, and `SMTP_PASSWORD` in plaintext on
+  disk rather than in SSM Parameter Store or Secrets Manager — unlike
+  `/magik/ghcr_pat` and `/magik/github_actions_pat`, which already get proper
+  treatment because the deploy script specifically needed to avoid leaking
+  them into a GitHub Actions log. Migrating the rest is real work (IAM
+  permissions on the instance role, app-side fetch logic instead of a flat
+  file read) and was explicitly deferred, not overlooked — least-privilege IAM
+  already limits who can reach the box, and `.env` was never committed to git.

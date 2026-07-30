@@ -150,6 +150,15 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
     }
   }, [])
 
+  // Set by App.jsx when the guest→account data migration (after Google OAuth
+  // sign-up) kept failing even after its own retries — the account itself is
+  // fine, but the user's pre-signup uploads/chats may not have carried over.
+  useEffect(() => {
+    if (auth?.guestMigrationWarning) {
+      addToast("Some of your previous data couldn't be transferred — we'll keep trying in the background", 'error')
+    }
+  }, [auth?.guestMigrationWarning])
+
   // Favicon — always the PNG logo (no pulse swap while streaming)
   useEffect(() => {
     const link = document.querySelector("link[rel~='icon']")
@@ -1006,23 +1015,23 @@ const handleNewChat = () => {
               {/* BOTTOM — controls row */}
               <div className="flex items-center gap-2 px-3 pb-2.5 pt-0">
 
-                {/* @ file scope button — disabled in web search mode */}
+                {/* @ file scope button — switches off web search mode when clicked */}
                 <button
                   type="button"
-                  onClick={() => { if (!webSearchMode) setShowFilePicker(p => !p) }}
-                  title={webSearchMode ? 'File scope unavailable in web search mode' : 'Scope to a file'}
+                  onClick={() => {
+                    if (webSearchMode) setWebSearchMode(false)
+                    setShowFilePicker(p => !p)
+                  }}
+                  title={webSearchMode ? 'Switch to file scope' : 'Scope to a file'}
                   aria-label="Scope query to a specific file"
-                  disabled={webSearchMode}
                   className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-lg text-[13px] font-semibold transition-all"
                   style={
-                    webSearchMode
-                      ? { background: 'transparent', color: 'var(--t-tx6)', cursor: 'not-allowed', opacity: 0.35 }
-                      : selectedFile || showFilePicker
-                        ? { background: 'rgba(139,92,246,0.18)', color: 'var(--t-accent)' }
-                        : { background: 'transparent', color: 'var(--t-tx4)' }
+                    selectedFile || showFilePicker
+                      ? { background: 'rgba(139,92,246,0.18)', color: 'var(--t-accent)' }
+                      : { background: 'transparent', color: 'var(--t-tx4)' }
                   }
-                  onMouseEnter={e => { if (!webSearchMode && !selectedFile && !showFilePicker) { e.currentTarget.style.background = 'var(--t-hov)'; e.currentTarget.style.color = 'var(--t-tx2)' } }}
-                  onMouseLeave={e => { if (!webSearchMode && !selectedFile && !showFilePicker) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--t-tx4)' } }}
+                  onMouseEnter={e => { if (!selectedFile && !showFilePicker) { e.currentTarget.style.background = 'var(--t-hov)'; e.currentTarget.style.color = 'var(--t-tx2)' } }}
+                  onMouseLeave={e => { if (!selectedFile && !showFilePicker) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--t-tx4)' } }}
                 >
                   @
                 </button>

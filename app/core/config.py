@@ -207,13 +207,26 @@ class Settings:
     INGESTION_CACHE_CLEAR_EVERY: int = _int("INGESTION_CACHE_CLEAR_EVERY", 25)
     # Parallelism caps for heavy ML operations — keep within VRAM budget
     VIDEO_CAPTION_CONCURRENCY: int = _int("VIDEO_CAPTION_CONCURRENCY", 3)
-    # Shared GPU semaphore — max concurrent ingestion jobs using GPU (embed/Whisper/Qwen2-VL).
-    # 3 jobs × peak ~3GB each = ~9GB working memory + ~14GB resident models = ~23GB.
-    # Conservative default for the 48GB L40S (g6e.xlarge) — see
-    # docs/runbooks/phase-30-aws-deployment.md Stage 1 item 5. Deliberately NOT
-    # raised blind; raise only after watching real VRAM headroom on the actual box,
-    # then set the override in the box's .env (not this default).
-    MAX_CONCURRENT_GPU_JOBS: int = _int("MAX_CONCURRENT_GPU_JOBS", 3)
+    # Shared GPU semaphore (app/core/gpu_admission.py) — max concurrent heavy
+    # GPU jobs across BOTH ingestion (embed/Whisper/Qwen2-VL) and query
+    # (embed/rerank/generate). One shared gate, not two independent ones —
+    # ingestion and query compete for the same physical VRAM budget, so
+    # separate limits could still sum past what the box can hold.
+    #
+    # Real measurement, 2026-07-30 (g6e.xlarge / L40S, 48GB): a single full
+    # multimodal ingestion (all 7 modalities in one session) used ~42GB,
+    # leaving ~4GB headroom — not enough for a second concurrent heavy job of
+    # similar size. This setting was previously 3, deliberately deferred
+    # pending exactly this measurement (see git history) — now that it
+    # exists, 3 is not conservative, it's a near-guaranteed OOM under any
+    # real concurrent load. Set to 1 (fully serialize) until a future
+    # headroom measurement justifies raising it.
+    MAX_CONCURRENT_GPU_JOBS: int = _int("MAX_CONCURRENT_GPU_JOBS", 1)
+    # How long a request waits for a GPU slot before getting a clean "server
+    # busy" response instead of queueing silently. Ingestion of a large video
+    # can hold the slot for minutes; a query waiting behind it should give up
+    # and let the user retry rather than hang with no feedback.
+    GPU_ADMISSION_TIMEOUT_SEC: int = _int("GPU_ADMISSION_TIMEOUT_SEC", 45)
     AUDIO_TRANSCRIPTION_WORKERS: int = _int("AUDIO_TRANSCRIPTION_WORKERS", 2)
     PDF_OCR_WORKERS: int = _int("PDF_OCR_WORKERS", 8)
     EMBEDDING_CACHE_TTL: int = _int("EMBEDDING_CACHE_TTL", 2_592_000)

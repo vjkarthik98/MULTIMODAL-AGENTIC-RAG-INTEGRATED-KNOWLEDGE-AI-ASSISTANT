@@ -84,7 +84,15 @@ export async function refreshAccessToken(refreshToken) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ refresh_token: refreshToken }),
   })
-  if (!res.ok) throw new Error('Refresh token expired')
+  if (!res.ok) {
+    // Tag with the HTTP status so callers can tell "server rejected this token"
+    // (401 — genuinely expired/revoked/already-rotated) apart from a transient
+    // 5xx/network hiccup, where the refresh token itself is still good and a
+    // retry should NOT log the user out.
+    const err = new Error('Refresh token expired')
+    err.status = res.status
+    throw err
+  }
   return res.json()  // { access_token, refresh_token, token_type, expires_in }
 }
 
@@ -317,7 +325,11 @@ export async function getIngestionStatus(token, jobId) {
   const res = await fetch(`${API}/rag/ingestion/status/${encodeURIComponent(jobId)}`, {
     headers: bearer(token),
   })
-  if (!res.ok) throw new Error(`Status check failed (${res.status})`)
+  if (!res.ok) {
+    const err = new Error(`Status check failed (${res.status})`)
+    err.status = res.status
+    throw err
+  }
   return res.json()  // IngestJob: { job_id, filename, modality, status, progress, chunks_done, chunks_total }
 }
 

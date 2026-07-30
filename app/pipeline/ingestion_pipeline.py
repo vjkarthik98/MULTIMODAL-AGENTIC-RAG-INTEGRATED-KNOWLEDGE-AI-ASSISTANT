@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
+from app.core.gpu_admission import gpu_slot
 from app.ingestion.schema import (
     CorruptFileError,
     DiskSpaceError,
@@ -548,21 +549,13 @@ class _ProgressEmitter:
                     pass
 
 
-# GPU SEMAPHORE — module-level, shared across all IngestionPipeline instances.
-# Prevents OOM when multiple users upload simultaneously — each concurrent GPU job
-# (embedding batch_size=128, Whisper 1.55GB, Qwen2-VL 2.2GB) adds to VRAM pressure.
-# Max 3 concurrent jobs leaves comfortable headroom on the 48GB L40S
-# (g6e.xlarge) with ~14GB resident models. Conservative default kept pending
-# real headroom measurement, per docs/runbooks/phase-30-aws-deployment.md.
-_GPU_SEMAPHORE: asyncio.Semaphore | None = None
-
-
-def _gpu_semaphore() -> asyncio.Semaphore:
-    global _GPU_SEMAPHORE
-    if _GPU_SEMAPHORE is None:
-        limit = getattr(settings, "MAX_CONCURRENT_GPU_JOBS", 3)
-        _GPU_SEMAPHORE = asyncio.Semaphore(limit)
-    return _GPU_SEMAPHORE
+# GPU SEMAPHORE — moved to app/core/gpu_admission.py, 2026-07-30. It used to
+# live here as a private, ingestion-only semaphore, but querying (embed +
+# rerank + generate) competes for the exact same VRAM budget and had no
+# admission control of its own — two independent limits could still sum past
+# what the box can hold. gpu_slot() (imported above) is the same semaphore,
+# shared with the query path, plus a graceful CUDA-OOM catch this one never
+# had.
 
 
 # INGEST JOB — PROGRESS TRACKING (Phase 8)
@@ -655,7 +648,7 @@ class IngestionPipeline:
     ) -> dict[str, Any]:
         import functools
 
-        async with _gpu_semaphore():  # module-level: shared across all pipeline instances
+        async with gpu_slot("ingest"):  # process-wide: shared with the query path too
             async with self._semaphore:  # instance-level: local concurrency cap
                 # Run on the dedicated GPU ingest executor — its thread already
                 # has PyTorch CUDA initialized from startup warmup.  Using the
