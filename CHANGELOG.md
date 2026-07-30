@@ -1197,6 +1197,16 @@ Two themes:
   correctness. Removed; the CUDA build is verified where a GPU actually exists
   (`install_cuda.sh` on the box, and the deploy health check).
 
+**The UI build stage was silently building nothing**
+
+- `.dockerignore` still had a blanket `ui/` exclusion left over from before
+  this release added the static UI mount, so `COPY ui/ ./` in the new
+  `ui-builder` stage found an empty context and failed with
+  `"/ui": not found`. Removed the stale line; verified with `pathspec`
+  (Docker's dockerignore matching engine) that `node_modules/` and `dist/`
+  already exclude `ui/node_modules/` and `ui/dist/` generically, so nothing
+  else needed to change.
+
 ### Improved — delivery pipeline
 
 - The remote deploy script is now authored as an ordinary shell script and
@@ -1222,8 +1232,9 @@ Two themes:
 **`deploy/aws/`**
 
 - **Wake gateway** (`lambda/wake_gateway/handler.py`) — an always-on Lambda
-  behind a public Function URL. Starts the stopped instance, holds the visitor
-  on a self-refreshing interstitial while ~18GB of models page off EBS, then
+  behind a public API Gateway HTTP API. Starts the stopped instance, holds the
+  visitor on a self-refreshing interstitial while ~18GB of models page off EBS,
+  then
   redirects once `/health` answers. Handles the states that actually occur:
   `stopped`, `pending`, `stopping`, running-but-not-yet-healthy, and
   `InsufficientInstanceCapacity` (which this account has hit before) each get a
@@ -1237,14 +1248,10 @@ Two themes:
   an **in-flight SSM check**, because a `cd.yml` deploy runs 20+ minutes at low
   network traffic and must never be interrupted. Both fail *safe*: unreadable
   CloudWatch or SSM means "assume busy, do nothing."
-- **Caddy config** (`caddy/Caddyfile`) — HTTPS reverse proxy for the box.
-  `flush_interval -1` keeps SSE token streaming intact (without it answers
-  arrive in one chunk at the end), with timeouts sized for cold model loads and
-  multi-minute multimodal ingestion.
 - **`scripts/deploy_lambdas.sh`** — idempotent one-shot: IAM roles, both
-  Lambdas, the public Function URL (including the resource policy that a
-  `NONE`-auth URL still requires, absent which every request 403s), and the
-  EventBridge schedule.
+  Lambdas, the public API Gateway HTTP API (including the explicit
+  `apigateway.amazonaws.com` invoke permission — see below for why this isn't
+  a Function URL), and the EventBridge schedule.
 - Least-privilege IAM throughout: `StartInstances`/`StopInstances` are scoped
   to the single instance ARN, never `*`. The wake gateway is reachable
   unauthenticated from the internet, so it must not be able to start anything
@@ -1293,27 +1300,114 @@ Two themes:
   the host (where `localhost` is correct) is unaffected. The sidecar is
   deliberately ephemeral — no persistence, 512MB cap, LRU eviction — because
   everything in it is rebuildable cache.
+- **The wake gateway's public entry point returned 403 Forbidden despite
+  correct configuration.** The wake gateway was first deployed behind a Lambda
+  Function URL (`auth-type NONE` + a resource policy granting
+  `lambda:InvokeFunctionUrl` to principal `*`, conditioned on
+  `lambda:FunctionUrlAuthType: NONE`). Both settings were independently
+  verified correct via `get-function-url-config` and `get-policy`, on two
+  separately created URLs, and requests still failed with 403 — AWS
+  Organizations SCPs were also checked and ruled out
+  (`AWSOrganizationsNotInUseException`, confirmed standalone account). Root
+  cause was never conclusively identified. Replaced the front door with an API
+  Gateway HTTP API (`apigatewayv2 create-api --target <lambda-arn>` plus an
+  explicit `lambda add-permission` for principal `apigateway.amazonaws.com`,
+  since the quick-create `--target` shortcut did not reliably attach the
+  invoke permission on its own — confirmed by a `500` that traced to a
+  Lambda log group that had never been created, i.e. the function was never
+  invoked). This is a strictly more mature permission model and worked on the
+  first request once the permission was attached. `handler.py` required no
+  changes — both integration types deliver the same
+  `{statusCode, headers, body}` response shape.
 
 ### Documentation
 
-- `deploy/aws/README.md` — architecture, deploy/verify commands, the
-  domain-attachment sequence, and the operational rules that are easy to get
-  wrong (never put the model cache on instance-store; close port 8000 once
-  Caddy owns 443).
+- `deploy/aws/README.md` — architecture, deploy/verify commands, and the
+  operational rules that are easy to get wrong (never put the model cache on
+  instance-store; port 8000 stays open since there is no reverse proxy in
+  front of the app).
+
+### Bug Fixed — Tier-2 eval could never have run
+
+The self-hosted GPU jobs in `eval-gate.yml` had never executed once — the
+runner they target did not exist until this phase. Auditing them before
+enabling found four independent defects, each fatal on its own, in a job that
+looked correct:
+
+- **No dependency installation.** `tier2-full-suite` went straight from
+  `actions/checkout` to `python -m app.eval.run`, with no `setup-python` and
+  no `pip install` (both of which `tier1-retrieval` has). A systemd-run runner
+  does not inherit a login shell's PATH, so nothing guaranteed an interpreter
+  with torch, let alone the project's dependencies.
+- **No Qdrant credentials.** Tier-1 explicitly maps `QDRANT_URL`/
+  `QDRANT_API_KEY` from repository secrets; Tier-2 set neither. Repository
+  secrets are not auto-injected into a job, so retrieval — the one *gated*
+  sub-suite — would have scored against an unreachable vector store.
+- **No BM25 index.** `app/utils/paths.py`'s `DATA_ROOT` is the *relative*
+  path `data/users`, resolved against the process CWD, and
+  `actions/checkout`'s `git clean -ffdx` deletes gitignored `data/`. The BM25
+  half of hybrid retrieval would have returned empty on every query.
+- **No access token.** `/rag/query` requires `get_current_user`, and
+  `EVAL_ACCESS_TOKEN` was never set, so every generation and e2e call would
+  have returned 401.
+
+Combined, the first three would have produced a *false* retrieval regression:
+the gate is real (`retrieval.gate_enabled: true`, v5 production baseline), so
+the job would have failed red while reporting a quality problem that did not
+exist — the single most corrosive failure mode a gate can have.
+
+Fixed by executing both self-hosted jobs inside the deployed container
+(`docker exec magik-current …`) rather than on the runner. That resolves all
+four at once — dependencies are baked into the image, credentials arrive via
+`--env-file /opt/magik/.env`, the real corpus is mounted at `/app/data`, and
+the live server answers on `127.0.0.1:8000` — and is more correct besides:
+post-deploy eval should measure the artifact actually serving traffic, not a
+git checkout beside it. The eval token is minted inside the container from its
+own `JWT_SECRET_KEY` and consumed within the same step, so no credential is
+stored in a secret, a step output, or a file.
+
+Also fixed while in here:
+
+- **Preflight checks with legible failures.** Both jobs now verify the
+  container is running and healthy before doing anything, and Tier-2
+  additionally asserts a BM25 index exists for `EVAL_USER_ID` — turning "the
+  corpus is not ingested for this tenant" into that exact message instead of a
+  silent recall collapse reported as a regression.
+- **`seed-eval-fixtures` published to a cache key nothing reads.** It saved
+  `bm25-eval-index-<hash>` while `tier1-retrieval` restores
+  `bm25-eval-index-v2-<hash>`. Every publish was a dead write; masked only
+  because Tier-1 self-heals by rebuilding from Qdrant. Salts now match.
+- **No job timeouts on GPU jobs.** Both inherited GitHub's 6-hour default,
+  so one hung judge call could pin a $1.86/hr instance for a quarter of a day.
+  Capped at 120 min (Tier-2) and 180 min (seed).
+
+### Features — self-hosted GPU runner registered, Tier-2 eval unblocked
+
+- **The self-hosted GPU runner (Phase 30 Stage 5) is registered and idle**,
+  removing the last blocker to running `eval-gate.yml`'s Tier-2 suite from
+  `post-deploy-eval`. But the runner lives on the same box `idle-stop`
+  monitors for auto-shutdown, and a GPU-bound eval job produces almost no
+  external `NetworkIn` — so enabling Tier-2 without a guard would let
+  `idle-stop` genuinely kill the instance mid-eval-run, corrupting the run and
+  taking the runner itself offline. Added a fourth guard to `idle_stop/
+  handler.py`: it checks the runner's `busy` status via the GitHub REST API
+  (`GET /repos/{repo}/actions/runners`) before ever stopping the box, using a
+  fine-grained PAT (Administration: read-only, the minimum that endpoint
+  allows) stored in SSM Parameter Store at `/magik/github_actions_pat` —
+  same pattern as `/magik/ghcr_pat`, never touching a GH Actions log. IAM is
+  scoped to `ssm:GetParameter` on that one parameter ARN only. Fails safe like
+  every other guard here: an unreadable token or API call means "assume busy,
+  do nothing." Setting the `SELF_HOSTED_GPU_RUNNER` repository variable to
+  `true` is still a manual step — see `deploy/aws/README.md`'s "Runner
+  busy-check token" section for the one-time PAT setup that must happen first.
 
 ### Known Issues
 
-- `APP_VERSION` in `app/core/config.py` still reads `0.25.0` and is asserted
-  against that literal by the config self-test, so it drifts from `VERSION`.
-  Reconciling the two (and the assert) is its own change, deliberately kept out
-  of a release already spanning the pipeline and the deployment substrate.
-- The self-hosted GPU runner is not yet registered, so `eval-gate.yml`'s Tier-2
-  suite cannot run. `post-deploy-eval` skips cleanly rather than queueing
-  against a runner that will never appear; set the `SELF_HOSTED_GPU_RUNNER`
-  repository variable to `true` once `gh runner list` shows an online `gpu`
-  runner.
-- Custom domain, ACM certificate and the Caddy TLS front end are configured but
-  not yet live — the demo is reachable through the wake gateway's Lambda
-  Function URL until DNS is attached. `CORS_ORIGINS` stays permissive and port
-  8000 stays publicly reachable until that lands; both tighten in the same
-  change.
+- Full wake-cycle verification (cold start → interstitial → redirect →
+  healthy UI) and idle-stop verification (confirming the box actually stops
+  itself after ~20-25 min idle) are both still pending — not because of a bug,
+  but because `g6e.xlarge` capacity in `us-east-1` has been intermittently
+  unavailable (`InsufficientInstanceCapacity`) throughout this phase, most
+  recently confirmed by the wake gateway correctly rendering its own
+  capacity-error page end-to-end. Re-run the verification steps in
+  `deploy/aws/README.md` once a `StartInstances` call succeeds.

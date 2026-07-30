@@ -8,10 +8,9 @@
 #
 #     cd deploy/aws/scripts && bash deploy_lambdas.sh
 #
-# Requires APP_URL to be set once the app endpoint is known. Before a domain
-# exists that is the instance's Elastic IP; afterwards it is the HTTPS
-# subdomain. Re-run this script after changing it — the value is baked into the
-# Lambda's environment, not read at request time.
+# Requires APP_URL to be set to the app endpoint (the instance's Elastic IP).
+# Re-run this script after changing it — the value is baked into the Lambda's
+# environment, not read at request time.
 
 set -euo pipefail
 
@@ -21,9 +20,10 @@ REGION="${AWS_REGION:-us-east-1}"
 INSTANCE_ID="${INSTANCE_ID:-i-02efa81c8876a014e}"
 INSTANCE_TAG="${INSTANCE_TAG:-magik-prod}"
 
-# Where the wake gateway redirects to once /health answers.
-# Pre-domain:  http://<elastic-ip>:8000
-# Post-domain: https://magik-app.yourdomain.com
+# Where the wake gateway redirects to once /health answers — the instance's
+# Elastic IP over plain HTTP. No custom domain is used for this project; the
+# public link recruiters use is the portfolio site, which links directly to
+# the wake gateway's own HTTPS API Gateway endpoint.
 APP_URL="${APP_URL:-http://3.208.159.124:8000}"
 
 IDLE_MINUTES="${IDLE_MINUTES:-20}"
@@ -116,31 +116,63 @@ deploy_fn "$WAKE_FN" "${AWS_DIR}/lambda/wake_gateway" "$WAKE_ROLE" \
   "Variables={EC2_INSTANCE_TAG=${INSTANCE_TAG},APP_URL=${APP_URL},HEALTH_TIMEOUT_S=3,REFRESH_SECONDS=7}" \
   15
 
-say "Wake gateway — public Function URL"
-if ! aws lambda get-function-url-config --function-name "$WAKE_FN" --region "$REGION" >/dev/null 2>&1; then
-  aws lambda create-function-url-config --function-name "$WAKE_FN" \
-    --auth-type NONE --region "$REGION" >/dev/null
-  # A Function URL with auth NONE still needs an explicit resource policy
-  # allowing public invoke — without it every request returns 403.
-  aws lambda add-permission --function-name "$WAKE_FN" \
-    --statement-id FunctionURLAllowPublicAccess \
-    --action lambda:InvokeFunctionUrl --principal '*' \
-    --function-url-auth-type NONE --region "$REGION" >/dev/null 2>&1 || true
-  ok "created public Function URL"
+say "Wake gateway — public API Gateway HTTP API"
+# NOT a Lambda Function URL. Verified in this account (2026-07-29): a
+# Function URL with auth-type NONE plus the documented public-invoke resource
+# policy statement was confirmed correct via `get-function-url-config` and
+# `get-policy` on TWO independently created URLs, and both still returned 403
+# Forbidden / AccessDeniedException. Root cause never conclusively identified.
+# API Gateway's invoke-permission model (principal apigateway.amazonaws.com,
+# action lambda:InvokeFunction) is older, more battle-tested, and worked
+# immediately once the permission was attached. handler.py needs no changes —
+# both integration types return the same {statusCode, headers, body} shape.
+API_NAME="magik-wake-gateway-api"
+WAKE_ARN="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${WAKE_FN}"
+
+API_ID=$(aws apigatewayv2 get-apis --region "$REGION" \
+  --query "Items[?Name=='${API_NAME}'].ApiId" --output text)
+
+if [ -z "$API_ID" ] || [ "$API_ID" = "None" ]; then
+  API_ID=$(aws apigatewayv2 create-api --name "$API_NAME" --protocol-type HTTP \
+    --target "$WAKE_ARN" --region "$REGION" --query ApiId --output text)
+  ok "created API $API_ID"
 else
-  ok "Function URL already configured"
+  ok "API $API_ID already exists"
 fi
 
-WAKE_URL=$(aws lambda get-function-url-config --function-name "$WAKE_FN" \
-  --region "$REGION" --query FunctionUrl --output text)
+# create-api --target is a "quick create" shortcut; it did not reliably attach
+# the Lambda invoke permission in testing. Adding it explicitly and
+# idempotently (statement-id collision is treated as already-applied, not an
+# error) rather than trusting the shortcut.
+aws lambda add-permission --function-name "$WAKE_FN" \
+  --statement-id apigateway-invoke --action lambda:InvokeFunction \
+  --principal apigateway.amazonaws.com \
+  --source-arn "arn:aws:execute-api:${REGION}:${ACCOUNT_ID}:${API_ID}/*/*" \
+  --region "$REGION" >/dev/null 2>&1 \
+  && ok "apigateway invoke permission attached" \
+  || ok "apigateway invoke permission already present"
+
+WAKE_URL=$(aws apigatewayv2 get-apis --region "$REGION" \
+  --query "Items[?ApiId=='${API_ID}'].ApiEndpoint" --output text)
 
 # ── 2. Idle stop ─────────────────────────────────────────────────────────────
 say "Idle stop — IAM role"
 ensure_role "$IDLE_ROLE" "${AWS_DIR}/iam/lambda-idle-stop-permissions.json" "magik-idle-stop-permissions"
 
+GITHUB_REPO="${GITHUB_REPO:-vjkarthik98/multimodal-rag-assistant}"
+GITHUB_RUNNER_LABEL="${GITHUB_RUNNER_LABEL:-gpu}"
+GITHUB_TOKEN_PARAM="${GITHUB_TOKEN_PARAM:-/magik/github_actions_pat}"
+
+if ! aws ssm get-parameter --name "$GITHUB_TOKEN_PARAM" --region "$REGION" >/dev/null 2>&1; then
+  printf '    \033[0;33mwarn\033[0m %s\n' \
+    "${GITHUB_TOKEN_PARAM} not found in SSM — idle-stop will fail SAFE (treat the" \
+    "          runner as busy, never stop) until it exists. See README.md:" \
+    "          'Runner busy-check token' for how to create and store it."
+fi
+
 say "Idle stop — Lambda"
 deploy_fn "$IDLE_FN" "${AWS_DIR}/lambda/idle_stop" "$IDLE_ROLE" \
-  "Variables={EC2_INSTANCE_TAG=${INSTANCE_TAG},IDLE_MINUTES=${IDLE_MINUTES},MIN_UPTIME_MINUTES=${MIN_UPTIME_MINUTES},NETWORK_IN_THRESHOLD_BYTES=1000000,DRY_RUN=false}" \
+  "Variables={EC2_INSTANCE_TAG=${INSTANCE_TAG},IDLE_MINUTES=${IDLE_MINUTES},MIN_UPTIME_MINUTES=${MIN_UPTIME_MINUTES},NETWORK_IN_THRESHOLD_BYTES=1000000,DRY_RUN=false,GITHUB_REPO=${GITHUB_REPO},GITHUB_RUNNER_LABEL=${GITHUB_RUNNER_LABEL},GITHUB_TOKEN_PARAM=${GITHUB_TOKEN_PARAM}}" \
   60
 
 say "Idle stop — EventBridge schedule (every 5 minutes)"
@@ -188,9 +220,7 @@ cat <<SUMMARY
    aws logs tail /aws/lambda/${WAKE_FN} --follow
    aws logs tail /aws/lambda/${IDLE_FN} --follow
 
- NOTE: the wake gateway health-checks APP_URL from outside AWS, so the app
- port must be reachable. Pre-domain that means 8000 open in the security
- group; once Caddy + the domain are live, switch APP_URL to the HTTPS
- subdomain, re-run this script, and close 8000.
+ NOTE: the wake gateway health-checks APP_URL from outside AWS, so port 8000
+ must stay open in the security group for that check to succeed.
 ────────────────────────────────────────────────────────────────────────
 SUMMARY
