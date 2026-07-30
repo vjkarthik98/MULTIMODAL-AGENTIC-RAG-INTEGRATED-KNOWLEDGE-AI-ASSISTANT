@@ -36,8 +36,22 @@ monitoring/
 CHANGELOG.md
 README.md
 
-# Tests — not shipped in the runtime image
+# Tests — not shipped in the runtime image, with ONE deliberate exception.
+#
+# app/guardrails/jailbreak.py resolves its semantic corpus to
+# <root>/tests/guardrails/adversarial/red_team_prompts.jsonl. Excluding all of
+# tests/ meant the deployed image logged `jailbreak_corpus_not_found` and ran
+# with `corpus_size=0` — pattern matching (46 patterns) still worked, but the
+# semantic tier silently had nothing to compare against, which is a real
+# weakening of defence-in-depth on a PUBLIC demo. Caught by reading container
+# logs on the first live deploy (2026-07-30).
+#
+# Docker evaluates .dockerignore per path with last-match-wins, so a `!` line
+# after a directory exclusion genuinely re-includes that single file (verified
+# with the `pathspec` engine: this file INCLUDED, tests/unit/** and the rest of
+# tests/guardrails/** still EXCLUDED).
 tests/
+!tests/guardrails/adversarial/red_team_prompts.jsonl
 
 # Python / tooling caches
 __pycache__/
