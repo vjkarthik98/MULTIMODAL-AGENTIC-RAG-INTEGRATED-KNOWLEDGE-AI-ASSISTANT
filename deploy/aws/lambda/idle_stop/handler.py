@@ -14,15 +14,24 @@ failure modes rather than theory:
   * in-flight SSM commands — cd.yml deploys via SSM and a deploy can run 20+
     minutes (image pull + model load) with low network traffic. Stopping
     mid-deploy would corrupt a release.
+  * a busy self-hosted GitHub Actions runner — Tier-2 eval (`eval-gate.yml`)
+    runs `[self-hosted, gpu]`, i.e. on this same box. A GPU-bound eval job is
+    CPU/GPU-heavy but produces almost no *external* NetworkIn, so without this
+    guard the CloudWatch signal alone would look idle mid-eval and this Lambda
+    would stop the instance out from under a running Tier-2 suite — corrupting
+    the run and knocking the runner itself offline until the box wakes again.
 
 Deliberately conservative: the cost of one extra idle interval (~$0.15) is far
-below the cost of stopping a live session or a running deploy.
+below the cost of stopping a live session, a running deploy, or a running eval.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 import boto3
@@ -40,6 +49,14 @@ MIN_UPTIME_MINUTES = int(os.environ.get("MIN_UPTIME_MINUTES", "15"))
 # session is orders of magnitude above it.
 NETWORK_IN_THRESHOLD_BYTES = int(os.environ.get("NETWORK_IN_THRESHOLD_BYTES", "1000000"))
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
+
+# GitHub Actions self-hosted runner "busy" check. The token needs repository
+# Administration:read (fine-grained) or `repo` scope (classic) — the same
+# minimum GitHub requires for the "list self-hosted runners" endpoint. Stored
+# in SSM the same way /magik/ghcr_pat is: never touches a GH Actions log.
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "vjkarthik98/multimodal-rag-assistant")
+GITHUB_RUNNER_LABEL = os.environ.get("GITHUB_RUNNER_LABEL", "gpu")
+GITHUB_TOKEN_PARAM = os.environ.get("GITHUB_TOKEN_PARAM", "/magik/github_actions_pat")
 
 _cfg = Config(connect_timeout=5, read_timeout=10, retries={"max_attempts": 3})
 ec2 = boto3.client("ec2", config=_cfg)
@@ -98,6 +115,42 @@ def _has_inflight_ssm(instance_id: str) -> bool:
     return False
 
 
+def _runner_busy() -> bool:
+    """True if the self-hosted GPU runner is currently executing a job.
+
+    Absence of a usable token or an unreachable API is treated as busy — same
+    fail-safe posture as the other guards: a missed stop costs ~$0.15, a wrong
+    one can corrupt a running eval.
+    """
+    try:
+        token = ssm.get_parameter(Name=GITHUB_TOKEN_PARAM, WithDecryption=True)["Parameter"]["Value"]
+    except ClientError as exc:
+        log.warning("could not read %s, assuming runner busy: %s", GITHUB_TOKEN_PARAM, exc)
+        return True
+
+    try:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{GITHUB_REPO}/actions/runners",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "magik-idle-stop",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.load(r)
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ValueError) as exc:
+        log.warning("GitHub runners API call failed, assuming busy: %s", exc)
+        return True
+
+    for runner in data.get("runners", []):
+        labels = [lbl.get("name") for lbl in runner.get("labels", [])]
+        if GITHUB_RUNNER_LABEL in labels and runner.get("busy"):
+            log.info("runner %s (labels=%s) is busy", runner.get("name"), labels)
+            return True
+    return False
+
+
 def _is_idle(instance_id: str) -> bool:
     end = datetime.now(timezone.utc)
     start = end - timedelta(minutes=IDLE_MINUTES)
@@ -145,6 +198,9 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
 
     if _has_inflight_ssm(instance_id):
         return {"action": "none", "instance": instance_id, "reason": "SSM command in flight"}
+
+    if _runner_busy():
+        return {"action": "none", "instance": instance_id, "reason": "self-hosted runner busy"}
 
     if not _is_idle(instance_id):
         return {"action": "none", "instance": instance_id, "reason": "recent network activity"}
