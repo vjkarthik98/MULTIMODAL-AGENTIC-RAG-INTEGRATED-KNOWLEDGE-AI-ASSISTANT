@@ -305,17 +305,50 @@ jobs:
   seed-eval-fixtures:
     if: github.event_name == 'workflow_dispatch' && inputs.seed == true
     runs-on: [self-hosted, gpu]
+    timeout-minutes: 180   # full multimodal re-ingest; never inherit the 6h default on a GPU box
+    env:
+      CONTAINER: magik-current
     steps:
       - uses: actions/checkout@v4
 
-      - name: Ingest eval corpus (Qdrant + local BM25)
-        run: python -m app.eval.datasets.build_gold_set --ingest
+      # Runs in the deployed container for the same reasons as tier2-full-suite
+      # above (deps, Qdrant credentials, and the persistent /opt/magik/data
+      # mount where data/raw/finance and the BM25 indexes actually live — a
+      # bare checkout has none of them).
+      - name: Preflight — deployed container is running
+        run: |
+          set -uo pipefail
+          if ! docker ps --filter "name=^/${CONTAINER}$" --filter status=running -q | grep -q .; then
+            echo "::error title=Seed preflight failed::Container '${CONTAINER}' is not running. Deploy first (cd.yml), then re-run this job."
+            exit 1
+          fi
 
+      - name: Ingest eval corpus (Qdrant + local BM25)
+        run: |
+          docker exec -e EVAL_USER_ID="${EVAL_USER_ID}" "$CONTAINER" \
+            python3.12 -m app.eval.datasets.build_gold_set --ingest
+
+      # Copy the freshly built index out of the container into the workspace,
+      # laid out exactly as tier1-retrieval expects to restore it.
+      - name: Extract BM25 index from container
+        run: |
+          set -uo pipefail
+          rm -rf "data/users/${EVAL_USER_ID}/bm25_index"
+          mkdir -p "data/users/${EVAL_USER_ID}"
+          docker cp "${CONTAINER}:/app/data/users/${EVAL_USER_ID}/bm25_index" \
+                    "data/users/${EVAL_USER_ID}/bm25_index"
+          ls -la "data/users/${EVAL_USER_ID}/bm25_index"
+
+      # NOTE THE `-v2-` SALT — it must match tier1-retrieval's restore key.
+      # It did not: this job saved to an unsalted `bm25-eval-index-<hash>` key
+      # while tier1 restores `bm25-eval-index-v2-<hash>`, so anything published
+      # here was written to a key tier1 would never read. Harmless only because
+      # tier1 self-heals by rebuilding from Qdrant; still a dead cache write.
       - name: Publish BM25 index cache
         uses: actions/cache/save@v4
         with:
           path: data/users/${{ env.EVAL_USER_ID }}/bm25_index
-          key: bm25-eval-index-${{ hashFiles('app/eval/datasets/gold/**') }}
+          key: bm25-eval-index-v2-${{ hashFiles('app/eval/datasets/gold/**') }}
 
   # ---------------------------------------------------------------------
   # TIER 2 — full generation + judge suite. Self-hosted on the real GPU box
@@ -329,32 +362,138 @@ jobs:
       github.event_name == 'repository_dispatch' ||
       (github.event_name == 'workflow_dispatch' && inputs.seed != true)
     runs-on: [self-hosted, gpu]
+    # A full generation suite on 100+ gold rows through a 7B model is slow.
+    # Without an explicit cap this inherits GitHub's 6h default and can pin a
+    # $1.86/hr GPU box for a quarter of a day on a hung judge call. 180 min is
+    # sized for the whole suite (retrieval + generation + judge + the modality
+    # sub-suites) with headroom, since a timeout here reads as a red gate
+    # rather than what it is.
+    timeout-minutes: 180
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      CONTAINER: magik-current
     steps:
       - uses: actions/checkout@v4
 
+      # ── Why this runs INSIDE the deployed container ──────────────────────
+      # This job used to run `python -m app.eval.run` directly on the runner.
+      # That could never have worked, and had never been executed once:
+      #
+      #   * no dependency install (unlike tier1's setup-python + pip install),
+      #     so it relied on an interpreter+venv that nothing provisions — and
+      #     a systemd-run runner does not inherit a login shell's PATH/venv;
+      #   * no QDRANT_URL/QDRANT_API_KEY (tier1 maps them from secrets; repo
+      #     secrets are NOT auto-injected), so retrieval — the one GATED
+      #     sub-suite — would score against an unreachable vector store;
+      #   * no BM25 index. DATA_DIR defaults to PROJECT_ROOT/data, i.e. the
+      #     checkout, and actions/checkout runs `git clean -ffdx` which wipes
+      #     gitignored data/. The BM25 half of hybrid retrieval would return
+      #     empty and the gate would report a phantom "regression";
+      #   * no EVAL_ACCESS_TOKEN, so every /rag/query call 401s
+      #     (get_current_user is required on that route).
+      #
+      # Executing in the container the deploy just shipped fixes all four at
+      # once — and is more correct besides: post-deploy eval should measure
+      # the artifact actually serving traffic, not a git checkout beside it.
+      # Deps, Qdrant credentials (--env-file /opt/magik/.env), the real BM25
+      # index (/opt/magik/data mounted at /app/data) and the live server on
+      # 127.0.0.1:8000 are all already there.
+      - name: Preflight — deployed container is running, healthy, and has eval data
+        run: |
+          set -uo pipefail
+          if ! docker ps --filter "name=^/${CONTAINER}$" --filter status=running -q | grep -q .; then
+            echo "::error title=Tier-2 preflight failed::Container '${CONTAINER}' is not running. Tier-2 evaluates the deployed container; run cd.yml's deploy job first."
+            exit 1
+          fi
+
+          ok=""
+          for _ in $(seq 1 20); do
+            if docker exec "$CONTAINER" curl -sf http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              ok="yes"; break
+            fi
+            sleep 15
+          done
+          if [ -z "$ok" ]; then
+            echo "::error title=Tier-2 preflight failed::/health did not answer within 5 minutes inside '${CONTAINER}'."
+            docker logs --tail 60 "$CONTAINER" 2>&1 || true
+            exit 1
+          fi
+
+          # Fail legibly on a missing corpus instead of scoring an empty index
+          # and reporting it as a quality regression — the exact failure mode
+          # tier1's cache-validation steps exist to prevent.
+          #
+          # The exact file the eval loads: retrieval_runner builds
+          # HybridRetriever with infra.get_bm25(), which is
+          # app/retrieval/bm25_retriever.BM25Retriever — NOT the per-modality
+          # app/bm25/*_bm25.py classes. Its path is user_bm25_path(uid) with no
+          # modality => data/users/<uid>/bm25_index/bm25.pkl. Checking for any
+          # *.pkl here would pass on per-modality files while the file the eval
+          # actually opens is missing, which is precisely the misleading
+          # failure this preflight exists to prevent.
+          #
+          # app/utils/paths.py's DATA_ROOT is the RELATIVE path "data/users",
+          # resolved against the process CWD — inside the container that is the
+          # image's WORKDIR /app, where /opt/magik/data is mounted. That is
+          # exactly why this must run in the container.
+          if ! docker exec "$CONTAINER" \
+               test -f "/app/data/users/${EVAL_USER_ID}/bm25_index/bm25.pkl"; then
+            echo "::error title=Tier-2 preflight failed::Missing /app/data/users/${EVAL_USER_ID}/bm25_index/bm25.pkl inside the container. Retrieval would degrade to dense-only and the gate would report a false regression. Rebuild it from Qdrant payloads (no GPU, no re-embedding, no re-chunking): docker exec ${CONTAINER} python3.12 -m app.retrieval.bm25_retriever --user_id ${EVAL_USER_ID}"
+            exit 1
+          fi
+          echo "preflight OK — container healthy, BM25 index present"
+
+      # The token is minted and consumed inside a single step so it is never
+      # written to a step output, a file, or the runner's env for other steps
+      # to read. Signed with the container's own JWT_SECRET_KEY; get_current_user
+      # builds the user straight from the payload (no DB lookup), so this
+      # authenticates as the eval tenant without storing any credential.
       - name: Full suite (retrieval + generation + behavioral + routing + e2e + ocr/audio/video + regression)
         id: full_suite
-        run: python -m app.eval.run --suite full
-        # The `full` suite includes retrieval, which IS gated now
-        # (retrieval.gate_enabled: true, baseline v4 — see eval-gate.yml's
-        # tier1 job comment). Every other sub-suite here (generation, e2e,
-        # behavioral, ocr, audio, video, routing) is still on the stale v3
-        # baseline (pre-Prometheus-2-7B judge, pre-164-row gold set) and
-        # stays informational-only via thresholds.yaml's own per-section
-        # gate_enabled — this step can still fail today, but only on a real
-        # retrieval regression, not on unverified generation-suite numbers.
-        # See docs/runbooks/ci-cd.md for the re-baseline procedure for the
-        # remaining sections. Once each is enabled, a non-zero exit here
-        # should trigger the rollback path in cd.yml.
+        run: |
+          set -uo pipefail
+          TOKEN="$(docker exec "$CONTAINER" python3.12 -c \
+            "from app.auth.jwt_handler import issue_tokens; print(issue_tokens('${EVAL_USER_ID}', 'eval@magik.local', 'user')['access_token'])" \
+            | tr -d '\r\n')"
+          if [ -z "$TOKEN" ]; then
+            echo "::error title=Tier-2 token mint failed::Could not issue an eval access token inside the container."
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+
+          docker exec \
+            -e EVAL_USER_ID="${EVAL_USER_ID}" \
+            -e EVAL_ACCESS_TOKEN="$TOKEN" \
+            -e EVAL_SERVER_URL="http://127.0.0.1:8000" \
+            "$CONTAINER" python3.12 -m app.eval.run --suite full
+        # The `full` suite includes retrieval, which IS gated
+        # (retrieval.gate_enabled: true, v5 production baseline). Every other
+        # sub-suite here (generation, e2e, behavioral, ocr, audio, video,
+        # routing) is still on the stale v3 baseline (pre-Prometheus-2-7B
+        # judge, pre-164-row gold set) and stays informational-only via
+        # thresholds.yaml's own per-section gate_enabled — this step can fail,
+        # but only on a real retrieval regression, not on unverified
+        # generation-suite numbers. See docs/runbooks/ci-cd.md for the
+        # re-baseline procedure for the remaining sections.
+
+      # Reports are written inside the container (/app/app/eval/reports, which
+      # is chown'd to appuser in the Dockerfile). Copy them into the workspace
+      # so the summary and artifact upload below can see them.
+      - name: Extract reports from container
+        if: always()
+        run: |
+          set -uo pipefail
+          rm -rf "${GITHUB_WORKSPACE}/eval-reports"
+          mkdir -p "${GITHUB_WORKSPACE}/eval-reports"
+          docker cp "${CONTAINER}:/app/app/eval/reports/." "${GITHUB_WORKSPACE}/eval-reports/" 2>/dev/null \
+            || echo "no reports produced (the suite likely failed before scoring)"
 
       - name: Post report to job summary
         if: always()
         run: |
           echo "## Tier-2 Full Eval Suite (${{ github.event_name }})" >> "$GITHUB_STEP_SUMMARY"
-          if [ -f app/eval/reports/rag_report.md ]; then
-            cat app/eval/reports/rag_report.md >> "$GITHUB_STEP_SUMMARY"
+          if [ -f eval-reports/rag_report.md ]; then
+            cat eval-reports/rag_report.md >> "$GITHUB_STEP_SUMMARY"
           else
             echo "_No report written — the run likely failed before scoring. Check the logs above._" >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -377,5 +516,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rag-report-tier2-${{ github.run_id }}
-          path: app/eval/reports/
+          path: eval-reports/
           retention-days: 90
+          if-no-files-found: warn

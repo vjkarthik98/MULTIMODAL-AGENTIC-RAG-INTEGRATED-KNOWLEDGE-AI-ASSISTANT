@@ -7,9 +7,11 @@ Lambda is the always-on front door that makes that invisible to a visitor:
     booting   -> same page (the instance is up but /health isn't answering yet)
     healthy   -> 302 to the app
 
-Deployed behind a Lambda Function URL (and later CloudFront + a custom domain;
-neither changes this code). Runs outside a VPC so it can reach the instance's
-public endpoint directly.
+Deployed behind an API Gateway HTTP API. Lambda Function URLs were tried
+first but returned a persistent 403 Forbidden in this account despite
+correct auth-type and resource-policy configuration — API Gateway's older
+permission model worked immediately, so that's the standard front door now.
+Runs outside a VPC so it can reach the instance's public endpoint directly.
 
 Cost note: this is the piece that makes scale-to-zero viable. Always-on would
 be ~$1,340/mo; stopped-by-default plus this gateway is ~$12/mo fixed plus a
