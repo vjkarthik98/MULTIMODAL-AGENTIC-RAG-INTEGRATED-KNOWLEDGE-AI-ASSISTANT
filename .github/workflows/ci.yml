@@ -65,10 +65,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # NO `cache: pip` — deliberate, and it is not an oversight.
+      #
+      # requirements.txt pulls torch + the CUDA/ML stack, so the pip download
+      # cache lands at ~4.8GB PER PYTHON VERSION. With a matrix of two, that is
+      # ~9.7GB of GitHub's 10GB per-repo cache limit, which starved the thing
+      # that actually matters: cd.yml's Docker buildx layer cache
+      # (`type=gha,scope=magik-cuda-runtime`). Measured 2026-07-30 —
+      # `gh cache list` showed the two pip entries at 4.84GiB each and NO
+      # buildx entry at all, which is why every tagged build recompiled
+      # llama-cpp-python from source for ~1h even after the cache scope was
+      # pinned.
+      #
+      # The trade is lopsided in the obvious direction: this costs ~2-3 min of
+      # pip downloads per run and buys back ~60 min per release build.
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
 
       # Runtime deps are needed for import-time collection (app/core/config.py
       # etc. are plain `os.getenv(..., default)` — no required secrets — but

@@ -258,6 +258,45 @@ jobs:
           fi
           log "preflight OK"
 
+          # ── Reclaim disk BEFORE pulling ~20GB ─────────────────────────────
+          # Every release leaves another multi-GB CUDA image behind and nothing
+          # ever collected them. On the v0.27.0 deploy the root volume filled
+          # and `docker pull` died mid-write with "no space left on device"
+          # after the build had already spent an hour — the single most
+          # expensive way to discover a full disk.
+          #
+          # Staged, least-destructive-first: dangling layers and build cache go
+          # unconditionally (nothing can want them), and the rollback image is
+          # only sacrificed if that was not enough. Losing instant rollback is
+          # strictly better than a deploy that cannot start.
+          disk_free_gb(){ df -BG --output=avail / | tail -1 | tr -dc '0-9'; }
+          log "disk free before cleanup: $(disk_free_gb)GB"
+
+          docker image prune -f >/dev/null 2>&1 || true
+          docker builder prune -af >/dev/null 2>&1 || true
+          log "disk free after safe prune: $(disk_free_gb)GB"
+
+          if [ "$(disk_free_gb)" -lt 40 ]; then
+            log "under 40GB — dropping the rollback container to reclaim its image"
+            docker rm -f magik-previous >/dev/null 2>&1 || true
+            # -a removes every image no RUNNING container references. The image
+            # behind magik-current is therefore retained.
+            docker image prune -af >/dev/null 2>&1 || true
+            log "disk free after full prune: $(disk_free_gb)GB"
+          fi
+
+          # Fail fast and legibly rather than 8 minutes into a doomed pull.
+          FREE_GB="$(disk_free_gb)"
+          if [ "${FREE_GB:-0}" -lt 30 ]; then
+            log "FATAL: only ${FREE_GB}GB free on / after cleanup; this image needs ~25GB to unpack."
+            log "Grow the EBS volume (growpart + resize2fs) or clear /opt/magik. Largest consumers:"
+            df -h / || true
+            du -sh /opt/magik/* 2>/dev/null | sort -rh | head -10 || true
+            docker system df || true
+            exit 1
+          fi
+          log "disk OK — ${FREE_GB}GB free"
+
           # ── Pull BEFORE touching the running container, so a failed pull
           #    never takes down a working service ───────────────────────────
           GHCR_PAT="$(aws ssm get-parameter --name /magik/ghcr_pat \
@@ -300,6 +339,15 @@ jobs:
 
           # ── Swap ──────────────────────────────────────────────────────────
           docker rm -f magik-previous >/dev/null 2>&1 || true
+          # STOP before rename. `docker rename` does NOT stop a container — it
+          # keeps running and keeps its port binding, so the `docker run` below
+          # then dies with "Bind for 0.0.0.0:8000 failed: port is already
+          # allocated". This is invisible on a first deploy (no magik-current
+          # exists, rename is a no-op) and breaks every deploy after it, which
+          # is exactly how it reached production: run #8 was green, v0.27.0
+          # failed here. Stopped — not removed — so the rollback path below can
+          # still bring it back with `docker start`.
+          docker stop -t 30 magik-current >/dev/null 2>&1 || true
           docker rename magik-current magik-previous >/dev/null 2>&1 || true
 
           # --shm-size: torch dataloaders/multiprocessing outgrow the 64MB default.

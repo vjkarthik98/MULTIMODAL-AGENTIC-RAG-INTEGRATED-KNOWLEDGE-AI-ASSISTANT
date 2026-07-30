@@ -1,6 +1,5 @@
 import { Component } from 'react'
 import { RefreshCw } from 'lucide-react'
-import MagikIcon from './MagikIcon'
 
 export default class ErrorBoundary extends Component {
   constructor(props) {
@@ -24,9 +23,7 @@ export default class ErrorBoundary extends Component {
         className="min-h-screen flex flex-col items-center justify-center px-6 text-center"
         style={{ background: 'var(--t-bg, #0a0a0a)' }}
       >
-        <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-500 to-blue-500 flex items-center justify-center shadow-lg mb-6">
-          <MagikIcon size={32} strokeWidth={1.7} className="text-white" />
-        </div>
+        <img src="/logo.png" alt="MAGIK" className="w-16 h-16 rounded-2xl object-cover shadow-lg mb-6" />
 
         <h1
           className="text-2xl font-bold mb-2"

@@ -132,10 +132,13 @@ jobs:
             echo "::warning title=EVAL_USER_ID is the fallback::Using 'eval_default'. If your ingested eval corpus lives under a different user_id, set the EVAL_USER_ID repository variable or this gate will score an empty tenant."
           fi
 
+      # NO `cache: pip` — see the long note in ci.yml's lint-type-test job.
+      # Short version: caching pip here stores ~4.8GB of torch/CUDA wheels and
+      # crowds cd.yml's Docker buildx cache out of the 10GB per-repo limit,
+      # turning every release build into a ~1h llama-cpp-python recompile.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
 
       - name: Install dependencies
         run: |
