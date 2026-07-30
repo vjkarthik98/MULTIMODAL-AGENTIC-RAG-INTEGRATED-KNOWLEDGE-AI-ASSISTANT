@@ -10,6 +10,7 @@ import GuestBanner from '../components/GuestBanner'
 import ConversionModal from '../components/ConversionModal'
 import { streamQuery, queryMeta, getChatSession, patchLastMessage, updateChatSession } from '../api/client'
 import { useToast } from '../context/ToastContext'
+import { uuid } from '../utils/uuid'
 import useIsMobile from '../hooks/useIsMobile'
 
 const CHAT_ICON = (
@@ -95,7 +96,7 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
     mq.addEventListener('change', handler)
     return () => mq.removeEventListener('change', handler)
   }, [isMobile])
-  const [sessionId, setSessionId]         = useState(() => crypto.randomUUID())
+  const [sessionId, setSessionId]         = useState(() => uuid())
   const [selectedFile, setSelectedFile]   = useState(null)
   const [showFilePicker, setShowFilePicker] = useState(false)
   const [webSearchMode, setWebSearchMode] = useState(false)
@@ -289,7 +290,7 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
     setInput('')
     setAutoScroll(true)
 
-    const botId = crypto.randomUUID()
+    const botId = uuid()
     const ts    = Date.now()
     setMessages(prev => skipUserMessage
       ? [...prev, { role: 'assistant', content: '', id: botId, pending: true, ts }]
@@ -545,7 +546,7 @@ const handleNewChat = () => {
     setStreamingId(null)
     setAutoScroll(true)
     setShowScrollBtn(false)
-    setSessionId(crypto.randomUUID())
+    setSessionId(uuid())
     setSelectedFile(null)
     setShowFilePicker(false)
     setTimeout(() => inputRef.current?.focus(), 50)

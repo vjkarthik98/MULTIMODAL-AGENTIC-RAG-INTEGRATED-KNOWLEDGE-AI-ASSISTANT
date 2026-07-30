@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
 import { Eye, EyeOff, Loader2, Sun, Moon, ShieldCheck, RotateCcw } from 'lucide-react'
-import MagikIcon from '../components/MagikIcon'
 import { login, register, verifyOtp } from '../api/client'
 
 const GoogleG = () => (
@@ -199,9 +198,7 @@ export default function LoginPage({ onLogin, onGuestMode, dark, onToggleTheme, o
       <div className="relative z-10 w-full flex flex-col items-center">
       {/* Brand */}
       <div className="flex flex-col items-center mb-6 sm:mb-10 gap-3 sm:gap-4">
-        <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl bg-gradient-to-br from-violet-500 to-blue-500 flex items-center justify-center shadow-lg">
-          <MagikIcon size={28} strokeWidth={1.7} className="text-white" />
-        </div>
+        <img src="/logo.png" alt="MAGIK" className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl object-cover shadow-lg" />
         <div className="text-center">
           <h1 className="text-3xl sm:text-4xl font-bold tracking-tight" style={{
             background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)',
