@@ -3,7 +3,7 @@
     "Permissions for the magik-wake-gateway Lambda role.",
     "Attach ALONGSIDE the AWS-managed AWSLambdaBasicExecutionRole (CloudWatch Logs).",
     "StartInstances is scoped to the single demo instance — this role is reachable",
-    "from a public, unauthenticated Function URL, so it must not be able to start",
+    "from a public, unauthenticated API Gateway endpoint, so it must not be able to start",
     "anything else in the account."
   ],
   "Version": "2012-10-17",

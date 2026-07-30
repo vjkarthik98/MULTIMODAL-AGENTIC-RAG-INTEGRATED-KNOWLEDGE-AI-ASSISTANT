@@ -2,9 +2,11 @@
   "_comment": [
     "Permissions for the magik-idle-stop Lambda role.",
     "Attach ALONGSIDE the AWS-managed AWSLambdaBasicExecutionRole (CloudWatch Logs).",
-    "StopInstances is scoped to the single demo instance. CloudWatch and SSM reads",
-    "require a wildcard resource (neither GetMetricStatistics nor ListCommands",
-    "supports resource-level scoping), but both are read-only."
+    "StopInstances is scoped to the single demo instance. CloudWatch and SSM ListCommands",
+    "reads require a wildcard resource (neither GetMetricStatistics nor ListCommands",
+    "supports resource-level scoping), but both are read-only.",
+    "GetParameter IS scoped to the single github_actions_pat parameter -- this",
+    "role must not be able to read any other secret in Parameter Store."
   ],
   "Version": "2012-10-17",
   "Statement": [
@@ -25,6 +27,12 @@
       "Effect": "Allow",
       "Action": ["cloudwatch:GetMetricStatistics", "ssm:ListCommands"],
       "Resource": "*"
+    },
+    {
+      "Sid": "ReadGithubRunnerCheckToken",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": "arn:aws:ssm:us-east-1:537557168406:parameter/magik/github_actions_pat"
     }
   ]
 }
