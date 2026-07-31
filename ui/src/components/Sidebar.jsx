@@ -29,6 +29,30 @@ const EXT_BADGE = {
   DOC:  { label: 'DOC', bg: 'bg-indigo-700' },
 }
 
+// Tracks in-flight audio/video ingestion jobs in localStorage, keyed by user
+// identity, so a page reload (e.g. a forced re-login mid-upload) doesn't just
+// drop the "uploading" indicator — the backend job keeps running regardless,
+// and this lets a remounted Sidebar reattach to it instead of the file only
+// reappearing once refreshKB() happens to notice it in the knowledge base.
+const ACTIVE_UPLOADS_KEY = 'magik_active_uploads'
+
+function _loadActiveUploads() {
+  try { return JSON.parse(localStorage.getItem(ACTIVE_UPLOADS_KEY) || '[]') } catch { return [] }
+}
+function _saveActiveUploads(list) {
+  try { localStorage.setItem(ACTIVE_UPLOADS_KEY, JSON.stringify(list)) } catch { /* storage unavailable */ }
+}
+function _rememberActiveUpload(identity, filename, jobId) {
+  if (!identity) return
+  const list = _loadActiveUploads().filter(j => !(j.identity === identity && j.filename === filename))
+  list.push({ identity, filename, jobId, startedAt: Date.now() })
+  _saveActiveUploads(list)
+}
+function _forgetActiveUpload(identity, filename) {
+  if (!identity) return
+  _saveActiveUploads(_loadActiveUploads().filter(j => !(j.identity === identity && j.filename === filename)))
+}
+
 function getInitials(email) {
   const local = (email || '').split('@')[0].trim()
   if (!local) return 'U'
@@ -350,6 +374,17 @@ export default function Sidebar({
     setLoadingKB(false)
   }
 
+  // Best-effort check used to disambiguate an evicted job-status record from a
+  // genuinely failed upload — see the 'not_found' handling around _pollJobStatus.
+  const _fileLandedInKB = async (filename) => {
+    try {
+      const files = await listKB(auth.token)
+      return files.some(f => f.filename === filename)
+    } catch {
+      return false
+    }
+  }
+
   // Re-fetch whenever the session identity changes (login/logout, guest<->real
   // user, or account switch) — not just on mount. Without authIdentity in the
   // deps, a stale closure keeps whatever the FIRST-mounted auth fetched even
@@ -364,6 +399,44 @@ export default function Sidebar({
   // change, and could momentarily show a false "knowledge base is empty"
   // message if a query landed inside that refetch window.
   useEffect(() => { prevFilenamesRef.current = new Set(); setKbFiles([]); refreshKB() }, [authIdentity])
+
+  // Reattach to any audio/video ingestion job that was still running when this
+  // tab last saw it (page reload, forced re-login from a silent-refresh race,
+  // browser crash) — the backend job is unaffected by the UI losing track of
+  // it, so without this the file's upload indicator just vanishes and only
+  // reappears once refreshKB() happens to notice it finished. Runs once per
+  // identity, same as the KB refetch above.
+  useEffect(() => {
+    if (!authIdentity) return
+    const pending = _loadActiveUploads().filter(j => j.identity === authIdentity)
+    if (!pending.length) return
+
+    pending.forEach(({ filename, jobId }) => {
+      setUploadingFiles(prev => new Set([...prev, filename]))
+      uploadTargets.current[filename] = 0
+      setUploadProgress(prev => ({ ...prev, [filename]: 0 }))
+
+      _pollJobStatus(auth.token, jobId, filename)
+        .then(async ({ ok, error: pollErr, chunks }) => {
+          if (ok) {
+            uploadTargets.current[filename] = 100
+            addToast(`Uploaded: ${filename}${chunks ? ` (${chunks} chunks)` : ''}`, 'success')
+          } else if (pollErr === 'not_found' && await _fileLandedInKB(filename)) {
+            addToast(`Uploaded: ${filename}`, 'success')
+          } else {
+            addToast(`Failed: ${filename}`, 'error')
+          }
+        })
+        .finally(() => {
+          _forgetActiveUpload(authIdentity, filename)
+          setUploadingFiles(prev => { const s = new Set(prev); s.delete(filename); return s })
+          setUploadProgress(prev => { const p = { ...prev }; delete p[filename]; return p })
+          setUploadStage(prev => { const s = { ...prev }; delete s[filename]; return s })
+          delete uploadTargets.current[filename]
+          refreshKB()
+        })
+    })
+  }, [authIdentity])
 
   /* ── Smooth upload progress animator ───────────────────────────────────────
    * The server reports progress in coarse stages (queued 2% → extracting 20% →
@@ -548,11 +621,23 @@ export default function Sidebar({
   }
 
   const _pollJobStatus = async (token, jobId, filename) => {
-    const INTERVAL = 1000, MAX_POLLS = 1800  // poll every 1s; up to 30 min (covers large video files)
+    // Up to 4h at 1 poll/sec — a 1hr+ video's transcription/diarization/embedding
+    // pipeline can run well past 30 min; short-lived jobs (everything but large
+    // audio/video) return via the 'done'/'error' checks below in seconds anyway,
+    // so a generous ceiling here costs nothing for the common case.
+    const INTERVAL = 1000, MAX_POLLS = 4 * 60 * 60
+    let notFoundStreak = 0
     for (let i = 0; i < MAX_POLLS; i++) {
       await new Promise(r => setTimeout(r, INTERVAL))
+      // Re-read the access token from storage on every tick instead of using the
+      // value captured when the upload started — the silent-refresh cycle in
+      // App.jsx rotates it roughly every 20 min, and a poll loop for a large
+      // video can easily outlive that. Falls back to the passed-in token for
+      // guest sessions, whose token never rotates.
+      const liveToken = localStorage.getItem('magik_token') || token
       try {
-        const job = await getIngestionStatus(token, jobId)
+        const job = await getIngestionStatus(liveToken, jobId)
+        notFoundStreak = 0
         // Prefer the server's real fractional progress when it's ahead of the
         // coarse stage floor, so the bar reflects actual chunk progress.
         const stagePct = _STAGE_PROGRESS[job.status] ?? 0
@@ -565,7 +650,16 @@ export default function Sidebar({
         }
         if (job.status === 'done') return { ok: true, chunks: job.chunks_done }
         if (job.status === 'error') return { ok: false, error: job.error || 'Processing failed' }
-      } catch (_) { /* network blip — keep polling */ }
+      } catch (err) {
+        if (err?.status === 404) {
+          // Job record evicted from the status cache (or briefly unreachable
+          // right after a reconnect) — a handful of consecutive misses means
+          // it's genuinely gone rather than a blip, so stop spinning and let
+          // the caller reconcile against the real knowledge-base list.
+          if (++notFoundStreak >= 5) return { ok: false, error: 'not_found' }
+        }
+        /* otherwise: network blip — keep polling */
+      }
     }
     return { ok: false, error: 'Timed out waiting for processing' }
   }
@@ -600,11 +694,19 @@ export default function Sidebar({
         const result = await ingestFile(auth.token, file, 'default', ctrl, onUploadProgress)
 
         if (result?.job_id) {
+          // Remembered in localStorage so a page reload (forced re-login,
+          // browser crash, tab close) doesn't strand this indicator — see the
+          // recovery effect below, which reattaches to still-running jobs.
+          _rememberActiveUpload(authIdentity, file.name, result.job_id)
           const { ok, error: pollErr, chunks } = await _pollJobStatus(auth.token, result.job_id, file.name)
           if (ok) {
             uploadTargets.current[file.name] = 100        // let the animator finish to 100
             await new Promise(r => setTimeout(r, 550))    // ...and let that climb render
             addToast(`Uploaded: ${file.name}${chunks ? ` (${chunks} chunks)` : ''}`, 'success')
+          } else if (pollErr === 'not_found' && await _fileLandedInKB(file.name)) {
+            // Status record was gone, but the file made it into the knowledge
+            // base anyway — treat as success instead of a false failure toast.
+            addToast(`Uploaded: ${file.name}`, 'success')
           } else {
             errors.push(`${file.name}: ${pollErr}`)
             addToast(`Failed: ${file.name}`, 'error')
@@ -628,6 +730,7 @@ export default function Sidebar({
         }
       } finally {
         delete uploadControllers.current[file.name]
+        _forgetActiveUpload(authIdentity, file.name)
       }
       setUploadingFiles(prev => { const s = new Set(prev); s.delete(file.name); return s })
       setUploadProgress(prev => { const p = { ...prev }; delete p[file.name]; return p })

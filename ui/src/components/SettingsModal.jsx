@@ -64,12 +64,12 @@ function Card({ title, children }) {
   )
 }
 
-function GhostButton({ onClick, disabled, icon: Icon, spinning, children, ...rest }) {
+function GhostButton({ onClick, disabled, icon: Icon, spinning, children, style, ...rest }) {
   return (
     <button
       type="button" onClick={onClick} disabled={disabled}
       className="flex items-center gap-2 rounded-lg px-3 py-1.5 text-[13px] transition-colors disabled:opacity-50 flex-shrink-0"
-      style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx3)' }}
+      style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx3)', ...style }}
       onMouseEnter={e => { if (!disabled) e.currentTarget.style.background = 'var(--t-hov2)' }}
       onMouseLeave={e => { e.currentTarget.style.background = 'var(--t-inp)' }}
       {...rest}
@@ -177,6 +177,8 @@ function AccountSection({ auth, dark, onToggleTheme, showSources, setShowSources
 /* ── Knowledge base ────────────────────────────────── */
 function KBSection({ auth, kbFiles, setKbFiles, addToast }) {
   const [deleting, setDeleting] = useState(null)
+  const [confirmDeleteAll, setConfirmDeleteAll] = useState(false)
+  const [deletingAll, setDeletingAll] = useState(false)
 
   const handleDelete = async (filename) => {
     setDeleting(filename)
@@ -191,11 +193,46 @@ function KBSection({ auth, kbFiles, setKbFiles, addToast }) {
     }
   }
 
+  const handleDeleteAll = async () => {
+    if (!confirmDeleteAll) { setConfirmDeleteAll(true); return }
+    setConfirmDeleteAll(false)
+    setDeletingAll(true)
+    const targets = kbFiles.map(f => f.filename)
+    let failed = 0
+    for (const filename of targets) {
+      try {
+        await deleteKBFile(auth.token, filename)
+        setKbFiles(prev => prev.filter(f => f.filename !== filename))
+      } catch {
+        failed++
+      }
+    }
+    setDeletingAll(false)
+    if (failed === 0) {
+      addToast(`Deleted all ${targets.length} file${targets.length !== 1 ? 's' : ''}`, 'success')
+    } else {
+      addToast(`Deleted ${targets.length - failed} of ${targets.length} files — ${failed} failed`, 'error')
+    }
+  }
+
   return (
     <div className="space-y-4">
-      <p className="text-[13px]" style={{ color: 'var(--t-tx5)' }}>
-        {kbFiles.length} file{kbFiles.length !== 1 ? 's' : ''} indexed for retrieval. Add more from the sidebar's upload zone.
-      </p>
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-[13px]" style={{ color: 'var(--t-tx5)' }}>
+          {kbFiles.length} file{kbFiles.length !== 1 ? 's' : ''} indexed for retrieval. Add more from the sidebar's upload zone.
+        </p>
+        {kbFiles.length > 0 && (
+          <GhostButton
+            onClick={handleDeleteAll}
+            disabled={deletingAll}
+            spinning={deletingAll}
+            icon={Trash2}
+            style={{ color: confirmDeleteAll ? 'var(--t-danger)' : undefined, borderColor: confirmDeleteAll ? 'var(--t-danger)' : undefined }}
+          >
+            {confirmDeleteAll ? 'Confirm delete all' : 'Delete all'}
+          </GhostButton>
+        )}
+      </div>
 
       {kbFiles.length === 0 ? (
         <div className="rounded-2xl py-10 text-center" style={{ background: 'var(--t-card)', border: '1px dashed var(--t-bd3)' }}>

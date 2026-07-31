@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.auth.dependencies import get_current_user
 from app.auth.models import UserPublic, UserRole
 from app.core.config import settings
+from app.core.gpu_admission import GPUBusyError, gpu_slot
 from app.core.infra_registry import infra
 from app.retrieval.bm25_retriever import BM25AggregatorRetriever
 from app.utils.logger import get_logger
@@ -959,16 +960,20 @@ async def query_rag(
         except Exception:
             pass
 
-        result = await asyncio.to_thread(
-            pipeline_fn,
-            query,
-            session_id,
-            request_body.sources,
-            user_id,
-            # A just-joined stream result IS the fresh regeneration the user
-            # asked for — read it from cache even when no_cache was requested.
-            request_body.no_cache and not _stream_joined,
-        )
+        # GPU admission — shared with ingestion (app/core/gpu_admission.py):
+        # embedding + reranking here and generation via llama-server compete
+        # for the same VRAM budget as any concurrent upload.
+        async with gpu_slot("query"):
+            result = await asyncio.to_thread(
+                pipeline_fn,
+                query,
+                session_id,
+                request_body.sources,
+                user_id,
+                # A just-joined stream result IS the fresh regeneration the user
+                # asked for — read it from cache even when no_cache was requested.
+                request_body.no_cache and not _stream_joined,
+            )
 
         if not isinstance(result, dict) or "answer" not in result:
             raise RuntimeError("Invalid pipeline response")
@@ -1043,6 +1048,12 @@ async def query_rag(
 
     except HTTPException:
         raise
+
+    except GPUBusyError as exc:
+        logger.warning(event="api_query_gpu_busy", request_id=request_id, error=str(exc))
+        raise HTTPException(
+            status_code=503, detail=str(exc), headers={"Retry-After": "30"}
+        ) from exc
 
     except Exception as exc:
         logger.error(
@@ -1440,30 +1451,36 @@ async def stream_query(
                     return _STOP
 
             try:
-                while True:
-                    token = await _loop.run_in_executor(None, _next_token)
-                    if token is _STOP:
-                        break
-                    if not token:
-                        continue
-                    if token.startswith("\x00REFUSAL\x00"):
-                        _refused = True
-                        yield 'data: {"__type__":"refusal"}\n\n'
-                        continue
-                    if token.startswith("\x00REPLACE\x00"):
-                        # Canonical guarded answer — supersedes the streamed tokens
-                        # for both the client bubble and persistence below.
-                        _final_answer = token[9:]
-                        import json as _json
+                # GPU admission held only for the actual token-generation loop
+                # below — released before the persistence/cache-write I/O that
+                # follows, so the slot frees up for the next waiter as soon as
+                # generation finishes rather than being held through unrelated
+                # Mongo/Redis work.
+                async with gpu_slot("query_stream"):
+                    while True:
+                        token = await _loop.run_in_executor(None, _next_token)
+                        if token is _STOP:
+                            break
+                        if not token:
+                            continue
+                        if token.startswith("\x00REFUSAL\x00"):
+                            _refused = True
+                            yield 'data: {"__type__":"refusal"}\n\n'
+                            continue
+                        if token.startswith("\x00REPLACE\x00"):
+                            # Canonical guarded answer — supersedes the streamed tokens
+                            # for both the client bubble and persistence below.
+                            _final_answer = token[9:]
+                            import json as _json
 
-                        yield f'data: {{"__type__":"replace","data":{_json.dumps(_final_answer)}}}\n\n'
-                        continue
-                    if token.startswith("\x00SOURCES\x00"):
-                        _sources_payload = token[9:]
-                        yield f'data: {{"__type__":"sources","data":{token[9:]}}}\n\n'
-                        continue
-                    _answer_parts.append(token)
-                    yield _sse(token)
+                            yield f'data: {{"__type__":"replace","data":{_json.dumps(_final_answer)}}}\n\n'
+                            continue
+                        if token.startswith("\x00SOURCES\x00"):
+                            _sources_payload = token[9:]
+                            yield f'data: {{"__type__":"sources","data":{token[9:]}}}\n\n'
+                            continue
+                        _answer_parts.append(token)
+                        yield _sse(token)
 
                 # PERSIST BEFORE [DONE] — the client patches/reads the stored turn
                 # the moment it sees [DONE]; writing after it would race that read.
@@ -1531,6 +1548,15 @@ async def stream_query(
                             event="stream_cache_write_failed", session_id=session_id, error=str(_ce)
                         )
 
+                yield "data: [DONE]\n\n"
+            except GPUBusyError as _busy:
+                logger.warning(
+                    event="stream_gpu_busy",
+                    request_id=request_id,
+                    session_id=session_id,
+                    error=str(_busy),
+                )
+                yield _sse(str(_busy))
                 yield "data: [DONE]\n\n"
             except Exception as exc:
                 logger.error(
@@ -1687,25 +1713,26 @@ async def upload_file(
         if not is_ingest_thread_ready():
             await asyncio.to_thread(seed_gpu_ingest_thread)
 
-        # INGEST — run on the dedicated gpu_ingest_executor whose single thread
-        # was pre-seeded with PyTorch CUDA context during startup warmup
-        # (or by seed_gpu_ingest_thread() above).  Using asyncio.to_thread()
-        # here dispatches to a random OS thread that has no CUDA context; after
-        # llama.cpp initialises its CUBLAS handle that causes a SIGSEGV.
-        from app.core.startup_optimizer import get_gpu_ingest_executor
-        from app.pipeline.ingestion_pipeline import process_file
+        # INGEST — process_file_async() runs this on the dedicated
+        # gpu_ingest_executor internally (single pre-seeded-CUDA-context
+        # thread — a random thread from the default executor would SIGSEGV
+        # here, see get_gpu_ingest_executor()'s docstring) and holds the
+        # process-wide GPU admission slot (app/core/gpu_admission.py) for the
+        # duration. This route used to call the bare module-level
+        # process_file() directly, which bypassed that slot entirely — the
+        # admission control existed and protected nothing. It also has its
+        # own per-modality timeout (media needs far longer than documents),
+        # which the old direct call here did not.
+        from app.pipeline.ingestion_pipeline import process_file_async
 
-        _ingest_loop = asyncio.get_running_loop()
         try:
-            result = await asyncio.wait_for(
-                _ingest_loop.run_in_executor(
-                    get_gpu_ingest_executor(),
-                    process_file,
-                    str(file_path),
-                    session_id,
-                    user_id,
-                ),
-                timeout=settings.FILE_PROCESSING_TIMEOUT_SEC,
+            result = await process_file_async(str(file_path), session_id, user_id)
+        except GPUBusyError as exc:
+            logger.warning(event="api_upload_gpu_busy", request_id=request_id, error=str(exc))
+            return JSONResponse(
+                status_code=503,
+                content={"request_id": request_id, "detail": str(exc)},
+                headers={"Retry-After": "30"},
             )
         except Exception as exc:
             err_str = str(exc).removeprefix("INGESTION_FAILED: ").strip()
