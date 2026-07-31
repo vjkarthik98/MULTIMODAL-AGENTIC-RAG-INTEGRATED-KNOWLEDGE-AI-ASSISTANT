@@ -455,11 +455,28 @@ jobs:
         id: full_suite
         run: |
           set -uo pipefail
-          TOKEN="$(docker exec "$CONTAINER" python3.12 -c \
-            "from app.auth.jwt_handler import issue_tokens; print(issue_tokens('${EVAL_USER_ID}', 'eval@magik.local', 'user')['access_token'])" \
-            | tr -d '\r\n')"
+          # NOT `| tr -d '\r\n'` on the raw output — that blindly concatenates
+          # every line docker exec prints. app/utils/logger.py's console
+          # handler writes to stdout (StreamHandler(sys.stdout)), so importing
+          # jwt_handler (which pulls in app.core.config, which logs
+          # "logging_initialized" on first import) prints a banner line BEFORE
+          # the token. tr -d only strips newlines, so banner+token got mashed
+          # into one string — a garbled non-JWT sent as the Bearer header on
+          # every single request. That's what actually killed the very first
+          # Tier-2 run: every generation/e2e/behavioral/routing query failed
+          # with a raw "invalid UTF-8 byte" header-decode error (retrieval was
+          # unaffected — it doesn't use HTTP/auth at all), the suite ended in
+          # ~15 minutes instead of hours, and the runner going idle afterward
+          # is what let idle-stop legitimately (if confusingly) stop the box.
+          #
+          # Extract by SHAPE instead: a JWT is exactly three base64url segments
+          # joined by dots, on its own line. Immune to any banner, warning, or
+          # future log line printed before or after it, regardless of cause.
+          RAW="$(docker exec "$CONTAINER" python3.12 -c \
+            "from app.auth.jwt_handler import issue_tokens; print(issue_tokens('${EVAL_USER_ID}', 'eval@magik.local', 'user')['access_token'])")"
+          TOKEN="$(printf '%s\n' "$RAW" | grep -oE '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$' | tail -n1)"
           if [ -z "$TOKEN" ]; then
-            echo "::error title=Tier-2 token mint failed::Could not issue an eval access token inside the container."
+            echo "::error title=Tier-2 token mint failed::Could not extract a JWT-shaped token from the container's output. Raw output (safe to show — no secret was successfully isolated, so nothing to mask): $RAW"
             exit 1
           fi
           echo "::add-mask::$TOKEN"

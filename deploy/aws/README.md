@@ -7,17 +7,17 @@ default** and wakes on demand.
 Visitor ──▶ API Gateway HTTP API ──▶ wake-gateway Lambda (always on, ~$0)
               │  stopped → StartInstances + "warming up" page (auto-refresh)
               │  booting → same page
-              └▶ healthy → 302 ──▶ EC2 g6e.xlarge (L40S) ──▶ app :8000 (plain HTTP)
+              └▶ healthy → 302 ──▶ EC2 g6e.xlarge (L40S) ──▶ Caddy :443 ──▶ app :8000
                                         ▲                                      │
      EventBridge every 5 min ──▶ idle-stop Lambda ──▶ StopInstances ◀──────────┘
-                                  (20m idle, 15m min uptime, skips during deploys)
+                                  (20m idle, 15m min uptime, skips during deploys/eval)
 ```
 
-There is no custom domain for AWS, and none is needed: the public link is a
-portfolio site (hosted elsewhere, e.g. Vercel), which links directly to the
-wake gateway's own HTTPS API Gateway endpoint — that URL is already a fully
-valid public `https://` address on its own. The app itself is reached over
-plain HTTP on `:8000` once woken.
+The public entry point is `magik.vk-ai.online` — HTTPS end to end, via Caddy
++ Let's Encrypt on the box. Port 8000 is not exposed to the internet; Caddy
+reaches the app over localhost only. `vk-ai.online` (the apex domain) points
+at a separate portfolio site, unrelated to this app — one domain, two
+independent subdomains, no shared infrastructure between them.
 
 **Note on the front door:** the wake gateway sits behind an **API Gateway HTTP
 API**, not a Lambda Function URL. A Function URL was tried first — `auth-type
@@ -42,6 +42,7 @@ burns a $200 credit in under a week.
 | `lambda/idle_stop/handler.py` | Scheduled idle check; stops the instance, with guards against killing a warming box, an in-flight deploy, or a running self-hosted eval job |
 | `iam/github-oidc-trust-policy.json` | Trust policy for `magik-deploy-role` (**read the comment — it explains the `environment:` subject-claim trap**) |
 | `iam/lambda-*-permissions.json` | Least-privilege policies, scoped to the single instance ARN |
+| `caddy/Caddyfile` | HTTPS reverse proxy on the box; SSE-safe, long timeouts for model loading. Uses `APP_DOMAIN_PLACEHOLDER` as a template — the box's actual `/etc/caddy/Caddyfile` has `magik.vk-ai.online` substituted in directly |
 | `scripts/deploy_lambdas.sh` | Idempotent one-shot deploy of both Lambdas, the API Gateway HTTP API, and the schedule |
 
 ## Deploy
@@ -52,7 +53,7 @@ Run from **AWS CloudShell** (already authenticated — no local AWS CLI needed):
 git clone https://github.com/vjkarthik98/multimodal-rag-assistant.git
 cd multimodal-rag-assistant/deploy/aws/scripts
 
-APP_URL="http://3.208.159.124:8000" bash deploy_lambdas.sh
+bash deploy_lambdas.sh   # APP_URL defaults to https://magik.vk-ai.online
 ```
 
 Safe to re-run; it updates in place. The script prints the API Gateway
@@ -99,19 +100,59 @@ token idle-stop uses to check whether the runner is actually busy:
    "runner busy" and never stops the box, which is safe but defeats scale-to-
    zero, so don't skip it.
 
+**Known limitation, not yet closed:** this guard can only see a runner GitHub
+still considers connected and busy. If the runner process itself disconnects
+mid-job (observed once, 2026-07-30 — root cause was a corrupted auth token
+sent on every eval request, not resource exhaustion; see `CHANGELOG.md`),
+GitHub reports it as simply offline rather than busy, and idle-stop's guard
+has nothing left to object to. It stopped the box in that incident, but only
+after the eval had already failed on its own — it did not kill a healthy run.
+Tightening this further (e.g. a liveness heartbeat independent of GitHub's own
+runner-status reporting) is a real improvement, not yet built.
+
+## Domain (done)
+
+`magik.vk-ai.online` → A record → the Elastic IP, HTTPS via Caddy + Let's
+Encrypt on the box. Completed 2026-07-30:
+
+1. GoDaddy DNS: A record, name `magik`, value `3.208.159.124`.
+2. Ports 80 (ACME challenge) and 443 opened in the security group.
+3. Caddy installed on the box (`apt` via Cloudsmith's repo), config at
+   `/etc/caddy/Caddyfile` — the site address is written as `https://
+   magik.vk-ai.online { ... }` with the scheme explicit. **This matters**: a
+   bare hostname with no scheme made Caddy log `"listening only on the HTTP
+   port, so no automatic HTTPS will be applied"` and never even attempt the
+   Let's Encrypt request — no error, just silently no port 443. Forcing
+   `https://` in the site address is what actually triggers automatic HTTPS.
+4. `OAUTH_REDIRECT_URI`, `FRONTEND_URL`, `CORS_ORIGINS` in `/opt/magik/.env`
+   updated to the HTTPS domain; the new redirect URI added in Google Cloud
+   Console (Google rejects bare-IP and non-HTTPS redirect URIs outright, so
+   Google Sign-In could not work at all before this).
+5. `deploy_lambdas.sh`'s `APP_URL` now defaults to `https://magik.vk-ai.online`
+   — the wake gateway health-checks and redirects through Caddy, not the bare
+   IP on :8000.
+
+**Recreate the container after any `.env` change** — `docker restart` does
+**not** re-read `--env-file`; only a fresh `docker run` does. This bit twice
+tonight (OAuth redirect URI, then `DEV_OTP_LOG`) before being caught.
+
 ## Operational notes
 
 - **Never** put the model cache on instance-store (`/opt/dlami/nvme`). It is
   wiped on every stop/start, and this design stops the box constantly — the
   ~20GB of weights would re-download on every single wake. They live on the EBS
   root volume via `/opt/magik/.hf_cache`.
-- The wake gateway health-checks `APP_URL` **from outside AWS**, so port 8000
-  must stay open in the security group for that check to succeed.
-- `CORS_ORIGINS` on the box's `/opt/magik/.env` should include the portfolio
-  origin alongside the box's own address — same-origin UI traffic doesn't need
-  CORS at all, this only covers the portfolio calling the API directly. Update
-  via SSM if it ever needs to change; `cd.yml` does not manage the contents of
-  `.env`, only `docker run --env-file` reading whatever is already there.
+- `/opt/magik/{.hf_cache,data,logs}` are **symlinks** into
+  `/home/ubuntu/multimodal-rag-assistant/`, not real directories under `/opt`.
+  Fragile: deleting that checkout (e.g. to reclaim disk) silently breaks
+  production. Real directories directly under `/opt/magik` would be sturdier;
+  not yet migrated.
+- `CORS_ORIGINS` on the box's `/opt/magik/.env` includes the portfolio's
+  Vercel origin, `vk-ai.online`, and `magik.vk-ai.online` — same-origin UI
+  traffic doesn't need CORS at all, this only covers the portfolio calling the
+  API directly. Update via SSM if it ever needs to change; `cd.yml` does not
+  manage the contents of `.env`, only `docker run --env-file` reading whatever
+  is already there.
 - Idle-stop fails **safe**: if CloudWatch, SSM, or the GitHub runners API
   cannot be read, it treats the instance as busy and does nothing. A missed
   stop costs ~$0.15; a wrong stop kills a live session, a running deploy, or a

@@ -132,6 +132,28 @@ async def _warmup_infra_background() -> None:
         logger.warning(event="infra_warmup_failed", error=str(e))
 
 
+# GUEST→USER QDRANT RECONCILIATION — retries any guest data migrations whose
+# Qdrant vector relabel step kept failing even after migrate_guest_to_user()'s
+# own in-request retries (e.g. Qdrant was mid-outage during a signup). The
+# startup sweep in _cleanup_temp_dirs() catches these on the next deploy/
+# restart; this loop catches them within the SAME process lifetime instead of
+# leaving migrated content mistagged and unsearchable until whenever that is.
+_GUEST_QDRANT_RECONCILE_INTERVAL_SEC = 30 * 60  # 30 min
+
+
+async def _periodic_guest_qdrant_reconcile() -> None:
+    from app.auth.guest_service import retry_pending_guest_qdrant_migrations
+
+    while True:
+        await asyncio.sleep(_GUEST_QDRANT_RECONCILE_INTERVAL_SEC)
+        try:
+            fixed = await asyncio.to_thread(retry_pending_guest_qdrant_migrations)
+            if fixed:
+                logger.info(event="guest_qdrant_migrations_reconciled", fixed=fixed)
+        except Exception as e:
+            logger.warning(event="guest_qdrant_reconcile_sweep_failed", error=str(e))
+
+
 # MODEL WARMUP — parallel GPU preload via ThreadPoolExecutor.
 # All GPU models are loaded concurrently into VRAM so the first query
 # has zero cold-start penalty. Uses model_registry._ensure() which is
@@ -213,6 +235,18 @@ def _cleanup_temp_dirs() -> None:
         except Exception as _ge:
             logger.warning(event="guest_dir_cleanup_failed", error=str(_ge))
 
+        # Reconcile any guest→user Qdrant vector relabels that were still
+        # failing after migrate_guest_to_user()'s own in-request retries gave
+        # up (e.g. Qdrant was down during signup) — see guest_service.py.
+        try:
+            from app.auth.guest_service import retry_pending_guest_qdrant_migrations
+
+            fixed = retry_pending_guest_qdrant_migrations()
+            if fixed:
+                logger.info(event="guest_qdrant_migrations_reconciled", fixed=fixed)
+        except Exception as _qe:
+            logger.warning(event="guest_qdrant_reconcile_sweep_failed", error=str(_qe))
+
     except Exception as e:
         logger.warning(event="temp_dir_cleanup_failed", error=str(e))
 
@@ -264,6 +298,9 @@ async def lifespan(app: FastAPI):
 
     # GPU model preload: all models load in parallel into VRAM
     background_tasks.append(asyncio.create_task(_warmup_models_async()))
+
+    # Guest→user Qdrant reconciliation loop — see docstring above the function
+    background_tasks.append(asyncio.create_task(_periodic_guest_qdrant_reconcile()))
 
     startup_latency = round(time.time() - startup_start, 2)
     logger.info(

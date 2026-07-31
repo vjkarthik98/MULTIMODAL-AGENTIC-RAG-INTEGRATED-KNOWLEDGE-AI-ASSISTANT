@@ -19,6 +19,7 @@ All Redis operations fail-open: a Redis outage must not break the app.
 from __future__ import annotations
 
 import shutil
+import time
 import uuid
 from typing import Any
 
@@ -263,20 +264,25 @@ def check_guest_create_rate(client_ip: str) -> bool:
 
 # ── Data migration: guest → real user ────────────────────────────────────────
 
+# If the Qdrant relabel step still fails after in-request retries, the
+# (guest_id, real_user_id) pair is parked here so the background sweep in
+# main.py (same one that runs cleanup_expired_guest_dirs) can keep retrying
+# it across process restarts — the filesystem/Redis steps proceed regardless
+# so a Qdrant/network blip never blocks or fails the user's signup, but their
+# migrated KB content would otherwise sit permanently mistagged and
+# unsearchable under the real account with no other path to fix it.
+_PENDING_QDRANT_PREFIX = "guest_migrate_pending_qdrant:"
+_PENDING_QDRANT_TTL = 7 * 24 * 3600  # 7 days — comfortably outlasts any outage
 
-def migrate_guest_to_user(guest_id: str, real_user_id: str) -> dict[str, Any]:
-    """Migrate all guest data to a real user_id after successful registration/OAuth.
 
-    Runs in this exact order:
-      1. Qdrant: overwrite user_id payload on all guest vectors (no re-embedding)
-      2. Filesystem: rename data/users/{guest_id}/ → data/users/{real_user_id}/
-         (merge knowledge_base/ if target already exists)
-      3. Redis: delete guest counters
-    Returns migration stats dict for audit logging.
+def _migrate_qdrant_vectors(guest_id: str, real_user_id: str) -> tuple[int, bool]:
+    """Relabel every guest-tagged vector's user_id payload to real_user_id.
+
+    Idempotent and safe to re-run: each pass only touches whatever vectors are
+    still tagged with guest_id, so a retry after a partial failure picks up
+    exactly where the last attempt left off. Returns (chunks_relabeled, ok).
     """
-    stats: dict[str, Any] = {"qdrant_chunks": 0, "files_moved": 0, "errors": []}
-
-    # Step 1: Qdrant payload migration
+    moved = 0
     try:
         from qdrant_client.models import FieldCondition, Filter, MatchValue
 
@@ -305,13 +311,96 @@ def migrate_guest_to_user(guest_id: str, real_user_id: str) -> dict[str, Any]:
                         payload={"user_id": real_user_id},
                         points=point_ids,
                     )
-                    stats["qdrant_chunks"] += len(point_ids)
+                    moved += len(point_ids)
                     if next_offset is None:
                         break
                     offset = next_offset
+        return moved, True
     except Exception as exc:
-        logger.warning(event="guest_migrate_qdrant_failed", error=str(exc))
-        stats["errors"].append(f"qdrant: {exc}")
+        logger.warning(
+            event="guest_migrate_qdrant_failed",
+            guest_id=guest_id,
+            real_user_id=real_user_id,
+            error=str(exc),
+        )
+        return moved, False
+
+
+def _schedule_qdrant_migration_retry(guest_id: str, real_user_id: str) -> None:
+    try:
+        r = _redis()
+        if r:
+            r.set(f"{_PENDING_QDRANT_PREFIX}{real_user_id}", guest_id, ex=_PENDING_QDRANT_TTL)
+    except Exception as exc:
+        logger.warning(event="guest_migrate_qdrant_schedule_failed", error=str(exc))
+
+
+def retry_pending_guest_qdrant_migrations() -> int:
+    """Re-attempt any guest→user Qdrant relabels that were still failing after
+    migrate_guest_to_user()'s own retries gave up (e.g. Qdrant was down during
+    signup). Call this from the same startup sweep as cleanup_expired_guest_dirs().
+    Returns the number of pending migrations successfully reconciled.
+    """
+    fixed = 0
+    try:
+        r = _redis()
+        if r is None:
+            return 0
+        pending_keys = r.keys(f"{_PENDING_QDRANT_PREFIX}*")
+        for key in pending_keys or []:
+            real_user_id = (
+                key[len(_PENDING_QDRANT_PREFIX) :]
+                if key.startswith(_PENDING_QDRANT_PREFIX)
+                else None
+            )
+            guest_id = r.get(key)
+            if not real_user_id or not guest_id:
+                continue
+            _, ok = _migrate_qdrant_vectors(guest_id, real_user_id)
+            if ok:
+                r.delete(key)
+                fixed += 1
+                logger.info(
+                    event="guest_qdrant_migration_reconciled",
+                    guest_id=guest_id,
+                    real_user_id=real_user_id,
+                )
+    except Exception as exc:
+        logger.warning(event="guest_qdrant_reconcile_sweep_failed", error=str(exc))
+    return fixed
+
+
+def migrate_guest_to_user(guest_id: str, real_user_id: str) -> dict[str, Any]:
+    """Migrate all guest data to a real user_id after successful registration/OAuth.
+
+    Runs in this exact order:
+      1. Qdrant: overwrite user_id payload on all guest vectors (no re-embedding),
+         retried a few times in-request; a persistent failure is handed off to
+         retry_pending_guest_qdrant_migrations() rather than silently dropped
+      2. Filesystem: rename data/users/{guest_id}/ → data/users/{real_user_id}/
+         (merge knowledge_base/ if target already exists)
+      3. Redis: delete guest counters
+    Returns migration stats dict for audit logging.
+    """
+    stats: dict[str, Any] = {"qdrant_chunks": 0, "files_moved": 0, "errors": []}
+
+    # Step 1: Qdrant payload migration — retry a few times in-request (covers
+    # the common case: a transient blip), then fall back to the durable
+    # pending-reconciliation record so it still gets fixed eventually without
+    # making the caller (registration/OAuth callback) wait indefinitely.
+    qdrant_ok = False
+    for attempt in range(3):
+        moved, qdrant_ok = _migrate_qdrant_vectors(guest_id, real_user_id)
+        stats["qdrant_chunks"] = moved
+        if qdrant_ok:
+            break
+        if attempt < 2:
+            time.sleep(0.4 * (attempt + 1))
+    if not qdrant_ok:
+        stats["errors"].append(
+            "qdrant: failed after retries — scheduled for background reconciliation"
+        )
+        _schedule_qdrant_migration_retry(guest_id, real_user_id)
 
     # Step 2: Filesystem rename / merge
     try:

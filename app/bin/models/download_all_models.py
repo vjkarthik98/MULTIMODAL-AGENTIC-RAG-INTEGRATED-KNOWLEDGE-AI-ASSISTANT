@@ -435,15 +435,24 @@ def _model_checksum(model_id: str, mtype: str) -> str | None:
         return _sha256_file(path) if path.exists() else None
     cache_key = "models--" + model_id.replace("/", "--")
     snapshots = Path(_hf_home) / "hub" / cache_key / "snapshots"
-    if not snapshots.exists():
+    if not snapshots.exists() or not any(snapshots.iterdir()):
         return None
-    revs = [d for d in snapshots.iterdir() if d.is_dir()]
-    if not revs:
-        return None
-    # Hub cache can hold multiple revisions side by side — hash the most
-    # recently modified snapshot, which is the one just downloaded/verified.
-    latest = max(revs, key=lambda d: d.stat().st_mtime)
-    return _sha256_dir(latest)
+    # Deliberately does NOT try to pick "the one right" revision snapshot.
+    # An earlier version picked max(revs, key=mtime), assuming exactly one
+    # snapshot dir — but a single from_pretrained() call sequence (tokenizer,
+    # then model) can resolve "main" to two different commits moments apart
+    # and materialize files across BOTH, e.g. yiyanghkust/finbert-tone: an
+    # older revision with pytorch_model.bin plus a newer one with
+    # model.safetensors, both real, both on disk. With two mtimes that close
+    # together, "latest by mtime" depends on directory-iteration order, which
+    # is not guaranteed stable — so a model that verified clean would
+    # "mismatch" moments later with nothing actually corrupted (caught
+    # 2026-07-30: identical files on disk, no re-download in between).
+    # _sha256_dir already recurses (rglob), so hashing `snapshots` itself
+    # covers every revision directory with one deterministic, sorted walk —
+    # more thorough than picking one, not less, and immune to this class of
+    # bug regardless of how many revisions the cache ends up holding.
+    return _sha256_dir(snapshots)
 
 
 def _verify_or_record_checksum(model_id: str, mtype: str) -> tuple[str | None, bool]:
