@@ -27,89 +27,161 @@ classifiers = [
 ]
 
 dependencies = [
-    # WEB FRAMEWORK
+    # Web Framework
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "python-multipart>=0.0.9",
     "aiofiles>=23.0",
 
-    # VALIDATION
+    # Data Validation & Configuration
     "pydantic>=2.6",
     "pydantic-settings>=2.0",
     "python-dotenv>=1.0",
 
-    # LLM
+    # LLM Inference — llama.cpp runs as a separate process (llama-server);
+    # see install_cuda.sh for the CUDA build required on GPU deployments.
     "llama-cpp-python>=0.2.60",
+    "sse-starlette>=2.0",
+    "starlette-context>=0.3",
     "huggingface_hub>=0.22",
 
-    # EMBEDDINGS
-    "torch>=2.2",
+    # Machine Learning & Embeddings — transformers pinned <5.0: v5's
+    # tokenizer backend refactor breaks TrOCR's slow-tokenizer path.
+    "torch>=2.6",
+    "torchvision>=0.21",
+    "torchaudio>=2.6",
     "sentence-transformers>=2.7",
-    "transformers>=4.39",
+    "transformers>=4.45,<5.0",
+    "sentencepiece>=0.2.0",
+    "accelerate>=1.1.0",
+    "bitsandbytes>=0.46.1",
     "faster-whisper>=1.0",
+    "qwen-vl-utils>=0.0.8",
+    "tiktoken>=0.7",
+    "datasets>=2.20",
+    "pyannote.audio>=3.1",
+    "soundfile>=0.12.1",
 
-    # VECTOR STORE
+    # Vector Store
     "qdrant-client>=1.9",
 
-    # MEMORY / STORAGE
+    # Memory & Storage
     "redis>=5.0",
     "upstash-redis>=1.0",
     "pymongo>=4.6",
 
-    # RETRIEVAL
+    # Retrieval
     "rank-bm25>=0.2",
+    "PyStemmer>=2.0.1",
 
-    # NUMERICAL
+    # Agent Orchestration
+    "langchain-core>=0.2",
+    "langchain-text-splitters>=0.0.1",
+
+    # Numerical & Scientific Computing
     "numpy>=1.26",
     "scikit-learn>=1.4",
+    "pandas>=2.2",
 
-    # WEB SEARCH
+    # Web Search & HTTP
     "tavily-python>=0.3",
     "httpx>=0.27",
+    "requests>=2.31",
 
-    # RESILIENCE
+    # Resilience
     "tenacity>=8.2",
+    "pybreaker>=1.0",
 
-    # IMAGE
+    # Image Processing — cairosvg/rawpy/mediapipe/pillow-heif are guarded by
+    # try/except ImportError at their call sites and degrade gracefully.
     "pillow>=10.2",
     "opencv-python>=4.9",
     "pytesseract>=0.3",
+    "easyocr>=1.7",
     "imagehash>=4.3",
+    "cairosvg>=2.7",
+    "rawpy>=0.21",
+    "mediapipe>=0.10",
+    "pillow-heif>=0.16",
 
-    # AUDIO
+    # Audio Processing — numba/llvmlite pinned for Python 3.12 compatibility.
     "pydub>=0.25",
+    "numba>=0.59.0",
+    "llvmlite>=0.42.0",
+    "librosa>=0.10",
+    "mutagen>=1.47",
+    "tensorflow[and-cuda]>=2.16; sys_platform == 'linux'",
+    "tensorflow>=2.16; sys_platform != 'linux'",
+    "tensorflow-hub>=0.16",
 
-    # DOCUMENT
+    # Video Processing
+    "av>=12.0",
+    "imageio-ffmpeg>=0.4",
+    "scenedetect[opencv]>=0.6",
+
+    # Document Processing — camelot-py needs Ghostscript on PATH; guarded by
+    # try/except ImportError, pdfplumber covers standard tables as fallback.
     "pdfplumber>=0.10",
     "pymupdf>=1.23",
+    "camelot-py[cv]>=0.11",
     "python-docx>=1.1",
     "openpyxl>=3.1",
-    "pandas>=2.2",
     "chardet>=5.0",
 
-    # TEXT PROCESSING
-    "langchain-text-splitters>=0.0.1",
+    # Text Processing & NLP
+    "ftfy>=6.1",
+    "wordsegment>=1.3",
+    "wordfreq>=3.0",
+    "textstat>=0.7",
+    "yake>=0.4",
+    "keybert>=0.8",
+    "lingua-language-detector>=2.0",
 
-    # SERIALIZATION
+    # Serialization
     "orjson>=3.9",
+    "PyYAML>=6.0",
 
-    # OBSERVABILITY
+    # Observability
     "structlog>=24.1",
     "prometheus-client>=0.20",
     "opentelemetry-api>=1.24",
     "opentelemetry-sdk>=1.24",
     "opentelemetry-exporter-otlp-proto-grpc>=1.24",
 
-    # SECURITY / GUARDRAILS — Phase 26
+    # Security & PII Protection — python-magic-bin bundles the libmagic DLL
+    # required on Windows. clamd and pyclamd are two independent ClamAV
+    # client implementations used by separate malware-scan call sites in
+    # this codebase (app/api/api_routes.py + app/ingestion/router.py use
+    # clamd; app/pipeline/ingestion_pipeline.py uses pyclamd) — both required.
+    "python-magic-bin>=0.4.14; sys_platform == 'win32'",
+    "python-magic>=0.4.14; sys_platform != 'win32'",
+    "bleach>=6.1",
     "presidio-analyzer>=2.2",
     "presidio-anonymizer>=2.2",
     "spacy>=3.7",               # Presidio NLP engine; run: python -m spacy download en_core_web_lg
-    "python-magic>=0.4.14",
-    "bleach>=6.1",
-    "PyYAML>=6.0",
+    "pyclamd>=0.4.0",
+    "clamd>=1.0.2",
+    "detoxify>=0.5",
 
-    # SYSTEM
+    # Authentication
+    "passlib[argon2]>=1.7.4",
+    "python-jose[cryptography]>=3.3.0",
+    "zxcvbn-python>=4.4.1",
+    "authlib>=1.3.0",
+    "pyotp>=2.9.0",
+    "qrcode[pil]>=7.4.2",
+    "google-auth>=2.29.0",
+    "resend>=2.0.0",
+
+    # System Utilities
     "psutil>=5.9",
+
+    # Evaluation Harness — ragas pinned: 0.1.21 is the last version
+    # compatible with the langchain constraint chain used by app/eval/judges/.
+    # Do not bump casually; re-baseline the eval suite if upgraded.
+    "ragas==0.1.21",
+    "jiwer>=3.0.0",
+    "mlflow>=2.10.0",
 ]
 
 

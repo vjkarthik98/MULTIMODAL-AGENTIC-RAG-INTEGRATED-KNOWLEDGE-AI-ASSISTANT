@@ -132,7 +132,9 @@ def check_and_record_resend(user_id: str) -> tuple[bool, int]:
         r.expire(count_key, settings.OTP_RESEND_WINDOW_SECONDS)
     if count > settings.OTP_RESEND_MAX_PER_WINDOW:
         window_ttl = r.ttl(count_key)
-        return False, int(window_ttl) if window_ttl and window_ttl > 0 else settings.OTP_RESEND_WINDOW_SECONDS
+        return False, (
+            int(window_ttl) if window_ttl and window_ttl > 0 else settings.OTP_RESEND_WINDOW_SECONDS
+        )
 
     r.setex(cooldown_key, settings.OTP_RESEND_COOLDOWN_SECONDS, "1")
     return True, 0
