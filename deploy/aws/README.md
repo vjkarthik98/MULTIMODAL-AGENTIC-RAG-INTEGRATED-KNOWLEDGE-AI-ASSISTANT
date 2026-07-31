@@ -42,6 +42,7 @@ burns a $200 credit in under a week.
 | `lambda/idle_stop/handler.py` | Scheduled idle check; stops the instance, with guards against killing a warming box, an in-flight deploy, or a running self-hosted eval job |
 | `iam/github-oidc-trust-policy.json` | Trust policy for `magik-deploy-role` (**read the comment — it explains the `environment:` subject-claim trap**) |
 | `iam/lambda-*-permissions.json` | Least-privilege policies, scoped to the single instance ARN |
+| `iam/ec2-instance-profile-permissions.json` | Least-privilege policy for the box's own instance profile — `ssm:GetParameter` on `/magik/ghcr_pat` plus the five app secrets below, each scoped to its exact ARN. Attach alongside the AWS-managed `AmazonSSMManagedInstanceCore`. Not applied by any script here — attach it by hand (console or `aws iam put-role-policy`) to whatever role the instance profile uses |
 | `caddy/Caddyfile` | HTTPS reverse proxy on the box; SSE-safe, long timeouts for model loading. Uses `APP_DOMAIN_PLACEHOLDER` as a template — the box's actual `/etc/caddy/Caddyfile` has `magik.vk-ai.online` substituted in directly |
 | `scripts/deploy_lambdas.sh` | Idempotent one-shot deploy of both Lambdas, the API Gateway HTTP API, and the schedule |
 
@@ -109,6 +110,56 @@ has nothing left to object to. It stopped the box in that incident, but only
 after the eval had already failed on its own — it did not kill a healthy run.
 Tightening this further (e.g. a liveness heartbeat independent of GitHub's own
 runner-status reporting) is a real improvement, not yet built.
+
+## App secrets in SSM (Phase 31 — closes the secrets-management gap)
+
+Five values used to live as plaintext in `/opt/magik/.env` indefinitely:
+`GOOGLE_CLIENT_SECRET`, `SMTP_PASSWORD`, `SECRET_KEY`, `JWT_SECRET_KEY`,
+`MONGO_URI`. `cd.yml`'s deploy job now fetches all five from SSM
+Parameter Store on every deploy (same `--with-decryption` pattern already
+used for `/magik/ghcr_pat`) and injects them via a freshly-generated,
+`0600`, never-committed `--env-file` that is deleted immediately after the
+container starts — the plaintext window on disk is this one deploy's
+runtime, not indefinite.
+
+**One-time setup** (from AWS CloudShell — do this before the next tagged
+deploy, or `cd.yml`'s deploy job fails fast on the first missing parameter):
+
+```bash
+aws ssm put-parameter --name /magik/google_client_secret --type SecureString \
+  --value "<the real value, currently in /opt/magik/.env>" --region us-east-1
+aws ssm put-parameter --name /magik/smtp_password --type SecureString \
+  --value "<the real value>" --region us-east-1
+aws ssm put-parameter --name /magik/secret_key --type SecureString \
+  --value "<the real value>" --region us-east-1
+aws ssm put-parameter --name /magik/jwt_secret_key --type SecureString \
+  --value "<the real value>" --region us-east-1
+aws ssm put-parameter --name /magik/mongo_uri --type SecureString \
+  --value "<the real value>" --region us-east-1
+```
+
+Then attach `iam/ec2-instance-profile-permissions.json` to the EC2 instance
+profile's role (this is a one-time manual step — unlike the two Lambda
+roles, nothing in `scripts/` manages the instance profile's policy).
+
+**After the first successful deploy under this scheme**, remove the five
+values from `/opt/magik/.env` on the box — they are no longer read from
+there (the freshly-fetched `--env-file` is layered on top and wins on any
+key collision, so leaving stale copies in `.env` is harmless but pointless,
+and defeats the point of the migration if never cleaned up).
+
+**Why fetch fresh on every deploy instead of once:** these are static,
+long-lived secrets — the SSM parameter value does not change between
+deploys, so `JWT_SECRET_KEY` in particular stays identical across releases
+and existing sessions are not invalidated by a deploy. Only the *storage*
+changed (SSM instead of a standing plaintext file), not the values or their
+lifecycle.
+
+**Not migrated, and why that's fine:** `QDRANT_API_KEY`/`QDRANT_URL` (GitHub
+encrypted secrets — Tier-1 eval runs on GitHub-hosted runners with zero AWS
+access, so SSM isn't reachable from there anyway) and `REDIS_URL`/`REDIS_TOKEN`
+(Upstash — lower blast radius than the five above; revisit only if a real
+incident motivates it, not preemptively).
 
 ## Domain (done)
 

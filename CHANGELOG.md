@@ -1693,6 +1693,43 @@ guest's uploads/chats move over when they sign up.
   the app's `lifespan`, so a stuck migration self-heals within the same
   server run instead of waiting on a restart.
 
+### Added — eval-only model downloads (Prometheus judge)
+
+The first genuinely clean Tier-2 run (see Known Issues) surfaced a real gap:
+`app/eval/judges/prometheus_judge.py` expects
+`.hf_cache/gguf/prometheus-7b-v2.0.Q8_0.gguf` on disk, but nothing ever put it
+there — `download_all_models.py`'s GGUF handling was hardcoded to a single
+global (repo, filename) pair (the main Qwen2.5-14B LLM), so there was no way
+to add a second GGUF-type model to the manifest at all. Tier-2 fell back to
+the lexical judge for every generation-quality metric, which is graceful
+(clearly labeled `lexical_fallback (prometheus_unavailable)`, doesn't affect
+the gated `retrieval` section) but not what the suite was meant to run.
+
+- `download_all_models.py`: GGUF handling generalized from one hardcoded
+  `_gguf_file`/`GGUF_REPO` pair to a `GGUF_MODELS` list of `{key, gguf_repo,
+  gguf_filename, size_gb, ...}` entries, so any number of distinctly-named
+  GGUF files can share `.hf_cache/gguf/`. Added `prometheus_judge`
+  (`prometheus-eval/prometheus-7b-v2.0-GGUF`,
+  `prometheus-7b-v2.0.Q8_0.gguf`, ~7.7GB) as the second entry.
+- New `"startup"` field (default `True`) on any manifest entry controls
+  whether `main()`'s default run — the one `start_server.py`'s
+  `ensure_models()` invokes on every boot, with no arguments — includes it.
+  `prometheus_judge` is `"startup": False`: it downloads to disk only via
+  `--only prometheus_judge` or `--include-eval-models`, never on a normal
+  instance boot. This was already true for *loading* it into VRAM (the
+  judge's own lazy singleton only fires from inside a Tier-2 eval call) —
+  the gap was purely that the file could never even land on disk for that
+  lazy load to find later.
+- Fixed a latent bug this change would otherwise have introduced:
+  `app/core/startup_validator.py`'s `_validate_gguf_checksum()` picked "the
+  first manifest entry with `type == gguf`" to verify against
+  `settings.LLM_MODEL_PATH` — safe when exactly one GGUF entry could ever
+  exist, silently wrong once a second one (Prometheus) can. `download_manifest.json`
+  entries now record `gguf_filename` for GGUF-type models, and the validator
+  matches on that filename instead of positional order, with a fallback to
+  the old first-entry behavior for manifests written before this field
+  existed (the already-deployed box's `download_manifest.json`).
+
 ### Known Issues
 
 - **Idle-stop is verified end to end** (2026-07-30): the instance stopped
@@ -1720,3 +1757,338 @@ guest's uploads/chats move over when they sign up.
   permissions on the instance role, app-side fetch logic instead of a flat
   file read) and was explicitly deferred, not overlooked — least-privilege IAM
   already limits who can reach the box, and `.env` was never committed to git.
+
+# [v0.28.0] — Monitoring & Observability, Tier-2 Auto-Rollback & Secrets Migration
+
+MINOR: this is Phase 31's deliverable, plus two items explicitly deferred from
+Phase 30 with a standing commitment to land them here rather than let them
+drift further ("the final version," per the v0.27.0 Known Issues entry above
+and the project's own phase-discipline rule — build it in the phase it's
+scoped to, or drop it, never silently carry it forward). Four themes:
+
+1. **The telemetry the app already emitted had nowhere to go.** Prometheus
+   counters/histograms across ~50 files and OpenTelemetry spans wrapping the
+   full request path existed since Phase 24, but nothing scraped, stored, or
+   visualized any of it — Phase 31 closes that loop.
+2. **Two Phase-30 incidents left real, scoped gaps.** A red Tier-2 eval result
+   had no connection back to the deploy that caused it, and five app secrets
+   sat in plaintext on the box indefinitely. Both were raised, explicitly
+   deferred to this phase by name, and are now built.
+3. **A first pass at the Grafana RAG-quality dashboard missed the actual ask.**
+   Re-checking the build against `docs/System_Design_v2.pdf` §8 — "add
+   RAG-quality SLOs (recall@k, faithfulness) as first-class monitored
+   signals" — found the dashboard only carried a live-sampled lexical proxy,
+   never the real gated numbers. Fixed in the same pass rather than left as a
+   known gap, since the PDF is the spec this phase is measured against.
+4. **App logs had no home either.** The same "nothing scraped, stored, or
+   visualized" gap from theme 1 applied to logs too — `docker logs` on the
+   box was the only way to see them. Closed with self-hosted Loki rather than
+   AWS CloudWatch Logs, to keep the whole observability story in one
+   self-hosted, $0-marginal-cost Grafana instance instead of splitting it
+   across two separately billed, separately viewed systems.
+
+### Added — Monitoring & Observability stack
+
+- **`docker-compose.monitoring.yml`** — Prometheus, Grafana, Tempo, and an
+  OpenTelemetry Collector, additive to the existing `docker run
+  --name magik-current` production container (never replacing it), joining
+  the same `magik-net` docker network `cd.yml` already creates so containers
+  reach each other by name with no new host port published except Grafana
+  itself, bound to `127.0.0.1` only and reverse-proxied through Caddy.
+- **Grafana gated behind Caddy `basic_auth`** at `/grafana` — treated as
+  non-negotiable, not a nice-to-have: an open Grafana on the public app
+  subdomain would leak internal metrics, traces, and error payloads (query
+  latencies, user counts, circuit-breaker state) to anyone who found the URL.
+- **Three dashboards**: `system_health.json` (per-modality ingestion
+  counters/errors, circuit-breaker state, infra latency), `rag_quality.json`
+  (see the two entries below — this shipped in two passes within the same
+  release once the gap in the first pass was caught), and `logs.json` (added
+  in a third pass alongside Loki, see below).
+- **Grafana unified alerting** (deliberately no Alertmanager, to keep the
+  container count down on a single resource-constrained host): circuit
+  breaker open >2min, ingestion error rate >10%, p95 latency breach, and
+  hallucination-rate drift, routed to a Slack-compatible webhook.
+- **Online eval** (`app/eval/jobs/shadow_sampler.py`, `app/eval/jobs/online_eval.py`)
+  — deterministic, best-effort sampling of live queries (`ONLINE_EVAL_SAMPLE_RATE`,
+  default 0) into MongoDB, scored with reference-free metrics (lexical
+  faithfulness/relevancy, the existing numeric-grounding hallucination check,
+  latency, routing distribution) and pushed as Prometheus gauges. Runs as a
+  background task inside `app/main.py`'s own process — deliberately, not a
+  separate CLI/cron process, since it needs to share the app's own
+  `prometheus_client` registry that `start_http_server` already serves; a
+  separate process would have its own registry and never reach the scrape
+  target. Wired into `app/api/api_routes.py::stream_query`'s existing
+  persistence block, guarded so it can never raise into or meaningfully delay
+  the request path.
+- **`monitoring/slo.md`** — SLOs redefined for this project's scale-to-zero
+  topology: a standard 99.9%-uptime target is meaningless when the box is
+  *deliberately* stopped most of the time, so the real SLO is "a visitor
+  never sees a broken page — either an instant response or a wake-latency
+  budget that resolves within the deploy pipeline's own 20-minute cold-start
+  ceiling."
+
+### Fixed — bugs found while building the above
+
+- **`PROMETHEUS_PORT` defaulted to `9090`** — identical to Prometheus
+  server's own default port, which would have silently broken scraping the
+  moment both ran on the same docker network. Changed to `9464` (the
+  OTel/Prometheus community convention for app-exporter ports).
+- **`GET /metrics` was never real Prometheus exposition format.** It returned
+  a JSON model/infra health dict — the actual Prometheus registry was already
+  served separately via `prometheus_client.start_http_server` on a different
+  port. Renamed the JSON route to `GET /status`, freeing `/metrics` for its
+  real purpose and fixing `app/api/middleware.py`'s quiet-path log filter to
+  match.
+- **Circuit breaker half-open state was indistinguishable from closed.**
+  `_circuit_breaker_state` set the same gauge value (`0`) for both, so no
+  alert could ever tell "recovering from a failure" from "healthy."
+  `app/core/infra_registry.py`'s `_CircuitBreaker` now uses a real 3-value
+  gauge (0=closed, 1=half-open, 2=open), and a failure during the half-open
+  probe now reopens the circuit immediately instead of needing `fail_max`
+  fresh failures to re-trip.
+
+### Added — Tier-2 auto-rollback on a retrieval-section failure (closes a Phase-30-deferred item)
+
+`cd.yml`'s `post-deploy-eval` job only ever *dispatched* Tier-2
+(`eval-gate.yml`'s `tier2-full-suite`) and never waited for or reacted to the
+result — a red Tier-2 run had zero connection back to the deploy that caused
+it. Raised and explicitly deferred at Phase 30's close; built here, scoped
+exactly as committed:
+
+- **Retrieval only, on purpose.** `thresholds.yaml` currently gates only the
+  `retrieval` section against a validated production baseline; every other
+  Tier-2 section is still informational-only against a stale
+  pre-Prometheus-judge baseline, so a red result there does not reliably
+  indicate a real regression and must never trigger a rollback.
+- `app/eval/runner.py`'s `EvalRunner.check_thresholds()` now tracks
+  `last_breached_sections`/`last_error_sections` — previously this
+  distinction existed only as printed log lines, never captured
+  structurally. `app/eval/run.py` writes it to a new `gate_result.json`
+  alongside the existing `rag_report.json`.
+  `eval-gate.yml`'s new rollback step reads that file, not the step's raw
+  exit code, which cannot tell "retrieval regressed" from "a different gated
+  section regressed" or "an unrelated infra error occurred."
+- Rolls back using the exact sequence `cd.yml`'s own health-check-triggered
+  rollback already uses (`docker rm -f` / rename / `docker start`) — no SSM
+  needed, since Tier-2 already runs *on* the box as the self-hosted GPU
+  runner. Scoped to `repository_dispatch` only (immediately post-deploy),
+  never the nightly schedule or a manual dispatch days later, since
+  `magik-previous` is only a meaningful revert target right after a fresh
+  deploy — it may be stale or already pruned under disk pressure by the time
+  a later run would look at it (`cd.yml`'s own cleanup sacrifices it under
+  40GB free).
+- A successful rollback still fails the job on purpose — a rollback
+  happening at all means the deploy was bad, and that must surface red, not
+  read as a quiet pass.
+
+### Added — app secrets migrated to SSM Parameter Store (closes a Phase-30-deferred item)
+
+`/opt/magik/.env` held `GOOGLE_CLIENT_SECRET`, `SMTP_PASSWORD`, `SECRET_KEY`,
+`JWT_SECRET_KEY`, and `MONGO_URI` in plaintext indefinitely — flagged in the
+v0.27.0 Known Issues above, explicitly scoped to this phase rather than left
+open-ended. `cd.yml`'s deploy job now fetches all five from SSM
+`SecureString` on every deploy (the same `--with-decryption` pattern already
+used for `/magik/ghcr_pat`), writes them to a freshly-generated, `0600`,
+never-committed env file layered on top of `--env-file /opt/magik/.env`, and
+deletes it immediately after the container starts — success or failure — so
+the plaintext window on disk is one deploy's runtime, not indefinite. New
+`deploy/aws/iam/ec2-instance-profile-permissions.json`, scoped to exactly
+these five parameter ARNs plus the pre-existing `ghcr_pat` one — this also
+closes an adjacent repo-hygiene gap: the instance profile's own permissions
+had never been captured as a file at all, unlike the two Lambda policies.
+`QDRANT_API_KEY`/`QDRANT_URL` (GitHub encrypted secrets — Tier-1 runs on a
+GitHub-hosted runner with no AWS access anyway) and `REDIS_URL`/`REDIS_TOKEN`
+(Upstash, lower blast radius) were left as-is — a deliberate stop-here
+decision, documented, not a silently abandoned scope.
+
+### Fixed — RAG-quality SLOs were not actually first-class monitored signals
+
+Re-checking the Grafana dashboard against `docs/System_Design_v2.pdf` §8's
+explicit ask found a real gap: the first pass at `rag_quality.json` only
+covered a live-sampled *lexical* faithfulness proxy (see Online Eval above).
+The numbers `thresholds.yaml` actually gates on — recall@5, recall@10, MRR,
+nDCG@10, hit_rate, context_precision, and the real CrossEncoder+GGUF/
+Prometheus-judge faithfulness and hallucination_rate — existed only inside a
+GitHub Actions log, invisible from Grafana.
+
+- New `pushgateway` service (`docker-compose.monitoring.yml`), loopback-bound
+  like Grafana. `eval-gate.yml`'s `tier2-full-suite` job now pushes every
+  numeric metric in `rag_report.json` to it after each run, generically — by
+  reading the report rather than hardcoding metric names, so new
+  suites/metrics appear automatically with no further workflow changes.
+- `rag_quality.json` gained a "CI Tier-2 (gated, real judge)" panel section:
+  retrieval recall/MRR/nDCG/hit_rate/context_precision against their real
+  gate floors, real-judge generation quality, real hallucination_rate, last
+  gate result, and staleness — clearly separated from the live-sampled
+  lexical panels above them so the two are never confused.
+- **Deliberately still not pushed from Tier-1** (the PR-time gate): it runs
+  on a GitHub-hosted runner with no network path to the box's Pushgateway,
+  and scores an ephemeral checkout rather than the production container —
+  plotting that alongside production numbers on the same dashboard would be
+  actively misleading, not just redundant.
+
+### Added — log aggregation (Loki + Promtail)
+
+Raised directly ("what about CloudWatch for app logs?") after the rest of
+this release shipped: the app container's logs existed only as `docker logs
+magik-current` / local files rotating at a 150MB cap on the box itself — no
+search, no retention beyond that cap, no correlation with the metrics/traces
+above, and CloudWatch had never been wired up for them (it was only ever
+used for the idle-stop Lambda's own execution logs and its `NetworkIn`
+metric check — unrelated).
+
+- **Loki, not CloudWatch Logs** — a deliberate choice, not the default AWS
+  answer: staying self-hosted keeps this in the same $0-marginal-cost,
+  single-Grafana-pane-of-glass model as the rest of the stack instead of
+  adding a second, separately billed, separately viewed log destination.
+  `docker-compose.monitoring.yml` gains `loki` (single-binary, local
+  filesystem storage, 7-day retention — same convention as Tempo) and
+  `promtail`, which tails the *same* Docker json-file logs every container
+  already writes via Docker service discovery (the socket + host log
+  directory, both read-only) — no change to how `magik-current` logs, no
+  Docker log-driver swap, `docker logs` keeps working exactly as before.
+- **Bidirectional log↔trace correlation**, for real, not just cosmetic:
+  `app/utils/logger.py`'s `JsonFormatter` already stamps every log line with
+  the current OTel `trace_id` (pre-existing, just never connected to
+  anything until now). Promtail's pipeline parses it out (requires
+  `LOG_JSON=true` on the box — new required `.env` addition), Tempo's
+  `tracesToLogsV2` and Loki's `derivedFields` are wired to each other by
+  datasource UID, so a log line links straight to its Tempo trace and back.
+- New `logs.json` dashboard: log volume by container, `magik-current` log
+  volume by level, an errors/warnings-only stream, and the full stream.
+- **A real bug caught before it shipped**: the Loki `derivedFields` URL was
+  first written as `$${__value.raw}` — correct escaping for a value living
+  *inside* `docker-compose.monitoring.yml` (where `$$` escapes compose's own
+  `${VAR}` substitution), wrong here, since `datasources.yml` is mounted
+  straight into Grafana and never passed through compose's substitution at
+  all. Would have silently produced a dead link. Fixed to the single-`$`
+  form Grafana's own template syntax actually expects.
+- `session_id`/`request_id` are parsed but deliberately not promoted to
+  indexed Loki labels (only `level`/`trace_id` are) — per-session/per-request
+  labels would be unbounded cardinality. Both stay queryable via a LogQL
+  line filter instead.
+
+### Removed — unused optional integrations (Cohere, SerpAPI, Langfuse)
+
+Three settings (`COHERE_API_KEY`, `SERPAPI_KEY`, plus `LANGFUSE_PUBLIC_KEY`/
+`LANGFUSE_SECRET_KEY`/`LANGFUSE_HOST`/`LANGFUSE_ENABLED`) were declared in
+`config.py` and placeholder-blank in `.env`/`.env.example` but never actually
+read anywhere in `app/` — confirmed by a repo-wide search, not assumed.
+Cohere (a hosted-reranker alternative to the local `BGE-reranker-large`
+already in use) and SerpAPI (a paid alternative to the Tavily web-search tool
+already wired up, with its own SSRF/injection guard integration a second
+provider would need rebuilding from scratch) were never even installed as
+dependencies. Langfuse (LLM tracing/cost observability) was an installed,
+never-imported dependency — and is now doubly redundant with the
+OTel+Prometheus+Grafana stack this release actually built, and would mean
+either standing up a second overlapping service or shipping prompts/document
+content to a third party, against this project's privacy-preserving,
+100%-local positioning. Removed from `app/core/config.py`, `.env.example`,
+`.env`, and `pyproject.toml` (the `observability` optional-dependency group
+and its mypy override entry).
+
+### Added — rate-limited OTP resend
+
+`POST /auth/verify-otp` had no way to request a fresh code: `LoginPage.jsx`'s
+"Resend code" button papered over the gap by re-calling the *original*
+login/register request, which happened to work for login (re-issues a new
+OTP as a side effect) but was silently broken for registration — at that
+point the account is still `is_active=False`, and `authenticate()` correctly
+rejects inactive accounts, so clicking resend mid-signup surfaced a
+confusing "email not verified" error instead of a new code.
+
+- New `POST /auth/resend-otp` (`app/auth/router.py`), keyed off the existing
+  `otp_token` (`mfa_challenge` JWT) so it works identically regardless of
+  which flow issued the challenge. Rate-limited via
+  `otp_store.check_and_record_resend()`: a cooldown between individual sends
+  (`OTP_RESEND_COOLDOWN_SECONDS`, default 45s) and a cap per rolling window
+  (`OTP_RESEND_MAX_PER_WINDOW`, default 5 per `OTP_RESEND_WINDOW_SECONDS`,
+  default 1h) — a 429 with `Retry-After` once either limit is hit, so resend
+  can't be used to hammer the mail provider or keep an OTP session alive
+  indefinitely.
+- `LoginPage.jsx`'s resend button now calls the real endpoint instead of the
+  login/register workaround, and its cooldown timer reads the server's
+  `cooldown_seconds` rather than a hardcoded client-side guess.
+
+### Removed — guest mode
+
+Guest mode (anonymous trial sessions with a 5-query/2-upload allowance that
+could "convert" into a real account) is gone — the app now requires a real
+signup or login before any use, full stop. Two things drove this, raised and
+agreed on directly rather than found as a bug:
+
+1. **The engineering cost had stopped paying for itself.** Guest→account
+   conversion needed a three-way data migration (Qdrant vector relabeling,
+   BM25 index, filesystem) spanning Redis-backed pending-state bridges, retry
+   loops, and a background reconciliation sweep — and it kept breaking:
+   guest data went missing after Google sign-up because a second,
+   independent "Continue with Google" button (the "Log in" modal) never
+   stashed the guest token the migration path needed, silently orphaning
+   Qdrant/BM25 data with no user-facing error and no delete path.
+2. **The product no longer needed it.** Chat-is-the-landing-page auto-guest
+   creation meant *every* visitor became a guest before ever seeing a
+   registration form, which had quietly made `/auth/guest/convert`'s
+   "skip OTP — the guest already demonstrated intent" rationale wrong by
+   default: nearly all real signups were going through the OTP-skipping
+   guest-conversion path, not the OTP-gated `/auth/register` path the
+   rationale assumed was the common case.
+
+**Backend**: deleted `app/auth/guest_router.py` and `app/auth/guest_service.py`
+outright (session lifecycle, Redis Lua atomic limit checks, the Qdrant/BM25/
+filesystem migration pipeline and its retry/reconciliation machinery, the
+OTP-gated-conversion bridge built earlier this same phase to fix the
+skip-OTP problem in point 2 above — all of it retired together rather than
+patched, since the feature it served no longer exists). Removed the guest
+role and its call sites: `UserRole.GUEST`, `require_real_user`,
+`issue_guest_token`, the three rate-limit-check blocks on `/ingest`,
+`/query/stream`, and `/upload`, and the `GUEST_*` settings block in
+`config.py`. `dependencies.py::_build_user_from_payload` now rejects an
+unrecognized `role` claim with a clean 401 instead of a 500, so a still-valid
+guest JWT issued before this deploy degrades gracefully rather than crashing
+a request. Also deleted `service.py::register_and_activate`, an already-dead
+method (zero remaining callers once `/guest/convert` was removed) uncovered
+while auditing this area.
+
+**Frontend**: `App.jsx` no longer auto-creates a guest session for a
+visitor with no stored credentials — it leaves `auth` null so `LoginPage`
+renders directly. Deleted `ConversionModal.jsx`, `GuestBanner.jsx` (already
+dead — imported but never rendered), `guestConstants.js`, and
+`LoginModal.jsx` (became unreachable once the guest-only "Log in"/"Sign up"
+CTAs that were its only entry points were removed). Stripped guest state,
+handlers, and UI branches from `Sidebar.jsx`, `ChatPage.jsx`, and
+`LoginPage.jsx` (the "Try without signing in" CTA), and removed
+`createGuestSession`/`convertGuestToUser`/`migrateGuestData`/`getGuestLimits`
+from `client.js`.
+
+**Verified**: backend imports cleanly and serves 57 routes with zero `guest`
+paths in the OpenAPI schema; `ruff check` passes on every touched file; the
+`tests/auth/` suite passes (2 pre-existing failures from a `bcrypt` package
+missing in the local dev venv, unrelated to this change — `tests/auth/
+test_guest_limits.py` itself was deleted, not left failing); `vite build`
+succeeds with no new lint errors. A repo-wide search for "guest" afterward
+turns up nothing outside this changelog's own history and one intentional
+comment explaining the 401-not-500 handling above.
+
+### Known Issues
+
+- **None of this has been validated against the live box.** This entire
+  release was built and syntax/logic-validated from a development
+  environment with no AWS/SSM access — `monitoring/` stack startup, the
+  Pushgateway push, the Tier-2 rollback path, the SSM secrets fetch, and the
+  Loki/Promtail log pipeline (including whether Promtail can actually read
+  `/var/lib/docker/containers/*/*.log` without a permissions fix — see the
+  compose file's comment on the `promtail` service) all still need a real
+  run against `magik-prod` before being trusted. See
+  `docs/runbooks/phase-31-monitoring.md` §4's validation matrix (items 15-20
+  cover Loki specifically).
+- **Finance numeric fidelity is not scored on live traffic** — `online_eval.py`
+  does not run `compute_finance_fidelity()` against sampled live answers; the
+  offline gate still applies at merge time and is now visible on the CI
+  Tier-2 dashboard panels, but the live-sampled signal specifically is a
+  documented gap, not silently dropped.
+- **One-time SSM setup is required before the next tagged deploy** — the five
+  app-secret parameters must be seeded (`aws ssm put-parameter`, commands in
+  `deploy/aws/README.md`) and `ec2-instance-profile-permissions.json`
+  attached to the instance profile's role, or `cd.yml`'s deploy job fails
+  fast on the first missing parameter rather than silently falling back to
+  the old plaintext `.env` values.

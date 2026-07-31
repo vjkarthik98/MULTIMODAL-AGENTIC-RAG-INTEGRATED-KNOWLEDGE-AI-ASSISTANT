@@ -307,6 +307,49 @@ jobs:
           log "pulling $IMG (multi-GB, several minutes expected)"
           docker pull "$IMG" || { log "FATAL: docker pull failed"; exit 1; }
 
+          # ── App secrets from SSM (Phase 31 — project memory
+          #    "secrets-management-gap") ───────────────────────────────────
+          # These five used to live as plaintext in /opt/magik/.env
+          # indefinitely. They now come from SSM SecureString on every
+          # deploy, written to a freshly-generated, 0600, never-committed
+          # env file that outlives only this docker run — deleted
+          # immediately after, success or failure, so the plaintext window
+          # on disk is this script's runtime, not "forever". The IAM policy
+          # this role runs under (deploy/aws/iam/ec2-instance-profile-
+          # permissions.json) scopes ssm:GetParameter to exactly these five
+          # ARNs plus /magik/ghcr_pat above — nothing else in Parameter
+          # Store is reachable from this box.
+          #
+          # One-time setup (not run by this script): seed the five values
+          # with `aws ssm put-parameter --type SecureString`, documented in
+          # deploy/aws/README.md's "App secrets in SSM" section — this
+          # script only ever READS them.
+          SECRETS_ENV="/opt/magik/.env.secrets"
+          rm -f "$SECRETS_ENV"
+          : > "$SECRETS_ENV"
+          chmod 600 "$SECRETS_ENV"
+          SECRETS_OK="yes"
+          for PARAM_KEY in \
+            "google_client_secret:GOOGLE_CLIENT_SECRET" \
+            "smtp_password:SMTP_PASSWORD" \
+            "secret_key:SECRET_KEY" \
+            "jwt_secret_key:JWT_SECRET_KEY" \
+            "mongo_uri:MONGO_URI"
+          do
+            SSM_NAME="${PARAM_KEY%%:*}"
+            ENV_KEY="${PARAM_KEY##*:}"
+            VAL="$(aws ssm get-parameter --name "/magik/${SSM_NAME}" \
+                     --with-decryption --query Parameter.Value --output text 2>/dev/null)" \
+              || { log "FATAL: could not read /magik/${SSM_NAME} from SSM"; SECRETS_OK="no"; break; }
+            echo "${ENV_KEY}=${VAL}" >> "$SECRETS_ENV"
+          done
+          if [ "$SECRETS_OK" != "yes" ]; then
+            rm -f "$SECRETS_ENV"
+            log "FATAL: app-secrets fetch from SSM failed — see deploy/aws/README.md 'App secrets in SSM'"
+            exit 1
+          fi
+          log "app secrets fetched from SSM (5/5)"
+
           # ── Local cache sidecar ───────────────────────────────────────────
           # app/core/infra_registry.py::get_cache() backs ingestion job status,
           # the JWT blacklist, the embedding cache and per-user rate limits. It
@@ -352,6 +395,10 @@ jobs:
 
           # --shm-size: torch dataloaders/multiprocessing outgrow the 64MB default.
           # --log-opt:  cap container logs; this box has already hit a full disk once.
+          # --env-file /opt/magik/.env.secrets AFTER --env-file /opt/magik/.env:
+          # Docker applies later --env-file values last, so the five SSM-sourced
+          # keys win over any stale copy still sitting in the long-lived .env
+          # during the migration window (see deploy/aws/README.md).
           docker run -d --name magik-current \
             --gpus all --restart unless-stopped \
             --network magik-net \
@@ -359,13 +406,20 @@ jobs:
             --log-opt max-size=50m --log-opt max-file=3 \
             -p 8000:8000 \
             --env-file /opt/magik/.env \
+            --env-file "$SECRETS_ENV" \
             -e LOCAL_CACHE_HOST=magik-redis \
             -e TORCH_HOME=/app/.hf_cache/torch \
             -v /opt/magik/.hf_cache:/app/.hf_cache \
             -v /opt/magik/data:/app/data \
             -v /opt/magik/logs:/app/logs \
             "$IMG"
-          if [ $? -ne 0 ]; then
+          RUN_STATUS=$?
+          # --env-file is read once at container-create time and baked into the
+          # container's env from here on — the file has no further purpose
+          # whether the run above succeeded or failed. Shrink the plaintext
+          # window on disk to as close to zero as possible.
+          rm -f "$SECRETS_ENV"
+          if [ "$RUN_STATUS" -ne 0 ]; then
             log "FATAL: docker run failed (port 8000 already held by a non-container process?)"
             docker rename magik-previous magik-current >/dev/null 2>&1 || true
             docker start magik-current >/dev/null 2>&1 || true

@@ -561,18 +561,30 @@ class ModelLoader:
                 processor = AutoProcessor.from_pretrained(
                     settings.QWEN2_VL_MODEL, trust_remote_code=True
                 )
-                load_kwargs: dict = {"trust_remote_code": True}
+                # low_cpu_mem_usage + device_map stream each shard straight to its
+                # target device as it's read, instead of the plain from_pretrained()
+                # default of materializing the FULL fp16 7B state dict (~15GB) in
+                # host CPU RAM first and only then .to(device)-copying it. On the
+                # g6e.xlarge's 32GB host RAM, already holding ~10 other resident
+                # models, that CPU-side spike was enough to push the box into swap
+                # thrashing severe enough to hang the SSH session and even
+                # `nvidia-smi` itself — reproduced twice, always stalled at shard
+                # 1/5 of this exact load. device_map is skipped for CPU/MPS, where
+                # there's no separate CPU-then-GPU copy to avoid.
+                load_kwargs: dict = {"trust_remote_code": True, "low_cpu_mem_usage": True}
                 if settings.QWEN2_VL_LOAD_IN_8BIT and decision.device == "cuda":
                     load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
                     # Force float16 compute so bitsandbytes INT8 never receives bfloat16
                     # inputs — the bfloat16→float16 cast inside the CUDA kernel segfaults.
                     load_kwargs["torch_dtype"] = _torch_dtype("float16")
+                    load_kwargs["device_map"] = {"": decision.device}
                 elif decision.device == "cuda":
                     load_kwargs["torch_dtype"] = _torch_dtype("float16")
+                    load_kwargs["device_map"] = {"": decision.device}
                 model = Qwen2VLForConditionalGeneration.from_pretrained(
                     settings.QWEN2_VL_MODEL, **load_kwargs
                 )
-                if not settings.QWEN2_VL_LOAD_IN_8BIT:
+                if decision.device != "cuda":
                     model.to(decision.device)
                 model.eval()
                 return processor, model
@@ -626,16 +638,22 @@ class ModelLoader:
                 processor = AutoProcessor.from_pretrained(
                     settings.VIDEO_QWEN2_VL_MODEL, trust_remote_code=True
                 )
-                load_kwargs: dict = {"trust_remote_code": True}
+                # See the identical comment in get_qwen2_vl() above — same fix,
+                # same reason (host-RAM spike during from_pretrained() vs. a
+                # per-shard device_map load), applied here for consistency in
+                # case VIDEO_QWEN2_VL_MODEL is ever bumped off the 2B checkpoint.
+                load_kwargs: dict = {"trust_remote_code": True, "low_cpu_mem_usage": True}
                 if settings.QWEN2_VL_LOAD_IN_8BIT and decision.device == "cuda":
                     load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
                     load_kwargs["torch_dtype"] = _torch_dtype("float16")
+                    load_kwargs["device_map"] = {"": decision.device}
                 elif decision.device == "cuda":
                     load_kwargs["torch_dtype"] = _torch_dtype("float16")
+                    load_kwargs["device_map"] = {"": decision.device}
                 model = Qwen2VLForConditionalGeneration.from_pretrained(
                     settings.VIDEO_QWEN2_VL_MODEL, **load_kwargs
                 )
-                if not settings.QWEN2_VL_LOAD_IN_8BIT:
+                if decision.device != "cuda":
                     model.to(decision.device)
                 model.eval()
                 return processor, model

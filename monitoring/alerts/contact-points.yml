@@ -1,0 +1,21 @@
+# Phase 31 — Grafana contact point provisioning.
+# Webhook URL comes from the environment (Grafana's provisioning YAML
+# supports ${VAR} expansion natively) — NEVER hardcoded here. Set
+# SLACK_WEBHOOK_URL in /opt/magik/.env (or any Slack-compatible incoming
+# webhook — ntfy.sh, Discord's Slack-compatible endpoint, etc. all work)
+# and pass it through to the grafana container (docker-compose.monitoring.yml
+# already forwards /opt/magik/.env via env_file).
+
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: magik-webhook
+    receivers:
+      - uid: magik-webhook-receiver
+        type: slack
+        settings:
+          url: "${SLACK_WEBHOOK_URL}"
+          title: "{{ .CommonAnnotations.summary }}"
+          text: "{{ .CommonAnnotations.description }}"
+        disableResolveMessage: false

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# APP/MAIN.PY — MAGIK FINANCE RAG v0.25.0
+# APP/MAIN.PY — MAGIK FINANCE RAG v0.28.0
 # FASTAPI APPLICATION ENTRY POINT — WIRES EVERYTHING TOGETHER
 # SECTION 4.6 — LIFESPAN, MIDDLEWARE, OTEL, PROMETHEUS, CORS, RATE LIMIT
 # ── HF CACHE MUST BE SET BEFORE ANY TRANSFORMERS/TORCH IMPORT ──────────────
@@ -132,28 +132,6 @@ async def _warmup_infra_background() -> None:
         logger.warning(event="infra_warmup_failed", error=str(e))
 
 
-# GUEST→USER QDRANT RECONCILIATION — retries any guest data migrations whose
-# Qdrant vector relabel step kept failing even after migrate_guest_to_user()'s
-# own in-request retries (e.g. Qdrant was mid-outage during a signup). The
-# startup sweep in _cleanup_temp_dirs() catches these on the next deploy/
-# restart; this loop catches them within the SAME process lifetime instead of
-# leaving migrated content mistagged and unsearchable until whenever that is.
-_GUEST_QDRANT_RECONCILE_INTERVAL_SEC = 30 * 60  # 30 min
-
-
-async def _periodic_guest_qdrant_reconcile() -> None:
-    from app.auth.guest_service import retry_pending_guest_qdrant_migrations
-
-    while True:
-        await asyncio.sleep(_GUEST_QDRANT_RECONCILE_INTERVAL_SEC)
-        try:
-            fixed = await asyncio.to_thread(retry_pending_guest_qdrant_migrations)
-            if fixed:
-                logger.info(event="guest_qdrant_migrations_reconciled", fixed=fixed)
-        except Exception as e:
-            logger.warning(event="guest_qdrant_reconcile_sweep_failed", error=str(e))
-
-
 # MODEL WARMUP — parallel GPU preload via ThreadPoolExecutor.
 # All GPU models are loaded concurrently into VRAM so the first query
 # has zero cold-start penalty. Uses model_registry._ensure() which is
@@ -225,28 +203,6 @@ def _cleanup_temp_dirs() -> None:
                         pass
         logger.info(event="temp_dirs_cleaned")
 
-        # Clean up expired guest user directories (guest_* older than TTL + 1h)
-        try:
-            from app.auth.guest_service import cleanup_expired_guest_dirs
-
-            removed = cleanup_expired_guest_dirs()
-            if removed:
-                logger.info(event="guest_dirs_cleaned", removed=removed)
-        except Exception as _ge:
-            logger.warning(event="guest_dir_cleanup_failed", error=str(_ge))
-
-        # Reconcile any guest→user Qdrant vector relabels that were still
-        # failing after migrate_guest_to_user()'s own in-request retries gave
-        # up (e.g. Qdrant was down during signup) — see guest_service.py.
-        try:
-            from app.auth.guest_service import retry_pending_guest_qdrant_migrations
-
-            fixed = retry_pending_guest_qdrant_migrations()
-            if fixed:
-                logger.info(event="guest_qdrant_migrations_reconciled", fixed=fixed)
-        except Exception as _qe:
-            logger.warning(event="guest_qdrant_reconcile_sweep_failed", error=str(_qe))
-
     except Exception as e:
         logger.warning(event="temp_dir_cleanup_failed", error=str(e))
 
@@ -299,8 +255,14 @@ async def lifespan(app: FastAPI):
     # GPU model preload: all models load in parallel into VRAM
     background_tasks.append(asyncio.create_task(_warmup_models_async()))
 
-    # Guest→user Qdrant reconciliation loop — see docstring above the function
-    background_tasks.append(asyncio.create_task(_periodic_guest_qdrant_reconcile()))
+    # Online eval (Phase 31) — no-op unless ONLINE_EVAL_ENABLED and
+    # ONLINE_EVAL_SAMPLE_RATE > 0. Must run in THIS process: it pushes into
+    # the same prometheus_client default registry _setup_prometheus() above
+    # just started serving on settings.PROMETHEUS_PORT — a separate CLI/cron
+    # process would have its own registry and never reach the scrape target.
+    from app.eval.jobs.online_eval import run_online_eval_loop
+
+    background_tasks.append(asyncio.create_task(run_online_eval_loop()))
 
     startup_latency = round(time.time() - startup_start, 2)
     logger.info(
@@ -618,10 +580,6 @@ from app.auth.router import router as auth_router
 
 app.include_router(auth_router)  # mounts at /auth (prefix defined in router.py)
 
-from app.auth.guest_router import router as guest_router
-
-app.include_router(guest_router)  # mounts at /auth/guest*
-
 from app.auth.admin_router import router as admin_router
 
 app.include_router(admin_router)  # mounts at /admin — requires role=admin JWT
@@ -718,11 +676,17 @@ def readiness() -> dict[str, Any]:
         }
 
 
-# METRICS — SECTION 6
+# STATUS — SECTION 6 — human/dashboard-facing JSON summary of model + infra
+# health. Renamed from "/metrics" (Phase 31): a route named /metrics that
+# returns a JSON dict, while the REAL Prometheus text-exposition metrics are
+# served by prometheus_client.start_http_server on settings.PROMETHEUS_PORT
+# (see _setup_prometheus() above), was two different things sharing one name.
+# /metrics is now reserved for the real Prometheus scrape target; this JSON
+# summary lives at /status. See monitoring/prometheus/prometheus.yml.
 
 
-@app.get("/metrics", tags=["System"])
-def metrics() -> dict[str, Any]:
+@app.get("/status", tags=["System"])
+def status() -> dict[str, Any]:
     if not settings.PROMETHEUS_ENABLED:
         return {
             "status": "disabled",
@@ -737,6 +701,7 @@ def metrics() -> dict[str, Any]:
             "status": "ok",
             "models": model_loader.health_check(),
             "infra": infra.health_check(),
+            "prometheus_port": settings.PROMETHEUS_PORT,
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}

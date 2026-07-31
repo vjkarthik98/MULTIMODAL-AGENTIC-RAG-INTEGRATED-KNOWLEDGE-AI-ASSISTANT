@@ -26,6 +26,15 @@ class EvalRunner:
     def __init__(self, cfg: EvalConfig | None = None):
         self.cfg = cfg or load_config()
         self._thresholds: dict[str, Any] | None = None
+        # Populated by check_thresholds() — which SECTIONS (not individual
+        # metrics) contributed a breach/error on the last call. Exit code
+        # alone can't distinguish "retrieval regressed" from "some other
+        # gated section regressed" or "an infra error occurred"; CD's
+        # auto-rollback (Phase 31 — see docs/runbooks/phase-31-monitoring.md)
+        # needs exactly that distinction, since only `retrieval` is currently
+        # a validated, trustworthy gate (thresholds.yaml header comment).
+        self.last_breached_sections: set[str] = set()
+        self.last_error_sections: set[str] = set()
 
     def _load_thresholds(self) -> dict[str, Any]:
         if self._thresholds is not None:
@@ -205,6 +214,8 @@ class EvalRunner:
         breaches: list[str] = []
         errors: list[str] = []
         any_gated = False
+        self.last_breached_sections = set()
+        self.last_error_sections = set()
 
         for suite_name, suite_result in results.items():
             for metric_name, m in suite_result.metrics.items():
@@ -230,6 +241,7 @@ class EvalRunner:
                         f"({threshold.get('why', '')})"
                     )
                     breaches.append(msg)
+                    self.last_breached_sections.add(section_name)
                     print(msg)
                 if max_val is not None and m.value > float(max_val):
                     msg = (
@@ -237,6 +249,7 @@ class EvalRunner:
                         f"({threshold.get('why', '')})"
                     )
                     breaches.append(msg)
+                    self.last_breached_sections.add(section_name)
                     print(msg)
 
             if suite_result.breached:
@@ -247,8 +260,10 @@ class EvalRunner:
                     any_gated = True
                     if "error" in k.lower():
                         errors.append(f"{suite_name}.{k}: {v}")
+                        self.last_error_sections.add(section_name)
                     else:
                         breaches.append(f"{suite_name}.{k}: {v}")
+                        self.last_breached_sections.add(section_name)
 
         if not any_gated:
             print(

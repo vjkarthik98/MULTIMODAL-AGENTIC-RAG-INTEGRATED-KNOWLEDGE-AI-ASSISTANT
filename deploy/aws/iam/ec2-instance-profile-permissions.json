@@ -1,0 +1,40 @@
+{
+  "_comment": [
+    "Permissions for the EC2 instance profile attached to the magik-prod box.",
+    "Attach ALONGSIDE the AWS-managed AmazonSSMManagedInstanceCore (required for",
+    "cd.yml's SSM-based deploy to reach the box at all).",
+    "",
+    "This file was previously undocumented: the box has relied on",
+    "ssm:GetParameter for /magik/ghcr_pat since Phase 30 (see cd.yml's",
+    "remote-deploy.sh, which runs ON this instance via SSM and calls",
+    "`aws ssm get-parameter --name /magik/ghcr_pat`), but the instance profile's",
+    "own policy was never captured as a repo file the way the two Lambda",
+    "policies were. Phase 31 (project memory 'secrets-management-gap') adds five",
+    "more app secrets to the same pattern and is the occasion to fix that gap.",
+    "",
+    "Every Resource below is scoped to one exact parameter path -- this role",
+    "must not be able to read any other secret in Parameter Store, and must",
+    "never be granted a wildcard ssm:GetParameter."
+  ],
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadGhcrPullToken",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter"],
+      "Resource": "arn:aws:ssm:us-east-1:537557168406:parameter/magik/ghcr_pat"
+    },
+    {
+      "Sid": "ReadAppSecretsAtDeployTime",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter"],
+      "Resource": [
+        "arn:aws:ssm:us-east-1:537557168406:parameter/magik/google_client_secret",
+        "arn:aws:ssm:us-east-1:537557168406:parameter/magik/smtp_password",
+        "arn:aws:ssm:us-east-1:537557168406:parameter/magik/secret_key",
+        "arn:aws:ssm:us-east-1:537557168406:parameter/magik/jwt_secret_key",
+        "arn:aws:ssm:us-east-1:537557168406:parameter/magik/mongo_uri"
+      ]
+    }
+  ]
+}

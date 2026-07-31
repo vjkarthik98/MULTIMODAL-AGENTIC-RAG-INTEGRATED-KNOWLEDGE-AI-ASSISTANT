@@ -629,6 +629,7 @@ def _build_memory_context(
     session_id: str,
     embedder: Any,
     memory: Any,
+    user_id: str | None = None,
 ) -> str:
     if not memory or len(query) < 20:
         return ""
@@ -636,7 +637,7 @@ def _build_memory_context(
         from app.memory.memory_filter import filter_relevant_history
         from app.memory.memory_fusion import build_memory_context
 
-        history = memory.get_history(session_id)
+        history = memory.get_history(session_id, user_id)
         if not history:
             return ""
         filtered = filter_relevant_history(query, history, embedder, session_id=session_id)
@@ -1331,7 +1332,9 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
             if decision == "memory":
                 # Recall from conversation memory and generate a grounded answer
                 try:
-                    mem_ctx = _build_memory_context(query, session_id, embedder, memory)
+                    mem_ctx = _build_memory_context(
+                        query, session_id, embedder, memory, user_id=user_id
+                    )
                     if mem_ctx:
                         mem_prompt = (
                             f"Based on our previous conversation:\n{mem_ctx}\n\n"
@@ -1408,7 +1411,7 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
             return resp
 
         # MEMORY CONTEXT — SECTION 4.7
-        memory_context = _build_memory_context(query, session_id, embedder, memory)
+        memory_context = _build_memory_context(query, session_id, embedder, memory, user_id=user_id)
 
         # QUERY DECOMPOSITION — SECTION 4.8
         # Gated heuristically: the decomposer is an extra serialized LLM call,

@@ -16,6 +16,7 @@ from app.auth.models import (
     ForgotPasswordRequest,
     LoginRequest,
     LogoutRequest,
+    OTPResendRequest,
     OTPVerifyRequest,
     RefreshRequest,
     RegisterRequest,
@@ -191,6 +192,75 @@ async def verify_otp(req: OTPVerifyRequest):
     tokens = issue_tokens(user.user_id, user.email, user.role.value)
     logger.info(event="otp_verified_complete", user_id=user_id)
     return {**TokenPair(**tokens).model_dump(), "device_token": device_token}
+
+
+# ── Resend OTP ─────────────────────────────────────────────────────────────────
+
+
+@router.post("/resend-otp")
+async def resend_otp(req: OTPResendRequest):
+    """
+    Resend a fresh 6-digit code for a pending login/registration OTP
+    challenge. Rate-limited: at least OTP_RESEND_COOLDOWN_SECONDS between
+    sends, and at most OTP_RESEND_MAX_PER_WINDOW within OTP_RESEND_WINDOW_SECONDS
+    — resending is not itself a way to keep the OTP session alive indefinitely
+    or to hammer the mail provider.
+    """
+    from jose import JWTError
+    from jose import jwt as jose_jwt
+
+    from app.auth.email_service import send_otp_email
+    from app.auth.otp_store import check_and_record_resend, generate_otp, store_otp
+
+    try:
+        payload = jose_jwt.decode(
+            req.otp_token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+        )
+        if payload.get("type") != "mfa_challenge":
+            raise ValueError("Invalid OTP token type")
+        user_id = payload["sub"]
+    except (JWTError, KeyError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="OTP session expired. Please sign in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from None
+
+    user = _svc.get_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    try:
+        allowed, retry_after = await asyncio.to_thread(check_and_record_resend, user_id)
+    except Exception as exc:
+        logger.error(event="otp_resend_rate_check_failed", error=str(exc), user_id=user_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not resend verification email. Please try again.",
+        ) from exc
+
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Please wait {retry_after}s before requesting another code.",
+            headers={"Retry-After": str(max(1, retry_after))},
+        )
+
+    otp = generate_otp()
+    try:
+        await asyncio.to_thread(store_otp, user_id, otp)
+        await asyncio.to_thread(send_otp_email, user.email, otp)
+    except Exception as exc:
+        logger.error(event="otp_resend_send_failed", error=str(exc), user_id=user_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not resend verification email. Please try again.",
+        ) from exc
+
+    logger.info(event="otp_resent", user_id=user_id)
+    return {"sent": True, "cooldown_seconds": settings.OTP_RESEND_COOLDOWN_SECONDS}
 
 
 # ── Login (OAuth2 form — enables /docs "Authorize" button) ───────────────────
