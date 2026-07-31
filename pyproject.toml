@@ -5,8 +5,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "multimodal-rag-assistant"
-version         = "0.26.0"
-description     = "Production Multimodal RAG + Agentic AI System — Phase 26"
+version         = "0.28.0"
+description     = "Production Multimodal RAG + Agentic AI System — Phase 31"
 readme          = "README.md"
 requires-python = ">=3.10"
 
@@ -145,10 +145,6 @@ dev = [
     "multimodal-rag-assistant[test,lint,typecheck,security]",
     "pre-commit>=3.7",
     "detect-secrets>=1.5",
-]
-
-observability = [
-    "langfuse>=2.0",
 ]
 
 
@@ -315,7 +311,6 @@ module = [
     "imagehash.*",
     "tavily.*",
     "upstash_redis.*",
-    "langfuse.*",
     "presidio_analyzer.*",
     "presidio_anonymizer.*",
     "spacy.*",

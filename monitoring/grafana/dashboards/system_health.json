@@ -1,0 +1,132 @@
+{
+  "title": "MAGIK — System Health",
+  "uid": "magik-system-health",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "tags": ["magik", "phase-31"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Circuit breaker state (qdrant / redis / mongo)",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "circuit_breaker_state",
+          "legendFormat": "{{service}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "Closed", "color": "green" } } },
+            { "type": "value", "options": { "1": { "text": "Half-Open", "color": "yellow" } } },
+            { "type": "value", "options": { "2": { "text": "Open", "color": "red" } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 2 }
+            ]
+          }
+        }
+      },
+      "options": { "textMode": "value_and_name", "colorMode": "background" }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Circuit breaker failure counts",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "circuit_breaker_failures_total",
+          "legendFormat": "{{service}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Infra service availability (qdrant / redis / mongo / bm25)",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "expr": "infra_service_available",
+          "legendFormat": "{{service}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 } }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Infra init latency (p50/p95)",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(infra_init_duration_seconds_bucket[5m])) by (le, service))",
+          "legendFormat": "p50 {{service}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(infra_init_duration_seconds_bucket[5m])) by (le, service))",
+          "legendFormat": "p95 {{service}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Per-modality ingestion volume (magik_{mod}_extracts_total)",
+      "description": "One row per modality ingestor's Prometheus Counter — see app/ingestion/{mod}_ingest.py. Grows automatically as new counters are added elsewhere in the per-modality stack (chunking/embedding/BM25 layers); this panel does not need updating when they are.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        {
+          "expr": "{__name__=~\"magik_.*_extracts_total\"}",
+          "instant": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Per-modality ingestion errors (magik_{mod}_extract_errors_total)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        {
+          "expr": "{__name__=~\"magik_.*_extract_errors_total\"}",
+          "instant": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "All magik_* metrics (catch-all — includes chunking/embedding/BM25/agent counters not itemized above)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "targets": [
+        {
+          "expr": "{__name__=~\"magik_.*\"}",
+          "instant": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

@@ -508,10 +508,174 @@ jobs:
           docker cp "${CONTAINER}:/app/app/eval/reports/." "${GITHUB_WORKSPACE}/eval-reports/" 2>/dev/null \
             || echo "no reports produced (the suite likely failed before scoring)"
 
+      # Phase 31 (System Design v2 §8 gap: "add RAG-quality SLOs (recall@k,
+      # faithfulness) as first-class monitored signals, not just system
+      # metrics") — this was left undone in the first Phase 31 pass: the
+      # rag_quality.json dashboard only carried the online/live-sampled
+      # LEXICAL faithfulness proxy, never the real gated numbers
+      # (recall@5/10, MRR, nDCG, context_precision, hit_rate, the real
+      # CrossEncoder+GGUF-judge faithfulness, hallucination_rate) that
+      # thresholds.yaml actually gates on. Those numbers existed only in a
+      # GitHub Actions log / job summary, invisible from Grafana. This step
+      # closes that gap by pushing every numeric metric in rag_report.json to
+      # the Pushgateway (docker-compose.monitoring.yml), generically — it
+      # does not hardcode metric names, so it keeps working as suites gain or
+      # rename metrics, with no changes needed here.
+      #
+      # Tier-1 (PR-time) deliberately does NOT push here: it runs on a
+      # GitHub-hosted runner with no network path to the box's Pushgateway
+      # (127.0.0.1-bound, same as Grafana), and its numbers are pre-merge
+      # validation against an ephemeral checkout, not the production
+      # container — conflating the two on one production dashboard would be
+      # actively misleading, not just redundant.
+      - name: Push eval metrics to Pushgateway
+        if: always()
+        run: |
+          set -uo pipefail
+          REPORT="${GITHUB_WORKSPACE}/eval-reports/rag_report.json"
+          GATE="${GITHUB_WORKSPACE}/eval-reports/gate_result.json"
+          if [ ! -f "$REPORT" ]; then
+            echo "no rag_report.json — suite failed before scoring, nothing to push"
+            exit 0
+          fi
+
+          python3 - "$REPORT" "$GATE" <<'PY' | curl -sf --data-binary @- \
+            http://127.0.0.1:9091/metrics/job/magik_eval_gate \
+            -X PUT || echo "::warning title=Pushgateway push failed::Prometheus dashboard will show stale numbers until the next successful Tier-2 run. Non-fatal — not blocking the job on a monitoring-sink outage."
+          import json, math, sys, time
+
+          report_path, gate_path = sys.argv[1], sys.argv[2]
+          report = json.load(open(report_path))
+          lines = []
+
+          for suite_name, sr in (report.get("suites") or {}).items():
+              for metric_name, m in (sr.get("metrics") or {}).items():
+                  val = m.get("value")
+                  if val is None:
+                      continue
+                  try:
+                      val = float(val)
+                  except (TypeError, ValueError):
+                      continue
+                  if math.isnan(val):
+                      continue
+                  # "full" suite metric names are prefixed ("retrieval.recall_at_5")
+                  # — split so the label matches thresholds.yaml's own section
+                  # names, same convention as app/eval/runner.py.
+                  if "." in metric_name:
+                      sub_suite, bare = metric_name.split(".", 1)
+                  else:
+                      sub_suite, bare = suite_name, metric_name
+                  lines.append(
+                      f'magik_eval_gate_metric_value{{suite="{sub_suite}",metric="{bare}"}} {val}'
+                  )
+
+          try:
+              gate = json.load(open(gate_path))
+              lines.append(f'magik_eval_gate_exit_code {int(gate.get("exit_code", -1))}')
+          except Exception:
+              pass
+
+          lines.append(f"magik_eval_gate_last_run_timestamp {int(time.time())}")
+          print("\n".join(lines))
+          PY
+
+      # Phase 31 — Tier-2 auto-rollback, scoped to a RETRIEVAL-section failure
+      # ONLY (project memory "tier2-autorollback-deferred": explicitly
+      # requested at Phase 30 close, deferred to "the final version").
+      #
+      # Why retrieval only: it's the one section with a validated, trustworthy
+      # baseline (thresholds.yaml's v5 production numbers, gate_enabled: true).
+      # Every other Tier-2 section (generation, e2e, behavioral, routing,
+      # ocr/audio/video) is still informational-only against a stale
+      # pre-Prometheus-judge baseline — a red result there doesn't reliably
+      # indicate a real regression, so rolling back on it would risk reverting
+      # good releases over noisy metrics. See thresholds.yaml's header.
+      #
+      # Why gate_result.json, not the step's exit code: the exit code alone
+      # can't distinguish "retrieval regressed" from "a different gated
+      # section regressed" (none are, today, but this must stay correct if
+      # that changes) or "an unrelated infra error occurred". gate_result.json
+      # (written by app/eval/run.py from app/eval/runner.py's
+      # last_breached_sections/last_error_sections) carries that distinction.
+      #
+      # Why repository_dispatch only, not schedule/workflow_dispatch: a
+      # rollback is only meaningful immediately after a fresh deploy, when
+      # magik-previous is genuinely "the last known-good state before THIS
+      # change". A nightly/manual Tier-2 run days later reacting to drift by
+      # reverting to a possibly-stale (or already-pruned — see cd.yml's disk
+      # cleanup, which sacrifices magik-previous under 40GB free) previous
+      # image is not the same guarantee and is out of scope for this feature.
+      #
+      # Reuses the EXACT rollback sequence cd.yml's deploy job already uses on
+      # its own health-check failure (docker rm -f / rename / start) — no SSM
+      # needed, this job already runs ON the box as the self-hosted runner.
+      - name: Auto-rollback on retrieval-section failure
+        if: always() && github.event_name == 'repository_dispatch'
+        id: rollback
+        run: |
+          set -uo pipefail
+          REPORT="${GITHUB_WORKSPACE}/eval-reports/gate_result.json"
+          echo "rolled_back=false" >> "$GITHUB_OUTPUT"
+
+          if [ ! -f "$REPORT" ]; then
+            echo "no gate_result.json — suite likely failed before scoring (crash/timeout), not a scored retrieval signal; not auto-rolling back on this alone"
+            exit 0
+          fi
+
+          RETRIEVAL_FAILED=$(python3 - "$REPORT" <<'PY'
+          import json, sys
+          data = json.load(open(sys.argv[1]))
+          breached = set(data.get("breached_sections") or [])
+          errored = set(data.get("error_sections") or [])
+          print("true" if "retrieval" in breached or "retrieval" in errored else "false")
+          PY
+          )
+
+          if [ "$RETRIEVAL_FAILED" != "true" ]; then
+            echo "retrieval section did not breach/error — no rollback"
+            exit 0
+          fi
+
+          echo "::warning title=Tier-2 retrieval-section failure — auto-rolling back::retrieval breached its gated threshold (or errored) on the deployed image. Reverting ${CONTAINER} to magik-previous."
+
+          if ! docker inspect magik-previous >/dev/null 2>&1; then
+            echo "::error title=Auto-rollback FAILED::retrieval section failed but no magik-previous image exists to roll back to (first deploy ever, or it was pruned under disk pressure — see cd.yml). Manual intervention required — see docs/runbooks/phase-30-aws-deployment.md Appendix H."
+            exit 1
+          fi
+
+          docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+          docker rename magik-previous "$CONTAINER"
+          docker start "$CONTAINER"
+
+          echo "waiting for rolled-back container's /health"
+          ok=""
+          for _ in $(seq 1 20); do
+            if docker exec "$CONTAINER" curl -sf http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              ok="yes"; break
+            fi
+            sleep 15
+          done
+
+          echo "rolled_back=true" >> "$GITHUB_OUTPUT"
+          if [ -z "$ok" ]; then
+            echo "::error title=Auto-rollback completed but the rolled-back container is not healthy::Manual intervention required immediately — the box may now be fully down. See docs/runbooks/phase-30-aws-deployment.md Appendix H."
+            exit 1
+          fi
+          echo "auto-rollback succeeded — ${CONTAINER} is back on the previous image and healthy"
+          # Still fail the job on purpose: a rollback happened, which means
+          # this deploy was bad — that must surface red, not silently pass,
+          # matching cd.yml's own health-check rollback path (also exits 1
+          # after a successful revert).
+          exit 1
+
       - name: Post report to job summary
         if: always()
         run: |
           echo "## Tier-2 Full Eval Suite (${{ github.event_name }})" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.rollback.outputs.rolled_back }}" = "true" ]; then
+            echo "**⚠️ AUTO-ROLLED BACK** — retrieval section failed Tier-2; ${CONTAINER} was reverted to the previous image. See the 'Auto-rollback' step log above." >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ -f eval-reports/rag_report.md ]; then
             cat eval-reports/rag_report.md >> "$GITHUB_STEP_SUMMARY"
           else
@@ -527,8 +691,12 @@ jobs:
       - name: Notify on failure (Slack, optional)
         if: failure() && env.SLACK_WEBHOOK_URL != ''
         run: |
+          MSG="MAGIK Tier-2 eval suite FAILED (${{ github.event_name }}, run ${{ github.run_id }})"
+          if [ "${{ steps.rollback.outputs.rolled_back }}" = "true" ]; then
+            MSG="MAGIK Tier-2 retrieval-section failure — AUTO-ROLLED BACK to the previous image (run ${{ github.run_id }})"
+          fi
           curl -sf -X POST -H "Content-Type: application/json" \
-            -d "{\"text\": \"MAGIK Tier-2 eval suite FAILED (${{ github.event_name }}, run ${{ github.run_id }}): ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            -d "{\"text\": \"${MSG}: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
             "$SLACK_WEBHOOK_URL"
 
       - name: Upload report

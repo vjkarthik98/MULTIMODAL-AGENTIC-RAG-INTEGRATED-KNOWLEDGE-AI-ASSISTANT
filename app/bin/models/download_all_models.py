@@ -8,9 +8,17 @@ Usage:
     python app/bin/models/download_all_models.py
     python app/bin/models/download_all_models.py --skip-gated    # skip pyannote (needs license)
     python app/bin/models/download_all_models.py --only gguf     # single model by key
+    python app/bin/models/download_all_models.py --only prometheus_judge   # Tier-2 judge only
+    python app/bin/models/download_all_models.py --include-eval-models    # + eval-only judges
 
 Set HF_TOKEN in .env for gated models (pyannote diarization requires license acceptance
 at https://hf.co/pyannote/speaker-diarization-3.1).
+
+Eval-only models (currently: prometheus_judge) are excluded from the default run
+— they're never loaded during normal app serving, only by the Tier-2 eval suite —
+so a normal instance boot (start_server.py's ensure_models() call, which passes
+no arguments) never downloads them. Fetch explicitly with --only <key> or
+--include-eval-models before running a Tier-2 eval that needs one.
 """
 
 from __future__ import annotations
@@ -36,7 +44,6 @@ for _stream in (sys.stdout, sys.stderr):
 _project_root = Path(__file__).resolve().parents[3]
 _hf_home = os.getenv("HF_HOME", str(_project_root / ".hf_cache"))
 _gguf_dir = Path(_hf_home) / "gguf"
-_gguf_file = "Qwen2.5-14B-Instruct-Q4_K_M.gguf"
 
 os.environ["HF_HOME"] = _hf_home
 os.environ["HF_HUB_CACHE"] = _hf_home + "/hub"
@@ -194,12 +201,41 @@ MODELS: list[dict] = [
         # missing toxicity-scoring layer block the whole download run.
         "optional": True,
     },
-    # ── LLM (GGUF single-file) — handled separately below ────────────────────
-    # key "gguf" is injected into the run loop, not listed here
+    # ── LLM (GGUF single-file) — handled via GGUF_MODELS below ───────────────
+    # key "gguf" (and any other GGUF entry) is injected into the run loop,
+    # not listed here — GGUF needs a (repo, filename) pair, not a bare
+    # model_id, so it doesn't fit the MODELS dict shape cleanly.
 ]
 
-GGUF_REPO = "bartowski/Qwen2.5-14B-Instruct-GGUF"
-GGUF_SIZE_GB = 9.0
+# Each entry needs its own repo+filename because a single from_pretrained()-
+# style model_id isn't enough to locate one file inside a GGUF repo that may
+# host several quantizations. "startup" (default True) controls whether
+# main()'s default run (the one start_server.py invokes on every boot)
+# includes this entry — set False for judge/eval-only models that must never
+# eat VRAM or download bandwidth on a normal app boot; fetch them explicitly
+# with `--only <key>` or `--include-eval-models` instead.
+GGUF_MODELS: list[dict] = [
+    {
+        "key": "gguf",
+        "gguf_repo": "bartowski/Qwen2.5-14B-Instruct-GGUF",
+        "gguf_filename": "Qwen2.5-14B-Instruct-Q4_K_M.gguf",
+        "size_gb": 9.0,
+        "gated": False,
+    },
+    {
+        "key": "prometheus_judge",
+        "gguf_repo": "prometheus-eval/prometheus-7b-v2.0-GGUF",
+        "gguf_filename": "prometheus-7b-v2.0.Q8_0.gguf",
+        "size_gb": 7.7,
+        "gated": False,
+        "optional": True,
+        # Loaded only by app/eval/judges/prometheus_judge.py during a Tier-2
+        # eval run — never touched during normal request serving. Excluded
+        # from the default start_server.py boot run for exactly that reason;
+        # see the "startup" filtering in main().
+        "startup": False,
+    },
+]
 
 
 # ── cache detection ───────────────────────────────────────────────────────────
@@ -215,8 +251,8 @@ def _is_hub_cached(model_id: str) -> bool:
     )
 
 
-def _is_gguf_cached() -> bool:
-    return (_gguf_dir / _gguf_file).exists()
+def _is_gguf_cached(filename: str) -> bool:
+    return (_gguf_dir / filename).exists()
 
 
 # ── per-type downloaders ──────────────────────────────────────────────────────
@@ -357,16 +393,16 @@ def _dl_pyannote(model_id: str, token: str, revision: str | None = None) -> None
     )
 
 
-def _dl_gguf(revision: str | None = None) -> None:
+def _dl_gguf(repo: str, filename: str, revision: str | None = None) -> None:
     from huggingface_hub import hf_hub_download
 
     _gguf_dir.mkdir(parents=True, exist_ok=True)
-    dest = _gguf_dir / _gguf_file
-    print(f"  Downloading {_gguf_file} from {GGUF_REPO} ...")
+    dest = _gguf_dir / filename
+    print(f"  Downloading {filename} from {repo} ...")
     print(f"  Destination: {dest}")
     cached = hf_hub_download(
-        repo_id=GGUF_REPO,
-        filename=_gguf_file,
+        repo_id=repo,
+        filename=filename,
         cache_dir=str(Path(_hf_home) / "hub"),
         token=HF_TOKEN or None,
         revision=revision,
@@ -422,7 +458,7 @@ def _sha256_dir(path: Path) -> str:
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
 
-def _model_checksum(model_id: str, mtype: str) -> str | None:
+def _model_checksum(model_id: str, mtype: str, gguf_filename: str | None = None) -> str | None:
     """Compute the current on-disk checksum for a model, or None if its
     layout doesn't support a clean single hash (rare loader types).
 
@@ -431,7 +467,7 @@ def _model_checksum(model_id: str, mtype: str) -> str | None:
     correctly returns None (no checksum available) rather than a wrong hash.
     """
     if mtype == "gguf":
-        path = _gguf_dir / _gguf_file
+        path = _gguf_dir / gguf_filename
         return _sha256_file(path) if path.exists() else None
     cache_key = "models--" + model_id.replace("/", "--")
     snapshots = Path(_hf_home) / "hub" / cache_key / "snapshots"
@@ -455,11 +491,13 @@ def _model_checksum(model_id: str, mtype: str) -> str | None:
     return _sha256_dir(snapshots)
 
 
-def _verify_or_record_checksum(model_id: str, mtype: str) -> tuple[str | None, bool]:
+def _verify_or_record_checksum(
+    model_id: str, mtype: str, gguf_filename: str | None = None
+) -> tuple[str | None, bool]:
     """Returns (sha256, mismatch). mismatch=True means the file(s) on disk no
     longer match what was recorded the last time this model was downloaded —
     silent corruption or an unexpected upstream swap, not assumed-safe."""
-    current = _model_checksum(model_id, mtype)
+    current = _model_checksum(model_id, mtype, gguf_filename=gguf_filename)
     if current is None:
         return None, False
     manifest_path = Path(_hf_home) / "download_manifest.json"
@@ -478,7 +516,12 @@ def _verify_or_record_checksum(model_id: str, mtype: str) -> tuple[str | None, b
 
 
 def _write_manifest(
-    model_id: str, size_gb: float, mtype: str, sha256: str | None, revision: str | None
+    model_id: str,
+    size_gb: float,
+    mtype: str,
+    sha256: str | None,
+    revision: str | None,
+    gguf_filename: str | None = None,
 ) -> None:
     manifest_path = Path(_hf_home) / "download_manifest.json"
     entries: list = []
@@ -488,16 +531,21 @@ def _write_manifest(
         except Exception:
             entries = []
     entries = [e for e in entries if e.get("model_id") != model_id]
-    entries.append(
-        {
-            "model_id": model_id,
-            "downloaded_at": datetime.now(timezone.utc).isoformat(),
-            "size_gb": size_gb,
-            "type": mtype,
-            "sha256": sha256,
-            "revision": revision,  # None = tracked the default branch, not pinned
-        }
-    )
+    entry = {
+        "model_id": model_id,
+        "downloaded_at": datetime.now(timezone.utc).isoformat(),
+        "size_gb": size_gb,
+        "type": mtype,
+        "sha256": sha256,
+        "revision": revision,  # None = tracked the default branch, not pinned
+    }
+    if gguf_filename:
+        # Disambiguates which GGUF this entry is once more than one GGUF-type
+        # model can be in the manifest (e.g. the main LLM vs. the Prometheus
+        # eval judge) — app/core/startup_validator.py's _validate_gguf_checksum
+        # needs this to pick the right entry instead of "the first gguf one".
+        entry["gguf_filename"] = gguf_filename
+    entries.append(entry)
     manifest_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
 
 
@@ -518,12 +566,19 @@ _TOKEN_GATED_DOWNLOADERS: dict = {
 }
 
 
-def _dispatch_download(mtype: str, model_id: str, gated: bool, revision: str | None) -> bool:
+def _dispatch_download(
+    mtype: str,
+    model_id: str,
+    gated: bool,
+    revision: str | None,
+    gguf_repo: str | None = None,
+    gguf_filename: str | None = None,
+) -> bool:
     """Run the right downloader for this model type. Returns False if the
     caller should count this as a skip rather than a success (pyannote with
     no HF_TOKEN set — a deliberate, expected skip, not a failure)."""
     if mtype == "gguf":
-        _dl_gguf(revision=revision)
+        _dl_gguf(gguf_repo, gguf_filename, revision=revision)
         return True
     if mtype == "faster-whisper":
         _dl_faster_whisper(model_id)
@@ -543,11 +598,15 @@ def _dispatch_download(mtype: str, model_id: str, gated: bool, revision: str | N
     return True
 
 
-def _handle_cached(model_id: str, mtype: str, optional: bool) -> str:
+def _handle_cached(
+    model_id: str, mtype: str, optional: bool, gguf_filename: str | None = None
+) -> str:
     """Model already on disk — verify its checksum instead of re-downloading.
     Returns "ok", "mismatch_skip" (optional model, don't fail the run), or
     "mismatch_fail" (required model, caller should record it as failed)."""
-    _current_sha, mismatch = _verify_or_record_checksum(model_id, mtype)
+    _current_sha, mismatch = _verify_or_record_checksum(
+        model_id, mtype, gguf_filename=gguf_filename
+    )
     if not mismatch:
         print("  Already cached — checksum OK, skipping.\n")
         return "ok"
@@ -570,25 +629,36 @@ def main() -> None:
     parser.add_argument(
         "--only", metavar="KEY", help="Download only this model key (e.g. embedder, gguf, diarizer)"
     )
+    parser.add_argument(
+        "--include-eval-models",
+        action="store_true",
+        help=(
+            "Also download eval-judge-only models (e.g. prometheus_judge) that "
+            "are normally excluded from the default run since they're never "
+            "loaded during app serving — only by the Tier-2 eval suite."
+        ),
+    )
     args = parser.parse_args()
 
     all_entries = MODELS + [
         {
-            "key": "gguf",
-            "model_id": GGUF_REPO,
+            "model_id": g["gguf_repo"],
             "type": "gguf",
-            "size_gb": GGUF_SIZE_GB,
-            "gated": False,
+            **g,
         }
+        for g in GGUF_MODELS
     ]
 
     if args.only:
         keys = {m["key"] for m in all_entries}
         if args.only not in keys:
             sys.exit(f"Unknown key '{args.only}'. Valid keys: {', '.join(sorted(keys))}")
+        # --only always honors the explicit request, regardless of "startup".
         run_list = [m for m in all_entries if m["key"] == args.only]
-    else:
+    elif args.include_eval_models:
         run_list = all_entries
+    else:
+        run_list = [m for m in all_entries if m.get("startup", True)]
 
     total_gb = sum(m["size_gb"] for m in run_list)
 
@@ -610,6 +680,8 @@ def main() -> None:
         mtype = m["type"]
         gated = m.get("gated", False)
         optional = m.get("optional", False)
+        gguf_repo = m.get("gguf_repo")
+        gguf_filename = m.get("gguf_filename")
 
         revision = m.get("revision")
         print(f"[{i}/{len(run_list)}] {key}  —  {model_id}  (~{m['size_gb']:.2f} GB)")
@@ -631,9 +703,9 @@ def main() -> None:
         # TORCH_HOME. Not worth a bespoke torch.hub cache-path check against
         # a directory layout that's a detoxify-package internal, not a
         # documented contract.
-        cached = _is_gguf_cached() if mtype == "gguf" else _is_hub_cached(model_id)
+        cached = _is_gguf_cached(gguf_filename) if mtype == "gguf" else _is_hub_cached(model_id)
         if cached:
-            result = _handle_cached(model_id, mtype, optional)
+            result = _handle_cached(model_id, mtype, optional, gguf_filename=gguf_filename)
             if result == "ok":
                 ok += 1
                 skipped += 1
@@ -645,14 +717,18 @@ def main() -> None:
 
         t0 = time.time()
         try:
-            proceeded = _dispatch_download(mtype, model_id, gated, revision)
+            proceeded = _dispatch_download(
+                mtype, model_id, gated, revision, gguf_repo=gguf_repo, gguf_filename=gguf_filename
+            )
             if not proceeded:
                 skipped += 1
                 print()
                 continue
 
-            sha256 = _model_checksum(model_id, mtype)
-            _write_manifest(model_id, m["size_gb"], mtype, sha256, revision)
+            sha256 = _model_checksum(model_id, mtype, gguf_filename=gguf_filename)
+            _write_manifest(
+                model_id, m["size_gb"], mtype, sha256, revision, gguf_filename=gguf_filename
+            )
             print(
                 f"  OK in {time.time() - t0:.0f}s"
                 + (f"  sha256={sha256[:12]}..." if sha256 else "")

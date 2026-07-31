@@ -1,0 +1,88 @@
+{
+  "title": "MAGIK — Logs",
+  "uid": "magik-logs",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "30s",
+  "tags": ["magik", "phase-31", "logs"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Read this first",
+      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "Shipped by Promtail from the same Docker json-file logs `docker logs <container>` already reads — nothing about `docker logs` changed. Structured field extraction (`level`, `trace_id`, click-through to the matching Tempo trace) requires `LOG_JSON=true` in `/opt/magik/.env` (see `docker-compose.monitoring.yml`'s header comment); without it, raw lines still ship and are still full-text searchable, just without the parsed labels. Click a log line's \"TraceID\" link to jump to `system_health.json`/`rag_quality.json`'s matching trace in Tempo (Explore)."
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Log volume by container (all levels)",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 3 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "sum by (container) (count_over_time({container=~\".+\"}[1m]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "magik-current log volume by level",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 3 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "sum by (level) (count_over_time({container=\"magik-current\"} | json [1m]))",
+          "refId": "A"
+        }
+      ],
+      "description": "Empty/flat unless LOG_JSON=true — level is a parsed field, not present in plain-text output."
+    },
+    {
+      "id": 4,
+      "type": "logs",
+      "title": "magik-current — errors and warnings",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 10 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "{container=\"magik-current\"} | json | level=~\"ERROR|WARNING\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 5,
+      "type": "logs",
+      "title": "magik-current — full stream (all levels)",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 19 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "{container=\"magik-current\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      }
+    }
+  ]
+}

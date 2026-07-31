@@ -119,24 +119,6 @@ class AuthService:
         logger.info(event="auth_user_registered_pending", email=req.email, user_id=user.user_id)
         return _doc_to_public(user.model_dump())
 
-    def register_and_activate(self, req: RegisterRequest) -> UserPublic:
-        """Register and immediately activate an account (no OTP step).
-
-        Used exclusively by the guest → real user conversion flow, where the
-        guest has already demonstrated real intent through product use.
-        Normal registration still requires OTP email verification.
-        """
-        user = self.register(req)
-        # If register() returned an already-active user (Google-linked account),
-        # activate_user is a no-op; otherwise it sets is_active=True.
-        self.activate_user(user.user_id)
-        # Re-fetch to return current is_active state
-        col = _get_mongo_collection()
-        doc = col.find_one({"user_id": user.user_id})
-        if doc is None:
-            return user
-        return _doc_to_public(doc)
-
     def activate_user(self, user_id: str) -> None:
         """Mark account as active after OTP verification."""
         col = _get_mongo_collection()

@@ -1,0 +1,19 @@
+# Phase 31 — Grafana notification policy provisioning: routes every alert in
+# the MAGIK folder groups (monitoring/alerts/rules.yml) to the webhook
+# contact point (monitoring/alerts/contact-points.yml).
+
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: magik-webhook
+    group_by: ["alertname"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+    routes:
+      - receiver: magik-webhook
+        object_matchers:
+          - ["severity", "=", "critical"]
+        group_wait: 10s
+        repeat_interval: 1h
