@@ -318,7 +318,10 @@ def _migrate_qdrant_vectors(guest_id: str, real_user_id: str) -> tuple[int, bool
         return moved, True
     except Exception as exc:
         logger.warning(
-            event="guest_migrate_qdrant_failed", guest_id=guest_id, real_user_id=real_user_id, error=str(exc)
+            event="guest_migrate_qdrant_failed",
+            guest_id=guest_id,
+            real_user_id=real_user_id,
+            error=str(exc),
         )
         return moved, False
 
@@ -345,7 +348,11 @@ def retry_pending_guest_qdrant_migrations() -> int:
             return 0
         pending_keys = r.keys(f"{_PENDING_QDRANT_PREFIX}*")
         for key in pending_keys or []:
-            real_user_id = key[len(_PENDING_QDRANT_PREFIX) :] if key.startswith(_PENDING_QDRANT_PREFIX) else None
+            real_user_id = (
+                key[len(_PENDING_QDRANT_PREFIX) :]
+                if key.startswith(_PENDING_QDRANT_PREFIX)
+                else None
+            )
             guest_id = r.get(key)
             if not real_user_id or not guest_id:
                 continue
@@ -354,7 +361,9 @@ def retry_pending_guest_qdrant_migrations() -> int:
                 r.delete(key)
                 fixed += 1
                 logger.info(
-                    event="guest_qdrant_migration_reconciled", guest_id=guest_id, real_user_id=real_user_id
+                    event="guest_qdrant_migration_reconciled",
+                    guest_id=guest_id,
+                    real_user_id=real_user_id,
                 )
     except Exception as exc:
         logger.warning(event="guest_qdrant_reconcile_sweep_failed", error=str(exc))
@@ -388,7 +397,9 @@ def migrate_guest_to_user(guest_id: str, real_user_id: str) -> dict[str, Any]:
         if attempt < 2:
             time.sleep(0.4 * (attempt + 1))
     if not qdrant_ok:
-        stats["errors"].append("qdrant: failed after retries — scheduled for background reconciliation")
+        stats["errors"].append(
+            "qdrant: failed after retries — scheduled for background reconciliation"
+        )
         _schedule_qdrant_migration_retry(guest_id, real_user_id)
 
     # Step 2: Filesystem rename / merge
