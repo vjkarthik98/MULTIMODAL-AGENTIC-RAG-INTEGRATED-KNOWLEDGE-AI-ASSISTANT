@@ -785,7 +785,9 @@ class Settings:
     OTP_TTL_SECONDS: int = _int("OTP_TTL_SECONDS", 600)  # 10 min
     OTP_MAX_ATTEMPTS: int = _int("OTP_MAX_ATTEMPTS", 3)
     OTP_LOCKOUT_SECONDS: int = _int("OTP_LOCKOUT_SECONDS", 900)  # 15 min
-    OTP_RESEND_COOLDOWN_SECONDS: int = _int("OTP_RESEND_COOLDOWN_SECONDS", 45)  # min gap between resends
+    OTP_RESEND_COOLDOWN_SECONDS: int = _int(
+        "OTP_RESEND_COOLDOWN_SECONDS", 45
+    )  # min gap between resends
     OTP_RESEND_MAX_PER_WINDOW: int = _int("OTP_RESEND_MAX_PER_WINDOW", 5)  # resend cap per window
     OTP_RESEND_WINDOW_SECONDS: int = _int("OTP_RESEND_WINDOW_SECONDS", 3600)  # 1 hr resend window
     RESET_TOKEN_TTL_SECONDS: int = _int("RESET_TOKEN_TTL_SECONDS", 3600)  # 1 hr
