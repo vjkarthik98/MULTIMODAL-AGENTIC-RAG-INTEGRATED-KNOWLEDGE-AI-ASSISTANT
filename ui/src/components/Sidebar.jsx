@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  Upload, X, Loader2, LogOut, User, FileText, Image, Sheet,
+  Upload, X, Loader2, LogOut, FileText, Image, Sheet,
   File, AlertCircle, PanelLeftClose, Sun, Moon,
   SquarePen, FolderOpen, FileVideo, FileAudio, FileType, LetterText, Settings,
   MessageSquare, MoreHorizontal, Pin, PinOff, Pencil,
@@ -179,15 +179,13 @@ export default function Sidebar({
   onSetUploadHandler,
   historyClearedAt,
   staleSessionId,
-  onGuestUploadLimit,
-  onShowLogin,
 }) {
   // Stable per-user identity — unlike auth?.token, this does NOT change when
   // the silent-refresh interval or a visibilitychange-triggered refresh
   // rotates the access token (App.jsx). Effects below that need to refetch
   // on a genuine login/logout/account-switch, but NOT on every token
   // rotation, key off this instead of auth?.token.
-  const authIdentity = auth?.email || auth?.guestUserId || null
+  const authIdentity = auth?.email || null
 
   const [dragOver, setDragOver]           = useState(false)
   const [sessions, setSessions]           = useState([])
@@ -269,34 +267,30 @@ export default function Sidebar({
     }
   }, [renamingId])
 
-  /* ── Account menu (Settings / Log in or Log out) — shared by both layouts ── */
+  /* ── Account menu (Settings / Log out) — shared by both layouts ── */
   const AccountMenu = ({ panelRef, className, style }) => (
     <div ref={panelRef} className={className}
       style={{ background: 'var(--t-card)', border: '1px solid var(--t-bd2)', ...style }}>
-      {!auth?.isGuest && (
-        <>
-          <button
-            onClick={() => { setMenuOpen(false); onOpenSettings?.() }}
-            className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm text-left transition-colors"
-            style={{ color: 'var(--t-tx3)' }}
-            onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov)'}
-            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-          >
-            <Settings size={15} />
-            Settings
-          </button>
-          <div className="h-px mx-2 my-1" style={{ background: 'var(--t-bd1)' }} />
-        </>
-      )}
       <button
-        onClick={() => { setMenuOpen(false); auth?.isGuest ? onShowLogin?.() : onLogout() }}
+        onClick={() => { setMenuOpen(false); onOpenSettings?.() }}
         className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm text-left transition-colors"
         style={{ color: 'var(--t-tx3)' }}
         onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov)'}
         onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
       >
-        {auth?.isGuest ? <User size={15} /> : <LogOut size={15} />}
-        {auth?.isGuest ? 'Log in' : 'Log out'}
+        <Settings size={15} />
+        Settings
+      </button>
+      <div className="h-px mx-2 my-1" style={{ background: 'var(--t-bd1)' }} />
+      <button
+        onClick={() => { setMenuOpen(false); onLogout() }}
+        className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm text-left transition-colors"
+        style={{ color: 'var(--t-tx3)' }}
+        onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov)'}
+        onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+      >
+        <LogOut size={15} />
+        Log out
       </button>
     </div>
   )
@@ -385,13 +379,13 @@ export default function Sidebar({
     }
   }
 
-  // Re-fetch whenever the session identity changes (login/logout, guest<->real
-  // user, or account switch) — not just on mount. Without authIdentity in the
+  // Re-fetch whenever the session identity changes (login/logout, or account
+  // switch) — not just on mount. Without authIdentity in the
   // deps, a stale closure keeps whatever the FIRST-mounted auth fetched even
   // after `auth` later flips (e.g. the initial auth-check race in App.jsx),
   // leaking one session's KB/Recents into another's UI. Clear immediately so
   // the previous session's data never lingers on screen while refetching.
-  // Keyed on authIdentity (email/guestUserId), NOT auth?.token: the silent
+  // Keyed on authIdentity (email), NOT auth?.token: the silent
   // token-refresh interval and visibilitychange handler in App.jsx rotate
   // the token every ~20 min (or on every tab focus) for the SAME user —
   // keying on the raw token blanked and re-fetched the KB/Recents lists on
@@ -491,9 +485,8 @@ export default function Sidebar({
   // why authIdentity (not auth?.token — rotates every silent refresh for the
   // same user) must be a dependency: without it, a stale closure keeps
   // showing whichever session's Recents were fetched first, leaking one
-  // account's chat history into another session's UI (e.g. the auth-check
-  // race in App.jsx resolving to a guest after the real user's data already
-  // rendered).
+  // account's chat history into another session's UI (e.g. a StrictMode
+  // double-invocation race in App.jsx's auth-check effect).
   useEffect(() => { setSessions([]); refreshSessions() }, [authIdentity])
 
   // When all history is cleared, empty the list instantly without a round-trip.
@@ -632,8 +625,8 @@ export default function Sidebar({
       // Re-read the access token from storage on every tick instead of using the
       // value captured when the upload started — the silent-refresh cycle in
       // App.jsx rotates it roughly every 20 min, and a poll loop for a large
-      // video can easily outlive that. Falls back to the passed-in token for
-      // guest sessions, whose token never rotates.
+      // video can easily outlive that. Falls back to the passed-in token in
+      // case localStorage hasn't caught up yet.
       const liveToken = localStorage.getItem('magik_token') || token
       try {
         const job = await getIngestionStatus(liveToken, jobId)
@@ -721,9 +714,6 @@ export default function Sidebar({
         if (err.name === 'AbortError') {
           addToast(`Cancelled: ${file.name}`, 'info')
           deleteKBFile(auth.token, file.name).catch(() => {})
-        } else if (err.message?.toLowerCase().includes('guest upload limit')) {
-          if (onGuestUploadLimit) onGuestUploadLimit()
-          else addToast('Sign up free to upload more files', 'info')
         } else {
           errors.push(`${file.name}: ${err.message}`)
           addToast(`Failed: ${file.name}`, 'error')
@@ -815,32 +805,19 @@ export default function Sidebar({
           {dark ? <Sun size={16} /> : <Moon size={16} />}
         </IconBtn>
 
-        {/* Avatar → account menu (or Log in button for guests) */}
-        {auth?.isGuest ? (
-          <button
-            onClick={onShowLogin}
-            title="Log in"
-            className="mt-1 w-8 h-8 rounded-full flex items-center justify-center transition-colors"
-            style={{ background: 'var(--t-hov2)' }}
-          >
-            <User size={16} style={{ color: 'var(--t-tx3)' }} />
-          </button>
-        ) : (
-          <>
-            <button
-              ref={avatarBtnRef}
-              onClick={() => setMenuOpen(o => !o)}
-              title={auth.email}
-              className="mt-1 w-8 h-8 rounded-full flex items-center justify-center transition-transform"
-              style={{ background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)', transform: menuOpen ? 'scale(1.06)' : 'scale(1)' }}
-            >
-              <span className="text-white text-[11px] font-bold tracking-tight">{avatarInitials}</span>
-            </button>
-          </>
-        )}
+        {/* Avatar → account menu */}
+        <button
+          ref={avatarBtnRef}
+          onClick={() => setMenuOpen(o => !o)}
+          title={auth.email}
+          className="mt-1 w-8 h-8 rounded-full flex items-center justify-center transition-transform"
+          style={{ background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)', transform: menuOpen ? 'scale(1.06)' : 'scale(1)' }}
+        >
+          <span className="text-white text-[11px] font-bold tracking-tight">{avatarInitials}</span>
+        </button>
       </div>
 
-      {!auth?.isGuest && menuOpen && menuPos && createPortal(
+      {menuOpen && menuPos && createPortal(
         <AccountMenu
           panelRef={menuPanelRef}
           className="fixed w-44 rounded-xl py-1.5 shadow-xl overflow-hidden z-50"
@@ -1183,71 +1160,40 @@ export default function Sidebar({
         )}
       </div>
 
-      {/* Bottom section — guest CTA or real user row */}
-      {auth?.isGuest ? (
-        <div className="px-4 pt-4 pb-3" style={{ borderTop: '1px solid var(--t-bd1)' }}>
-          <p className="text-sm font-bold mb-1" style={{ color: 'var(--t-tx1)' }}>
-            Get responses tailored to you
-          </p>
-          <p className="text-xs mb-3 leading-relaxed" style={{ color: 'var(--t-tx5)' }}>
-            Log in to save your documents, chat history, and unlock unlimited queries.
-          </p>
+      {/* Bottom section — real user row */}
+      <div ref={menuRef} className="relative px-4 py-3.5" style={{ borderTop: '1px solid var(--t-bd1)' }}>
+        {/* Account menu */}
+        {menuOpen && (
+          <AccountMenu
+            panelRef={menuPanelRef}
+            className="absolute left-4 right-4 rounded-xl py-1.5 shadow-xl overflow-hidden z-20"
+            style={{ bottom: 'calc(100% + 6px)' }}
+          />
+        )}
+
+        {/* Trigger row */}
+        <div className="flex items-center gap-3">
           <button
-            onClick={onShowLogin}
-            className="w-full flex items-center justify-center rounded-full py-3 text-sm font-bold transition-opacity mb-2"
-            style={{ background: 'var(--t-tx1)', color: 'var(--t-bg)' }}
-            onMouseEnter={e => e.currentTarget.style.opacity = '0.88'}
-            onMouseLeave={e => e.currentTarget.style.opacity = '1'}
+            onClick={() => setMenuOpen(o => !o)}
+            title={auth.email}
+            className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 transition-transform"
+            style={{ background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)', transform: menuOpen ? 'scale(1.06)' : 'scale(1)' }}
           >
-            Log in
+            <span className="text-white text-[11px] font-bold tracking-tight">{avatarInitials}</span>
           </button>
+          <span className="flex-1 text-sm truncate min-w-0" style={{ color: 'var(--t-tx4)' }}>{auth.email}</span>
           <button
             onClick={onToggleTheme}
-            className="w-full flex items-center justify-center gap-1.5 rounded-lg py-1.5 text-xs transition-colors"
-            style={{ color: 'var(--t-tx6)' }}
-            onMouseEnter={e => e.currentTarget.style.color = 'var(--t-tx4)'}
-            onMouseLeave={e => e.currentTarget.style.color = 'var(--t-tx6)'}
+            className="flex-shrink-0 transition-colors"
+            style={{ color: 'var(--t-tx5)' }}
+            onMouseEnter={e => e.currentTarget.style.color = 'var(--t-accent)'}
+            onMouseLeave={e => e.currentTarget.style.color = 'var(--t-tx5)'}
             title={dark ? 'Switch to light mode' : 'Switch to dark mode'}
           >
-            {dark ? <Sun size={13} /> : <Moon size={13} />}
-            {dark ? 'Light mode' : 'Dark mode'}
+            {dark ? <Sun size={15} /> : <Moon size={15} />}
           </button>
         </div>
-      ) : (
-        <div ref={menuRef} className="relative px-4 py-3.5" style={{ borderTop: '1px solid var(--t-bd1)' }}>
-          {/* Account menu */}
-          {menuOpen && (
-            <AccountMenu
-              panelRef={menuPanelRef}
-              className="absolute left-4 right-4 rounded-xl py-1.5 shadow-xl overflow-hidden z-20"
-              style={{ bottom: 'calc(100% + 6px)' }}
-            />
-          )}
-
-          {/* Trigger row */}
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => setMenuOpen(o => !o)}
-              title={auth.email}
-              className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 transition-transform"
-              style={{ background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)', transform: menuOpen ? 'scale(1.06)' : 'scale(1)' }}
-            >
-              <span className="text-white text-[11px] font-bold tracking-tight">{avatarInitials}</span>
-            </button>
-            <span className="flex-1 text-sm truncate min-w-0" style={{ color: 'var(--t-tx4)' }}>{auth.email}</span>
-            <button
-              onClick={onToggleTheme}
-              className="flex-shrink-0 transition-colors"
-              style={{ color: 'var(--t-tx5)' }}
-              onMouseEnter={e => e.currentTarget.style.color = 'var(--t-accent)'}
-              onMouseLeave={e => e.currentTarget.style.color = 'var(--t-tx5)'}
-              title={dark ? 'Switch to light mode' : 'Switch to dark mode'}
-            >
-              {dark ? <Sun size={15} /> : <Moon size={15} />}
-            </button>
-          </div>
-        </div>
-      )}
+      </div>
     </div>
 
     {/* KB filename tooltip — portalled to escape overflow container */}

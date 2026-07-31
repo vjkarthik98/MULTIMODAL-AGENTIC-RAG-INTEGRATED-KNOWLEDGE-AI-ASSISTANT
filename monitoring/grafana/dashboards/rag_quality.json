@@ -1,0 +1,271 @@
+{
+  "title": "MAGIK — RAG Quality",
+  "uid": "magik-rag-quality",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-7d", "to": "now" },
+  "refresh": "5m",
+  "tags": ["magik", "phase-31", "eval"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Read this first",
+      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "**These are live-sampled, reference-free metrics** from `app/eval/jobs/online_eval.py` scoring `ONLINE_EVAL_SAMPLE_RATE` of real traffic with the lexical judge (no ground truth available on live traffic, no GPU judge call — see the module docstring). They are a drift signal, not a substitute for the gated CI gold-set suite (`app/eval/thresholds.yaml`, recall@5/MRR/nDCG/faithfulness-with-ground-truth), which only runs in `eval-gate.yml` against the curated gold set. Both empty/flat panels usually mean `ONLINE_EVAL_ENABLED`/`ONLINE_EVAL_SAMPLE_RATE` are unset (both default off) or `PROMETHEUS_ENABLED` is false."
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Lexical faithfulness (rolling, sampled live traffic)",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 3 },
+      "targets": [{ "expr": "magik_eval_online_faithfulness", "refId": "A" }],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 } }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Lexical answer relevancy (rolling, sampled live traffic)",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 3 },
+      "targets": [{ "expr": "magik_eval_online_answer_relevancy", "refId": "A" }],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 } }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Hallucination flag rate (numeric-grounding check, rolling)",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 10 },
+      "targets": [{ "expr": "magik_eval_online_hallucination_rate", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "yellow", "value": 0.4 },
+              { "color": "red", "value": 0.72 }
+            ]
+          }
+        }
+      },
+      "description": "0.72 threshold line matches thresholds.yaml's hallucination.hallucination_rate max (offline gate) — same detector, different traffic sample, so a sustained crossing here is a meaningful early-warning signal."
+    },
+    {
+      "id": 5,
+      "type": "piechart",
+      "title": "Routing decision share (rolling)",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 10 },
+      "targets": [{ "expr": "magik_eval_online_route_share", "legendFormat": "{{route}}", "refId": "A" }]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "End-to-end stream latency — p50 / p95 (sampled live traffic)",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 17 },
+      "targets": [
+        { "expr": "magik_eval_online_latency_p50_ms", "legendFormat": "p50", "refId": "A" },
+        { "expr": "magik_eval_online_latency_p95_ms", "legendFormat": "p95", "refId": "B" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "red", "value": 60000 }
+            ]
+          }
+        }
+      },
+      "description": "60000ms threshold line matches thresholds.yaml's latency.p95_sec ceiling (offline gate, same production hardware)."
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Samples scored in most recent online_eval run",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 17 },
+      "targets": [{ "expr": "magik_eval_online_sample_count", "refId": "A" }]
+    },
+    {
+      "id": 8,
+      "type": "text",
+      "title": "CI Tier-2 (gated, real judge) — below this line",
+      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 24 },
+      "options": {
+        "mode": "markdown",
+        "content": "**These come from `eval-gate.yml`'s `tier2-full-suite`** — the real CrossEncoder+GGUF-judge / Prometheus-judge numbers `thresholds.yaml` actually gates on (`retrieval` is enforced; the rest are informational until re-baselined — see the header comment in `thresholds.yaml`), pushed to Prometheus Pushgateway after every post-deploy and manually-dispatched Tier-2 run (not on every PR — Tier-1 has no network path to this box and scores an ephemeral checkout, not the production container; see `.github/workflows/eval-gate.yml`'s comment on the push step). Values persist between runs (Pushgateway semantics) — a flat line between two points is real, not a gap in scraping."
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Retrieval quality — recall@5 / recall@10 / hit_rate (CI Tier-2, GATED)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+      "targets": [
+        {
+          "expr": "magik_eval_gate_metric_value{suite=\"retrieval\",metric=\"recall_at_5\"}",
+          "legendFormat": "recall@5",
+          "refId": "A"
+        },
+        {
+          "expr": "magik_eval_gate_metric_value{suite=\"retrieval\",metric=\"recall_at_10\"}",
+          "legendFormat": "recall@10",
+          "refId": "B"
+        },
+        {
+          "expr": "magik_eval_gate_metric_value{suite=\"retrieval\",metric=\"hit_rate\"}",
+          "legendFormat": "hit_rate",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "red", "value": 0 }, { "color": "green", "value": 0.4835 }]
+          }
+        }
+      },
+      "description": "Gate floors (thresholds.yaml, v5 production baseline): recall@5 >= 0.4835, recall@10 >= 0.5259, hit_rate >= 0.6447. A breach here is what triggers eval-gate.yml's auto-rollback (see docs/runbooks/phase-31-monitoring.md §6) — this panel should visually confirm what the job log already said, not be the first place you learn about it."
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Retrieval ranking quality — MRR / nDCG@10 / context_precision (CI Tier-2, GATED)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+      "targets": [
+        {
+          "expr": "magik_eval_gate_metric_value{suite=\"retrieval\",metric=\"mrr\"}",
+          "legendFormat": "MRR",
+          "refId": "A"
+        },
+        {
+          "expr": "magik_eval_gate_metric_value{suite=\"retrieval\",metric=\"ndcg_at_10\"}",
+          "legendFormat": "nDCG@10",
+          "refId": "B"
+        },
+        {
+          "expr": "magik_eval_gate_metric_value{suite=\"retrieval\",metric=\"context_precision\"}",
+          "legendFormat": "context_precision",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 } },
+      "description": "Gate floors: MRR >= 0.3380, nDCG@10 >= 0.3823, context_precision >= 0.0255 — context_precision's absolute value is low by design (thresholds.yaml flags it as a known future retrieval-quality target, not a bug in this panel)."
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Generation quality — faithfulness / answer_relevancy / context_recall (CI Tier-2, informational)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 },
+      "targets": [
+        {
+          "expr": "magik_eval_gate_metric_value{suite=\"generation\",metric=\"faithfulness\"}",
+          "legendFormat": "faithfulness",
+          "refId": "A"
+        },
+        {
+          "expr": "magik_eval_gate_metric_value{suite=\"generation\",metric=\"answer_relevancy\"}",
+          "legendFormat": "answer_relevancy",
+          "refId": "B"
+        },
+        {
+          "expr": "magik_eval_gate_metric_value{suite=\"generation\",metric=\"context_recall\"}",
+          "legendFormat": "context_recall",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 } },
+      "description": "NOT gated — thresholds.yaml keeps `generation` informational-only pending re-baseline on the current judge (see its header comment). Real judge (CrossEncoder+GGUF or Prometheus-2-7B per EVAL_JUDGE_MODEL), unlike the lexical faithfulness panel above."
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Hallucination rate — real judge (CI Tier-2, informational)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 },
+      "targets": [
+        {
+          "expr": "magik_eval_gate_metric_value{suite=\"hallucination\",metric=\"hallucination_rate\"}",
+          "legendFormat": "hallucination_rate",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "yellow", "value": 0.4 },
+              { "color": "red", "value": 0.72 }
+            ]
+          }
+        }
+      },
+      "description": "thresholds.yaml gate ceiling: max 0.72 (not currently enforced — hallucination stays informational, only retrieval gates). Compare against the live-sampled panel above: same detector (hallucination_flag_single), different traffic — this is the curated gold set, that one is sampled production traffic."
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Last Tier-2 gate result",
+      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 43 },
+      "targets": [{ "expr": "magik_eval_gate_exit_code", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "PASS", "color": "green" } } },
+            { "type": "value", "options": { "1": { "text": "THRESHOLD BREACH", "color": "red" } } },
+            { "type": "value", "options": { "2": { "text": "INFRA/DATA ERROR", "color": "orange" } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "red", "value": 1 },
+              { "color": "orange", "value": 2 }
+            ]
+          }
+        }
+      },
+      "options": { "textMode": "value_and_name", "colorMode": "background" }
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "Last Tier-2 push age",
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 43 },
+      "targets": [
+        {
+          "expr": "time() - magik_eval_gate_last_run_timestamp",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "yellow", "value": 172800 },
+              { "color": "red", "value": 604800 }
+            ]
+          }
+        }
+      },
+      "description": "Yellow past 2 days, red past 7 — Tier-2 only runs post-deploy and (once enabled) nightly, so this is expected to sit in the hours-to-a-day range on an active release cadence, not near-zero like a scrape-based metric."
+    }
+  ]
+}

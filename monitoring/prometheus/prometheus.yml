@@ -1,0 +1,59 @@
+# Phase 31 — Prometheus scrape config.
+#
+# Runs as a container on the `magik-net` docker network (the same network
+# cd.yml already creates for magik-current + magik-redis, see .github/workflows/cd.yml).
+# Scrapes the app by its container DNS name, NOT a published host port — the
+# app's Prometheus port (settings.PROMETHEUS_PORT, default 9464) is never
+# published to the host; only containers on magik-net can reach it. This
+# keeps it off the public internet without needing any security-group change.
+#
+# Requires PROMETHEUS_ENABLED=true in /opt/magik/.env (off by default).
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    env: production
+    service: magik
+
+scrape_configs:
+  - job_name: magik-app
+    static_configs:
+      - targets: ["magik-current:9464"]
+    # magik-current is the app container name cd.yml uses for `docker run
+    # --name magik-current`. On restart/redeploy the name is stable — cd.yml
+    # always swaps to the same name — so this target never needs updating.
+
+  - job_name: prometheus-self
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]
+    # otel-collector's own Prometheus self-metrics (collector health), not the
+    # app's traces — those go out-of-band via OTLP, not scraped.
+
+  - job_name: pushgateway
+    honor_labels: true # keep the job/suite/metric labels the pusher set, don't overwrite with this job's own
+    static_configs:
+      - targets: ["pushgateway:9091"]
+    # Offline/CI-gate RAG-quality numbers (recall@k, MRR, nDCG, faithfulness,
+    # hallucination_rate — the real thresholds.yaml-gated metrics), pushed by
+    # eval-gate.yml's tier2-full-suite job. See docker-compose.monitoring.yml's
+    # pushgateway service comment for why this exists as a push, not a scrape.
+
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]
+    # Loki's own ingestion/query health (chunks flushed, ingester state,
+    # query latency) — not the shipped application logs themselves, those
+    # live in Loki's own store and are queried via Grafana Explore / the
+    # logs.json dashboard, not scraped as Prometheus metrics.
+
+  - job_name: promtail
+    static_configs:
+      - targets: ["promtail:9080"]
+    # Promtail's own shipping health (bytes read, send failures, dropped
+    # lines) — the signal to check if "logs stopped appearing in Grafana"
+    # ever needs diagnosing.

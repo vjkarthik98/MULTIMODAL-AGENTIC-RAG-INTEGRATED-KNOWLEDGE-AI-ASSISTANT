@@ -55,10 +55,15 @@ class _CircuitBreaker:
         self._failures = 0
         self._opened_at = 0.0
         self._open = False
+        # True only during the single-trial window after reset_timeout elapses
+        # and before the next record_success()/record_failure() call resolves
+        # it. Gauge value 1. Distinct from _open (gauge 2) — see set()s below.
+        self._half_open = False
 
     def record_success(self) -> None:
         self._failures = 0
         self._open = False
+        self._half_open = False
         self._opened_at = 0.0
         _circuit_breaker_state.labels(service=self.name).set(0)
         _circuit_breaker_failures.labels(service=self.name).set(0)
@@ -67,10 +72,14 @@ class _CircuitBreaker:
         self._failures += 1
         _circuit_breaker_failures.labels(service=self.name).set(self._failures)
 
-        if self._failures >= self.fail_max:
+        # A failure during the half-open probe reopens immediately — no need
+        # to re-accumulate fail_max failures again; the probe already proved
+        # the service is still down.
+        if self._half_open or self._failures >= self.fail_max:
             self._open = True
+            self._half_open = False
             self._opened_at = time.time()
-            _circuit_breaker_state.labels(service=self.name).set(1)
+            _circuit_breaker_state.labels(service=self.name).set(2)
             logger.warning(
                 "circuit_breaker_opened",
                 service=self.name,
@@ -80,13 +89,16 @@ class _CircuitBreaker:
 
     def is_open(self) -> bool:
         if self._open:
-            # HALF-OPEN PROBE AFTER RESET TIMEOUT
+            # HALF-OPEN PROBE AFTER RESET TIMEOUT — let exactly one trial
+            # request through; the caller's subsequent record_success() or
+            # record_failure() decides whether it fully closes (0) or
+            # reopens (2). Failure count is preserved (not reset to 0) so a
+            # failed probe re-opens via the `self._half_open` branch above
+            # rather than needing fail_max fresh failures.
             if time.time() - self._opened_at >= self.reset_timeout:
                 self._open = False
-                self._failures = 0
-                self._opened_at = 0.0
-                _circuit_breaker_state.labels(service=self.name).set(0)
-                _circuit_breaker_failures.labels(service=self.name).set(0)
+                self._half_open = True
+                _circuit_breaker_state.labels(service=self.name).set(1)
                 logger.info("circuit_breaker_half_open", service=self.name)
                 return False
             return True

@@ -16,10 +16,17 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login/form", auto_error=Fal
 def _build_user_from_payload(payload: dict) -> UserPublic:
     from datetime import datetime, timezone
 
+    try:
+        role = UserRole(payload.get("role", "user"))
+    except ValueError:
+        # Unrecognized role (e.g. a still-valid "guest" JWT issued before guest
+        # mode was removed) — treat as unauthenticated rather than a 500.
+        raise ValueError("Unrecognized role in token") from None
+
     return UserPublic(
         user_id=payload["sub"],
         email=payload["email"],
-        role=UserRole(payload.get("role", "user")),
+        role=role,
         is_active=True,
         created_at=datetime.now(timezone.utc),
     )
@@ -54,14 +61,13 @@ async def get_current_user(token: str | None = Depends(oauth2_scheme)) -> UserPu
 
     try:
         payload = verify_token(token, expected_type="access")
+        return _build_user_from_payload(payload)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(exc),
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
-
-    return _build_user_from_payload(payload)
 
 
 async def get_current_admin_user(
@@ -72,24 +78,6 @@ async def get_current_admin_user(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required",
-        )
-    return current_user
-
-
-async def require_real_user(
-    current_user: UserPublic = Depends(get_current_user),
-) -> UserPublic:
-    """Like get_current_user but rejects guest JWTs with HTTP 402.
-
-    Use on routes that guests must never access (account settings, chat history,
-    logout-all, delete account). The 429 limit checks on ingest/query are handled
-    inline in the route handlers — this dependency is for hard feature exclusions.
-    """
-    if current_user.role == UserRole.GUEST:
-        raise HTTPException(
-            status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail="Guest sessions cannot use this feature. Please sign up to continue.",
-            headers={"X-Guest-Upgrade-Required": "true"},
         )
     return current_user
 

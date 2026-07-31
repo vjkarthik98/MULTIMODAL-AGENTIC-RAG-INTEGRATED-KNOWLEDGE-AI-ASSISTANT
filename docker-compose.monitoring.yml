@@ -1,0 +1,217 @@
+# Phase 31 — Monitoring stack. ADDITIVE overlay: run alongside the production
+# app container, never in place of it. The app itself runs as a standalone
+# `docker run --name magik-current` container (see .github/workflows/cd.yml),
+# not part of docker-compose — this file only adds Prometheus/OTel/Tempo/
+# Grafana on the SAME `magik-net` docker network cd.yml already creates, so
+# containers reach each other by name without publishing any new port to the
+# host or the public internet.
+#
+# On the box:
+#   docker network create magik-net 2>/dev/null || true   # idempotent, cd.yml also does this
+#   docker compose -f docker-compose.monitoring.yml up -d
+#
+# Requires in /opt/magik/.env (both default OFF, see app/core/config.py):
+#   PROMETHEUS_ENABLED=true
+#   OTEL_ENABLED=true
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317   # NOT the localhost:4317 code default —
+#                                                              # the collector is a separate container.
+# Optional (rolling live-quality panel, see monitoring/grafana/dashboards/rag_quality.json):
+#   ONLINE_EVAL_ENABLED=true
+#   ONLINE_EVAL_SAMPLE_RATE=0.05
+#
+# Required for Loki log correlation (level/trace_id extraction, jump from a
+# log line straight to its Tempo trace) — without it, logs still ship to
+# Loki (Promtail ships the raw line regardless), just unparsed/unenriched:
+#   LOG_JSON=true
+#
+# Local dev: this file targets the production single-host topology
+# (external magik-net, /opt/magik persistent paths) and is NOT meant to run
+# against the local CPU dev stack in docker-compose.yml — that stack doesn't
+# create magik-net or enable Prometheus/OTel by default.
+
+networks:
+  magik-net:
+    external: true
+
+volumes:
+  prometheus_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      # Persistent EBS root path, same convention as /opt/magik/{.hf_cache,data,logs}
+      # (docs/runbooks/phase-30-aws-deployment.md) — NOT a Docker-managed volume
+      # on ephemeral storage, or all history is lost on every idle-stop cycle.
+      device: /opt/magik/monitoring/prometheus
+  grafana_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/magik/monitoring/grafana
+  tempo_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/magik/monitoring/tempo
+  loki_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/magik/monitoring/loki
+  promtail_positions:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      # Small (a handful of KB — one tail offset per container) but still
+      # persistent, so a Promtail restart resumes rather than re-ships or gaps.
+      device: /opt/magik/monitoring/promtail
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: magik-prometheus
+    restart: unless-stopped
+    networks:
+      - magik-net
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+    # Not published to the host — only reachable by other magik-net
+    # containers (Grafana). Reach it for local debugging via
+    # `docker exec -it magik-prometheus wget -qO- localhost:9090/-/healthy`.
+
+  # Receives the offline/CI-gate RAG-quality numbers (recall@k, MRR, nDCG,
+  # faithfulness, hallucination_rate — the actual thresholds.yaml-gated
+  # metrics) from eval-gate.yml's tier2-full-suite job, which runs ON this
+  # box as the self-hosted GPU runner (a plain host process, not itself a
+  # magik-net container) — hence the loopback port publish below, the same
+  # pattern grafana uses, so the runner can reach it via plain HTTP without
+  # joining the docker network. See .github/workflows/eval-gate.yml's "Push
+  # eval metrics to Pushgateway" step and monitoring/grafana/dashboards/
+  # rag_quality.json's "CI Tier-2 (gated)" panels.
+  #
+  # Why a Pushgateway and not a scrape target: Tier-2 is a batch job, not a
+  # long-running server with a stable /metrics endpoint — Pushgateway is
+  # Prometheus's own documented pattern for exactly this. Values persist
+  # until the next push (or an explicit delete), which is correct here: the
+  # last Tier-2 result should stay visible between runs, not disappear.
+  pushgateway:
+    image: prom/pushgateway:v1.9.0
+    container_name: magik-pushgateway
+    restart: unless-stopped
+    networks:
+      - magik-net
+    ports:
+      - "127.0.0.1:9091:9091"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.112.0
+    container_name: magik-otel-collector
+    restart: unless-stopped
+    networks:
+      - magik-net
+    volumes:
+      - ./monitoring/otel/collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    depends_on:
+      - tempo
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    container_name: magik-tempo
+    restart: unless-stopped
+    networks:
+      - magik-net
+    volumes:
+      - ./monitoring/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+
+  # Log aggregation — see monitoring/loki/loki-config.yaml for retention/
+  # storage. Not published to the host; only Grafana and Promtail (both on
+  # magik-net) ever reach it.
+  loki:
+    image: grafana/loki:3.3.2
+    container_name: magik-loki
+    restart: unless-stopped
+    networks:
+      - magik-net
+    volumes:
+      - ./monitoring/loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+
+  # Ships every container's existing Docker json-file logs to Loki — see
+  # monitoring/loki/promtail-config.yaml. Read-only access to the Docker
+  # socket (container discovery/labels) and the host's Docker log directory
+  # (the actual log files) — Promtail never writes to either.
+  #
+  # If logs don't appear (validation matrix item #16) and the container logs
+  # "permission denied" reading /var/lib/docker/containers/*/*.log: those
+  # files are root-owned on most distros. The upstream grafana/promtail image
+  # runs as root by default for exactly this reason; if that ever changes
+  # upstream, add `user: "0"` here rather than loosening the host directory's
+  # permissions.
+  promtail:
+    image: grafana/promtail:3.3.2
+    container_name: magik-promtail
+    restart: unless-stopped
+    networks:
+      - magik-net
+    volumes:
+      - ./monitoring/loki/promtail-config.yaml:/etc/promtail/config.yaml:ro
+      - promtail_positions:/positions
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    command: ["-config.file=/etc/promtail/config.yaml"]
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    container_name: magik-grafana
+    restart: unless-stopped
+    networks:
+      - magik-net
+    environment:
+      # GF_SECURITY_ADMIN_PASSWORD is REQUIRED from /opt/magik/.env — no
+      # default here on purpose; Grafana refuses a blank/default admin
+      # password to fail loudly rather than silently ship an open dashboard.
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in /opt/magik/.env}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      # Grafana is reverse-proxied at a sub-path with additional Caddy
+      # basicauth in front (see deploy/aws/caddy/Caddyfile) — defense in
+      # depth, not a substitute for the Caddy gate.
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+    env_file:
+      - path: /opt/magik/.env
+        required: false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./monitoring/grafana/provisioning/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards/files:ro
+      # Alert rules + contact point + notification policy (monitoring/alerts/rules.yml).
+      # SLACK_WEBHOOK_URL for contact-points.yml's ${SLACK_WEBHOOK_URL} comes
+      # from the env_file above (/opt/magik/.env) — never set here directly.
+      - ./monitoring/alerts:/etc/grafana/provisioning/alerting:ro
+    # Published to 127.0.0.1 only — Caddy reverse-proxies it from there; it is
+    # NEVER bound to 0.0.0.0, so it is unreachable even if a security-group
+    # rule were accidentally loosened.
+    ports:
+      - "127.0.0.1:3001:3000"
+    depends_on:
+      - prometheus
+      - tempo
+      - loki

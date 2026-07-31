@@ -91,7 +91,19 @@ def _validate_gguf_checksum(manifest_entries: list[dict]) -> None:
     add real startup latency for comparatively low incremental safety, since
     download_all_models.py already re-verifies all of them on every re-run.
     """
-    gguf_entry = next((e for e in manifest_entries if e.get("type") == "gguf"), None)
+    # More than one GGUF-type entry can exist in the manifest now (the main
+    # LLM plus eval-only judges like Prometheus, see
+    # app/bin/models/download_all_models.py's GGUF_MODELS) — "the first
+    # gguf-type entry" is no longer a safe way to find the main LLM's entry,
+    # so match on the filename actually configured as LLM_MODEL_PATH.
+    # Manifests written before this field existed have no "gguf_filename" key
+    # at all (only one GGUF model existed then) — fall back to that entry for
+    # those, so an already-deployed manifest.json isn't treated as invalid.
+    expected_name = Path(settings.LLM_MODEL_PATH).name
+    gguf_entries = [e for e in manifest_entries if e.get("type") == "gguf"]
+    gguf_entry = next((e for e in gguf_entries if e.get("gguf_filename") == expected_name), None)
+    if gguf_entry is None:
+        gguf_entry = next((e for e in gguf_entries if "gguf_filename" not in e), None)
     if gguf_entry is None:
         return  # no GGUF entry yet — validate_model_manifest()'s presence check already covers this
     expected = gguf_entry.get("sha256")

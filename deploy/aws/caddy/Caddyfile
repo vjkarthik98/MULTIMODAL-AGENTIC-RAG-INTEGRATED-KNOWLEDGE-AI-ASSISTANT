@@ -15,11 +15,46 @@ https://APP_DOMAIN_PLACEHOLDER {
 	# multimodal ingestion (audio/video transcription) runs well past typical
 	# proxy defaults. A demo that times out mid-model-load is worse than one
 	# that just takes a while.
-	reverse_proxy 127.0.0.1:8000 {
-		flush_interval -1
-		transport http {
-			read_timeout 300s
-			write_timeout 300s
+	#
+	# NOTE: once Phase 31's /grafana handle block (below) was added, this had
+	# to move into its own `handle {}` too — Caddy's docs warn against mixing
+	# bare top-level directives with handle blocks in the same server block
+	# (unpredictable evaluation order). `handle` blocks are evaluated in
+	# order, first match wins; the bare `handle {}` below matches everything
+	# /grafana/* didn't.
+	handle /grafana/* {
+		# Phase 31 — Grafana, gated behind Caddy basic_auth. This is CRITICAL,
+		# not optional: an open Grafana on the public app subdomain leaks
+		# internal metrics, traces, and error payloads (query latencies, user
+		# counts, circuit-breaker state) to anyone who finds the URL.
+		# Grafana's own GF_SECURITY_ADMIN_PASSWORD
+		# (docker-compose.monitoring.yml) is defense in depth, not a
+		# substitute for this gate — don't skip it because Grafana "also" has
+		# a login screen.
+		#
+		# GRAFANA_BASICAUTH_HASH_PLACEHOLDER: generate with
+		#   docker run --rm caddy:2 caddy hash-password --plaintext '<your password>'
+		# and substitute the bcrypt hash below before deploy — same
+		# placeholder convention as APP_DOMAIN_PLACEHOLDER above (both
+		# hand-replaced, not templated at runtime).
+		#
+		# handle (not handle_path): Grafana's GF_SERVER_SERVE_FROM_SUB_PATH=true
+		# (docker-compose.monitoring.yml) expects the /grafana prefix
+		# preserved on the forwarded request, not stripped — handle_path
+		# would break asset URLs and redirects.
+		basic_auth {
+			admin GRAFANA_BASICAUTH_HASH_PLACEHOLDER
+		}
+		reverse_proxy 127.0.0.1:3001
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8000 {
+			flush_interval -1
+			transport http {
+				read_timeout 300s
+				write_timeout 300s
+			}
 		}
 	}
 

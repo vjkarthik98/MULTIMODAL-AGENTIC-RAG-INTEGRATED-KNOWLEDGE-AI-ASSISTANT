@@ -1,0 +1,58 @@
+# Phase 31 — Grafana datasource provisioning (auto-loaded on container start,
+# no manual "Add data source" click-ops).
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      # Trace -> Logs: jump from a span straight to the log lines from the
+      # same trace_id, in Loki. Filled in now that Loki exists (was an empty
+      # stub before this pass).
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: "-5m"
+        spanEndTimeShift: "5m"
+        filterByTraceID: true
+        tags: []
+      serviceMap:
+        datasourceUid: prometheus
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      # Logs -> Traces: the reverse direction — a log line carrying a
+      # trace_id field (app/utils/logger.py's JsonFormatter, requires
+      # LOG_JSON=true) gets a "Tempo" button to jump straight to that trace.
+      # derivedFields matches on the RAW log line via regex (Loki datasource
+      # limitation — jsonData can't reference the parsed `trace_id` label
+      # directly), so this depends on the app emitting the literal
+      # `"trace_id":"<hex>"` substring LOG_JSON=true produces.
+      derivedFields:
+        - datasourceUid: tempo
+          matcherRegex: '"trace_id":\s*"([0-9a-f]+)"'
+          name: TraceID
+          # Single $ — this file is mounted straight into Grafana, never
+          # passed through docker-compose's own ${VAR} substitution (that
+          # only applies inside docker-compose.monitoring.yml itself), so it
+          # needs no escaping. ${__value.raw} is Grafana's own derivedFields
+          # template syntax for "the regex's first capture group".
+          url: "${__value.raw}"
+          urlDisplayLabel: "View trace"

@@ -129,6 +129,27 @@ Examples:
     # Check thresholds
     exit_code = runner.check_thresholds(results)
 
+    # Structured gate result — separate from rag_report.json (which is
+    # written BEFORE check_thresholds() runs and never carries breach detail,
+    # only raw metric values). CD's Tier-2 auto-rollback (Phase 31 — see
+    # docs/runbooks/phase-31-monitoring.md) needs to know WHICH section
+    # breached, not just the exit code, so it only reverts on the one
+    # currently-trustworthy gated section (retrieval), never on noise from a
+    # still-informational section or an unrelated infra error.
+    if not args.no_report:
+        try:
+            import json as _json
+
+            gate_result = {
+                "exit_code": exit_code,
+                "breached_sections": sorted(runner.last_breached_sections),
+                "error_sections": sorted(runner.last_error_sections),
+            }
+            with open(cfg.reports_dir / "gate_result.json", "w") as f:
+                _json.dump(gate_result, f, indent=2)
+        except Exception as exc:
+            print(f"[WARN] Could not write gate_result.json: {exc}")
+
     # MLflow tracking (file backend; optional — fails gracefully if mlflow not installed)
     if not args.no_report:
         try:

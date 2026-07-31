@@ -1,0 +1,127 @@
+# Phase 31 — Grafana unified alerting rules (provisioning-as-code).
+# No Alertmanager: Grafana's built-in alerting covers this on a single small
+# host with one fewer container. Mounted into the Grafana container at
+# /etc/grafana/provisioning/alerting/ alongside contact-points.yml and
+# notification-policies.yml in this same directory.
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: magik-system
+    folder: MAGIK
+    interval: 1m
+    rules:
+      - uid: magik-circuit-breaker-open
+        title: "Circuit breaker OPEN"
+        condition: C
+        for: 2m
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 300, to: 0 }
+            model:
+              expr: "circuit_breaker_state"
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [1] } # state==2 (open); half-open (1) does not page
+              refId: C
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} circuit breaker is OPEN (state=2) — service unavailable after repeated failures."
+          description: "See app/core/infra_registry.py's _CircuitBreaker. Check Qdrant/Redis/Mongo connectivity for {{ $labels.service }}."
+
+      - uid: magik-error-rate-spike
+        title: "Ingestion error rate spike"
+        condition: C
+        for: 5m
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              expr: "sum(rate({__name__=~\"magik_.*_extract_errors_total\"}[5m])) / clamp_min(sum(rate({__name__=~\"magik_.*_extracts_total\"}[5m])), 1)"
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.1] } # >10% of ingestion extracts erroring
+              refId: C
+        labels:
+          severity: high
+        annotations:
+          summary: "Ingestion error rate above 10% across the last 5 minutes (all modalities combined)."
+          description: "Check which modality via monitoring/grafana/dashboards/system_health.json's per-modality error table."
+
+      - uid: magik-p95-latency-breach
+        title: "p95 latency breach (online sample)"
+        condition: C
+        for: 5m
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 300, to: 0 }
+            model:
+              expr: "magik_eval_online_latency_p95_ms"
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # 60000ms mirrors app/eval/thresholds.yaml's latency.p95_sec: max 60.0
+              # (same production hardware ceiling, offline gate's number).
+              conditions:
+                - evaluator: { type: gt, params: [60000] }
+              refId: C
+        labels:
+          severity: high
+        annotations:
+          summary: "Sampled live p95 latency exceeds the 60s offline-gate ceiling (thresholds.yaml latency.p95_sec)."
+          description: "Requires ONLINE_EVAL_ENABLED=true and a nonzero ONLINE_EVAL_SAMPLE_RATE to have data — see monitoring/slo.md."
+
+  - orgId: 1
+    name: magik-rag-quality
+    folder: MAGIK
+    interval: 5m
+    rules:
+      - uid: magik-eval-hallucination-drift
+        title: "Online hallucination rate drift"
+        condition: C
+        for: 15m
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 900, to: 0 }
+            model:
+              expr: "magik_eval_online_hallucination_rate"
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # Same 0.72 ceiling as thresholds.yaml's hallucination.hallucination_rate
+              # (offline gate) — sustained crossing on live traffic is an early-warning
+              # signal, not itself a CI gate (see rag_quality.json's panel note).
+              conditions:
+                - evaluator: { type: gt, params: [0.72] }
+              refId: C
+        labels:
+          severity: high
+        annotations:
+          summary: "Sampled live hallucination flag rate sustained above 0.72 for 15 minutes."
+          description: "Cross-check against a recent deploy or corpus change; re-run the offline gold-set suite (python -m app.eval.run --suite all --gate) to confirm before treating this as a real regression — this is a lexical-judge signal on live traffic, not the CI gate itself."

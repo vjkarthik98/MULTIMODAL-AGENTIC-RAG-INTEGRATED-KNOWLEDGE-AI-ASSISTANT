@@ -42,7 +42,7 @@ _PUBLIC_PREFIXES = (
 _QUIET_PATHS = frozenset(
     (
         "/health",
-        "/metrics",
+        "/status",  # renamed from "/metrics" in Phase 31 — see app/main.py
     )
 )
 
