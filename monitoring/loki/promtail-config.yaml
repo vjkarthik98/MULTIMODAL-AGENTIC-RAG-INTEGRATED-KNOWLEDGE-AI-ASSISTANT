@@ -1,0 +1,71 @@
+# Phase 31 — Promtail: tails the Docker json-file logs every container on
+# this host already writes (no change to `docker run` invocations, no Docker
+# log-driver swap — magik-current keeps working exactly as before, `docker
+# logs magik-current` is unaffected) and ships them to Loki.
+#
+# Discovers containers via the Docker socket (read-only bind mount below) so
+# every container on the box shows up in Loki automatically — the app
+# (magik-current), its Redis sidecar, and the monitoring stack's own
+# containers — with no per-container config to maintain as containers come
+# and go across deploys.
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  # Persisted on the same bind-mounted volume as Loki's own data so a
+  # container restart resumes from where it left off instead of re-shipping
+  # (or worse, gapping) the tail position.
+  filename: /positions/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      # __meta_docker_container_name arrives as "/magik-current" (leading
+      # slash is Docker's own container-name convention) — strip it so the
+      # `container` label matches the name used everywhere else (Prometheus
+      # metric labels, dashboard titles, docker exec commands).
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/(.*)"
+        target_label: "container"
+      - source_labels: ["__meta_docker_container_log_stream"]
+        target_label: "stream"
+    pipeline_stages:
+      # Unwraps Docker's own json-file envelope ({"log":"...","stream":"stdout",
+      # "time":"..."}) — required first, before the app's own JSON can be read.
+      - docker: {}
+      # Parses app/utils/logger.py's structlog JSON payload (only emitted
+      # when LOG_JSON=true on the box — see docker-compose.monitoring.yml's
+      # header comment). A parse failure here (LOG_JSON=false, or a
+      # non-app container's plain-text output) is non-fatal: the stage
+      # no-ops and the raw line still ships to Loki unenriched, just without
+      # the extracted labels/correlation below.
+      - json:
+          expressions:
+            level: level
+            event: event
+            trace_id: trace_id
+            session_id: session_id
+            request_id: request_id
+            logger: logger
+            timestamp: timestamp
+      # Index cardinality is deliberately narrow: level + trace_id only.
+      # session_id/request_id are still queryable via LogQL line filters
+      # (`| json | session_id="..."`) without becoming index labels — Loki's
+      # cardinality cost scales with indexed label combinations, and
+      # per-session/per-request labels would be effectively unbounded.
+      - labels:
+          level:
+          trace_id:
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+          fallback_formats:
+            - RFC3339

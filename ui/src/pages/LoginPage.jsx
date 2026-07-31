@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Eye, EyeOff, Loader2, Sun, Moon, ShieldCheck, RotateCcw } from 'lucide-react'
-import { login, register, verifyOtp } from '../api/client'
+import { login, register, verifyOtp, resendOtp } from '../api/client'
 
 const GoogleG = () => (
   <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
@@ -11,7 +11,7 @@ const GoogleG = () => (
   </svg>
 )
 
-export default function LoginPage({ onLogin, onGuestMode, dark, onToggleTheme, onForgotPassword }) {
+export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPassword }) {
   const [mounted, setMounted] = useState(false)
   useEffect(() => { requestAnimationFrame(() => setMounted(true)) }, [])
 
@@ -34,8 +34,8 @@ export default function LoginPage({ onLogin, onGuestMode, dark, onToggleTheme, o
   const otpRefs = useRef([])
   const cooldownRef = useRef(null)
 
-  const startCooldown = () => {
-    setResendCooldown(60)
+  const startCooldown = (seconds = 60) => {
+    setResendCooldown(seconds)
     clearInterval(cooldownRef.current)
     cooldownRef.current = setInterval(() => {
       setResendCooldown(prev => {
@@ -136,16 +136,20 @@ export default function LoginPage({ onLogin, onGuestMode, dark, onToggleTheme, o
     if (resendCooldown > 0 || resending) return
     setResending(true); setError('')
     try {
-      // Resend uses the same endpoint as the original action (login for signin, login for resend)
-      const data = await login(email, password)
-      if (data.otp_token) setOtpToken(data.otp_token)
+      // Dedicated resend endpoint — reuses the existing otp_token (works
+      // identically whether the challenge came from login or register)
+      // instead of re-running the original login/register call, which broke
+      // resend during registration (the account is still inactive at that
+      // point, and login on an inactive account is correctly rejected).
+      const data = await resendOtp(otpToken)
       setOtpCode(['', '', '', '', '', ''])
       otpRefs.current[0]?.focus()
-      startCooldown()
+      startCooldown(data.cooldown_seconds || 60)
       setSuccess('New code sent!')
       setTimeout(() => setSuccess(''), 3000)
     } catch (err) {
       setError(err.message)
+      if (err.status === 429) startCooldown(60)
     } finally {
       setResending(false)
     }
@@ -305,50 +309,6 @@ export default function LoginPage({ onLogin, onGuestMode, dark, onToggleTheme, o
               <GoogleG />
               Continue with Google
             </button>
-
-            {/* Guest CTA */}
-            {onGuestMode && (
-              <button
-                type="button"
-                onClick={onGuestMode}
-                className="w-full flex items-center justify-center gap-2.5 rounded-xl py-3 px-4 text-sm font-medium transition-all mt-2"
-                style={{
-                  background: 'linear-gradient(135deg, rgba(139,92,246,0.08) 0%, rgba(59,130,246,0.06) 100%)',
-                  border: '1px solid rgba(139,92,246,0.25)',
-                  color: 'var(--t-tx2)',
-                }}
-                onMouseEnter={e => {
-                  e.currentTarget.style.background = 'linear-gradient(135deg, rgba(139,92,246,0.14) 0%, rgba(59,130,246,0.10) 100%)'
-                  e.currentTarget.style.borderColor = 'rgba(139,92,246,0.45)'
-                }}
-                onMouseLeave={e => {
-                  e.currentTarget.style.background = 'linear-gradient(135deg, rgba(139,92,246,0.08) 0%, rgba(59,130,246,0.06) 100%)'
-                  e.currentTarget.style.borderColor = 'rgba(139,92,246,0.25)'
-                }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="url(#bolt-grad)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <defs>
-                    <linearGradient id="bolt-grad" x1="0" y1="0" x2="1" y2="1">
-                      <stop offset="0%" stopColor="#8b5cf6"/>
-                      <stop offset="100%" stopColor="#3b82f6"/>
-                    </linearGradient>
-                  </defs>
-                  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
-                </svg>
-                Try without signing in
-                <span
-                  className="text-xs font-semibold px-1.5 py-0.5 rounded-md"
-                  style={{
-                    background: 'linear-gradient(135deg, rgba(139,92,246,0.18), rgba(59,130,246,0.14))',
-                    border: '1px solid rgba(139,92,246,0.3)',
-                    color: '#a78bfa',
-                    letterSpacing: '0.01em',
-                  }}
-                >
-                  5 free
-                </span>
-              </button>
-            )}
 
             {/* Divider */}
             <div className="flex items-center gap-3 my-7">

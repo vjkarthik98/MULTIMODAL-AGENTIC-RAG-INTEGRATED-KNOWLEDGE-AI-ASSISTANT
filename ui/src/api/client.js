@@ -28,7 +28,22 @@ export async function verifyOtp(otpToken, code) {
     const err = await res.json().catch(() => ({}))
     throw new Error(err.detail || `Verification failed (${res.status})`)
   }
-  return res.json()  // { access_token, refresh_token, ... }
+  return res.json()  // { access_token, refresh_token, ..., migration_stats? }
+}
+
+export async function resendOtp(otpToken) {
+  const res = await fetch(`${API}/auth/resend-otp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ otp_token: otpToken }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    const error = new Error(err.detail || `Resend failed (${res.status})`)
+    error.status = res.status
+    throw error
+  }
+  return res.json()  // { sent: true, cooldown_seconds }
 }
 
 export async function forgotPassword(email) {
@@ -367,56 +382,3 @@ export async function getChunkMeta(token, chunkId) {
   return res.json()
 }
 
-// ── Guest mode ─────────────────────────────────────────────────────────────
-
-export async function createGuestSession() {
-  const res = await fetch(`${API}/auth/guest`, { method: 'POST' })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}))
-    throw new Error(err.detail || `Guest session failed (${res.status})`)
-  }
-  return res.json()
-  // { access_token, token_type, expires_in, guest_user_id, queries_left, uploads_left }
-}
-
-export async function getGuestLimits(token) {
-  try {
-    const res = await fetch(`${API}/auth/guest/limits`, { headers: bearer(token) })
-    if (!res.ok) return null
-    return res.json()  // { queries_left, uploads_left, queries_used, uploads_used }
-  } catch {
-    return null
-  }
-}
-
-export async function convertGuestToUser(guestToken, payload) {
-  // payload: { email, password } for email/password path
-  const res = await fetch(`${API}/auth/guest/convert`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ guest_token: guestToken, ...payload }),
-  })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}))
-    const status = res.status
-    const error = new Error(err.detail || `Conversion failed (${status})`)
-    error.status = status
-    throw error
-  }
-  return res.json()
-  // { access_token, refresh_token, token_type, expires_in, email, migration_stats }
-}
-
-export async function migrateGuestData(realToken, guestToken) {
-  // Called after Google OAuth conversion — real JWT in Authorization header, guest token in body
-  const res = await fetch(`${API}/auth/guest/migrate`, {
-    method: 'POST',
-    headers: { ...bearer(realToken), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ guest_token: guestToken }),
-  })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}))
-    throw new Error(err.detail || `Migration failed (${res.status})`)
-  }
-  return res.json()  // { migrated: true, migration_stats }
-}

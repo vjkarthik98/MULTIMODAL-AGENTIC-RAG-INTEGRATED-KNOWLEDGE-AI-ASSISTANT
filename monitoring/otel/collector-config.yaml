@@ -1,0 +1,48 @@
+# Phase 31 — OpenTelemetry Collector config.
+#
+# Receives spans from the app via OTLP gRPC (app/main.py's OTLPSpanExporter,
+# settings.OTEL_EXPORTER_OTLP_ENDPOINT — must be set to
+# http://otel-collector:4317 in /opt/magik/.env, NOT the code default of
+# localhost:4317, since the app and this collector are separate containers
+# on the magik-net docker network). Exports traces to Tempo for storage,
+# viewable in Grafana Explore (see monitoring/grafana/provisioning/datasources.yml).
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+  # A single small host with intermittent scale-to-zero traffic doesn't need
+  # unbounded span retention in memory between flushes.
+  memory_limiter:
+    check_interval: 5s
+    limit_mib: 200
+    spike_limit_mib: 50
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  # Collector's own health/throughput metrics — scraped by Prometheus
+  # (see monitoring/prometheus/prometheus.yml's otel-collector job).
+  prometheus:
+    endpoint: 0.0.0.0:8888
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]

@@ -104,6 +104,42 @@ def verify_otp(user_id: str, submitted: str) -> bool:
     return True
 
 
+_RESEND_COOLDOWN_PREFIX = "otp_resend_cooldown:"
+_RESEND_COUNT_PREFIX = "otp_resend_count:"
+
+
+def check_and_record_resend(user_id: str) -> tuple[bool, int]:
+    """Atomically check the resend cooldown/cap and record this attempt.
+
+    Two independent limits: a short cooldown between individual resends
+    (stops a single click-happy user or a naive retry loop from hammering
+    the mail provider), and a cap on total resends per rolling window (stops
+    someone using resend as a way to keep re-triggering emails indefinitely).
+
+    Returns (allowed, retry_after_seconds). When not allowed, retry_after_seconds
+    is how long the caller must wait before trying again.
+    """
+    r = _redis()
+    cooldown_key = f"{_RESEND_COOLDOWN_PREFIX}{user_id}"
+    count_key = f"{_RESEND_COUNT_PREFIX}{user_id}"
+
+    cooldown_ttl = r.ttl(cooldown_key)
+    if cooldown_ttl and cooldown_ttl > 0:
+        return False, int(cooldown_ttl)
+
+    count = r.incr(count_key)
+    if count == 1:
+        r.expire(count_key, settings.OTP_RESEND_WINDOW_SECONDS)
+    if count > settings.OTP_RESEND_MAX_PER_WINDOW:
+        window_ttl = r.ttl(count_key)
+        return False, (
+            int(window_ttl) if window_ttl and window_ttl > 0 else settings.OTP_RESEND_WINDOW_SECONDS
+        )
+
+    r.setex(cooldown_key, settings.OTP_RESEND_COOLDOWN_SECONDS, "1")
+    return True, 0
+
+
 def delete_otp(user_id: str) -> None:
     """Remove all OTP keys for a user (used on resend to reset state)."""
     r = _redis()
@@ -148,6 +184,8 @@ def delete_otp_keys(user_id: str) -> None:
             f"{_OTP_PREFIX}{user_id}",
             f"{_ATTEMPTS_PREFIX}{user_id}",
             f"{_LOCKED_PREFIX}{user_id}",
+            f"{_RESEND_COOLDOWN_PREFIX}{user_id}",
+            f"{_RESEND_COUNT_PREFIX}{user_id}",
         )
         logger.info(event="otp_keys_deleted", user_id=user_id)
     except Exception as exc:

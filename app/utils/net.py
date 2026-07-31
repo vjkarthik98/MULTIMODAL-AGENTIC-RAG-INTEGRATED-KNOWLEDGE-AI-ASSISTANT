@@ -4,7 +4,7 @@ Single source of truth for turning a FastAPI Request into a client IP used for
 rate limiting and abuse guards. X-Forwarded-For is only trusted when the
 direct TCP peer is a configured trusted proxy (settings.TRUSTED_PROXY_IPS) —
 otherwise it's attacker-controlled and any IP-keyed limit built on it (rate
-limits, guest quotas) is trivially bypassed by spoofing the header.
+limits) is trivially bypassed by spoofing the header.
 """
 
 from __future__ import annotations

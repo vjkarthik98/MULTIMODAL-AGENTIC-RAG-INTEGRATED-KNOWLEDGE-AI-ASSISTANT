@@ -1,0 +1,31 @@
+# Phase 31 — Tempo trace storage config.
+# Local filesystem backend (no S3/GCS) — appropriate for a single-host,
+# scale-to-zero deployment. Bounded retention keeps this off the 100GB EBS
+# root volume's critical path (models + data already dominate it).
+
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    block_retention: 168h # 7 days — a demo/portfolio box has no need for longer trace history
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+    wal:
+      path: /var/tempo/wal

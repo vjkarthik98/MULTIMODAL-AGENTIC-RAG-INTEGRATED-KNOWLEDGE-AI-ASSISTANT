@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.auth.dependencies import get_current_user
-from app.auth.models import UserPublic, UserRole
+from app.auth.models import UserPublic
 from app.core.config import settings
 from app.core.gpu_admission import GPUBusyError, gpu_slot
 from app.core.infra_registry import infra
@@ -538,20 +538,6 @@ async def ingest_document(
     user_id = current_user.user_id
 
     _rate_limit_check(request)
-
-    # Guest upload limit — enforced atomically in Redis (Lua script, no race
-    # condition), scoped both per-guest-session AND aggregated per client IP
-    # so a fresh guest session from a new tab doesn't reset the effective quota.
-    if current_user.role == UserRole.GUEST:
-        from app.auth.guest_service import check_and_increment_uploads
-
-        allowed = await asyncio.to_thread(check_and_increment_uploads, user_id, _client_ip(request))
-        if not allowed:
-            raise HTTPException(
-                status_code=429,
-                detail="Guest upload limit reached. Sign up free to continue.",
-                headers={"X-Guest-Upgrade-Required": "true", "X-Guest-Limit-Type": "uploads"},
-            )
 
     try:
         if not file.filename:
@@ -1162,34 +1148,6 @@ async def stream_query(
 
     _rate_limit_check(request)
 
-    # Guest query limit — atomic Lua check in Redis, fails open on Redis outage.
-    # Scoped both per-guest-session and aggregated per client IP so a fresh
-    # guest session from a new tab doesn't reset the effective quota.
-    if current_user.role == UserRole.GUEST:
-        from app.auth.guest_service import check_and_increment_queries
-
-        allowed = await asyncio.to_thread(
-            check_and_increment_queries, current_user.user_id, _client_ip(request)
-        )
-        if not allowed:
-
-            async def _guest_limit_stream():
-                import json as _json
-
-                payload = _json.dumps({"__type__": "guest_limit", "limit_type": "queries"})
-                yield f"data: {payload}\n\n"
-                yield "data: [DONE]\n\n"
-
-            return StreamingResponse(
-                _guest_limit_stream(),
-                media_type="text/event-stream",
-                headers={
-                    "X-Guest-Upgrade-Required": "true",
-                    "X-Accel-Buffering": "no",
-                    "Cache-Control": "no-cache",
-                },
-            )
-
     try:
         query = _clean(request_body.query)
 
@@ -1441,6 +1399,7 @@ async def stream_query(
             _refused = False
             _loop = asyncio.get_running_loop()
             _STOP = object()
+            _stream_t0 = time.perf_counter()
 
             def _next_token():
                 # generator.__next__ blocks on llama.cpp between tokens — it must
@@ -1548,6 +1507,24 @@ async def stream_query(
                             event="stream_cache_write_failed", session_id=session_id, error=str(_ce)
                         )
 
+                    # ONLINE EVAL SAMPLING (Phase 31) — best-effort, no-op unless
+                    # ONLINE_EVAL_SAMPLE_RATE > 0; sample_and_log() never raises,
+                    # this try/except is defense in depth only.
+                    try:
+                        from app.eval.jobs.shadow_sampler import sample_and_log
+
+                        sample_and_log(
+                            session_id=session_id,
+                            user_id=_stream_user_id,
+                            query=query,
+                            answer=_full_answer,
+                            sources=_src,
+                            route="rag",
+                            latency_ms=(time.perf_counter() - _stream_t0) * 1000,
+                        )
+                    except Exception:
+                        pass
+
                 yield "data: [DONE]\n\n"
             except GPUBusyError as _busy:
                 logger.warning(
@@ -1620,19 +1597,6 @@ async def upload_file(
     user_id = current_user.user_id
 
     _rate_limit_check(request)
-
-    # Guest upload limit — same atomic Lua check as /ingest, aggregated per
-    # client IP too (see check_and_increment_uploads docstring).
-    if current_user.role == UserRole.GUEST:
-        from app.auth.guest_service import check_and_increment_uploads
-
-        allowed = await asyncio.to_thread(check_and_increment_uploads, user_id, _client_ip(request))
-        if not allowed:
-            raise HTTPException(
-                status_code=429,
-                detail="Guest upload limit reached. Sign up free to continue.",
-                headers={"X-Guest-Upgrade-Required": "true", "X-Guest-Limit-Type": "uploads"},
-            )
 
     try:
         if not file.filename:

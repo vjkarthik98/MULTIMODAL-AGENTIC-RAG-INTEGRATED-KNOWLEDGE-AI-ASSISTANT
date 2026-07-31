@@ -84,7 +84,7 @@ class Settings:
     APP_NAME: str = _str("APP_NAME", "Multimodal Agentic RAG Integrated Knowledge AI Assistant")
     # Keep in sync with /VERSION and the test assertion below by hand — nothing
     # reads /VERSION at runtime, so this drifts silently if only one is bumped.
-    APP_VERSION: str = _str("APP_VERSION", "0.27.0")
+    APP_VERSION: str = _str("APP_VERSION", "0.28.0")
     APP_DESCRIPTION: str = _str(
         "APP_DESCRIPTION", "Production Multimodal Agentic RAG Integrated AI System"
     )
@@ -129,9 +129,12 @@ class Settings:
     OTEL_SERVICE_NAME: str = _str("OTEL_SERVICE_NAME", "multimodal-rag-assistant")
     OTEL_SAMPLING_RATIO: float = _float("OTEL_SAMPLING_RATIO", 1.0)
 
-    # PROMETHEUS
+    # PROMETHEUS — 9464 is the OpenTelemetry/Prometheus community convention for
+    # app-exporter ports; NOT 9090, which is the Prometheus server's own default
+    # web port and collides with it the moment both run on the same docker network
+    # (see monitoring/prometheus/prometheus.yml, Phase 31).
     PROMETHEUS_ENABLED: bool = _bool("PROMETHEUS_ENABLED", False)
-    PROMETHEUS_PORT: int = _int("PROMETHEUS_PORT", 9090)
+    PROMETHEUS_PORT: int = _int("PROMETHEUS_PORT", 9464)
     PROMETHEUS_METRICS_PATH: str = _str("PROMETHEUS_METRICS_PATH", "/metrics")
 
     # PERFORMANCE — defaults tuned for AWS g6e.xlarge L40S (48 GB) GPU deployment
@@ -405,7 +408,6 @@ class Settings:
     MMR_ENABLED: bool = _bool("MMR_ENABLED", True)
     # 0.5 picks diverse chunks so cross-doc questions get both DOC-010 and DOC-011
     MMR_LAMBDA: float = _float("MMR_LAMBDA", 0.5)
-    COHERE_API_KEY: str | None = _opt("COHERE_API_KEY")
 
     RERANK_MODALITY_WEIGHTS: dict[str, float] = {
         "text": 1.0,
@@ -484,6 +486,15 @@ class Settings:
     MONGO_AUDIT_COLLECTION: str = _str("MONGO_AUDIT_COLLECTION", "audit_log")
     MONGO_SESSIONS_COLLECTION: str = _str("MONGO_SESSIONS_COLLECTION", "chat_sessions")
     MONGO_FEEDBACK_COLLECTION: str = _str("MONGO_FEEDBACK_COLLECTION", "feedback")
+    MONGO_EVAL_SHADOW_COLLECTION: str = _str("MONGO_EVAL_SHADOW_COLLECTION", "eval_shadow")
+
+    # ONLINE EVAL (Phase 31) — deterministic sampling of live queries into
+    # MONGO_EVAL_SHADOW_COLLECTION for app/eval/jobs/online_eval.py to score.
+    # 0.0 = disabled (default). Reference-free metrics only (no gold set is
+    # available for arbitrary live traffic) — see app/eval/jobs/online_eval.py.
+    ONLINE_EVAL_SAMPLE_RATE: float = _float("ONLINE_EVAL_SAMPLE_RATE", 0.0)
+    ONLINE_EVAL_ENABLED: bool = _bool("ONLINE_EVAL_ENABLED", False)
+    ONLINE_EVAL_INTERVAL_SEC: int = _int("ONLINE_EVAL_INTERVAL_SEC", 1800)
 
     # TEXT REPAIR — per-pass toggles for the broken-corpus hardening layer
     # (mojibake fix, noise-line strip, whitespace recovery, OCR normalization,
@@ -593,7 +604,6 @@ class Settings:
 
     # WEB SEARCH
     TAVILY_API_KEY: str = _str("TAVILY_API_KEY", "")
-    SERPAPI_KEY: str | None = _opt("SERPAPI_KEY")
     WEB_MAX_DOCS: int = _int("WEB_MAX_DOCS", 5)
     WEB_MAX_RESULTS: int = _int("WEB_MAX_RESULTS", 10)
     WEB_DOC_MAX_CHARS: int = _int("WEB_DOC_MAX_CHARS", 1000)
@@ -748,26 +758,9 @@ class Settings:
     SLO_AUDIO_P95_MS: int = _int("SLO_AUDIO_P95_MS", 300000)
     SLO_VIDEO_P95_MS: int = _int("SLO_VIDEO_P95_MS", 900000)
 
-    # OBSERVABILITY
-    LANGFUSE_PUBLIC_KEY: str | None = _opt("LANGFUSE_PUBLIC_KEY")
-    LANGFUSE_SECRET_KEY: str | None = _opt("LANGFUSE_SECRET_KEY")
-    LANGFUSE_HOST: str = _str("LANGFUSE_HOST", "https://cloud.langfuse.com")
-    LANGFUSE_ENABLED: bool = _bool("LANGFUSE_ENABLED", False)
-
     # MULTI-USER
     DEFAULT_DEV_USER_ID: str = _str("DEFAULT_DEV_USER_ID", "a3f9c821-4b2e-11ef-9454-0242ac120002")
     TEST_USER_2_ID: str = _str("TEST_USER_2_ID", "b7d2e109-4b2e-11ef-9454-0242ac120002")
-
-    # GUEST MODE — trial session limits
-    GUEST_QUERY_LIMIT: int = _int("GUEST_QUERY_LIMIT", 5)
-    GUEST_FILE_LIMIT: int = _int("GUEST_FILE_LIMIT", 2)
-    GUEST_SESSION_TTL_HOURS: int = _int("GUEST_SESSION_TTL_HOURS", 24)
-    # Aggregate per-IP caps — a per-guest_id counter alone is trivially reset by
-    # opening a new tab/incognito window (each mints a fresh guest_id with its
-    # own quota via POST /auth/guest). These bound TOTAL guest usage from one
-    # IP across ALL its guest sessions, same TTL window as a single session.
-    GUEST_IP_QUERY_LIMIT: int = _int("GUEST_IP_QUERY_LIMIT", 20)
-    GUEST_IP_FILE_LIMIT: int = _int("GUEST_IP_FILE_LIMIT", 8)
 
     # JWT AUTHENTICATION — Phase 27
     JWT_SECRET_KEY: str = _str("JWT_SECRET_KEY", "CHANGE_ME_IN_PRODUCTION")
@@ -792,6 +785,11 @@ class Settings:
     OTP_TTL_SECONDS: int = _int("OTP_TTL_SECONDS", 600)  # 10 min
     OTP_MAX_ATTEMPTS: int = _int("OTP_MAX_ATTEMPTS", 3)
     OTP_LOCKOUT_SECONDS: int = _int("OTP_LOCKOUT_SECONDS", 900)  # 15 min
+    OTP_RESEND_COOLDOWN_SECONDS: int = _int(
+        "OTP_RESEND_COOLDOWN_SECONDS", 45
+    )  # min gap between resends
+    OTP_RESEND_MAX_PER_WINDOW: int = _int("OTP_RESEND_MAX_PER_WINDOW", 5)  # resend cap per window
+    OTP_RESEND_WINDOW_SECONDS: int = _int("OTP_RESEND_WINDOW_SECONDS", 3600)  # 1 hr resend window
     RESET_TOKEN_TTL_SECONDS: int = _int("RESET_TOKEN_TTL_SECONDS", 3600)  # 1 hr
     # Dev-only: log OTP/reset links to console instead of sending email
     DEV_OTP_LOG: bool = _bool("DEV_OTP_LOG", False)
@@ -1020,7 +1018,7 @@ class TestSettings:
 
     def test_defaults_are_valid(self):
         s = Settings()
-        assert s.APP_VERSION == "0.27.0"
+        assert s.APP_VERSION == "0.28.0"
         assert s.TEXT_EMBEDDING_DIM == 1024
         assert s.VISION_EMBEDDING_DIM > 0
         assert s.CHUNK_OVERLAP < s.CHUNK_SIZE

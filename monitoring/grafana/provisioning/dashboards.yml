@@ -1,0 +1,15 @@
+# Phase 31 — Grafana dashboard provisioning: auto-loads every .json under
+# monitoring/grafana/dashboards/ on container start.
+
+apiVersion: 1
+
+providers:
+  - name: MAGIK
+    orgId: 1
+    folder: MAGIK
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards/files
