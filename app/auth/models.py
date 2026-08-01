@@ -29,6 +29,15 @@ class UserInDB(BaseModel):
     # fixed, publicly-shared login (recruiters/hiring managers) that skips OTP
     # on every login. See /auth/login in router.py for the bypass.
     is_demo: bool = False
+    # Set only by app/bin/seed_test_tenants.py, never by /auth/register — a
+    # dedicated, non-public account used exclusively by automated quality
+    # tooling (k6 load/stress/multi-user simulation, live-mode Schemathesis,
+    # ZAP). Skips OTP for the same non-interactive-automation reason is_demo
+    # does (see /auth/login), but is otherwise a completely ordinary account —
+    # no tenant-isolation exemption, no elevated quota, nothing. Distinct from
+    # is_demo so the one shared public recruiter login is never reused (and
+    # never rate-limit-contended) by test tooling.
+    is_load_test: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_login: datetime | None = None
 
@@ -53,6 +62,7 @@ class UserPublic(BaseModel):
     role: UserRole
     is_active: bool
     is_demo: bool = False
+    is_load_test: bool = False
     created_at: datetime
 
 

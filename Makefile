@@ -1,7 +1,9 @@
 .DEFAULT_GOAL := help
 .PHONY: help install install-dev lint format typecheck test test-unit test-auth test-guardrails \
         test-randomized integration eval-retrieval eval-full benchmark security-scan sbom \
-        release docker-build docker-run compose-up compose-down clean
+        release docker-build docker-run compose-up compose-down clean \
+        api-contract ragas-report deepeval-report seed-test-tenants k6-smoke k6-stress \
+        k6-multiuser lighthouse zap-baseline
 
 PYTHON ?= python
 
@@ -119,6 +121,41 @@ sbom:  ## CycloneDX SBOM of the current Python environment (cd.yml SBOMs the ima
 	$(PYTHON) -m pip install --quiet --upgrade cyclonedx-bom
 	$(PYTHON) -m cyclonedx_py environment -o sbom.local.json
 	@echo "Wrote sbom.local.json"
+
+# ── Quality & Performance Reporting ──────────────────────────────────────────
+# Local-mode targets — all assume `docker compose up -d api qdrant redis mongo`
+# is already running. Live-mode equivalents (against the real deployed URL)
+# are manual/on-demand only — see perf/k6/README.md, scripts/schemathesis_live.sh,
+# security/zap/README.md, and docs/reports/browser-performance/README.md.
+# Never wired into a scheduled workflow — see .github/workflows/quality-live.yml.
+
+api-contract:  ## Schemathesis property-based API contract test (GET-only, safe)
+	pytest tests/api_contract/ -v
+
+ragas-report:  ## Standalone RAGAS report (real ragas==0.1.21, local judge) — see app/eval/ragas_report.py
+	$(PYTHON) -m app.eval.ragas_report
+
+deepeval-report:  ## DeepEval suite, second-opinion LLM eval, local GGUF judge — see app/eval/deepeval_suite.py
+	$(PYTHON) -m app.eval.deepeval_suite
+
+seed-test-tenants:  ## Provision dedicated is_load_test accounts for k6/live-mode tooling (never the public demo login)
+	$(PYTHON) -m app.bin.seed_test_tenants --count 10
+
+k6-smoke:  ## k6 sanity check — see perf/k6/README.md for one-time tenant setup
+	k6 run perf/k6/smoke.js
+
+k6-stress:  ## k6 ramping load test, local target only
+	k6 run perf/k6/stress.js
+
+k6-multiuser:  ## k6 multi-tenant concurrency test — asserts zero cross-tenant leakage under load
+	k6 run --vus 8 --iterations 24 perf/k6/multi_user_tenant.js
+
+lighthouse:  ## Browser performance (Core Web Vitals) against the built UI, served locally by lhci
+	npm --prefix ui run build
+	npx --yes @lhci/cli@0.14 autorun --config=lighthouserc.json
+
+zap-baseline:  ## OWASP ZAP passive baseline DAST scan against the local docker-compose stack
+	bash security/zap/run_baseline.sh
 
 # Preflight only — it deliberately does NOT cut the release. Tagging is done by
 # .github/workflows/release.yml (Actions tab -> Release -> Run workflow), which

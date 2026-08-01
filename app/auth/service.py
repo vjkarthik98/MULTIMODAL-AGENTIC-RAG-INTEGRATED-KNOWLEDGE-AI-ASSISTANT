@@ -48,8 +48,18 @@ def _get_mongo_collection():
     from app.core.infra_registry import infra
 
     mongo = infra.get_mongo()
-    if mongo is None:
-        raise RuntimeError("MongoDB is not available")
+    # infra.get_mongo() returning non-None does NOT mean it's connected —
+    # MongoMemory.__init__ swallows a missing pymongo install or a failed
+    # connection and leaves .client = None rather than raising (see
+    # app/memory/mongo_memory.py's pymongo_not_installed / connection-error
+    # paths). Checking only `mongo is None` let that surface as a bare
+    # `TypeError: 'NoneType' object is not subscriptable` on `mongo.client[...]`
+    # below instead of a clear, actionable error.
+    if mongo is None or mongo.client is None:
+        raise RuntimeError(
+            "MongoDB is not available — pymongo may not be installed, or no "
+            "MongoDB server is reachable at settings.MONGO_URI"
+        )
     db = mongo.client[settings.MONGO_DB_NAME]
     return db[settings.AUTH_COLLECTION]
 
@@ -61,6 +71,7 @@ def _doc_to_public(doc: dict) -> UserPublic:
         role=doc.get("role", "user"),
         is_active=doc.get("is_active", True),
         is_demo=doc.get("is_demo", False),
+        is_load_test=doc.get("is_load_test", False),
         created_at=doc.get("created_at", datetime.now(timezone.utc)),
     )
 
@@ -298,4 +309,48 @@ class AuthService:
         )
         col.insert_one(user.model_dump())
         logger.info(event="auth_demo_user_created", email=email, user_id=user.user_id)
+        return _doc_to_public(user.model_dump())
+
+    def seed_load_test_user(self, email: str, password: str) -> UserPublic:
+        """Create or reset one dedicated automated-test-tooling account.
+
+        Idempotent, same shape as seed_demo_user — but sets is_load_test, not
+        is_demo, so this is unambiguously never the shared recruiter login.
+        Used only by app/bin/seed_test_tenants.py, never reachable from any
+        HTTP route. No tenant-isolation exemption, no elevated quota — an
+        is_load_test account is a completely ordinary tenant in every data
+        layer (Qdrant/BM25/Redis/Mongo all filter on user_id exactly as for
+        any other account); the only special-case is the OTP skip at login,
+        needed because this account is driven by non-interactive tooling
+        (k6, Schemathesis live-mode, ZAP) that cannot solve an email OTP.
+        """
+        _check_password_strength(password, email)
+        col = _get_mongo_collection()
+        existing = col.find_one({"email": email})
+        hashed = _hash_password(password)
+
+        if existing:
+            col.update_one(
+                {"email": email},
+                {
+                    "$set": {
+                        "hashed_password": hashed,
+                        "is_active": True,
+                        "is_load_test": True,
+                    },
+                    "$addToSet": {"auth_providers": "email"},
+                },
+            )
+            logger.info(event="auth_load_test_user_reset", email=email, user_id=existing["user_id"])
+            return _doc_to_public(col.find_one({"email": email}))
+
+        user = UserInDB(
+            email=email,
+            hashed_password=hashed,
+            auth_providers=["email"],
+            is_active=True,
+            is_load_test=True,
+        )
+        col.insert_one(user.model_dump())
+        logger.info(event="auth_load_test_user_created", email=email, user_id=user.user_id)
         return _doc_to_public(user.model_dump())

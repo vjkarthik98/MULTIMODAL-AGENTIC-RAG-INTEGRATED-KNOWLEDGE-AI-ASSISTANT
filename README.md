@@ -6,6 +6,7 @@
 [![Eval Gate](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/eval-gate.yml/badge.svg)](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/eval-gate.yml)
 [![CD](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/cd.yml/badge.svg)](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/cd.yml)
 [![Security](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/security.yml/badge.svg)](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/security.yml)
+[![Quality](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/quality.yml/badge.svg)](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/quality.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 
@@ -30,6 +31,7 @@ The demo runs on a scale-to-zero AWS GPU box — it may take 60-90 seconds to wa
 - [Security & Guardrails](#security--guardrails)
 - [Testing](#testing)
 - [CI/CD](#cicd)
+- [Quality & Performance Reports](#quality--performance-reports)
 - [Deployment](#deployment)
 - [Observability](#observability)
 - [Known Limitations & Roadmap](#known-limitations--roadmap)
@@ -417,8 +419,41 @@ Always scope pytest to a specific subdirectory (`tests/unit/`, `tests/auth/`, `t
 | `cd.yml` | Tag push (`v*`) | Builds the production image, pushes to GHCR, deploys via SSM, health-checks, auto-rolls back on failure |
 | `release.yml` | Manual dispatch | Syncs version files, tags, publishes a GitHub Release |
 | `security.yml` | Push/PR + weekly cron | Secret scanning (`detect-secrets`), dependency CVEs (`pip-audit`), SAST (Bandit), container scanning |
+| `quality.yml` | Every PR touching `app/api/`, `ui/`, auth, or `perf/k6/` | API contract (Schemathesis), k6 smoke, OWASP ZAP baseline (DAST), Lighthouse — all against the local docker-compose stack. Informational, not a required check yet — see `quality-reports/README.md` |
+| `quality-live.yml` | Manual dispatch only | The live-mode equivalents (RAGAS, DeepEval, k6, Lighthouse, ZAP baseline) against the real deployed URL — never scheduled, never on push/PR |
 
 `cd.yml` authenticates to AWS via GitHub OIDC — there are no long-lived AWS credentials stored in the repository.
+
+## Quality & Performance Reports
+
+A dedicated testing initiative on top of the eval harness above: API contract
+testing, a second LLM-eval framework, load/stress testing, browser
+performance, DAST, and passive uptime monitoring — all open-source, all
+designed around two constraints specific to this deployment: a single
+wake-on-demand GPU box (never woken by monitoring itself) and real,
+IP-keyed rate limits (tooling never contends with real visitor traffic).
+Full design rationale in `quality-reports/README.md`.
+
+| Ask | Tool | Local (automatic, every PR) | Live (manual, real deployed URL) |
+|---|---|---|---|
+| API testing | [Schemathesis](https://schemathesis.readthedocs.io/) | ✅ `quality.yml` | `make -f Makefile` → `scripts/schemathesis_live.sh` |
+| RAGAS | [Ragas](https://github.com/explodinggradients/ragas) `0.1.21` | `make ragas-report` | ✅ default mode — `app/eval/ragas_report.py` |
+| DeepEval | [DeepEval](https://github.com/confident-ai/deepeval) (local GGUF judge, never OpenAI) | `make deepeval-report` | ✅ default mode — `app/eval/deepeval_suite.py` |
+| Stress / performance | [k6](https://k6.io/) | ✅ smoke only, `quality.yml` | `perf/k6/live_profile.js` (manual) |
+| Multi-user simulation | k6, dedicated test tenants | `make k6-multiuser` | `perf/k6/multi_user_tenant.js` — asserts **zero cross-tenant leakage** under concurrent load |
+| Browser performance | [Lighthouse](https://github.com/GoogleChrome/lighthouse) / Lighthouse CI | ✅ `quality.yml` | manual, real Core Web Vitals |
+| Security scan (DAST) | [OWASP ZAP](https://www.zaproxy.org/) | ✅ baseline (passive), `quality.yml` | baseline safe any time; **active scan is a local, human-supervised script only** — never CI, see `security/zap/README.md` |
+| Uptime monitoring | [Uptime Kuma](https://github.com/louislam/uptime-kuma) | — | passive push from the wake/idle-stop Lambdas themselves; Kuma never polls the app (that would wake it) — see `monitoring/uptime-kuma/README.md` |
+
+Reports land in `quality-reports/<tool>/` (tracked in git — unlike `docs/`,
+this directory exists specifically to be visible on GitHub and linkable from
+here and the portfolio site). `scripts/generate_quality_badges.py` turns the
+latest committed report per tool into shields.io badges.
+
+This is freshly built tooling, not yet run against the live deployment — the
+Local/Live columns above describe what each tool does and how to run it, not
+a claim that numbers already exist. Real scores appear in `quality-reports/`
+and as badges once each tool has actually been run and a report committed.
 
 ## Deployment
 

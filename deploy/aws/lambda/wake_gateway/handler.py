@@ -16,6 +16,17 @@ Runs outside a VPC so it can reach the instance's public endpoint directly.
 Cost note: this is the piece that makes scale-to-zero viable. Always-on would
 be ~$1,340/mo; stopped-by-default plus this gateway is ~$12/mo fixed plus a
 few dollars per active hour.
+
+Uptime monitoring hook (optional, KUMA_PUSH_URL): when set, this function
+pushes an "up" heartbeat to a self-hosted Uptime Kuma push-monitor URL at the
+exact moment it confirms the app is genuinely healthy and about to redirect a
+real visitor to it — see _push_kuma_up() below. This is deliberately a PUSH
+from here, not a POLL from Kuma: Kuma never calls this gateway itself, because
+doing so would BE a visitor request and would wake the instance on its own,
+defeating the entire point of scale-to-zero. Every push this function makes
+is therefore a side effect of a real visitor already being here — it can
+never be the cause of a wake. See deploy/aws/lambda/idle_stop/handler.py for
+the matching "down" push when the instance actually goes back to sleep.
 """
 
 from __future__ import annotations
@@ -37,6 +48,12 @@ APP_URL = os.environ.get("APP_URL", "").rstrip("/")
 HEALTH_URL = os.environ.get("HEALTH_URL") or (f"{APP_URL}/health" if APP_URL else "")
 HEALTH_TIMEOUT_S = float(os.environ.get("HEALTH_TIMEOUT_S", "3"))
 REFRESH_SECONDS = os.environ.get("REFRESH_SECONDS", "7")
+
+# Optional — unset by default, so this is a strict no-op until Phase F's Kuma
+# host is actually provisioned and this env var is deliberately set (see
+# deploy/aws/scripts/deploy_lambdas.sh and monitoring/uptime-kuma/).
+KUMA_PUSH_URL = os.environ.get("KUMA_PUSH_URL", "").rstrip("/")
+KUMA_PUSH_TIMEOUT_S = float(os.environ.get("KUMA_PUSH_TIMEOUT_S", "2"))
 
 # Short timeouts + no retries: this Lambda sits in front of a human staring at
 # a browser tab. A slow AWS call must not turn into a 30s blank page — better
@@ -109,6 +126,22 @@ def _error_page(msg: str, status: int = 503) -> dict:
     )
 
 
+def _push_kuma_up() -> None:
+    """Fire-and-forget heartbeat to Uptime Kuma's push monitor. No-op if
+    KUMA_PUSH_URL is unset. Never allowed to affect the visitor-facing
+    response — any failure here is swallowed, same fail-open posture as
+    everything else in this Lambda that isn't the core wake/redirect path.
+    """
+    if not KUMA_PUSH_URL:
+        return
+    try:
+        url = f"{KUMA_PUSH_URL}?status=up&msg=woken_by_visitor"
+        req = urllib.request.Request(url, headers={"User-Agent": "magik-wake-gateway"})
+        urllib.request.urlopen(req, timeout=KUMA_PUSH_TIMEOUT_S).close()
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
+        log.info("kuma push failed (non-fatal): %s", exc)
+
+
 def _find_instance() -> tuple[str | None, str | None]:
     """Return (instance_id, state) for the tagged instance, or (None, None)."""
     resp = ec2.describe_instances(
@@ -178,6 +211,7 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
 
     if state == "running" and _is_healthy():
         log.info("healthy -> redirecting to %s", APP_URL)
+        _push_kuma_up()  # real visitor confirmed the app is genuinely serving
         return _resp(302, "", {"location": APP_URL})
 
     # running but not yet answering /health — models still loading

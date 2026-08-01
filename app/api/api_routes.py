@@ -349,10 +349,6 @@ def _audit_log(
         pass
 
 
-def _rate_limit_check(request: Request) -> None:
-    pass
-
-
 # MALWARE SCAN — CLAMAV
 
 
@@ -536,8 +532,6 @@ async def ingest_document(
     request_id = _request_id()
     file_path: Path | None = None
     user_id = current_user.user_id
-
-    _rate_limit_check(request)
 
     try:
         if not file.filename:
@@ -841,8 +835,6 @@ async def query_rag(
     session_id = request_body.session_id
     user_id = current_user.user_id
 
-    _rate_limit_check(request)
-
     try:
         query = _clean(request_body.query)
 
@@ -1145,8 +1137,6 @@ async def stream_query(
 ) -> StreamingResponse:
     request_id = _request_id()
     session_id = request_body.session_id
-
-    _rate_limit_check(request)
 
     try:
         query = _clean(request_body.query)
@@ -1639,8 +1629,6 @@ async def upload_file(
     request_id = _request_id()
     file_path: Path | None = None
     user_id = current_user.user_id
-
-    _rate_limit_check(request)
 
     try:
         if not file.filename:
