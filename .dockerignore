@@ -36,22 +36,20 @@ monitoring/
 CHANGELOG.md
 README.md
 
-# Tests — not shipped in the runtime image, with ONE deliberate exception.
+# Tests — not shipped in the runtime image.
 #
-# app/guardrails/jailbreak.py resolves its semantic corpus to
-# <root>/tests/guardrails/adversarial/red_team_prompts.jsonl. Excluding all of
-# tests/ meant the deployed image logged `jailbreak_corpus_not_found` and ran
-# with `corpus_size=0` — pattern matching (46 patterns) still worked, but the
-# semantic tier silently had nothing to compare against, which is a real
-# weakening of defence-in-depth on a PUBLIC demo. Caught by reading container
-# logs on the first live deploy (2026-07-30).
-#
-# Docker evaluates .dockerignore per path with last-match-wins, so a `!` line
-# after a directory exclusion genuinely re-includes that single file (verified
-# with the `pathspec` engine: this file INCLUDED, tests/unit/** and the rest of
-# tests/guardrails/** still EXCLUDED).
+# A `!tests/guardrails/adversarial/red_team_prompts.jsonl` negation used to
+# live here (2026-07-30) to re-include jailbreak.py's semantic corpus after
+# the blanket `tests/` exclusion below. It didn't actually work — a live
+# Tier-2 eval run on 2026-07-31 still showed `jailbreak_corpus_not_found` /
+# corpus_size=0 in production, proving Docker's real BuildKit .dockerignore
+# engine does not reliably re-include a file once its parent directory is
+# excluded (unlike the `pathspec` Python library, which simulates .gitignore
+# semantics and misled the earlier verification). Fixed at the root instead:
+# the corpus now lives under app/guardrails/resources/ (ships normally via
+# COPY app/ app/, no negation needed) and tests/ read from that same
+# location — see tests/guardrails/conftest.py.
 tests/
-!tests/guardrails/adversarial/red_team_prompts.jsonl
 
 # Python / tooling caches
 __pycache__/

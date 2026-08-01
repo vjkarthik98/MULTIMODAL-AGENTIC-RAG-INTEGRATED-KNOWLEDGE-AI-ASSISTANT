@@ -67,10 +67,17 @@ https://APP_DOMAIN_PLACEHOLDER {
 		Referrer-Policy "strict-origin-when-cross-origin"
 	}
 
-	log {
-		output file /var/log/caddy/access.log {
-			roll_size 50mb
-			roll_keep 5
-		}
-	}
+	# No `log { output file ... }` block on purpose. Caddy's default access
+	# logging already goes to stdout -> journald, readable with
+	# `journalctl -u caddy`. Adding a file output here broke every reload on
+	# the g6e box with "open /var/log/caddy/access.log: permission denied",
+	# and the reload failing left the OLD config live while `systemctl reload`
+	# still exited 0 — a silent no-op that is genuinely hard to spot. The
+	# directory was already owned caddy:caddy and the unit only sets
+	# ProtectSystem=full (which does not cover /var/log), so the cause is
+	# most likely an AppArmor profile; it was never root-caused because
+	# journald logging is sufficient here. If you re-add file logging, verify
+	# the running config afterwards via the admin API rather than trusting
+	# the exit code:
+	#   sudo curl -s localhost:2019/config/ | head -c 2000
 }

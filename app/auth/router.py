@@ -99,6 +99,15 @@ async def login(req: LoginRequest):
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
 
+    # Fixed demo account (app/bin/seed_demo_account.py) — always skips OTP.
+    # It's a single publicly-shared login with a known password, so an email
+    # round-trip would only add friction for whoever's holding the
+    # credentials, not add any real verification value.
+    if user.is_demo:
+        tokens = issue_tokens(user.user_id, user.email, user.role.value)
+        logger.info(event="login_demo_account", user_id=user.user_id)
+        return TokenPair(**tokens).model_dump()
+
     # Check for a trusted device token — skip OTP if valid
     from app.auth.email_service import send_otp_email
     from app.auth.otp_store import generate_otp, store_otp, verify_device_token

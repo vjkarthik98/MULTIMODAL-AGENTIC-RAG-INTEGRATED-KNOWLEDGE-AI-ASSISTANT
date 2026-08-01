@@ -192,7 +192,18 @@ services:
       # Grafana is reverse-proxied at a sub-path with additional Caddy
       # basicauth in front (see deploy/aws/caddy/Caddyfile) — defense in
       # depth, not a substitute for the Caddy gate.
-      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
+      #
+      # Hardcoded external URL, not the "%(protocol)s://%(domain)s/..."
+      # template — Grafana itself only ever speaks plain HTTP on the
+      # container's internal port, so %(protocol)s resolves to "http" and
+      # %(domain)s defaults to "localhost" (neither knows about Caddy
+      # terminating TLS on the real public hostname in front of it). Left
+      # templated, this silently breaks the post-login redirect (browser
+      # sent to https://localhost/grafana/... — unreachable, blank page,
+      # no error) even though GF_SERVER_SERVE_FROM_SUB_PATH itself is
+      # correct. Override GRAFANA_ROOT_URL in /opt/magik/.env if the
+      # public domain ever changes.
+      GF_SERVER_ROOT_URL: "${GRAFANA_ROOT_URL:-https://magik.vk-ai.online/grafana/}"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
     env_file:
       - path: /opt/magik/.env
@@ -203,7 +214,7 @@ services:
       - ./monitoring/grafana/provisioning/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
       - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards/files:ro
       # Alert rules + contact point + notification policy (monitoring/alerts/rules.yml).
-      # SLACK_WEBHOOK_URL for contact-points.yml's ${SLACK_WEBHOOK_URL} comes
+      # NTFY_WEBHOOK_URL for contact-points.yml's ${NTFY_WEBHOOK_URL} comes
       # from the env_file above (/opt/magik/.env) — never set here directly.
       - ./monitoring/alerts:/etc/grafana/provisioning/alerting:ro
     # Published to 127.0.0.1 only — Caddy reverse-proxies it from there; it is

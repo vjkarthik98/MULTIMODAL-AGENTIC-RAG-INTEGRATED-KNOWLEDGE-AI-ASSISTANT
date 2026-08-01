@@ -95,7 +95,16 @@ def _load_corpus_embeddings() -> None:
         corpus_file = cfg.get("corpus_file", "adversarial/red_team_prompts.jsonl")
         jailbreak_tag = cfg.get("corpus_jailbreak_tag", "jailbreak")
 
-        corpus_path = Path(__file__).parent.parent.parent / "tests" / "guardrails" / corpus_file
+        # Lives under app/, not tests/ — this corpus is a live production
+        # detection input for the semantic jailbreak check (Tier 2), not
+        # just a test fixture, so it must ship in the Docker image (which
+        # COPYs app/ but never tests/). Confirmed missing in production via
+        # a live Tier-2 eval run: corpus_size=0, detector running on its 46
+        # regex patterns only with zero semantic corpus coverage. Directory
+        # named "resources", not "data" — .dockerignore excludes any `data/`
+        # at any depth (user-data volume mount rule), which would have
+        # silently re-broken this the same way.
+        corpus_path = Path(__file__).parent / "resources" / corpus_file
         if not corpus_path.exists():
             logger.info("jailbreak_corpus_not_found", path=str(corpus_path))
             return

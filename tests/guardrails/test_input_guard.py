@@ -28,7 +28,16 @@ import app.guardrails.input_guard as ig
 # ---------------------------------------------------------------------------
 
 def _load_corpus() -> List[Dict[str, Any]]:
-    path = Path(__file__).parent / "adversarial" / "red_team_prompts.jsonl"
+    # app/guardrails/data/, not tests/ — this corpus is a live production
+    # detection input, not just a fixture; see conftest.py's CORPUS_PATH.
+    path = (
+        Path(__file__).parent.parent.parent
+        / "app"
+        / "guardrails"
+        / "resources"
+        / "adversarial"
+        / "red_team_prompts.jsonl"
+    )
     cases = []
     with open(path, encoding="utf-8") as fh:
         for line in fh:

@@ -283,7 +283,7 @@ def _format_history(
 # FETCH MONGO SUMMARY — SAFE
 
 
-def _fetch_mongo_summary(session_id: str) -> str:
+def _fetch_mongo_summary(session_id: str, user_id: str | None = None) -> str:
     try:
         from app.core.infra_registry import infra
 
@@ -291,7 +291,7 @@ def _fetch_mongo_summary(session_id: str) -> str:
         if mongo and hasattr(mongo, "get_latest_summary"):
 
             def _do():
-                return mongo.get_latest_summary(session_id) or ""
+                return mongo.get_latest_summary(session_id, user_id) or ""
 
             if _PYBREAKER_AVAILABLE:
                 return _fusion_breaker(_do)()
@@ -352,6 +352,7 @@ def build_memory_context(
     vector_memories: list[dict[str, Any]] | None = None,
     max_total_chars: int | None = None,
     session_id: str = "default",
+    user_id: str | None = None,
 ) -> str:
     start = time.time()
     max_total_chars = max_total_chars or settings.MEMORY_MAX_CONTEXT_CHARS
@@ -363,7 +364,7 @@ def build_memory_context(
 
         # FETCH FROM MONGO IF NOT PROVIDED
         if not summary:
-            summary = _normalize(_fetch_mongo_summary(session_id))
+            summary = _normalize(_fetch_mongo_summary(session_id, user_id))
 
         # FORMAT HISTORY
         history_str = _format_history(
@@ -479,6 +480,7 @@ async def async_build_memory_context(
     vector_memories: list[dict[str, Any]] | None = None,
     max_total_chars: int | None = None,
     session_id: str = "default",
+    user_id: str | None = None,
 ) -> str:
     return await asyncio.to_thread(
         build_memory_context,
@@ -487,4 +489,5 @@ async def async_build_memory_context(
         vector_memories,
         max_total_chars,
         session_id,
+        user_id,
     )
