@@ -469,7 +469,7 @@ class TestRAGPipelineRun:
     def test_memory_get_history_called(self):
         pipeline, _, _, mock_memory = _make_pipeline()
         pipeline.run("query", session_id="s1")
-        mock_memory.get_history.assert_called_once_with("s1")
+        mock_memory.get_history.assert_called_once_with("s1", user_id=None)
 
     def test_retrieval_error_returns_empty(self):
         pipeline, mock_retriever, *_ = _make_pipeline()
