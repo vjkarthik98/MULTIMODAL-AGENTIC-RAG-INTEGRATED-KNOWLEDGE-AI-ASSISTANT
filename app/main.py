@@ -463,6 +463,37 @@ _rate_limit_store: dict[str, Any] = {}
 from app.utils.net import resolve_client_ip as _resolve_client_ip
 
 
+def _rate_limit_user_id(request: Request) -> str | None:
+    """Independently verify the Bearer token to get a user_id, without
+    depending on AuthMiddleware having already run.
+
+    Empirically verified (not assumed) that this middleware executes BEFORE
+    AuthMiddleware: FastAPI/Starlette's add_middleware() prepends, so the
+    LAST middleware registered in app/main.py ends up OUTERMOST — and this
+    `rate_limit` middleware is registered (via @app.middleware("http")) after
+    AuthMiddleware's app.add_middleware(AuthMiddleware) call below, which
+    means it actually runs first on ingress despite the auth block appearing
+    earlier in the file. request.state.user is therefore always None here.
+    Small, accepted cost: a valid token gets decoded + blacklist-checked
+    twice per request (once here, once in AuthMiddleware) rather than once —
+    reordering to share the work would make rate limiting depend on Auth
+    running first, losing its current cheap, outermost early-rejection
+    property for anonymous/malformed-token traffic.
+    """
+    from app.api.middleware import _extract_bearer
+
+    token = _extract_bearer(request)
+    if not token:
+        return None
+    try:
+        from app.auth.jwt_handler import verify_token
+
+        payload = verify_token(token, expected_type="access")
+        return payload["sub"]
+    except Exception:
+        return None
+
+
 def _rate_limit_key(prefix: str, client_ip: str, window: float) -> tuple[str, dict]:
     now = time.time()
     key = f"{prefix}:{client_ip}"
@@ -519,6 +550,39 @@ async def rate_limit(request: Request, call_next) -> Response:
             )
 
     if not settings.RATE_LIMIT_RPM:
+        return await call_next(request)
+
+    # Per-user when authenticated (Redis-backed, app/auth/rate_limit.py —
+    # shared across all app instances, keyed on identity not network
+    # location), falling back to the existing per-IP in-memory bucket for
+    # anonymous/unauthenticated requests, which have no user identity to key
+    # on. Before this, EVERY request — authenticated or not — shared one
+    # bucket per client IP, so N users behind the same IP (a shared office/
+    # university NAT, or a battery of load-test VUs from one host) collided
+    # in one 60/min bucket regardless of how many distinct accounts were
+    # involved. See perf/k6/README.md for how that surfaced.
+    user_id = _rate_limit_user_id(request)
+
+    if user_id:
+        from app.auth.rate_limit import check_user_rate_limit
+
+        try:
+            check_user_rate_limit(user_id)
+        except ValueError:
+            request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+            logger.warning(
+                event="rate_limit_exceeded",
+                user_id=user_id,
+                limit=settings.RATE_LIMIT_RPM,
+            )
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "status": "error",
+                    "message": "Rate limit exceeded — please slow down",
+                    "request_id": request_id,
+                },
+            )
         return await call_next(request)
 
     _, entry = _rate_limit_key("ratelimit", client_ip, 60.0)

@@ -213,8 +213,18 @@ security = [
     "pip-licenses>=4.4", # dependency license scan — flags copyleft/unknown licenses
 ]
 
+# Quality & Performance Reporting — API contract testing (Schemathesis) and a
+# second, independent LLM-eval framework (DeepEval) alongside the pinned Ragas
+# harness above. Both open-source (MIT / Apache-2.0). k6/Lighthouse/OWASP ZAP/
+# Uptime Kuma are external tools (Docker/binary), not pip deps — see perf/,
+# lighthouserc.json, security/zap/, monitoring/uptime-kuma/.
+quality = [
+    "schemathesis>=3.35",
+    "deepeval>=1.4",
+]
+
 dev = [
-    "multimodal-rag-assistant[test,lint,typecheck,security]",
+    "multimodal-rag-assistant[test,lint,typecheck,security,quality]",
     "pre-commit>=3.7",
     "detect-secrets>=1.5",
 ]

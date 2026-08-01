@@ -30,6 +30,13 @@ APP_URL="${APP_URL:-https://magik.vk-ai.online}"
 IDLE_MINUTES="${IDLE_MINUTES:-20}"
 MIN_UPTIME_MINUTES="${MIN_UPTIME_MINUTES:-15}"
 
+# Optional — empty by default, which is a strict no-op in both handlers (see
+# their KUMA_PUSH_URL guards). Set this only once the Phase F Uptime Kuma
+# host (monitoring/uptime-kuma/) exists and you have its push-monitor URL —
+# never wire this up speculatively, since a set-but-wrong value just means
+# silently-failing pushes (harmless, but worth getting right).
+KUMA_PUSH_URL="${KUMA_PUSH_URL:-}"
+
 WAKE_FN="magik-wake-gateway"
 IDLE_FN="magik-idle-stop"
 WAKE_ROLE="magik-wake-gateway-role"
@@ -114,7 +121,7 @@ ensure_role "$WAKE_ROLE" "${AWS_DIR}/iam/lambda-wake-gateway-permissions.json" "
 
 say "Wake gateway — Lambda"
 deploy_fn "$WAKE_FN" "${AWS_DIR}/lambda/wake_gateway" "$WAKE_ROLE" \
-  "Variables={EC2_INSTANCE_TAG=${INSTANCE_TAG},APP_URL=${APP_URL},HEALTH_TIMEOUT_S=3,REFRESH_SECONDS=7}" \
+  "Variables={EC2_INSTANCE_TAG=${INSTANCE_TAG},APP_URL=${APP_URL},HEALTH_TIMEOUT_S=3,REFRESH_SECONDS=7,KUMA_PUSH_URL=${KUMA_PUSH_URL}}" \
   15
 
 say "Wake gateway — public API Gateway HTTP API"
@@ -173,7 +180,7 @@ fi
 
 say "Idle stop — Lambda"
 deploy_fn "$IDLE_FN" "${AWS_DIR}/lambda/idle_stop" "$IDLE_ROLE" \
-  "Variables={EC2_INSTANCE_TAG=${INSTANCE_TAG},IDLE_MINUTES=${IDLE_MINUTES},MIN_UPTIME_MINUTES=${MIN_UPTIME_MINUTES},NETWORK_IN_THRESHOLD_BYTES=1000000,DRY_RUN=false,GITHUB_REPO=${GITHUB_REPO},GITHUB_RUNNER_LABEL=${GITHUB_RUNNER_LABEL},GITHUB_TOKEN_PARAM=${GITHUB_TOKEN_PARAM}}" \
+  "Variables={EC2_INSTANCE_TAG=${INSTANCE_TAG},IDLE_MINUTES=${IDLE_MINUTES},MIN_UPTIME_MINUTES=${MIN_UPTIME_MINUTES},NETWORK_IN_THRESHOLD_BYTES=1000000,DRY_RUN=false,GITHUB_REPO=${GITHUB_REPO},GITHUB_RUNNER_LABEL=${GITHUB_RUNNER_LABEL},GITHUB_TOKEN_PARAM=${GITHUB_TOKEN_PARAM},APP_URL=${APP_URL},KUMA_PUSH_URL=${KUMA_PUSH_URL}}" \
   60
 
 say "Idle stop — EventBridge schedule (every 5 minutes)"

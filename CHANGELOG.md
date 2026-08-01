@@ -2332,3 +2332,367 @@ pure-text BGE embedder load and failing the whole Tier-1 gate. Added
   already-planned full secrets/config unification pass (SSM for real
   secrets, a new committed `deploy/aws/prod.env` for non-secret config),
   not fixed ad hoc here.
+
+# [v0.29.0] — Testing & Quality Reporting Initiative, Per-User Rate Limiting
+
+MINOR: a portfolio-facing testing initiative — API contract testing, a
+second independent LLM-eval framework, load/stress/multi-user simulation,
+browser performance, DAST, and passive uptime monitoring — all open-source,
+designed so results can be linked from the README and the portfolio site.
+Two constraints shaped every design decision here, both driven by this
+being a low-traffic portfolio deployment rather than a scaled production
+system:
+
+1. **The GPU box is wake-on-demand and must never be woken by monitoring
+   itself.** A naive uptime monitor polling the app would defeat scale-to-
+   zero on its own. Solved with a passive, push-based design: the existing
+   `wake_gateway`/`idle_stop` Lambdas (unchanged in purpose, only additive)
+   report status as a side effect of work they already do, and nothing new
+   ever calls the wake path.
+2. **Heavy/repeated testing needs a target that can't disrupt the one real
+   box a recruiter might be looking at, or the rate limits protecting it.**
+   Local-mode tooling runs automatically in CI against docker-compose;
+   live-mode tooling is manual/on-demand only, and never authenticates as
+   the shared public demo account (`testuser@ragdev.local`) — a dedicated
+   `is_load_test` tenant class was added specifically so automated tooling
+   can never contend with a real visitor's login or rate-limit bucket.
+
+Building this also surfaced a real, unrelated bug: the general API rate
+limit was keyed on client IP, not on the authenticated user, and a fully-
+built per-user Redis limiter had been sitting uncalled since it was written.
+Fixed in the same release rather than left as a documented gap, since the
+testing work that found it depended on the fix being real.
+
+### Added — API contract & LLM evaluation
+
+- **Schemathesis** (`tests/api_contract/`, `scripts/schemathesis_live.sh`) —
+  property-based fuzzing driven off MAGIK's own `/openapi.json`, scoped to
+  GET operations only (mutating routes are expensive/stateful/rate-limited,
+  and fuzzing them would either self-lock via the limiter or spam real side
+  effects — see the file's own docstring). Skips cleanly, not hangs, when no
+  server is reachable — same `TestClient(app)`-avoidance reasoning as
+  `tests/integration/conftest.py::requires_llama_server` (firing the real
+  FastAPI lifespan triggers unstoppable background GPU model loading).
+- **`app/eval/ragas_report.py`** — a dedicated, always-real-Ragas-library
+  report exporter. `app/eval/metrics/generation.py` already computed Ragas
+  metrics as one judge option inside the general generation suite; this
+  produces a standalone, portfolio-facing artifact independent of whatever
+  judge the CI gate happens to be configured with, reusing
+  `generation_runner.py`'s existing query/grading helpers rather than
+  duplicating them.
+- **`app/eval/deepeval_suite.py`** — a second, independent OSS eval
+  framework (DeepEval) alongside Ragas, scoring the same gold queries for a
+  real side-by-side comparison. Judge is MAGIK's own resident Mistral-7B
+  GGUF via `/rag/llm/generate` (`get_deepeval_llm()`), never OpenAI —
+  DeepEval's default judge is GPT-4o, which would have silently broken this
+  project's 100%-open-source/privacy-preserving positioning.
+- Mode (local vs. live) for both is entirely `EVAL_SERVER_URL` — the same
+  env var `app/eval/judges/gguf_judge.py` already reads. No separate live
+  code path exists to drift out of sync.
+
+### Added — Load, stress & multi-user simulation
+
+- **`app/bin/seed_test_tenants.py`** + `UserInDB.is_load_test` /
+  `UserPublic.is_load_test` (`app/auth/models.py`) + `AuthService
+  .seed_load_test_user()` (`app/auth/service.py`) + the matching OTP-skip
+  branch in `/auth/login` (`app/auth/router.py`) — a dedicated account class
+  for automated tooling, structurally distinct from `is_demo`. No tenant-
+  isolation exemption, no elevated quota; the only special case is skipping
+  OTP, for the same reason `is_demo` does (non-interactive callers can't
+  solve an email code).
+- **k6** (AGPL-3.0, chosen for its native Prometheus remote-write into the
+  already-deployed Grafana): `perf/k6/smoke.js`, `stress.js`, `soak.js`
+  (local-only, always — see file docstrings), `live_profile.js` (manual,
+  live), and `multi_user_tenant.js` — N tenants concurrently, asserting
+  **zero cross-tenant leakage** under real concurrent load by seeding each
+  tenant a document with a unique marker string and checking no other
+  tenant's marker ever appears in another's answer. Release-blocking if it
+  ever fails.
+
+### Added — Browser performance & DAST
+
+- **Lighthouse CI** (`lighthouserc.json`, `make lighthouse`) — local pass
+  against a locally-served `ui/dist` build (zero cost, deterministic);
+  `quality-reports/browser-performance/README.md` documents the separate
+  manual live pass (plain `lighthouse`, not `lhci`) for the real Core Web
+  Vitals number, cold and warm.
+- **OWASP ZAP** (`security/zap/run_baseline.sh`, passive, CI-safe; `security
+  /zap/run_active_scan.sh`, manual/opt-in only) — the active scanner
+  authenticates as a dedicated test tenant and excludes
+  `/auth/register`, `/rag/ingest`, `/rag/upload`, `/admin/*` from attack
+  scope (real side effects / LLM-backed and slow); `/auth/login` stays
+  in-scope deliberately, since tripping its limiter is the correct outcome
+  proving the brute-force protection works.
+
+### Added — Passive uptime monitoring
+
+- **`deploy/aws/lambda/wake_gateway/handler.py`** and **`deploy/aws/lambda
+  /idle_stop/handler.py`** — additive-only `KUMA_PUSH_URL` hooks (both
+  no-op until set). `wake_gateway` pushes "up" only at the exact moment a
+  real visitor's request confirms the app is genuinely healthy — it cannot
+  itself be the cause of a wake, since it only ever runs as a consequence of
+  one. `idle_stop` reports "up + latency" on its existing 5-minute
+  EventBridge tick while the instance is running (a direct health probe
+  against the app, bypassing the wake gateway entirely — the instance is
+  already confirmed running via the EC2 API before this fires) and reports
+  "down" the moment it actually calls `stop_instances`. No new Lambda, no
+  new IAM grant, no new schedule.
+- **`monitoring/uptime-kuma/`** (`docker-compose.yml`, `Caddyfile`,
+  `README.md`) — a standalone Uptime Kuma stack, deliberately NOT part of
+  `docker-compose.monitoring.yml` (which only runs while the GPU box is
+  awake — a status page hosted there would go dark exactly when it's most
+  useful to check). Designed for a small, separate, always-on host; **not
+  provisioned** — this ships the ready-to-run config only.
+
+### Added — Reporting & CI
+
+- **`quality-reports/`** — tracked in git deliberately (unlike `docs/`,
+  which is gitignored except `.gitkeep` and holds local working notes) so
+  reports are actually visible on GitHub and linkable from the README and
+  the portfolio site. `scripts/generate_quality_badges.py` turns the latest
+  committed report per tool into shields.io endpoint badges
+  (`quality-badges/`, also tracked — shields.io fetches it straight from
+  `raw.githubusercontent.com`).
+- **`.github/workflows/quality.yml`** — local-mode checks (Schemathesis, k6
+  smoke, ZAP baseline, Lighthouse) against docker-compose, path-filtered on
+  PRs touching `app/api/`, `ui/`, auth, or `perf/k6/`. Informational, not a
+  required check yet, mirroring `security.yml`'s own documented day-one-red-
+  gate reasoning.
+- **`.github/workflows/quality-live.yml`** — `workflow_dispatch`-only, never
+  scheduled or on push/PR. A human picks exactly one tool per run; ZAP's
+  active scan is deliberately not an option here (it's interactive by
+  design, meant to be run locally by a human watching the output).
+- New README section, **Quality & Performance Reports**, honestly describes
+  this as freshly built tooling with no live numbers yet — the Local/Live
+  columns document what each tool does, not a claim that scores already
+  exist.
+
+### Fixed — rate limiting was per-IP, not per-user
+
+- `app/main.py`'s `rate_limit` middleware keyed `RATE_LIMIT_RPM=60/min` on
+  client IP for every request, authenticated or not — discovered while
+  writing k6 scripts that round-robin across tenants and found they all
+  still shared one bucket. Root cause: a fully-built, correct per-user
+  Redis-backed limiter (`app/auth/rate_limit.py::check_user_rate_limit`)
+  existed but was never called — its only call site,
+  `_rate_limit_check()` in `app/api/api_routes.py`, was a no-op stub.
+- Fix required first establishing the *actual* middleware execution order —
+  empirically verified (not assumed) that `rate_limit` runs BEFORE
+  `AuthMiddleware` despite the file's own ordering comment only accounting
+  for `CORSMiddleware`/`GZipMiddleware`: FastAPI/Starlette's
+  `add_middleware()` prepends, so the middleware registered LAST in
+  `app/main.py` ends up outermost and runs first on ingress. `request.state
+  .user` is therefore never populated yet at this point.
+- `rate_limit` now independently decodes the Bearer token
+  (`_rate_limit_user_id()`, reusing `app.api.middleware._extract_bearer` +
+  `app.auth.jwt_handler.verify_token`) rather than depending on
+  `AuthMiddleware` having already run — a deliberate small duplication
+  (one extra JWT decode + blacklist check per authenticated request) that
+  keeps rate limiting as the cheap, outermost early-rejection layer instead
+  of reordering the whole middleware stack around it. When a valid token is
+  present, calls the real per-user limiter; falls back to the original
+  per-IP bucket only for unauthenticated requests, which have no identity
+  to key on. The IP-keyed brute-force limiter on `/auth/login` and friends
+  is unchanged — correct as-is, since there's no identity yet at that point
+  by definition.
+- Removed the dead `_rate_limit_check()` stub and its four call sites
+  (`/ingest`, `/upload`, `/query`, `/query/stream`) — fully superseded by
+  the middleware-level check, which now covers every route.
+
+### Fixed — bugs found manually testing the demo-account walkthrough
+
+Found and fixed while actually using `testuser@ragdev.local` end to end
+(the demo account added in v0.28.0) rather than just reading the code —
+each of these three only surfaces when a real browser session exercises
+the specific path, which is exactly why manual walkthrough testing was
+worth doing before calling that feature done.
+
+- **Web-search toggle could silently answer from the knowledge base
+  instead of the web.** `POST /rag/query/stream` correctly detected
+  `force_web: true` from the UI's globe-icon toggle, but if the search
+  tool then threw (Tavily error/timeout) or came back with an empty
+  answer, the code fell straight through to the normal cache/KB pipeline
+  with no error, no user-visible signal, and — in the empty-answer case —
+  not even a log line. That fallback pipeline has no idea the user
+  explicitly asked for web-only, so it happily reclassified and answered
+  from the KB instead. Fixed in `app/api/api_routes.py`: when `force_web`
+  is set and the web tool fails for any reason, the user now sees a plain
+  "web search failed — try again, or turn off web search to ask about
+  your files instead" message rather than an unlabeled KB answer masquer-
+  ading as a web one. Heuristic-only web detection (phrase/real-time-signal
+  matches with no explicit toggle) keeps the original graceful KB fallback,
+  since that path never had an explicit opt-out to violate. Both failure
+  modes now log (`stream_web_search_empty` / `stream_web_search_failed` /
+  `stream_web_search_tool_unavailable`) for diagnosing the underlying cause
+  (most likely `TAVILY_API_KEY` unset or invalid).
+- **"Member since" on the Account settings page always showed today's
+  date**, drifting forward on every login instead of showing the real
+  join date. Root cause: `GET /auth/me` returned `get_current_user()`'s
+  JWT-only stand-in `UserPublic` as-is — that object exists purely for
+  cheap authorization checks on every protected route (JWTs don't carry
+  `created_at`, so the stand-in fills it with `datetime.now()` as a
+  placeholder), which is correct for routes that only need `user_id`/
+  `role`, but wrong for `/auth/me`, whose entire purpose is showing real
+  profile data. Fixed in `app/auth/router.py`: `/auth/me` now does a real
+  `AuthService.get_by_id()` lookup and returns that (falling back to the
+  stand-in only in the `AUTH_ENABLED=False` local-dev bypass, which has no
+  real account to look up and is disabled in production). `is_active`/
+  `is_demo` had the same fabricated-not-fetched problem and are fixed by
+  the same change.
+- **Source citation chips and the active web-search icon were barely
+  legible in light theme** — both used a fixed `#22d3ee`/`#0ea5e9` cyan
+  hardcoded independent of theme, which read fine on the dark background
+  it was tuned for but washed out against light/white backgrounds. Added
+  a theme-aware `--t-web` CSS variable (`index.css`): dark theme keeps the
+  original `#22d3ee` unchanged, light theme gets `#0284c7` (sky-600) for
+  real contrast. `MessageBubble.jsx`'s `getModalityColor()` and
+  `ChatPage.jsx`'s web-search toggle button both reference it now instead
+  of a fixed hex. Scoped deliberately to just these two call sites — the
+  same cyan used for speaker-role colors in `EarningsCallBrowser.jsx`,
+  `TranscriptViewer.jsx`, and `MediaTimestampChip.jsx` is unrelated and
+  was left untouched.
+
+All three verified: backend changes compile, `ruff check` passes, full app
+still imports cleanly with all routes intact, `tests/auth/` passes (same 2
+pre-existing `bcrypt`-env failures as every prior release, unrelated);
+frontend change verified with a clean `vite build` and no new lint errors.
+
+### Fixed — Tier-2 crash: duplicate Prometheus metric registration
+
+A real "full" Tier-2 eval run (user-supplied log) stalled the entire
+generation phase, and the live app independently crashed on ingestion with
+`ValueError: Duplicated timeseries in CollectorRegistry`. Root cause was the
+same in both cases: several modules each defined their own top-level
+`Histogram`/`Counter` for what was semantically the same metric, unguarded
+by the try/except-plus-cache pattern (`_get_metrics()` / `_METRICS`) already
+used everywhere else in this codebase. `prometheus_client` raises on a
+second registration of the same metric name in one process, and because the
+colliding modules are imported lazily (inside a function body, not at
+module top level), Python evicts the failed module from `sys.modules` —
+turning a single collision into a **permanent, repeating crash** on every
+subsequent import for the life of the process, not a one-time failure.
+
+- **Generation-phase crash** — `app/reasoning/reasoning_engine.py` and
+  `app/llm/gguf_model.py` both defined `llm_call_latency_seconds`;
+  `reasoning_engine.py` also redefined `reasoning_engine_duration_seconds`.
+  `app/pipeline/rag_pipeline.py` and `app/pipeline/query_pipeline.py` each
+  redefined both `llm_call_latency_seconds` and `retrieval_latency_seconds`
+  again. Unified all of these onto three new shared singletons in
+  `app/core/metrics.py` (`llm_call_latency`, `retrieval_latency`,
+  `reasoning_engine_duration`, each with the existing `_Noop()` fallback
+  pattern) — every call site now imports and calls the shared instance
+  instead of defining its own.
+- **Live ingestion crash** (`fomc_dec2024.txt: INGESTION_FAILED`, caught via
+  a live UI screenshot) — `app/ingestion/router.py` defined
+  `file_ingestion_duration_seconds`, `file_ingestion_errors_total`, and
+  `chunk_count_per_file` at module top level, unguarded; `app/pipeline
+  /ingestion_pipeline.py` redefined all three plus `embedding_latency_seconds`
+  inside its own `_get_metrics()`. Same fix: four new shared singletons in
+  `app/core/metrics.py` (`file_ingestion_duration`, `chunk_count_per_file`,
+  `embedding_latency`, `file_ingestion_errors`), both files now import
+  rather than redefine.
+- **Silent duplicate losses** (no crash, but under the guarded pattern the
+  second definition silently no-ops, so one of the two call sites' data
+  goes nowhere) — `app/core/model_loader.py` had a dead, never-`.observe()`
+  'd `embedding_latency_seconds` definition, deleted outright.
+  `app/retrieval/hybrid_retriever.py` redefined `retrieval_latency_seconds`
+  a third time; repointed to the same shared singleton.
+- Verified by direct reproduction, not just static review: imported
+  `app.core.metrics`, `app.reasoning.reasoning_engine`, and
+  `app.llm.gguf_model` together in one process and confirmed
+  object-identity between all three modules' references to the shared
+  singletons. The full import chain across all nine affected modules was
+  additionally reproduced **live on the production box**, inside the
+  running `magik-current` container against its real environment — see
+  Known Issues below for what that live check does and does not cover.
+
+### Fixed — video ingestion silently dropping the audio transcript
+
+`app/ingestion/video_ingest.py` ran its audio pipeline and frame extraction
+concurrently via a raw `concurrent.futures.ThreadPoolExecutor.submit(fn,
+*args)`. Unlike `asyncio.to_thread()` / `loop.run_in_executor(None, ctx.run,
+...)` (which this same file already uses correctly elsewhere, in
+`ingest_async()`), a raw `.submit()` does **not** propagate
+`contextvars.ContextVar` state into the worker thread. The audio worker
+therefore ran with no active user context, and every downstream call into
+`app/utils/paths.py`'s `resolved_temp_dir()` raised — caught upstream and
+silently degraded to zero `speech_segments` for every video ingested,
+rather than surfacing as an error. Fixed by capturing
+`contextvars.copy_context()` before submitting and running both futures
+through `_pool.submit(_ctx.run, fn, *args)`, matching the file's own
+existing correct pattern.
+
+### Fixed — deploy secrets & config unification (closes the v0.28.0 Known Issue)
+
+Resolves the v0.28.0 release's documented gap ("the live box's `.env` still
+needs three manual corrections... not fixed ad hoc here"):
+
+- New committed `deploy/aws/prod.env` — the non-secret deploy config
+  (`GRAFANA_ROOT_URL`, `VRAM_BUDGET_GB=44`, `QDRANT_URL`, `REDIS_URL`,
+  OAuth/CORS/frontend URLs, `DEFAULT_DEV_USER_ID`, `EVAL_USER_ID`) that
+  previously existed only as hand-edited values on the live box. Audited
+  before committing to confirm it holds no real secrets — `NTFY_WEBHOOK_URL`
+  was caught during that audit and moved to SSM instead of landing here.
+- `.github/workflows/cd.yml` — the SSM secrets loop extended from 5 to 9
+  parameters (`qdrant_api_key`, `redis_token`, `hf_token`, `tavily_api_key`
+  added); `prod.env` is now base64-shipped at deploy time into
+  `/opt/magik/.env.prod` and passed via `--env-file` alongside the SSM
+  secrets file.
+- `deploy/aws/iam/ec2-instance-profile-permissions.json` — extended for the
+  4 new app-secret ARNs, plus a new `ReadMonitoringSecretsAtDeployTime`
+  statement covering `grafana_admin_password` / `ntfy_webhook_url`. Applied
+  live to the box's instance role via `put-role-policy` and confirmed via
+  `get-role-policy`.
+- New `deploy/aws/scripts/deploy_monitoring.sh` — fetches the two
+  monitoring secrets from SSM into a throwaway env file, runs `docker
+  compose up -d` against it plus `prod.env`, deletes the throwaway file.
+  `docker-compose.monitoring.yml`'s grafana service now sources both.
+
+### Documentation
+
+- `README.md` / `CLAUDE.md` — the "download all models" command comment
+  said `~18GB` / `~20GB`; corrected to the real measured
+  `~25.2GB (17 models)`, based on a live `download_all_models.py` run.
+
+### Known Issues
+
+- **Nothing in this release has been run yet.** Every report/badge is
+  honestly "not yet measured" — this ships the tooling, not results. First
+  real numbers require `docker compose up -d api qdrant redis mongo`,
+  `python -m app.bin.seed_test_tenants`, then the `make` targets in
+  `quality-reports/README.md`.
+- **The per-user rate limit fix has not been exercised end to end** — it
+  needs a live Qdrant/Redis/Mongo stack and a real Bearer token to verify
+  the Redis-backed path actually engages instead of silently falling back
+  to IP (Redis-unavailable is a fail-open no-op by design, so a broken
+  Redis connection would look identical to "working" without a deliberate
+  check).
+- **The Uptime Kuma host is not provisioned** — `monitoring/uptime-kuma/`
+  is ready-to-run config only, per the plan's explicit checkpoint that new
+  AWS infrastructure needs a separate go-ahead.
+- **`quality-live.yml` cannot run yet** — needs the `MAGIK_LIVE_URL` and
+  `MAGIK_TEST_TENANTS` repo secrets set first.
+- **The demo account (`testuser@ragdev.local`) needs its `is_demo` flag
+  re-verified on every fresh environment.** `python -m
+  app.bin.seed_demo_account` is a database write, not something a deploy
+  or `git clone` provides — confirmed missing (no `is_demo` field at all)
+  on an account that predated the feature, which still asked for OTP until
+  the script was actually run against that environment's live Mongo.
+- **The Prometheus metric-collision fix is import-verified, not yet
+  exercised end to end.** Confirmed live on the box that all nine affected
+  modules now import together in the running container without raising —
+  proves the crash mechanism is gone, not that a full Tier-2 run or a real
+  ingestion completes cleanly. That end-to-end pass (upload a file, run
+  real queries through the deployed UI) is the next step, not yet done as
+  of this entry.
+- **The video-ingestion contextvars fix has not been live-tested.** Root
+  cause was traced directly in code and the fix mirrors an already-correct
+  pattern elsewhere in the same file, but it needs a real video ingested
+  through the running pipeline (GPU + ffmpeg) to confirm `speech_segments`
+  actually populates now — not yet run.
+- **The redundant re-ingestion issue from the original Tier-2 log is
+  unresolved.** `video_runner.py`'s dedup-by-`source_file` cache reads as
+  structurally correct on inspection; no alternate cause (suite
+  double-invocation, retry decorator) was found either. Best working guess
+  is a deploy-staleness gap rather than a code bug, but this is not
+  confirmed — flagged here rather than silently dropped.

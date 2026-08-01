@@ -1,0 +1,50 @@
+# Uptime Kuma (MIT, louislam/uptime-kuma) — standalone status page.
+#
+# Deliberately NOT part of docker-compose.monitoring.yml (which runs
+# Prometheus/Grafana/Loki/Tempo ON the GPU production box). Kuma must run
+# somewhere ALWAYS-ON, independent of the GPU box — the whole point of a
+# status page is to be checkable while the monitored thing is asleep, and
+# the passive push design (deploy/aws/lambda/wake_gateway/handler.py,
+# deploy/aws/lambda/idle_stop/handler.py) means Kuma only ever RECEIVES
+# heartbeats, it never polls the app itself (see those files' docstrings for
+# why — polling would wake the box on its own).
+#
+# Run this on a small, separate, always-on host — a t4g.micro/t3.micro (or
+# whatever's free-tier eligible), NOT the g6e.xlarge GPU instance. Roughly
+# $3-8/mo, a fixed cost independent of the GPU box's $12-vs-$1,340/mo
+# stopped-vs-always-on tradeoff (see deploy/aws/lambda/wake_gateway's own
+# cost note). This is a real, separate line item — provision deliberately,
+# not as a side effect of anything else.
+#
+# Setup: see README.md in this directory for the full provisioning sequence
+# (host, DNS, this compose file, creating the Push monitor, wiring
+# KUMA_PUSH_URL into the two Lambdas).
+
+services:
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    container_name: magik-uptime-kuma
+    restart: unless-stopped
+    volumes:
+      - kuma-data:/app/data
+    ports:
+      # Bound to localhost only — Caddy (below) is the public-facing side,
+      # terminating TLS and providing the real hostname.
+      - "127.0.0.1:3001:3001"
+
+  caddy:
+    image: caddy:2
+    container_name: magik-uptime-kuma-caddy
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - uptime-kuma
+
+volumes:
+  kuma-data:
+  caddy-data:
+  caddy-config:

@@ -1019,7 +1019,11 @@ const handleNewChat = () => {
                   aria-label={webSearchMode ? 'Disable web search mode' : 'Enable web search mode'}
                   className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-lg transition-all"
                   style={webSearchMode
-                    ? { background: 'rgba(14,165,233,0.18)', color: '#0ea5e9', border: '1px solid rgba(14,165,233,0.4)' }
+                    ? {
+                        background: 'color-mix(in srgb, var(--t-web) 18%, transparent)',
+                        color: 'var(--t-web)',
+                        border: '1px solid color-mix(in srgb, var(--t-web) 40%, transparent)',
+                      }
                     : { background: 'transparent', color: 'var(--t-tx4)', border: '1px solid transparent' }
                   }
                   onMouseEnter={e => { if (!webSearchMode) { e.currentTarget.style.background = 'var(--t-hov)'; e.currentTarget.style.color = 'var(--t-tx2)' } }}
