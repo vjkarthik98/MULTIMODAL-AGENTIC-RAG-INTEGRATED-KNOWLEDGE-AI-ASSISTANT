@@ -729,8 +729,11 @@ async def ingest_document(
         background_tasks.add_task(_cleanup_file, file_path)
 
 
-# DIRECT LLM GENERATE — eval judge endpoint (no RAG, no guardrails, raw LLM output)
-# Only accessible internally; used by GGUFJudge to score Ragas metrics.
+# DIRECT LLM GENERATE — bypasses RAG pipeline for raw LLM output (no RAG, no
+# guardrails). Not currently called by the eval harness — app/eval/judges/
+# qwen_judge.py loads its own dedicated GGUF in-process instead, so eval
+# judging never contends with this route. Kept for direct debugging/manual
+# access to the resident model.
 
 
 class GenerateRequest(BaseModel):
@@ -744,7 +747,7 @@ async def llm_generate(
     request_body: GenerateRequest,
     current_user: UserPublic = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Direct LLM generation — bypasses RAG pipeline. Used by eval judge."""
+    """Direct LLM generation — bypasses RAG pipeline."""
     try:
         from app.core.model_loader import model_loader
 
@@ -1324,7 +1327,9 @@ async def stream_query(
                     logger.warning(event="stream_web_search_empty", session_id=session_id)
                     _web_failure_reason = "returned no results"
                 else:
-                    logger.warning(event="stream_web_search_tool_unavailable", session_id=session_id)
+                    logger.warning(
+                        event="stream_web_search_tool_unavailable", session_id=session_id
+                    )
                     _web_failure_reason = "is not configured on this server"
             except Exception as _web_err:
                 logger.warning(

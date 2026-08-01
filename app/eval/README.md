@@ -4,7 +4,7 @@
 
 ```bash
 # Install eval deps (once)
-pip install ragas>=0.1.10 jiwer>=3.0.0 mlflow>=2.10.0
+pip install ragas==0.1.21 jiwer>=3.0.0 mlflow>=2.10.0
 
 # Bootstrap gold set candidates (human review required before full eval)
 python -m app.eval.datasets.build_gold_set --modality all
@@ -45,7 +45,7 @@ python -m app.eval.run --suite regression --baseline app/eval/baselines/rag_repo
 | Suite | What it measures | Gold file |
 |-------|-----------------|-----------|
 | `retrieval` | recall@k, MRR, nDCG, context_precision against real `Retriever.retrieval()` | `text_gold.jsonl` |
-| `generation` | faithfulness, answer_relevancy, context_recall, citation_accuracy via Ragas + local GGUF judge | all gold files |
+| `generation` | faithfulness, answer_relevancy, context_recall, citation_accuracy via the Qwen2.5-7B judge | all gold files |
 | `ocr` | CER, WER of image OCR against ground-truth text | `image_gold.jsonl` |
 | `audio` | WER of Whisper transcript vs gold transcript | `audio_gold.jsonl` |
 | `video` | frame-caption recall, caption repetition rate, transcript WER | `video_gold.jsonl` |

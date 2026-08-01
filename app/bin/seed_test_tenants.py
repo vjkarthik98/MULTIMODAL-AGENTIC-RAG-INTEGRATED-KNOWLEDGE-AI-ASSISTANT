@@ -58,7 +58,9 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--count", type=int, default=5, help="Number of test tenants (default: 5)")
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="Where to write credentials JSON")
+    parser.add_argument(
+        "--out", type=Path, default=DEFAULT_OUT, help="Where to write credentials JSON"
+    )
     args = parser.parse_args()
 
     from app.auth.service import AuthService

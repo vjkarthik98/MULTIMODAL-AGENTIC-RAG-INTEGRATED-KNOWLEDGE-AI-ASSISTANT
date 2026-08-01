@@ -2,7 +2,8 @@
 
 Calls the live FastAPI server's /rag/query endpoint (HTTP) instead of
 importing query_pipeline directly. This prevents double-loading GPU models
-when the server is already running — same pattern as GGUFJudge.
+when the server is already running — same pattern as the eval judge's own
+DeepEval wrapper (app/eval/judges/qwen_judge.py).
 
 Falls back to direct pipeline import if EVAL_SERVER_URL is not reachable.
 Scores faithfulness, answer_relevancy, context_recall, citation_accuracy,
@@ -244,8 +245,7 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
         )
 
     if eval_rows:
-        _prefer_ragas = os.environ.get("EVAL_PREFER_RAGAS", "true").lower() == "true"
-        gen_metrics = compute_generation_metrics(eval_rows, prefer_ragas=_prefer_ragas)
+        gen_metrics = compute_generation_metrics(eval_rows)
         for m in gen_metrics.values():
             result.add(m)
 

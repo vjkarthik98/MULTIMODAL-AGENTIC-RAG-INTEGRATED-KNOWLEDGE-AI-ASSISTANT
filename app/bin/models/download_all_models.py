@@ -8,17 +8,18 @@ Usage:
     python app/bin/models/download_all_models.py
     python app/bin/models/download_all_models.py --skip-gated    # skip pyannote (needs license)
     python app/bin/models/download_all_models.py --only gguf     # single model by key
-    python app/bin/models/download_all_models.py --only prometheus_judge   # judge only
+    python app/bin/models/download_all_models.py --only qwen_judge   # judge only
 
 Set HF_TOKEN in .env for gated models (pyannote diarization requires license acceptance
 at https://hf.co/pyannote/speaker-diarization-3.1).
 
-prometheus_judge (the Tier-2 LLM-as-judge) IS included in the default run —
-it's a pure disk fetch (no VRAM, no model load), so a one-time ~4.4GB
-download on the box's first boot is worth it to guarantee Tier-2 always has
-its real judge instead of silently degrading to a weaker lexical fallback.
-It's still marked "optional" so a download hiccup can't fail the whole
-provisioning run, and app/eval/judges/prometheus_judge.py::ensure_available()
+qwen_judge (MAGIK's single eval judge — Tier-2 gate, Ragas, and DeepEval all
+grade through it, see app/eval/judges/qwen_judge.py) IS included in the
+default run — it's a pure disk fetch (no VRAM, no model load), so a one-time
+~4.7GB download on the box's first boot is worth it to guarantee Tier-2
+always has its real judge instead of silently degrading to a weaker lexical
+fallback. It's still marked "optional" so a download hiccup can't fail the
+whole provisioning run, and app/eval/judges/qwen_judge.py::ensure_available()
 is a second, independent fetch attempt if it's ever still missing when
 Tier-2 actually runs. `--include-eval-models` remains for any FUTURE
 eval-only model that genuinely should stay opt-in.
@@ -241,7 +242,7 @@ MODELS: list[dict] = [
 # it True) controls whether main()'s default run (the one start_server.py
 # invokes on every boot) includes this entry — set False only for a model
 # that would genuinely cost something recurring on every normal boot (real
-# VRAM/compute, not just a one-time disk fetch); see prometheus_judge's own
+# VRAM/compute, not just a one-time disk fetch); see qwen_judge's own
 # comment above for why a plain download doesn't qualify. `--only <key>` or
 # `--include-eval-models` still force-fetch anything regardless of this flag.
 GGUF_MODELS: list[dict] = [
@@ -253,39 +254,43 @@ GGUF_MODELS: list[dict] = [
         "gated": False,
     },
     {
-        "key": "prometheus_judge",
-        "gguf_repo": "prometheus-eval/prometheus-7b-v2.0-GGUF",
-        # Q4_K_M, NOT Q8_0 — verified live via the HF Hub API
-        # (huggingface.co/api/models/prometheus-eval/prometheus-7b-v2.0-GGUF,
-        # 2026-08-01): this repo contains exactly one .gguf file, and it
-        # isn't Q8_0. The old Q8_0 filename here 404'd on every real
-        # download attempt (confirmed live) — it never existed, this was a
-        # pre-existing bug, not a hypothetical. Don't change this filename
-        # again without re-checking that same API response first.
-        "gguf_filename": "prometheus-7b-v2.0.Q4_K_M.gguf",
-        "size_gb": 4.4,
+        "key": "qwen_judge",
+        # bartowski's requant, not the official Qwen/Qwen2.5-7B-Instruct-GGUF
+        # repo — verified live via the HF Hub API (2026-08-01) that the
+        # official repo's Q4_K_M is split across 2 shard files
+        # (qwen2.5-7b-instruct-q4_k_m-0000{1,2}-of-00002.gguf), which this
+        # single-filename download pattern can't express. bartowski publishes
+        # a single-file Q4_K_M for this size class, same convention as the
+        # "gguf" entry above. Don't change this filename/repo without
+        # re-checking that same API response first — see prometheus_judge's
+        # retired comment here for what happens when that step is skipped
+        # (a guessed filename 404'd on every real download attempt).
+        "gguf_repo": "bartowski/Qwen2.5-7B-Instruct-GGUF",
+        "gguf_filename": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+        "size_gb": 4.7,
         "gated": False,
         "optional": True,
-        # Loaded only by app/eval/judges/prometheus_judge.py during a Tier-2
-        # eval run — never touched during normal request serving, so this
-        # was originally "startup": False (excluded from the default boot
-        # run) on the theory that it shouldn't cost anything on a normal
+        # Loaded only by app/eval/judges/qwen_judge.py during a Tier-2
+        # eval run (also backs the Ragas report and DeepEval — MAGIK's
+        # single eval judge) — never touched during normal request serving,
+        # so this was originally "startup": False (excluded from the default
+        # boot run) on the theory that it shouldn't cost anything on a normal
         # boot. That theory doesn't actually hold: _dl_gguf() below is a
         # pure disk fetch (hf_hub_download + hardlink) — it never
         # instantiates Llama(...), so it costs zero VRAM regardless of this
-        # flag; VRAM is only spent if/when prometheus_judge.py's own
-        # _load_prometheus() runs, which this flag doesn't gate at all. The
-        # ONLY real cost was a one-time ~4.4GB download on the box's FIRST
+        # flag; VRAM is only spent if/when qwen_judge.py's own
+        # _load_qwen_judge() runs, which this flag doesn't gate at all. The
+        # ONLY real cost was a one-time ~4.7GB download on the box's FIRST
         # boot (every boot after that is a fast cached-file + checksum
         # check, same as every other model here). Given that, defaulting
         # it OFF just meant Tier-2 — an important quality gate — silently
         # graded with a much weaker lexical judge until someone remembered
-        # a manual `--only prometheus_judge` step (confirmed happening live
-        # on 2026-07-31). Left "optional": True so a download hiccup still
-        # can't fail the whole provisioning run; prometheus_judge.py's own
-        # ensure_available() is a second, independent safety net that
-        # auto-fetches it inline if it's still somehow missing when Tier-2
-        # actually needs it.
+        # a manual `--only qwen_judge` step (confirmed happening live with
+        # the previous judge, prometheus_judge, on 2026-07-31). Left
+        # "optional": True so a download hiccup still can't fail the whole
+        # provisioning run; qwen_judge.py's own ensure_available() is a
+        # second, independent safety net that auto-fetches it inline if
+        # it's still somehow missing when Tier-2 actually needs it.
     },
 ]
 
@@ -703,7 +708,7 @@ def main() -> None:
         action="store_true",
         help=(
             "Also download any eval-only model explicitly marked "
-            '"startup": False (none currently — prometheus_judge is in the '
+            '"startup": False (none currently — qwen_judge is in the '
             "default run since it costs nothing but disk on a normal boot). "
             "Kept for a future judge/eval model that genuinely should stay opt-in."
         ),

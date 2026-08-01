@@ -2648,6 +2648,128 @@ needs three manual corrections... not fixed ad hoc here"):
   compose up -d` against it plus `prod.env`, deletes the throwaway file.
   `docker-compose.monitoring.yml`'s grafana service now sources both.
 
+### Fixed — first real CI run of the new quality tooling surfaced 3 bugs
+
+The `quality.yml`/`ci.yml` workflows in this release had never actually been
+run before (per this same entry's earlier "nothing has been run yet" note).
+The first real run found:
+
+- **`Dockerfile`'s `dev-runtime` target was fundamentally broken** — every
+  local-mode job that depends on the docker-compose API container
+  (Schemathesis, k6 smoke, ZAP baseline) failed identically with
+  `ModuleNotFoundError: No module named 'dotenv'` on `start_server.py`'s
+  first third-party import. Root cause: `base-deps` creates `/opt/venv` via
+  `python3.12 -m venv`, and `venv` makes `bin/python3.12` a **symlink** to
+  the interpreter that created it (`/usr/bin/python3.12`, installed via the
+  deadsnakes PPA on Ubuntu 22.04) rather than a self-contained copy. The
+  `runtime` stage re-installs `python3.12` the identical way before copying
+  that venv, so its symlink resolves there; `dev-runtime` copied the same
+  venv onto `python:3.12-slim` (Debian, not Ubuntu, no matching
+  `/usr/bin/python3.12`) and never installed `python3.12` at all — the
+  symlink was dangling, and PATH lookup silently fell through to the base
+  image's own bare system Python with zero packages installed. Fixed by
+  switching `dev-runtime`'s base to `ubuntu:22.04` and installing
+  `python3.12` via the same deadsnakes path `runtime` already uses —
+  mirrors a proven-working pattern instead of assuming portability across
+  different base distros. **Not yet confirmed by an actual rebuild** — no
+  Docker available in the environment this was diagnosed in; reasoning is
+  from static analysis of the Dockerfile plus the fact that it explains the
+  failure's perfect, deterministic reproduction across 3 independent fresh
+  builds.
+- **`lighthouserc.json`'s `url` was missing the `:PORT` placeholder** LHCI's
+  `staticDistDir` static server requires — Chrome was navigating to
+  `http://localhost/index.html` (implicit port 80, nothing listening there)
+  instead of the server's actual random port, so every single Lighthouse
+  audit failed identically with `NO_FCP` (connection failure, not a real
+  performance/rendering issue). Fixed by using the literal `PORT`
+  placeholder LHCI substitutes at runtime.
+- **`ruff check` failures in `deepeval_suite.py`/`ragas_report.py`** — 1
+  unused import, 2 unnecessarily-quoted forward-ref type annotations, 3
+  extraneous `f`-string prefixes on strings with no placeholders. All
+  mechanical, applied via `ruff --fix`. Fixing them exposed `black`
+  formatting drift in 2 of those files plus 3 more
+  (`seed_test_tenants.py`, `api_routes.py`, `reasoning_engine.py`) left
+  over from earlier edits this same release that were never run through
+  `black` — all 5 reformatted; `ruff`/`black --check`/`isort --check` all
+  verified clean afterward.
+- **`detect-secrets` false positive** in
+  `deploy/aws/scripts/deploy_monitoring.sh` — `SECRETS_OK` (a boolean
+  fetch-succeeded flag, never a real secret) tripped the keyword-heuristic
+  plugin purely because the variable name contains "SECRET". Renamed to
+  `FETCH_OK` rather than suppressing with a pragma comment, since it isn't
+  actually secret-adjacent data.
+
+### Removed — retired Phi-3 and Prometheus; MAGIK now has a single eval judge
+
+Judge history: Phi-3-mini (original judge, grading quality wasn't good
+enough to trust) → Prometheus-2-7B (good at its one job, but architecturally
+locked to a fixed Direct-Assessment rubric format — it cannot answer Ragas's
+free-form internal JSON prompts). An initial pass this session deleted
+`phi3_judge.py` and, on hitting that incompatibility, unilaterally dropped
+the real `ragas` library instead of asking first — an overreach, corrected
+here per explicit direction: **exactly one judge model, project-wide, with
+both Ragas and DeepEval kept alive on top of it.**
+
+- **New: `app/eval/judges/qwen_judge.py`** — Qwen2.5-7B-Instruct
+  (Apache-2.0), MAGIK's single eval judge. A genuine general
+  instruction-follower with reliable JSON-mode output, so one model now
+  backs all three consumers below instead of splitting across judge files:
+  a Direct-Assessment rubric interface (`score`/`grade_metric`/
+  `grade_behavioral`, same `RUBRICS` contract Prometheus used — rubric text
+  is model-agnostic) for the Tier-2 gate and `metrics/behavioral.py`; a
+  `BaseRagasLLM` wrapper (`QwenRagasJudge`/`get_ragas_judge()`) for the real
+  `ragas.evaluate()` integration; and a public `generate()` primitive that
+  `deepeval_suite.py`'s own `DeepEvalBaseLLM` wrapper calls directly. A
+  smaller sibling of the resident RAG model (Qwen2.5-14B-Instruct,
+  `app/core/config.py:172`), same VRAM class (~4.7GB Q4_K_M) as the
+  Prometheus judge it replaces — bartowski's single-file quant, not the
+  official Qwen repo, whose Q4_K_M is split across 2 shard files (verified
+  live via the HF Hub API before picking a repo, same discipline
+  `prometheus_judge.py`'s own retired filename-guessing bug should have
+  had from the start).
+- **Deleted**: `app/eval/judges/prometheus_judge.py`,
+  `app/eval/judges/crossencoder_judge.py` (zero call sites, only
+  self-referential and one doc mention), `app/eval/single_query_eval.py`
+  (undocumented, unreferenced standalone debug CLI that called Phi-3's raw
+  generation directly; duplicated what `metrics/generation.py` already
+  computes properly). `app/eval/judges/gguf_judge.py`'s dead
+  `GGUFJudge`/`get_judge()` (a *third*, separate legacy Ragas-judge routing
+  through `/rag/llm/generate`, zero callers) also removed. Its one still-live
+  piece, `_extract_json_from_text()`, was folded directly into
+  `qwen_judge.py` and `gguf_judge.py` deleted outright — a file named
+  "judge" holding no judge, kept alive only because two other modules
+  imported one helper from it, was exactly the kind of clutter this pass
+  was supposed to remove, not recreate.
+- **`app/eval/deepeval_suite.py`** — `get_deepeval_llm()` rebuilt around
+  `qwen_judge.generate()`. This used to route through the live app server
+  and judge the RAG model (Qwen2.5-14B) with itself — a real
+  self-evaluation-bias concern, fixed as a side effect of consolidating
+  onto one dedicated, separately-loaded judge model.
+- **`app/eval/metrics/generation.py`** — `compute_generation_metrics_ragas()`
+  restored (real `ragas.evaluate()`, now via `qwen_judge`), backing
+  `app/eval/ragas_report.py` (restored from the incorrect `prometheus_report.py`
+  rewrite). `compute_generation_metrics()` simplified to one judge path
+  (rubric interface, lexical fallback) — no more `EVAL_JUDGE_MODEL`
+  branching between multiple LLM judges, since there's only one now.
+  `lexical_judge.py` unchanged — it isn't a competing judge, it's the
+  automatic fallback plus what `online_eval.py` uses for live-traffic
+  shadow sampling (a full LLM judge call on every real query would fight
+  actual users for the one GPU).
+- **`ragas==0.1.21`** restored to `pyproject.toml` / `requirements.txt`.
+- Tooling naming reverted to Ragas (`make ragas-report`,
+  `quality-reports/ragas/`, `quality-badges/ragas.json`,
+  `scripts/generate_quality_badges.py`'s `ragas_badge()`,
+  `quality-live.yml`'s `ragas-report` dispatch option) — undoing the
+  incorrect Prometheus-report rename.
+- `README.md`, `app/eval/README.md`, `app/eval/datasets/
+  GOLDEN_DATASET_GENERATION_PROMPT.md`, `.github/workflows/eval-gate.yml`,
+  `monitoring/grafana/dashboards/rag_quality.json`, and stale
+  `GGUFJudge`/eval-judge comments in `app/api/api_routes.py` and
+  `app/eval/runners/generation_runner.py` updated to name Qwen2.5-7B as the
+  active judge. `app/eval/thresholds.yaml`'s v3 baseline comment left
+  untouched — accurate historical record of what judge that already-retired
+  baseline used, not a claim about current behavior.
+
 ### Documentation
 
 - `README.md` / `CLAUDE.md` — the "download all models" command comment
@@ -2696,3 +2818,13 @@ needs three manual corrections... not fixed ad hoc here"):
   double-invocation, retry decorator) was found either. Best working guess
   is a deploy-staleness gap rather than a code bug, but this is not
   confirmed — flagged here rather than silently dropped.
+- **The Qwen2.5-7B judge swap is verified by static analysis only** —
+  `ruff`/`black`/`isort` clean and a plain `python -c "import ..."` chain
+  across every touched module, same static check used earlier this session
+  for the Prometheus metrics fix. No GPU/GGUF runtime is available in the
+  environment this was built in. Before trusting any Tier-2/Ragas/DeepEval
+  number against the new judge: download its GGUF
+  (`python -m app.bin.models.download_all_models --only qwen_judge` on the
+  box), then run `python -m app.eval.ragas_report --modality txt` and
+  `python -m app.eval.deepeval_suite --limit 3` against a couple of gold
+  rows to confirm it actually grades successfully end to end.

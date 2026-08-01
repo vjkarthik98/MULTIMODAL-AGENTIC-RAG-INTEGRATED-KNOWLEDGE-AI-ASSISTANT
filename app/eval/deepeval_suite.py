@@ -10,17 +10,21 @@ Ragas doesn't have at all: bias and toxicity of the generated answer. Two
 independent frameworks agreeing (or disagreeing) on the same gold queries is
 a stronger, more portfolio-credible claim than either alone.
 
-Judge: the SAME local server MAGIK already runs (Mistral-7B GGUF via
-/rag/llm/generate), never OpenAI — this project's whole positioning is
+Judge: MAGIK's single dedicated eval judge (app/eval/judges/qwen_judge.py —
+Qwen2.5-7B-Instruct), never OpenAI — this project's whole positioning is
 100%-open-source and privacy-preserving (see CLAUDE.md), and DeepEval's
-default judge is GPT-4o, which would silently break that claim. MagikLocalLLM
-below is DeepEval's documented extension point for exactly this
-(DeepEvalBaseLLM), following the same call-the-live-server pattern as
-app/eval/judges/gguf_judge.py (Ragas's equivalent wrapper) so eval never
-double-loads the GGUF model into a second process.
+default judge is GPT-4o, which would silently break that claim.
+MagikLocalLLM below is DeepEval's documented extension point for exactly
+this (DeepEvalBaseLLM), calling qwen_judge.generate() directly. This used to
+route through the live app server (`/rag/llm/generate`) and judge the RAG
+model with itself — a real self-evaluation-bias concern, fixed as a side
+effect of consolidating onto one dedicated, separately-loaded judge model
+shared with the Tier-2 gate and Ragas report.
 
 Mode (local vs live) is EVAL_SERVER_URL, same convention as the rest of
 app/eval/ — see app/eval/ragas_report.py's docstring for the full rationale.
+That variable still selects which deployed RAG system's *answers* get
+graded; the judge itself always runs locally regardless of mode.
 
 Usage:
     python -m app.eval.deepeval_suite                         # local, txt/pdf/docx gold
@@ -34,15 +38,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-import httpx
-
 from app.eval.config import EvalConfig, load_config
-from app.eval.judges.gguf_judge import _extract_json_from_text
 from app.eval.runners.generation_runner import (
     _SERVER_URL,
     _full_contexts,
@@ -54,7 +54,6 @@ from app.eval.runners.generation_runner import (
 )
 
 REPORTS_DIR = Path(__file__).resolve().parents[2] / "quality-reports" / "deepeval"
-_HTTP_TIMEOUT = 300
 
 
 def _mode_tag(server_url: str) -> str:
@@ -62,29 +61,17 @@ def _mode_tag(server_url: str) -> str:
     return "local" if host in ("127.0.0.1", "localhost") else "live"
 
 
-def _call_server(prompt: str, temperature: float) -> str:
-    forced_prompt = (
-        "[INST] You are a strict JSON-only evaluator. "
-        "Output ONLY raw JSON matching the schema requested in the prompt below — "
-        "no preamble, no markdown fences, no explanation.\n\n" + prompt + " [/INST]"
-    )
-    with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
-        resp = client.post(
-            f"{_SERVER_URL}/rag/llm/generate",
-            json={"prompt": forced_prompt, "max_tokens": 768, "temperature": temperature},
-        )
-        resp.raise_for_status()
-        return resp.json().get("text") or ""
-
-
 def get_deepeval_llm(temperature: float = 0.0):
-    """Build a DeepEvalBaseLLM subclass wrapping MAGIK's own resident GGUF model.
+    """Build a DeepEvalBaseLLM subclass wrapping MAGIK's dedicated eval judge.
 
     Built lazily inside this function (deepeval is an optional `[quality]`
     extra) so `python -m app.eval.run` and every other eval entrypoint keep
     working without deepeval installed.
     """
     from deepeval.models import DeepEvalBaseLLM
+
+    from app.eval.judges.qwen_judge import _extract_json_from_text
+    from app.eval.judges.qwen_judge import generate as _judge_generate
 
     class _MagikLocalLLM(DeepEvalBaseLLM):
         def __init__(self, temperature: float = 0.0):
@@ -93,8 +80,14 @@ def get_deepeval_llm(temperature: float = 0.0):
         def load_model(self):
             return self
 
-        def generate(self, prompt: str, schema=None) -> "object":
-            raw = _call_server(prompt, self.temperature)
+        def generate(self, prompt: str, schema=None) -> object:
+            raw = _judge_generate(
+                prompt,
+                system="You are a strict JSON-only evaluator. Output ONLY raw JSON "
+                "matching the schema requested in the prompt — no preamble, no "
+                "markdown fences, no explanation.",
+                temperature=self.temperature,
+            )
             extracted = _extract_json_from_text(raw)
             if schema is not None:
                 try:
@@ -105,11 +98,11 @@ def get_deepeval_llm(temperature: float = 0.0):
                     return extracted
             return extracted
 
-        async def a_generate(self, prompt: str, schema=None) -> "object":
+        async def a_generate(self, prompt: str, schema=None) -> object:
             return await asyncio.to_thread(self.generate, prompt, schema)
 
         def get_model_name(self) -> str:
-            return "magik-mistral-7b-gguf (local, no OpenAI)"
+            return "qwen2.5-7b-instruct (local, no OpenAI)"
 
     return _MagikLocalLLM(temperature=temperature)
 
@@ -132,10 +125,18 @@ def _build_metrics(names: list[str], model, threshold: float = 0.5) -> dict:
     )
 
     factory = {
-        "faithfulness": lambda: FaithfulnessMetric(threshold=threshold, model=model, include_reason=False),
-        "answer_relevancy": lambda: AnswerRelevancyMetric(threshold=threshold, model=model, include_reason=False),
-        "hallucination": lambda: HallucinationMetric(threshold=threshold, model=model, include_reason=False),
-        "contextual_recall": lambda: ContextualRecallMetric(threshold=threshold, model=model, include_reason=False),
+        "faithfulness": lambda: FaithfulnessMetric(
+            threshold=threshold, model=model, include_reason=False
+        ),
+        "answer_relevancy": lambda: AnswerRelevancyMetric(
+            threshold=threshold, model=model, include_reason=False
+        ),
+        "hallucination": lambda: HallucinationMetric(
+            threshold=threshold, model=model, include_reason=False
+        ),
+        "contextual_recall": lambda: ContextualRecallMetric(
+            threshold=threshold, model=model, include_reason=False
+        ),
         "bias": lambda: BiasMetric(threshold=threshold, model=model, include_reason=False),
         "toxicity": lambda: ToxicityMetric(threshold=threshold, model=model, include_reason=False),
     }
@@ -154,7 +155,9 @@ async def _build_eval_rows(cfg: EvalConfig, limit: int | None) -> tuple[list[dic
     if limit:
         gold_rows = gold_rows[:limit]
     if not gold_rows:
-        raise RuntimeError("No curated gold rows with reference answers for the requested modality.")
+        raise RuntimeError(
+            "No curated gold rows with reference answers for the requested modality."
+        )
 
     full_ctx_retriever = _make_full_context_retriever()
     eval_rows: list[dict] = []
@@ -255,7 +258,7 @@ def _write_report(payload: dict, mode: str, errors: list[str]) -> tuple[Path, Pa
         "",
         f"**Mode:** `{mode}` ({_SERVER_URL})  ",
         f"**Generated:** {timestamp}  ",
-        f"**Judge:** local Mistral-7B GGUF (no OpenAI)  ",
+        "**Judge:** local Mistral-7B GGUF (no OpenAI)  ",
         "",
         "| Metric | Mean | n |",
         "|---|---|---|",
@@ -274,7 +277,9 @@ def _write_report(payload: dict, mode: str, errors: list[str]) -> tuple[Path, Pa
         "```",
         f"DeepEval ({mode}, {timestamp[:10]}): "
         + ", ".join(
-            f"{name}={s['mean']:.3f}" for name, s in sorted(full["summary"].items()) if s["mean"] is not None
+            f"{name}={s['mean']:.3f}"
+            for name, s in sorted(full["summary"].items())
+            if s["mean"] is not None
         ),
         "```",
     ]
@@ -286,14 +291,18 @@ def _write_report(payload: dict, mode: str, errors: list[str]) -> tuple[Path, Pa
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="DeepEval suite — second-opinion LLM eval, local judge")
+    parser = argparse.ArgumentParser(
+        description="DeepEval suite — second-opinion LLM eval, local judge"
+    )
     parser.add_argument(
         "--modality",
         default=None,
         choices=["txt", "pdf", "docx", "xlsx", "image", "audio", "video"],
     )
     parser.add_argument("--user-id", default=None)
-    parser.add_argument("--limit", type=int, default=None, help="Cap the number of gold rows evaluated")
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Cap the number of gold rows evaluated"
+    )
     parser.add_argument(
         "--metrics",
         default=",".join(ALL_METRICS),
@@ -304,7 +313,9 @@ def main() -> int:
     try:
         import deepeval  # noqa: F401
     except ImportError:
-        print('[deepeval-suite] FATAL: deepeval not installed — pip install "multimodal-rag-assistant[quality]"')
+        print(
+            '[deepeval-suite] FATAL: deepeval not installed — pip install "multimodal-rag-assistant[quality]"'
+        )
         return 2
 
     cfg = load_config()
