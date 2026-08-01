@@ -45,7 +45,7 @@ SECRETS_ENV="/opt/magik/.env.monitoring.secrets"
 rm -f "${SECRETS_ENV}"
 : > "${SECRETS_ENV}"
 chmod 600 "${SECRETS_ENV}"
-SECRETS_OK="yes"
+FETCH_OK="yes"
 for PARAM_KEY in \
   "grafana_admin_password:GRAFANA_ADMIN_PASSWORD" \
   "ntfy_webhook_url:NTFY_WEBHOOK_URL"
@@ -54,10 +54,10 @@ do
   ENV_KEY="${PARAM_KEY##*:}"
   VAL="$(aws ssm get-parameter --name "/magik/${SSM_NAME}" \
            --with-decryption --query Parameter.Value --output text 2>/dev/null)" \
-    || { log "FATAL: could not read /magik/${SSM_NAME} from SSM"; SECRETS_OK="no"; break; }
+    || { log "FATAL: could not read /magik/${SSM_NAME} from SSM"; FETCH_OK="no"; break; }
   echo "${ENV_KEY}=${VAL}" >> "${SECRETS_ENV}"
 done
-if [ "${SECRETS_OK}" != "yes" ]; then
+if [ "${FETCH_OK}" != "yes" ]; then
   rm -f "${SECRETS_ENV}"
   log "FATAL: monitoring-stack secrets fetch from SSM failed — seed them first, see deploy/aws/README.md"
   exit 1

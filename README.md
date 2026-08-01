@@ -171,7 +171,7 @@ The pipeline never imports a per-modality file directly — it dispatches throug
 
 **Observability** — `structlog`, `prometheus-client`, OpenTelemetry (API/SDK/OTLP exporter), Grafana, Loki, Tempo.
 
-**Evaluation** — a custom harness (`app/eval/`) with `ragas`, `jiwer` (WER/CER), `mlflow`; five swappable LLM judges including a self-hosted Prometheus-2-7B judge.
+**Evaluation** — a custom harness (`app/eval/`) with `ragas`, `jiwer` (WER/CER), `mlflow`; a single self-hosted judge (Qwen2.5-7B-Instruct) backs the Tier-2 gate, the RAGAS report, and DeepEval, with a pure-Python lexical fallback if it's unavailable.
 
 **Frontend** — React 19, Vite, Tailwind CSS, `react-markdown` + `remark-gfm` for rendering tables and formatted answers.
 

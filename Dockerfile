@@ -171,7 +171,21 @@ CMD ["python3.12", "start_server.py"]
 # and every other model fall back to CPU automatically (device_manager.py
 # auto-detects — no code or config difference needed between targets).
 # ---------------------------------------------------------------------------
-FROM python:3.12-slim AS dev-runtime
+FROM ubuntu:22.04 AS dev-runtime
+
+# Base was `python:3.12-slim` (Debian) until this was caught live in CI
+# (2026-08-01, 3 independent job builds — Schemathesis/k6/ZAP — all failed
+# identically with `ModuleNotFoundError: No module named 'dotenv'` on
+# start_server.py's very first third-party import). Root cause: base-deps
+# creates /opt/venv via `python3.12 -m venv`, and `venv` makes `bin/python3.12`
+# a SYMLINK to the interpreter that created it (/usr/bin/python3.12, installed
+# via the deadsnakes PPA on Ubuntu 22.04 there) — not a self-contained copy.
+# The `runtime` stage below re-installs python3.12 the identical way before
+# copying that venv, so its symlink resolves; this stage did not, so the
+# symlink was dangling on Debian and PATH lookup silently fell through to the
+# base image's own bare system Python (no packages installed at all). Now
+# matches `runtime`'s proven-working pattern exactly, on plain Ubuntu 22.04
+# instead of the multi-GB CUDA devel/runtime images — still fast to build.
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -183,6 +197,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PORT=8000
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.12 \
         tesseract-ocr tesseract-ocr-eng ffmpeg libmagic1 libgomp1 curl \
         gcc \
     && rm -rf /var/lib/apt/lists/*

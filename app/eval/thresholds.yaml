@@ -12,18 +12,19 @@
 # was already re-measured for real this session (n=56, 2026-07-24) once a
 # real ingestion bug (BM25 index missing a source file, see
 # docs/runbooks/phase29-plan.md Workstream D) was fixed and corpus verified
-# correct. generation/e2e/behavioral/etc. all route through the Prometheus-2-7B
-# judge over HTTP against a live server — re-baselining those is a Tier-2 /
-# AWS-GPU-box exercise, deliberately out of scope here.
+# correct. generation/e2e/behavioral/etc. all route through MAGIK's single
+# judge (app/eval/judges/qwen_judge.py — Qwen2.5-7B-Instruct, replacing
+# Prometheus-2-7B 2026-08-01) against a live server — re-baselining those is
+# a Tier-2 / AWS-GPU-box exercise, deliberately out of scope here.
 #
 # Procedure to re-enable a still-informational section:
 #   1. Run un-gated:  EVAL_USER_ID=<owner> python -m app.eval.run --suite full
-#   2. Record the Prometheus/v1.0.0 numbers as that section's baseline v4.
+#   2. Record the Qwen/v1.0.0 numbers as that section's baseline v4.
 #   3. Set each metric's min/max at baseline_v4 * 0.9 (safety-critical) / 0.95 (rest).
 #   4. Add `gate_enabled: true` inside that section (not the global flag).
 #
 # New metrics to baseline before gating (targets shown; no gate until measured):
-#   generation.answer_correctness   target ~0.75   (Prometheus rubric)
+#   generation.answer_correctness   target ~0.75   (Direct-Assessment rubric)
 #   generation.citation_locator_accuracy  target ~0.80 (per-modality page/sheet/ts/frame)
 #   behavioral.refusal_accuracy     target ~0.90   (abstains when answer not in KB)
 #   behavioral.adversarial_pass     target ~0.90   (ignores injection / corrects false premise)

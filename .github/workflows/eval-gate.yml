@@ -7,7 +7,7 @@ name: Eval Gate
 #                       ~3GB RAM. Runs on every PR, on a standard hosted
 #                       runner, and blocks merge on regression.
 #
-#   tier2-full-suite — full generation + Prometheus-2-7B judge suite.
+#   tier2-full-suite — full generation + Qwen2.5-7B judge suite.
 #                       Needs the full resident model stack (~17.7GB+ per
 #                       CLAUDE.md's model catalog) AND a live running API
 #                       (app/eval/run.py routes generation calls through

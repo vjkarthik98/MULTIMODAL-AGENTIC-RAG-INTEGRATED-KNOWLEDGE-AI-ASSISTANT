@@ -19,6 +19,7 @@ from app.core.metrics import reasoning_engine_duration as _reasoning_duration
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
+
 # PROMETHEUS METRICS — reasoning_engine_duration_seconds and
 # llm_call_latency_seconds are shared singletons from app.core.metrics, not
 # defined here (see that file's comment: this module used to register both

@@ -24,7 +24,10 @@ EVAL_USER_ID: str = (
     os.getenv("EVAL_USER_ID", _settings.PROJECT_ROOT and "eval_default") or "eval_default"
 )
 EVAL_SESSION_PREFIX: str = "eval"
-EVAL_JUDGE_MODEL: str = os.getenv("EVAL_JUDGE_MODEL", "prometheus_2_7b")
+# Provenance/metadata only (MLflow logging, SuiteResult.judge) — MAGIK has a
+# single judge (app/eval/judges/qwen_judge.py), so this no longer selects
+# between judges the way it once did. Kept as an env var for override/testing.
+EVAL_JUDGE_MODEL: str = os.getenv("EVAL_JUDGE_MODEL", "qwen2.5_7b")
 EVAL_JUDGE_TEMPERATURE: float = float(os.getenv("EVAL_JUDGE_TEMPERATURE", "0.1"))
 EVAL_FAIL_ON_MISSING_JUDGE: bool = (
     os.getenv("EVAL_FAIL_ON_MISSING_JUDGE", "false").lower() == "true"

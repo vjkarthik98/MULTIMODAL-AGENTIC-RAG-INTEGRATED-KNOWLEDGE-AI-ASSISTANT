@@ -17,7 +17,7 @@ can review sampled answers and provide thumbs-up/thumbs-down + free-text feedbac
 1. Sampled query/answer stored in MongoDB (online eval)
 2. Human reviewer opens Gradio panel, sees unevaluated samples
 3. Submits rating — stored back to MongoDB as `human_eval_score`
-4. Aggregate human scores tracked alongside Ragas auto-scores in Grafana
+4. Aggregate human scores tracked alongside auto-judge scores in Grafana
 
 ### Quality gate extension
 - Phase 29 CI gate can optionally check `human_eval_score_avg >= 0.8` before merging

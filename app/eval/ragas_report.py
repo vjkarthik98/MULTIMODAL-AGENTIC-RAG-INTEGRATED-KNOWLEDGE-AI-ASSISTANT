@@ -2,21 +2,13 @@
 
 app/eval/metrics/generation.py:compute_generation_metrics_ragas() already
 computes real Ragas metrics (ragas==0.1.21, pinned in pyproject.toml):
-answer_relevancy + context_recall via ragas.evaluate() against the Phi-3
-judge (app/eval/judges/phi3_judge.py), plus faithfulness via a direct Phi-3
-NLI call (Ragas's own faithfulness "decompose" step truncates long contexts —
-see that function's docstring for why it's computed separately). Today that
-path is ONE JUDGE OPTION inside the general-purpose generation suite
-(app/eval/runners/generation_runner.py), selected only when
-EVAL_JUDGE_MODEL != "prometheus_2_7b" (the configured default). That suite's
-report (rag_report.md) mixes Ragas results in with whichever judge happened
-to be configured, across every suite.
-
-This script exists to produce a dedicated, always-Ragas report: "graded by
-the real Ragas library, here is exactly how MAGIK's answers scored" is a
-specific, reusable claim worth its own artifact for the README / portfolio,
-independent of whatever EVAL_JUDGE_MODEL the CI gate happens to be configured
-with on a given day.
+answer_relevancy + context_recall via ragas.evaluate() against MAGIK's single
+judge (app/eval/judges/qwen_judge.py — Qwen2.5-7B-Instruct), plus faithfulness
+via a direct NLI call (Ragas's own faithfulness "decompose" step truncates
+long contexts — see that function's docstring for why it's computed
+separately). This script produces a dedicated, always-Ragas report: "graded
+by the real Ragas library, here is exactly how MAGIK's answers scored" is a
+specific, reusable claim worth its own artifact for the README / portfolio.
 
 No retrieval/query logic is duplicated here — this reuses the exact same
 gold-row loading, live-server querying, and full-context grading helpers
@@ -24,7 +16,7 @@ generation_runner.py already uses, so the numbers in this report and in
 rag_report.md are always computed the same way.
 
 Mode (local vs live) is entirely a function of EVAL_SERVER_URL, the same env
-var app/eval/judges/gguf_judge.py and generation_runner.py already read:
+var generation_runner.py already reads:
   - unset / http://127.0.0.1:8000 (default) -> local mode, docker-compose stack
   - set to the real deployed URL             -> live mode
 There is no separate "live" code path to maintain — pointing EVAL_SERVER_URL
@@ -147,12 +139,15 @@ def _write_report(
         "mode": mode,
         "server_url": server_url,
         "ragas_version": "0.1.21",
-        "judge": "phi3_mini (direct NLI for faithfulness; ragas.evaluate() for "
+        "judge": "qwen2.5-7b-instruct (direct NLI for faithfulness; ragas.evaluate() for "
         "answer_relevancy/context_recall)",
         "n_queries": len(eval_rows),
         "n_errors": len(errors),
         "errors": errors,
-        "metrics": {name: m.to_dict() if hasattr(m, "to_dict") else vars(m) for name, m in ragas_metrics.items()},
+        "metrics": {
+            name: m.to_dict() if hasattr(m, "to_dict") else vars(m)
+            for name, m in ragas_metrics.items()
+        },
         "finance_fidelity": avg_fidelity,
         "hallucination_rate": hallucination.value if hallucination else None,
     }
@@ -168,8 +163,8 @@ def _write_report(
         "",
         f"**Mode:** `{mode}` ({server_url})  ",
         f"**Generated:** {timestamp}  ",
-        f"**Ragas version:** 0.1.21  ",
-        f"**Judge:** Phi-3-mini-4k-instruct (local, no OpenAI)  ",
+        "**Ragas version:** 0.1.21  ",
+        "**Judge:** Qwen2.5-7B-Instruct (local, no OpenAI)  ",
         f"**Queries evaluated:** {len(eval_rows)} ({len(errors)} errors)",
         "",
         "| Metric | Value | n | Notes |",
@@ -178,7 +173,9 @@ def _write_report(
     for name, m in sorted(ragas_metrics.items()):
         lines.append(f"| `{name}` | {m.value:.4f} | {m.n} | {m.notes or ''} |")
     if avg_fidelity is not None:
-        lines.append(f"| `finance_fidelity` | {avg_fidelity:.4f} | {len(finance_fidelity_scores)} | verbatim number match |")
+        lines.append(
+            f"| `finance_fidelity` | {avg_fidelity:.4f} | {len(finance_fidelity_scores)} | verbatim number match |"
+        )
     if hallucination is not None:
         lines.append(f"| `hallucination_rate` | {hallucination.value:.4f} | {hallucination.n} | |")
     lines.append("")
