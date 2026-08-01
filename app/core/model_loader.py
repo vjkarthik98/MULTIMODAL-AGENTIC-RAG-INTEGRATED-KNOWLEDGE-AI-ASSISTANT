@@ -152,6 +152,13 @@ class ModelLoader:
         self._ner: Any | None = None
         self._finbert: Any | None = None
 
+        # Idle-eviction bookkeeping — see _EVICTABLE_MODELS/unload_idle_models
+        # below. Only ingestion-only models are tracked; core query-path
+        # models (llm, text_embedder, reranker, siglip and its embedder
+        # wrappers — siglip_text_embedder is used for cross-modal query-time
+        # search, not just ingestion) are deliberately never evicted.
+        self._last_used: dict[str, float] = {}
+
         self._initialized = False
 
         logger.info(
@@ -169,11 +176,83 @@ class ModelLoader:
         # The "default" device is the LLM's device — the heaviest workload.
         return device_manager.device_for("llm")
 
+    # IDLE EVICTION — ingestion-only models, never the core query path.
+    #
+    # Added 2026-08-01: this loader never freed a model once loaded, so a
+    # long-running process (a full Tier-2 eval run touches every modality
+    # in sequence) only ever accumulates VRAM until something OOMs —
+    # confirmed live (nvidia-smi: 44.3GB/46.1GB used, ~1.8GB free, still
+    # climbing). Eviction is scoped to models that are ONLY ever touched
+    # during ingestion/chunking, never during query serving — confirmed by
+    # tracing every caller of each getter below. Notably NOT evictable:
+    # llm/text_embedder/reranker (every query needs them) and
+    # siglip/image_embedder/siglip_text_embedder/multimodal (SigLIP's text-
+    # embedding path is used for cross-modal query-time search, not just
+    # ingestion — evicting it would silently reload a multi-second model on
+    # a live user's query instead of only during the next ingest).
+    _EVICTABLE_MODELS: dict[str, tuple[str, ...]] = {
+        "whisper": ("_whisper",),
+        "blip": ("_blip_model", "_blip_processor", "_blip_device"),
+        "qwen2_vl": ("_qwen2vl_model", "_qwen2vl_processor", "_qwen2vl_device"),
+        "qwen2_vl_video": ("_qwen2vl_v_model", "_qwen2vl_v_processor", "_qwen2vl_v_device"),
+        "trocr": ("_trocr_model", "_trocr_processor", "_trocr_device"),
+        "diarizer": ("_diarizer",),
+        "ner": ("_ner",),
+        "finbert": ("_finbert",),
+    }
+
+    def _touch(self, name: str) -> None:
+        """Record that an evictable model was just used — called on every
+        get_X() call for models in _EVICTABLE_MODELS, cache hit or not, so
+        unload_idle_models() only evicts models that are genuinely idle."""
+        self._last_used[name] = time.time()
+
+    def unload_idle_models(self, idle_seconds: float = 300.0) -> list[str]:
+        """Free any evictable model that hasn't been used in idle_seconds.
+
+        Safe to call anytime: guarded by the same self._lock every getter
+        uses, so this never races an in-flight get_X() call — either this
+        runs first and the next getter reloads fresh, or the getter's own
+        lock acquisition runs first and this simply finds nothing to evict
+        for that model this pass (last_used was just updated).
+        """
+        evicted: list[str] = []
+        with self._lock:
+            now = time.time()
+            for name, attrs in self._EVICTABLE_MODELS.items():
+                if getattr(self, attrs[0]) is None:
+                    continue  # not loaded — nothing to evict
+                last_used = self._last_used.get(name, 0.0)
+                if now - last_used < idle_seconds:
+                    continue  # used too recently
+                for attr in attrs:
+                    setattr(self, attr, None)
+                self._last_used.pop(name, None)
+                _model_loaded.labels(model=name).set(0)
+                evicted.append(name)
+                logger.info(
+                    "model_evicted_idle", model=name, idle_seconds=round(now - last_used, 1)
+                )
+
+        if evicted:
+            self._oom_guard()  # actually reclaim the freed VRAM
+        return evicted
+
     # OOM GUARD — flush CUDA cache + Python GC between model loads (MD spec)
 
-    @staticmethod
-    def _oom_guard() -> None:
-        """Release CUDA memory and run GC before loading the next model."""
+    def _oom_guard(self, loading: str | None = None) -> None:
+        """Release CUDA memory and run GC before loading the next model.
+
+        `loading`, when given, both marks that model as just-used (so a
+        model that was already cached under some other path never evicts
+        itself moments before its own getter returns it) and runs the idle-
+        eviction sweep first, so a heavy new load gets first crack at VRAM
+        another model has been sitting on unused.
+        """
+        if loading is not None:
+            self._touch(loading)
+            self.unload_idle_models()
+
         import gc
 
         gc.collect()
@@ -452,6 +531,7 @@ class ModelLoader:
     # WHISPER — ASR
 
     def get_whisper(self):
+        self._touch("whisper")
         if self._whisper:
             return self._whisper
 
@@ -459,6 +539,7 @@ class ModelLoader:
             if self._whisper:
                 return self._whisper
 
+            self._oom_guard(loading="whisper")
             decision = device_manager.decision_for("whisper")
             device = decision.device if decision.device != "mps" else "cpu"
             compute_type = decision.dtype or ("float16" if device == "cuda" else "int8")
@@ -479,6 +560,7 @@ class ModelLoader:
     # BLIP — IMAGE CAPTIONING
 
     def get_blip(self) -> tuple:
+        self._touch("blip")
         if self._blip_model:
             return self._blip_processor, self._blip_model, self._blip_device
 
@@ -486,6 +568,7 @@ class ModelLoader:
             if self._blip_model:
                 return self._blip_processor, self._blip_model, self._blip_device
 
+            self._oom_guard(loading="blip")
             decision = device_manager.decision_for("blip")
 
             def _load():
@@ -542,6 +625,7 @@ class ModelLoader:
     # QWEN2-VL — VIDEO FRAME + FINANCIAL CHART CAPTIONING (2B INT8, ~2.2 GB)
 
     def get_qwen2_vl(self) -> tuple:
+        self._touch("qwen2_vl")
         if self._qwen2vl_model:
             return self._qwen2vl_processor, self._qwen2vl_model, self._qwen2vl_device
 
@@ -549,7 +633,7 @@ class ModelLoader:
             if self._qwen2vl_model:
                 return self._qwen2vl_processor, self._qwen2vl_model, self._qwen2vl_device
 
-            self._oom_guard()
+            self._oom_guard(loading="qwen2_vl")
             decision = device_manager.decision_for("qwen2_vl")
 
             def _load():
@@ -614,6 +698,7 @@ class ModelLoader:
         separate, latency-motivated 180-token video caption budget alongside any
         model-size change). See docs/runbooks/phase-30-aws-deployment.md.
         """
+        self._touch("qwen2_vl_video")
         if self._qwen2vl_v_model:
             return self._qwen2vl_v_processor, self._qwen2vl_v_model, self._qwen2vl_v_device
 
@@ -626,7 +711,7 @@ class ModelLoader:
             if settings.VIDEO_QWEN2_VL_MODEL == settings.QWEN2_VL_MODEL:
                 return self.get_qwen2_vl()
 
-            self._oom_guard()
+            self._oom_guard(loading="qwen2_vl_video")
             decision = device_manager.decision_for("qwen2_vl")
 
             def _load():
@@ -669,6 +754,7 @@ class ModelLoader:
     # TROCR — PRINTED OCR FOR FINANCIAL DOCUMENTS
 
     def get_trocr(self) -> tuple:
+        self._touch("trocr")
         if self._trocr_model:
             return self._trocr_processor, self._trocr_model, self._trocr_device
 
@@ -676,7 +762,7 @@ class ModelLoader:
             if self._trocr_model:
                 return self._trocr_processor, self._trocr_model, self._trocr_device
 
-            self._oom_guard()
+            self._oom_guard(loading="trocr")
             decision = device_manager.decision_for("trocr")
 
             def _load():
@@ -736,6 +822,7 @@ class ModelLoader:
     # PYANNOTE DIARIZER — SPEAKER DIARIZATION (requires HF_TOKEN + license)
 
     def get_diarizer(self):
+        self._touch("diarizer")
         if self._diarizer:
             return self._diarizer
 
@@ -743,7 +830,7 @@ class ModelLoader:
             if self._diarizer:
                 return self._diarizer
 
-            self._oom_guard()
+            self._oom_guard(loading="diarizer")
             if not settings.HF_TOKEN:
                 raise RuntimeError(
                     "Diarizer requires HF_TOKEN with pyannote model access. "
@@ -753,6 +840,49 @@ class ModelLoader:
             decision = device_manager.decision_for("diarizer")
 
             def _load():
+                # Suppress known-benign noise from pyannote's own dependency
+                # chain — all confirmed non-fatal (diarization works
+                # correctly despite every one of these), traced live
+                # 2026-08-01. Same pattern as app/guardrails/pii.py's
+                # Presidio suppression: filters set right before the noisy
+                # library is imported/used, not globally at app startup.
+                import logging as _logging
+                import warnings as _warnings
+
+                # pyannote's own deliberate TF32-disabled-for-reproducibility
+                # notice — informational, not a problem to fix.
+                _warnings.filterwarnings(
+                    "ignore",
+                    category=Warning,
+                    module=r"pyannote\.audio\.utils\.reproducibility",
+                )
+                # PyTorch's std() warning when a pooling layer sees a
+                # sequence too short for a meaningful degrees-of-freedom
+                # correction — degrades gracefully, not a crash. Only worth
+                # revisiting if real diarization output looks wrong, not
+                # from this warning alone.
+                _warnings.filterwarnings(
+                    "ignore",
+                    category=UserWarning,
+                    module=r"pyannote\.audio\.models\.blocks\.pooling",
+                )
+                # speechbrain logs its own auto-applied environment
+                # workarounds at INFO — not an error, nothing to act on.
+                _logging.getLogger("speechbrain.utils.quirks").setLevel(_logging.WARNING)
+                try:
+                    # The WeSpeaker embedding model (pyannote/wespeaker-
+                    # voxceleb-resnet34-LM) runs via onnxruntime, which logs
+                    # its own device-enumeration probe via a DRM sysfs path
+                    # ("/sys/class/drm/card0") that doesn't exist inside a
+                    # Docker container's device namespace — CUDA is used via
+                    # the standard NVIDIA driver path regardless, confirmed
+                    # by every model loading successfully on device=cuda.
+                    import onnxruntime as _ort
+
+                    _ort.set_default_logger_severity(3)  # ERROR and above only
+                except ImportError:
+                    pass
+
                 # torchaudio ≥2.1 removed AudioMetaData / .info() / .load() /
                 # .list_audio_backends() from the public API; patch them back
                 # with soundfile-based shims before pyannote.audio is imported.
@@ -778,6 +908,7 @@ class ModelLoader:
     # BERT-NER — FINANCE ENTITY EXTRACTION
 
     def get_ner(self):
+        self._touch("ner")
         if self._ner:
             return self._ner
 
@@ -785,7 +916,7 @@ class ModelLoader:
             if self._ner:
                 return self._ner
 
-            self._oom_guard()
+            self._oom_guard(loading="ner")
             decision = device_manager.decision_for("ner")
 
             def _load():
@@ -814,6 +945,7 @@ class ModelLoader:
     # FINBERT — finance tone/sentiment classifier
 
     def get_finbert(self):
+        self._touch("finbert")
         if self._finbert:
             return self._finbert
 
@@ -821,7 +953,7 @@ class ModelLoader:
             if self._finbert:
                 return self._finbert
 
-            self._oom_guard()
+            self._oom_guard(loading="finbert")
             decision = device_manager.decision_for("ner")  # small model, same slot as NER
 
             def _load():

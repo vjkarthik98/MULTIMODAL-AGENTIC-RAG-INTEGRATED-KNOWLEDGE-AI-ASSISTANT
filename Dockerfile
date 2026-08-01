@@ -122,7 +122,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         software-properties-common \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y --no-install-recommends \
-        python3.12 \
+        python3.12 python3.12-dev \
         tesseract-ocr tesseract-ocr-eng ffmpeg libmagic1 libgomp1 curl \
         gcc \
     && rm -rf /var/lib/apt/lists/*
@@ -133,6 +133,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ever surfaces as a hard error — confirmed live on the production box via
 # a full Tier-2 eval run where all 14/14 image-ingest calls failed both
 # captioners.
+# python3.12-dev — gcc alone wasn't enough: Triton's generated cuda_utils.c
+# does `#include <Python.h>`, which only python3.12-dev ships (plain
+# python3.12 is the interpreter only, no C headers). Without it, gcc runs
+# but fails immediately with "fatal error: Python.h: No such file or
+# directory" — confirmed live on the production box (2026-08-01) the moment
+# gcc was hot-patched in and image captioning got past its first failure
+# mode straight into this one.
 
 RUN groupadd --gid 10001 appuser \
     && useradd --uid 10001 --gid appuser --shell /bin/bash --create-home appuser
@@ -197,16 +204,23 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PORT=8000
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        software-properties-common \
+        software-properties-common gnupg \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y --no-install-recommends \
-        python3.12 \
+        python3.12 python3.12-dev \
         tesseract-ocr tesseract-ocr-eng ffmpeg libmagic1 libgomp1 curl \
         gcc \
     && rm -rf /var/lib/apt/lists/*
-# gcc — see the matching comment in the `runtime` stage above: Triton needs
-# a C compiler at inference time for image-captioning kernels, not just at
-# build time.
+# gcc / python3.12-dev — see the matching comments in the `runtime` stage
+# above: Triton needs a C compiler AND Python.h at inference time for
+# image-captioning kernels, not just at build time.
+# gnupg — plain `ubuntu:22.04` (unlike the nvidia/cuda:*-ubuntu22.04 images
+# base-deps/runtime use, which ship it already) doesn't include gpg-agent,
+# and add-apt-repository needs it to import the deadsnakes PPA's signing
+# key. Without it: "gpg: error running '/usr/bin/gpg-agent': probably not
+# installed" — confirmed live in CI (2026-08-01) right after this stage's
+# base image was switched from python:3.12-slim to ubuntu:22.04 to fix a
+# different bug (broken venv symlink across base images, see git history).
 
 RUN groupadd --gid 10001 appuser \
     && useradd --uid 10001 --gid appuser --shell /bin/bash --create-home appuser

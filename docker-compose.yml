@@ -33,6 +33,12 @@ services:
       MONGO_URI: mongodb://mongo:27017
       LOCAL_CACHE_HOST: redis
       LOCAL_CACHE_PORT: "6379"
+      # Without this, TORCH_HOME falls back to start_server.py's own default
+      # (.torch_cache, project-root-relative) — not one of the volumes below,
+      # so anything cached there (detoxify's torch.hub weights) is wiped on
+      # every `docker compose down` + `up`. Same fix as cd.yml's production
+      # `docker run` already applies; mirrored here for dev-runtime parity.
+      TORCH_HOME: /app/.hf_cache/torch
     volumes:
       - ./.hf_cache:/app/.hf_cache
       - ./data:/app/data
