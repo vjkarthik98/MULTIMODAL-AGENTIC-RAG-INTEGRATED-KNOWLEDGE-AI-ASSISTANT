@@ -73,11 +73,12 @@ _model_loaded = Gauge(
     "Whether a model is loaded (1=yes, 0=no)",
     ["model"],
 )
-_embedding_latency = Histogram(
-    "embedding_latency_seconds",
-    "Embedding latency by model",
-    ["model"],
-)
+# embedding_latency_seconds was defined here too, colliding with
+# app/pipeline/ingestion_pipeline.py's identical metric name — removed
+# rather than unified, since it was dead code: defined but never once
+# observed anywhere in this file. ingestion_pipeline.py is the one real
+# owner (see app/core/metrics.py for the shared singleton, part of the
+# same duplicate-metric audit as file_ingestion_duration_seconds).
 
 
 # SEMAPHORE — lazy init to avoid missing event loop at import time

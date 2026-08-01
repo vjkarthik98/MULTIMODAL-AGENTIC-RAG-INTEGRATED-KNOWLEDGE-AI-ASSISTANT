@@ -12,6 +12,19 @@
     "policies were. Phase 31 (project memory 'secrets-management-gap') adds five",
     "more app secrets to the same pattern and is the occasion to fix that gap.",
     "",
+    "A later pass (same memory doc, 2026-08-01) added four more --",
+    "qdrant_api_key, redis_token, hf_token, tavily_api_key -- after auditing",
+    ".env.example against what was actually still SSM-eligible. Note what is",
+    "deliberately NOT here: GOOGLE_CLIENT_ID (OAuth client IDs are public by",
+    "design, only _SECRET is confidential) belongs in the committed",
+    "deploy/aws/prod.env instead, and grafana_admin_password / ntfy_webhook_url",
+    "are real secrets too but are consumed by the separately-deployed",
+    "monitoring stack, not this app container -- they get their own",
+    "statement below (ReadMonitoringSecretsAtDeployTime), same role, since",
+    "deploy/aws/scripts/deploy_monitoring.sh runs ON this same box under",
+    "this same instance profile, just fetching for a different docker",
+    "compose invocation.",
+    "",
     "Every Resource below is scoped to one exact parameter path -- this role",
     "must not be able to read any other secret in Parameter Store, and must",
     "never be granted a wildcard ssm:GetParameter."
@@ -33,7 +46,20 @@
         "arn:aws:ssm:us-east-1:537557168406:parameter/magik/smtp_password",
         "arn:aws:ssm:us-east-1:537557168406:parameter/magik/secret_key",
         "arn:aws:ssm:us-east-1:537557168406:parameter/magik/jwt_secret_key",
-        "arn:aws:ssm:us-east-1:537557168406:parameter/magik/mongo_uri"
+        "arn:aws:ssm:us-east-1:537557168406:parameter/magik/mongo_uri",
+        "arn:aws:ssm:us-east-1:537557168406:parameter/magik/qdrant_api_key",
+        "arn:aws:ssm:us-east-1:537557168406:parameter/magik/redis_token",
+        "arn:aws:ssm:us-east-1:537557168406:parameter/magik/hf_token",
+        "arn:aws:ssm:us-east-1:537557168406:parameter/magik/tavily_api_key"
+      ]
+    },
+    {
+      "Sid": "ReadMonitoringSecretsAtDeployTime",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter"],
+      "Resource": [
+        "arn:aws:ssm:us-east-1:537557168406:parameter/magik/grafana_admin_password",
+        "arn:aws:ssm:us-east-1:537557168406:parameter/magik/ntfy_webhook_url"
       ]
     }
   ]

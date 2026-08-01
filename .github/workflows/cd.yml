@@ -307,20 +307,41 @@ jobs:
           log "pulling $IMG (multi-GB, several minutes expected)"
           docker pull "$IMG" || { log "FATAL: docker pull failed"; exit 1; }
 
+          # ── Committed non-secret deploy config (deploy/aws/prod.env) ───────
+          # GRAFANA_ROOT_URL, NTFY_WEBHOOK_URL, VRAM_BUDGET_GB — previously
+          # hand-edited directly on the box (v0.28.0 Known Issue), which let
+          # them drift out of sync with what's actually committed. This file
+          # is now the single source of truth; every deploy overwrites
+          # /opt/magik/.env.prod with it, so a stale hand-edit here can't
+          # persist past the next tag push.
+          echo "__PROD_ENV_B64__" | base64 -d > /opt/magik/.env.prod
+          log "prod.env config written"
+
           # ── App secrets from SSM (Phase 31 — project memory
           #    "secrets-management-gap") ───────────────────────────────────
-          # These five used to live as plaintext in /opt/magik/.env
-          # indefinitely. They now come from SSM SecureString on every
-          # deploy, written to a freshly-generated, 0600, never-committed
-          # env file that outlives only this docker run — deleted
-          # immediately after, success or failure, so the plaintext window
-          # on disk is this script's runtime, not "forever". The IAM policy
-          # this role runs under (deploy/aws/iam/ec2-instance-profile-
-          # permissions.json) scopes ssm:GetParameter to exactly these five
-          # ARNs plus /magik/ghcr_pat above — nothing else in Parameter
-          # Store is reachable from this box.
+          # These nine used to live as plaintext in /opt/magik/.env
+          # indefinitely (the original five, plus four more — QDRANT_API_KEY,
+          # REDIS_TOKEN, HF_TOKEN, TAVILY_API_KEY — added in the same pass
+          # that also corrected GOOGLE_CLIENT_ID's miscategorization: OAuth
+          # client IDs are public by design, only the matching _SECRET is
+          # confidential, so GOOGLE_CLIENT_ID stays in prod.env, not here).
+          # GRAFANA_ADMIN_PASSWORD and NTFY_WEBHOOK_URL are ALSO real secrets
+          # from that same audit, but deliberately NOT in this loop — they're
+          # consumed by the separately-deployed monitoring stack
+          # (docker-compose.monitoring.yml), not this app container, so they
+          # need their own fetch mechanism, not this one.
           #
-          # One-time setup (not run by this script): seed the five values
+          # They now come from SSM SecureString on every deploy, written to
+          # a freshly-generated, 0600, never-committed env file that outlives
+          # only this docker run — deleted immediately after, success or
+          # failure, so the plaintext window on disk is this script's
+          # runtime, not "forever". The IAM policy this role runs under
+          # (deploy/aws/iam/ec2-instance-profile-permissions.json) scopes
+          # ssm:GetParameter to exactly these nine ARNs plus /magik/ghcr_pat
+          # above — nothing else in Parameter Store is reachable from this
+          # box.
+          #
+          # One-time setup (not run by this script): seed the nine values
           # with `aws ssm put-parameter --type SecureString`, documented in
           # deploy/aws/README.md's "App secrets in SSM" section — this
           # script only ever READS them.
@@ -334,7 +355,11 @@ jobs:
             "smtp_password:SMTP_PASSWORD" \
             "secret_key:SECRET_KEY" \
             "jwt_secret_key:JWT_SECRET_KEY" \
-            "mongo_uri:MONGO_URI"
+            "mongo_uri:MONGO_URI" \
+            "qdrant_api_key:QDRANT_API_KEY" \
+            "redis_token:REDIS_TOKEN" \
+            "hf_token:HF_TOKEN" \
+            "tavily_api_key:TAVILY_API_KEY"
           do
             SSM_NAME="${PARAM_KEY%%:*}"
             ENV_KEY="${PARAM_KEY##*:}"
@@ -348,7 +373,7 @@ jobs:
             log "FATAL: app-secrets fetch from SSM failed — see deploy/aws/README.md 'App secrets in SSM'"
             exit 1
           fi
-          log "app secrets fetched from SSM (5/5)"
+          log "app secrets fetched from SSM (9/9)"
 
           # ── Local cache sidecar ───────────────────────────────────────────
           # app/core/infra_registry.py::get_cache() backs ingestion job status,
@@ -395,10 +420,13 @@ jobs:
 
           # --shm-size: torch dataloaders/multiprocessing outgrow the 64MB default.
           # --log-opt:  cap container logs; this box has already hit a full disk once.
-          # --env-file /opt/magik/.env.secrets AFTER --env-file /opt/magik/.env:
-          # Docker applies later --env-file values last, so the five SSM-sourced
-          # keys win over any stale copy still sitting in the long-lived .env
-          # during the migration window (see deploy/aws/README.md).
+          # --env-file ordering — Docker applies later --env-file values last,
+          # so each layer wins over the one before it:
+          #   .env          → the long-lived, box-local file (legacy/manual values)
+          #   .env.prod     → committed deploy/aws/prod.env, rewritten every
+          #                   deploy, so it always wins over a stale hand-edit
+          #                   still sitting in .env (see deploy/aws/README.md)
+          #   $SECRETS_ENV  → the five SSM-sourced secrets, always win last
           docker run -d --name magik-current \
             --gpus all --restart unless-stopped \
             --network magik-net \
@@ -406,6 +434,7 @@ jobs:
             --log-opt max-size=50m --log-opt max-file=3 \
             -p 8000:8000 \
             --env-file /opt/magik/.env \
+            --env-file /opt/magik/.env.prod \
             --env-file "$SECRETS_ENV" \
             -e LOCAL_CACHE_HOST=magik-redis \
             -e TORCH_HOME=/app/.hf_cache/torch \
@@ -453,7 +482,13 @@ jobs:
           exit 1
           REMOTE_EOF
 
-          sed -i "s|__IMAGE_REF__|${IMAGE_REF}|g; s|__GH_OWNER__|${GH_OWNER}|g" /tmp/remote-deploy.sh
+          # deploy/aws/prod.env is committed and checked out right here on the
+          # runner — base64 it whole so its contents survive the same single
+          # quoting boundary as IMAGE_REF/GH_OWNER below, then substitute it
+          # in like any other placeholder. No new escaping rules to get wrong.
+          PROD_ENV_B64="$(base64 -w0 deploy/aws/prod.env)"
+
+          sed -i "s|__IMAGE_REF__|${IMAGE_REF}|g; s|__GH_OWNER__|${GH_OWNER}|g; s|__PROD_ENV_B64__|${PROD_ENV_B64}|g" /tmp/remote-deploy.sh
           SCRIPT_B64="$(base64 -w0 /tmp/remote-deploy.sh)"
 
           CMD_ID=$(aws ssm send-command \

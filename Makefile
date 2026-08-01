@@ -44,7 +44,13 @@ test:  ## Full non-slow suite (needs live Qdrant/Redis/Mongo — see .env)
 	pytest tests/ -m "not slow" --ignore=tests/integration/test_document_pipeline.py -q
 
 test-unit:  ## Fast unit tests only — no external services, no real models (mocked). Scoped to tests/unit/ directly (not tests/ + -m unit) — see ci.yml comment for why.
-	pytest tests/unit/ -m unit -q --cov=app --cov-report=term-missing
+	# --cov-fail-under=0 matches ci.yml exactly: pyproject.toml's fail_under=70
+	# is measured against the FULL app/ package, but tests/unit/ alone only
+	# ever covers ~27% of it — without this override, a run that's identical
+	# to what CI does still fails locally on the coverage gate, not on an
+	# actual test failure. Confirmed live (2026-08-01): this exact mismatch
+	# made a genuinely clean local run look red.
+	pytest tests/unit/ -m unit -q --cov=app --cov-report=term-missing --cov-fail-under=0
 
 test-auth:  ## Tenant-isolation / auth test suite. Scoped directly to tests/auth/, not `tests/ -m auth` — same tests/integration/ collection-storm issue as test-unit.
 	pytest tests/auth/ -v

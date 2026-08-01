@@ -13,6 +13,10 @@ from typing import Any
 
 from app.core.config import settings
 from app.core.gpu_admission import gpu_slot
+from app.core.metrics import chunk_count_per_file as _shared_chunk_count_per_file
+from app.core.metrics import embedding_latency as _shared_embedding_latency
+from app.core.metrics import file_ingestion_duration as _shared_file_ingestion_duration
+from app.core.metrics import file_ingestion_errors as _shared_file_ingestion_errors
 from app.ingestion.schema import (
     CorruptFileError,
     DiskSpaceError,
@@ -29,32 +33,21 @@ logger = get_logger(__name__)
 
 
 # PROMETHEUS METRICS
+# file_ingestion_duration_seconds, file_ingestion_errors_total,
+# chunk_count_per_file, and embedding_latency_seconds are shared singletons
+# from app.core.metrics, not defined here — this file's own copies used to
+# race against identical copies in app/ingestion/router.py (which lost that
+# race in a way that crashed permanently, since it's imported lazily — see
+# router.py's comment for the live incident this closes) and
+# app/core/model_loader.py (a dead, never-observed copy, deleted rather than
+# unified). queue_depth and pii_redacted are genuinely unique to this file
+# and stay here, just now guarded the same consistent way.
 
 
 def _get_metrics():
     try:
-        from prometheus_client import Counter, Gauge, Histogram
+        from prometheus_client import Counter, Gauge
 
-        ingestion_duration = Histogram(
-            "file_ingestion_duration_seconds",
-            "Ingestion duration by modality",
-            ["modality"],
-        )
-        ingestion_errors = Counter(
-            "file_ingestion_errors_total",
-            "Ingestion errors by modality and error type",
-            ["modality", "error_type"],
-        )
-        chunk_count = Histogram(
-            "chunk_count_per_file",
-            "Chunks produced per file",
-            ["modality"],
-        )
-        embedding_latency = Histogram(
-            "embedding_latency_seconds",
-            "Embedding latency by model",
-            ["model"],
-        )
         queue_depth = Gauge(
             "queue_depth",
             "Ingestion queue backlog",
@@ -65,10 +58,6 @@ def _get_metrics():
             ["entity_type"],
         )
         return {
-            "ingestion_duration": ingestion_duration,
-            "ingestion_errors": ingestion_errors,
-            "chunk_count": chunk_count,
-            "embedding_latency": embedding_latency,
             "queue_depth": queue_depth,
             "pii_redacted": pii_redacted,
         }
@@ -87,32 +76,28 @@ if settings.PROMETHEUS_ENABLED:
 
 def _record_duration(modality: str, duration: float) -> None:
     try:
-        if "ingestion_duration" in _METRICS:
-            _METRICS["ingestion_duration"].labels(modality=modality).observe(duration)
+        _shared_file_ingestion_duration.labels(modality=modality).observe(duration)
     except Exception:
         pass
 
 
 def _record_error(modality: str, error_type: str) -> None:
     try:
-        if "ingestion_errors" in _METRICS:
-            _METRICS["ingestion_errors"].labels(modality=modality, error_type=error_type).inc()
+        _shared_file_ingestion_errors.labels(modality=modality, error_type=error_type).inc()
     except Exception:
         pass
 
 
 def _record_chunks(modality: str, count: int) -> None:
     try:
-        if "chunk_count" in _METRICS:
-            _METRICS["chunk_count"].labels(modality=modality).observe(count)
+        _shared_chunk_count_per_file.labels(modality=modality).observe(count)
     except Exception:
         pass
 
 
 def _record_embed_latency(model: str, latency: float) -> None:
     try:
-        if "embedding_latency" in _METRICS:
-            _METRICS["embedding_latency"].labels(model=model).observe(latency)
+        _shared_embedding_latency.labels(model=model).observe(latency)
     except Exception:
         pass
 
