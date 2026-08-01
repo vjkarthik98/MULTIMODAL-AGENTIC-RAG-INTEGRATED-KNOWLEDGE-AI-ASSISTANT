@@ -140,6 +140,22 @@ jobs:
         with:
           python-version: "3.11"
 
+      # Pinning the CPU torchcodec wheel (below) fixed the libnvrtc.so.13/CUDA
+      # crash, but exposed the next layer: torchcodec's wheel has no bundled
+      # FFmpeg — it dynamically loads libavutil.so/libavcodec.so etc. from
+      # the system at import time. This hosted runner's preinstalled ffmpeg
+      # is a static tool-cache binary with no matching shared libraries, so
+      # every one of torchcodec's supported FFmpeg versions (4-8) failed to
+      # dlopen — confirmed live (2026-08-01, run 30681177552): "OSError:
+      # libavutil.so.60/59/58/57/56: cannot open shared object file", which
+      # again crashed the same pure-text BGE embedder load and failed
+      # retriever_init as a gate breach. apt's ffmpeg package (unlike the
+      # tool-cache one) ships real libavutil/libavcodec/libswscale .so files.
+      - name: Install ffmpeg (shared libs for torchcodec)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -149,7 +165,20 @@ jobs:
           # pin the CPU wheel explicitly first per requirements.txt's own
           # header, since HybridRetriever here loads the BGE embedder
           # in-process (torch import at collection/call time either way).
-          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+          #
+          # torchcodec included here too — it's torchaudio's own transitive
+          # dependency (modern torchaudio delegates torchaudio.load() to it),
+          # not declared directly in requirements.txt, so without pinning it
+          # to this same CPU index pip resolved it from PyPI's default index
+          # instead and got a build whose .so files hard-require
+          # libnvrtc.so.13 (CUDA runtime) just to *import*, even though
+          # nothing here ever touches audio decoding — confirmed live
+          # (2026-07-31): a plain text_embedder (BGE) load crashed
+          # retriever_init entirely, failing the whole Tier-1 gate, because
+          # something in the transformers/sentence-transformers import chain
+          # eagerly probes torchaudio (which eagerly probes torchcodec) even
+          # when loading a pure-text model that never needs either.
+          pip install torch torchvision torchaudio torchcodec --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
 
       # BM25 index for EVAL_USER_ID is gitignored local state (data/), not

@@ -4,7 +4,15 @@
 # GPU note: torch is hardware-specific (CPU vs CUDA build) and must be
 # installed separately, BEFORE this file, with the index matching your
 # target. See install_cuda.sh for the AWS g6e.xlarge / L40S CUDA build.
-#   CPU:  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+# torchcodec is included alongside torch/torchvision/torchaudio on the CPU
+# line — it's torchaudio's own transitive dependency (modern torchaudio
+# delegates torchaudio.load() to it) but isn't declared directly below, so
+# without pinning it to the same index pip resolves it from PyPI's default
+# index instead and gets a build that hard-requires libnvrtc.so.13 (CUDA
+# runtime) just to import — crashes even a pure-text model load on a
+# CPU-only machine. Confirmed live in CI (2026-07-31); see ci.yml/
+# eval-gate.yml's install steps for the identical fix.
+#   CPU:  pip install torch torchvision torchaudio torchcodec --index-url https://download.pytorch.org/whl/cpu
 #   CUDA: pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 \
 #           --index-url https://download.pytorch.org/whl/cu124
 # `pip install -r requirements.txt` afterward is a no-op for torch as long as

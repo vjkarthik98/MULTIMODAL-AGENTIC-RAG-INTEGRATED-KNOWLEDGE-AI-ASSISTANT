@@ -12,7 +12,17 @@ import pytest
 # JSONL corpus loader
 # ---------------------------------------------------------------------------
 
-CORPUS_PATH = Path(__file__).parent / "adversarial" / "red_team_prompts.jsonl"
+# Lives under app/guardrails/data/ (not tests/) — it's a live production
+# detection input for jailbreak.py's semantic corpus check, not just a test
+# fixture, so it must ship in the Docker image. Moved 2026-07-31.
+CORPUS_PATH = (
+    Path(__file__).parent.parent.parent
+    / "app"
+    / "guardrails"
+    / "resources"
+    / "adversarial"
+    / "red_team_prompts.jsonl"
+)
 
 
 def load_corpus() -> List[Dict[str, Any]]:

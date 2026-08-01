@@ -2638,6 +2638,16 @@ def _is_degenerate_answer(text: str) -> bool:
 _STREAM_PREFIX_GATE = settings.STREAM_PREFIX_GATE_CHARS
 _STREAM_HOLDBACK = settings.STREAM_HOLDBACK_CHARS
 
+# Same text as VerificationLoop's own (private) _LIMITATION_NOTICE — kept as
+# a separate local copy rather than importing that module-private name
+# across a package boundary. Used only on the raw-generation fallback path
+# (see the "HALLUCINATION LIMITATION NOTICE" block below); VerificationLoop
+# already appends this itself when it runs and verification fails.
+_STREAM_LIMITATION_NOTICE = (
+    "This answer could not be fully verified against the source material — "
+    "treat the figures above with caution."
+)
+
 
 # SANDWICH REORDER — Liu et al. "Lost in the Middle" (2023):
 # LLMs attend best to the beginning and end of long prompts; middle positions
@@ -3160,7 +3170,7 @@ class RAGPipeline:
             t_mem = time.time()
             try:
                 mgr = self._get_memory_manager()
-                history = mgr.get_history(session_id)
+                history = mgr.get_history(session_id, user_id=user_id)
             except Exception as e:
                 logger.warning(event="rag_memory_fetch_failed", error=str(e))
                 history = []
@@ -3444,6 +3454,29 @@ class RAGPipeline:
                     )
                     return
 
+                # MEMORY HISTORY — this is the live SSE path real users hit
+                # (see the module docstring / "Streaming vs query_pipeline
+                # divergence" project note): it previously never fetched
+                # conversation history at all, unlike run() above and
+                # query_pipeline.py, both of which do. Every multi-turn
+                # memory reference ("what did I ask earlier") silently had
+                # nothing to work with, in production, for every real user,
+                # regardless of the MemoryManager user_id fixes elsewhere —
+                # this call site simply never asked. Mirrors run()'s fetch.
+                _stream_history_text = ""
+                try:
+                    mgr = self._get_memory_manager()
+                    _stream_history = mgr.get_history(session_id, user_id=user_id)
+                    _stream_history_text = _format_history(
+                        _stream_history, settings.MEMORY_MAX_CONTEXT_CHARS
+                    )
+                except Exception as _mem_err:
+                    logger.warning(
+                        event="rag_stream_memory_fetch_failed",
+                        error=str(_mem_err),
+                        session_id=session_id,
+                    )
+
                 # Hybrid retrieval's own top-3 (before rerank). For DOCX the
                 # cross-encoder reranker is unreliable on finance sections — it
                 # over-weights lexical footnote matches (e.g. a "China risk
@@ -3645,7 +3678,7 @@ class RAGPipeline:
                             llm=self._get_llm(),
                             modality_hint=_mod0_norm,
                             filters=_stream_filters,
-                            memory_context="",
+                            memory_context=_stream_history_text,
                         )
                         logger.info(
                             event="rag_stream_verification_result",
@@ -3669,6 +3702,7 @@ class RAGPipeline:
                 prompt = builder.build_prompt(
                     query=query,
                     context=context,
+                    memory=_stream_history_text,
                     session_id=session_id,
                 )
 
@@ -3773,6 +3807,7 @@ class RAGPipeline:
                     )
                     for d in docs
                 ]
+                _stream_hallucination_warning = False
                 try:
                     from app.guardrails.output_guard import check as _og_check
 
@@ -3790,6 +3825,11 @@ class RAGPipeline:
                         answer, context_chunks=_ctx, sources=_sources, session_id=session_id
                     )
                     answer = _og.text
+                    _stream_hallucination_warning = _og.hallucination_warning
+                    if _stream_hallucination_warning:
+                        logger.warning(
+                            event="rag_stream_hallucination_flagged", session_id=session_id
+                        )
                 except Exception as _og_err:
                     logger.warning(event="rag_stream_output_guard_failed", error=str(_og_err))
 
@@ -4147,6 +4187,30 @@ class RAGPipeline:
                         logger.warning(
                             event="rag_stream_image_date_expand_failed", error=str(_date_err)
                         )
+
+                # HALLUCINATION LIMITATION NOTICE — output_guard flagged the
+                # raw answer as containing numbers unsupported by context, but
+                # (unlike the TXT-modality numeric guard above, which actually
+                # strips the offending sentence) has no way to remove the
+                # figure from the other modalities/web-search path — it only
+                # flags. When VerificationLoop ran (_av_reasoned_answer is not
+                # None) this is already handled: it appends the identical
+                # notice itself on a failed verification, so skip here to
+                # avoid double-appending. When it didn't run — confirmed via a
+                # live Tier-2 log: web-search-sourced answers (docs[0]'s
+                # modality isn't one of the 7 in AGENT_VERIFY_MODALITIES, so
+                # _av_dominant is False) invented plausible-looking market
+                # figures (a fake S&P 500 level, a fake Fed funds rate) with
+                # zero mitigation of any kind, silently, because this signal
+                # was computed and then simply never read — this is the only
+                # remaining safety net for that case.
+                if (
+                    _stream_hallucination_warning
+                    and _av_reasoned_answer is None
+                    and answer
+                    and not answer.rstrip().endswith(_STREAM_LIMITATION_NOTICE)
+                ):
+                    answer = f"{answer.rstrip()}\n\n{_STREAM_LIMITATION_NOTICE}"
 
                 # STREAM THE CLEAN ANSWER progressively — gives the client a
                 # typing effect without ever exposing the raw leaked preamble.

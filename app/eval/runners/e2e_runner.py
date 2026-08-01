@@ -55,9 +55,16 @@ def _resolve_chunk_ids(sources: list[dict]) -> list[str]:
     try:
         from qdrant_client.models import FieldCondition, Filter, MatchValue
 
-        from app.vectorstore.qdrant_store import QdrantVectorStore
+        from app.core.infra_registry import infra
 
-        qs = QdrantVectorStore()
+        # Reuse the cached singleton, not a fresh QdrantVectorStore() per call —
+        # this function runs once per gold row (56-100+ times in e2e/Tier-2),
+        # and a bare QdrantVectorStore() re-opens a client + re-lists collections
+        # (_warm_cache()) on every single row. Confirmed via the box's first
+        # completed Tier-2 run: qdrant_initialized logged hundreds of times.
+        qs = infra.get_vector_store()
+        if qs is None:
+            return []
         coll = qs.text_collection
     except Exception:
         return []

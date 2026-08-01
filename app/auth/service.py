@@ -60,6 +60,7 @@ def _doc_to_public(doc: dict) -> UserPublic:
         email=doc["email"],
         role=doc.get("role", "user"),
         is_active=doc.get("is_active", True),
+        is_demo=doc.get("is_demo", False),
         created_at=doc.get("created_at", datetime.now(timezone.utc)),
     )
 
@@ -258,3 +259,43 @@ class AuthService:
         col = _get_mongo_collection()
         col.update_one({"user_id": user_id}, {"$set": {"is_active": False}})
         logger.info(event="auth_user_deactivated", user_id=user_id)
+
+    def seed_demo_user(self, email: str, password: str) -> UserPublic:
+        """Create or reset the one fixed, publicly-shared demo account.
+
+        Idempotent — safe to re-run: an existing account at this email is
+        reset to the given password and (re-)marked as demo rather than
+        rejected as a duplicate. Always active, never requires OTP (see
+        /auth/login's is_demo bypass). Used only by
+        app/bin/seed_demo_account.py, never reachable from any HTTP route.
+        """
+        _check_password_strength(password, email)
+        col = _get_mongo_collection()
+        existing = col.find_one({"email": email})
+        hashed = _hash_password(password)
+
+        if existing:
+            col.update_one(
+                {"email": email},
+                {
+                    "$set": {
+                        "hashed_password": hashed,
+                        "is_active": True,
+                        "is_demo": True,
+                    },
+                    "$addToSet": {"auth_providers": "email"},
+                },
+            )
+            logger.info(event="auth_demo_user_reset", email=email, user_id=existing["user_id"])
+            return _doc_to_public(col.find_one({"email": email}))
+
+        user = UserInDB(
+            email=email,
+            hashed_password=hashed,
+            auth_providers=["email"],
+            is_active=True,
+            is_demo=True,
+        )
+        col.insert_one(user.model_dump())
+        logger.info(event="auth_demo_user_created", email=email, user_id=user.user_id)
+        return _doc_to_public(user.model_dump())

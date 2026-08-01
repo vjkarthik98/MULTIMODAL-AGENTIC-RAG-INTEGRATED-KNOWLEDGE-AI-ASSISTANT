@@ -344,6 +344,23 @@ class ToolRegistry:
         )
 
         # MEMORY TOOL
+        # KNOWN GAP, not fixed: self.memory.get_history(session_id) omits
+        # user_id, so RedisMemory._key() refuses the lookup and this always
+        # returns [] silently — same class of bug fixed everywhere else in
+        # the memory layer (query_pipeline.py, rag_pipeline.py,
+        # memory_manager.py) during a 2026-07-31 audit. Left unfixed here
+        # specifically because it's confirmed DEAD CODE, not a live bug:
+        # verified no caller anywhere invokes this registered tool — the
+        # only decision=="memory" handling in the codebase
+        # (query_pipeline.py) calls _build_memory_context() directly
+        # instead, bypassing the tool registry entirely, and
+        # rag_pipeline.py never imports ToolRegistry at all. This tool
+        # only becomes reachable if/when app/agents/planner.py's
+        # multi-step tool-chaining scaffold gets real callers (see
+        # CLAUDE.md: AgentExecutor.run() is single-dispatch today) — fix
+        # this (thread session's user_id through the query/context args
+        # and into this call) at that point, not before; "context: dict"
+        # already exists as the natural place to carry it.
         def memory_tool(query: str, context: dict, session_id: str):
             if not self.memory:
                 return []

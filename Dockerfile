@@ -124,7 +124,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update && apt-get install -y --no-install-recommends \
         python3.12 \
         tesseract-ocr tesseract-ocr-eng ffmpeg libmagic1 libgomp1 curl \
+        gcc \
     && rm -rf /var/lib/apt/lists/*
+# gcc (not the full build-essential) — Triton JIT-compiles kernels for
+# Qwen2-VL/BLIP INT8 inference at *request* time, not just at image build
+# time. Without it, image captioning silently fails on every ingest
+# ("Failed to find C compiler") while OCR keeps working, so nothing here
+# ever surfaces as a hard error — confirmed live on the production box via
+# a full Tier-2 eval run where all 14/14 image-ingest calls failed both
+# captioners.
 
 RUN groupadd --gid 10001 appuser \
     && useradd --uid 10001 --gid appuser --shell /bin/bash --create-home appuser
@@ -176,7 +184,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tesseract-ocr tesseract-ocr-eng ffmpeg libmagic1 libgomp1 curl \
+        gcc \
     && rm -rf /var/lib/apt/lists/*
+# gcc — see the matching comment in the `runtime` stage above: Triton needs
+# a C compiler at inference time for image-captioning kernels, not just at
+# build time.
 
 RUN groupadd --gid 10001 appuser \
     && useradd --uid 10001 --gid appuser --shell /bin/bash --create-home appuser

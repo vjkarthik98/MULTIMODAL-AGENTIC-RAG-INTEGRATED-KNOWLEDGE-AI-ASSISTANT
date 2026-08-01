@@ -64,8 +64,39 @@ def run_video_suite(cfg: EvalConfig) -> SuiteResult:
     all_gold_captions: list[str] = []
     all_generated_transcripts: list[str] = []
     all_gold_transcripts: list[str] = []
+    all_captions_flat: list[str] = []
 
     raw_corpus_dir = cfg.raw_corpus_dir / "video"
+
+    # Multiple gold rows commonly test the SAME video (different caption/
+    # transcript excerpts of one recording), and this suite additionally
+    # used to re-ingest a second time per row just for the repetition-rate
+    # check below — up to 2x N full video ingests (diarization + Whisper +
+    # frame captioning, the most expensive of any modality) for N gold rows
+    # on one file. Ingest each distinct source_file at most once per suite
+    # run and reuse the split (captions, transcript) for both purposes.
+    _ingest_cache: dict[str, tuple[list[str], list[str]] | None] = {}
+
+    def _get_split(source_file: str, video_path: Any, row_id: str) -> tuple[list[str], list[str]]:
+        if source_file in _ingest_cache:
+            cached = _ingest_cache[source_file]
+            return cached if cached is not None else ([], [])
+        session_id = f"{cfg.session_prefix}_video_{row_id}"
+        try:
+            from app.utils.paths import reset_current_user, set_current_user
+
+            _token = set_current_user(cfg.user_id)
+            try:
+                docs = video_ingest.ingest(file_path=str(video_path), session_id=session_id)
+            finally:
+                reset_current_user(_token)
+        except Exception as exc:
+            result.breached[f"ingest_error_{row_id}"] = str(exc)
+            _ingest_cache[source_file] = None
+            return [], []
+        split = _split_by_subtype(docs)
+        _ingest_cache[source_file] = split
+        return split
 
     for row in gold_rows:
         gold_frame_caps = row.get("gold_frame_captions", [])
@@ -76,34 +107,23 @@ def run_video_suite(cfg: EvalConfig) -> SuiteResult:
             "TODO",
         )
 
-        if not has_gold_caps and not has_gold_transcript:
-            continue
-
         source_file = row.get("source_file") or ""
         if not source_file:
             continue
         video_path = raw_corpus_dir / source_file
         if not video_path.exists():
-            result.breached[f"missing_file_{row['id']}"] = str(video_path)
+            if has_gold_caps or has_gold_transcript:
+                result.breached[f"missing_file_{row['id']}"] = str(video_path)
             continue
 
-        session_id = f"{cfg.session_prefix}_video_{row['id']}"
-        try:
-            from app.utils.paths import reset_current_user, set_current_user
+        # Repetition-rate check runs on every available file regardless of
+        # gold — collect it here so a file with no gold data still ingests
+        # exactly once, not zero-then-once-more in a second pass.
+        captions, transcript_parts = _get_split(source_file, video_path, row["id"])
+        all_captions_flat.extend(captions)
 
-            _token = set_current_user(cfg.user_id)
-            try:
-                docs = video_ingest.ingest(
-                    file_path=str(video_path),
-                    session_id=session_id,
-                )
-            finally:
-                reset_current_user(_token)
-        except Exception as exc:
-            result.breached[f"ingest_error_{row['id']}"] = str(exc)
+        if not has_gold_caps and not has_gold_transcript:
             continue
-
-        captions, transcript_parts = _split_by_subtype(docs)
 
         if has_gold_caps and captions:
             # Pair generated captions with gold captions (by position, padded with empty)
@@ -122,28 +142,7 @@ def run_video_suite(cfg: EvalConfig) -> SuiteResult:
     else:
         result.add(MetricResult.empty("frame_caption_recall", "no frame caption pairs available"))
 
-    # BLIP repetition detection (P1-9) — run on ALL captions regardless of gold
-    all_captions_flat: list[str] = []
-    for row in gold_rows:
-        source_file = row.get("source_file") or ""
-        if not source_file:
-            continue
-        video_path = raw_corpus_dir / source_file
-        if video_path.exists():
-            session_id = f"{cfg.session_prefix}_video_rep_{row['id']}"
-            try:
-                from app.utils.paths import reset_current_user, set_current_user
-
-                _tok = set_current_user(cfg.user_id)
-                try:
-                    docs = video_ingest.ingest(str(video_path), session_id=session_id)
-                finally:
-                    reset_current_user(_tok)
-                caps, _ = _split_by_subtype(docs)
-                all_captions_flat.extend(caps)
-            except Exception:
-                pass
-
+    # BLIP repetition detection (P1-9) — collected above alongside the main pass
     if all_captions_flat:
         result.add(caption_repetition_rate(all_captions_flat))
     else:

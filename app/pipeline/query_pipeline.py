@@ -641,7 +641,7 @@ def _build_memory_context(
         if not history:
             return ""
         filtered = filter_relevant_history(query, history, embedder, session_id=session_id)
-        return build_memory_context("", filtered, session_id=session_id)
+        return build_memory_context("", filtered, session_id=session_id, user_id=user_id)
     except Exception as e:
         logger.warning(event="memory_context_failed", error=str(e), session_id=session_id)
         return ""
@@ -683,7 +683,7 @@ def _store_interaction(
         # Use raw message count (not sliding-window trimmed) so we never skip
         # past the threshold. Accept size % every_n in {0, 1} to tolerate the
         # two-message-per-turn increment landing one over a clean multiple.
-        size = mgr.get_memory_size(session_id)
+        size = mgr.get_memory_size(session_id, user_id=user_id)
         every_n = settings.MEMORY_SUMMARY_EVERY_N_TURNS * 2  # each turn = 2 messages
         if every_n > 0 and size >= every_n and size % every_n <= 1:
             import threading
@@ -693,7 +693,7 @@ def _store_interaction(
                     from app.core.model_loader import model_loader
 
                     llm = model_loader.get_llm()
-                    mgr.summarize_and_compress(session_id, llm)
+                    mgr.summarize_and_compress(session_id, llm, user_id=user_id)
                     logger.info(
                         event="auto_summary_triggered",
                         session_id=session_id,

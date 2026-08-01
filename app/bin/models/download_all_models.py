@@ -8,17 +8,20 @@ Usage:
     python app/bin/models/download_all_models.py
     python app/bin/models/download_all_models.py --skip-gated    # skip pyannote (needs license)
     python app/bin/models/download_all_models.py --only gguf     # single model by key
-    python app/bin/models/download_all_models.py --only prometheus_judge   # Tier-2 judge only
-    python app/bin/models/download_all_models.py --include-eval-models    # + eval-only judges
+    python app/bin/models/download_all_models.py --only prometheus_judge   # judge only
 
 Set HF_TOKEN in .env for gated models (pyannote diarization requires license acceptance
 at https://hf.co/pyannote/speaker-diarization-3.1).
 
-Eval-only models (currently: prometheus_judge) are excluded from the default run
-— they're never loaded during normal app serving, only by the Tier-2 eval suite —
-so a normal instance boot (start_server.py's ensure_models() call, which passes
-no arguments) never downloads them. Fetch explicitly with --only <key> or
---include-eval-models before running a Tier-2 eval that needs one.
+prometheus_judge (the Tier-2 LLM-as-judge) IS included in the default run —
+it's a pure disk fetch (no VRAM, no model load), so a one-time ~4.4GB
+download on the box's first boot is worth it to guarantee Tier-2 always has
+its real judge instead of silently degrading to a weaker lexical fallback.
+It's still marked "optional" so a download hiccup can't fail the whole
+provisioning run, and app/eval/judges/prometheus_judge.py::ensure_available()
+is a second, independent fetch attempt if it's ever still missing when
+Tier-2 actually runs. `--include-eval-models` remains for any FUTURE
+eval-only model that genuinely should stay opt-in.
 """
 
 from __future__ import annotations
@@ -205,15 +208,42 @@ MODELS: list[dict] = [
     # key "gguf" (and any other GGUF entry) is injected into the run loop,
     # not listed here — GGUF needs a (repo, filename) pair, not a bare
     # model_id, so it doesn't fit the MODELS dict shape cleanly.
+    {
+        # Not an HF Hub or torch.hub model — EasyOCR fetches its detector +
+        # recognizer weights from its own JaidedAI-hosted CDN into
+        # EASYOCR_MODEL_DIR (app/core/config.py). Added here after a live
+        # Tier-2 eval run showed the FIRST real image ingest on a fresh box
+        # eating 155s against a 10s SLO (both a live download and the model
+        # load happening inline on the request path) — every model that can
+        # be pre-fetched at provisioning time should be, same as everything
+        # else in this file.
+        "key": "easyocr",
+        "model_id": "easyocr/en",
+        "type": "easyocr",
+        "size_gb": 0.06,
+        "gated": False,
+        # image_ingest.py/image_chunker.py already treat a missing/failed
+        # EasyOCR as a soft degradation (falls back to TrOCR-only OCR, logs
+        # a warning, never raises) — this provisioning script should not be
+        # stricter than the app it's provisioning for. Without this flag, a
+        # box where `pip install` hasn't picked up easyocr>=1.7 yet (it IS
+        # declared in requirements.txt/pyproject.toml — an environment gap,
+        # not a missing dependency) hard-fails the ENTIRE script run over
+        # one non-critical model, the same mistake this file's own comments
+        # already document fixing for detoxify below.
+        "optional": True,
+    },
 ]
 
 # Each entry needs its own repo+filename because a single from_pretrained()-
 # style model_id isn't enough to locate one file inside a GGUF repo that may
-# host several quantizations. "startup" (default True) controls whether
-# main()'s default run (the one start_server.py invokes on every boot)
-# includes this entry — set False for judge/eval-only models that must never
-# eat VRAM or download bandwidth on a normal app boot; fetch them explicitly
-# with `--only <key>` or `--include-eval-models` instead.
+# host several quantizations. "startup" (default True, omit the key to keep
+# it True) controls whether main()'s default run (the one start_server.py
+# invokes on every boot) includes this entry — set False only for a model
+# that would genuinely cost something recurring on every normal boot (real
+# VRAM/compute, not just a one-time disk fetch); see prometheus_judge's own
+# comment above for why a plain download doesn't qualify. `--only <key>` or
+# `--include-eval-models` still force-fetch anything regardless of this flag.
 GGUF_MODELS: list[dict] = [
     {
         "key": "gguf",
@@ -225,15 +255,37 @@ GGUF_MODELS: list[dict] = [
     {
         "key": "prometheus_judge",
         "gguf_repo": "prometheus-eval/prometheus-7b-v2.0-GGUF",
-        "gguf_filename": "prometheus-7b-v2.0.Q8_0.gguf",
-        "size_gb": 7.7,
+        # Q4_K_M, NOT Q8_0 — verified live via the HF Hub API
+        # (huggingface.co/api/models/prometheus-eval/prometheus-7b-v2.0-GGUF,
+        # 2026-08-01): this repo contains exactly one .gguf file, and it
+        # isn't Q8_0. The old Q8_0 filename here 404'd on every real
+        # download attempt (confirmed live) — it never existed, this was a
+        # pre-existing bug, not a hypothetical. Don't change this filename
+        # again without re-checking that same API response first.
+        "gguf_filename": "prometheus-7b-v2.0.Q4_K_M.gguf",
+        "size_gb": 4.4,
         "gated": False,
         "optional": True,
         # Loaded only by app/eval/judges/prometheus_judge.py during a Tier-2
-        # eval run — never touched during normal request serving. Excluded
-        # from the default start_server.py boot run for exactly that reason;
-        # see the "startup" filtering in main().
-        "startup": False,
+        # eval run — never touched during normal request serving, so this
+        # was originally "startup": False (excluded from the default boot
+        # run) on the theory that it shouldn't cost anything on a normal
+        # boot. That theory doesn't actually hold: _dl_gguf() below is a
+        # pure disk fetch (hf_hub_download + hardlink) — it never
+        # instantiates Llama(...), so it costs zero VRAM regardless of this
+        # flag; VRAM is only spent if/when prometheus_judge.py's own
+        # _load_prometheus() runs, which this flag doesn't gate at all. The
+        # ONLY real cost was a one-time ~4.4GB download on the box's FIRST
+        # boot (every boot after that is a fast cached-file + checksum
+        # check, same as every other model here). Given that, defaulting
+        # it OFF just meant Tier-2 — an important quality gate — silently
+        # graded with a much weaker lexical judge until someone remembered
+        # a manual `--only prometheus_judge` step (confirmed happening live
+        # on 2026-07-31). Left "optional": True so a download hiccup still
+        # can't fail the whole provisioning run; prometheus_judge.py's own
+        # ensure_available() is a second, independent safety net that
+        # auto-fetches it inline if it's still somehow missing when Tier-2
+        # actually needs it.
     },
 ]
 
@@ -331,6 +383,20 @@ def _dl_faster_whisper(model_id: str) -> None:
 
     size = model_id.split("faster-whisper-", 1)[-1]
     WhisperModel(size, device="cpu", compute_type="int8", download_root=None)
+
+
+_easyocr_dir = Path(_hf_home) / "easyocr"
+
+
+def _dl_easyocr() -> None:
+    # Reader() downloads on construction unless download_enabled=False.
+    # model_storage_directory must match app/core/config.py's
+    # EASYOCR_MODEL_DIR default (both derive from the same _hf_home /
+    # HF_HOME) so the app finds what this script fetched.
+    import easyocr
+
+    _easyocr_dir.mkdir(parents=True, exist_ok=True)
+    easyocr.Reader(["en"], gpu=False, verbose=False, model_storage_directory=str(_easyocr_dir))
 
 
 def _dl_detoxify() -> None:
@@ -592,6 +658,9 @@ def _dispatch_download(
     if mtype == "detoxify":
         _dl_detoxify()
         return True
+    if mtype == "easyocr":
+        _dl_easyocr()
+        return True
 
     downloader = _TOKEN_GATED_DOWNLOADERS.get(mtype, _dl_transformers)
     downloader(model_id, HF_TOKEN if gated else "", revision=revision)
@@ -633,9 +702,10 @@ def main() -> None:
         "--include-eval-models",
         action="store_true",
         help=(
-            "Also download eval-judge-only models (e.g. prometheus_judge) that "
-            "are normally excluded from the default run since they're never "
-            "loaded during app serving — only by the Tier-2 eval suite."
+            "Also download any eval-only model explicitly marked "
+            '"startup": False (none currently — prometheus_judge is in the '
+            "default run since it costs nothing but disk on a normal boot). "
+            "Kept for a future judge/eval model that genuinely should stay opt-in."
         ),
     )
     args = parser.parse_args()

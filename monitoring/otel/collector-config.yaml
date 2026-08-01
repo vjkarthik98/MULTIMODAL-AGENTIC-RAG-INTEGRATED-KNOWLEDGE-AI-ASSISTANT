@@ -31,12 +31,27 @@ exporters:
     endpoint: tempo:4317
     tls:
       insecure: true
-  # Collector's own health/throughput metrics — scraped by Prometheus
-  # (see monitoring/prometheus/prometheus.yml's otel-collector job).
+  # Prometheus-format re-export of whatever the app sends this collector via
+  # OTLP metrics (currently nothing — app/main.py only exports traces here;
+  # its own /metrics is scraped directly by Prometheus, port 9464). Kept for
+  # future use. Deliberately NOT :8888 — that's the collector's own
+  # self-telemetry port below, and both listeners live in the same process,
+  # so a shared port is a bind conflict, not a merge. This collided until
+  # 2026-07-31 and crash-looped the container.
   prometheus:
-    endpoint: 0.0.0.0:8888
+    endpoint: 0.0.0.0:8889
 
 service:
+  # Collector's own health/throughput self-metrics — scraped by Prometheus
+  # (see monitoring/prometheus/prometheus.yml's otel-collector job). Must
+  # bind 0.0.0.0, not the otelcol-contrib default of localhost:8888 —
+  # Prometheus scrapes this cross-container as `otel-collector:8888`, which
+  # resolves to this container's eth0, not its loopback; a bare default
+  # silently made the job unreachable even once the port collision on this
+  # same 8888 (the prometheus *exporter*, above) is fixed.
+  telemetry:
+    metrics:
+      address: 0.0.0.0:8888
   pipelines:
     traces:
       receivers: [otlp]
