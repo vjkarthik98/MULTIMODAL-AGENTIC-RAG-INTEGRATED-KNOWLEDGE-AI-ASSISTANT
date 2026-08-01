@@ -1135,9 +1135,7 @@ class MongoMemory:
         try:
 
             def _do():
-                return self.messages.count_documents(
-                    {"session_id": session_id, "user_id": user_id}
-                )
+                return self.messages.count_documents({"session_id": session_id, "user_id": user_id})
 
             return int(self._retry(_do))
         except Exception:
