@@ -1122,13 +1122,22 @@ class MongoMemory:
 
     # MESSAGE COUNT
 
-    def message_count(self, session_id: str) -> int:
+    def message_count(self, session_id: str, user_id: str | None = None) -> int:
         if not self._is_available():
+            return 0
+        if not user_id:
+            logger.error(
+                event="mongo_message_count_missing_user_id",
+                session_id=session_id,
+                error="message_count called without user_id — refusing an unscoped query",
+            )
             return 0
         try:
 
             def _do():
-                return self.messages.count_documents({"session_id": session_id})
+                return self.messages.count_documents(
+                    {"session_id": session_id, "user_id": user_id}
+                )
 
             return int(self._retry(_do))
         except Exception:

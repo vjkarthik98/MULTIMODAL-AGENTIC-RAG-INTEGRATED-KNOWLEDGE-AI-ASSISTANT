@@ -2069,26 +2069,266 @@ succeeds with no new lint errors. A repo-wide search for "guest" afterward
 turns up nothing outside this changelog's own history and one intentional
 comment explaining the 401-not-500 handling above.
 
+### Added — fixed demo account (recruiter/hiring-manager walkthroughs)
+
+Guest mode's removal above meant there was no zero-friction way left for
+someone evaluating this project to try it without registering. Rather than
+rebuild any form of anonymous access, added one permanent, pre-verified
+login instead — a deliberately narrow, opt-in replacement, not a guest-mode
+reintroduction.
+
+- **`app/auth/models.py` / `service.py`**: new `is_demo: bool` field on the
+  user record (`UserInDB`/`UserPublic`), and `AuthService.seed_demo_user()`
+  — idempotent create-or-reset, always `is_active=True`. Never reachable
+  from `/auth/register`; only settable via the new seed script below.
+- **`app/auth/router.py`**: `POST /auth/login` checks `is_demo` immediately
+  after password verification and, if set, issues tokens directly — no OTP
+  email round-trip. No frontend change needed: `LoginPage.jsx` already had a
+  "no OTP required" response branch from the trusted-device-token feature,
+  and this reuses it unmodified.
+- **New `app/bin/seed_demo_account.py`**: creates/resets the account
+  (`python -m app.bin.seed_demo_account`, or `--email`/--password` to use a
+  different one). Deliberately does *not* fabricate example chat history or
+  citations — those are only trustworthy if they come from real retrieval
+  against real embeddings, so the script prints the bundled finance
+  benchmark files (`data/finance/apple_10k.pdf`, `ctryprem.xlsx`, the AAPL
+  chart image, the FOMC audio, the Q4 2025 earnings-call video,
+  `fomc_dec2024.txt`) and a set of suggested questions as next steps to run
+  once, for real, through the actual UI.
+- **Deliberately left fully open, by explicit choice**: no per-endpoint
+  restrictions on this account — uploads, deletes, password changes, and
+  the GDPR self-delete endpoint all behave identically to a normal account.
+  Concretely, this means: (a) the per-request rate limiting is IP-keyed, not
+  account-keyed (`app/main.py`'s `rate_limit` middleware — 60 req/min per
+  IP, independent 5/min login and 3/hour register brute-force caps), so
+  there's no *aggregate* cost ceiling across everyone sharing the
+  credentials; (b) anyone holding the credentials can permanently delete the
+  account, its files, and its history via the existing GDPR self-delete
+  button, or lock out every other concurrent session via password change.
+  Tenant isolation and guardrails are unaffected either way — this account
+  cannot see or touch other users' data, and prompt-injection/output
+  guardrails apply to it identically. Noted as an accepted trade-off, not an
+  oversight — a follow-up to lock down just the destructive endpoints for
+  `is_demo` accounts specifically was scoped but not built, on request.
+- **Incidentally found while auditing this path**: `api_routes.py`'s
+  `_rate_limit_check()` helper is a no-op stub (`pass`) — predates guest-mode
+  removal, unrelated to it. Harmless today only because the IP-keyed
+  middleware limit above covers `/ingest`, `/query/stream`, and `/upload`
+  independently of it; flagged here rather than silently left mysterious.
+
+### Fixed — monitoring stack, found live on the box post-deploy
+
+- **Grafana crash-looped indefinitely.** `monitoring/alerts/contact-points.yml`
+  declared a `slack`-type contact point whose `url` resolved empty
+  (`SLACK_WEBHOOK_URL` was never set), and Grafana 11.3 treats that as a
+  fatal provisioning error, not a soft warning. Switched to a generic
+  `webhook` type against an ntfy.sh topic, which has no `recipient`
+  requirement.
+- **Grafana's post-login redirect went to `https://localhost/grafana/...`.**
+  `GF_SERVER_ROOT_URL` used the `%(protocol)s://%(domain)s/...` template —
+  Grafana only ever speaks plain HTTP internally and has no way to know
+  Caddy terminates TLS on the real hostname in front of it. Hardcoded to
+  the actual external URL, overridable via a new `GRAFANA_ROOT_URL`.
+- **OTel Collector crash-looped** on a port collision: its own internal
+  self-telemetry and its `prometheus` metrics exporter both defaulted to
+  `:8888` inside the same process. Split to `:8888`/`:8889`; also fixed the
+  self-telemetry's `localhost`-only default bind, which would have made
+  Prometheus's own scrape of it silently unreachable cross-container even
+  after the collision was fixed.
+- **`deploy/aws/caddy/Caddyfile`'s `log { output file ... }` block broke
+  every `caddy reload`** on the box (`open /var/log/caddy/access.log:
+  permission denied`, cause never fully root-caused — journald logging via
+  stdout was judged sufficient). Removed from the template so a future
+  deploy doesn't reintroduce it.
+
+### Fixed — conversation memory silently dropped on the live streaming path
+
+`MemoryManager.get_history()` had no `user_id` parameter in its signature
+at all, so no caller could ever thread one through regardless of what it
+itself received — both Redis and Mongo correctly fail closed on a missing
+`user_id` (no tenant-isolation leak, confirmed), but the practical effect
+was that every conversation-memory lookup silently returned empty. Fixed
+across the whole chain: `memory_manager.py` (`get_history`,
+`get_history_async`, `summarize_and_compress`, `get_last_k`, `get_context`),
+`memory_fusion.py` (`_fetch_mongo_summary`, `build_memory_context`),
+`mongo_memory.py` (`message_count` had no tenant filter at all — a real,
+separate gap from every other method in that file), `query_pipeline.py`,
+and `rag_pipeline.py::run()`.
+
+The more severe half of this: **`RagPipeline.stream()` — the actual live
+SSE path the UI calls, confirmed distinct from `query_pipeline.py` which
+every eval run exercises instead — never fetched conversation memory at
+all**, for any modality, unconditionally. Its `VerificationLoop` call
+hardcoded `memory_context=""` (the `_av_*` variable naming there is legacy
+from when that branch really was audio/video-only; it now covers all 7
+default `AGENT_VERIFY_MODALITIES`, not a narrow case), and its raw
+fallback-generation `build_prompt()` call omitted the `memory=` argument
+entirely. This is why no eval run ever caught it — eval exercises
+`query_pipeline.py`, which was already correct. Fixed by adding a real
+history fetch near the top of `stream()` and wiring it into both paths.
+
+### Fixed — image and video captioning fully broken in production
+
+Every image ingested in production got zero semantic caption (OCR still
+worked) — `Dockerfile`'s `runtime` and `dev-runtime` stages never installed
+a C compiler, and Triton needs one at *inference* time, not just build
+time, to JIT-compile kernels for Qwen2-VL/BLIP. Added `gcc` to both stages.
+Video frame captioning (`video_chunker.py::caption_frame`) uses the same
+`Qwen2VLForConditionalGeneration` class — same fix covers it; confirmed no
+separate video-specific bug.
+
+### Fixed — eval harness burning hours on redundant re-ingestion
+
+Multiple gold rows commonly test the same underlying file (different
+excerpts of one earnings call, different OCR assertions on one chart), and
+none of the three heaviest suite runners deduplicated by `source_file`:
+`audio_runner.py` re-ran full diarization+Whisper transcription from
+scratch 11+ times on one file (~430s each, ~80 minutes on one file alone —
+almost certainly the dominant cost of the 2-hour Tier-2 run that triggered
+this whole audit), `ocr_runner.py` re-ingested one image 14 times, and
+`video_runner.py` was worst of all — it ingested every file **twice** per
+row via two entirely separate loops. All three now cache by `source_file`
+within a suite run.
+
+### Fixed — verification loop scoring its own retry strategy into failure
+
+The self-verification loop (`app/verification/`) failed the large majority
+of routing-eval queries, and its `expand_retrieval` retry consistently
+scored *worse* than the baseline attempt it was meant to improve.
+Root cause: `retrieval_evaluator.py`'s `relevance_frac` was computed as
+`relevant_docs / len(docs)` against the *entire* retrieved pool, which
+legitimately balloons to 60-120 docs during that retry strategy — since
+only a handful of any batch ever scores above the relevance threshold (the
+rest is intentional MMR/diversity filler), a bigger pool mechanically
+produced a *lower* ratio, punishing the exact strategy meant to help.
+Fixed to score against a bounded top-10 by score instead.
+`ConfidenceScorer.score()`'s `overall` is `0.6*weakest + 0.4*mean`, and
+`retrieval` was almost always the weakest of the four dimensions, so this
+should lift both.
+
+### Fixed — retrieval eval's first query absorbing a full model-load cost
+
+`hybrid_search_slo_exceeded` fired at 26.8s against a 5s target on query
+#1 of every retrieval-suite run, ~0.02-0.2s on every query after.
+`retrieval_runner.py` constructed `HybridRetriever` without ever warming
+`siglip_text_embedder`, which every query needs for cross-modal search
+(`HybridRetriever.search()` loads it lazily on first use) — so the first
+gold row paid the full SigLIP cold-start cost inside its own timed
+latency measurement. Fixed by calling
+`model_registry.ensure_for_query(needs_vision=True)` before the loop
+starts, matching how the live query path warms models; a warm-up failure
+degrades to the old inline-cost behavior rather than failing the suite.
+
+### Fixed — guardrails: one false-positive noise source, one real gap
+
+- **`gguf_prompt_injection_stripped` fired on nearly every LLM call.** Root
+  cause: `input_guard._normalize_encoding()` runs NFKC Unicode
+  normalization unconditionally (fixes ligatures like "ﬁ"→"fi", footnote
+  superscripts, smart quotes — all routine in typeset financial PDFs, zero
+  malicious content involved), and `gguf_model.py`'s own
+  `if cleaned != prompt: warn` couldn't distinguish that from a genuine
+  injection match. `input_guard.sanitize()` already logs the precise
+  signal internally, only inside its real match branch — removed the
+  redundant, imprecise duplicate check.
+- **`output_guard_hallucination_flagged` answers shipped with zero
+  mitigation** on the streaming path specifically. `query_pipeline.py` was
+  already correct (properly propagates the flag and skips caching a
+  flagged answer). `rag_pipeline.py::stream()` computed the flag and never
+  even read it. The eval log's concrete examples — a fabricated S&P 500
+  level, a fabricated Fed funds rate — were web-search-sourced answers,
+  where `VerificationLoop` doesn't run at all (`docs[0]`'s modality isn't
+  one of the 7 in `AGENT_VERIFY_MODALITIES`), so they had no other safety
+  net either. Fixed: log the flag, and append the same limitation notice
+  `VerificationLoop` already uses elsewhere — but only when verification
+  didn't run, to avoid double-appending on the path that already handles
+  this correctly.
+
+### Added — Prometheus judge self-provisioning
+
+Tier-2's LLM-as-judge scoring was silently falling back to a much weaker
+lexical judge on every run, because `prometheus_judge` was excluded from
+the default model download (`"startup": False`, on the theory that an
+eval-only model shouldn't cost anything on a normal boot). That theory
+didn't hold up: the download step is pure disk I/O, never touches VRAM
+regardless of this flag, so the only real cost was a one-time download on
+first boot. Removed the exclusion — it's now downloaded by default, same
+as every other resident model — and added
+`prometheus_judge.py::ensure_available()` as an independent second safety
+net that fetches it inline if it's still somehow missing when Tier-2 needs
+it.
+
+Separately, and more fundamentally: **the GGUF filename this whole
+subsystem targeted, `prometheus-7b-v2.0.Q8_0.gguf`, never existed.**
+Verified directly against the HF Hub API
+(`huggingface.co/api/models/prometheus-eval/prometheus-7b-v2.0-GGUF`) that
+the repo contains exactly one `.gguf` file, and it's `Q4_K_M` (~4.4GB), not
+`Q8_0` — every download attempt against the old filename 404'd, a
+pre-existing bug this release actually fixes rather than papers over.
+Corrected in `prometheus_judge.py` and `download_all_models.py`.
+
+### Fixed — CI: GitHub Actions Tier-1 gate crashing on a GPU-less runner
+
+`torchaudio>=2.6` transitively pulls in `torchcodec` (not declared
+directly) for its `torchaudio.load()` implementation. `ci.yml` and
+`eval-gate.yml` already pin `torch`/`torchvision`/`torchaudio` to PyPI's
+CPU-only PyTorch index for exactly this class of problem, but `torchcodec`
+wasn't included in that pin — so pip resolved it from PyPI's default index
+instead and got a build whose shared libraries hard-require
+`libnvrtc.so.13` (CUDA runtime) just to *import*, crashing even a
+pure-text BGE embedder load and failing the whole Tier-1 gate. Added
+`torchcodec` to the existing CPU-index pin in both workflow files and to
+`requirements.txt`'s documented install command.
+
+### Fixed — provisioning script robustness
+
+- `download_all_models.py`'s `easyocr` entry hard-failed the *entire*
+  script (`sys.exit(1)`) when the package wasn't yet installed in the
+  running environment — stricter than the app itself, which already
+  degrades gracefully (falls back to TrOCR-only OCR) when EasyOCR is
+  unavailable. Marked `"optional": True` to match.
+- EasyOCR was downloading its detector+recognizer weights live on the
+  first real image request (155s against a 10s SLO) into its own default
+  cache directory, outside both `HF_HOME` and `TORCH_HOME` and outside the
+  persisted `.hf_cache` volume. Added a new `EASYOCR_MODEL_DIR` setting,
+  threaded into all 3 `easyocr.Reader()` call sites, and a pre-download
+  entry in `download_all_models.py`.
+
+### Documentation
+
+- `VRAM_BUDGET_GB`'s documented recommended value was `46` on the g6e.xlarge
+  L40S — but the nominal 48GB card shows as ~44.4GB actually visible to
+  CUDA once the OS/driver take their share (confirmed live via
+  `device_manager`'s own startup log). A value above the real total is a
+  silent no-op (`device_manager.py` does
+  `min(actual_free_vram, VRAM_BUDGET_GB)`), so `46` never bound and this
+  setting was doing nothing. Corrected to `44` in `.env.example`,
+  `config.py`'s comment, and `phase-30-aws-deployment.md`.
+- `tool_registry.py`'s registered `memory_tool` has the identical
+  missing-`user_id` gap as everything fixed above — confirmed via a full
+  call-site audit that it is genuinely unreachable dead code today (no
+  caller anywhere; `query_pipeline.py`'s only `decision=="memory"` handling
+  calls `_build_memory_context()` directly, bypassing the tool registry
+  entirely, and `rag_pipeline.py` never imports `ToolRegistry` at all).
+  Left unfixed on purpose, documented precisely in-code for if/when
+  `app/agents/planner.py`'s multi-step tool-chaining scaffold ever gets
+  real callers.
+
 ### Known Issues
 
-- **None of this has been validated against the live box.** This entire
-  release was built and syntax/logic-validated from a development
-  environment with no AWS/SSM access — `monitoring/` stack startup, the
-  Pushgateway push, the Tier-2 rollback path, the SSM secrets fetch, and the
-  Loki/Promtail log pipeline (including whether Promtail can actually read
-  `/var/lib/docker/containers/*/*.log` without a permissions fix — see the
-  compose file's comment on the `promtail` service) all still need a real
-  run against `magik-prod` before being trusted. See
-  `docs/runbooks/phase-31-monitoring.md` §4's validation matrix (items 15-20
-  cover Loki specifically).
 - **Finance numeric fidelity is not scored on live traffic** — `online_eval.py`
   does not run `compute_finance_fidelity()` against sampled live answers; the
   offline gate still applies at merge time and is now visible on the CI
   Tier-2 dashboard panels, but the live-sampled signal specifically is a
   documented gap, not silently dropped.
-- **One-time SSM setup is required before the next tagged deploy** — the five
-  app-secret parameters must be seeded (`aws ssm put-parameter`, commands in
-  `deploy/aws/README.md`) and `ec2-instance-profile-permissions.json`
-  attached to the instance profile's role, or `cd.yml`'s deploy job fails
-  fast on the first missing parameter rather than silently falling back to
-  the old plaintext `.env` values.
+- **None of the fixes below have been re-verified against a second live
+  run.** Every one has a traced root cause and compiles clean; none has
+  been confirmed by actually watching a fresh Tier-2 run's numbers move, or
+  by redeploying and re-checking the monitoring stack a second time.
+- **The live box's `.env` still needs three manual corrections** that this
+  release only fixed in documentation/defaults: `GRAFANA_ROOT_URL` /
+  `NTFY_WEBHOOK_URL` (added by hand during live debugging, not yet
+  reconciled with a committed config source), and `VRAM_BUDGET_GB` (still
+  `46` on the box, not yet changed to `44`). All three fold into the
+  already-planned full secrets/config unification pass (SSM for real
+  secrets, a new committed `deploy/aws/prod.env` for non-secret config),
+  not fixed ad hoc here.

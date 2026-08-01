@@ -80,6 +80,16 @@ class Settings:
     # torch.hub cache (separate mechanism from HF_HOME above; used by Detoxify)
     TORCH_HOME: str = _str("TORCH_HOME", str(Path(__file__).resolve().parents[2] / ".torch_cache"))
 
+    # EasyOCR's own cache (separate mechanism again — a JaidedAI CDN download,
+    # not HF Hub or torch.hub). Defaults to EasyOCR's own ~/.EasyOCR unless
+    # pointed at the persisted volume here — without this, every
+    # easyocr.Reader() call site downloads to the container's ephemeral
+    # filesystem, re-fetching from scratch (~2min, confirmed live) on every
+    # container recreate instead of once at provisioning time.
+    EASYOCR_MODEL_DIR: str = _str(
+        "EASYOCR_MODEL_DIR", str(Path(__file__).resolve().parents[2] / ".hf_cache" / "easyocr")
+    )
+
     # CORE APPLICATION
     APP_NAME: str = _str("APP_NAME", "Multimodal Agentic RAG Integrated Knowledge AI Assistant")
     # Keep in sync with /VERSION and the test assertion below by hand — nothing
@@ -261,11 +271,17 @@ class Settings:
     # MODEL DEVICE / WARMUP — target deploy is L40S 48 GB (AWS g6e.xlarge)
     # Profiles: "auto" (CUDA → all_gpu, else cpu), "hybrid", "all_gpu", "all_cpu"
     MODELS_DEVICE_PROFILE: str = _str("MODELS_DEVICE_PROFILE", "all_gpu")
-    # Per docs/runbooks/phase-30-aws-deployment.md Stage 1 item 4, the 48GB
-    # L40S value (46.0) is a box-level `.env` override, not a code default —
-    # this conservative default merely caps usage (safe either way), so it's
-    # left as-is here rather than baked into a shared default that isn't
-    # hardware-pinned. Set VRAM_BUDGET_GB=46 in the box's .env on g6e.xlarge.
+    # Per docs/runbooks/phase-30-aws-deployment.md Stage 1 item 4, the g6e.xlarge
+    # L40S value is a box-level `.env` override, not a code default — this
+    # conservative default merely caps usage (safe either way), so it's left
+    # as-is here rather than baked into a shared default that isn't
+    # hardware-pinned. Set VRAM_BUDGET_GB=44 (not 46 — see .env.example) in
+    # the box's .env on g6e.xlarge: the nominal 48GB card shows as ~44.4GB
+    # actually visible to CUDA once the OS/driver take their share
+    # (confirmed live). A value above the real total is a silent no-op —
+    # device_manager.py's LLM layer-count formula does
+    # min(actual_free_vram, VRAM_BUDGET_GB), so 46 never binds and the
+    # setting stops doing anything at all.
     VRAM_BUDGET_GB: float = _float("VRAM_BUDGET_GB", 22.0)
     WARMUP_AT_STARTUP: bool = _bool("WARMUP_AT_STARTUP", True)
     # LATENCY: eager-load ONLY the text query/ingest essentials at startup

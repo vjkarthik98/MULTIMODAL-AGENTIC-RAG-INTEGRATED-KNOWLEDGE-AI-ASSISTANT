@@ -14,6 +14,9 @@ from app.eval.datasets.gold_loader import load_gold
 from app.eval.metrics.base import SuiteResult
 from app.eval.metrics.latency import latency_stats
 from app.eval.metrics.retrieval import aggregate_retrieval_metrics
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 _RETRIEVAL_MODALITIES = ["txt", "pdf", "docx", "xlsx"]
 
@@ -41,6 +44,27 @@ def run_retrieval_suite(cfg: EvalConfig) -> SuiteResult:
     except Exception as e:
         result.breached["retriever_init"] = str(e)
         return result
+
+    # HybridRetriever.search() lazily loads siglip_text_embedder on its first
+    # call (every query does cross-modal vision search, not just image
+    # queries — see vision_count in its logs). Without warming it here, the
+    # FIRST gold row eats the full SigLIP cold-start cost inside its own
+    # timed latency measurement — confirmed live: 26.8s against a 5s SLO on
+    # query #1, ~0.02-0.2s on every query after. Warm it the same way the
+    # live query path does (model_registry.ensure_for_query), outside the
+    # timing loop, so the SLO measures real per-query latency, not a
+    # one-time model-load cost misattributed to whichever row runs first.
+    try:
+        from app.core.model_registry import model_registry
+
+        model_registry.ensure_for_query(needs_vision=True)
+    except Exception as exc:
+        # Not a breach — a warm-up failure just means the first query pays
+        # the cold-start cost inline instead (the pre-fix behavior), not
+        # that retrieval itself is broken. model_registry._ensure() already
+        # treats individual model failures as warnings internally; match
+        # that severity here rather than failing an otherwise-passing run.
+        logger.warning(event="retrieval_suite_warmup_failed", error=str(exc))
 
     # NOTE — this suite measures the FUSION component of retrieval only
     # (BM25 + dense + RRF). It deliberately does NOT apply the cross-encoder

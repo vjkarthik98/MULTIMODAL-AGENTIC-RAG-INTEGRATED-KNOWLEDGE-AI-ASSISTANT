@@ -67,6 +67,14 @@ def run_ocr_suite(cfg: EvalConfig) -> SuiteResult:
 
     raw_corpus_dir = cfg.raw_corpus_dir / "image"
 
+    # Multiple gold rows commonly test the SAME image (different OCR
+    # assertions against one chart/screenshot). Without this cache, every
+    # row re-ran full ingestion — captioning, OCR, chunking — from scratch;
+    # confirmed live: the same file ingested 14 times in one suite run, with
+    # the first cold-start call alone costing 155s against a 10s SLO. Ingest
+    # each distinct source_file once per suite run and reuse its OCR text.
+    _ingest_cache: dict[str, str | None] = {}
+
     for row in gold_rows:
         gold_ocr = row.get("gold_ocr_text", "")
         if not gold_ocr or gold_ocr == "TODO_fill_after_ocr":
@@ -78,23 +86,31 @@ def run_ocr_suite(cfg: EvalConfig) -> SuiteResult:
             result.breached[f"missing_file_{row['id']}"] = str(image_path)
             continue
 
-        session_id = f"{cfg.session_prefix}_ocr_{row['id']}"
-        try:
-            from app.utils.paths import reset_current_user, set_current_user
-
-            _token = set_current_user(cfg.user_id)
+        if source_file in _ingest_cache:
+            ocr_text = _ingest_cache[source_file]
+            if ocr_text is None:
+                continue  # this file already failed to ingest earlier this run
+        else:
+            session_id = f"{cfg.session_prefix}_ocr_{row['id']}"
             try:
-                docs = image_ingest.ingest(
-                    file_path=str(image_path),
-                    session_id=session_id,
-                )
-            finally:
-                reset_current_user(_token)
-        except Exception as exc:
-            result.breached[f"ingest_error_{row['id']}"] = str(exc)
-            continue
+                from app.utils.paths import reset_current_user, set_current_user
 
-        ocr_text = _collect_ocr_text(docs)
+                _token = set_current_user(cfg.user_id)
+                try:
+                    docs = image_ingest.ingest(
+                        file_path=str(image_path),
+                        session_id=session_id,
+                    )
+                finally:
+                    reset_current_user(_token)
+            except Exception as exc:
+                result.breached[f"ingest_error_{row['id']}"] = str(exc)
+                _ingest_cache[source_file] = None
+                continue
+
+            ocr_text = _collect_ocr_text(docs)
+            _ingest_cache[source_file] = ocr_text
+
         hypotheses.append(ocr_text)
         gold_ocr_texts.append(gold_ocr)
 

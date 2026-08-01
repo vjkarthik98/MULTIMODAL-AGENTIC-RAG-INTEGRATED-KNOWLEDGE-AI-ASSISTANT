@@ -295,6 +295,7 @@ class MemoryManager:
         self,
         session_id: str,
         limit: int | None = None,
+        user_id: str | None = None,
     ) -> list[dict[str, Any]]:
 
         limit = limit or settings.MAX_HISTORY_MESSAGES
@@ -307,7 +308,7 @@ class MemoryManager:
             # REDIS PRIMARY — SECTION 4.7
             if self.redis_memory:
                 try:
-                    data = self.redis_memory.get(session_id)
+                    data = self.redis_memory.get(session_id, user_id)
                     if isinstance(data, list) and data:
                         history = data
                         source = "redis"
@@ -322,7 +323,7 @@ class MemoryManager:
             # MONGO FALLBACK OR MERGE — SECTION 4.7
             if self.mongo_memory:
                 try:
-                    mongo_data = self.mongo_memory.get(session_id)
+                    mongo_data = self.mongo_memory.get(session_id, user_id)
                     if isinstance(mongo_data, list) and mongo_data:
                         if not history:
                             history = mongo_data
@@ -379,11 +380,12 @@ class MemoryManager:
         self,
         session_id: str,
         limit: int | None = None,
+        user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         async with self._semaphore:
             return await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: self.get_history(session_id, limit),
+                lambda: self.get_history(session_id, limit, user_id),
             )
 
     # CLEAR SESSION — SECTION 4.7
@@ -493,11 +495,12 @@ class MemoryManager:
         self,
         session_id: str,
         llm: Any,
+        user_id: str | None = None,
     ) -> str | None:
         try:
             from app.memory.summarizer import summarize_conversation
 
-            history = self.get_history(session_id)
+            history = self.get_history(session_id, user_id=user_id)
             if not history:
                 return None
 
@@ -530,16 +533,19 @@ class MemoryManager:
         self,
         session_id: str,
         k: int,
+        user_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        history = self.get_history(session_id, limit=k)
+        history = self.get_history(session_id, limit=k, user_id=user_id)
         return history[-k:] if history else []
 
     # GET CONTEXT AS STRING — SECTION 4.7
     # Always returns a string (may be empty). Never raises.
 
-    def get_context(self, session_id: str, limit: int | None = None) -> str:
+    def get_context(
+        self, session_id: str, limit: int | None = None, user_id: str | None = None
+    ) -> str:
         try:
-            history = self.get_history(session_id, limit=limit)
+            history = self.get_history(session_id, limit=limit, user_id=user_id)
             if not history:
                 return ""
             parts: list[str] = []
@@ -570,10 +576,10 @@ class MemoryManager:
 
     # MEMORY SIZE — SECTION 4.7
 
-    def get_memory_size(self, session_id: str) -> int:
+    def get_memory_size(self, session_id: str, user_id: str | None = None) -> int:
         if self.redis_memory and hasattr(self.redis_memory, "get_memory_size"):
             try:
-                return self.redis_memory.get_memory_size(session_id)
+                return self.redis_memory.get_memory_size(session_id, user_id)
             except Exception:
                 pass
         # Use raw document count — get_history() applies sliding-window trimming
@@ -581,12 +587,12 @@ class MemoryManager:
         # modulo-based summarization trigger.
         if self.mongo_memory and hasattr(self.mongo_memory, "message_count"):
             try:
-                raw = self.mongo_memory.message_count(session_id)
+                raw = self.mongo_memory.message_count(session_id, user_id)
                 if raw > 0:
                     return raw
             except Exception:
                 pass
-        return len(self.get_history(session_id))
+        return len(self.get_history(session_id, user_id=user_id))
 
     # HEALTH CHECK — SECTION 4.7
 

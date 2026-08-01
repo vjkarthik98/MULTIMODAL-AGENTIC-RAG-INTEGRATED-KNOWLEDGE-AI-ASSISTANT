@@ -61,6 +61,14 @@ def run_audio_suite(cfg: EvalConfig) -> SuiteResult:
 
     raw_corpus_dir = cfg.raw_corpus_dir / "audio"
 
+    # Multiple gold rows commonly test different excerpts of the SAME
+    # recording (e.g. 11+ rows all against one ~50min FOMC press conference).
+    # Without this cache, every row re-ran full diarization + Whisper
+    # transcription from scratch — confirmed live: ~430s per row, 11 rows on
+    # one file, ~80 minutes spent re-transcribing identical audio. Ingest
+    # each distinct source_file once per suite run and reuse its transcript.
+    _ingest_cache: dict[str, str | None] = {}
+
     for row in gold_rows:
         gold_transcript = row.get("gold_transcript_excerpt", "")
         if not gold_transcript or gold_transcript in ("TODO_fill_from_official_transcript", "TODO"):
@@ -72,23 +80,31 @@ def run_audio_suite(cfg: EvalConfig) -> SuiteResult:
             result.breached[f"missing_file_{row['id']}"] = str(audio_path)
             continue
 
-        session_id = f"{cfg.session_prefix}_audio_{row['id']}"
-        try:
-            from app.utils.paths import reset_current_user, set_current_user
-
-            _token = set_current_user(cfg.user_id)
+        if source_file in _ingest_cache:
+            transcript = _ingest_cache[source_file]
+            if transcript is None:
+                continue  # this file already failed to ingest earlier this run
+        else:
+            session_id = f"{cfg.session_prefix}_audio_{row['id']}"
             try:
-                docs = audio_ingest.ingest(
-                    file_path=str(audio_path),
-                    session_id=session_id,
-                )
-            finally:
-                reset_current_user(_token)
-        except Exception as exc:
-            result.breached[f"ingest_error_{row['id']}"] = str(exc)
-            continue
+                from app.utils.paths import reset_current_user, set_current_user
 
-        transcript = _collect_transcript(docs)
+                _token = set_current_user(cfg.user_id)
+                try:
+                    docs = audio_ingest.ingest(
+                        file_path=str(audio_path),
+                        session_id=session_id,
+                    )
+                finally:
+                    reset_current_user(_token)
+            except Exception as exc:
+                result.breached[f"ingest_error_{row['id']}"] = str(exc)
+                _ingest_cache[source_file] = None
+                continue
+
+            transcript = _collect_transcript(docs)
+            _ingest_cache[source_file] = transcript
+
         transcripts.append(transcript)
         gold_transcripts.append(gold_transcript)
 
