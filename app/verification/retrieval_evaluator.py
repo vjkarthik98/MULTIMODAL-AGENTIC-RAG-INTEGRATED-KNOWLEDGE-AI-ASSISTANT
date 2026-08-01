@@ -19,6 +19,19 @@ _NUM_WITH_CONTEXT_RE = re.compile(
 )
 _MIN_SCORE_FOR_RELEVANT = 0.15
 
+# relevance_frac is scored over the top-K docs by score, not the full
+# retrieved pool — the pool legitimately balloons to 60-120 during the
+# "expand_retrieval" retry strategy (more candidates fetched on purpose),
+# and only ever a handful of those are genuinely relevant (the rest is
+# long-tail MMR/diversity filler, same as any retrieval system). Scoring
+# the ratio against the whole pool meant a *bigger* retry pool produced a
+# *lower* relevance_frac purely from dilution — confirmed live: every
+# expand_retrieval attempt in a full Tier-2 eval run scored WORSE on
+# retrieval than the baseline attempt it was supposed to improve on. Top-K
+# approximates "the docs that actually matter for generation" regardless of
+# how large the raw candidate pool grew.
+_TOP_K_FOR_RELEVANCE = 10
+
 
 class RetrievalEvaluator:
     def evaluate(self, query: str, docs: list[dict[str, Any]]) -> RetrievalEvalResult:
@@ -29,8 +42,9 @@ class RetrievalEvaluator:
                 reason="no documents retrieved",
             )
 
-        relevant = [d for d in docs if self._score_of(d) >= _MIN_SCORE_FOR_RELEVANT]
-        relevance_frac = len(relevant) / len(docs) if docs else 0.0
+        top_k_docs = sorted(docs, key=self._score_of, reverse=True)[:_TOP_K_FOR_RELEVANCE]
+        relevant = [d for d in top_k_docs if self._score_of(d) >= _MIN_SCORE_FOR_RELEVANT]
+        relevance_frac = len(relevant) / len(top_k_docs) if top_k_docs else 0.0
 
         aspect_frac = self._aspect_coverage(query, docs)
         conflicting = self._has_conflicting_numbers(docs)

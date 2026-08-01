@@ -99,7 +99,18 @@ jobs:
           # `import torch` touches torch._dynamo/triton at collection time.
           # This step was simply missing here — invisible until now because
           # `ruff` always failed first and the job never reached `pytest`.
-          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+          #
+          # torchcodec included here too — torchaudio's own transitive
+          # dependency (modern torchaudio delegates torchaudio.load() to
+          # it), not declared directly in requirements.txt. Without pinning
+          # it to this same CPU index it resolved from PyPI's default index
+          # instead, with .so files that hard-require libnvrtc.so.13 (CUDA
+          # runtime) just to *import* — confirmed live (2026-07-31) crashing
+          # a plain text-only BGE embedder load, because transformers/
+          # sentence-transformers eagerly probe torchaudio (which eagerly
+          # probes torchcodec) even when loading a model that never touches
+          # audio.
+          pip install torch torchvision torchaudio torchcodec --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
           pip install -e ".[dev]"
 

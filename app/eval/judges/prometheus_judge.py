@@ -11,16 +11,22 @@ We drive it in its native contract and normalize the 1-5 score to 0..1 so the
 existing MetricResult / thresholds pipeline is unchanged.
 
 Model: prometheus-eval/prometheus-7b-v2.0 (Apache-2.0, Mistral-7B based)
-Quant: Q8_0 GGUF (~7.7GB VRAM) — highest fidelity that fits the free headroom.
-Path:  ./.hf_cache/gguf/prometheus-7b-v2.0.Q8_0.gguf
+Quant: Q4_K_M GGUF (~4.4GB VRAM). NOT Q8_0 — a Q8_0 build was assumed here
+previously but never actually existed in the GGUF repo; confirmed live via
+the HF Hub API (2026-08-01) that prometheus-eval/prometheus-7b-v2.0-GGUF
+contains exactly one .gguf file, Q4_K_M. Every download attempt against the
+old Q8_0 filename 404'd.
+Path:  ./.hf_cache/gguf/prometheus-7b-v2.0.Q4_K_M.gguf
 """
 
 from __future__ import annotations
 
 import os
 import re
+import shutil
 import threading
 import typing as t
+from pathlib import Path
 
 from app.core.config import get_settings
 
@@ -28,13 +34,25 @@ _settings = get_settings()
 
 _MODEL_PATH = os.getenv(
     "PROMETHEUS_JUDGE_MODEL_PATH",
-    str(_settings.PROJECT_ROOT / ".hf_cache" / "gguf" / "prometheus-7b-v2.0.Q8_0.gguf"),
+    str(_settings.PROJECT_ROOT / ".hf_cache" / "gguf" / "prometheus-7b-v2.0.Q4_K_M.gguf"),
 )
 _N_GPU_LAYERS = int(os.getenv("PROMETHEUS_JUDGE_GPU_LAYERS", "-1"))  # -1 = all layers on GPU
 _N_CTX = int(os.getenv("PROMETHEUS_JUDGE_N_CTX", "8192"))
 
+# Must match app/bin/models/download_all_models.py's GGUF_MODELS "prometheus_judge"
+# entry — this is the same file, fetched here as a fallback rather than only
+# ever at provisioning time. Filename verified against the live HF Hub API
+# (https://huggingface.co/api/models/prometheus-eval/prometheus-7b-v2.0-GGUF)
+# on 2026-08-01 — this repo has exactly one .gguf file. Do not change this
+# back to a Q8_0/other quant name without re-checking that API response;
+# guessing at a filename here is exactly what produced the 404 this comment
+# is fixing.
+_GGUF_REPO = "prometheus-eval/prometheus-7b-v2.0-GGUF"
+_GGUF_FILENAME = "prometheus-7b-v2.0.Q4_K_M.gguf"
+
 _lock = threading.Lock()
 _llm = None
+_download_attempted = False
 
 
 # ── Native Prometheus-2 prompt contract ───────────────────────────────────────
@@ -147,7 +165,7 @@ RUBRICS: dict[str, str] = {
 
 
 def _load_prometheus():
-    """Load Prometheus-2-7B Q8_0 once and cache it."""
+    """Load Prometheus-2-7B Q4_K_M once and cache it."""
     global _llm
     if _llm is not None:
         return _llm
@@ -157,12 +175,12 @@ def _load_prometheus():
         if not os.path.exists(_MODEL_PATH):
             raise RuntimeError(
                 f"Prometheus judge GGUF not found at {_MODEL_PATH}. "
-                "Download prometheus-7b-v2.0.Q8_0.gguf into .hf_cache/gguf/."
+                "Download prometheus-7b-v2.0.Q4_K_M.gguf into .hf_cache/gguf/."
             )
         try:
             from llama_cpp import Llama
 
-            print(f"[eval] Loading Prometheus-2-7B judge (Q8_0) from {_MODEL_PATH} ...")
+            print(f"[eval] Loading Prometheus-2-7B judge (Q4_K_M) from {_MODEL_PATH} ...")
             _llm = Llama(
                 model_path=_MODEL_PATH,
                 n_ctx=_N_CTX,
@@ -295,3 +313,62 @@ def grade_behavioral(rubric_id: str, query: str, answer: str, reference: str) ->
 
 def is_available() -> bool:
     return os.path.exists(_MODEL_PATH)
+
+
+def ensure_available() -> bool:
+    """Like is_available(), but auto-downloads the judge GGUF on a miss
+    instead of just reporting it missing.
+
+    Tier-2 is a quality *gate* — grading it with the much weaker lexical
+    fallback because a one-time `--only prometheus_judge` provisioning step
+    was never run (it's deliberately excluded from every normal server
+    boot; see download_all_models.py) silently produces numbers that look
+    like a real judge ran when one didn't. Confirmed happening live: a full
+    Tier-2 run fell back to lexical scoring for its entire duration without
+    anyone noticing until the logs were read closely afterward.
+
+    Downloads at most once per process (`_download_attempted` guard) —
+    never retries the same failure on every one of the ~100+ rows a suite
+    grades, which would otherwise hammer HF Hub with repeated failing
+    requests for the whole run.
+    """
+    global _download_attempted
+    if os.path.exists(_MODEL_PATH):
+        return True
+    if _download_attempted:
+        return False
+    _download_attempted = True
+
+    try:
+        from huggingface_hub import hf_hub_download
+
+        print(
+            f"[eval] Prometheus judge GGUF not found — downloading {_GGUF_FILENAME} "
+            f"from {_GGUF_REPO} (one-time, ~7.7GB, may take a few minutes) ..."
+        )
+        dest = Path(_MODEL_PATH)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        hub_cache_dir = str(_settings.PROJECT_ROOT / ".hf_cache" / "hub")
+        cached = hf_hub_download(
+            repo_id=_GGUF_REPO,
+            filename=_GGUF_FILENAME,
+            cache_dir=hub_cache_dir,
+            token=os.getenv("HF_TOKEN") or None,
+        )
+        if not dest.exists():
+            # Hardlink, not copy — same rationale as download_all_models.py's
+            # _dl_gguf: this is a multi-GB file already on the same
+            # filesystem inside the hub blob store, no reason to duplicate
+            # it on disk. Falls back to a copy across a cross-device mount.
+            real_src = Path(cached).resolve()
+            try:
+                os.link(real_src, dest)
+            except OSError:
+                shutil.copy2(real_src, dest)
+        print("[eval] Prometheus judge GGUF downloaded ✓")
+        return True
+    except Exception as exc:
+        print(
+            f"[eval] Prometheus judge auto-download failed ({exc}) — falling back to lexical judge"
+        )
+        return False

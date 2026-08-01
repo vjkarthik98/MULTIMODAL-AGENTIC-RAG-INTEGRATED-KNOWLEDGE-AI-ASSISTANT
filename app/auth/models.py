@@ -25,6 +25,10 @@ class UserInDB(BaseModel):
     )  # ["email"], ["google"], ["email","google"]
     role: UserRole = UserRole.USER
     is_active: bool = True
+    # Set only by app/bin/seed_demo_account.py, never by /auth/register — a
+    # fixed, publicly-shared login (recruiters/hiring managers) that skips OTP
+    # on every login. See /auth/login in router.py for the bypass.
+    is_demo: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_login: datetime | None = None
 
@@ -48,6 +52,7 @@ class UserPublic(BaseModel):
     email: str
     role: UserRole
     is_active: bool
+    is_demo: bool = False
     created_at: datetime
 
 

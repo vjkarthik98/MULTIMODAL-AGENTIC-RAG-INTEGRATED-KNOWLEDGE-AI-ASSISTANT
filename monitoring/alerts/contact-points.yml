@@ -1,10 +1,16 @@
 # Phase 31 — Grafana contact point provisioning.
 # Webhook URL comes from the environment (Grafana's provisioning YAML
 # supports ${VAR} expansion natively) — NEVER hardcoded here. Set
-# SLACK_WEBHOOK_URL in /opt/magik/.env (or any Slack-compatible incoming
-# webhook — ntfy.sh, Discord's Slack-compatible endpoint, etc. all work)
+# NTFY_WEBHOOK_URL in /opt/magik/.env to a topic URL (e.g.
+# https://ntfy.sh/<your-topic>) or any other webhook-compatible endpoint,
 # and pass it through to the grafana container (docker-compose.monitoring.yml
 # already forwards /opt/magik/.env via env_file).
+#
+# Generic "webhook" type (not "slack") deliberately — the slack contact type
+# hard-requires a `recipient` when its `url` resolves empty and fails
+# provisioning fatally (crash-loops the whole Grafana container), even
+# though the receiver is otherwise unused. "webhook" has no such requirement
+# beyond a non-empty url, so keep NTFY_WEBHOOK_URL set at all times.
 
 apiVersion: 1
 
@@ -13,9 +19,8 @@ contactPoints:
     name: magik-webhook
     receivers:
       - uid: magik-webhook-receiver
-        type: slack
+        type: webhook
         settings:
-          url: "${SLACK_WEBHOOK_URL}"
-          title: "{{ .CommonAnnotations.summary }}"
-          text: "{{ .CommonAnnotations.description }}"
+          url: "${NTFY_WEBHOOK_URL}"
+          httpMethod: POST
         disableResolveMessage: false

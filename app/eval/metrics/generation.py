@@ -483,9 +483,8 @@ def compute_generation_metrics(
         try:
             from app.eval.judges import prometheus_judge
 
-            if prometheus_judge.is_available():
+            if prometheus_judge.ensure_available():
                 return compute_generation_metrics_prometheus(eval_rows)
-            print("[eval] Prometheus GGUF not found — falling back to lexical judge")
         except Exception as exc:
             print(f"[eval] Prometheus judge failed ({exc}) — falling back to lexical judge")
         return compute_generation_metrics_lexical(

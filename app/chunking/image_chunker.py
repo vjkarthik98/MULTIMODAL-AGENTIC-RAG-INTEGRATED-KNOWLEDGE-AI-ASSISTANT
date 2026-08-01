@@ -966,7 +966,9 @@ def _get_easyocr() -> Any:
     if _easyocr_reader is None:
         import easyocr
 
-        _easyocr_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+        _easyocr_reader = easyocr.Reader(
+            ["en"], gpu=False, verbose=False, model_storage_directory=settings.EASYOCR_MODEL_DIR
+        )
     return _easyocr_reader
 
 

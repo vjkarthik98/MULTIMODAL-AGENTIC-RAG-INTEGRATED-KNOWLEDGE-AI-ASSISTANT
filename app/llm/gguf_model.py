@@ -334,9 +334,19 @@ class GGUFModel:
     def _sanitize_prompt(self, prompt: str) -> str:
         from app.guardrails.input_guard import sanitize as _guard_sanitize
 
+        # No `if cleaned != prompt: log a warning` here on purpose — that
+        # comparison can't tell a genuine injection strip apart from
+        # _normalize_encoding()'s routine, always-on NFKC pass (ligatures
+        # like "fi"->"fi", footnote superscripts, smart quotes — all
+        # ordinary in typeset financial PDFs, zero malicious content
+        # involved). Confirmed live: this fired on nearly every LLM call in
+        # a full Tier-2 run, drowning out genuine detections in noise.
+        # sanitize() itself already logs the precise signal —
+        # input_guard_sanitize_stripped, with pattern/severity detail, only
+        # inside its real `if match:` branch, already correctly tagged
+        # surface="gguf_model" — so there is nothing this duplicate,
+        # imprecise check adds.
         cleaned = _guard_sanitize(prompt, surface="gguf_model")
-        if cleaned != prompt:
-            logger.warning(event="gguf_prompt_injection_stripped")
         # Append finance safety guard (plan Phase 6.6)
         cleaned = cleaned + self._FINANCE_SAFETY_SUFFIX
         return cleaned
