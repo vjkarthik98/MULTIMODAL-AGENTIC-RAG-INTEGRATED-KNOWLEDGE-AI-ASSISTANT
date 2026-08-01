@@ -22,7 +22,9 @@ import argparse
 import sys
 
 DEFAULT_EMAIL = "testuser@ragdev.local"
-DEFAULT_PASSWORD = "Test@123"
+DEFAULT_PASSWORD = (
+    "Test@123"  # pragma: allowlist secret — intentionally public demo credential, not a real secret
+)
 
 # Bundled finance benchmark files already used for accuracy testing —
 # reasonable defaults to upload for a finance-RAG demo walkthrough.
@@ -46,9 +48,15 @@ SUGGESTED_QUERIES = [
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--email", default=DEFAULT_EMAIL, help=f"Demo account email (default: {DEFAULT_EMAIL})")
-    parser.add_argument("--password", default=DEFAULT_PASSWORD, help="Demo account password (default: Test@123)")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--email", default=DEFAULT_EMAIL, help=f"Demo account email (default: {DEFAULT_EMAIL})"
+    )
+    parser.add_argument(
+        "--password", default=DEFAULT_PASSWORD, help="Demo account password (default: Test@123)"
+    )
     args = parser.parse_args()
 
     from app.auth.service import AuthService

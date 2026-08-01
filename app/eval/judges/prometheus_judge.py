@@ -368,5 +368,7 @@ def ensure_available() -> bool:
         print("[eval] Prometheus judge GGUF downloaded ✓")
         return True
     except Exception as exc:
-        print(f"[eval] Prometheus judge auto-download failed ({exc}) — falling back to lexical judge")
+        print(
+            f"[eval] Prometheus judge auto-download failed ({exc}) — falling back to lexical judge"
+        )
         return False
