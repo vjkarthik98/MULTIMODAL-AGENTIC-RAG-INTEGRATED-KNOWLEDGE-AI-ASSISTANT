@@ -2669,20 +2669,33 @@ The first real run found:
   symlink was dangling, and PATH lookup silently fell through to the base
   image's own bare system Python with zero packages installed. Fixed by
   switching `dev-runtime`'s base to `ubuntu:22.04` and installing
-  `python3.12` via the same deadsnakes path `runtime` already uses —
-  mirrors a proven-working pattern instead of assuming portability across
-  different base distros. **Not yet confirmed by an actual rebuild** — no
-  Docker available in the environment this was diagnosed in; reasoning is
-  from static analysis of the Dockerfile plus the fact that it explains the
-  failure's perfect, deterministic reproduction across 3 independent fresh
-  builds.
-- **`lighthouserc.json`'s `url` was missing the `:PORT` placeholder** LHCI's
-  `staticDistDir` static server requires — Chrome was navigating to
-  `http://localhost/index.html` (implicit port 80, nothing listening there)
-  instead of the server's actual random port, so every single Lighthouse
-  audit failed identically with `NO_FCP` (connection failure, not a real
-  performance/rendering issue). Fixed by using the literal `PORT`
-  placeholder LHCI substitutes at runtime.
+  `python3.12` via the same deadsnakes path `runtime` already uses.
+  **This fix was itself incomplete on the first attempt** — it was diagnosed
+  and applied with no Docker available locally to verify, and the real CI
+  run it went through exposed a second, genuinely new failure it introduced:
+  `add-apt-repository -y ppa:deadsnakes/ppa` failed importing the PPA's
+  signing key (`gpg: error running '/usr/bin/gpg-agent': probably not
+  installed`) — the CUDA-based images `runtime`/`base-deps` use ship
+  `gnupg` already; plain `ubuntu:22.04` does not. Fixed by adding `gnupg` to
+  `dev-runtime`'s `apt-get install` line, confirmed against the actual CI
+  failure log (`gh run view --log-failed`), not static analysis this time.
+- **`lighthouserc.json`'s `url` config was wrong, twice.** First attempt
+  (this same entry, originally): diagnosed `http://localhost/index.html`
+  (no port) as the bug, on the theory that LHCI's `staticDistDir` server
+  binds a random port and Chrome was hitting the implicit port 80 instead —
+  changed it to `http://localhost:PORT/index.html`. That diagnosis was
+  wrong: LHCI's actual documented behavior (confirmed against
+  GoogleChrome/lighthouse-ci's own config docs) is that with
+  `staticDistDir`, `url` entries are written *without* any port at all —
+  the tool substitutes its real server port into whatever URL you give it
+  automatically. The literal string `"PORT"` isn't a supported placeholder
+  in this version; it made things strictly worse, changing an unexplained
+  `NO_FCP` into a guaranteed `TypeError: Invalid URL` crash (confirmed via
+  the real CI failure log). Reverted to the original, correct
+  `http://localhost/index.html` — the real root cause of the original
+  `NO_FCP` failure was never actually identified; reverting to documented-
+  correct config is the fix, but this hasn't been re-confirmed by a passing
+  CI run yet.
 - **`ruff check` failures in `deepeval_suite.py`/`ragas_report.py`** — 1
   unused import, 2 unnecessarily-quoted forward-ref type annotations, 3
   extraneous `f`-string prefixes on strings with no placeholders. All
@@ -2769,6 +2782,116 @@ both Ragas and DeepEval kept alive on top of it.**
   active judge. `app/eval/thresholds.yaml`'s v3 baseline comment left
   untouched — accurate historical record of what judge that already-retired
   baseline used, not a claim about current behavior.
+
+### Fixed — provisioning re-downloaded/re-verified models on every single boot
+
+Live production logs (`docker logs magik-current`) showed 10 models
+(`embedder`, `reranker`, `ner`, `finbert`, `keybert`, `siglip`, `blip`,
+`qwen2vl`, `trocr`, `whisper`) reported `CHECKSUM MISMATCH` on every boot,
+and `detoxify`/`easyocr` reported a fresh "OK in Ns" instead of "Already
+cached" every boot too — despite all of them being genuinely present and
+loading fine at runtime (confirmed: the same boot that logged all 10
+mismatches also logged `embedder`/`reranker` loading successfully into
+CUDA). Two separate bugs, both in `app/bin/models/download_all_models.py`:
+
+- **Checksum verification hashed "whatever's in the directory now"**,
+  not what was actually downloaded. `_model_checksum()`/`_sha256_dir()`
+  recursively hash every file under a model's HF-hub snapshot directory;
+  if the model-loading code (transformers/sentence-transformers) writes
+  any auxiliary file into that same directory the first time the app
+  actually uses the model — tokenizer merges, generated indexes,
+  framework-specific caches — every later boot's hash permanently
+  diverges from the one recorded right after download, even though
+  nothing originally downloaded ever changed. Fixed by recording the
+  exact relative-path file list at download time
+  (`_write_manifest(..., files=...)`) and verifying only those specific
+  files later (`_sha256_dir(..., only_files=...)`) — files added
+  afterward are simply never part of the comparison. Legacy manifest
+  entries with no recorded file list fall back to the old whole-directory
+  behavior once, then self-heal on the next successful write.
+- **`_is_hub_cached()` didn't recognize `detoxify`/`easyocr`'s storage
+  layout** — both use their own directory structure (`TORCH_HOME`/torch.hub
+  for detoxify, a flat `model_storage_directory` for easyocr), not the
+  standard `models--X/snapshots/` huggingface_hub layout the check
+  assumed. Checking the wrong layout always returned "not cached", so the
+  "already cached, skip" fast path was never taken and every boot paid
+  the full cost of re-instantiating `Detoxify()`/`easyocr.Reader()` (the
+  network fetch itself already no-ops when cached — model construction/
+  load does not). Added type-aware cache checks for both.
+- Production's `docker run` (`cd.yml`) already correctly points
+  `TORCH_HOME` at `/app/.hf_cache/torch` (inside the persisted volume) —
+  the files were never actually being lost on instance stop/start, only
+  needlessly re-verified/re-instantiated. Added the same `TORCH_HOME`
+  override to `docker-compose.yml` for local dev-runtime parity, which
+  was missing it.
+
+### Fixed — image/video captioning silently failing on the deployed image; noisy-but-benign log spam
+
+Live gold-corpus re-ingestion (`app.eval.datasets.build_gold_set --ingest`)
+surfaced `blip_caption_failed` / `qwen2vl_caption_failed` on every image and
+video file, plus several third-party warnings that turned out to be
+confirmed-benign but were worth silencing at the source rather than leaving
+operators to keep re-diagnosing them:
+
+- **`Dockerfile`'s `runtime` and `dev-runtime` stages installed `python3.12`
+  but not `python3.12-dev`.** Triton JIT-compiles a small C extension
+  (`cuda_utils.c`) at *request* time for Qwen2-VL/BLIP INT8 inference — the
+  `gcc` fix already in this file (see the "first real CI run" entry above)
+  got compilation started, but it immediately failed with `fatal error:
+  Python.h: No such file or directory`, since plain `python3.12` ships no C
+  headers. Confirmed live on the production box, in that order: installing
+  `gcc` alone changed the failure mode from "no compiler found" straight
+  into this one. Added `python3.12-dev` alongside `gcc` in both stages.
+- **`app/core/model_loader.py`'s diarizer loader now suppresses known-benign
+  noise from pyannote's own dependency chain**, traced live and confirmed
+  non-fatal one by one rather than blanket-silenced: pyannote's own
+  deliberate TF32-disabled-for-reproducibility notice; a PyTorch `std()`
+  warning from pyannote's pooling layer on very short audio segments
+  (degrades gracefully, not a crash); speechbrain's INFO-level log of its
+  own auto-applied environment workarounds; and onnxruntime's device-
+  enumeration probe (used by the WeSpeaker embedding model) failing to find
+  a DRM sysfs path that doesn't exist inside a Docker container's device
+  namespace — CUDA already works via the standard NVIDIA driver path
+  regardless. Same suppression pattern already used in
+  `app/guardrails/pii.py` for Presidio's own noisy warnings: filters set
+  right before the specific noisy library loads, not a global blanket
+  suppression at app startup.
+
+### Added — idle eviction for ingestion-only models
+
+`app/core/model_loader.py` never freed a model once loaded — every getter's
+singleton-caching pattern (`if self._X: return self._X`) had no counterpart
+for releasing it. A long-running process (a full Tier-2 eval run touches
+every modality in sequence) only ever accumulated VRAM until something
+OOM'd — confirmed live the same day as the `qwen_judge.py` VRAM fix above
+(nvidia-smi: 44.3GB/46.1GB used, ~1.8GB free, still climbing, with the judge
+not even loaded yet).
+
+- `ModelLoader._EVICTABLE_MODELS` scopes eviction to models confirmed, by
+  tracing every caller, to be used *only* during ingestion/chunking, never
+  during query serving: `whisper`, `blip`, `qwen2_vl`, `qwen2_vl_video`,
+  `trocr`, `diarizer`, `ner`, `finbert`. Deliberately excludes `llm`/
+  `text_embedder`/`reranker` (every query needs them) and `siglip`/
+  `image_embedder`/`siglip_text_embedder`/`multimodal` — SigLIP's text-
+  embedding path is used for cross-modal query-time search
+  (`get_siglip_text_embedder`), not just ingestion, so evicting it would
+  silently reload a multi-second model on a live user's query instead of
+  only before the next ingest.
+- `unload_idle_models(idle_seconds=300)` frees any evictable model unused
+  for 5+ minutes, then runs the existing `_oom_guard()` cache-clear to
+  actually hand the freed VRAM back to the driver. Guarded by the same
+  `self._lock` (an `RLock`) every getter already uses, so it never races an
+  in-flight `get_X()` call.
+- `_oom_guard()` (previously a `@staticmethod`, now an instance method —
+  every call site already used `self._oom_guard()`, so this is a drop-in
+  change) takes an optional `loading` parameter: when a getter is about to
+  load a new model, it marks that model as just-used and runs the idle
+  sweep first, so a heavy new load gets first claim on VRAM another model
+  has been sitting on unused — no explicit wiring needed in the eval
+  harness or anywhere else, it happens automatically on the next load.
+- Every evictable getter now calls `self._touch(name)` unconditionally
+  (cache hit or not) so `last_used` accurately reflects real usage, not
+  just fresh loads.
 
 ### Documentation
 

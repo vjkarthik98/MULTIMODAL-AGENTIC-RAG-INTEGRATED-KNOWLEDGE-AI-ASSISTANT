@@ -81,6 +81,51 @@ _llm = None
 _download_attempted = False
 
 
+def _resolve_gpu_layers() -> int:
+    """-1 (the default) triggers an adaptive VRAM check at load time — the
+    same free-VRAM-aware fallback app/core/device_manager.py's
+    llm_gpu_layers() already applies to the main LLM, replicated here since
+    qwen_judge.py has no device_manager integration of its own. Any other
+    explicit QWEN_JUDGE_GPU_LAYERS value is a deliberate override and is
+    used as-is, no check performed.
+
+    Why this matters: app/core/model_loader.py's _oom_guard() only frees
+    cached-but-unused PyTorch memory — it cannot reclaim space from models
+    that are still resident and referenced, and every model in this
+    codebase's singleton loader pattern stays loaded for the life of the
+    process (no eviction). A full Tier-2 run touches every multimodal
+    model (embedder, reranker, main LLM, SigLIP, BLIP, Qwen2-VL, Whisper,
+    diarizer+WeSpeaker+segmentation) before the judge ever loads, which can
+    leave VRAM already >90% full. Blindly requesting all layers on GPU in
+    that state OOMs instead of degrading — confirmed live 2026-08-01
+    (nvidia-smi: 42.6GB/46.1GB used, ~3.4GB free, well under this model's
+    ~4.7GB GGUF size, before this fix existed).
+    """
+    if _N_GPU_LAYERS != -1:
+        return _N_GPU_LAYERS
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return 0
+        free_bytes = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_reserved(
+            0
+        )
+        free_gb = free_bytes / (1024**3)
+    except Exception:
+        return -1  # can't check — try full GPU offload and let llama_cpp fail loudly if wrong
+
+    # ~4.7GB GGUF plus headroom for the n_ctx=8192 KV cache and inference buffers.
+    _required_gb = 6.0
+    if free_gb < _required_gb:
+        print(
+            f"[eval] Qwen judge: only {free_gb:.1f}GB VRAM free (need ~{_required_gb:.0f}GB) — "
+            "loading on CPU instead of GPU to avoid an OOM crash. Slower, but functional."
+        )
+        return 0
+    return -1
+
+
 def _load_qwen_judge():
     """Load Qwen2.5-7B-Instruct Q4_K_M once and cache it."""
     global _llm
@@ -97,11 +142,15 @@ def _load_qwen_judge():
         try:
             from llama_cpp import Llama
 
-            print(f"[eval] Loading Qwen2.5-7B-Instruct judge (Q4_K_M) from {_MODEL_PATH} ...")
+            n_gpu_layers = _resolve_gpu_layers()
+            print(
+                f"[eval] Loading Qwen2.5-7B-Instruct judge (Q4_K_M) from {_MODEL_PATH} "
+                f"(n_gpu_layers={n_gpu_layers}) ..."
+            )
             _llm = Llama(
                 model_path=_MODEL_PATH,
                 n_ctx=_N_CTX,
-                n_gpu_layers=_N_GPU_LAYERS,
+                n_gpu_layers=n_gpu_layers,
                 n_threads=4,
                 verbose=False,
             )
