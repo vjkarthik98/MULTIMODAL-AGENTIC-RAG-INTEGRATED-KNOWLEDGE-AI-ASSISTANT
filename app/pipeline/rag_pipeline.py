@@ -11,12 +11,21 @@ from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 from app.core.config import settings
+from app.core.metrics import llm_call_latency as _shared_llm_latency
+from app.core.metrics import retrieval_latency as _shared_retrieval_latency
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 # PROMETHEUS METRICS — SECTION 6
+# llm_call_latency_seconds and retrieval_latency_seconds are shared
+# singletons from app.core.metrics, not defined here — this file used to
+# register its own copies of both, which raced against identical copies in
+# gguf_model.py/query_pipeline.py/reasoning_engine.py. See app/core/
+# metrics.py's comment for the live incident (reasoning_engine.py's
+# unguarded copy of the same name crashed 100% of a Tier-2 run) that made
+# this get fixed everywhere, not just where it was actually crashing.
 
 
 def _get_metrics():
@@ -28,26 +37,14 @@ def _get_metrics():
             "RAG pipeline total duration",
             ["stage"],
         )
-        llm_latency = Histogram(
-            "llm_call_latency_seconds",
-            "LLM call latency by model",
-            ["model"],
-        )
         rag_errors = Counter(
             "rag_pipeline_errors_total",
             "RAG pipeline errors by stage",
             ["stage"],
         )
-        retrieval_latency = Histogram(
-            "retrieval_latency_seconds",
-            "Retrieval latency",
-            ["retriever_type"],
-        )
         return {
             "rag_duration": rag_duration,
-            "llm_latency": llm_latency,
             "rag_errors": rag_errors,
-            "retrieval_latency": retrieval_latency,
         }
     except Exception:
         return {}
@@ -72,8 +69,7 @@ def _record_stage(stage: str, latency: float) -> None:
 
 def _record_llm(model: str, latency: float) -> None:
     try:
-        if "llm_latency" in _METRICS:
-            _METRICS["llm_latency"].labels(model=model).observe(latency)
+        _shared_llm_latency.labels(model=model, mode="pipeline").observe(latency)
     except Exception:
         pass
 
@@ -88,8 +84,7 @@ def _record_error(stage: str) -> None:
 
 def _record_retrieval(retriever_type: str, latency: float) -> None:
     try:
-        if "retrieval_latency" in _METRICS:
-            _METRICS["retrieval_latency"].labels(retriever_type=retriever_type).observe(latency)
+        _shared_retrieval_latency.labels(retriever_type=retriever_type).observe(latency)
     except Exception:
         pass
 

@@ -83,3 +83,111 @@ eval_online_latency_p50_ms = (_gauges or {}).get("eval_online_latency_p50_ms", _
 eval_online_latency_p95_ms = (_gauges or {}).get("eval_online_latency_p95_ms", _Noop())
 eval_online_sample_count = (_gauges or {}).get("eval_online_sample_count", _Noop())
 eval_online_route_share = (_gauges or {}).get("eval_online_route_share", _Noop())
+
+
+# Cross-module shared Histograms — moved here 2026-08-01 after a live Tier-2
+# run showed these same three metric names independently re-defined in
+# gguf_model.py / rag_pipeline.py / query_pipeline.py / reasoning_engine.py.
+# Three of those four wrapped their own copy safely (function + try/except +
+# module-level cache), so losing the registration race there just meant
+# silently-empty metrics for that module. reasoning_engine.py's copy was
+# unconditional, unguarded top-level code — and since it's only ever
+# imported lazily, inside a function (query_pipeline.py's per-query path,
+# not at module top-level), a losing collision there doesn't just no-op:
+# Python evicts the failed module from sys.modules, so the NEXT query
+# retries the same import, re-executes the same module body, and hits the
+# same ValueError again — permanently, for the rest of the process, on
+# every single query that needs ReasoningEngine. Confirmed live: one race
+# lost at the first generation query took down 100% of the "full" Tier-2
+# suite's generation phase, instantly and irrecoverably, for the rest of
+# that run. Defining each metric exactly once, here, removes the race
+# entirely instead of just making the loser's failure mode softer.
+#
+# llm_call_latency_seconds keeps gguf_model.py's richer ["model", "mode"]
+# label shape (not the 1-label version the other three callers used) — a
+# shared Histogram must have ONE label schema, and observing with a
+# different label set than what a metric was registered with raises at
+# observe() time, not just at registration. Callers that don't have a
+# meaningful "mode" pass mode="pipeline" (see call sites) rather than being
+# silently dropped.
+def _make_shared_histograms():
+    if not settings.PROMETHEUS_ENABLED:
+        return None
+    try:
+        from prometheus_client import Histogram
+
+        return {
+            "llm_call_latency": Histogram(
+                "llm_call_latency_seconds",
+                "LLM call latency by model and mode",
+                ["model", "mode"],
+            ),
+            "retrieval_latency": Histogram(
+                "retrieval_latency_seconds",
+                "Retrieval latency by retriever type",
+                ["retriever_type"],
+            ),
+            "reasoning_engine_duration": Histogram(
+                "reasoning_engine_duration_seconds",
+                "Reasoning engine duration",
+                ["status"],
+            ),
+            # Found in the same audit (2026-08-01, live "fomc_dec2024.txt:
+            # INGESTION_FAILED" error surfaced in the UI) — router.py had its
+            # own unguarded top-level copy of these three, colliding with
+            # ingestion_pipeline.py's safely-guarded one, and router.py is
+            # itself only ever imported lazily (ingestion_pipeline.py:916,
+            # inside a function) — the exact same crash-and-never-recover
+            # shape as reasoning_engine_duration_seconds above, just on the
+            # file-upload path instead of the generation path.
+            "file_ingestion_duration": Histogram(
+                "file_ingestion_duration_seconds",
+                "Ingestion duration by modality",
+                ["modality"],
+            ),
+            "chunk_count_per_file": Histogram(
+                "chunk_count_per_file",
+                "Chunks produced per file",
+                ["modality"],
+            ),
+            # embedding_latency_seconds: model_loader.py's own copy was
+            # dead code (defined, never once observed) — deleted there
+            # rather than unified, so this singleton has exactly one real
+            # caller (ingestion_pipeline.py).
+            "embedding_latency": Histogram(
+                "embedding_latency_seconds",
+                "Embedding latency by model",
+                ["model"],
+            ),
+        }
+    except Exception:
+        return None
+
+
+def _make_shared_counters():
+    if not settings.PROMETHEUS_ENABLED:
+        return None
+    try:
+        from prometheus_client import Counter
+
+        return {
+            "file_ingestion_errors": Counter(
+                "file_ingestion_errors_total",
+                "Ingestion errors by modality and error type",
+                ["modality", "error_type"],
+            ),
+        }
+    except Exception:
+        return None
+
+
+_shared_histograms = _make_shared_histograms()
+_shared_counters = _make_shared_counters()
+
+llm_call_latency = (_shared_histograms or {}).get("llm_call_latency", _Noop())
+retrieval_latency = (_shared_histograms or {}).get("retrieval_latency", _Noop())
+reasoning_engine_duration = (_shared_histograms or {}).get("reasoning_engine_duration", _Noop())
+file_ingestion_duration = (_shared_histograms or {}).get("file_ingestion_duration", _Noop())
+chunk_count_per_file = (_shared_histograms or {}).get("chunk_count_per_file", _Noop())
+embedding_latency = (_shared_histograms or {}).get("embedding_latency", _Noop())
+file_ingestion_errors = (_shared_counters or {}).get("file_ingestion_errors", _Noop())

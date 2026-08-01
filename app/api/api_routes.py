@@ -1277,6 +1277,7 @@ async def stream_query(
         )
 
         if _is_web_request:
+            _web_failure_reason: str | None = None
             try:
                 from app.pipeline.query_pipeline import _get_tool_registry
 
@@ -1324,13 +1325,56 @@ async def stream_query(
                                 "X-Accel-Buffering": "no",
                             },
                         )
+                    # Tool ran without raising but returned nothing usable — this
+                    # previously fell through to cache/RAG completely silently
+                    # (no log, no user-visible signal), which is how a user who
+                    # explicitly toggled web search could end up looking at a
+                    # KB-sourced answer with no indication their web search
+                    # never actually happened.
+                    logger.warning(event="stream_web_search_empty", session_id=session_id)
+                    _web_failure_reason = "returned no results"
+                else:
+                    logger.warning(event="stream_web_search_tool_unavailable", session_id=session_id)
+                    _web_failure_reason = "is not configured on this server"
             except Exception as _web_err:
                 logger.warning(
                     event="stream_web_search_failed",
                     error=str(_web_err),
                     session_id=session_id,
                 )
-                # Fall through to cache check / normal RAG if web search fails
+                _web_failure_reason = "hit a temporary error"
+
+            # request_body.force_web means the user explicitly toggled the web-
+            # search button — they've deliberately excluded the knowledge base,
+            # so silently answering from it instead on failure would be actively
+            # misleading (they'd have no way to know the answer isn't from the
+            # web they asked for). Tell them plainly instead. Queries that only
+            # matched a phrase/real-time heuristic (force_web=False) keep the
+            # original graceful fall-through to cache/RAG below, since the user
+            # never explicitly opted out of the KB for those.
+            if request_body.force_web and _web_failure_reason:
+                _web_fail_msg = (
+                    f"Web search {_web_failure_reason} — please try again, or turn off "
+                    "web search to ask about your uploaded files instead."
+                )
+
+                async def web_failed_stream():
+                    for piece in _stream_chunks(_web_fail_msg):
+                        yield _sse(piece)
+                        await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(
+                    web_failed_stream(),
+                    media_type="text/event-stream",
+                    headers={
+                        "X-Request-ID": request_id,
+                        "Cache-Control": "no-cache",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+                # Fall through to cache check / normal RAG only for the
+                # heuristic-matched (non-explicit) case.
 
         # REDIS CACHE CHECK — skip for web requests and explicit no_cache (regenerate).
         # On a cache hit we stream the cached answer immediately.
