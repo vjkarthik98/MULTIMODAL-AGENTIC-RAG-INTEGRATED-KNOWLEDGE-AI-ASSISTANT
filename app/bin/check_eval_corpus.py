@@ -51,9 +51,15 @@ def _count_sources(client: QdrantClient, collection: str) -> Counter:
 
 def main() -> None:
     client = (
-        QdrantClient(url=settings.QDRANT_URL, api_key=settings.QDRANT_API_KEY, timeout=settings.QDRANT_TIMEOUT)
+        QdrantClient(
+            url=settings.QDRANT_URL,
+            api_key=settings.QDRANT_API_KEY,
+            timeout=settings.QDRANT_TIMEOUT,
+        )
         if settings.QDRANT_URL
-        else QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT, timeout=settings.QDRANT_TIMEOUT)
+        else QdrantClient(
+            host=settings.QDRANT_HOST, port=settings.QDRANT_PORT, timeout=settings.QDRANT_TIMEOUT
+        )
     )
 
     print(f"EVAL_USER_ID = {EVAL_USER_ID}\n")
