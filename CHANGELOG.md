@@ -3003,3 +3003,64 @@ longer block a check that was never supposed to block anything yet.
   (2026-08-02). Worked around manually by disabling the
   `magik-idle-stop-schedule` EventBridge schedule for the duration; not yet
   fixed at the code level.
+
+### Fixed — Lighthouse `NO_FCP` flakiness in CI (headless Chrome sandbox/shm)
+
+After the URL fix and assertion-preset fix above both landed and were
+verified against real passing/failing CI runs, the Lighthouse job still
+failed intermittently with `NO_FCP` on a *different* run — same symptom
+(page never paints within Lighthouse's ~30s wait window) but a different
+ephemeral port each time, ruling out the already-fixed URL bug as the
+cause. Root-caused via the raw job log
+(`gh api .../actions/jobs/{id}/logs`, not the summary UI): the timeline
+showed the static server starting, Chrome's launcher connecting
+successfully (~7s), navigation beginning, then `NO_FCP` firing ~31s later
+with `"No browser errors logged to the console"` — no JS exception, no
+`Target closed`/`Protocol error` crash signal, just silence. That
+combination (clean console, full timeout exhausted, no crash) is the
+signature of headless Chrome failing to initialize its renderer inside a
+GitHub Actions runner's default sandbox/`/dev/shm` constraints, not a
+config or app bug — this class of flake is why `lighthouserc.json`'s own
+ecosystem (and Chrome-in-Docker guidance generally) documents
+`--no-sandbox --disable-dev-shm-usage` as the standard mitigation. Added
+`settings.chromeFlags: "--no-sandbox --disable-dev-shm-usage --disable-gpu"`
+to `lighthouserc.json`'s `collect` block. Not yet verified against a real
+passing CI run as of this entry — next push must be watched end to end
+before this is called closed, per explicit instruction not to claim a fix
+without evidence.
+
+### Investigated, not fixed — k6 smoke / ZAP baseline / Schemathesis all fail on model download, not app bugs
+
+All three jobs run `docker compose up -d api qdrant redis mongo` then poll
+`/health` for up to 150s. Root-caused via raw job logs
+(`gh api .../actions/jobs/{id}/logs`): `start_server.py`'s `main()` calls
+`ensure_models()` synchronously and only launches uvicorn after it returns
+— so on a fresh `ubuntu-latest` runner with an empty `.hf_cache`, the port
+never opens until the full ~25.2GB / 17-model set finishes downloading,
+which the 150s health-check loop (and the job's own `timeout-minutes`)
+can't survive. Caught one run mid-download of the 14B main LLM GGUF when
+its job got killed by the timeout.
+
+Confirmed this is a real, structural gap, not a quick patch: GitHub's
+per-repo Actions cache can't hold 25GB (checked against the docs before
+proposing it), so `actions/cache` isn't viable here. The one existing
+pattern that avoids this — `tier1-retrieval` in `eval-gate.yml` — doesn't
+spin up a local API stack at all; it runs on `ubuntu-latest` and talks
+directly to the real Qdrant Cloud instance via secrets, downloading only
+the embedding model it needs. The heavier jobs (`tier2-full-suite`) are
+designed to run on a self-hosted GPU runner with `.hf_cache` already
+resident — but per `eval-gate.yml`'s own comment, **no self-hosted runner
+has ever actually been registered**, which is why `tier2-full-suite` shows
+`skipping` rather than `pass`/`fail`.
+
+Registering one for k6/ZAP/Schemathesis to reuse would fix this properly,
+but it's a separate, real infrastructure decision (the runner would need
+the box awake to pick up jobs, in direct tension with the idle-stop
+scale-to-zero design covered elsewhere in this file) — not something to
+fold into this merge. Per explicit decision: left red, documented here.
+`quality.yml`'s own header already frames these as informational/not
+required for exactly this "day-one-red-gate" reason, and none of the 4
+jobs in that workflow carry the `Required` badge on the PR — only
+`tier1-retrieval` does. Tracked as a future task: register a self-hosted
+runner (GPU not actually needed for these 3 — they only need `.hf_cache`
+already warm) and repoint `quality.yml`'s `runs-on` at it.
