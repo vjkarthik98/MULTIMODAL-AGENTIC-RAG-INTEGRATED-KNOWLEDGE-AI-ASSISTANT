@@ -349,10 +349,6 @@ def _audit_log(
         pass
 
 
-def _rate_limit_check(request: Request) -> None:
-    pass
-
-
 # MALWARE SCAN — CLAMAV
 
 
@@ -536,8 +532,6 @@ async def ingest_document(
     request_id = _request_id()
     file_path: Path | None = None
     user_id = current_user.user_id
-
-    _rate_limit_check(request)
 
     try:
         if not file.filename:
@@ -735,8 +729,11 @@ async def ingest_document(
         background_tasks.add_task(_cleanup_file, file_path)
 
 
-# DIRECT LLM GENERATE — eval judge endpoint (no RAG, no guardrails, raw LLM output)
-# Only accessible internally; used by GGUFJudge to score Ragas metrics.
+# DIRECT LLM GENERATE — bypasses RAG pipeline for raw LLM output (no RAG, no
+# guardrails). Not currently called by the eval harness — app/eval/judges/
+# qwen_judge.py loads its own dedicated GGUF in-process instead, so eval
+# judging never contends with this route. Kept for direct debugging/manual
+# access to the resident model.
 
 
 class GenerateRequest(BaseModel):
@@ -750,7 +747,7 @@ async def llm_generate(
     request_body: GenerateRequest,
     current_user: UserPublic = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Direct LLM generation — bypasses RAG pipeline. Used by eval judge."""
+    """Direct LLM generation — bypasses RAG pipeline."""
     try:
         from app.core.model_loader import model_loader
 
@@ -840,8 +837,6 @@ async def query_rag(
     request_id = _request_id()
     session_id = request_body.session_id
     user_id = current_user.user_id
-
-    _rate_limit_check(request)
 
     try:
         query = _clean(request_body.query)
@@ -1146,8 +1141,6 @@ async def stream_query(
     request_id = _request_id()
     session_id = request_body.session_id
 
-    _rate_limit_check(request)
-
     try:
         query = _clean(request_body.query)
 
@@ -1277,6 +1270,7 @@ async def stream_query(
         )
 
         if _is_web_request:
+            _web_failure_reason: str | None = None
             try:
                 from app.pipeline.query_pipeline import _get_tool_registry
 
@@ -1324,13 +1318,58 @@ async def stream_query(
                                 "X-Accel-Buffering": "no",
                             },
                         )
+                    # Tool ran without raising but returned nothing usable — this
+                    # previously fell through to cache/RAG completely silently
+                    # (no log, no user-visible signal), which is how a user who
+                    # explicitly toggled web search could end up looking at a
+                    # KB-sourced answer with no indication their web search
+                    # never actually happened.
+                    logger.warning(event="stream_web_search_empty", session_id=session_id)
+                    _web_failure_reason = "returned no results"
+                else:
+                    logger.warning(
+                        event="stream_web_search_tool_unavailable", session_id=session_id
+                    )
+                    _web_failure_reason = "is not configured on this server"
             except Exception as _web_err:
                 logger.warning(
                     event="stream_web_search_failed",
                     error=str(_web_err),
                     session_id=session_id,
                 )
-                # Fall through to cache check / normal RAG if web search fails
+                _web_failure_reason = "hit a temporary error"
+
+            # request_body.force_web means the user explicitly toggled the web-
+            # search button — they've deliberately excluded the knowledge base,
+            # so silently answering from it instead on failure would be actively
+            # misleading (they'd have no way to know the answer isn't from the
+            # web they asked for). Tell them plainly instead. Queries that only
+            # matched a phrase/real-time heuristic (force_web=False) keep the
+            # original graceful fall-through to cache/RAG below, since the user
+            # never explicitly opted out of the KB for those.
+            if request_body.force_web and _web_failure_reason:
+                _web_fail_msg = (
+                    f"Web search {_web_failure_reason} — please try again, or turn off "
+                    "web search to ask about your uploaded files instead."
+                )
+
+                async def web_failed_stream():
+                    for piece in _stream_chunks(_web_fail_msg):
+                        yield _sse(piece)
+                        await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(
+                    web_failed_stream(),
+                    media_type="text/event-stream",
+                    headers={
+                        "X-Request-ID": request_id,
+                        "Cache-Control": "no-cache",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+                # Fall through to cache check / normal RAG only for the
+                # heuristic-matched (non-explicit) case.
 
         # REDIS CACHE CHECK — skip for web requests and explicit no_cache (regenerate).
         # On a cache hit we stream the cached answer immediately.
@@ -1595,8 +1634,6 @@ async def upload_file(
     request_id = _request_id()
     file_path: Path | None = None
     user_id = current_user.user_id
-
-    _rate_limit_check(request)
 
     try:
         if not file.filename:

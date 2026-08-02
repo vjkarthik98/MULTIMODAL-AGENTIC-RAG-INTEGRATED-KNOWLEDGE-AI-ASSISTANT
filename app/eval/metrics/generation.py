@@ -226,21 +226,23 @@ def _deterministic_context_recall(reference: str, contexts: list[str]) -> float 
     return round(hits / len(facts), 4)
 
 
-def compute_generation_metrics_prometheus(
+def compute_generation_metrics_rubric(
     eval_rows: list[dict],
 ) -> dict[str, MetricResult]:
-    """Compute generation metrics with the Prometheus-2-7B purpose-built judge.
+    """Compute generation metrics via MAGIK's single judge (app/eval/judges/qwen_judge.py),
+    using its Direct-Assessment rubric interface.
 
-    Prometheus scores each row 1-5 against a per-metric rubric (native Direct
-    Assessment contract); scores are normalized to 0..1. Rows the judge cannot
-    parse are skipped, not counted as 0, so a parser miss never fakes a regression.
+    The judge scores each row 1-5 against a per-metric rubric; scores are
+    normalized to 0..1. Rows the judge cannot parse are skipped, not counted
+    as 0, so a parser miss never fakes a regression.
     """
-    from app.eval.judges import prometheus_judge
+    from app.eval.judges import qwen_judge
 
     # context_recall is computed DETERMINISTICALLY (see _deterministic_context_recall):
-    # the Prometheus framing graded the raw context-wall as an "answer", scoring ~0
-    # even when the reference facts were present. faithfulness/relevancy/correctness
-    # stay on Prometheus (verified deterministic + discriminating on clean inputs).
+    # grading the raw context-wall as an "answer" scores ~0 even when the reference
+    # facts are present. faithfulness/relevancy/correctness stay on the judge
+    # (verified deterministic + discriminating on clean inputs under Prometheus;
+    # same rubric contract, unaffected by the judge swap).
     metric_names = ["faithfulness", "answer_relevancy", "answer_correctness"]
     buckets: dict[str, list[float]] = {m: [] for m in metric_names}
     recall_vals: list[float] = []
@@ -265,7 +267,7 @@ def compute_generation_metrics_prometheus(
             if m == "answer_relevancy" and not (answer and query):
                 continue
             try:
-                val = prometheus_judge.grade_metric(m, graded_row)
+                val = qwen_judge.grade_metric(m, graded_row)
             except Exception:
                 val = None
             if val is not None:
@@ -292,7 +294,7 @@ def compute_generation_metrics_prometheus(
                 notes=(
                     "deterministic (reference facts recoverable from context)"
                     if m == "context_recall"
-                    else "judge=prometheus_2_7b"
+                    else "judge=qwen2.5_7b"
                 ),
             )
 
@@ -323,9 +325,11 @@ def compute_generation_metrics_prometheus(
 async def compute_generation_metrics_ragas(
     eval_rows: list[dict],
 ) -> dict[str, MetricResult]:
-    """Compute generation metrics using Ragas + local GGUF judge.
+    """Compute generation metrics using the real Ragas library + MAGIK's judge.
 
-    Falls back to lexical judge if GGUF unavailable or Ragas fails.
+    Backs app/eval/ragas_report.py's standalone, always-real-Ragas-library
+    portfolio report. Falls back to the lexical judge if the judge is
+    unavailable or Ragas itself fails.
     """
     try:
         from datasets import Dataset
@@ -338,12 +342,10 @@ async def compute_generation_metrics_ragas(
         from ragas.run_config import RunConfig
 
         from app.core.config import settings as app_settings
-        from app.eval.judges.phi3_judge import get_judge
+        from app.eval.judges.qwen_judge import get_ragas_judge
 
-        # Phi-3-mini-4k-instruct judge — dedicated eval judge, outputs strict JSON.
-        # Loads ~2.3GB alongside Mistral 7B on GPU.
         RunConfig(max_workers=1, timeout=300)
-        judge = get_judge()
+        judge = get_ragas_judge()
         embeddings = HuggingfaceEmbeddings(model_name=app_settings.EMBEDDING_MODEL)
 
         # Build ragas-compatible dataset (use ground_truth, not deprecated ground_truths)
@@ -379,22 +381,22 @@ async def compute_generation_metrics_ragas(
                     name=key,
                     value=float(val),
                     n=len(eval_rows),
-                    notes="judge=phi3_mini",
+                    notes="judge=qwen2.5_7b",
                 )
 
-        # Faithfulness — direct Phi-3 NLI (skip Ragas decompose step which truncates)
+        # Faithfulness — direct NLI call (skip Ragas decompose step which truncates)
         try:
             import json as _json
             import re as _re
 
-            from app.eval.judges.phi3_judge import _extract_json, _generate
+            from app.eval.judges.qwen_judge import _extract_json_from_text
+            from app.eval.judges.qwen_judge import generate as _judge_generate
 
             faith_scores = []
             for row in eval_rows:
                 answer = row.get("answer") or ""
                 contexts = row.get("contexts") or []
                 ctx_text = " ".join(contexts)[:800] if contexts else ""
-                # Split answer into simple sentences
                 sentences = [
                     s.strip() for s in _re.split(r'(?<=[.!?])\s+', answer) if len(s.strip()) > 10
                 ][:4]
@@ -407,8 +409,11 @@ async def compute_generation_metrics_ragas(
                     f"context: {ctx_text}\n"
                     f"statements: {stmts_str}"
                 )
-                raw = _generate(nli_prompt)
-                extracted = _extract_json(raw)
+                raw = _judge_generate(
+                    nli_prompt,
+                    system="You are a JSON-only evaluator. Output ONLY a JSON array.",
+                )
+                extracted = _extract_json_from_text(raw)
                 try:
                     items = _json.loads(extracted)
                     if isinstance(items, list) and items:
@@ -423,9 +428,9 @@ async def compute_generation_metrics_ragas(
                     name="faithfulness",
                     value=round(sum(faith_scores) / len(faith_scores), 4),
                     n=len(faith_scores),
-                    notes="judge=phi3_mini_direct_nli",
+                    notes="judge=qwen2.5_7b_direct_nli",
                 )
-        except Exception as _fe:
+        except Exception:
             pass
 
         # Add metrics Ragas doesn't compute
@@ -448,58 +453,31 @@ async def compute_generation_metrics_ragas(
         return metrics_out
 
     except Exception as exc:
-        # Fall back to lexical judge, clearly labelled
-        fallback = compute_generation_metrics_lexical(
+        return compute_generation_metrics_lexical(
             eval_rows, judge_label=f"lexical_fallback (ragas_error: {exc})"
         )
-        return fallback
 
 
 def compute_generation_metrics(
     eval_rows: list[dict],
-    prefer_ragas: bool = True,
 ) -> dict[str, MetricResult]:
-    """Synchronous entry point.
+    """Synchronous entry point — MAGIK's single judge (qwen_judge), rubric
+    interface, with lexical fallback if the judge is unavailable or fails.
 
-    Judge selection follows EVAL_JUDGE_MODEL:
-      - "prometheus" / "prometheus_2_7b" → purpose-built Prometheus-2 judge
-      - anything else with prefer_ragas   → Ragas + phi3 judge (legacy path)
-      - lexical fallback if the chosen judge fails.
+    Judge history: this used to branch on EVAL_JUDGE_MODEL between multiple
+    LLM judges (Prometheus, and before that Phi-3 via Ragas). Simplified
+    2026-08-01 to one judge, one path — see app/eval/judges/qwen_judge.py's
+    module docstring for why. app/eval/ragas_report.py calls
+    compute_generation_metrics_ragas() directly for its own real-Ragas-library
+    report; that path is deliberately not branched into here.
     """
-    # Single source of truth — app/eval/config.py owns this env var's default.
-    # This previously re-read EVAL_JUDGE_MODEL directly with its own, DIFFERENT
-    # fallback ("gguf_mistral" here vs "prometheus_2_7b" there). While .env
-    # happened to set the variable explicitly the two agreed by luck; once the
-    # settings migration dropped it from .env, they silently diverged — the
-    # report's `judge` field (from EvalConfig) claimed prometheus_2_7b while
-    # this function actually dispatched the legacy Ragas/phi3 path. That makes
-    # every generation number attest to a judge that never ran, which is
-    # exactly the provenance thresholds.yaml's v3 retirement depends on.
-    from app.eval.config import EVAL_JUDGE_MODEL
+    from app.eval.judges import qwen_judge
 
-    judge_model = EVAL_JUDGE_MODEL.lower()
-
-    if judge_model.startswith("prometheus"):
-        try:
-            from app.eval.judges import prometheus_judge
-
-            if prometheus_judge.ensure_available():
-                return compute_generation_metrics_prometheus(eval_rows)
-        except Exception as exc:
-            print(f"[eval] Prometheus judge failed ({exc}) — falling back to lexical judge")
-        return compute_generation_metrics_lexical(
-            eval_rows, judge_label="lexical_fallback (prometheus_unavailable)"
-        )
-
-    if prefer_ragas:
-        try:
-            import asyncio
-
-            loop = asyncio.new_event_loop()
-            metrics = loop.run_until_complete(compute_generation_metrics_ragas(eval_rows))
-            loop.close()
-            return metrics
-        except Exception:
-            pass  # fall through to lexical
-
-    return compute_generation_metrics_lexical(eval_rows)
+    try:
+        if qwen_judge.ensure_available():
+            return compute_generation_metrics_rubric(eval_rows)
+    except Exception as exc:
+        print(f"[eval] Qwen judge failed ({exc}) — falling back to lexical judge")
+    return compute_generation_metrics_lexical(
+        eval_rows, judge_label="lexical_fallback (qwen_judge_unavailable)"
+    )

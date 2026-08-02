@@ -2,8 +2,8 @@
 
 ## What this will be
 
-Shadow Ragas scoring on a sample of live production queries — without affecting the user
-experience or response latency.
+Shadow generation-quality scoring on a sample of live production queries — without affecting
+the user experience or response latency.
 
 ## Design
 
@@ -15,7 +15,7 @@ experience or response latency.
 
 ### Async scoring
 - Background task (FastAPI BackgroundTasks or Celery) picks up sampled queries
-- Runs the same Ragas metrics as offline eval: faithfulness, answer_relevancy
+- Runs the same generation metrics as offline eval: faithfulness, answer_relevancy
 - Uses the GGUF local judge — same as offline, no extra cost
 - Writes scores to `MONGO_EVAL_SHADOW_COLLECTION`
 

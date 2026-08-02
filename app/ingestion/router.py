@@ -10,9 +10,11 @@ from pathlib import Path
 import magic
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
-from prometheus_client import Counter, Histogram
 
 from app.core.config import settings
+from app.core.metrics import chunk_count_per_file as _ingestion_docs
+from app.core.metrics import file_ingestion_duration as _ingestion_duration
+from app.core.metrics import file_ingestion_errors as _ingestion_errors
 from app.core.response import Modality
 from app.guardrails.exceptions import GuardrailBlocked
 from app.ingestion.audio_ingest import AudioIngestor, ingest_audio_full
@@ -29,22 +31,18 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
-# PROMETHEUS METRICS
-_ingestion_duration = Histogram(
-    "file_ingestion_duration_seconds",
-    "Ingestion duration by modality",
-    ["modality"],
-)
-_ingestion_errors = Counter(
-    "file_ingestion_errors_total",
-    "Ingestion errors by modality and error type",
-    ["modality", "error_type"],
-)
-_ingestion_docs = Histogram(
-    "chunk_count_per_file",
-    "Chunks produced per file",
-    ["modality"],
-)
+# PROMETHEUS METRICS — file_ingestion_duration_seconds, chunk_count_per_file,
+# and file_ingestion_errors_total are shared singletons from app.core.metrics
+# (imported above), not defined here. This file used to register its own
+# unguarded top-level copies of all three, colliding with identical copies
+# already registered by ingestion_pipeline.py's safely-guarded _get_metrics()
+# — and since this module is only ever imported lazily (ingestion_pipeline.py,
+# inside route_ingestion_sync()'s caller, not at module top level), a losing
+# race here didn't just no-op: Python evicts a failed import from sys.modules,
+# so every subsequent file upload re-attempted and re-failed the same import,
+# permanently, for the rest of the process. Confirmed live 2026-08-01 — a
+# real upload ("fomc_dec2024.txt") failed with exactly this
+# "Duplicated timeseries in CollectorRegistry" error in the running UI.
 
 # EXTENSION MAPS
 TEXT_EXTENSIONS: set[str] = {".txt", ".md", ".rst", ".csv", ".log", ".json", ".yaml", ".yml"}

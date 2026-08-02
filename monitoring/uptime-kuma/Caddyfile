@@ -1,0 +1,47 @@
+# Reverse proxy for the standalone Uptime Kuma host — separate physical host
+# and separate Caddy instance from deploy/aws/caddy/Caddyfile (which fronts
+# the GPU box and only runs while that box is awake). This one must stay up
+# 24/7, so it lives on the small always-on host from this directory's
+# README.md.
+#
+# STATUS_DOMAIN_PLACEHOLDER: replace with the real subdomain before deploy
+# (e.g. status.vk-ai.online) — same hand-replaced-placeholder convention as
+# deploy/aws/caddy/Caddyfile's APP_DOMAIN_PLACEHOLDER.
+
+STATUS_DOMAIN_PLACEHOLDER {
+	# The push-heartbeat endpoint the two Lambdas hit — deliberately NOT
+	# behind basic_auth. It's unauthenticated by design (Kuma secures it with
+	# a long random per-monitor token baked into the URL itself, the same
+	# way a webhook URL is normally "secret by obscurity + length", not by a
+	# login prompt) and a Lambda cannot solve a basic-auth challenge anyway.
+	# Ordered BEFORE the general handle block below — Caddy evaluates
+	# `handle` blocks in order, first match wins.
+	handle /api/push/* {
+		reverse_proxy 127.0.0.1:3001
+	}
+
+	# Kuma's own public status page — deliberately open, no basic_auth. This
+	# is THE link for the portfolio/README ("live uptime"): a recruiter must
+	# be able to open it with no credentials. Kuma's status pages are
+	# read-only by design (no admin actions reachable from here).
+	handle /status/* {
+		reverse_proxy 127.0.0.1:3001
+	}
+	handle /status {
+		reverse_proxy 127.0.0.1:3001
+	}
+
+	# Everything else (the admin dashboard, settings, monitor config) —
+	# gated behind Caddy basic_auth as defense in depth, same principle as
+	# the main Caddyfile's /grafana/* block. Kuma has its own login screen
+	# too; this is a second layer, not a substitute.
+	#
+	# KUMA_BASICAUTH_HASH_PLACEHOLDER: generate with
+	#   docker run --rm caddy:2 caddy hash-password --plaintext '<your password>'
+	handle {
+		basic_auth {
+			admin KUMA_BASICAUTH_HASH_PLACEHOLDER
+		}
+		reverse_proxy 127.0.0.1:3001
+	}
+}

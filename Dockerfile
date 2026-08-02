@@ -122,7 +122,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         software-properties-common \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y --no-install-recommends \
-        python3.12 \
+        python3.12 python3.12-dev \
         tesseract-ocr tesseract-ocr-eng ffmpeg libmagic1 libgomp1 curl \
         gcc \
     && rm -rf /var/lib/apt/lists/*
@@ -133,6 +133,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ever surfaces as a hard error — confirmed live on the production box via
 # a full Tier-2 eval run where all 14/14 image-ingest calls failed both
 # captioners.
+# python3.12-dev — gcc alone wasn't enough: Triton's generated cuda_utils.c
+# does `#include <Python.h>`, which only python3.12-dev ships (plain
+# python3.12 is the interpreter only, no C headers). Without it, gcc runs
+# but fails immediately with "fatal error: Python.h: No such file or
+# directory" — confirmed live on the production box (2026-08-01) the moment
+# gcc was hot-patched in and image captioning got past its first failure
+# mode straight into this one.
 
 RUN groupadd --gid 10001 appuser \
     && useradd --uid 10001 --gid appuser --shell /bin/bash --create-home appuser
@@ -171,7 +178,21 @@ CMD ["python3.12", "start_server.py"]
 # and every other model fall back to CPU automatically (device_manager.py
 # auto-detects — no code or config difference needed between targets).
 # ---------------------------------------------------------------------------
-FROM python:3.12-slim AS dev-runtime
+FROM ubuntu:22.04 AS dev-runtime
+
+# Base was `python:3.12-slim` (Debian) until this was caught live in CI
+# (2026-08-01, 3 independent job builds — Schemathesis/k6/ZAP — all failed
+# identically with `ModuleNotFoundError: No module named 'dotenv'` on
+# start_server.py's very first third-party import). Root cause: base-deps
+# creates /opt/venv via `python3.12 -m venv`, and `venv` makes `bin/python3.12`
+# a SYMLINK to the interpreter that created it (/usr/bin/python3.12, installed
+# via the deadsnakes PPA on Ubuntu 22.04 there) — not a self-contained copy.
+# The `runtime` stage below re-installs python3.12 the identical way before
+# copying that venv, so its symlink resolves; this stage did not, so the
+# symlink was dangling on Debian and PATH lookup silently fell through to the
+# base image's own bare system Python (no packages installed at all). Now
+# matches `runtime`'s proven-working pattern exactly, on plain Ubuntu 22.04
+# instead of the multi-GB CUDA devel/runtime images — still fast to build.
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -183,12 +204,23 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PORT=8000
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common gnupg \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.12 python3.12-dev \
         tesseract-ocr tesseract-ocr-eng ffmpeg libmagic1 libgomp1 curl \
         gcc \
     && rm -rf /var/lib/apt/lists/*
-# gcc — see the matching comment in the `runtime` stage above: Triton needs
-# a C compiler at inference time for image-captioning kernels, not just at
-# build time.
+# gcc / python3.12-dev — see the matching comments in the `runtime` stage
+# above: Triton needs a C compiler AND Python.h at inference time for
+# image-captioning kernels, not just at build time.
+# gnupg — plain `ubuntu:22.04` (unlike the nvidia/cuda:*-ubuntu22.04 images
+# base-deps/runtime use, which ship it already) doesn't include gpg-agent,
+# and add-apt-repository needs it to import the deadsnakes PPA's signing
+# key. Without it: "gpg: error running '/usr/bin/gpg-agent': probably not
+# installed" — confirmed live in CI (2026-08-01) right after this stage's
+# base image was switched from python:3.12-slim to ubuntu:22.04 to fix a
+# different bug (broken venv symlink across base images, see git history).
 
 RUN groupadd --gid 10001 appuser \
     && useradd --uid 10001 --gid appuser --shell /bin/bash --create-home appuser

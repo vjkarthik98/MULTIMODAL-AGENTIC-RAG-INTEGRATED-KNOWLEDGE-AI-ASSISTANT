@@ -1,0 +1,123 @@
+name: Quality & Performance (live)
+
+# Manual, on-demand ONLY — workflow_dispatch, never push/pull_request/schedule.
+# Every job here targets the REAL deployed URL, which wakes the wake-on-demand
+# AWS box (deploy/aws/lambda/wake_gateway/) if it's asleep. That's an accepted
+# cost for a portfolio project with low real traffic (see the approved plan),
+# but it must always be a deliberate human action — a human clicking "Run
+# workflow" and picking exactly one tool, never something that fires on a
+# schedule or as a side effect of a PR.
+#
+# ZAP's active scan is deliberately NOT an option here — security/zap/
+# run_active_scan.sh is interactive by design (a real-time confirmation
+# pause) and is meant to be run locally by a human watching the output, not
+# from a CI runner. See that script's docstring.
+#
+# Requires repo secrets: MAGIK_LIVE_URL (the real deployed URL) and
+# MAGIK_TEST_TENANTS (JSON from app/bin/seed_test_tenants.py — dedicated test
+# tenants, never the shared public demo login). Set these once in
+# Settings -> Secrets and variables -> Actions before the first run.
+on:
+  workflow_dispatch:
+    inputs:
+      tool:
+        description: "Which live-mode check to run"
+        required: true
+        type: choice
+        options:
+          - schemathesis
+          - ragas-report
+          - deepeval-report
+          - k6-live-profile
+          - k6-multiuser
+          - lighthouse
+          - zap-baseline
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    name: ${{ inputs.tool }} (live)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Warn this wakes the live box
+        run: echo "::notice::Targeting ${{ inputs.tool }} against the live deployed URL — this wakes the AWS box if it's asleep."
+
+      - uses: actions/setup-python@v5
+        if: contains(fromJSON('["schemathesis","ragas-report","deepeval-report"]'), inputs.tool)
+        with:
+          python-version: "3.11"
+
+      - name: Schemathesis (live, GET-only)
+        if: inputs.tool == 'schemathesis'
+        env:
+          MAGIK_LIVE_URL: ${{ secrets.MAGIK_LIVE_URL }}
+        run: |
+          pip install "multimodal-rag-assistant[quality] @ ." || pip install schemathesis
+          bash scripts/schemathesis_live.sh
+
+      - name: RAGAS report (live)
+        if: inputs.tool == 'ragas-report'
+        env:
+          EVAL_SERVER_URL: ${{ secrets.MAGIK_LIVE_URL }}
+        run: |
+          pip install -r requirements.txt
+          pip install -e .
+          python -m app.eval.ragas_report
+
+      - name: DeepEval suite (live)
+        if: inputs.tool == 'deepeval-report'
+        env:
+          EVAL_SERVER_URL: ${{ secrets.MAGIK_LIVE_URL }}
+        run: |
+          pip install -r requirements.txt
+          pip install -e ".[quality]"
+          python -m app.eval.deepeval_suite --limit 10
+
+      - uses: grafana/setup-k6-action@v1
+        if: contains(fromJSON('["k6-live-profile","k6-multiuser"]'), inputs.tool)
+
+      - name: k6 live profile
+        if: inputs.tool == 'k6-live-profile'
+        env:
+          MAGIK_API_BASE_URL: ${{ secrets.MAGIK_LIVE_URL }}
+          MAGIK_TEST_TENANTS: ${{ secrets.MAGIK_TEST_TENANTS }}
+        run: k6 run perf/k6/live_profile.js
+
+      - name: k6 multi-user tenant isolation (live)
+        if: inputs.tool == 'k6-multiuser'
+        env:
+          MAGIK_API_BASE_URL: ${{ secrets.MAGIK_LIVE_URL }}
+          MAGIK_TEST_TENANTS: ${{ secrets.MAGIK_TEST_TENANTS }}
+        run: k6 run --vus 5 --iterations 15 perf/k6/multi_user_tenant.js
+
+      - uses: actions/setup-node@v4
+        if: inputs.tool == 'lighthouse'
+        with:
+          node-version: "20"
+
+      - name: Lighthouse (live)
+        if: inputs.tool == 'lighthouse'
+        run: |
+          npx --yes lighthouse "${{ secrets.MAGIK_LIVE_URL }}" \
+            --output=html --output=json \
+            --output-path=quality-reports/browser-performance/ci-live \
+            --only-categories=performance,accessibility,best-practices \
+            --chrome-flags="--headless --no-sandbox"
+
+      - name: ZAP baseline (live, passive/safe)
+        if: inputs.tool == 'zap-baseline'
+        env:
+          TARGET_URL: ${{ secrets.MAGIK_LIVE_URL }}
+        run: bash security/zap/run_baseline.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quality-live-${{ inputs.tool }}
+          path: quality-reports/**
+          retention-days: 30

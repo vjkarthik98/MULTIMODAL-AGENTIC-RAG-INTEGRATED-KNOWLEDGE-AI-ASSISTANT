@@ -108,6 +108,15 @@ async def login(req: LoginRequest):
         logger.info(event="login_demo_account", user_id=user.user_id)
         return TokenPair(**tokens).model_dump()
 
+    # Dedicated automated-test-tooling account (app/bin/seed_test_tenants.py)
+    # — skips OTP for the same reason is_demo does (non-interactive caller
+    # can't solve an email code), but is otherwise a completely ordinary
+    # tenant. Never the shared demo login — see UserInDB.is_load_test.
+    if user.is_load_test:
+        tokens = issue_tokens(user.user_id, user.email, user.role.value)
+        logger.info(event="login_load_test_account", user_id=user.user_id)
+        return TokenPair(**tokens).model_dump()
+
     # Check for a trusted device token — skip OTP if valid
     from app.auth.email_service import send_otp_email
     from app.auth.otp_store import generate_otp, store_otp, verify_device_token
@@ -314,8 +323,23 @@ async def refresh(req: RefreshRequest) -> TokenPair:
 
 @router.get("/me", response_model=UserPublic)
 async def me(current_user: UserPublic = Depends(get_current_user)) -> UserPublic:
-    """Return the currently authenticated user's profile."""
-    return current_user
+    """Return the currently authenticated user's profile.
+
+    Deliberately re-fetches from Mongo rather than returning `current_user`
+    as-is: that object comes from get_current_user(), which builds a cheap
+    JWT-only stand-in for authorization checks on every protected route —
+    JWTs don't carry account-creation date (or current is_active/is_demo),
+    so that stand-in fills created_at with datetime.now() as a placeholder.
+    Fine for routes that only need user_id/role, wrong for this one, whose
+    entire purpose is showing the user their real profile (this was the bug
+    behind "Member since" always showing today's date).
+    """
+    user = await asyncio.to_thread(_svc.get_by_id, current_user.user_id)
+    # Falls back to the stand-in only when no Mongo doc exists at all — the
+    # AUTH_ENABLED=False dev-bypass path (main.py's validate_auth_config()
+    # keeps this disabled in production), where DEFAULT_DEV_USER_ID has no
+    # real account. Every genuine authenticated user has a real doc.
+    return user or current_user
 
 
 # ── Google OAuth2 ─────────────────────────────────────────────────────────────

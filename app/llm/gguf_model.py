@@ -9,23 +9,24 @@ from collections.abc import Iterator
 from typing import Any
 
 from app.core.config import settings
+from app.core.metrics import llm_call_latency as _shared_llm_latency
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 # PROMETHEUS METRICS — SECTION 6
+# llm_call_latency_seconds is a shared singleton from app.core.metrics —
+# this file used to register its own copy of the same metric name, which
+# silently raced (and usually lost) against identical copies in
+# rag_pipeline.py/query_pipeline.py/reasoning_engine.py. See app/core/
+# metrics.py's comment for the live incident that made this get fixed.
 
 
 def _get_metrics():
     try:
-        from prometheus_client import Counter, Gauge, Histogram
+        from prometheus_client import Counter, Gauge
 
-        llm_latency = Histogram(
-            "llm_call_latency_seconds",
-            "LLM inference latency",
-            ["model", "mode"],
-        )
         llm_errors = Counter(
             "llm_errors_total",
             "LLM errors by type",
@@ -42,7 +43,6 @@ def _get_metrics():
             ["service"],
         )
         return {
-            "llm_latency": llm_latency,
             "llm_errors": llm_errors,
             "llm_tokens": llm_tokens,
             "circuit_state": circuit_state,
@@ -62,8 +62,7 @@ if settings.PROMETHEUS_ENABLED:
 
 def _record_latency(model: str, mode: str, latency: float) -> None:
     try:
-        if "llm_latency" in _METRICS:
-            _METRICS["llm_latency"].labels(model=model, mode=mode).observe(latency)
+        _shared_llm_latency.labels(model=model, mode=mode).observe(latency)
     except Exception:
         pass
 

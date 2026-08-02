@@ -34,6 +34,7 @@
   --t-accent:       #8b5cf6;   /* violet-500 */
   --t-accent-hover: #7c3aed;   /* violet-600 */
   --t-accent-soft:  rgba(139,92,246,0.08);
+  --t-web: #22d3ee;   /* cyan-400 — source chips + web-search toggle */
   --t-err-bg: rgba(127,29,29,0.15);
   --t-err-bd: rgba(153,27,27,0.4);
   --t-err-tx: #fca5a5;
@@ -72,6 +73,7 @@
   --t-accent:       #7c3aed;
   --t-accent-hover: #6d28d9;
   --t-accent-soft:  rgba(124,58,237,0.08);
+  --t-web: #0284c7;   /* sky-600 — same role as dark's cyan, readable on light backgrounds */
   --t-err-bg: rgba(220,38,38,0.10);
   --t-err-bd: rgba(220,38,38,0.32);
   --t-err-tx: #b91c1c;

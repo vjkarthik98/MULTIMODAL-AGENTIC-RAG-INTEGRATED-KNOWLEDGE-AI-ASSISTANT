@@ -182,11 +182,14 @@ services:
     networks:
       - magik-net
     environment:
-      # GF_SECURITY_ADMIN_PASSWORD is REQUIRED from /opt/magik/.env — no
-      # default here on purpose; Grafana refuses a blank/default admin
-      # password to fail loudly rather than silently ship an open dashboard.
+      # GF_SECURITY_ADMIN_PASSWORD is REQUIRED — no default here on purpose;
+      # Grafana refuses a blank/default admin password to fail loudly rather
+      # than silently ship an open dashboard. As of the secrets-management-gap
+      # migration (2026-08-01), the real value comes from SSM SecureString via
+      # deploy/aws/scripts/deploy_monitoring.sh, not a hand-edited /opt/magik/.env
+      # — see that script and deploy/aws/README.md "App secrets in SSM".
       GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
-      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in /opt/magik/.env}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?run deploy/aws/scripts/deploy_monitoring.sh, not docker compose directly — it fetches this from SSM}"
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       # Grafana is reverse-proxied at a sub-path with additional Caddy
@@ -201,12 +204,23 @@ services:
       # templated, this silently breaks the post-login redirect (browser
       # sent to https://localhost/grafana/... — unreachable, blank page,
       # no error) even though GF_SERVER_SERVE_FROM_SUB_PATH itself is
-      # correct. Override GRAFANA_ROOT_URL in /opt/magik/.env if the
-      # public domain ever changes.
+      # correct. Source of truth is now the committed deploy/aws/prod.env,
+      # not a hand-edited /opt/magik/.env (see the v0.28.0 Known Issue this
+      # closed) — override there if the public domain ever changes.
       GF_SERVER_ROOT_URL: "${GRAFANA_ROOT_URL:-https://magik.vk-ai.online/grafana/}"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
     env_file:
+      # /opt/magik/.env — legacy, hand-maintained, kept for anything not yet
+      # migrated. .env.monitoring.secrets is the SSM-fetched throwaway file
+      # deploy_monitoring.sh writes just before this `up`, deleted right
+      # after — later entries win on a key collision, so a fresh SSM value
+      # always beats a stale copy still sitting in the legacy file. Both are
+      # `required: false`: a bare `docker compose up` (bypassing the wrapper
+      # script) must still fail loudly on the `:?` above rather than erroring
+      # on a missing file first, which would read as a different problem.
       - path: /opt/magik/.env
+        required: false
+      - path: /opt/magik/.env.monitoring.secrets
         required: false
     volumes:
       - grafana_data:/var/lib/grafana

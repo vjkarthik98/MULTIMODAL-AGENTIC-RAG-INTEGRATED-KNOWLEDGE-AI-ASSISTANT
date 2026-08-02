@@ -239,9 +239,12 @@ function isNoInfoResponse(content) {
   return NO_INFO_PATTERNS.some(p => lc.includes(p))
 }
 
-/* ── Modality colour + icon — unified teal for all source types ── */
+/* ── Modality colour + icon — unified colour for all source types.
+   Theme-aware (--t-web, index.css): dark keeps the original cyan, light
+   uses a darker, higher-contrast blue — the fixed cyan hex read as
+   washed-out/illegible on light backgrounds. */
 function getModalityColor(_source, _isWeb) {
-  return '#22d3ee'
+  return 'var(--t-web)'
 }
 
 function SourceIcon({ source, isWeb }) {
