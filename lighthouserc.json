@@ -3,7 +3,10 @@
     "collect": {
       "staticDistDir": "./ui/dist",
       "url": ["http://localhost/index.html"],
-      "numberOfRuns": 3
+      "numberOfRuns": 3,
+      "settings": {
+        "chromeFlags": "--no-sandbox --disable-dev-shm-usage --disable-gpu"
+      }
     },
     "assert": {
       "preset": "lighthouse:no-pwa",
