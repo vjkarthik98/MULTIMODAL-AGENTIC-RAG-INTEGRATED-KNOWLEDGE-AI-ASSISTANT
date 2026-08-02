@@ -13,6 +13,7 @@
 .env.*
 !.env.example
 .envrc
+.magik_test_tenants.json
 
 # -----------------------------------------------------------------------------
 # Folders tracked as structure only — the directory ships via .gitkeep, but
@@ -163,6 +164,18 @@ trivy-results.sarif
 bandit-report.json
 pip-audit-report.json
 licenses-report.json
+
+# Quality & Performance Reporting — quality-reports/ itself IS tracked (see
+# quality-reports/README.md), but raw/noisy per-run tool output within it is
+# regenerable and stays local, same principle as the bandit/pip-audit files
+# above. Only the curated *.md + *.json snapshots you deliberately commit
+# should land in git.
+quality-reports/**/.lhci/
+quality-reports/**/*-raw.xml
+quality-reports/**/*-raw.json
+# NOTE: quality-badges/ is deliberately NOT ignored — shields.io "endpoint"
+# badges (see scripts/generate_quality_badges.py) fetch this JSON straight
+# from raw.githubusercontent.com, which only serves committed files.
 
 # -----------------------------------------------------------------------------
 # Misc tooling

@@ -10,34 +10,57 @@ from typing import Any
 import structlog
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
-from prometheus_client import Counter, Histogram
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import settings
+from app.core.metrics import llm_call_latency as _llm_call_duration
+from app.core.metrics import reasoning_engine_duration as _reasoning_duration
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
-# PROMETHEUS METRICS
-_reasoning_duration = Histogram(
-    "reasoning_engine_duration_seconds",
-    "Reasoning engine duration",
-    ["status"],
-)
-_reasoning_errors = Counter(
-    "reasoning_engine_errors_total",
-    "Reasoning engine errors by type",
-    ["error_type"],
-)
-_hallucination_flags = Counter(
-    "reasoning_hallucination_flags_total",
-    "Answers flagged as potentially hallucinated",
-)
-_llm_call_duration = Histogram(
-    "llm_call_latency_seconds",
-    "LLM call latency",
-    ["model"],
-)
+
+# PROMETHEUS METRICS — reasoning_engine_duration_seconds and
+# llm_call_latency_seconds are shared singletons from app.core.metrics, not
+# defined here (see that file's comment: this module used to register both
+# unconditionally at top level, which crashed permanently on its own lazy,
+# deferred first import — see app/pipeline/query_pipeline.py's
+# `from app.reasoning.reasoning_engine import ReasoningEngine`). Counters
+# below are genuinely unique to this module, so they stay local, but now
+# guarded the same way every other metrics-owning module in this codebase
+# already is — a losing race here should degrade to a no-op, never crash.
+def _make_local_metrics():
+    if not settings.PROMETHEUS_ENABLED:
+        return None
+    try:
+        from prometheus_client import Counter
+
+        return {
+            "reasoning_errors": Counter(
+                "reasoning_engine_errors_total",
+                "Reasoning engine errors by type",
+                ["error_type"],
+            ),
+            "hallucination_flags": Counter(
+                "reasoning_hallucination_flags_total",
+                "Answers flagged as potentially hallucinated",
+            ),
+        }
+    except Exception:
+        return None
+
+
+class _NoopCounter:
+    def labels(self, **_):
+        return self
+
+    def inc(self, *_):
+        pass
+
+
+_local_metrics = _make_local_metrics()
+_reasoning_errors = (_local_metrics or {}).get("reasoning_errors", _NoopCounter())
+_hallucination_flags = (_local_metrics or {}).get("hallucination_flags", _NoopCounter())
 
 # SEMAPHORE — lazy init to avoid missing event loop at import time
 _semaphore: asyncio.Semaphore | None = None
@@ -2283,7 +2306,7 @@ class ReasoningEngine:
             )
             llm_latency = round(time.time() - t_start, 2)
 
-            _llm_call_duration.labels(model=self.model_name).observe(llm_latency)
+            _llm_call_duration.labels(model=self.model_name, mode="pipeline").observe(llm_latency)
 
             if llm_latency > settings.MODEL_TIMEOUT_SEC:
                 logger.warning(
@@ -2296,7 +2319,7 @@ class ReasoningEngine:
 
         except Exception as exc:
             llm_latency = round(time.time() - t_start, 2)
-            _llm_call_duration.labels(model=self.model_name).observe(llm_latency)
+            _llm_call_duration.labels(model=self.model_name, mode="pipeline").observe(llm_latency)
             logger.error(
                 "reasoning_llm_call_failed",
                 error=str(exc),

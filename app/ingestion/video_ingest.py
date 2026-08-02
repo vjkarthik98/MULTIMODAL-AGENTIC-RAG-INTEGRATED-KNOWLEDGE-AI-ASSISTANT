@@ -1000,11 +1000,26 @@ def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
         frame_future = None
         audio_path_tmp: str | None = None
 
+        # ThreadPoolExecutor.submit() does NOT propagate contextvars into the
+        # worker thread — unlike asyncio.to_thread()/loop.run_in_executor with
+        # ctx.run (see ingest_async() above, which already gets this right).
+        # Without this, _run_audio_pipeline loses the _current_user_id set
+        # by the caller, and every resolved_temp_dir() call inside it (via
+        # audio_ingest.py) raises "called without active user context" —
+        # confirmed live: silently broke every video's internal audio
+        # extraction (speech_segments always 0), while the video ingest
+        # itself still reported success, since this failure is caught and
+        # only logged as a warning below.
+        import contextvars
+
+        _ctx = contextvars.copy_context()
+
         with ThreadPoolExecutor(max_workers=2) as _pool:
             if has_audio:
                 fd, audio_path_tmp = tempfile.mkstemp(suffix=".wav", dir=str(staging))
                 os.close(fd)
                 audio_future = _pool.submit(
+                    _ctx.run,
                     _run_audio_pipeline,
                     file_path,
                     audio_path_tmp,
@@ -1017,6 +1032,7 @@ def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
 
             if has_video:
                 frame_future = _pool.submit(
+                    _ctx.run,
                     extract_frames,
                     file_path,
                     settings.VIDEO_FRAME_INTERVAL_SEC,

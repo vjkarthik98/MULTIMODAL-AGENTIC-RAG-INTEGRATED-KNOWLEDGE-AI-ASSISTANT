@@ -23,6 +23,23 @@ failure modes rather than theory:
 
 Deliberately conservative: the cost of one extra idle interval (~$0.15) is far
 below the cost of stopping a live session, a running deploy, or a running eval.
+
+Uptime monitoring hooks (optional, KUMA_PUSH_URL): this function already runs
+on a fixed 5-minute EventBridge schedule regardless of monitoring, so it is
+the natural place to report "the instance is up and actually serving" while
+it's running, and "the instance just went back to sleep" the moment it stops
+— see _push_kuma_up() and _push_kuma_down() below. Two rules keep this
+strictly passive:
+  1. The health probe in _push_kuma_up() hits DIRECT_HEALTH_URL — the app
+     directly (e.g. https://magik.vk-ai.online/health via Caddy on the box
+     itself) — NEVER the wake-gateway. It only fires when
+     _find_running_instance() has already confirmed via the EC2 API that the
+     instance is running, so this call cannot wake anything: the box is
+     already up before this function is ever reached.
+  2. This Lambda never calls the wake path and never starts the instance —
+     only deploy/aws/lambda/wake_gateway/handler.py does that, and only in
+     response to a real visitor request. This file only ever stops things
+     (or reports on what's already running).
 """
 
 from __future__ import annotations
@@ -30,6 +47,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -50,6 +68,18 @@ MIN_UPTIME_MINUTES = int(os.environ.get("MIN_UPTIME_MINUTES", "15"))
 NETWORK_IN_THRESHOLD_BYTES = int(os.environ.get("NETWORK_IN_THRESHOLD_BYTES", "1000000"))
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 
+# Optional — both unset by default, so this whole block is a strict no-op
+# until Phase F's Kuma host is actually provisioned (see
+# deploy/aws/scripts/deploy_lambdas.sh and monitoring/uptime-kuma/).
+KUMA_PUSH_URL = os.environ.get("KUMA_PUSH_URL", "").rstrip("/")
+KUMA_PUSH_TIMEOUT_S = float(os.environ.get("KUMA_PUSH_TIMEOUT_S", "2"))
+# The app directly (Caddy on the box) — NEVER the wake-gateway URL. Defaults
+# from APP_URL for consistency with wake_gateway/handler.py's own HEALTH_URL
+# derivation, but this Lambda only calls it after independently confirming
+# via the EC2 API that the instance is already running (see file docstring).
+APP_URL = os.environ.get("APP_URL", "").rstrip("/")
+DIRECT_HEALTH_URL = os.environ.get("DIRECT_HEALTH_URL") or (f"{APP_URL}/health" if APP_URL else "")
+
 # GitHub Actions self-hosted runner "busy" check. The token needs repository
 # Administration:read (fine-grained) or `repo` scope (classic) — the same
 # minimum GitHub requires for the "list self-hosted runners" endpoint. Stored
@@ -62,6 +92,42 @@ _cfg = Config(connect_timeout=5, read_timeout=10, retries={"max_attempts": 3})
 ec2 = boto3.client("ec2", config=_cfg)
 cw = boto3.client("cloudwatch", config=_cfg)
 ssm = boto3.client("ssm", config=_cfg)
+
+
+def _push_kuma(status: str, msg: str) -> None:
+    """Fire-and-forget heartbeat to Uptime Kuma's push monitor. No-op if
+    KUMA_PUSH_URL is unset. Never allowed to affect the stop/skip decision —
+    any failure here is swallowed.
+    """
+    if not KUMA_PUSH_URL:
+        return
+    try:
+        url = f"{KUMA_PUSH_URL}?status={status}&msg={msg}"
+        req = urllib.request.Request(url, headers={"User-Agent": "magik-idle-stop"})
+        urllib.request.urlopen(req, timeout=KUMA_PUSH_TIMEOUT_S).close()
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
+        log.info("kuma push failed (non-fatal): %s", exc)
+
+
+def _push_kuma_up_if_healthy() -> None:
+    """Report the instance as up-and-serving, with real latency, WITHOUT ever
+    touching the wake-gateway — see file docstring rule 1. Only called after
+    _find_running_instance() has already confirmed via the EC2 API (not an
+    HTTP request to the app) that the instance is running, so this cannot be
+    the cause of a wake.
+    """
+    if not KUMA_PUSH_URL or not DIRECT_HEALTH_URL:
+        return
+    start = time.monotonic()
+    try:
+        req = urllib.request.Request(DIRECT_HEALTH_URL, headers={"User-Agent": "magik-idle-stop"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            healthy = 200 <= r.status < 300
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
+        log.info("direct health probe failed: %s", exc)
+        healthy = False
+    latency_ms = round((time.monotonic() - start) * 1000)
+    _push_kuma("up" if healthy else "down", f"direct_health_check_{latency_ms}ms")
 
 
 def _find_running_instance() -> tuple[str | None, datetime | None]:
@@ -190,6 +256,13 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
     if not instance_id:
         return {"action": "none", "reason": "no running instance"}
 
+    # Uptime reporting for the active window — every 5-min tick the instance
+    # is running, regardless of whether this tick ends up stopping it. This
+    # is the "collect a report while someone is actually using it" half of
+    # the passive design (see file docstring); the "down" push below is the
+    # other half, fired only at the moment this Lambda actually stops it.
+    _push_kuma_up_if_healthy()
+
     uptime = _uptime_minutes(instance_id, launch_time)
     if uptime < MIN_UPTIME_MINUTES:
         msg = f"uptime {uptime:.1f}m < {MIN_UPTIME_MINUTES}m guard"
@@ -211,6 +284,7 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
 
     ec2.stop_instances(InstanceIds=[instance_id])
     log.info("STOPPED %s after %.1fm uptime, idle %dm", instance_id, uptime, IDLE_MINUTES)
+    _push_kuma("down", f"idle_{IDLE_MINUTES}m_stopped")
     return {
         "action": "stopped",
         "instance": instance_id,

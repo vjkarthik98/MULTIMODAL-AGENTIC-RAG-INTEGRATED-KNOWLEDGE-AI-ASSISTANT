@@ -283,9 +283,9 @@ These gold fields are consumed directly by the metrics already wired in `thresho
   `faithfulness`, `answer_relevancy`, `context_recall`, `context_precision`,
   `citation_accuracy`, `template_leak_rate` (`metrics/generation.py`,
   `thresholds.yaml:51-69`).
-- Judged by whichever of `judges/{gguf_judge, crossencoder_judge, lexical_judge,
-  phi3_judge}.py` the suite selects — write `reference_answer` as a clean prose answer a
-  judge model can NLI-compare against the generated answer, not as bullet fragments.
+- Judged by MAGIK's single judge (`judges/qwen_judge.py`, `lexical_judge.py`
+  fallback) — write `reference_answer` as a clean prose answer a judge model
+  can NLI-compare against the generated answer, not as bullet fragments.
 - `gold_ocr_text` / `gold_transcript_excerpt` / `gold_frame_captions` →
   `ocr.ocr_cer/ocr_wer`, `audio.audio_wer`, `video.frame_caption_recall` /
   `caption_repetition_rate` (`thresholds.yaml:81-100`).

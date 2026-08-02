@@ -8,17 +8,18 @@ Usage:
     python app/bin/models/download_all_models.py
     python app/bin/models/download_all_models.py --skip-gated    # skip pyannote (needs license)
     python app/bin/models/download_all_models.py --only gguf     # single model by key
-    python app/bin/models/download_all_models.py --only prometheus_judge   # judge only
+    python app/bin/models/download_all_models.py --only qwen_judge   # judge only
 
 Set HF_TOKEN in .env for gated models (pyannote diarization requires license acceptance
 at https://hf.co/pyannote/speaker-diarization-3.1).
 
-prometheus_judge (the Tier-2 LLM-as-judge) IS included in the default run —
-it's a pure disk fetch (no VRAM, no model load), so a one-time ~4.4GB
-download on the box's first boot is worth it to guarantee Tier-2 always has
-its real judge instead of silently degrading to a weaker lexical fallback.
-It's still marked "optional" so a download hiccup can't fail the whole
-provisioning run, and app/eval/judges/prometheus_judge.py::ensure_available()
+qwen_judge (MAGIK's single eval judge — Tier-2 gate, Ragas, and DeepEval all
+grade through it, see app/eval/judges/qwen_judge.py) IS included in the
+default run — it's a pure disk fetch (no VRAM, no model load), so a one-time
+~4.7GB download on the box's first boot is worth it to guarantee Tier-2
+always has its real judge instead of silently degrading to a weaker lexical
+fallback. It's still marked "optional" so a download hiccup can't fail the
+whole provisioning run, and app/eval/judges/qwen_judge.py::ensure_available()
 is a second, independent fetch attempt if it's ever still missing when
 Tier-2 actually runs. `--include-eval-models` remains for any FUTURE
 eval-only model that genuinely should stay opt-in.
@@ -241,7 +242,7 @@ MODELS: list[dict] = [
 # it True) controls whether main()'s default run (the one start_server.py
 # invokes on every boot) includes this entry — set False only for a model
 # that would genuinely cost something recurring on every normal boot (real
-# VRAM/compute, not just a one-time disk fetch); see prometheus_judge's own
+# VRAM/compute, not just a one-time disk fetch); see qwen_judge's own
 # comment above for why a plain download doesn't qualify. `--only <key>` or
 # `--include-eval-models` still force-fetch anything regardless of this flag.
 GGUF_MODELS: list[dict] = [
@@ -253,39 +254,43 @@ GGUF_MODELS: list[dict] = [
         "gated": False,
     },
     {
-        "key": "prometheus_judge",
-        "gguf_repo": "prometheus-eval/prometheus-7b-v2.0-GGUF",
-        # Q4_K_M, NOT Q8_0 — verified live via the HF Hub API
-        # (huggingface.co/api/models/prometheus-eval/prometheus-7b-v2.0-GGUF,
-        # 2026-08-01): this repo contains exactly one .gguf file, and it
-        # isn't Q8_0. The old Q8_0 filename here 404'd on every real
-        # download attempt (confirmed live) — it never existed, this was a
-        # pre-existing bug, not a hypothetical. Don't change this filename
-        # again without re-checking that same API response first.
-        "gguf_filename": "prometheus-7b-v2.0.Q4_K_M.gguf",
-        "size_gb": 4.4,
+        "key": "qwen_judge",
+        # bartowski's requant, not the official Qwen/Qwen2.5-7B-Instruct-GGUF
+        # repo — verified live via the HF Hub API (2026-08-01) that the
+        # official repo's Q4_K_M is split across 2 shard files
+        # (qwen2.5-7b-instruct-q4_k_m-0000{1,2}-of-00002.gguf), which this
+        # single-filename download pattern can't express. bartowski publishes
+        # a single-file Q4_K_M for this size class, same convention as the
+        # "gguf" entry above. Don't change this filename/repo without
+        # re-checking that same API response first — see prometheus_judge's
+        # retired comment here for what happens when that step is skipped
+        # (a guessed filename 404'd on every real download attempt).
+        "gguf_repo": "bartowski/Qwen2.5-7B-Instruct-GGUF",
+        "gguf_filename": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+        "size_gb": 4.7,
         "gated": False,
         "optional": True,
-        # Loaded only by app/eval/judges/prometheus_judge.py during a Tier-2
-        # eval run — never touched during normal request serving, so this
-        # was originally "startup": False (excluded from the default boot
-        # run) on the theory that it shouldn't cost anything on a normal
+        # Loaded only by app/eval/judges/qwen_judge.py during a Tier-2
+        # eval run (also backs the Ragas report and DeepEval — MAGIK's
+        # single eval judge) — never touched during normal request serving,
+        # so this was originally "startup": False (excluded from the default
+        # boot run) on the theory that it shouldn't cost anything on a normal
         # boot. That theory doesn't actually hold: _dl_gguf() below is a
         # pure disk fetch (hf_hub_download + hardlink) — it never
         # instantiates Llama(...), so it costs zero VRAM regardless of this
-        # flag; VRAM is only spent if/when prometheus_judge.py's own
-        # _load_prometheus() runs, which this flag doesn't gate at all. The
-        # ONLY real cost was a one-time ~4.4GB download on the box's FIRST
+        # flag; VRAM is only spent if/when qwen_judge.py's own
+        # _load_qwen_judge() runs, which this flag doesn't gate at all. The
+        # ONLY real cost was a one-time ~4.7GB download on the box's FIRST
         # boot (every boot after that is a fast cached-file + checksum
         # check, same as every other model here). Given that, defaulting
         # it OFF just meant Tier-2 — an important quality gate — silently
         # graded with a much weaker lexical judge until someone remembered
-        # a manual `--only prometheus_judge` step (confirmed happening live
-        # on 2026-07-31). Left "optional": True so a download hiccup still
-        # can't fail the whole provisioning run; prometheus_judge.py's own
-        # ensure_available() is a second, independent safety net that
-        # auto-fetches it inline if it's still somehow missing when Tier-2
-        # actually needs it.
+        # a manual `--only qwen_judge` step (confirmed happening live with
+        # the previous judge, prometheus_judge, on 2026-07-31). Left
+        # "optional": True so a download hiccup still can't fail the whole
+        # provisioning run; qwen_judge.py's own ensure_available() is a
+        # second, independent safety net that auto-fetches it inline if
+        # it's still somehow missing when Tier-2 actually needs it.
     },
 ]
 
@@ -293,7 +298,22 @@ GGUF_MODELS: list[dict] = [
 # ── cache detection ───────────────────────────────────────────────────────────
 
 
-def _is_hub_cached(model_id: str) -> bool:
+def _is_hub_cached(model_id: str, mtype: str | None = None) -> bool:
+    # detoxify (torch.hub, under TORCH_HOME) and easyocr (its own flat
+    # model_storage_directory, under _easyocr_dir) don't use the standard
+    # `models--X/snapshots/` huggingface_hub cache layout the check below
+    # assumes — checking that layout for them always returns False, so the
+    # "already cached, skip" fast path was never taken and every boot paid
+    # the full ~12s/~2s cost of re-instantiating Detoxify()/Reader() (the
+    # underlying network fetch itself already no-ops when cached; the model
+    # construction/load does not). Confirmed live 2026-08-01: both reported
+    # "OK in Ns" — not "Already cached — checksum OK, skipping" — on every
+    # single boot despite the files genuinely being present and reused.
+    if mtype == "detoxify":
+        checkpoints = Path(_torch_home) / "hub" / "checkpoints"
+        return checkpoints.is_dir() and any(checkpoints.iterdir())
+    if mtype == "easyocr":
+        return _easyocr_dir.is_dir() and any(_easyocr_dir.iterdir())
     cache_key = "models--" + model_id.replace("/", "--")
     snapshots = Path(_hf_home) / "hub" / cache_key / "snapshots"
     if not snapshots.exists():
@@ -513,32 +533,58 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _sha256_dir(path: Path) -> str:
-    """Combined hash of every real file under path — stable regardless of
-    filesystem traversal order, so it's comparable across machines/runs."""
+def _sha256_dir(path: Path, only_files: list[str] | None = None) -> tuple[str, list[str]]:
+    """Combined hash of files under path, plus the sorted relative-path list
+    that was actually hashed. Stable regardless of filesystem traversal
+    order, so it's comparable across machines/runs.
+
+    `only_files`, when given, restricts hashing to exactly those relative
+    paths (skipping any that no longer exist) instead of re-enumerating the
+    directory — see _model_checksum's docstring for why this matters: model
+    loading code can write auxiliary files into this same directory after
+    download (tokenizer merges, generated indexes, framework-specific
+    caches), and re-enumerating "everything currently here" would count
+    those as drift even though nothing originally downloaded ever changed.
+    """
+    if only_files is not None:
+        candidates = [path / rel for rel in only_files]
+    else:
+        candidates = sorted(path.rglob("*"))
     parts = []
-    for f in sorted(path.rglob("*")):
+    hashed: list[str] = []
+    for f in candidates:
         if f.is_file():
             rel = f.relative_to(path).as_posix()
             parts.append(f"{rel}:{_sha256_file(f)}")
-    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+            hashed.append(rel)
+    digest = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+    return digest, sorted(hashed)
 
 
-def _model_checksum(model_id: str, mtype: str, gguf_filename: str | None = None) -> str | None:
-    """Compute the current on-disk checksum for a model, or None if its
-    layout doesn't support a clean single hash (rare loader types).
+def _model_checksum(
+    model_id: str, mtype: str, gguf_filename: str | None = None, only_files: list[str] | None = None
+) -> tuple[str | None, list[str] | None]:
+    """Compute the current on-disk checksum for a model, or (None, None) if
+    its layout doesn't support a clean single hash (rare loader types).
+
+    Returns (sha256, file_list) — file_list is the sorted relative paths
+    that were actually hashed (None for the single-file gguf case, where
+    there's nothing to enumerate). Pass `only_files` on a verify call to
+    hash exactly the files recorded at download time, ignoring anything
+    added to the directory since — see _sha256_dir's docstring.
 
     "detoxify" always falls through to the generic .hf_cache-shaped path
     below, which won't exist (it's cached under TORCH_HOME instead) — this
-    correctly returns None (no checksum available) rather than a wrong hash.
+    correctly returns (None, None) (no checksum available) rather than a
+    wrong hash.
     """
     if mtype == "gguf":
         path = _gguf_dir / gguf_filename
-        return _sha256_file(path) if path.exists() else None
+        return (_sha256_file(path), None) if path.exists() else (None, None)
     cache_key = "models--" + model_id.replace("/", "--")
     snapshots = Path(_hf_home) / "hub" / cache_key / "snapshots"
     if not snapshots.exists() or not any(snapshots.iterdir()):
-        return None
+        return None, None
     # Deliberately does NOT try to pick "the one right" revision snapshot.
     # An earlier version picked max(revs, key=mtime), assuming exactly one
     # snapshot dir — but a single from_pretrained() call sequence (tokenizer,
@@ -554,19 +600,26 @@ def _model_checksum(model_id: str, mtype: str, gguf_filename: str | None = None)
     # covers every revision directory with one deterministic, sorted walk —
     # more thorough than picking one, not less, and immune to this class of
     # bug regardless of how many revisions the cache ends up holding.
-    return _sha256_dir(snapshots)
+    return _sha256_dir(snapshots, only_files=only_files)
 
 
 def _verify_or_record_checksum(
     model_id: str, mtype: str, gguf_filename: str | None = None
 ) -> tuple[str | None, bool]:
-    """Returns (sha256, mismatch). mismatch=True means the file(s) on disk no
-    longer match what was recorded the last time this model was downloaded —
-    silent corruption or an unexpected upstream swap, not assumed-safe."""
-    current = _model_checksum(model_id, mtype, gguf_filename=gguf_filename)
-    if current is None:
-        return None, False
+    """Returns (sha256, mismatch). mismatch=True means a file recorded at the
+    last download is missing or its content changed — silent corruption or
+    an unexpected upstream swap, not assumed-safe. Files that appeared in
+    the directory AFTER that download (e.g. written by the model-loading
+    code the first time the app actually used it) are never part of this
+    comparison — see _sha256_dir's docstring for why re-enumerating
+    "whatever's there now" produced permanent false-positive mismatches for
+    every HF-hub-cached model that gets touched at load time (confirmed
+    live 2026-08-01: embedder/reranker/ner/finbert/keybert/siglip/blip/
+    qwen2vl/trocr/whisper flagged MISMATCH on every single boot despite
+    loading and working fine at runtime)."""
     manifest_path = Path(_hf_home) / "download_manifest.json"
+    recorded_files: list[str] | None = None
+    recorded_sha: str | None = None
     if manifest_path.exists():
         try:
             entries = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -574,8 +627,18 @@ def _verify_or_record_checksum(
             entries = []
         for e in entries:
             if e.get("model_id") == model_id and e.get("sha256"):
-                return current, e["sha256"] != current
-    return current, False
+                recorded_sha = e["sha256"]
+                recorded_files = e.get("files")  # None for pre-fix manifest entries
+                break
+
+    current, _hashed_files = _model_checksum(
+        model_id, mtype, gguf_filename=gguf_filename, only_files=recorded_files
+    )
+    if current is None:
+        return None, False
+    if recorded_sha is None:
+        return current, False
+    return current, recorded_sha != current
 
 
 # ── manifest ──────────────────────────────────────────────────────────────────
@@ -588,6 +651,7 @@ def _write_manifest(
     sha256: str | None,
     revision: str | None,
     gguf_filename: str | None = None,
+    files: list[str] | None = None,
 ) -> None:
     manifest_path = Path(_hf_home) / "download_manifest.json"
     entries: list = []
@@ -605,6 +669,12 @@ def _write_manifest(
         "sha256": sha256,
         "revision": revision,  # None = tracked the default branch, not pinned
     }
+    if files is not None:
+        # The exact relative-path file list hashed at download time — later
+        # verification hashes only these, so files the model-loading code
+        # writes into this same directory afterward never register as
+        # "drift". See _sha256_dir's docstring.
+        entry["files"] = files
     if gguf_filename:
         # Disambiguates which GGUF this entry is once more than one GGUF-type
         # model can be in the manifest (e.g. the main LLM vs. the Prometheus
@@ -703,7 +773,7 @@ def main() -> None:
         action="store_true",
         help=(
             "Also download any eval-only model explicitly marked "
-            '"startup": False (none currently — prometheus_judge is in the '
+            '"startup": False (none currently — qwen_judge is in the '
             "default run since it costs nothing but disk on a normal boot). "
             "Kept for a future judge/eval model that genuinely should stay opt-in."
         ),
@@ -765,15 +835,11 @@ def main() -> None:
             continue
 
         # fast local cache check
-        # NOTE — "detoxify" always reports uncached here (falls through to
-        # _is_hub_cached, whose .hf_cache-shaped path never exists for a
-        # torch.hub-fetched model) and always re-attempts _dl_detoxify().
-        # That's a fast no-op, not a bug: torch.hub.load_state_dict_from_url
-        # skips the actual download itself if the file already exists under
-        # TORCH_HOME. Not worth a bespoke torch.hub cache-path check against
-        # a directory layout that's a detoxify-package internal, not a
-        # documented contract.
-        cached = _is_gguf_cached(gguf_filename) if mtype == "gguf" else _is_hub_cached(model_id)
+        cached = (
+            _is_gguf_cached(gguf_filename)
+            if mtype == "gguf"
+            else _is_hub_cached(model_id, mtype=mtype)
+        )
         if cached:
             result = _handle_cached(model_id, mtype, optional, gguf_filename=gguf_filename)
             if result == "ok":
@@ -795,9 +861,15 @@ def main() -> None:
                 print()
                 continue
 
-            sha256 = _model_checksum(model_id, mtype, gguf_filename=gguf_filename)
+            sha256, files = _model_checksum(model_id, mtype, gguf_filename=gguf_filename)
             _write_manifest(
-                model_id, m["size_gb"], mtype, sha256, revision, gguf_filename=gguf_filename
+                model_id,
+                m["size_gb"],
+                mtype,
+                sha256,
+                revision,
+                gguf_filename=gguf_filename,
+                files=files,
             )
             print(
                 f"  OK in {time.time() - t0:.0f}s"

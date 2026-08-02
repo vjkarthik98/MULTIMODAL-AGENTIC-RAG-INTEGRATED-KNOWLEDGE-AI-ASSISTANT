@@ -11,18 +11,21 @@ from collections import OrderedDict
 from typing import Any
 
 from app.core.config import settings
+from app.core.metrics import retrieval_latency as _retrieval_duration
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# retrieval_latency_seconds is a shared singleton from app.core.metrics, not
+# defined here — this file's own copy raced against identical copies in
+# query_pipeline.py/rag_pipeline.py (already unified there; see that file's
+# comment for the live incident this same audit closed on the generation
+# path). This one didn't crash — the try/except below already caught the
+# collision — but it silently dropped ALL three metrics in this block
+# (results/errors too, not just latency) for whichever module lost.
 try:
     from prometheus_client import Counter, Histogram
 
-    _retrieval_duration = Histogram(
-        "retrieval_latency_seconds",
-        "Retrieval latency",
-        ["retriever_type"],
-    )
     _retrieval_results = Histogram(
         "retrieval_results_count",
         "Number of results returned per retrieval",

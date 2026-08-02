@@ -11,36 +11,30 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from app.core.config import settings
+from app.core.metrics import llm_call_latency as _shared_llm_latency
+from app.core.metrics import retrieval_latency as _shared_retrieval_latency
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 # PROMETHEUS METRICS — SECTION 6
+# llm_call_latency_seconds and retrieval_latency_seconds are shared
+# singletons from app.core.metrics, not defined here — see app/core/
+# metrics.py's comment; this file's own copies used to race against
+# identical copies in gguf_model.py/rag_pipeline.py/reasoning_engine.py.
 
 
 def _get_metrics():
     try:
-        from prometheus_client import Counter, Histogram
+        from prometheus_client import Counter
 
-        retrieval_latency = Histogram(
-            "retrieval_latency_seconds",
-            "Retrieval latency by retriever type",
-            ["retriever_type"],
-        )
-        llm_latency = Histogram(
-            "llm_call_latency_seconds",
-            "LLM call latency by model",
-            ["model"],
-        )
         query_errors = Counter(
             "query_pipeline_errors_total",
             "Query pipeline errors by stage",
             ["stage"],
         )
         return {
-            "retrieval_latency": retrieval_latency,
-            "llm_latency": llm_latency,
             "query_errors": query_errors,
         }
     except Exception:
@@ -58,16 +52,14 @@ if settings.PROMETHEUS_ENABLED:
 
 def _record_retrieval_latency(retriever_type: str, latency: float) -> None:
     try:
-        if "retrieval_latency" in _METRICS:
-            _METRICS["retrieval_latency"].labels(retriever_type=retriever_type).observe(latency)
+        _shared_retrieval_latency.labels(retriever_type=retriever_type).observe(latency)
     except Exception:
         pass
 
 
 def _record_llm_latency(model: str, latency: float) -> None:
     try:
-        if "llm_latency" in _METRICS:
-            _METRICS["llm_latency"].labels(model=model).observe(latency)
+        _shared_llm_latency.labels(model=model, mode="pipeline").observe(latency)
     except Exception:
         pass
 
