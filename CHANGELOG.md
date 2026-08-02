@@ -3064,3 +3064,27 @@ jobs in that workflow carry the `Required` badge on the PR — only
 `tier1-retrieval` does. Tracked as a future task: register a self-hosted
 runner (GPU not actually needed for these 3 — they only need `.hf_cache`
 already warm) and repoint `quality.yml`'s `runs-on` at it.
+
+### Fixed — cd.yml's `deploy` job had no `actions/checkout` step
+
+First real `v0.29.0` deploy attempt failed at the very first repo-file
+access: `base64: deploy/aws/prod.env: No such file or directory`. Root
+cause, confirmed directly from the failed job's log: the `deploy` job in
+`cd.yml` never checked out the repository at all — it went straight from
+configuring AWS credentials to resolving the EC2 instance ID, then later
+tried to read `deploy/aws/prod.env` off a runner filesystem that was never
+given the repo in the first place. (`build-push`, a separate job, does
+have its own checkout — job filesystems don't share state, so that one
+job having it never helped `deploy`.) The inline comment right above the
+failing line even asserted the file was "committed and checked out right
+here on the runner" — it wasn't; that assumption was simply wrong and
+untested until this run.
+
+Fix: added `- uses: actions/checkout@v4` as the first step of the `deploy`
+job. Confirmed no other step in that job reads a repo-relative path — the
+rest is either AWS API calls or a literal heredoc written inline, so this
+one step is the complete fix. `build-push` had already succeeded and
+pushed `ghcr.io/vjkarthik98/multimodal-rag-assistant:v0.29.0` before this
+failure, so the image itself needed no changes — only this workflow file.
+The `v0.29.0` tag was deleted and re-pushed at the same version (not
+bumped) once this fix landed, since nothing application-level changed.
