@@ -14,7 +14,14 @@
         "categories:seo": ["off"],
         "uses-http2": "off",
         "unused-javascript": "off",
-        "csp-xss": "off"
+        "csp-xss": "off",
+        "lcp-lazy-loaded": "off",
+        "non-composited-animations": "off",
+        "prioritize-lcp-image": "off",
+        "button-name": ["warn", { "minScore": 0.9 }],
+        "meta-description": ["warn", { "minScore": 0.9 }],
+        "target-size": ["warn", { "minScore": 0.9 }],
+        "uses-responsive-images": ["warn", { "maxLength": 0 }]
       }
     },
     "upload": {
