@@ -46,6 +46,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Prepare bind-mounted directories for the non-root container
+        # docker-compose.yml bind-mounts ./.hf_cache, ./data, ./logs from the
+        # runner's checkout — actions/checkout and Docker's own auto-create-
+        # on-first-mount both leave these owned by the runner's default user
+        # (or root), not the container's non-root `appuser` (uid/gid 10001,
+        # set in Dockerfile). Without this, start_server.py fails immediately
+        # with PermissionError on /app/logs/llama_server.log and every
+        # /app/.hf_cache/* subdirectory it tries to write to — this is the
+        # real reason "Wait for API health" never saw the API come up, once
+        # the earlier Dockerfile build issue was fixed and jobs got far
+        # enough to actually reach this step for the first time (confirmed
+        # live via the real failure log, 2026-08-01).
+        run: |
+          mkdir -p .hf_cache data logs
+          sudo chown -R 10001:10001 .hf_cache data logs
+
       - name: Start local stack
         run: docker compose up -d api qdrant redis mongo
 
@@ -82,6 +98,22 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Prepare bind-mounted directories for the non-root container
+        # docker-compose.yml bind-mounts ./.hf_cache, ./data, ./logs from the
+        # runner's checkout — actions/checkout and Docker's own auto-create-
+        # on-first-mount both leave these owned by the runner's default user
+        # (or root), not the container's non-root `appuser` (uid/gid 10001,
+        # set in Dockerfile). Without this, start_server.py fails immediately
+        # with PermissionError on /app/logs/llama_server.log and every
+        # /app/.hf_cache/* subdirectory it tries to write to — this is the
+        # real reason "Wait for API health" never saw the API come up, once
+        # the earlier Dockerfile build issue was fixed and jobs got far
+        # enough to actually reach this step for the first time (confirmed
+        # live via the real failure log, 2026-08-01).
+        run: |
+          mkdir -p .hf_cache data logs
+          sudo chown -R 10001:10001 .hf_cache data logs
 
       - name: Start local stack
         run: docker compose up -d api qdrant redis mongo
@@ -130,6 +162,22 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
+      - name: Prepare bind-mounted directories for the non-root container
+        # docker-compose.yml bind-mounts ./.hf_cache, ./data, ./logs from the
+        # runner's checkout — actions/checkout and Docker's own auto-create-
+        # on-first-mount both leave these owned by the runner's default user
+        # (or root), not the container's non-root `appuser` (uid/gid 10001,
+        # set in Dockerfile). Without this, start_server.py fails immediately
+        # with PermissionError on /app/logs/llama_server.log and every
+        # /app/.hf_cache/* subdirectory it tries to write to — this is the
+        # real reason "Wait for API health" never saw the API come up, once
+        # the earlier Dockerfile build issue was fixed and jobs got far
+        # enough to actually reach this step for the first time (confirmed
+        # live via the real failure log, 2026-08-01).
+        run: |
+          mkdir -p .hf_cache data logs
+          sudo chown -R 10001:10001 .hf_cache data logs
 
       - name: Start local stack
         run: docker compose up -d api qdrant redis mongo
