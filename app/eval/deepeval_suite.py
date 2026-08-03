@@ -159,6 +159,9 @@ async def _build_eval_rows(cfg: EvalConfig, limit: int | None) -> tuple[list[dic
             "No curated gold rows with reference answers for the requested modality."
         )
 
+    import os
+
+    access_token = os.getenv("EVAL_ACCESS_TOKEN", "")
     full_ctx_retriever = _make_full_context_retriever()
     eval_rows: list[dict] = []
     errors: list[str] = []
@@ -167,7 +170,12 @@ async def _build_eval_rows(cfg: EvalConfig, limit: int | None) -> tuple[list[dic
         query = row["query"]
         session_id = f"{cfg.session_prefix}_deepeval_{row['id']}"
         try:
-            result = _query_via_server(query=query, session_id=session_id, user_id=cfg.user_id)
+            result = _query_via_server(
+                query=query,
+                session_id=session_id,
+                user_id=cfg.user_id,
+                access_token=access_token,
+            )
         except Exception as exc:
             errors.append(f"{row['id']}: {exc}")
             continue
@@ -339,7 +347,7 @@ def main() -> int:
         return 2
 
     if not eval_rows:
-        print("[deepeval-suite] FATAL: no queries succeeded — see errors above")
+        print("[deepeval-suite] FATAL: no queries succeeded: " + "; ".join(errors))
         return 2
 
     metric_names = [m.strip() for m in args.metrics.split(",") if m.strip()]

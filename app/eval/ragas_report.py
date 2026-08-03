@@ -75,6 +75,9 @@ async def _build_eval_rows(cfg: EvalConfig) -> tuple[list[dict], list[str]]:
             "run app.eval.datasets.build_gold_set --ingest and review TODO rows first."
         )
 
+    import os
+
+    access_token = os.getenv("EVAL_ACCESS_TOKEN", "")
     full_ctx_retriever = _make_full_context_retriever()
     eval_rows: list[dict] = []
     errors: list[str] = []
@@ -87,6 +90,7 @@ async def _build_eval_rows(cfg: EvalConfig) -> tuple[list[dict], list[str]]:
                 query=query,
                 session_id=session_id,
                 user_id=cfg.user_id,
+                access_token=access_token,
             )
         except Exception as exc:
             errors.append(f"{row['id']}: {exc}")
@@ -232,7 +236,9 @@ def main() -> int:
         return 2
 
     if not eval_rows:
-        print("[ragas-report] FATAL: no queries succeeded — see errors above")
+        print("[ragas-report] FATAL: no queries succeeded:")
+        for e in errors:
+            print(f"[ragas-report]   {e}")
         return 2
 
     ragas_metrics = asyncio.run(compute_generation_metrics_ragas(eval_rows))
