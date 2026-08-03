@@ -89,8 +89,16 @@ langchain-text-splitters>=0.0.1
 
 # ------------------------------------------------------------------------------
 # Numerical & Scientific Computing
+# Upper bound pinned: unconstrained numpy>=1.26 let pip resolve 2.5.x when
+# deepeval was added to this file, which conflicts with presidio-analyzer
+# (<2.5.0) and langchain 0.2.x (<2.0.0) with no install-time error — pip
+# does not backtrack across already-installed packages, so this silently
+# ships a broken dependency set instead of failing the build. Confirmed
+# live (2026-08-03): 1.26.4 (this range) installs cleanly for presidio,
+# langchain, and deepeval together — deepeval does not actually require
+# numpy>=2.5, pip just over-resolved to latest by default.
 # ------------------------------------------------------------------------------
-numpy>=1.26
+numpy>=1.26,<2.0.0
 scikit-learn>=1.4
 pandas>=2.2
 
@@ -226,6 +234,7 @@ psutil>=5.9
 # it changes every generation metric; re-baseline the eval suite if upgraded.
 # ------------------------------------------------------------------------------
 ragas==0.1.21
+deepeval>=1.4
 jiwer>=3.0.0
 mlflow>=2.10.0
 
