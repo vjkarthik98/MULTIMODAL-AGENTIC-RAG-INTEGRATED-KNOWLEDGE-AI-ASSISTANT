@@ -708,15 +708,6 @@ class Settings:
         ["txt", "pdf", "docx", "xlsx", "image", "audio", "video"],
     )
 
-    # CONVERSATIONAL REWRAP — an additive, tone-only second LLM pass that runs
-    # AFTER every accuracy-critical stage (verification, citation attachment,
-    # figure normalization). It never touches the citation footer and is
-    # discarded outright if it drops or changes any number in the answer body
-    # (see rag_pipeline.py's _conversational_rewrap) — a config revert, not a
-    # code revert, if it ever needs to come back off.
-    CONVERSATIONAL_REWRAP_ENABLED: bool = _bool("CONVERSATIONAL_REWRAP_ENABLED", True)
-    CONVERSATIONAL_REWRAP_MAX_TOKENS: int = _int("CONVERSATIONAL_REWRAP_MAX_TOKENS", 300)
-
     # VIDEO
     VIDEO_FRAME_INTERVAL_SEC: int = _int("VIDEO_FRAME_INTERVAL_SEC", 2)
     MAX_VIDEO_FRAMES: int = _int("MAX_VIDEO_FRAMES", 20)

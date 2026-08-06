@@ -2644,86 +2644,6 @@ _STREAM_LIMITATION_NOTICE = (
 )
 
 
-# CONVERSATIONAL REWRAP — additive tone-only second LLM pass. Runs after every
-# accuracy-critical stage (verification, figure normalization, citation
-# attachment) on the final, already-guarded `answer` string, so it can never
-# affect grounding — it only ever rephrases text that has already been proven
-# correct. Fails safe: any doubt about fact preservation discards the rewrite
-# and returns the original, unchanged, so the worst case is a silent no-op,
-# never a wrong figure reaching the user.
-
-_NUMBER_RE = re.compile(r'\d+(?:,\d{3})*(?:\.\d+)?')
-_CITATION_FOOTER_RE = re.compile(r'^Sources?:\s', re.IGNORECASE)
-_REWRAP_SKIP_QUERY_TYPES = frozenset({"structured", "code"})
-
-_REWRAP_PROMPT = (
-    "Rewrite the following answer so it reads naturally and conversationally, "
-    "the way a knowledgeable person would explain it out loud. Keep every "
-    "fact and every number EXACTLY as written — do not add, remove, or "
-    "change any figure, name, or date, and do not add any new information. "
-    "Do not add citations, brackets, or a 'Sources:' line. Output ONLY the "
-    "rewritten answer, nothing else.\n\nANSWER:\n{body}\n\nREWRITTEN:\n"
-)
-
-
-def _split_citation_footer(answer: str) -> tuple[str, str]:
-    """Split off a trailing 'Source(s): [...]' footer line (attached by
-    _attach_page_citations / _attach_section_citations / _attach_image_citations
-    above) so the rewrap call only ever sees the prose body — citation
-    formatting is never at risk of being reworded, reordered, or dropped."""
-    parts = answer.rsplit("\n\n", 1)
-    if len(parts) == 2 and _CITATION_FOOTER_RE.match(parts[1]):
-        return parts[0], "\n\n" + parts[1]
-    return answer, ""
-
-
-def _conversational_rewrap(answer: str, query: str, session_id: str, llm: Any) -> str:
-    if not settings.CONVERSATIONAL_REWRAP_ENABLED or not answer or not llm:
-        return answer
-
-    try:
-        from app.prompt.prompt_builder import _detect_query_type  # noqa: PLC0415
-
-        if _detect_query_type(query) in _REWRAP_SKIP_QUERY_TYPES:
-            return answer
-    except Exception:
-        pass  # if detection fails, still attempt the rewrap — worst case a no-op below
-
-    body, footer = _split_citation_footer(answer)
-    if len(body) < 20:
-        return answer
-
-    try:
-        rewritten = llm.generate(
-            _REWRAP_PROMPT.format(body=body),
-            max_tokens=settings.CONVERSATIONAL_REWRAP_MAX_TOKENS,
-            temperature=0.3,
-            top_p=settings.LLM_TOP_P,
-            session_id=session_id,
-        )
-    except Exception as exc:
-        logger.warning(event="rag_stream_rewrap_failed", error=str(exc), session_id=session_id)
-        return answer
-
-    rewritten = (rewritten or "").strip()
-    if not rewritten:
-        return answer
-
-    # VERIFICATION GATE — the rewrite must preserve every number exactly (no
-    # additions, no drops, no rounding). Any mismatch discards it outright.
-    if set(_NUMBER_RE.findall(body)) != set(_NUMBER_RE.findall(rewritten)):
-        logger.info(event="rag_stream_rewrap_rejected_number_mismatch", session_id=session_id)
-        return answer
-
-    # A rewrite that collapsed to near-nothing (truncated/garbage generation)
-    # is worse than the original — discard it too.
-    if len(rewritten) < 0.4 * len(body):
-        logger.info(event="rag_stream_rewrap_rejected_too_short", session_id=session_id)
-        return answer
-
-    return rewritten + footer
-
-
 # SANDWICH REORDER — Liu et al. "Lost in the Middle" (2023):
 # LLMs attend best to the beginning and end of long prompts; middle positions
 # are attended to least.  Placing the best-ranked chunk first and the
@@ -4304,20 +4224,6 @@ class RAGPipeline:
                     except Exception as _date_err:
                         logger.warning(
                             event="rag_stream_image_date_expand_failed", error=str(_date_err)
-                        )
-
-                # CONVERSATIONAL REWRAP — tone-only second pass on the final,
-                # fully-guarded prose (after every accuracy stage above has
-                # run: verification, figure normalization, citation
-                # attachment, synth overrides). Skipped when the hallucination
-                # guard flagged this answer — an uncertain answer gets no
-                # further LLM touch, only the limitation notice below.
-                if not _stream_hallucination_warning:
-                    try:
-                        answer = _conversational_rewrap(answer, query, session_id, llm)
-                    except Exception as _rewrap_err:
-                        logger.warning(
-                            event="rag_stream_rewrap_unhandled_error", error=str(_rewrap_err)
                         )
 
                 # HALLUCINATION LIMITATION NOTICE — output_guard flagged the
