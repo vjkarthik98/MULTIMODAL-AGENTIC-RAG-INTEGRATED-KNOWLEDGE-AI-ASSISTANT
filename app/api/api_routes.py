@@ -1289,6 +1289,66 @@ def _web_source_payload(urls: list, titles: list) -> list[dict[str, Any]]:
     ]
 
 
+# ── DOCUMENT-SUMMARIZE ROUTING — /rag/query/stream only ────────────────────
+#
+# "Summarize this file" is a whole-document operation, not a top-k semantic
+# question — app/pipeline/summarize.py pulls every chunk of the resolved file
+# in original order and map-reduces over the LLM's context budget. Follows
+# the exact _is_web_request/_run_web_search short-circuit pattern above: a
+# hard-rule keyword check, then an early SSE return, placed before the cache
+# check so a summarize request never returns a stale cached Q&A answer.
+
+_SUMMARIZE_PHRASES = frozenset(
+    {
+        "summarize this",
+        "summarize the document",
+        "summarize this document",
+        "summarize this file",
+        "summarize the file",
+        "summarise this",
+        "summarise the document",
+        "summarise this document",
+        "summarise this file",
+        "summarise the file",
+        "give me a summary",
+        "provide a summary",
+        "can you summarize",
+        "can you summarise",
+        "tl;dr",
+        "tldr",
+    }
+)
+
+# A query that STARTS with the bare verb ("summarize apple_10k.pdf",
+# "summarize the risk factors") is also a candidate — whether it actually
+# becomes a whole-document summary depends on whether _resolve_summarize_source
+# below can pin down a specific file. If it can't (e.g. "summarize the risk
+# factors" names a topic, not a file), the caller falls through to normal RAG
+# instead of forcing a document-level summary.
+_SUMMARIZE_VERB_RE = re.compile(r"^\s*(?:summarize|summarise)\b", re.IGNORECASE)
+
+
+def _is_summarize_request(query: str) -> bool:
+    q = (query or "").lower()
+    return bool(_SUMMARIZE_VERB_RE.match(q)) or any(p in q for p in _SUMMARIZE_PHRASES)
+
+
+def _resolve_summarize_source(query: str, sources: list[str] | None) -> str | None:
+    """Pick the single file a summarize request targets, or None if it can't
+    be resolved to exactly one file — the caller then falls through to normal
+    RAG rather than guessing. Prefers an explicit UI file selection
+    (`sources`, already plumbed through QueryRequest for the normal RAG path)
+    over a filename mentioned in the query text."""
+    if sources and len(sources) == 1:
+        return sources[0]
+    from app.pipeline.rag_pipeline import _detect_filename_scope_stream
+
+    detected = _detect_filename_scope_stream(query)
+    if detected and len(detected) == 1:
+        return detected[0]
+    return None
+
+
 @router.post("/query/stream")
 async def stream_query(
     request_body: QueryRequest,
@@ -1437,6 +1497,66 @@ async def stream_query(
                 )
                 # Fall through to cache check / normal RAG only for the
                 # heuristic-matched (non-explicit) case.
+
+        # DOCUMENT SUMMARIZE — checked before the cache so a summarize request
+        # never returns a stale cached Q&A answer for the same session/query
+        # text. If no single file can be resolved, falls through to normal RAG
+        # (so "summarize the risk factors" without a named file still works as
+        # an ordinary question) rather than forcing a document-level summary.
+        if _is_summarize_request(query):
+            _summarize_target = _resolve_summarize_source(query, request_body.sources)
+            if _summarize_target:
+                from app.core.response import build_sources
+                from app.pipeline.summarize import summarize_document
+
+                _summary_text = await asyncio.to_thread(
+                    summarize_document,
+                    _summarize_target,
+                    session_id,
+                    current_user.user_id,
+                )
+                logger.info(
+                    event="stream_summarize_document",
+                    source=_summarize_target,
+                    session_id=session_id,
+                )
+
+                try:
+                    _store = infra.get_vector_store()
+                    _summary_chunks = (
+                        _store.get_all_chunks_by_source(_summarize_target, current_user.user_id)[
+                            :5
+                        ]
+                        if _store
+                        else []
+                    )
+                    _summary_sources = build_sources(_summary_chunks)
+                except Exception as _src_err:
+                    logger.warning(
+                        event="stream_summarize_sources_failed", error=str(_src_err)
+                    )
+                    _summary_sources = []
+
+                async def summarize_event_stream():
+                    for piece in _stream_chunks(_summary_text):
+                        yield _sse(piece)
+                        await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
+                    if _summary_sources:
+                        yield (
+                            f'data: {{"__type__":"sources","data":'
+                            f'{json.dumps(_summary_sources)}}}\n\n'
+                        )
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(
+                    summarize_event_stream(),
+                    media_type="text/event-stream",
+                    headers={
+                        "X-Request-ID": request_id,
+                        "Cache-Control": "no-cache",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
 
         # REDIS CACHE CHECK — skip for web requests and explicit no_cache (regenerate).
         # On a cache hit we stream the cached answer immediately.

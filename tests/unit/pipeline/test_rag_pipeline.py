@@ -7,6 +7,7 @@ from app.pipeline.rag_pipeline import (
     _build_context,
     _build_p248_sources,
     _compose,
+    _conversational_rewrap,
     _dedup_docs,
     _extract_sources,
     _format_history,
@@ -14,6 +15,7 @@ from app.pipeline.rag_pipeline import (
     _normalize,
     _normalize_docs,
     _sanitize,
+    _split_citation_footer,
 )
 
 
@@ -509,3 +511,145 @@ class TestRAGPipelineRun:
         result = pipeline.run("query", session_id="s1")
         assert "metadata" in result
         assert "docs" in result["metadata"]
+
+
+# ---------------------------------------------------------------------------
+# _split_citation_footer
+# ---------------------------------------------------------------------------
+
+class TestSplitCitationFooter:
+
+    def test_splits_page_footer(self):
+        answer = "Revenue was $391,035 million.\n\nSources: [p.27] [p.29]"
+        body, footer = _split_citation_footer(answer)
+        assert body == "Revenue was $391,035 million."
+        assert footer == "\n\nSources: [p.27] [p.29]"
+
+    def test_splits_singular_source_footer(self):
+        answer = "Something.\n\nSource: [aapl-chart.jpg]"
+        body, footer = _split_citation_footer(answer)
+        assert body == "Something."
+        assert footer == "\n\nSource: [aapl-chart.jpg]"
+
+    def test_no_footer_returns_whole_answer_as_body(self):
+        answer = "Revenue was $391,035 million."
+        body, footer = _split_citation_footer(answer)
+        assert body == answer
+        assert footer == ""
+
+    def test_non_citation_double_newline_not_treated_as_footer(self):
+        answer = "First paragraph.\n\nSecond paragraph, not a citation."
+        body, footer = _split_citation_footer(answer)
+        assert body == answer
+        assert footer == ""
+
+
+# ---------------------------------------------------------------------------
+# _conversational_rewrap
+# ---------------------------------------------------------------------------
+
+class TestConversationalRewrap:
+
+    def test_disabled_returns_original(self):
+        with patch("app.pipeline.rag_pipeline.settings") as mock_settings:
+            mock_settings.CONVERSATIONAL_REWRAP_ENABLED = False
+            llm = MagicMock()
+            result = _conversational_rewrap("Revenue was $10 million.", "q", "s1", llm)
+        assert result == "Revenue was $10 million."
+        llm.generate.assert_not_called()
+
+    def test_empty_answer_returns_empty(self):
+        llm = MagicMock()
+        result = _conversational_rewrap("", "q", "s1", llm)
+        assert result == ""
+        llm.generate.assert_not_called()
+
+    def test_no_llm_returns_original(self):
+        result = _conversational_rewrap("Revenue was $10 million.", "q", "s1", None)
+        assert result == "Revenue was $10 million."
+
+    def test_accepts_rewrite_when_numbers_match(self):
+        original = "Revenue was $391,035 million in FY2024."
+        rewritten = "In FY2024, the company brought in $391,035 million in revenue."
+        llm = MagicMock()
+        llm.generate.return_value = rewritten
+        with patch("app.prompt.prompt_builder._detect_query_type", return_value="general"):
+            result = _conversational_rewrap(original, "what was revenue?", "s1", llm)
+        assert result == rewritten
+
+    def test_rejects_rewrite_that_drops_a_number(self):
+        original = "Revenue was $391,035 million, up from $383,285 million."
+        rewritten = "Revenue was $391,035 million."  # dropped the prior-year figure
+        llm = MagicMock()
+        llm.generate.return_value = rewritten
+        with patch("app.prompt.prompt_builder._detect_query_type", return_value="general"):
+            result = _conversational_rewrap(original, "q", "s1", llm)
+        assert result == original
+
+    def test_rejects_rewrite_that_adds_a_number(self):
+        original = "Revenue was $391,035 million."
+        rewritten = "Revenue was $391,035 million, roughly 8% higher than last year."
+        llm = MagicMock()
+        llm.generate.return_value = rewritten
+        with patch("app.prompt.prompt_builder._detect_query_type", return_value="general"):
+            result = _conversational_rewrap(original, "q", "s1", llm)
+        assert result == original
+
+    def test_preserves_citation_footer_untouched(self):
+        original = "Revenue was $391,035 million.\n\nSources: [p.27]"
+        rewritten_body = "The company reported $391,035 million in revenue."
+        llm = MagicMock()
+        llm.generate.return_value = rewritten_body
+        with patch("app.prompt.prompt_builder._detect_query_type", return_value="general"):
+            result = _conversational_rewrap(original, "q", "s1", llm)
+        assert result == rewritten_body + "\n\nSources: [p.27]"
+        # The footer text must never be part of what was sent to the LLM.
+        sent_prompt = llm.generate.call_args[0][0]
+        assert "Sources: [p.27]" not in sent_prompt
+
+    def test_skips_structured_query_type(self):
+        original = "Net sales: $391,035 million."
+        llm = MagicMock()
+        with patch("app.prompt.prompt_builder._detect_query_type", return_value="structured"):
+            result = _conversational_rewrap(original, "extract net sales", "s1", llm)
+        assert result == original
+        llm.generate.assert_not_called()
+
+    def test_skips_code_query_type(self):
+        original = "def foo(): pass"
+        llm = MagicMock()
+        with patch("app.prompt.prompt_builder._detect_query_type", return_value="code"):
+            result = _conversational_rewrap(original, "write a function", "s1", llm)
+        assert result == original
+        llm.generate.assert_not_called()
+
+    def test_llm_exception_returns_original(self):
+        original = "Revenue was $10 million."
+        llm = MagicMock()
+        llm.generate.side_effect = RuntimeError("boom")
+        with patch("app.prompt.prompt_builder._detect_query_type", return_value="general"):
+            result = _conversational_rewrap(original, "q", "s1", llm)
+        assert result == original
+
+    def test_empty_rewrite_returns_original(self):
+        original = "Revenue was $10 million."
+        llm = MagicMock()
+        llm.generate.return_value = "   "
+        with patch("app.prompt.prompt_builder._detect_query_type", return_value="general"):
+            result = _conversational_rewrap(original, "q", "s1", llm)
+        assert result == original
+
+    def test_too_short_rewrite_rejected(self):
+        original = "Revenue was $391,035 million in fiscal year 2024, up significantly."
+        llm = MagicMock()
+        llm.generate.return_value = "$391,035 million."  # numbers match but collapsed
+        with patch("app.prompt.prompt_builder._detect_query_type", return_value="general"):
+            result = _conversational_rewrap(original, "q", "s1", llm)
+        assert result == original
+
+    def test_short_body_skips_rewrap_entirely(self):
+        original = "Yes."
+        llm = MagicMock()
+        result = _conversational_rewrap(original, "is that right?", "s1", llm)
+        assert result == original
+        llm.generate.assert_not_called()
