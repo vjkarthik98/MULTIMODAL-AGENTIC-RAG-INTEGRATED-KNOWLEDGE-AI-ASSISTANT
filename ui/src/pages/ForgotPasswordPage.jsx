@@ -26,7 +26,7 @@ export default function ForgotPasswordPage({ onBack }) {
 
   return (
     <div
-      className="relative min-h-screen flex flex-col items-center justify-center px-6 transition-opacity duration-300"
+      className="relative min-h-dvh-screen flex flex-col items-center justify-center px-4 sm:px-6 transition-opacity duration-300"
       style={{ background: 'var(--t-bg)', opacity: mounted ? 1 : 0 }}
     >
       {/* Ambient glow */}
