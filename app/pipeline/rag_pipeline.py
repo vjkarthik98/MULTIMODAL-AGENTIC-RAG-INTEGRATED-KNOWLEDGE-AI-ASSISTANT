@@ -3404,6 +3404,7 @@ class RAGPipeline:
         session_id: str = "default",
         user_id: str | None = None,
         sources: list[str] | None = None,
+        regenerate: bool = False,
     ) -> Iterator[str]:
 
         query = _normalize(query)
@@ -3674,6 +3675,7 @@ class RAGPipeline:
                             modality_hint=_mod0_norm,
                             filters=_stream_filters,
                             memory_context=_stream_history_text,
+                            regenerate=regenerate,
                         )
                         logger.info(
                             event="rag_stream_verification_result",
@@ -3699,6 +3701,7 @@ class RAGPipeline:
                     context=context,
                     memory=_stream_history_text,
                     session_id=session_id,
+                    regenerate=regenerate,
                 )
 
                 # PII PROMPT STRIP — same as non-streaming path (Phase 26 P1)
@@ -3771,12 +3774,30 @@ class RAGPipeline:
                     else:
                         prefix_checked = True
                 else:
+                    # SAMPLING — deterministic (temp 0.0-0.1) on the normal
+                    # path so the same question gives the same answer. On an
+                    # explicit regenerate that determinism is exactly what
+                    # made the button a no-op, so raise the temperature to a
+                    # floor and pick a fresh seed; see app/llm/regeneration.py.
+                    _temp = _adaptive_temperature(query)
+                    _seed = None
+                    if regenerate:
+                        from app.llm.regeneration import regeneration_sampling
+
+                        _temp, _seed = regeneration_sampling(_temp)
+                        logger.info(
+                            event="rag_stream_regenerate",
+                            session_id=session_id,
+                            temperature=_temp,
+                            seed=_seed,
+                        )
                     for token in llm.stream(
                         prompt,
                         max_tokens=_max_tok,
-                        temperature=_adaptive_temperature(query),
+                        temperature=_temp,
                         top_p=settings.LLM_TOP_P,
                         session_id=session_id,
+                        seed=_seed,
                     ):
                         collected_tokens.append(token)
                         if refusal_mode or prefix_checked:
@@ -3880,8 +3901,30 @@ class RAGPipeline:
                 # accurate meta-path answer (its lazy /rag/query fallback). The
                 # genuine "no documents" case never reaches here — it is handled
                 # by the deterministic retrieval gate above.
-                if not answer or _is_llm_refusal(answer):
-                    logger.info(event="rag_stream_llm_refused_using_meta", session_id=session_id)
+                #
+                # `refusal_mode` (set at the prefix gate, on the RAW model
+                # output) must be honoured here, not just re-derived from
+                # `answer`: by this point the answer has been through the
+                # output guard, the figure normalizer and
+                # _strip_leaked_instructions, and the stripper removes a
+                # leading "I could not find any relevant information in the
+                # provided sources to answer this question." as a preamble.
+                # The re-derived check then saw only the refusal's tail ("The
+                # documents discuss unrelated topics such as ...") and let it
+                # through — so a decapitated refusal reached the user dressed
+                # as a real answer, with source chips attached, instead of
+                # falling back to the accurate meta answer. The two decisions
+                # were also already inconsistent with each other: once
+                # refusal_mode is set the token loop stops flushing, so those
+                # tokens were suppressed live and then delivered anyway via
+                # REPLACE. Same prefix-anchored rule either way — this only
+                # makes the final decision agree with the streaming one.
+                if not answer or refusal_mode or _is_llm_refusal(answer):
+                    logger.info(
+                        event="rag_stream_llm_refused_using_meta",
+                        session_id=session_id,
+                        caught_at_prefix_gate=refusal_mode,
+                    )
                     yield "\x00REFUSAL\x00"
                     return
 

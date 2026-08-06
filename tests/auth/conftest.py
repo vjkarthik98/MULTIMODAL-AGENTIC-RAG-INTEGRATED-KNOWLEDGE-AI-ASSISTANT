@@ -129,6 +129,25 @@ def _reset_users_collection():
     _users_col.clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_auth_rate_limit_buckets():
+    """Clear the in-process IP brute-force buckets between tests.
+
+    app.main's auth rate limiter is a module-level dict keyed by client IP,
+    and TestClient presents the same IP for every request in the run — so
+    without this, one test file's login attempts spend the per-minute budget
+    and a later file's perfectly valid login gets a 429 instead of its
+    expected response. Only touched if app.main is already imported, so
+    service-level tests don't pay for importing the app.
+    """
+    import sys
+
+    main = sys.modules.get("app.main")
+    if main is not None:
+        main._rate_limit_store.clear()
+    yield
+
+
 @pytest.fixture
 def mock_mongo_col(monkeypatch):
     """Patch _get_mongo_collection in auth.service to use in-memory store."""

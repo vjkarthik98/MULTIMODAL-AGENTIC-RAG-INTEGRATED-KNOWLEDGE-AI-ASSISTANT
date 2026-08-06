@@ -44,7 +44,8 @@ burns a $200 credit in under a week.
 | `iam/lambda-*-permissions.json` | Least-privilege policies, scoped to the single instance ARN |
 | `iam/ec2-instance-profile-permissions.json` | Least-privilege policy for the box's own instance profile — `ssm:GetParameter` on `/magik/ghcr_pat` plus the nine app secrets below, each scoped to its exact ARN. Attach alongside the AWS-managed `AmazonSSMManagedInstanceCore`. Not applied by any script here — attach it by hand (console or `aws iam put-role-policy`) to whatever role the instance profile uses |
 | `caddy/Caddyfile` | HTTPS reverse proxy on the box; SSE-safe, long timeouts for model loading. Uses `APP_DOMAIN_PLACEHOLDER` as a template — the box's actual `/etc/caddy/Caddyfile` has `magik.vk-ai.online` substituted in directly |
-| `prod.env` | Committed, non-secret deploy config (`GRAFANA_ROOT_URL`, `VRAM_BUDGET_GB`, `QDRANT_URL`, `REDIS_URL`, `GOOGLE_CLIENT_ID`, `OAUTH_REDIRECT_URI`, `FRONTEND_URL`, `SMTP_USER`, `CORS_ORIGINS`, `DEFAULT_DEV_USER_ID`, `EVAL_USER_ID`) — layered into the app container by `cd.yml`'s deploy step, and into the monitoring stack's own compose substitution by `scripts/deploy_monitoring.sh`. Editing this and pushing a tag (for the app) or re-running the monitoring script is the only correct way to change these values; hand-editing `/opt/magik/.env` for them makes this file drift out of sync with what's actually live |
+| `prod.env` | Committed, non-secret deploy config (`GRAFANA_ROOT_URL`, `VRAM_BUDGET_GB`, `QDRANT_URL`, `REDIS_URL`, `GOOGLE_CLIENT_ID`, `OAUTH_REDIRECT_URI`, `FRONTEND_URL`, `SMTP_USER`, `CORS_ORIGINS`, `DEFAULT_DEV_USER_ID`, `EVAL_USER_ID`) — layered into the app container by `cd.yml`'s `promote-production` step, and into the monitoring stack's own compose substitution by `scripts/deploy_monitoring.sh`. Editing this and pushing a tag (for the app) or re-running the monitoring script is the only correct way to change these values; hand-editing `/opt/magik/.env` for them makes this file drift out of sync with what's actually live |
+| `staging.env` | Same idea as `prod.env`, but for the private staging box `cd.yml`'s `deploy-staging` step targets — no `GRAFANA_ROOT_URL`/`CORS_ORIGINS`/`FRONTEND_URL` (staging has no monitoring stack and is never reachable from outside the box), same `QDRANT_URL`/`REDIS_URL`/`VRAM_BUDGET_GB`/`EVAL_USER_ID` as prod (staging shares prod's external services, isolated by `EVAL_USER_ID` tenant scoping). See "Staging gate" below |
 | `scripts/deploy_lambdas.sh` | Idempotent one-shot deploy of both Lambdas, the API Gateway HTTP API, and the schedule |
 | `scripts/deploy_monitoring.sh` | Idempotent bring-up of the monitoring stack (`docker compose -f docker-compose.monitoring.yml up -d`), fetching `GRAFANA_ADMIN_PASSWORD`/`NTFY_WEBHOOK_URL` from SSM first — see "App secrets in SSM" below. Run this instead of a bare `docker compose up`, or the two SSM-only secrets never reach the stack |
 
@@ -77,6 +78,36 @@ aws ec2 describe-instances --instance-ids i-02efa81c8876a014e \
 
 `DRY_RUN=true` on the idle-stop Lambda logs its decision without stopping
 anything — useful for confirming the thresholds before trusting it.
+
+**If a visitor reports the wake page never redirects even after several
+minutes:** the instance is reaching `running` but `/health` is never
+answering (past `STUCK_MINUTES`, default 6, the page itself now says so
+explicitly instead of repeating the generic "starting up" copy forever — see
+`deploy/aws/lambda/wake_gateway/handler.py`). That page change only makes the
+symptom visible; it can't fix an app that won't come up. Diagnose from here:
+
+```bash
+# What the gateway itself saw on each check (state, elapsed time, stuck warnings)
+aws logs tail /aws/lambda/magik-wake-gateway --follow
+
+# What the app itself is doing once EC2 is up — SSM into the box, no SSH key needed
+aws ssm start-session --target i-02efa81c8876a014e
+sudo journalctl -u magik -n 200 --no-pager   # or: docker compose logs --tail 200, per how it's actually run
+curl -s localhost:8000/health               # bypasses Caddy — isolates "app is fine" vs "Caddy/TLS is the problem"
+curl -sI https://magik.vk-ai.online/health  # the exact request the Lambda makes, from the box itself
+```
+
+`app/main.py`'s `/health` is a trivial, synchronous, no-dependency handler
+(returns `{"status": "ok", ...}` immediately, doesn't touch Qdrant/Redis/
+Mongo) — so if `curl localhost:8000/health` on the box succeeds but the
+Lambda still can't reach `https://magik.vk-ai.online/health`, the app itself
+is fine and the problem is in front of it: most likely Caddy failed to start
+or its Let's Encrypt certificate renewal failed (the wake gateway's health
+check is a real HTTPS request from outside AWS — an expired/invalid cert
+fails it exactly like a genuinely dead app would). If `localhost:8000/health`
+itself doesn't answer, look for a crash on startup — a bad deploy, or
+`app/core/startup_validator.py` raising because the model manifest is
+incomplete.
 
 ## Runner busy-check token (required before enabling Tier-2 eval)
 
@@ -182,7 +213,8 @@ section for how they're seeded and fetched.
 
 Two more values, consumed by `docker-compose.monitoring.yml`'s `grafana`
 service specifically, not the app container — `scripts/deploy_monitoring.sh`
-fetches them, `cd.yml` never touches them.
+fetches them; `cd.yml`'s app-container deploy step never touches them (its
+separate monitoring-sync step below runs the same script, so it does).
 
 **One-time setup** (from AWS CloudShell, same account/region as above):
 
@@ -199,18 +231,60 @@ the *same* instance-profile role as the app secrets above, since
 `deploy_monitoring.sh` runs on this same box, so re-attaching the policy
 once covers all nine app-secret ARNs plus these two.
 
-**Bring the stack up** with the wrapper script, not a bare `docker compose
-up` (which would leave `GRAFANA_ADMIN_PASSWORD` unset and fail Grafana's own
-`:?` guard, and never deliver `NTFY_WEBHOOK_URL` to the container at all):
+**Automated as of the `promote-production` job's "Sync + redeploy monitoring
+stack" step**: every tag that promotes to production also brings the box's
+persistent repo checkout at `/home/ubuntu/multimodal-rag-assistant` (see
+"Operational notes" below) to that exact tag via `git fetch` + `git reset
+--hard`, then re-runs `deploy_monitoring.sh` over SSM. This step is
+`continue-on-error: true` and gated on the app deploy having already
+succeeded — a monitoring-stack hiccup can never fail or roll back the app
+promotion, and gets its own separate Slack failure notification so it isn't
+mistaken for a production-app incident. Config changes under `monitoring/`
+or to `docker-compose.monitoring.yml` now reach production automatically on
+the next tag push; no manual step needed for that case.
+
+**Manually re-running the wrapper script is now only needed for two cases**:
+one-off/out-of-band changes that don't come with a new tag (e.g. rotating
+`GRAFANA_ADMIN_PASSWORD`/`NTFY_WEBHOOK_URL` in SSM on their own), or
+recovering a box where the automated step failed:
 
 ```bash
 bash deploy/aws/scripts/deploy_monitoring.sh
 ```
 
+(Not a bare `docker compose up` — that would leave `GRAFANA_ADMIN_PASSWORD`
+unset and fail Grafana's own `:?` guard, and never deliver
+`NTFY_WEBHOOK_URL` to the container at all.)
+
 **After the first successful run**, remove `GRAFANA_ADMIN_PASSWORD` and
 `NTFY_WEBHOOK_URL` from `/opt/magik/.env` on the box, same reasoning as the
 app secrets above — the freshly-fetched file is layered on top and wins on
 any key collision, so a stale copy left in `.env` is harmless but pointless.
+
+## Staging gate (private box, no HTTP, no Caddy)
+
+A tag no longer deploys straight to production. `cd.yml` deploys first to a
+**second** EC2 box (`magik-staging`), runs the full Tier-2 RAG-quality suite
+against it, and only promotes the exact same image to production if that
+passes — see `docs/runbooks/ci-cd.md`'s "Staging gate" section for the full
+design, prerequisite list, and manual validation steps.
+
+This box is deliberately **not** wired into the wake-gateway/Caddy/domain
+setup above — that's the public-demo front door for production traffic,
+which staging never receives. It:
+
+- has **no security-group ingress on 80/443/8000** (SSM is the only way in,
+  exactly like management access to the prod box today),
+- runs the app container bound to `127.0.0.1:8000` only, never `0.0.0.0`,
+- lives under `/opt/magik-staging/{.env,.hf_cache,data,logs}` — parallel to,
+  and never colliding with, prod's `/opt/magik/...` — with its own
+  `magik-staging-current`/`magik-staging-previous` container pair,
+- reuses `iam/ec2-instance-profile-permissions.json` unchanged (attach the
+  same policy to its own instance profile — nothing in that file is
+  prod-specific) and shares prod's SSM app secrets and external services
+  (Qdrant/Redis/Mongo), isolated by `EVAL_USER_ID` tenant scoping,
+- needs its own self-hosted GitHub Actions runner registered on it, labelled
+  `staging-gpu` (see `SELF_HOSTED_STAGING_GPU_RUNNER` repo variable).
 
 ## Domain (done)
 

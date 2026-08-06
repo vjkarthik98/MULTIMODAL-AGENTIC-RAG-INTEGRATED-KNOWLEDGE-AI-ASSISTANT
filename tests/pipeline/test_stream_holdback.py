@@ -47,7 +47,13 @@ class _FakeRetriever:
 
 
 class _FakePromptBuilder:
-    def build_prompt(self, query, context, session_id):
+    # **kwargs, not a fixed parameter list: the real PromptBuilder gained
+    # `memory` (and later `regenerate`) and this double did not, so every test
+    # in this file failed inside stream()'s try/except as
+    # "unexpected keyword argument 'memory'" — a broken double reported as a
+    # streaming bug. Accept whatever the caller passes; these tests are about
+    # the holdback/flush behaviour, not the prompt's shape.
+    def build_prompt(self, query, context, session_id=None, **kwargs):
         return f"CONTEXT: {context}\nQUERY: {query}"
 
 

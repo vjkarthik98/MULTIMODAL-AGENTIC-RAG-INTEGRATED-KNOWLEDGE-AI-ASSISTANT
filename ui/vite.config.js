@@ -12,5 +12,8 @@ export default defineConfig({
       '/admin':{ target: 'http://localhost:8000', changeOrigin: true },
     },
   },
-  build: { outDir: 'dist' },
+  // sourcemap explicitly off (this is already Vite's default, but stated so a
+  // future contributor enabling it for error-tracking has to make a conscious
+  // choice rather than silently exposing full source in production).
+  build: { outDir: 'dist', sourcemap: false },
 })

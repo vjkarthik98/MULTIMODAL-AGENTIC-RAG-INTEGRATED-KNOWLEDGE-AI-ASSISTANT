@@ -7,18 +7,23 @@ name: Eval Gate
 #                       ~3GB RAM. Runs on every PR, on a standard hosted
 #                       runner, and blocks merge on regression.
 #
-#   tier2-full-suite — full generation + Qwen2.5-7B judge suite.
-#                       Needs the full resident model stack (~17.7GB+ per
-#                       CLAUDE.md's model catalog) AND a live running API
-#                       (app/eval/run.py routes generation calls through
-#                       HTTP to /rag/query, not in-process). This does not
-#                       fit on any hosted CI runner or a 16GB laptop —
-#                       it runs ONLY on the self-hosted runner registered on
-#                       the real AWS GPU box, triggered by schedule /
-#                       workflow_dispatch / repository_dispatch — deliberately
-#                       NEVER by `pull_request`, since this is a public repo
-#                       and a fork PR must never be able to execute on a
-#                       self-hosted runner.
+#   tier2-nightly     — full generation + Qwen2.5-7B judge suite, against
+#                       PRODUCTION, informational only. Needs the full
+#                       resident model stack (~17.7GB+ per CLAUDE.md's model
+#                       catalog) AND a live running API (app/eval/run.py
+#                       routes generation calls through HTTP to /rag/query,
+#                       not in-process). This does not fit on any hosted CI
+#                       runner or a 16GB laptop — it runs ONLY on the
+#                       self-hosted runner registered on the real AWS GPU
+#                       box, triggered by schedule / workflow_dispatch —
+#                       deliberately NEVER by `pull_request`, since this is a
+#                       public repo and a fork PR must never be able to
+#                       execute on a self-hosted runner. The actual eval
+#                       logic lives in tier2-eval.yml (a `workflow_call`
+#                       reusable workflow) — this job is a thin caller into
+#                       it, targeting magik-current. The BLOCKING copy of
+#                       this same suite runs pre-promotion against staging;
+#                       see cd.yml's `tier2-staging-gate`.
 #
 #   seed-eval-fixtures — one-off/maintainer job. The gold QA set
 #                       (app/eval/datasets/gold/*.jsonl) is versioned in git,
@@ -32,14 +37,21 @@ name: Eval Gate
 #                       a GitHub Actions cache that tier1-retrieval restores.
 #                       Must be re-run whenever the gold set / corpus changes
 #                       (cache key is keyed on the gold-set file hashes).
+#
+#   tier2-nightly       — thin caller into tier2-eval.yml (reusable workflow),
+#                       targeting PRODUCTION (magik-current), informational
+#                       only. Blocking Tier-2 now runs pre-promotion against
+#                       STAGING instead — see cd.yml's `tier2-staging-gate`.
+#                       This nightly run exists purely to catch drift on the
+#                       already-live production image between releases.
 
 on:
   # No paths-ignore on pull_request — same reasoning as ci.yml (see the note
   # there): a filtered-out workflow reports NO status, so a required check
   # would hang a doc-only PR on "waiting for status" forever. Public repo =
   # unlimited free minutes, so the skip bought nothing. workflow_dispatch/
-  # schedule/repository_dispatch aren't file-change triggers, so path
-  # filtering never applied to them either way.
+  # schedule aren't file-change triggers, so path filtering never applied to
+  # them either way.
   pull_request:
   workflow_dispatch:
     inputs:
@@ -49,18 +61,16 @@ on:
         default: false
   # NIGHTLY TIER-2 — DISABLED until a self-hosted GPU runner is registered.
   #
-  # tier2-full-suite is `runs-on: [self-hosted, gpu]`. With no such runner
-  # registered, a scheduled run does not fail fast — it sits QUEUED waiting
-  # for a matching runner that will never appear (observed: run 30190058393
-  # queued 3h+ and counting). That produces a permanently-yellow workflow and
-  # daily noise that means nothing.
+  # tier2-eval.yml's job is `runs-on: [self-hosted, gpu]`. With no such
+  # runner registered, a scheduled run does not fail fast — it sits QUEUED
+  # waiting for a matching runner that will never appear (observed: run
+  # 30190058393 queued 3h+ and counting). That produces a permanently-yellow
+  # workflow and daily noise that means nothing.
   #
   # Re-enable by uncommenting, as part of the Phase 30 AWS bring-up, once
   # `gh runner list` shows a runner with the `gpu` label online.
   # schedule:
   #   - cron: "0 3 * * *"   # nightly tier2 run
-  repository_dispatch:
-    types: [post-deploy-eval]   # triggered by cd.yml after a successful deploy
 
 concurrency:
   group: eval-gate-${{ github.workflow }}-${{ github.ref }}
@@ -343,8 +353,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Runs in the deployed container for the same reasons as tier2-full-suite
-      # above (deps, Qdrant credentials, and the persistent /opt/magik/data
+      # Runs in the deployed container for the same reasons as tier2-eval.yml's
+      # job (deps, Qdrant credentials, and the persistent /opt/magik/data
       # mount where data/raw/finance and the BM25 indexes actually live — a
       # bare checkout has none of them).
       - name: Preflight — deployed container is running
@@ -383,356 +393,26 @@ jobs:
           key: bm25-eval-index-v2-${{ hashFiles('app/eval/datasets/gold/**') }}
 
   # ---------------------------------------------------------------------
-  # TIER 2 — full generation + judge suite. Self-hosted on the real GPU box
-  # ONLY. Needs the live API up (app/eval/run.py's generation suites call
-  # /rag/query over HTTP) — cd.yml's deploy job must complete before this
-  # is meaningfully triggered via repository_dispatch.
+  # TIER 2 (nightly, production, informational) — thin caller into
+  # tier2-eval.yml, the reusable workflow holding the actual full
+  # generation + judge suite logic. Needs the live API up in the target
+  # container; cd.yml's promote-production job must have completed before
+  # this run is meaningful.
+  #
+  # This is deliberately NOT the gate that decides whether a release ships —
+  # that gate is cd.yml's `tier2-staging-gate`, which runs the SAME reusable
+  # workflow against staging BEFORE production is ever touched. This nightly
+  # run exists only to catch drift on the already-live production image
+  # between releases (e.g. an external dependency regressing quality with no
+  # code change on our side).
   # ---------------------------------------------------------------------
-  tier2-full-suite:
-    if: >-
-      github.event_name == 'schedule' ||
-      github.event_name == 'repository_dispatch' ||
-      (github.event_name == 'workflow_dispatch' && inputs.seed != true)
-    runs-on: [self-hosted, gpu]
-    # A full generation suite on 100+ gold rows through a 7B model is slow.
-    # Without an explicit cap this inherits GitHub's 6h default and can pin a
-    # $1.86/hr GPU box for a quarter of a day on a hung judge call. 180 min is
-    # sized for the whole suite (retrieval + generation + judge + the modality
-    # sub-suites) with headroom, since a timeout here reads as a red gate
-    # rather than what it is.
-    timeout-minutes: 180
-    env:
-      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-      CONTAINER: magik-current
-    steps:
-      - uses: actions/checkout@v4
-
-      # ── Why this runs INSIDE the deployed container ──────────────────────
-      # This job used to run `python -m app.eval.run` directly on the runner.
-      # That could never have worked, and had never been executed once:
-      #
-      #   * no dependency install (unlike tier1's setup-python + pip install),
-      #     so it relied on an interpreter+venv that nothing provisions — and
-      #     a systemd-run runner does not inherit a login shell's PATH/venv;
-      #   * no QDRANT_URL/QDRANT_API_KEY (tier1 maps them from secrets; repo
-      #     secrets are NOT auto-injected), so retrieval — the one GATED
-      #     sub-suite — would score against an unreachable vector store;
-      #   * no BM25 index. DATA_DIR defaults to PROJECT_ROOT/data, i.e. the
-      #     checkout, and actions/checkout runs `git clean -ffdx` which wipes
-      #     gitignored data/. The BM25 half of hybrid retrieval would return
-      #     empty and the gate would report a phantom "regression";
-      #   * no EVAL_ACCESS_TOKEN, so every /rag/query call 401s
-      #     (get_current_user is required on that route).
-      #
-      # Executing in the container the deploy just shipped fixes all four at
-      # once — and is more correct besides: post-deploy eval should measure
-      # the artifact actually serving traffic, not a git checkout beside it.
-      # Deps, Qdrant credentials (--env-file /opt/magik/.env), the real BM25
-      # index (/opt/magik/data mounted at /app/data) and the live server on
-      # 127.0.0.1:8000 are all already there.
-      - name: Preflight — deployed container is running, healthy, and has eval data
-        run: |
-          set -uo pipefail
-          if ! docker ps --filter "name=^/${CONTAINER}$" --filter status=running -q | grep -q .; then
-            echo "::error title=Tier-2 preflight failed::Container '${CONTAINER}' is not running. Tier-2 evaluates the deployed container; run cd.yml's deploy job first."
-            exit 1
-          fi
-
-          ok=""
-          for _ in $(seq 1 20); do
-            if docker exec "$CONTAINER" curl -sf http://127.0.0.1:8000/health >/dev/null 2>&1; then
-              ok="yes"; break
-            fi
-            sleep 15
-          done
-          if [ -z "$ok" ]; then
-            echo "::error title=Tier-2 preflight failed::/health did not answer within 5 minutes inside '${CONTAINER}'."
-            docker logs --tail 60 "$CONTAINER" 2>&1 || true
-            exit 1
-          fi
-
-          # Fail legibly on a missing corpus instead of scoring an empty index
-          # and reporting it as a quality regression — the exact failure mode
-          # tier1's cache-validation steps exist to prevent.
-          #
-          # The exact file the eval loads: retrieval_runner builds
-          # HybridRetriever with infra.get_bm25(), which is
-          # app/retrieval/bm25_retriever.BM25Retriever — NOT the per-modality
-          # app/bm25/*_bm25.py classes. Its path is user_bm25_path(uid) with no
-          # modality => data/users/<uid>/bm25_index/bm25.pkl. Checking for any
-          # *.pkl here would pass on per-modality files while the file the eval
-          # actually opens is missing, which is precisely the misleading
-          # failure this preflight exists to prevent.
-          #
-          # app/utils/paths.py's DATA_ROOT is the RELATIVE path "data/users",
-          # resolved against the process CWD — inside the container that is the
-          # image's WORKDIR /app, where /opt/magik/data is mounted. That is
-          # exactly why this must run in the container.
-          if ! docker exec "$CONTAINER" \
-               test -f "/app/data/users/${EVAL_USER_ID}/bm25_index/bm25.pkl"; then
-            echo "::error title=Tier-2 preflight failed::Missing /app/data/users/${EVAL_USER_ID}/bm25_index/bm25.pkl inside the container. Retrieval would degrade to dense-only and the gate would report a false regression. Rebuild it from Qdrant payloads (no GPU, no re-embedding, no re-chunking): docker exec ${CONTAINER} python3.12 -m app.retrieval.bm25_retriever --user_id ${EVAL_USER_ID}"
-            exit 1
-          fi
-          echo "preflight OK — container healthy, BM25 index present"
-
-      # The token is minted and consumed inside a single step so it is never
-      # written to a step output, a file, or the runner's env for other steps
-      # to read. Signed with the container's own JWT_SECRET_KEY; get_current_user
-      # builds the user straight from the payload (no DB lookup), so this
-      # authenticates as the eval tenant without storing any credential.
-      - name: Full suite (retrieval + generation + behavioral + routing + e2e + ocr/audio/video + regression)
-        id: full_suite
-        run: |
-          set -uo pipefail
-          # NOT `| tr -d '\r\n'` on the raw output — that blindly concatenates
-          # every line docker exec prints. app/utils/logger.py's console
-          # handler writes to stdout (StreamHandler(sys.stdout)), so importing
-          # jwt_handler (which pulls in app.core.config, which logs
-          # "logging_initialized" on first import) prints a banner line BEFORE
-          # the token. tr -d only strips newlines, so banner+token got mashed
-          # into one string — a garbled non-JWT sent as the Bearer header on
-          # every single request. That's what actually killed the very first
-          # Tier-2 run: every generation/e2e/behavioral/routing query failed
-          # with a raw "invalid UTF-8 byte" header-decode error (retrieval was
-          # unaffected — it doesn't use HTTP/auth at all), the suite ended in
-          # ~15 minutes instead of hours, and the runner going idle afterward
-          # is what let idle-stop legitimately (if confusingly) stop the box.
-          #
-          # Extract by SHAPE instead: a JWT is exactly three base64url segments
-          # joined by dots, on its own line. Immune to any banner, warning, or
-          # future log line printed before or after it, regardless of cause.
-          RAW="$(docker exec "$CONTAINER" python3.12 -c \
-            "from app.auth.jwt_handler import issue_tokens; print(issue_tokens('${EVAL_USER_ID}', 'eval@magik.local', 'user')['access_token'])")"
-          TOKEN="$(printf '%s\n' "$RAW" | grep -oE '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$' | tail -n1)"
-          if [ -z "$TOKEN" ]; then
-            echo "::error title=Tier-2 token mint failed::Could not extract a JWT-shaped token from the container's output. Raw output (safe to show — no secret was successfully isolated, so nothing to mask): $RAW"
-            exit 1
-          fi
-          echo "::add-mask::$TOKEN"
-
-          docker exec \
-            -e EVAL_USER_ID="${EVAL_USER_ID}" \
-            -e EVAL_ACCESS_TOKEN="$TOKEN" \
-            -e EVAL_SERVER_URL="http://127.0.0.1:8000" \
-            "$CONTAINER" python3.12 -m app.eval.run --suite full
-        # The `full` suite includes retrieval, which IS gated
-        # (retrieval.gate_enabled: true, v5 production baseline). Every other
-        # sub-suite here (generation, e2e, behavioral, ocr, audio, video,
-        # routing) is still on the stale v3 baseline (pre-Prometheus-2-7B
-        # judge, pre-164-row gold set) and stays informational-only via
-        # thresholds.yaml's own per-section gate_enabled — this step can fail,
-        # but only on a real retrieval regression, not on unverified
-        # generation-suite numbers. See docs/runbooks/ci-cd.md for the
-        # re-baseline procedure for the remaining sections.
-
-      # Reports are written inside the container (/app/app/eval/reports, which
-      # is chown'd to appuser in the Dockerfile). Copy them into the workspace
-      # so the summary and artifact upload below can see them.
-      - name: Extract reports from container
-        if: always()
-        run: |
-          set -uo pipefail
-          rm -rf "${GITHUB_WORKSPACE}/eval-reports"
-          mkdir -p "${GITHUB_WORKSPACE}/eval-reports"
-          docker cp "${CONTAINER}:/app/app/eval/reports/." "${GITHUB_WORKSPACE}/eval-reports/" 2>/dev/null \
-            || echo "no reports produced (the suite likely failed before scoring)"
-
-      # Phase 31 (System Design v2 §8 gap: "add RAG-quality SLOs (recall@k,
-      # faithfulness) as first-class monitored signals, not just system
-      # metrics") — this was left undone in the first Phase 31 pass: the
-      # rag_quality.json dashboard only carried the online/live-sampled
-      # LEXICAL faithfulness proxy, never the real gated numbers
-      # (recall@5/10, MRR, nDCG, context_precision, hit_rate, the real
-      # CrossEncoder+GGUF-judge faithfulness, hallucination_rate) that
-      # thresholds.yaml actually gates on. Those numbers existed only in a
-      # GitHub Actions log / job summary, invisible from Grafana. This step
-      # closes that gap by pushing every numeric metric in rag_report.json to
-      # the Pushgateway (docker-compose.monitoring.yml), generically — it
-      # does not hardcode metric names, so it keeps working as suites gain or
-      # rename metrics, with no changes needed here.
-      #
-      # Tier-1 (PR-time) deliberately does NOT push here: it runs on a
-      # GitHub-hosted runner with no network path to the box's Pushgateway
-      # (127.0.0.1-bound, same as Grafana), and its numbers are pre-merge
-      # validation against an ephemeral checkout, not the production
-      # container — conflating the two on one production dashboard would be
-      # actively misleading, not just redundant.
-      - name: Push eval metrics to Pushgateway
-        if: always()
-        run: |
-          set -uo pipefail
-          REPORT="${GITHUB_WORKSPACE}/eval-reports/rag_report.json"
-          GATE="${GITHUB_WORKSPACE}/eval-reports/gate_result.json"
-          if [ ! -f "$REPORT" ]; then
-            echo "no rag_report.json — suite failed before scoring, nothing to push"
-            exit 0
-          fi
-
-          python3 - "$REPORT" "$GATE" <<'PY' | curl -sf --data-binary @- \
-            http://127.0.0.1:9091/metrics/job/magik_eval_gate \
-            -X PUT || echo "::warning title=Pushgateway push failed::Prometheus dashboard will show stale numbers until the next successful Tier-2 run. Non-fatal — not blocking the job on a monitoring-sink outage."
-          import json, math, sys, time
-
-          report_path, gate_path = sys.argv[1], sys.argv[2]
-          report = json.load(open(report_path))
-          lines = []
-
-          for suite_name, sr in (report.get("suites") or {}).items():
-              for metric_name, m in (sr.get("metrics") or {}).items():
-                  val = m.get("value")
-                  if val is None:
-                      continue
-                  try:
-                      val = float(val)
-                  except (TypeError, ValueError):
-                      continue
-                  if math.isnan(val):
-                      continue
-                  # "full" suite metric names are prefixed ("retrieval.recall_at_5")
-                  # — split so the label matches thresholds.yaml's own section
-                  # names, same convention as app/eval/runner.py.
-                  if "." in metric_name:
-                      sub_suite, bare = metric_name.split(".", 1)
-                  else:
-                      sub_suite, bare = suite_name, metric_name
-                  lines.append(
-                      f'magik_eval_gate_metric_value{{suite="{sub_suite}",metric="{bare}"}} {val}'
-                  )
-
-          try:
-              gate = json.load(open(gate_path))
-              lines.append(f'magik_eval_gate_exit_code {int(gate.get("exit_code", -1))}')
-          except Exception:
-              pass
-
-          lines.append(f"magik_eval_gate_last_run_timestamp {int(time.time())}")
-          print("\n".join(lines))
-          PY
-
-      # Phase 31 — Tier-2 auto-rollback, scoped to a RETRIEVAL-section failure
-      # ONLY (project memory "tier2-autorollback-deferred": explicitly
-      # requested at Phase 30 close, deferred to "the final version").
-      #
-      # Why retrieval only: it's the one section with a validated, trustworthy
-      # baseline (thresholds.yaml's v5 production numbers, gate_enabled: true).
-      # Every other Tier-2 section (generation, e2e, behavioral, routing,
-      # ocr/audio/video) is still informational-only against a stale
-      # pre-Prometheus-judge baseline — a red result there doesn't reliably
-      # indicate a real regression, so rolling back on it would risk reverting
-      # good releases over noisy metrics. See thresholds.yaml's header.
-      #
-      # Why gate_result.json, not the step's exit code: the exit code alone
-      # can't distinguish "retrieval regressed" from "a different gated
-      # section regressed" (none are, today, but this must stay correct if
-      # that changes) or "an unrelated infra error occurred". gate_result.json
-      # (written by app/eval/run.py from app/eval/runner.py's
-      # last_breached_sections/last_error_sections) carries that distinction.
-      #
-      # Why repository_dispatch only, not schedule/workflow_dispatch: a
-      # rollback is only meaningful immediately after a fresh deploy, when
-      # magik-previous is genuinely "the last known-good state before THIS
-      # change". A nightly/manual Tier-2 run days later reacting to drift by
-      # reverting to a possibly-stale (or already-pruned — see cd.yml's disk
-      # cleanup, which sacrifices magik-previous under 40GB free) previous
-      # image is not the same guarantee and is out of scope for this feature.
-      #
-      # Reuses the EXACT rollback sequence cd.yml's deploy job already uses on
-      # its own health-check failure (docker rm -f / rename / start) — no SSM
-      # needed, this job already runs ON the box as the self-hosted runner.
-      - name: Auto-rollback on retrieval-section failure
-        if: always() && github.event_name == 'repository_dispatch'
-        id: rollback
-        run: |
-          set -uo pipefail
-          REPORT="${GITHUB_WORKSPACE}/eval-reports/gate_result.json"
-          echo "rolled_back=false" >> "$GITHUB_OUTPUT"
-
-          if [ ! -f "$REPORT" ]; then
-            echo "no gate_result.json — suite likely failed before scoring (crash/timeout), not a scored retrieval signal; not auto-rolling back on this alone"
-            exit 0
-          fi
-
-          RETRIEVAL_FAILED=$(python3 - "$REPORT" <<'PY'
-          import json, sys
-          data = json.load(open(sys.argv[1]))
-          breached = set(data.get("breached_sections") or [])
-          errored = set(data.get("error_sections") or [])
-          print("true" if "retrieval" in breached or "retrieval" in errored else "false")
-          PY
-          )
-
-          if [ "$RETRIEVAL_FAILED" != "true" ]; then
-            echo "retrieval section did not breach/error — no rollback"
-            exit 0
-          fi
-
-          echo "::warning title=Tier-2 retrieval-section failure — auto-rolling back::retrieval breached its gated threshold (or errored) on the deployed image. Reverting ${CONTAINER} to magik-previous."
-
-          if ! docker inspect magik-previous >/dev/null 2>&1; then
-            echo "::error title=Auto-rollback FAILED::retrieval section failed but no magik-previous image exists to roll back to (first deploy ever, or it was pruned under disk pressure — see cd.yml). Manual intervention required — see docs/runbooks/phase-30-aws-deployment.md Appendix H."
-            exit 1
-          fi
-
-          docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-          docker rename magik-previous "$CONTAINER"
-          docker start "$CONTAINER"
-
-          echo "waiting for rolled-back container's /health"
-          ok=""
-          for _ in $(seq 1 20); do
-            if docker exec "$CONTAINER" curl -sf http://127.0.0.1:8000/health >/dev/null 2>&1; then
-              ok="yes"; break
-            fi
-            sleep 15
-          done
-
-          echo "rolled_back=true" >> "$GITHUB_OUTPUT"
-          if [ -z "$ok" ]; then
-            echo "::error title=Auto-rollback completed but the rolled-back container is not healthy::Manual intervention required immediately — the box may now be fully down. See docs/runbooks/phase-30-aws-deployment.md Appendix H."
-            exit 1
-          fi
-          echo "auto-rollback succeeded — ${CONTAINER} is back on the previous image and healthy"
-          # Still fail the job on purpose: a rollback happened, which means
-          # this deploy was bad — that must surface red, not silently pass,
-          # matching cd.yml's own health-check rollback path (also exits 1
-          # after a successful revert).
-          exit 1
-
-      - name: Post report to job summary
-        if: always()
-        run: |
-          echo "## Tier-2 Full Eval Suite (${{ github.event_name }})" >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ steps.rollback.outputs.rolled_back }}" = "true" ]; then
-            echo "**⚠️ AUTO-ROLLED BACK** — retrieval section failed Tier-2; ${CONTAINER} was reverted to the previous image. See the 'Auto-rollback' step log above." >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [ -f eval-reports/rag_report.md ]; then
-            cat eval-reports/rag_report.md >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "_No report written — the run likely failed before scoring. Check the logs above._" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      # No one watches a 3am scheduled run's Actions tab live — this is the
-      # nightly/post-deploy tier, so failure needs to reach someone async.
-      # No-op until SLACK_WEBHOOK_URL is set (repo secret) — see
-      # docs/runbooks/ci-cd.md. Uses a plain incoming-webhook POST so it
-      # works with Slack as-is and with Discord by swapping "text" for
-      # "content" in the payload.
-      - name: Notify on failure (Slack, optional)
-        if: failure() && env.SLACK_WEBHOOK_URL != ''
-        run: |
-          MSG="MAGIK Tier-2 eval suite FAILED (${{ github.event_name }}, run ${{ github.run_id }})"
-          if [ "${{ steps.rollback.outputs.rolled_back }}" = "true" ]; then
-            MSG="MAGIK Tier-2 retrieval-section failure — AUTO-ROLLED BACK to the previous image (run ${{ github.run_id }})"
-          fi
-          curl -sf -X POST -H "Content-Type: application/json" \
-            -d "{\"text\": \"${MSG}: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
-            "$SLACK_WEBHOOK_URL"
-
-      - name: Upload report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rag-report-tier2-${{ github.run_id }}
-          path: eval-reports/
-          retention-days: 90
-          if-no-files-found: warn
+  tier2-nightly:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.seed != true)
+    uses: ./.github/workflows/tier2-eval.yml
+    secrets: inherit
+    with:
+      container: magik-current
+      previous_container: magik-previous
+      runner_label: gpu
+      environment_label: production
+      runner_available: ${{ vars.SELF_HOSTED_GPU_RUNNER == 'true' }}

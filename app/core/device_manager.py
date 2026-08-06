@@ -152,6 +152,36 @@ class DeviceManager:
     def vram_total_gb(self) -> float:
         return self._vram_total_gb
 
+    def free_vram_gb(self) -> float | None:
+        """Real free VRAM in GB, as reported by the CUDA driver.
+
+        Returns None when CUDA is unavailable or the query fails, so callers
+        can distinguish "no GPU / can't tell" from a genuine low reading and
+        decline to act rather than acting on a fabricated 0.0.
+
+        USE THIS, NOT `total_memory - torch.cuda.memory_reserved()`. That
+        expression counts only the CALLING process's PyTorch caching
+        allocator, which on this deployment is a small minority of what is
+        actually resident on the card. It cannot see:
+          * the separate llama-server process holding the 14B GGUF
+            (app/llm/gguf_model.py's LLM_USE_SERVER path),
+          * the eval judge's own llama.cpp worker process
+            (app/eval/judges/qwen_judge_worker.py),
+          * llama.cpp allocations or non-PyTorch CUDA context overhead.
+        `torch.cuda.mem_get_info()` asks the driver and therefore accounts for
+        every process on the device. app/eval/judges/qwen_judge.py had a
+        private copy of exactly this logic (its CPU-fallback guard was
+        silently inert because of the allocator-only version); it now calls
+        here instead, so there is one implementation.
+        """
+        if not self._cuda_ok or self._torch is None:
+            return None
+        try:
+            free_bytes, _total = self._torch.cuda.mem_get_info()
+            return free_bytes / (1024**3)
+        except Exception:
+            return None
+
     # PER-MODEL DEVICE — per-model override > profile map > fallback
 
     def device_for(self, name: str) -> str:

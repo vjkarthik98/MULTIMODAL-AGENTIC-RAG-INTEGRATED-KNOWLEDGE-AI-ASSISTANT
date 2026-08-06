@@ -21,7 +21,11 @@ from __future__ import annotations
 import argparse
 import sys
 
-DEFAULT_EMAIL = "testuser@ragdev.local"
+from app.core.config import settings
+
+# Single source of truth — /auth/login's OTP bypass matches this same address,
+# so seeding a different one would produce an account that still asks for OTP.
+DEFAULT_EMAIL = settings.DEMO_ACCOUNT_EMAIL or "testuser@ragdev.local"
 DEFAULT_PASSWORD = (
     "Test@123"  # pragma: allowlist secret — intentionally public demo credential, not a real secret
 )

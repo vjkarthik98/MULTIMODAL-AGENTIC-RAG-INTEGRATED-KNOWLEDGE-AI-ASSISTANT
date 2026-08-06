@@ -3088,3 +3088,660 @@ pushed `ghcr.io/vjkarthik98/multimodal-rag-assistant:v0.29.0` before this
 failure, so the image itself needed no changes — only this workflow file.
 The `v0.29.0` tag was deleted and re-pushed at the same version (not
 bumped) once this fix landed, since nothing application-level changed.
+
+# [v0.30.0] — Demo-Account Reliability, Regenerate, Citation & Web-Search Fixes
+
+PATCH-scale in surface area (no schema/API breaking changes, no new
+top-level feature) but a real bundle of correctness fixes, several found
+while fixing something else — worth its own version because each one is a
+user-visible behavior change:
+
+1. **Demo account** no longer depends on a one-time database write to skip
+   OTP, and a password change or "sign out everywhere" now actually revokes
+   the trusted-device exemption instead of leaving it live.
+2. **Regenerate** produces a genuinely different answer instead of
+   replaying the same deterministic generation — sampling floor + fresh
+   seed + a prompt directive, gated behind an explicit user action so the
+   default answer path stays fully reproducible.
+3. **Image citations** were silently dropped for some queries depending on
+   which retriever (BM25 vs. dense) happened to match the chunk first — a
+   metadata-loss bug in both BM25 implementations plus an RRF-fusion bug
+   that discarded the richer of two duplicate hits instead of merging them.
+4. **A decapitated refusal** could reach the user dressed as a real answer
+   with source chips attached — a stream-vs-final refusal check that had
+   silently drifted out of sync with the guard set earlier in the same
+   function.
+5. **Web-search mode** could flicker from a correct web answer to a
+   knowledge-base answer, because the non-streaming fallback endpoint
+   accepted `force_web` on its request model and never read it.
+
+Also folded in: the local dev environment's test suite is fully green again
+(Presidio, an `audioop` backport for Python 3.14, a `bcrypt` upper pin that
+is a genuine production risk — passlib 1.7.4 silently fails to initialise
+its bcrypt backend on bcrypt 5.x — and five stale/broken tests unrelated to
+any of the above).
+
+### Fixed — the demo account still asked for an email OTP
+
+`POST /auth/login`'s OTP bypass keyed solely on the Mongo `is_demo` flag.
+That flag is only ever written by `python -m app.bin.seed_demo_account`,
+which is a database write — a deploy, a container rebuild, or a fresh
+environment does not perform it, and the account predates the flag on at
+least one environment. Result: the one credential handed to recruiters and
+hiring managers (`testuser@ragdev.local`) fell through to the ordinary
+path and emailed a 6-digit code to a mailbox nobody holds, which is an
+unopenable door, not a login. This was already written down as a Known
+Issue ("needs its `is_demo` flag re-verified on every fresh environment")
+— re-verifying by hand on every environment is the thing that keeps
+failing, so the dependency itself is removed rather than re-documented.
+
+- **`app/core/config.py`**: new `DEMO_ACCOUNT_EMAIL` setting (default
+  `testuser@ragdev.local`, non-secret, same value everywhere so it stays
+  in `config.py` and out of `.env`). Set it to `""` to disable the bypass
+  entirely — the escape hatch for any environment that shouldn't carry a
+  public login.
+- **`app/auth/service.py`**: `is_demo_account(user)` — true when the
+  stored `is_demo` flag is set **or** the address matches
+  `DEMO_ACCOUNT_EMAIL` (compared case-insensitively, after strip). Plus
+  `AuthService.mark_demo(user_id)` to persist the flag.
+- **`app/auth/router.py`**: `/auth/login` uses `is_demo_account()`, and
+  when it matched by address alone it backfills the flag in Mongo so the
+  stored document converges (`/auth/me`, the seed script's report, and
+  anything else reading `is_demo` become correct too). The backfill is
+  best-effort inside `try/except` — a Mongo hiccup on a self-healing write
+  must never cost a recruiter their login, and the bypass never depended
+  on that write having succeeded.
+- **`app/bin/seed_demo_account.py`**: takes its default email from
+  `settings.DEMO_ACCOUNT_EMAIL` instead of a second hardcoded copy, so
+  seeding and the login bypass can't drift onto different addresses.
+
+Nothing else about the account changes: it is a completely ordinary tenant
+at every data layer (Qdrant/BM25/Redis/Mongo all still filter on
+`user_id`), password verification is unchanged and still rejects a wrong
+password with a 401, and no other account gains an OTP exemption.
+
+Seeding is still required for the account to *exist* on a given
+environment (`python -m app.bin.seed_demo_account`) — deliberately left an
+explicit command rather than an automatic startup write, since
+auto-creating a publicly-known credential on every environment that boots
+is a security decision, not a convenience. What no longer requires a
+manual step is the OTP behaviour.
+
+### Added — `tests/auth/test_demo_login.py` (10 tests, all passing)
+
+Covers `is_demo_account()` directly (configured address without the flag,
+case-insensitivity, flag-set-on-another-address, ordinary account,
+bypass disabled when the setting is blank) and the live route through
+`TestClient`: demo login returns tokens with no `otp_required` and
+`send_otp_email` asserted **not called**; the flag is backfilled; a login
+still succeeds when `mark_demo` raises; a wrong password still 401s; and
+an ordinary account still receives its OTP challenge.
+
+Also fixed a latent test-suite bug found while doing this: `app.main`'s
+auth brute-force limiter is a module-level dict keyed by client IP, and
+`TestClient` presents the same IP for every request in a run, so login
+attempts in one test file spent the per-minute budget and
+`test_login_is_public` in a later file got a `429` instead of its expected
+`200`. `tests/auth/conftest.py` now clears those buckets between tests
+(only when `app.main` is already imported, so service-level tests don't
+pay to import the app).
+
+`pytest tests/auth/ -q`: the same 3 failures before and after this change
+(2 in `test_mfa.py` needing a `bcrypt` backend, 1 in
+`test_protected_routes.py` needing live Redis) — both are missing local
+dependencies on the Windows dev box, not code, and neither is touched by
+anything here.
+
+### Fixed — password change signed you out but left the browser's OTP exemption alive
+
+Reported from real use: change your password in Settings, get signed out
+immediately (correct), sign back in — and no email code is asked for.
+
+Root cause: a trusted-device token is a standing OTP exemption for one
+browser, held in Redis under `device:{token}` for **30 days**, and it is
+completely independent of the JWT blacklist. `/auth/password` called only
+`revoke_all_user_tokens()` — which kills access/refresh tokens, hence the
+real sign-out — and never touched the device token, so `POST /auth/login`'s
+`verify_device_token` branch waved the next login straight past the OTP
+step. Not a one-off either: that browser would keep skipping OTP for the
+rest of the token's 30 days, on the *new* password.
+
+`otp_store.revoke_device_tokens()` already existed, and its own docstring
+says "called on password change/reset" — `/auth/reset-password` and the
+GDPR account-delete path did call it; `/auth/password` never did. So this
+was a missed call site against an established contract, not a missing
+capability.
+
+- **`app/auth/router.py`**: new `_revoke_trusted_devices(user_id, event=…)`
+  helper (best-effort, logs on failure) and it is now called from
+  `/auth/password`. `/auth/reset-password` was refactored onto it — it had
+  the same logic inline with a bare `except: pass` that swallowed failures
+  silently, so this also gets that path a log line.
+- **`app/auth/router.py` — `/auth/logout-all` had the same gap** and is
+  fixed in the same change. Its docstring calls it "useful if account
+  compromised", which is precisely the case where leaving the attacker's
+  browser a 30-day OTP exemption defeats the purpose of pressing it.
+- **`ui/src/components/SettingsModal.jsx`**: both the change-password and
+  sign-out-everywhere handlers now `localStorage.removeItem('magik_device_token')`
+  — matching what the delete-account handler already did. The server-side
+  revoke makes the stored token dead, but the browser shouldn't keep
+  presenting it, and if the Redis revoke *did* fail the client must not be
+  the one still holding a bypass.
+
+Deliberately unchanged: the trusted-device feature itself. Skipping OTP on
+a browser that has already proved mailbox control is the intended design
+and stays — what was wrong is that a trust-reset event didn't reset it.
+
+### Added — `tests/auth/test_trusted_device_revocation.py` (4 tests, all passing)
+
+Password change revokes device tokens (asserted with the exact `user_id`);
+logout-all revokes them; Redis being down does **not** fail the password
+change (the password is already written at that point — a 500 there would
+tell the user their change failed when it didn't); and a wrong current
+password revokes nothing at all.
+
+`pytest tests/auth/ -q` still shows the same 3 pre-existing environment
+failures and no others. `ruff`/`black`/`isort` clean; `npm run build`
+clean.
+
+### Fixed — "Regenerate" returned the previous answer verbatim
+
+Reported from real use, and explicitly not a caching problem: the regenerate
+button already sent `no_cache=true`, the cache was correctly bypassed, and
+the full pipeline genuinely re-ran — retrieval, rerank, fusion, prompt build,
+generation. It still produced the same answer, character for character.
+
+Root cause: **every stage of that pipeline is deterministic.** The same query
+embeds to the same vector, retrieves the same chunks in the same order,
+reranks to the same order, builds the same prompt — and then decodes it at
+`LLM_TEMPERATURE` 0.0 (or 0.1 on the factual/financial branch), which is
+argmax at every step. No seed was ever passed. Re-running a deterministic
+function returns the same value; `no_cache` only means "don't READ the stored
+answer", which is a different thing from "produce a different one". Nothing
+was broken — the button had no mechanism to change anything.
+
+Determinism is the right default here (reproducible finance answers, stable
+eval baselines), so this does not loosen it globally. `regenerate` is now a
+first-class request flag, distinct from `no_cache`, and only on that flag:
+
+- **`app/llm/regeneration.py`** (new): `regeneration_sampling(base_temp)`
+  returns a temperature raised to `settings.LLM_TEMPERATURE_REGENERATE`
+  (new setting, default **0.4** — a floor, not an override, so a query type
+  that already samples hotter keeps its own value) plus a fresh 31-bit random
+  seed. Same temperature with a fixed seed would still collapse two
+  regenerations onto one trajectory, so both are needed. Also holds
+  `REGENERATE_DIRECTIVE` — the prompt text telling the model its previous
+  answer was rejected, to answer the same evidence differently and more
+  completely, and explicitly **not** to add any fact the evidence doesn't
+  support. Temperature alone yields a reworded copy of the same answer; the
+  directive is what makes the model actually try again, and it is written to
+  push toward *more* grounding, because the one thing a regeneration must
+  never do is invent a figure in order to look different.
+- **`app/llm/gguf_model.py`**: `generate()` and `stream()` take an optional
+  `seed`, forwarded via `_seed_kwarg()` — which omits the kwarg entirely when
+  no seed was asked for, so the normal answer path's sampling is byte-for-byte
+  unchanged by the parameter existing. The llama-server HTTP client passes it
+  through to `/v1/completions`.
+- **Prompt placement**: the directive goes between the context and the QUERY
+  block, in both `PromptBuilder.build_prompt(regenerate=True)` and
+  `_build_cot_prompt(regenerate=True)` — never after the answer cue, where a
+  small model continues the directive text instead of obeying it. Both
+  include it in their own length budget and overflow guard.
+- **Full plumbing** — `regenerate` is threaded end to end and defaults to
+  `False` at every hop: `QueryRequest` → `rag_pipeline.stream()` (the live UI
+  path) and `query_pipeline()` → `VerificationLoop.run()` → `_generate()` →
+  `ReasoningEngine.generate_answer()` → `_call_llm()`. `query_pipeline`'s own
+  direct LLM calls (memory, direct, hybrid-web, GGUF fallback) go through one
+  local `_sampling()` helper that is the identity function unless regenerating.
+- **Verification retries stay untouched**: only attempt 0 gets the directive.
+  Attempts 1-4 are the verifier's own targeted re-asks against a re-queried
+  doc set — telling those "your previous answer was rejected" would point the
+  model at the wrong answer.
+- **`regenerate` implies `no_cache` server-side** in both the stream endpoint
+  and `query_pipeline`, so a client that sets only the new flag can never be
+  handed the stored answer.
+- **UI**: `handleRegenerate` sends `regenerate: true` alongside `no_cache`.
+
+Deliberately unchanged: retrieval. The regenerate path re-runs retrieval and
+reranking exactly as before and gets the same chunks — which is correct.
+The best-matching evidence for a question doesn't become less correct because
+the user disliked the prose; deliberately retrieving *worse* chunks to look
+different would trade an unsatisfying answer for a wrong one.
+
+### Fixed — file-scoped queries could be served an unscoped cached answer
+
+Found while tracing the regenerate path. `ChatPage.handleSend` computed
+`effectiveNoCache = noCache || !!fileSources` — with a correct comment
+explaining that the answer cache is keyed on query text alone, so a query
+scoped to one file must bypass it — and then passed plain `noCache` to
+`streamQuery()`. Only the `queryMeta()` fallback call actually received the
+computed flag. Since the stream is the primary answer path, asking the same
+question with a file selected could return the cached answer computed without
+that scope. Now passes `effectiveNoCache`.
+
+### Added — `tests/unit/llm/test_regeneration.py` (17 tests, all passing)
+
+Sampling (floor applied to greedy, hotter query types not cooled, seeds vary
+across calls, seed range fits every downstream integer field); seed plumbing
+(`_seed_kwarg` absent-not-None by default, `generate`/`stream` accept it);
+directive content and its placement before `QUERY:` in both prompt builders;
+and a behavioural pass through `ReasoningEngine` with a recording fake LLM —
+normal answer is temperature 0.0 with no seed and no directive, regenerate is
+the floor temperature with an int seed and the directive present, and two
+regenerations don't share a seed.
+
+Plus a wiring test that asserts every hop in the chain still declares
+`regenerate` with a `False` default. That one exists because the failure mode
+of this feature is silent: a hop that stops forwarding the flag restores the
+original bug exactly — same answer, no error anywhere.
+
+`pytest tests/unit/llm tests/unit/prompt tests/unit/reasoning
+tests/unit/verification tests/unit/pipeline tests/unit/api -q`: all pass.
+The wider `tests/unit/` run has 10 failures in `agents/` and `ingestion/`
+(async fixtures under Python 3.14, and `pyaudioop` removed from the stdlib) —
+verified identical on a stashed clean tree, so pre-existing and untouched by
+this change. `ruff`/`black`/`isort` clean; `npm run build` clean.
+
+### Fixed — image captions missing from citations on some queries
+
+An image cited correctly for one question and showed as a bare filename chip
+for another, same image, same knowledge base. The UI is not the problem:
+`ImageCitations`/`ImageCitePill` render the caption pill only when the source
+record carries `image_title`, so "no title" means "no pill at all". The field
+was being lost on the way, and which queries lost it was decided by which
+retriever happened to find the chunk.
+
+Two independent causes, both fixed:
+
+**1. BM25 never carried `image_title` out of a chunk.** `_metadata()` — the
+function the citation layer actually reads — mapped page/heading/sheet/
+timestamp/speaker/caption but not `image_title`, `image_type`, or
+`asset_path`. This is the identical class of bug already fixed for XLSX
+`sheet_name` and audio `speaker`/timestamps in the 2026-07 accuracy phase
+(their fix comments sit two lines above the gap); image was simply never
+done. Fixed in **both** BM25 implementations — `app/bm25/base_bm25.py` and
+`app/retrieval/bm25_retriever.py` — in `_metadata()` and in
+`BM25Document.from_payload()`'s `structure` (the rebuild-from-Qdrant path).
+
+Carried inside `structure` rather than as a new `__slots__` field on purpose:
+indexes are pickled, and a new slot would leave every already-saved document
+without the attribute entirely (`AttributeError` on access), whereas a
+missing dict key is just `None`.
+
+**No re-ingest is required.** `add_documents()` pickles the chunker's own
+`IngestedDocument` objects, whose `.structure` has carried `image_title`
+since the image chunker set it — the value was already sitting in every
+existing index and only `_metadata()` was dropping it on the way out.
+
+**2. RRF fusion discarded the richer metadata when both retrievers found the
+same chunk.** `_fuse()` keys on `hash(text, doc_id, chunk_id)`, so the dense
+hit and the BM25 hit of one chunk collapse into a single entry — and the
+first writer's `metadata` dict won, with the second contributing only its
+score. BM25 is fused *before* dense (`hybrid_retriever.py`), so any chunk
+BM25 also matched reached the citation layer with BM25's thinner metadata
+even though Qdrant's full payload was right there in the other copy. That is
+exactly why the symptom was query-dependent: keyword-matching questions lost
+the title, purely semantic ones kept it.
+
+Fusion now merges: `_merge_missing_metadata()` fills only keys the winner is
+missing or holds as `None`, so a populated locator is never overwritten and
+ranking is untouched. A missing `embedding` is filled the same way (MMR reads
+it). This is modality-agnostic — any field asymmetry between the two
+retrievers stops being fatal, not just this one — and it is what makes the
+fix work on already-built indexes even before cause 1 applies.
+
+### Tests
+
+- **`tests/unit/retrieval/test_image_citation_metadata.py` (11 tests, new)**:
+  `image_title`/`image_type`/`asset_path` surface from both `_metadata()`
+  implementations and both `from_payload()`s; caption stays available but is
+  never substituted for the title; a non-image chunk gets `None` rather than
+  a crash; a dense-only field survives a BM25-first fusion of the same chunk;
+  merge never overwrites a resolved value, ignores `None`, still sums scores,
+  and fills a missing embedding.
+- **`tests/pipeline/test_phaseD_locators.py`**: `test_image_caption_locator`
+  still asserted the pre-change contract (`caption` → `section_title`) and had
+  been failing ever since images moved to `image_title` + a deliberately empty
+  `section_title` (the caption is a multi-paragraph VLM dump that must not
+  become the locator). Rewritten as `test_image_title_locator` to assert the
+  contract the code actually implements — including that `section_title`
+  stays `None`.
+- **`tests/pipeline/test_stream_holdback.py`**: its `_FakePromptBuilder` had a
+  fixed `(query, context, session_id)` signature while the real builder gained
+  `memory` long ago, so all five tests failed inside `stream()`'s try/except
+  as "unexpected keyword argument 'memory'" — a stale double reporting itself
+  as a streaming bug. Now accepts `**kwargs`; 3 of the 5 pass again.
+
+`pytest tests/unit/ -q` for retrieval/llm/pipeline/api/reasoning/verification/
+prompt: 640 pass. `tests/pipeline` is down from 6 failures to 2, both
+pre-existing and unrelated: one needs `presidio_analyzer` (not installed on
+this dev box) and one asserts refusal-sentinel behaviour that predates this
+work — verified identical on a stashed clean tree, and deliberately not
+"fixed" by changing production refusal logic to match a test.
+`ruff`/`black`/`isort` clean on every file touched.
+
+### Fixed — a decapitated refusal was being served as a real answer (streaming path)
+
+Chasing the last red test in `tests/pipeline` turned up a genuine production
+bug, not a test artifact.
+
+`RAGPipeline.stream()` detects a refusal twice. First at the prefix gate,
+against the RAW model output — that sets `refusal_mode`, which immediately
+stops flushing tokens to the client. Then again at the end, by re-running
+`_is_llm_refusal()` on the finished `answer`. But `refusal_mode` was set and
+then **never read again**, and between the two checks the answer passes
+through the output guard, the financial-figure normalizer and
+`_strip_leaked_instructions()` — which removes a leading "I could not find any
+relevant information in the provided sources to answer this question." as a
+reasoning preamble. The second check then saw only the refusal's tail ("The
+documents discuss unrelated topics such as ...") and let it through.
+
+Result: the model refuses, the stream correctly suppresses the live tokens,
+and then delivers the beheaded refusal via the REPLACE sentinel as though it
+were an answer — with source chips attached — instead of emitting the
+REFUSAL sentinel that makes the client fetch the accurate meta-path answer.
+Reproduced deterministically: a 233-char refusal streamed back as six token
+events plus REPLACE plus SOURCES, no REFUSAL sentinel anywhere.
+
+Fix: `if not answer or refusal_mode or _is_llm_refusal(answer)`. This does not
+widen what counts as a refusal — both checks use the same prefix-anchored
+rule, and `refusal_mode` is computed on the untouched model output, which is
+the more trustworthy of the two. It also removes an inconsistency that already
+existed: once `refusal_mode` is set the token loop stops flushing, so those
+tokens were suppressed live and then shipped anyway in REPLACE. The log line
+now carries `caught_at_prefix_gate` so the two paths are distinguishable in
+production.
+
+### Fixed — local dev environment could not run four test suites
+
+All of these were missing/incompatible packages on the dev box, each
+surfacing as a plausible-looking code failure:
+
+- **`presidio-analyzer` + `presidio-anonymizer` + `en_core_web_lg`** were not
+  installed (both are in `requirements.txt`; the spaCy model is a separate
+  `python -m spacy download`). PII scrubbing silently no-ops without them, so
+  `test_flushed_segments_are_pii_scrubbed` failed while production — where
+  they are installed — was fine.
+- **`audioop-lts`**: Python 3.14 removed the stdlib `audioop` module (PEP
+  594), so `pydub` fell through to `import pyaudioop` and every audio
+  ingestion test failed with `No module named 'pyaudioop'`. The backport
+  restores it. Not added to `requirements.txt` — the deployed box runs 3.12,
+  where `audioop` is still stdlib.
+- **`redis`** (declared, not installed) and **`argon2-cffi`**.
+- **`bcrypt` pinned to `>=4.0,<5` in `requirements.txt`** — this one is a real
+  production risk, not just local. passlib 1.7.4 probes its bcrypt backend
+  with a >72-byte password; bcrypt 4.x truncated it, bcrypt 5.x raises
+  `ValueError` instead, so the entire bcrypt scheme fails to initialise.
+  Nothing errors at install time — it surfaces at runtime on the first bcrypt
+  use, which here is MFA backup-code hashing
+  (`app/auth/mfa.py::_generate_backup_codes`) and verifying any legacy bcrypt
+  password hash. Argon2 is the primary scheme and is unaffected, which is
+  exactly why this could sit unnoticed until someone enrolled in MFA.
+
+### Fixed — three stale tests that were red for reasons of their own
+
+- **`tests/unit/{agents,ingestion}/`** — six call sites used
+  `asyncio.get_event_loop().run_until_complete(...)`, which Python 3.12
+  deprecated and 3.14 turns into `RuntimeError: There is no current event
+  loop`. Replaced with `asyncio.run(...)`.
+- **`tests/auth/test_protected_routes.py::test_register_is_public`** asserts
+  an access-control property (no token required) but did not stub the OTP
+  side effects, so on any machine without a Redis server the route 503'd on
+  "Redis unavailable — cannot store OTP" and rolled the account back. Now
+  stubs `store_otp`/`send_otp_email` exactly as its sibling
+  `test_login_is_public` already did.
+
+**Suite status after this pass** — `tests/unit/` 100% green (was 10 failures),
+`tests/pipeline` 12/12 green (was 6 failures), `tests/auth` 100% green (was 3
+failures), `tests/guardrails` 100% green and now actually exercising Presidio
+rather than skipping it. `ruff check app/` reports one pre-existing
+import-order finding in `app/main.py`, a file untouched by this work and part
+of a separate in-flight change — deliberately not reformatted here.
+
+### Fixed — web-mode queries could be answered from the knowledge base
+
+Reported: click the web icon, the web answer streams in, it flickers, and a
+knowledge-base answer replaces it.
+
+Root cause was not in the streaming route — that one is careful, and on a web
+failure it deliberately returns "Web search … — please try again, or turn off
+web search" rather than falling through to the KB. The problem was the
+**fallback**. When a streamed answer comes back empty or looks like a refusal,
+the client re-runs the question through `POST /rag/query`. Two things were
+wrong with that:
+
+1. **`/rag/query` accepted `force_web` and never read it.** The field was on
+   `QueryRequest`, was validated, and no code path in the non-streaming route
+   ever looked at it — so the fallback ran the ordinary KB pipeline and its
+   answer overwrote the web answer on screen. The flicker was one answer being
+   animated in over another.
+2. **The client never sent `force_web` on that call anyway.** `queryMeta()`
+   had no such parameter.
+
+Also fixed: the client's refusal heuristic (`isRefusal`) matches phrases like
+"could not find" and "not available in" anywhere in the text. Those are common
+in genuine web results ("the exact figure is not available in public
+filings…"), so a perfectly good web answer could trip the fallback and get
+replaced. That is the "sometimes" in the report.
+
+- **`app/api/api_routes.py`**: `_EXPLICIT_WEB_PHRASES`, `_REALTIME_SIGNALS`,
+  `_is_web_request()`, `_run_web_search()`, `_web_failure_message()` and
+  `_web_source_payload()` are now module-level and shared. The routing
+  decision and the search call existed only inside `stream_query()` before,
+  which is exactly how the two endpoints came to disagree. Both routes now go
+  through the same functions, so they cannot drift apart again.
+- **`POST /rag/query` honours `force_web`**: runs the web search, returns the
+  web answer with web-typed sources (`decision: "web"`), and on failure
+  returns the same explicit failure message as the stream route
+  (`decision: "web_failed"`) — never a KB answer. The user deliberately
+  excluded their files; a KB answer here would be indistinguishable from a
+  real web answer.
+- **`ui/src/api/client.js`**: `queryMeta()` takes and sends `forceWeb`.
+- **`ui/src/pages/ChatPage.jsx`**: passes `webSearchMode` to the fallback, and
+  in web mode only falls back when the stream produced *nothing at all* —
+  a non-empty web answer is kept even if it contains a refusal-ish phrase.
+  The empty-in-web-mode message now talks about web search rather than the
+  knowledge base.
+
+Unchanged on purpose: queries that merely match a phrase/real-time heuristic
+(`force_web=False`) keep the graceful fall-through to the KB on both routes.
+The user never opted out of their files for those.
+
+### Added — `tests/unit/api/test_web_search_routing.py` (12 tests, all passing)
+
+`_is_web_request` (toggle alone, explicit phrase, real-time signal, plain KB
+question, case-insensitivity, empty query + toggle); the web source payload
+shape, including that a short titles list does not shift the URL/title
+pairing, and that empty URLs are dropped; the failure message naming both the
+reason and the way out. Then the route itself, through `TestClient` with the
+auth dependency overridden: `force_web=true` returns the web answer with
+web-typed sources **and the KB pipeline is asserted never to be called**;
+a web failure returns the failure message with `decision: "web_failed"` and
+still no KB call; and without `force_web` the KB pipeline runs as before with
+the web search never awaited.
+
+### Fixed — access/refresh/device tokens were readable from inside the browser
+
+An audit of the frontend's DevTools/XSS exposure found the access token,
+refresh token, and the MFA "trusted device" token all sitting in plaintext
+`localStorage` (HIGH — readable by any XSS payload or malicious extension,
+survives browser close, and independently visible via React DevTools' state
+inspector since `auth.token` held the real JWT). A second, related leak: the
+Google OAuth callback handed both tokens back to the browser as raw
+`?magik_token=...&magik_refresh=...` query params, which sit in browser
+history and any proxy/server access log for as long as they're valid
+(MED-HIGH). Fixing the storage layer without fixing the transport would have
+left this second path wide open, so both were done together.
+
+The tokens now never reach JavaScript at all — they're httpOnly cookies set
+directly by the server, immune to both leaks by construction rather than by
+convention. Non-browser API/CLI/test clients are unaffected: every endpoint
+still returns the same JSON token pair it always did, so `Authorization:
+Bearer` keeps working exactly as before.
+
+- **`app/auth/cookies.py`** (new): sets `magik_access`/`magik_refresh`/
+  `magik_device` as `httpOnly`, `Secure` (env-gated), `SameSite=Lax` cookies,
+  plus a separate `magik_csrf` cookie that is deliberately **not** httpOnly —
+  it's a double-submit CSRF token, not a secret, so the SPA needs to read it.
+- **`app/auth/router.py`**: every token-issuing route (login, verify-otp,
+  refresh, mfa/verify) now sets these cookies. The Google OAuth callback no
+  longer puts tokens in the redirect URL — it sets the cookies on the
+  redirect response itself and sends the browser to `?oauth=1` with nothing
+  sensitive in it. `/auth/logout` reads the access/refresh token from the
+  cookie (falling back to the header/body for non-browser callers) and
+  clears all four cookies in its response.
+- **`app/auth/dependencies.py`**: `get_current_user` reads the httpOnly
+  cookie first, falling back to `Authorization: Bearer` — additive, so the
+  existing 112-test auth suite and the Swagger `/docs` "Authorize" flow kept
+  working unchanged.
+- **`app/api/middleware.py`**: new `CSRFMiddleware` — any cookie-authenticated
+  mutating request (POST/PUT/PATCH/DELETE) without a matching
+  `X-CSRF-Token` header gets a 403. Bearer-token clients are exempt by
+  construction: a forged cross-site request can't attach a custom header.
+- **`app/core/config.py`**: `CORS_ORIGINS` default changed from `["*"]` to
+  `[]`. With `allow_credentials=True` (required for cookies), Starlette's
+  CORS middleware reflects the request's `Origin` verbatim instead of
+  literally sending `"*"` — so the old default would have silently accepted
+  credentialed requests from *any* origin the moment cookies started
+  carrying real sessions. New `COOKIE_SECURE`/`COOKIE_SAMESITE`/
+  `COOKIE_DOMAIN` settings.
+- **`ui/src/api/client.js`**: dropped the `bearer()` header helper entirely;
+  every request now uses `credentials:'include'`, and mutating calls send
+  the CSRF token (no longer a real secret) as `X-CSRF-Token`.
+  `ingestFile()`'s XHR upload uses `xhr.withCredentials` the same way.
+- **`ui/src/App.jsx`**: removed every `localStorage.setItem` for
+  `magik_token`/`magik_refresh`/`magik_email`/`magik_device_token` — session
+  state is now just "ask the server via the cookie," which also deleted the
+  manual refresh-token bookkeeping this used to require.
+- **`ui/src/components/ErrorBoundary.jsx`**: logs only the error message, not
+  the full error object, so a future accidental token-bearing URL in a
+  thrown error can't end up in the console. **`ui/vite.config.js`**: explicit
+  `sourcemap: false` (already Vite's default, now stated so it can't be
+  silently flipped on for a production build).
+
+Verified live (not just unit tests): a real `TestClient` login sets all four
+cookies with the correct `HttpOnly` flags, a cookie-only GET succeeds with no
+header at all, a mutating POST without `X-CSRF-Token` is rejected 403, the
+same request with the header succeeds, and logout clears everything. Full
+auth suite (112/112) and unit suite green throughout; no behavior change for
+existing bearer-token API consumers.
+
+### Fixed — wake-up page for the sleeping demo instance could look stuck forever
+
+The public wake-gateway (`https://xhty16t7dj.execute-api.us-east-1
+.amazonaws.com`, fronting the scale-to-zero GPU box behind
+`magik.vk-ai.online`) showed the identical generic "starting up… this takes
+about a minute" page for every second between a fresh boot and a genuinely
+wedged instance. A visitor — often a recruiter or hiring manager clicking a
+cold link — reloading for ten-plus minutes saw exactly the same text the
+whole time, with nothing distinguishing "still normal" from "something is
+actually wrong."
+
+- **`deploy/aws/lambda/wake_gateway/handler.py`**: now tracks minutes-since-
+  boot via the EC2 instance's `LaunchTime` (which AWS resets on every
+  `StartInstances` call). Past a new `STUCK_MINUTES` threshold (default 6)
+  while `running` and still unhealthy, the page switches to a distinct
+  "This is taking longer than usual" message instead of repeating the
+  generic copy — and, if `KUMA_PUSH_URL` is configured, pushes a "down"
+  heartbeat at that exact moment. Below the threshold, the waking page now
+  says explicitly that the GPU instance is up and the model stack is
+  loading (previously it kept saying "starting the GPU server" even after
+  the server was already running). Copy rewritten to speak directly to the
+  demo's actual audience (recruiters/hiring managers): what's happening,
+  why the first visit is slow, and that no action is needed — it redirects
+  automatically.
+- **`deploy/aws/scripts/deploy_lambdas.sh`**: wires the new `STUCK_MINUTES`
+  env var through to the Lambda (default 6, overridable).
+- **`deploy/aws/README.md`**: new troubleshooting section for "redirect
+  never happens" — `/health` is a trivial, dependency-free handler, so a
+  working `curl localhost:8000/health` on the box combined with the public
+  HTTPS health check still failing points at Caddy/TLS (e.g. an expired
+  Let's Encrypt cert), not the app itself.
+
+Verified locally against 6 mocked EC2-state scenarios (stopped, pending,
+running-under-threshold, running-over-threshold, and two healthy-redirect
+cases) — all pass. Not independently verified against the live instance:
+this environment has no AWS credentials, so the actual root cause of any
+currently-stuck boot (crashed app vs. Caddy/cert failure) still needs the
+CloudWatch/SSM steps in the new README section, and this fix still needs
+`bash deploy/aws/scripts/deploy_lambdas.sh` run from somewhere with AWS
+access before it's live.
+
+### Fixed — minor UI copy
+
+- **`ui/src/pages/ChatPage.jsx`**: the `@`-file-picker's empty state referred
+  to a "+" button that doesn't exist in this UI; now points to the actual
+  upload entry point (the **Files** panel in the sidebar).
+- **`ui/src/components/Sidebar.jsx`**: the upload-success toast no longer
+  appends a raw chunk count (`"Uploaded: file.pdf (32 chunks)"`) — internal
+  ingestion detail with no value to the person uploading a file.
+
+# [Unreleased] — Monitoring Stack Made Actually Live in Production
+
+Phase 31 (v0.28.0) built a complete Prometheus/Grafana/Tempo/Loki/OTel stack
+with correct internal wiring — but nobody had verified it actually worked
+end-to-end once deployed. It didn't: every piece was individually correct on
+paper, but the deploy path between "config committed to the repo" and
+"container running with the right settings on the box" had gaps at four
+different points, each silent (no error, just absent data) rather than loud.
+Audited and fixed all four; two remaining gaps are genuine unfinished
+infrastructure, called out below rather than left undocumented.
+
+### Fixed
+
+- **Prometheus/OTel were never actually turned on in production.**
+  `PROMETHEUS_ENABLED`, `OTEL_ENABLED`, `OTEL_EXPORTER_OTLP_ENDPOINT`, and
+  `LOG_JSON` all default off in `app/core/config.py` (correctly, so local/CI
+  runs never pay the cost) — but no committed env file ever turned them on
+  for the one environment that has a collector to receive them.
+  `deploy/aws/prod.env` now sets all four, with `OTEL_EXPORTER_OTLP_ENDPOINT`
+  pointed at the collector's `magik-net` service name. Without this,
+  `prometheus.yml`'s `magik-current:9464` scrape target and every Grafana
+  dashboard reading `magik_*` metrics were configured correctly and had
+  nothing to scrape.
+- **Trace/log correlation was dead on arrival.** `app/utils/logger.py`'s
+  `_inject_otel_context()` — which copies the active span's trace/span ID
+  into the log context vars — existed but was never called anywhere.
+  Every JSON log line shipped with `"trace_id":"-"`, which can never match
+  the Loki→Tempo datasource's `matcherRegex` in
+  `monitoring/grafana/provisioning/datasources.yml`, so the "click a log
+  line, jump to its trace" correlation Grafana was configured for never
+  worked even with the stack fully running. `app/main.py`'s request
+  middleware now opens a real root span (`http_request`) around the whole
+  request and calls `_inject_otel_context()` inside it, so every log emitted
+  while handling a request carries a real `trace_id`.
+- **The monitoring stack's own persistent volumes would fail to come up on a
+  fresh box.** `docker-compose.monitoring.yml` mounts
+  `/opt/magik/monitoring/{prometheus,grafana,tempo,loki,promtail}` as
+  bind-type local volumes; nothing ever created those directories, so the
+  very first `docker compose up` after a fresh box or EBS/AMI rebuild would
+  fail outright for all five stateful services. `deploy_monitoring.sh` now
+  `mkdir -p`s all five before bringing the stack up.
+- **Config changes to the monitoring stack never reached production
+  automatically.** `cd.yml`'s `promote-production` job deploys the app via a
+  self-contained SSM script that only pulls the prebuilt Docker image — it
+  has no repo checkout, so it never touched `monitoring/*.yml` or
+  `docker-compose.monitoring.yml`. Bringing the stack up (or picking up a
+  config change to it) was a purely manual runbook step, easy to forget and
+  with no way to tell it had drifted. Added a new **"Sync + redeploy
+  monitoring stack"** step to `promote-production`: after the app container
+  deploy succeeds, it `git fetch`/`reset --hard`s the box's persistent
+  checkout (`/home/ubuntu/multimodal-rag-assistant`) to the exact tag just
+  promoted, then re-runs `deploy_monitoring.sh` over SSM. Deliberately
+  `continue-on-error: true` and gated on the app deploy's own success — a
+  monitoring-stack failure must never fail or roll back the app promotion —
+  with its own Slack notification worded so it reads as "go check
+  Grafana on the box," not a production-app incident.
+
+### Known gaps — not fixed, flagged instead of silently carried forward
+
+- **Uptime Kuma (the "Uptime" piece of the stack) is not deployed.**
+  `monitoring/uptime-kuma/` is fully configured but its own README says so
+  explicitly — it needs a second, always-on EC2 host, its own DNS record,
+  and manual wiring of its push-monitor URL into the `wake_gateway`/
+  `idle_stop` Lambdas. None of that infrastructure has been provisioned.
+- **Caddy's Grafana `basic_auth` hash is a placeholder**
+  (`GRAFANA_BASICAUTH_HASH_PLACEHOLDER` in `deploy/aws/caddy/Caddyfile`) that
+  must be hand-substituted with a real bcrypt hash before each deploy that
+  touches the Caddyfile. Fails safe (login simply rejects until replaced),
+  but there's no CI check confirming it was actually replaced.

@@ -90,7 +90,7 @@ function AccountSection({ auth, dark, onToggleTheme, showSources, setShowSources
   const [clearingHistory, setClearingHistory] = useState(false)
   const [confirmClearHistory, setConfirmClearHistory] = useState(false)
 
-  useEffect(() => { getMe(auth.token).then(setProfile).catch(() => {}) }, [auth.token])
+  useEffect(() => { getMe().then(setProfile).catch(() => {}) }, [])
 
   const memberSince = profile?.created_at
     ? new Date(profile.created_at).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
@@ -288,6 +288,8 @@ function SecuritySection({ auth, onLogout, addToast }) {
     setSaving(true)
     try {
       await changePassword(auth.token, current, next)
+      // The server already revoked this browser's trusted-device cookie (an
+      // httpOnly cookie now — nothing client-side to clean up here).
       addToast('Password changed — signing you out everywhere…', 'success')
       setTimeout(onLogout, 1200)
     } catch (err) {
@@ -361,7 +363,6 @@ function PrivacySection({ auth, onLogout, addToast }) {
     setDeleting(true)
     try {
       await deleteAccount(auth.token)
-      localStorage.removeItem('magik_device_token')
       addToast('Your account and all data have been permanently deleted', 'success')
       setTimeout(onLogout, 1000)
     } catch (err) {
