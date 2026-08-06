@@ -41,12 +41,11 @@ function Highlighted({ text, term }) {
 }
 
 /* ── Props:
-     auth      – { token }
      fileHash  – string
      filename  – string (display)
      onBack    – () => void, optional
 */
-export default function TranscriptViewer({ auth, fileHash, filename, onBack }) {
+export default function TranscriptViewer({ fileHash, filename, onBack }) {
   const [loading, setLoading]   = useState(true)
   const [error, setError]       = useState(null)
   const [chunks, setChunks]     = useState([])
@@ -57,7 +56,7 @@ export default function TranscriptViewer({ auth, fileHash, filename, onBack }) {
   useEffect(() => {
     if (!fileHash) return
     setLoading(true); setError(null)
-    getTranscript(auth.token, fileHash)
+    getTranscript(fileHash)
       .then(data => setChunks(data.chunks || []))
       .catch(err => setError(err.message))
       .finally(() => setLoading(false))

@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 
-**Live demo:** [magik.vk-ai.online](https://magik.vk-ai.online)
+**Live demo:** (https://xhty16t7dj.execute-api.us-east-1.amazonaws.com)
 
 The demo runs on a scale-to-zero AWS GPU box — it may take 60-90 seconds to wake up from a cold stop on the first request. See [Deployment](#deployment) for why.
 

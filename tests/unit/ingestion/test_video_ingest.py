@@ -207,4 +207,4 @@ class TestVideoIngestAsync:
             with pytest.raises(ValueError):
                 await ingest_async(path, session_id="")
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())

@@ -35,13 +35,12 @@ function groupBySections(chunks) {
 }
 
 /* ── Props:
-     auth         – { token }
      fileHash     – string (audio/video KB file hash)
      filename     – string (display name)
      onSelectTurn – (query: string) => void — pre-fills chat input
      onClose      – () => void
 */
-export default function EarningsCallBrowser({ auth, fileHash, filename, onSelectTurn, onClose }) {
+export default function EarningsCallBrowser({ fileHash, filename, onSelectTurn, onClose }) {
   const [loading, setLoading]         = useState(true)
   const [error, setError]             = useState(null)
   const [sections, setSections]       = useState([])
@@ -50,7 +49,7 @@ export default function EarningsCallBrowser({ auth, fileHash, filename, onSelect
   useEffect(() => {
     if (!fileHash) return
     setLoading(true); setError(null)
-    getTranscript(auth.token, fileHash)
+    getTranscript(fileHash)
       .then(data => {
         const grouped = groupBySections(data.chunks || [])
         setSections(grouped)

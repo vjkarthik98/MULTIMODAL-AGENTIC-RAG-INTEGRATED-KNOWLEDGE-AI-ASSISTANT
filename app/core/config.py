@@ -94,7 +94,7 @@ class Settings:
     APP_NAME: str = _str("APP_NAME", "Multimodal Agentic RAG Integrated Knowledge AI Assistant")
     # Keep in sync with /VERSION and the test assertion below by hand — nothing
     # reads /VERSION at runtime, so this drifts silently if only one is bumped.
-    APP_VERSION: str = _str("APP_VERSION", "0.29.0")
+    APP_VERSION: str = _str("APP_VERSION", "0.30.0")
     APP_DESCRIPTION: str = _str(
         "APP_DESCRIPTION", "Production Multimodal Agentic RAG Integrated AI System"
     )
@@ -182,6 +182,14 @@ class Settings:
     LLM_TEMPERATURE: float = _float("LLM_TEMPERATURE", 0.0)
     LLM_TEMPERATURE_FACTUAL: float = _float("LLM_TEMPERATURE_FACTUAL", 0.1)
     LLM_TEMPERATURE_GENERATIVE: float = _float("LLM_TEMPERATURE_GENERATIVE", 0.35)
+    # Floor temperature for an explicit user "regenerate this answer" request.
+    # The normal path decodes at 0.0-0.1 (greedy/near-greedy) so the same
+    # question always yields the same answer — correct for a factual RAG, but
+    # it makes the regenerate button a no-op: identical prompt, identical
+    # sampling, identical text. See app/llm/regeneration.py. Kept modest on
+    # purpose: high enough to explore a genuinely different phrasing/ordering,
+    # low enough that the model doesn't start improvising figures.
+    LLM_TEMPERATURE_REGENERATE: float = _float("LLM_TEMPERATURE_REGENERATE", 0.4)
     LLM_TOP_P: float = _float("LLM_TOP_P", 0.9)
     LLM_TOP_K_SAMPLING: int = _int("LLM_TOP_K_SAMPLING", 40)
     LLM_MIN_P: float = _float("LLM_MIN_P", 0.05)
@@ -293,6 +301,31 @@ class Settings:
     #   text_embedder,llm,reranker,siglip,image_embedder,siglip_text_embedder,blip,trocr,whisper,ner,finbert,diarizer
     WARMUP_MODELS: list[str] = _list("WARMUP_MODELS", ["text_embedder", "llm", "reranker"])
     MODEL_PARALLEL_LOAD: bool = _bool("MODEL_PARALLEL_LOAD", True)
+
+    # IDLE MODEL EVICTION — the unload half of WARMUP_MODELS' load-on-demand.
+    #
+    # model_loader.unload_idle_models() has existed since 2026-08-01 but its
+    # only caller was _oom_guard(loading=...), which runs solely when ANOTHER
+    # heavy model is about to load. So eviction was reactive to demand
+    # pressure and never to idleness: upload one image, and BLIP2/Qwen2-VL
+    # stayed resident in VRAM indefinitely if nothing else was ever uploaded.
+    # app/core/model_reaper.py is the background sweeper that makes the
+    # idle_seconds argument actually mean something.
+    #
+    # Only the 8 ingestion-only models in _EVICTABLE_MODELS are affected.
+    # The query hot set (llm, text_embedder, reranker, and the SigLIP family
+    # used for cross-modal query search) is pinned and never evicted — a
+    # live query must never wait on a model reload.
+    MODEL_IDLE_EVICTION_ENABLED: bool = _bool("MODEL_IDLE_EVICTION_ENABLED", True)
+    # Long enough that a user uploading several files in one sitting doesn't
+    # pay a reload (~25s for a VLM) between them; short enough that a box
+    # left alone gives its VRAM back promptly.
+    MODEL_IDLE_TIMEOUT_SEC: float = _float("MODEL_IDLE_TIMEOUT_SEC", 300.0)
+    MODEL_REAPER_INTERVAL_SEC: float = _float("MODEL_REAPER_INTERVAL_SEC", 60.0)
+    # Urgent trigger: when free VRAM falls below this, evict least-recently-
+    # used evictable models regardless of age. 0 disables pressure eviction
+    # and leaves only the idle-TTL sweep.
+    MODEL_EVICT_VRAM_WATERMARK_GB: float = _float("MODEL_EVICT_VRAM_WATERMARK_GB", 6.0)
     LLM_GPU_LAYERS_AUTO: bool = _bool("LLM_GPU_LAYERS_AUTO", True)
     LLM_GPU_LAYERS_ALL: int = _int("LLM_GPU_LAYERS_ALL", -1)
     LLM_N_CTX: int = _int("LLM_N_CTX", 16384)
@@ -787,6 +820,23 @@ class Settings:
     PASSWORD_MIN_ZXCVBN_SCORE: int = _int("PASSWORD_MIN_ZXCVBN_SCORE", 2)
     PASSWORD_MIN_LENGTH: int = _int("PASSWORD_MIN_LENGTH", 8)
     AUTH_ENABLED: bool = _bool("AUTH_ENABLED", True)
+    # httpOnly cookie attributes for the browser session (access/refresh/device
+    # tokens are never exposed to JS — see app/auth/cookies.py). Secure defaults
+    # to on outside local dev so cookies are never sent over plain HTTP in any
+    # real deployment; SameSite=Lax blocks cross-site form/script forgery while
+    # still surviving the Google OAuth redirect landing on our own callback.
+    COOKIE_SECURE: bool = _bool("COOKIE_SECURE", ENV != "development")
+    COOKIE_SAMESITE: str = _str("COOKIE_SAMESITE", "lax")
+    COOKIE_DOMAIN: str | None = _opt("COOKIE_DOMAIN")  # None = host-only cookie
+    # The one fixed, publicly-shared demo login (recruiters / hiring managers).
+    # /auth/login skips the email OTP for this address — see app/auth/router.py.
+    # Matching on the address, not only on the Mongo `is_demo` flag, is
+    # deliberate: the flag is a database write that only
+    # `python -m app.bin.seed_demo_account` performs, so a fresh environment
+    # (or an account that predated the flag) would silently fall back to
+    # asking a recruiter for an OTP they can't receive. Set to "" to disable
+    # the bypass entirely.
+    DEMO_ACCOUNT_EMAIL: str = _str("DEMO_ACCOUNT_EMAIL", "testuser@ragdev.local")
 
     # EMAIL (Gmail SMTP) — OTP + password-reset
     SMTP_HOST: str = _str("SMTP_HOST", "smtp.gmail.com")
@@ -813,7 +863,13 @@ class Settings:
     # SECURITY
     SECRET_KEY: str = _str("SECRET_KEY", "CHANGE_ME_IN_PRODUCTION")
     DATABASE_URL: str = _str("DATABASE_URL", "sqlite:///./data/rag_users.db")
-    CORS_ORIGINS: list[str] = _list("CORS_ORIGINS", ["*"])
+    # No wildcard default: CORSMiddleware runs with allow_credentials=True (see
+    # main.py) so the auth cookies ride every allowed cross-origin request —
+    # Starlette's CORS middleware reflects the request's Origin verbatim
+    # instead of literally sending "*" whenever allow_credentials=True, so an
+    # unset/"*" value here would silently accept credentialed requests from
+    # ANY origin. Must be set explicitly per environment (see .env.example).
+    CORS_ORIGINS: list[str] = _list("CORS_ORIGINS", [])
     RATE_LIMIT_RPM: int = _int("RATE_LIMIT_RPM", 60)
     # Comma-separated list of trusted reverse-proxy IPs (e.g. an internal ALB).
     # X-Forwarded-For is ONLY trusted when the direct TCP peer is in this list —
@@ -1034,7 +1090,7 @@ class TestSettings:
 
     def test_defaults_are_valid(self):
         s = Settings()
-        assert s.APP_VERSION == "0.29.0"
+        assert s.APP_VERSION == "0.30.0"
         assert s.TEXT_EMBEDDING_DIM == 1024
         assert s.VISION_EMBEDDING_DIM > 0
         assert s.CHUNK_OVERLAP < s.CHUNK_SIZE

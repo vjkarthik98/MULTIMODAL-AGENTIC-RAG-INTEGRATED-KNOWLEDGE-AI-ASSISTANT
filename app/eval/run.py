@@ -105,6 +105,33 @@ Examples:
     if args.baseline:
         cfg._baseline_path = Path(args.baseline)  # regression runner picks this up
 
+    # ── Clear stale reports BEFORE running ───────────────────────────────
+    # app/eval/reports/rag_report.{json,md} are COMMITTED TO GIT, so a copy
+    # ships baked into the Docker image and is present at /app/app/eval/
+    # reports the moment the container starts — before this harness has
+    # computed anything. Whatever a previous run wrote there also survives,
+    # since the container is long-lived between Tier-2 runs.
+    #
+    # So if this process dies before writing its own results — a crash, an
+    # OOM kill, a CI timeout — every downstream consumer reads the leftover
+    # file and cannot tell it from a genuine result. All of them did:
+    #   * eval-gate.yml's "Extract reports from container" copied it out,
+    #   * the Pushgateway step published it to Grafana as current numbers,
+    #   * the job summary and the uploaded artifact showed it as this run's.
+    # Observed live on run 30806087765: the process was SIGSEGV-killed
+    # mid-run having written nothing, and the published artifact was the
+    # committed report generated 2026-07-26 (git SHA 50d1afc) — presented as
+    # if it were that run's own output, with a passing retrieval section.
+    #
+    # Deleting them up front makes absence-of-results unambiguous: no file
+    # means no result, which every consumer already handles correctly.
+    if not args.no_report:
+        for _stale in ("rag_report.json", "rag_report.md", "gate_result.json"):
+            try:
+                (cfg.reports_dir / _stale).unlink(missing_ok=True)
+            except OSError as exc:
+                print(f"[WARN] Could not clear stale {_stale}: {exc}")
+
     # Run
     from app.eval.runner import EvalRunner
 

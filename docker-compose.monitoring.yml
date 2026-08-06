@@ -90,10 +90,11 @@ services:
 
   # Receives the offline/CI-gate RAG-quality numbers (recall@k, MRR, nDCG,
   # faithfulness, hallucination_rate — the actual thresholds.yaml-gated
-  # metrics) from eval-gate.yml's tier2-full-suite job, which runs ON this
-  # box as the self-hosted GPU runner (a plain host process, not itself a
-  # magik-net container) — hence the loopback port publish below, the same
-  # pattern grafana uses, so the runner can reach it via plain HTTP without
+  # metrics) from tier2-eval.yml's job (called by eval-gate.yml's nightly
+  # tier2-nightly), which runs ON this box as the self-hosted GPU runner (a
+  # plain host process, not itself a magik-net container) — hence the
+  # loopback port publish below, the same pattern grafana uses, so the
+  # runner can reach it via plain HTTP without
   # joining the docker network. See .github/workflows/eval-gate.yml's "Push
   # eval metrics to Pushgateway" step and monitoring/grafana/dashboards/
   # rag_quality.json's "CI Tier-2 (gated)" panels.

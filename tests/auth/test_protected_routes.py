@@ -96,10 +96,19 @@ def test_me_with_bearer_prefix_missing_returns_401(client, valid_token):
 # ── /auth/register and /auth/login are PUBLIC ────────────────────────────────
 
 def test_register_is_public(client):
-    r = client.post("/auth/register", json={
-        "email": "newuser@example.com",
-        "password": "NewUserPass99!"
-    })
+    # This asserts an ACCESS-CONTROL property (no token required), so the OTP
+    # side effects are stubbed exactly as test_login_is_public already does.
+    # Without the stubs the route 503s on "Redis unavailable — cannot store
+    # OTP" and rolls the account back, so the test failed on any machine with
+    # no Redis server — reporting missing infrastructure as a broken route.
+    from unittest.mock import patch as _patch
+
+    with _patch("app.auth.otp_store.store_otp"), \
+         _patch("app.auth.email_service.send_otp_email"):
+        r = client.post("/auth/register", json={
+            "email": "newuser@example.com",
+            "password": "NewUserPass99!"
+        })
     assert r.status_code == 201
 
 

@@ -22,6 +22,15 @@ DeepEval previously judged the live RAG server with itself, a real
 self-evaluation-bias concern this also fixes.
 Path:  ./.hf_cache/gguf/Qwen2.5-7B-Instruct-Q4_K_M.gguf
 
+RUNS OUT-OF-PROCESS. The model is loaded by `qwen_judge_worker.py` in its own
+subprocess, and everything here proxies to it over a JSON-lines pipe. This is
+not an optimization — it is the same hard constraint `app/llm/gguf_model.py`
+already obeys for the resident LLM: llama.cpp and PyTorch cannot share one
+process's CUDA context without corrupting it, fatally so on worker threads.
+Loading the judge in-process (as this file used to) is what made every
+Tier-2 full-suite run die mid-way at the generation->routing boundary with
+SIGSEGV/SIGKILL. See qwen_judge_worker.py's docstring for the full writeup.
+
 Three interfaces on top of one `generate()` primitive:
   1. Rubric / Direct-Assessment scoring (`score`, `grade_metric`,
      `grade_behavioral`) — backs the Tier-2 gate (metrics/generation.py) and
@@ -42,10 +51,14 @@ Three interfaces on top of one `generate()` primitive:
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import queue
 import re
 import shutil
+import subprocess
+import sys
 import threading
 import typing as t
 from pathlib import Path
@@ -77,8 +90,25 @@ _GGUF_REPO = "bartowski/Qwen2.5-7B-Instruct-GGUF"
 _GGUF_FILENAME = "Qwen2.5-7B-Instruct-Q4_K_M.gguf"
 
 _lock = threading.Lock()
-_llm = None
 _download_attempted = False
+
+# ── Out-of-process worker state ─────────────────────────────────────────────
+# The judge model is NOT loaded in this process. See qwen_judge_worker.py's
+# module docstring for the full root-cause writeup; the short version is that
+# llama.cpp's CUDA init corrupts PyTorch's CUDA context in the same process,
+# which is fatal on worker threads — and `routing`/`e2e` run the real
+# query_pipeline in-process, on agent_controller.py's ThreadPoolExecutor.
+# That combination killed every Tier-2 full-suite run (exit 139 SIGSEGV /
+# exit 137 SIGKILL) at the generation->routing boundary.
+_proc: subprocess.Popen | None = None
+_resp_q: queue.Queue | None = None
+_worker_failed: str | None = None  # sticky: don't respawn a worker that can't load
+
+# A 7B Q4_K_M generation of <=1024 tokens takes seconds on GPU and minutes on
+# CPU fallback. 900s is generous enough for the CPU path without letting a
+# genuinely wedged worker hang the whole 180-minute CI job.
+_GEN_TIMEOUT_SEC = int(os.getenv("QWEN_JUDGE_TIMEOUT_SEC", "900"))
+_LOAD_TIMEOUT_SEC = int(os.getenv("QWEN_JUDGE_LOAD_TIMEOUT_SEC", "900"))
 
 
 def _resolve_gpu_layers() -> int:
@@ -100,20 +130,30 @@ def _resolve_gpu_layers() -> int:
     that state OOMs instead of degrading — confirmed live 2026-08-01
     (nvidia-smi: 42.6GB/46.1GB used, ~3.4GB free, well under this model's
     ~4.7GB GGUF size, before this fix existed).
+
+    MEASURED FROM THE DRIVER, NOT FROM PyTorch'S ALLOCATOR. The original
+    version computed `total_memory - torch.cuda.memory_reserved(0)`, which
+    counts ONLY this process's PyTorch caching allocator and is blind to the
+    separate llama-server process, the app's own model stack, and llama.cpp's
+    allocations. On the production box that reported tens of GB "free" while
+    the card was nearly full, so the CPU-fallback guard described above could
+    never actually fire — it always returned -1 (full GPU offload).
+    `device_manager.free_vram_gb()` asks the CUDA driver, which accounts for
+    every process on the device; see its docstring for the full reasoning.
     """
     if _N_GPU_LAYERS != -1:
         return _N_GPU_LAYERS
     try:
-        import torch
+        from app.core.device_manager import device_manager
 
-        if not torch.cuda.is_available():
-            return 0
-        free_bytes = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_reserved(
-            0
-        )
-        free_gb = free_bytes / (1024**3)
+        if not device_manager.cuda_available:
+            return 0  # no GPU to offload to
+        free_gb = device_manager.free_vram_gb()
     except Exception:
         return -1  # can't check — try full GPU offload and let llama_cpp fail loudly if wrong
+
+    if free_gb is None:
+        return -1  # CUDA present but the driver query failed — don't guess low
 
     # ~4.7GB GGUF plus headroom for the n_ctx=8192 KV cache and inference buffers.
     _required_gb = 6.0
@@ -126,38 +166,128 @@ def _resolve_gpu_layers() -> int:
     return -1
 
 
-def _load_qwen_judge():
-    """Load Qwen2.5-7B-Instruct Q4_K_M once and cache it."""
-    global _llm
-    if _llm is not None:
-        return _llm
-    with _lock:
-        if _llm is not None:
-            return _llm
-        if not os.path.exists(_MODEL_PATH):
-            raise RuntimeError(
-                f"Qwen judge GGUF not found at {_MODEL_PATH}. "
-                f"Download {_GGUF_FILENAME} into .hf_cache/gguf/."
-            )
-        try:
-            from llama_cpp import Llama
+def _reader_loop(proc: subprocess.Popen, q: queue.Queue) -> None:
+    """Drain the worker's protocol channel into a queue.
 
-            n_gpu_layers = _resolve_gpu_layers()
-            print(
-                f"[eval] Loading Qwen2.5-7B-Instruct judge (Q4_K_M) from {_MODEL_PATH} "
-                f"(n_gpu_layers={n_gpu_layers}) ..."
-            )
-            _llm = Llama(
-                model_path=_MODEL_PATH,
-                n_ctx=_N_CTX,
-                n_gpu_layers=n_gpu_layers,
-                n_threads=4,
-                verbose=False,
-            )
-            print("[eval] Qwen judge loaded ✓")
-        except Exception as e:
-            raise RuntimeError(f"Failed to load Qwen judge: {e}") from e
-    return _llm
+    A dedicated thread (rather than a blocking readline at each call site) is
+    what makes the request timeouts below real: if the worker dies or wedges,
+    `q.get(timeout=...)` returns control instead of blocking forever.
+    """
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.strip()
+            if line:
+                q.put(line)
+    except Exception:  # noqa: BLE001 — pipe closed on shutdown is normal
+        pass
+    finally:
+        q.put(None)  # EOF sentinel — unblocks any waiter with a clear signal
+
+
+def _discard_worker() -> None:
+    """Kill and forget the worker so the next call spawns a clean one.
+
+    Called on timeout and on mid-request death. This is not just tidiness: the
+    protocol is one-response-per-request over a shared queue, so a request that
+    timed out while the worker was merely slow would leave its late response
+    sitting in the queue and every subsequent call would read the PREVIOUS
+    call's answer — silently grading every remaining row against shifted
+    output. Discarding the worker makes that desynchronization impossible.
+    """
+    global _proc, _resp_q
+    proc, _proc, _resp_q = _proc, None, None
+    if proc is None:
+        return
+    try:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=10)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _shutdown_worker() -> None:
+    global _proc, _resp_q
+    proc, _proc, _resp_q = _proc, None, None
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if proc.stdin and not proc.stdin.closed:
+            proc.stdin.write(json.dumps({"cmd": "shutdown"}) + "\n")
+            proc.stdin.flush()
+        proc.wait(timeout=15)
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def _start_worker() -> subprocess.Popen:
+    """Spawn (once) the isolated llama.cpp judge process and wait for ready."""
+    global _proc, _resp_q, _worker_failed
+
+    if _worker_failed:
+        raise RuntimeError(_worker_failed)
+    if _proc is not None and _proc.poll() is None:
+        return _proc
+
+    if not os.path.exists(_MODEL_PATH):
+        raise RuntimeError(
+            f"Qwen judge GGUF not found at {_MODEL_PATH}. "
+            f"Download {_GGUF_FILENAME} into .hf_cache/gguf/."
+        )
+
+    n_gpu_layers = _resolve_gpu_layers()
+    print(
+        f"[eval] Starting Qwen2.5-7B-Instruct judge worker (Q4_K_M) from {_MODEL_PATH} "
+        f"(separate process, n_gpu_layers={n_gpu_layers}) ..."
+    )
+
+    env = os.environ.copy()
+    env["QWEN_JUDGE_WORKER_MODEL_PATH"] = _MODEL_PATH
+    env["QWEN_JUDGE_WORKER_N_CTX"] = str(_N_CTX)
+    env["QWEN_JUDGE_WORKER_GPU_LAYERS"] = str(n_gpu_layers)
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "app.eval.judges.qwen_judge_worker"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=None,  # inherit — llama.cpp banners stay visible in the CI log
+        env=env,
+        cwd=str(_settings.PROJECT_ROOT),
+        text=True,
+        bufsize=1,
+    )
+    q: queue.Queue = queue.Queue()
+    threading.Thread(target=_reader_loop, args=(proc, q), daemon=True).start()
+
+    try:
+        raw = q.get(timeout=_LOAD_TIMEOUT_SEC)
+    except queue.Empty:
+        proc.kill()
+        _worker_failed = f"Qwen judge worker did not become ready within {_LOAD_TIMEOUT_SEC}s"
+        raise RuntimeError(_worker_failed) from None
+
+    if raw is None:
+        proc.wait(timeout=5)
+        _worker_failed = (
+            f"Qwen judge worker exited during startup (returncode={proc.returncode}) — "
+            "see its stderr above in the job log"
+        )
+        raise RuntimeError(_worker_failed)
+
+    msg = json.loads(raw)
+    if not msg.get("ok"):
+        proc.kill()
+        _worker_failed = f"Qwen judge worker failed to load the model: {msg.get('error')}"
+        raise RuntimeError(_worker_failed)
+
+    _proc, _resp_q = proc, q
+    atexit.register(_shutdown_worker)
+    print("[eval] Qwen judge worker ready [OK]")
+    return proc
 
 
 def _chatml(system: str, user: str) -> str:
@@ -229,17 +359,61 @@ def generate(prompt: str, system: str = "", max_tokens: int = 768, temperature: 
 
     Public (no leading underscore): deepeval_suite.py's own DeepEvalBaseLLM
     wrapper calls this directly instead of routing through the live server.
+
+    Executes in the isolated worker process (qwen_judge_worker.py), never in
+    this one. The `_lock` serializes request/response pairs over the single
+    pipe — Ragas is configured `max_workers=1` and the rubric graders are
+    sequential, so this is not a throughput constraint.
+
+    Error contract is unchanged and deliberate: every failure path returns a
+    JSON `{"error": ...}` string rather than raising, so one bad grading
+    degrades that single metric to None instead of aborting the suite.
     """
-    llm = _load_qwen_judge()
     full_prompt = _chatml(system or "You are a helpful, precise assistant.", prompt)
     try:
-        out = llm(
-            full_prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            stop=["<|im_end|>", "<|im_start|>"],
-        )
-        return out["choices"][0]["text"].strip()
+        with _lock:
+            _start_worker()
+            proc, q = _proc, _resp_q
+            if proc is None or q is None or proc.stdin is None:
+                raise RuntimeError("Qwen judge worker is not running")
+
+            proc.stdin.write(
+                json.dumps(
+                    {
+                        "prompt": full_prompt,
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                        "stop": ["<|im_end|>", "<|im_start|>"],
+                    }
+                )
+                + "\n"
+            )
+            proc.stdin.flush()
+
+            try:
+                raw = q.get(timeout=_GEN_TIMEOUT_SEC)
+            except queue.Empty:
+                _discard_worker()
+                raise RuntimeError(
+                    f"Qwen judge worker timed out after {_GEN_TIMEOUT_SEC}s"
+                ) from None
+            if raw is None:
+                # Reap before reading the code, or poll() races the exit and
+                # reports a useless "returncode=None" in the CI log. A signal
+                # shows up negative here (e.g. -9 = SIGKILL/OOM-killer, -11 =
+                # SIGSEGV), which is exactly the distinction worth logging.
+                try:
+                    rc: int | None = proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    rc = proc.poll()
+                _discard_worker()
+                raise RuntimeError(f"Qwen judge worker died mid-request (returncode={rc})")
+
+            msg = json.loads(raw)
+
+        if not msg.get("ok"):
+            return json.dumps({"error": msg.get("error", "unknown judge worker error")})
+        return (msg.get("text") or "").strip()
     except Exception as e:
         return json.dumps({"error": str(e)})
 

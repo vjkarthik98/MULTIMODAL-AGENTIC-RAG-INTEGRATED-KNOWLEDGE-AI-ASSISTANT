@@ -78,6 +78,17 @@ COMPOSE_ENV="$(mktemp /tmp/monitoring-compose.XXXXXX.env)"
 chmod 600 "${COMPOSE_ENV}"
 cat "${AWS_DIR}/prod.env" "${SECRETS_ENV}" > "${COMPOSE_ENV}"
 
+# ── Ensure persistent EBS-backed host paths exist ───────────────────────────
+# docker-compose.monitoring.yml mounts these as `driver: local, o: bind`
+# volumes (prometheus/grafana/tempo/loki/promtail) — a bind-type local volume
+# with a non-existent host directory fails `docker compose up` outright, so
+# this must run before the first `up` on a fresh box (or after an EBS/AMI
+# rebuild that dropped /opt/magik/monitoring).
+for d in prometheus grafana tempo loki promtail; do
+  mkdir -p "/opt/magik/monitoring/${d}"
+done
+log "host volume directories present under /opt/magik/monitoring"
+
 # ── Bring the stack up ───────────────────────────────────────────────────────
 cd "${REPO_ROOT}"
 docker network create magik-net >/dev/null 2>&1 || true

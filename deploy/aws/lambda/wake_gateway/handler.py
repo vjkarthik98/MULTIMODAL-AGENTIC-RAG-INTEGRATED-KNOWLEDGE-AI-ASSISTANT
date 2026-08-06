@@ -3,9 +3,13 @@
 The GPU instance (g6e.xlarge / L40S, ~$1.86/hr) is stopped by default. This
 Lambda is the always-on front door that makes that invisible to a visitor:
 
-    stopped   -> StartInstances, show a self-refreshing "warming up" page
-    booting   -> same page (the instance is up but /health isn't answering yet)
-    healthy   -> 302 to the app
+    stopped        -> StartInstances, show a self-refreshing "warming up" page
+    booting        -> same page (instance not running yet)
+    running        -> same page, now saying so explicitly (models loading)
+    running+stuck  -> distinct "taking longer than usual" page once the
+                       instance has been running past STUCK_MINUTES without
+                       /health ever going green — see below
+    healthy        -> 302 to the app
 
 Deployed behind an API Gateway HTTP API. Lambda Function URLs were tried
 first but returned a persistent 403 Forbidden in this account despite
@@ -17,16 +21,25 @@ Cost note: this is the piece that makes scale-to-zero viable. Always-on would
 be ~$1,340/mo; stopped-by-default plus this gateway is ~$12/mo fixed plus a
 few dollars per active hour.
 
+Stuck-state detection (STUCK_MINUTES, default 6): every request while
+state=="running" recomputes minutes-since-LaunchTime (AWS resets LaunchTime on
+every StartInstances call, so this is genuinely "minutes since this boot").
+Before this existed, a visitor reloading a wedged instance (crashed app,
+unreachable Qdrant/Redis/Mongo, bad deploy) saw the exact same "about a
+minute" copy indefinitely, with nothing distinguishing a normal 45-second boot
+from an instance stuck for 20 minutes — that indistinguishability was the bug.
+
 Uptime monitoring hook (optional, KUMA_PUSH_URL): when set, this function
-pushes an "up" heartbeat to a self-hosted Uptime Kuma push-monitor URL at the
-exact moment it confirms the app is genuinely healthy and about to redirect a
-real visitor to it — see _push_kuma_up() below. This is deliberately a PUSH
-from here, not a POLL from Kuma: Kuma never calls this gateway itself, because
-doing so would BE a visitor request and would wake the instance on its own,
-defeating the entire point of scale-to-zero. Every push this function makes
-is therefore a side effect of a real visitor already being here — it can
-never be the cause of a wake. See deploy/aws/lambda/idle_stop/handler.py for
-the matching "down" push when the instance actually goes back to sleep.
+pushes an "up" heartbeat the moment it confirms the app is genuinely healthy
+and about to redirect a real visitor, and a "down" heartbeat the moment it
+detects the stuck state above — see _push_kuma() below. This is deliberately
+a PUSH from here, not a POLL from Kuma: Kuma never calls this gateway itself,
+because doing so would BE a visitor request and would wake the instance on
+its own, defeating the entire point of scale-to-zero. Every push this
+function makes is therefore a side effect of a real visitor already being
+here — it can never be the cause of a wake. See
+deploy/aws/lambda/idle_stop/handler.py for the independent, schedule-driven
+"up"/"down" pushes that don't depend on a visitor showing up at all.
 """
 
 from __future__ import annotations
@@ -35,6 +48,7 @@ import logging
 import os
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 import boto3
 from botocore.config import Config
@@ -48,6 +62,15 @@ APP_URL = os.environ.get("APP_URL", "").rstrip("/")
 HEALTH_URL = os.environ.get("HEALTH_URL") or (f"{APP_URL}/health" if APP_URL else "")
 HEALTH_TIMEOUT_S = float(os.environ.get("HEALTH_TIMEOUT_S", "3"))
 REFRESH_SECONDS = os.environ.get("REFRESH_SECONDS", "7")
+
+# EC2 has been "running" this long without /health ever going green -> stop
+# showing the same indistinguishable "starting up" copy forever and switch to
+# an explicit "this is taking longer than usual" page instead. Model loading
+# normally finishes well under this; past it, something is genuinely wrong
+# (crashed app, unreachable Qdrant/Redis/Mongo dependency, bad deploy) and a
+# visitor endlessly reloading the *identical* "about a minute" message with no
+# escalation was the actual bug being fixed here — not just the copy.
+STUCK_MINUTES = float(os.environ.get("STUCK_MINUTES", "6"))
 
 # Optional — unset by default, so this is a strict no-op until Phase F's Kuma
 # host is actually provisioned and this env var is deliberately set (see
@@ -99,15 +122,43 @@ def _resp(status: int, body: str, headers: dict[str, str] | None = None) -> dict
     return {"statusCode": status, "headers": base, "body": body}
 
 
-def _waking_page() -> dict:
+def _waking_page(*, instance_running: bool) -> dict:
+    # Once EC2 itself is confirmed running, say so explicitly — "starting the
+    # GPU server" is no longer true at that point, and telling a hiring
+    # manager the *actual* current step (models loading, not server boot)
+    # is what makes the wait legible instead of a generic spinner.
+    detail = (
+        "<p>The GPU instance is up and the AI model stack is loading.</p>"
+        if instance_running
+        else "<p>Starting the GPU server, then loading the AI model stack.</p>"
+    )
     return _resp(
         200,
         _html(
             "MAGIK — starting up",
-            "Waking up MAGIK",
-            "<p>Starting the GPU server and loading the multimodal model stack.</p>"
-            "<p>This takes about a minute on the first visit.</p>"
-            '<p class="n">This page refreshes automatically — no need to reload.</p>',
+            "Thanks for checking out MAGIK",
+            detail
+            + "<p>This live demo scales its GPU server to zero when idle to keep hosting "
+            "costs down, so the first visit takes about a minute to spin back up.</p>"
+            '<p class="n">You\'ll be redirected to the sign-in page automatically the '
+            "moment it's ready — no need to click or refresh anything.</p>",
+            refresh=True,
+        ),
+    )
+
+
+def _stuck_page(elapsed_minutes: float) -> dict:
+    return _resp(
+        200,
+        _html(
+            "MAGIK — still starting",
+            "This is taking longer than usual",
+            f"<p>The GPU instance has been running for about {elapsed_minutes:.0f} minutes "
+            "but the app still isn't answering — normally this takes under a minute.</p>"
+            "<p>You don't need to do anything: this page keeps checking automatically "
+            "and will redirect you to sign-in the moment it recovers.</p>"
+            '<p class="n">If this keeps happening after a few more minutes, please try '
+            "again a bit later.</p>",
             refresh=True,
         ),
     )
@@ -126,7 +177,7 @@ def _error_page(msg: str, status: int = 503) -> dict:
     )
 
 
-def _push_kuma_up() -> None:
+def _push_kuma(status: str, msg: str) -> None:
     """Fire-and-forget heartbeat to Uptime Kuma's push monitor. No-op if
     KUMA_PUSH_URL is unset. Never allowed to affect the visitor-facing
     response — any failure here is swallowed, same fail-open posture as
@@ -135,15 +186,20 @@ def _push_kuma_up() -> None:
     if not KUMA_PUSH_URL:
         return
     try:
-        url = f"{KUMA_PUSH_URL}?status=up&msg=woken_by_visitor"
+        url = f"{KUMA_PUSH_URL}?status={status}&msg={msg}"
         req = urllib.request.Request(url, headers={"User-Agent": "magik-wake-gateway"})
         urllib.request.urlopen(req, timeout=KUMA_PUSH_TIMEOUT_S).close()
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
         log.info("kuma push failed (non-fatal): %s", exc)
 
 
-def _find_instance() -> tuple[str | None, str | None]:
-    """Return (instance_id, state) for the tagged instance, or (None, None)."""
+def _find_instance() -> tuple[str | None, str | None, datetime | None]:
+    """Return (instance_id, state, launch_time) for the tagged instance, or
+    (None, None, None). AWS resets LaunchTime to the moment of the most
+    recent StartInstances call — not the instance's original creation time —
+    so "minutes since LaunchTime" while state=="running" is exactly "minutes
+    since this boot," which is what stuck-state detection needs below.
+    """
     resp = ec2.describe_instances(
         Filters=[
             {"Name": "tag:Name", "Values": [INSTANCE_TAG]},
@@ -155,8 +211,8 @@ def _find_instance() -> tuple[str | None, str | None]:
     )
     for reservation in resp.get("Reservations", []):
         for inst in reservation.get("Instances", []):
-            return inst["InstanceId"], inst["State"]["Name"]
-    return None, None
+            return inst["InstanceId"], inst["State"]["Name"], inst.get("LaunchTime")
+    return None, None, None
 
 
 def _is_healthy() -> bool:
@@ -177,7 +233,7 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
         return _error_page("Gateway is not fully configured.", 500)
 
     try:
-        instance_id, state = _find_instance()
+        instance_id, state, launch_time = _find_instance()
     except ClientError as exc:
         log.exception("describe_instances failed")
         return _error_page(f"Could not query the demo instance ({exc.response['Error']['Code']}).")
@@ -204,15 +260,30 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
                         "Please try again in a few minutes."
                     )
                 return _error_page(f"Could not start the demo instance ({code}).")
-        return _waking_page()
+        return _waking_page(instance_running=False)
 
     if state in _WAKING_STATES:
-        return _waking_page()
+        return _waking_page(instance_running=False)
 
     if state == "running" and _is_healthy():
         log.info("healthy -> redirecting to %s", APP_URL)
-        _push_kuma_up()  # real visitor confirmed the app is genuinely serving
+        _push_kuma("up", "woken_by_visitor")  # real visitor confirmed the app is genuinely serving
         return _resp(302, "", {"location": APP_URL})
 
-    # running but not yet answering /health — models still loading
-    return _waking_page()
+    # running but not yet answering /health — models still loading, OR the
+    # app is genuinely stuck (crashed, a dependency it needs is unreachable,
+    # a bad deploy). Previously both looked identical to the visitor forever;
+    # now a real elapsed-time check tells them apart.
+    elapsed_minutes = 0.0
+    if launch_time is not None:
+        elapsed_minutes = (datetime.now(timezone.utc) - launch_time).total_seconds() / 60
+
+    if elapsed_minutes >= STUCK_MINUTES:
+        log.warning(
+            "instance %s running %.1fm without going healthy (threshold %.1fm)",
+            instance_id, elapsed_minutes, STUCK_MINUTES,
+        )
+        _push_kuma("down", f"unhealthy_after_{elapsed_minutes:.0f}m")
+        return _stuck_page(elapsed_minutes)
+
+    return _waking_page(instance_running=True)

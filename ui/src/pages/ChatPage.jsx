@@ -280,7 +280,7 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
     .replace(/[,;]\s*$/, '')                  // bare trailing comma/semicolon
     .trim())
 
-  const handleSend = useCallback(async (overrideText, { skipUserMessage = false, noCache = false } = {}) => {
+  const handleSend = useCallback(async (overrideText, { skipUserMessage = false, noCache = false, regenerate = false } = {}) => {
     const text = (overrideText ?? input).trim()
     if (!text || streaming) return
     setInput('')
@@ -361,7 +361,11 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
     }
 
     try {
-      const res = await streamQuery(auth.token, text, sessionId, controller.signal, noCache, fileSources, webSearchMode)
+      // effectiveNoCache, not noCache: a file-scoped query must never be served
+      // the cached answer of the same question asked unscoped (the cache key is
+      // query-only). The scoped path was computing that flag and then not
+      // sending it on the stream request — only queryMeta below got it right.
+      const res = await streamQuery(auth.token, text, sessionId, controller.signal, effectiveNoCache, fileSources, webSearchMode, regenerate)
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}))
         throw new Error(errBody.detail || `Server error ${res.status}`)
@@ -442,7 +446,17 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
       // check but strips to "" here. isRefusal("") is true, so this catches it.
       // The meta answer is the same one persisted to redis/mongo, so the user
       // sees the real response instead of an empty bubble.
-      if (refused || isRefusal(streamedAnswer)) {
+      // In web mode the KB fallback is wrong by construction: the user
+      // explicitly excluded their files, and the backend already guarantees a
+      // user-visible message when the web search itself fails. Only fall back
+      // when the stream produced nothing at all — a non-empty web answer is
+      // kept even if it happens to contain a phrase isRefusal() matches
+      // ("could not find", "not available in", …), which is common in real
+      // web results and is what replaced a good web answer with a KB one.
+      const needsFallback = webSearchMode
+        ? (refused || !streamedAnswer)
+        : (refused || isRefusal(streamedAnswer))
+      if (needsFallback) {
         // Reset to the typing indicator while we wait for the meta answer. In
         // the refused case the bubble was already showing dots; in the empty
         // case it briefly showed a blank bubble, so this removes that flash.
@@ -451,10 +465,11 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
         ))
         // Lazily run the full meta pipeline (CrossEncoder + CoT) — only on this
         // fallback path, so the common case never pays a second LLM generation.
-        const meta = await queryMeta(auth.token, text, sessionId, effectiveNoCache, fileSources).catch(() => null)
+        const meta = await queryMeta(auth.token, text, sessionId, effectiveNoCache, fileSources, regenerate, webSearchMode).catch(() => null)
         const metaAnswer = cleanStreamText(meta?.answer || '')
-        const finalText = metaAnswer ||
-          'I could not find relevant information in your knowledge base to answer this question.'
+        const finalText = metaAnswer || (webSearchMode
+          ? 'Web search did not return an answer — please try again, or turn off web search to ask about your uploaded files instead.'
+          : 'I could not find relevant information in your knowledge base to answer this question.')
         const metaSources = (meta?.sources?.length > 0) ? meta.sources : (streamedSources || [])
         setMessages(prev => prev.map(m =>
           m.id === botId ? { ...m, sources: metaSources } : m
@@ -516,7 +531,7 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
       const lastBotIdx = [...prev].map((m,i) => m.role === 'assistant' ? i : -1).filter(i => i >= 0).pop()
       return lastBotIdx != null ? prev.filter((_, i) => i !== lastBotIdx) : prev
     })
-    handleSend(lastUser.content, { skipUserMessage: true, noCache: true })
+    handleSend(lastUser.content, { skipUserMessage: true, noCache: true, regenerate: true })
   }, [messages, streaming, handleSend])
 
   // Edit a past user message: drop everything from that point on, then resend the edited text
@@ -544,7 +559,7 @@ const handleNewChat = () => {
     if (streaming || loadingSession || !targetId || targetId === sessionId) return
     setLoadingSession(true)
     try {
-      const session = await getChatSession(auth.token, targetId)
+      const session = await getChatSession(targetId)
       if (!session) {
         addToast('That chat is no longer available', 'error')
         setStaleSessionId(targetId)
@@ -892,7 +907,7 @@ const handleNewChat = () => {
                 </div>
                 {kbFiles.length === 0 ? (
                   <div className="px-4 py-4 text-center text-[13px]" style={{ color: 'var(--t-tx5)' }}>
-                    No files uploaded yet — use the <strong style={{ color: 'var(--t-tx3)' }}>+</strong> button to add files
+                    No files uploaded yet — use the <strong style={{ color: 'var(--t-tx3)' }}>Files</strong> panel in the sidebar to add files
                   </div>
                 ) : (
                   <div className="overflow-y-auto" style={{ maxHeight: 220 }}>

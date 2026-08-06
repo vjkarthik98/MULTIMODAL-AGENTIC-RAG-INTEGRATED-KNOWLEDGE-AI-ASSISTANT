@@ -238,6 +238,13 @@ class QueryRequest(BaseModel):
     # specific uploaded file when the session has many ingested documents.
     sources: list[str] | None = Field(default=None, max_length=20)
     no_cache: bool = Field(default=False)
+    # The user pressed "regenerate" on an answer they weren't happy with.
+    # Distinct from no_cache, which only says "don't READ a cached answer":
+    # re-running this pipeline uncached still reproduces the previous answer
+    # exactly, because retrieval and decoding are both deterministic. This
+    # flag is what makes the second attempt genuinely different — see
+    # app/llm/regeneration.py.
+    regenerate: bool = Field(default=False)
     force_web: bool = Field(default=False)
 
     @field_validator("query")
@@ -731,9 +738,9 @@ async def ingest_document(
 
 # DIRECT LLM GENERATE — bypasses RAG pipeline for raw LLM output (no RAG, no
 # guardrails). Not currently called by the eval harness — app/eval/judges/
-# qwen_judge.py loads its own dedicated GGUF in-process instead, so eval
-# judging never contends with this route. Kept for direct debugging/manual
-# access to the resident model.
+# qwen_judge.py runs its own dedicated GGUF in a separate worker process
+# (qwen_judge_worker.py), so eval judging never contends with this route.
+# Kept for direct debugging/manual access to the resident model.
 
 
 class GenerateRequest(BaseModel):
@@ -912,6 +919,40 @@ async def query_rag(
             ip=_client_ip(request),
         )
 
+        # WEB SEARCH — same routing decision the stream route makes, because
+        # this endpoint IS the client's fallback when a streamed answer comes
+        # back empty or as a refusal. Without this, a query the user had
+        # explicitly switched to web mode fell through to the knowledge-base
+        # pipeline here and its KB answer replaced the web answer on screen —
+        # the "clicked the web icon, it flickers, then answers from the KB"
+        # report. force_web only: a query that merely matched a phrase or
+        # real-time heuristic keeps the graceful KB fall-through, exactly as
+        # on the stream route.
+        if request_body.force_web:
+            _web_answer, _web_urls, _web_titles, _web_fail = await _run_web_search(
+                query, session_id
+            )
+            # No KB fall-through on failure either: the user deliberately
+            # excluded the knowledge base, so a KB answer here would be
+            # indistinguishable from a real web answer.
+            _answer = _web_answer or _web_failure_message(_web_fail or "returned no results")
+            logger.info(
+                event="query_web_search",
+                request_id=request_id,
+                session_id=session_id,
+                ok=bool(_web_answer),
+            )
+            return {
+                "request_id": request_id,
+                "answer": _answer,
+                "confidence": 0.7 if _web_answer else 0.0,
+                "sources": _web_source_payload(_web_urls, _web_titles),
+                "cache_hit": False,
+                "decision": "web" if _web_answer else "web_failed",
+                "source": "web_search",
+                "latency": round(time.time() - start, 3),
+            }
+
         pipeline_fn = _get_query_pipeline()
 
         # IN-FLIGHT JOIN — if /rag/query/stream is mid-generation for this
@@ -953,7 +994,10 @@ async def query_rag(
                 user_id,
                 # A just-joined stream result IS the fresh regeneration the user
                 # asked for — read it from cache even when no_cache was requested.
-                request_body.no_cache and not _stream_joined,
+                (request_body.no_cache or request_body.regenerate) and not _stream_joined,
+                # Same reasoning: if we joined the stream's regeneration there is
+                # nothing left to regenerate here.
+                request_body.regenerate and not _stream_joined,
             )
 
         if not isinstance(result, dict) or "answer" not in result:
@@ -1132,6 +1176,119 @@ def _sse(payload: str) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+# ── WEB-SEARCH ROUTING — shared by /rag/query and /rag/query/stream ───────────
+#
+# These used to live inside stream_query() only, so /rag/query ignored
+# `force_web` entirely: the field existed on QueryRequest, was accepted, and
+# was never read. The UI's refusal fallback calls /rag/query, so a query the
+# user had explicitly switched to web mode could come back answered from the
+# knowledge base — the exact thing the stream route goes out of its way to
+# prevent. One decision function, one search call, both routes.
+
+_EXPLICIT_WEB_PHRASES = frozenset(
+    {
+        "from web",
+        "from the web",
+        "search web",
+        "search the web",
+        "get from web",
+        "get it from web",
+        "web search",
+        "find online",
+        "search online",
+        "look online",
+        "from internet",
+        "from the internet",
+        "find on the internet",
+        "look it up",
+    }
+)
+
+# NOTE: bare "current" and "share price" were removed — both are ordinary
+# terms inside static finance documents ("current rating", "current price
+# target", "12-month price target ... share price of $207.00"), not
+# exclusively live-data requests. They forced ANY matching question to skip
+# the knowledge base entirely, silently dropping ingested DOCX/PDF context for
+# common document questions. The remaining signals are specific enough to
+# real-time intent to keep.
+_REALTIME_SIGNALS = frozenset(
+    {
+        "today",
+        "now",
+        "latest",
+        "live",
+        "right now",
+        "stock price",
+        "price today",
+        "news today",
+        "this week",
+        "this month",
+        "currently trading",
+    }
+)
+
+
+def _is_web_request(query: str, force_web: bool) -> bool:
+    """True when this query should be answered from the web rather than the KB."""
+    q = (query or "").lower()
+    return (
+        bool(force_web)
+        or any(phrase in q for phrase in _EXPLICIT_WEB_PHRASES)
+        or any(sig in q for sig in _REALTIME_SIGNALS)
+    )
+
+
+def _web_failure_message(reason: str) -> str:
+    return (
+        f"Web search {reason} — please try again, or turn off web search to ask "
+        "about your uploaded files instead."
+    )
+
+
+async def _run_web_search(query: str, session_id: str) -> tuple[str, list, list, str | None]:
+    """Run the search tool. Returns (answer, source_urls, titles, failure_reason).
+
+    `failure_reason` is None on success and a short human phrase otherwise —
+    callers decide what to do with it, but a caller handling an explicit
+    force_web request must NEVER fall through to the knowledge base on
+    failure: the user deliberately excluded it, so a KB answer would be
+    presented as a web answer with no way to tell the difference.
+    """
+    try:
+        from app.pipeline.query_pipeline import _get_tool_registry
+
+        _search_tool = _get_tool_registry().get_optional("search")
+        if _search_tool is None:
+            logger.warning(event="web_search_tool_unavailable", session_id=session_id)
+            return "", [], [], "is not configured on this server"
+
+        out = await asyncio.to_thread(_search_tool.handler, query, {}, session_id) or {}
+        answer = (out.get("answer") or "").strip()
+        if not answer:
+            logger.warning(event="web_search_empty", session_id=session_id)
+            return "", [], [], "returned no results"
+        return answer, (out.get("sources") or []), (out.get("titles") or []), None
+    except Exception as exc:
+        logger.warning(event="web_search_failed", error=str(exc), session_id=session_id)
+        return "", [], [], "hit a temporary error"
+
+
+def _web_source_payload(urls: list, titles: list) -> list[dict[str, Any]]:
+    """Web sources in the same typed shape the KB path emits, so the client
+    renders them as title+domain cards through the existing contract."""
+    return [
+        {
+            "source": u,
+            "modality": "web",
+            "title": (titles[i] if i < len(titles) else ""),
+            "page_number": None,
+            "start_time": None,
+        }
+        for i, u in enumerate(urls or [])
+        if u
+    ]
+
+
 @router.post("/query/stream")
 async def stream_query(
     request_body: QueryRequest,
@@ -1223,121 +1380,34 @@ async def stream_query(
         #   • real-time signals ("today", "stock price", "latest", etc.)
         # When triggered the web tool is called directly and ONLY web source
         # chips are emitted — no KB file sources are shown at all.
-        _EXPLICIT_WEB_PHRASES = frozenset(
-            {
-                "from web",
-                "from the web",
-                "search web",
-                "search the web",
-                "get from web",
-                "get it from web",
-                "web search",
-                "find online",
-                "search online",
-                "look online",
-                "from internet",
-                "from the internet",
-                "find on the internet",
-                "look it up",
-            }
-        )
-        # NOTE: bare "current" and "share price" were removed — both are
-        # ordinary terms inside static finance documents ("current rating",
-        # "current price target", "12-month price target ... share price of
-        # $207.00"), not exclusively live-data requests. They forced ANY
-        # matching question to skip the knowledge base entirely ("no KB file
-        # sources shown at all" — see below), silently dropping ingested
-        # DOCX/PDF context for common document questions. The remaining
-        # signals are specific enough to real-time intent to keep.
-        _REALTIME_SIGNALS = {
-            "today",
-            "now",
-            "latest",
-            "live",
-            "right now",
-            "stock price",
-            "price today",
-            "news today",
-            "this week",
-            "this month",
-            "currently trading",
-        }
-        _q_lower = query.lower()
-        _is_web_request = (
-            request_body.force_web
-            or any(phrase in _q_lower for phrase in _EXPLICIT_WEB_PHRASES)
-            or any(sig in _q_lower for sig in _REALTIME_SIGNALS)
-        )
+        if _is_web_request(query, request_body.force_web):
+            _web_answer, _web_sources, _web_titles, _web_failure_reason = await _run_web_search(
+                query, session_id
+            )
+            if _web_answer:
+                logger.info(event="stream_web_search", session_id=session_id)
+                _web_payload = _web_source_payload(_web_sources, _web_titles)
 
-        if _is_web_request:
-            _web_failure_reason: str | None = None
-            try:
-                from app.pipeline.query_pipeline import _get_tool_registry
+                async def web_event_stream():
+                    for piece in _stream_chunks(_web_answer):
+                        yield _sse(piece)
+                        await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
+                    # Emit the web sources (URL + article title) as a typed
+                    # sources event so the client renders them as title+domain
+                    # cards below the answer (same contract as the KB path).
+                    if _web_payload:
+                        yield f'data: {{"__type__":"sources","data":{json.dumps(_web_payload)}}}\n\n'
+                    yield "data: [DONE]\n\n"
 
-                _reg = _get_tool_registry()
-                _search_tool = _reg.get_optional("search")
-                if _search_tool is not None:
-                    _tool_out = (
-                        await asyncio.to_thread(_search_tool.handler, query, {}, session_id) or {}
-                    )
-                    _web_answer = (_tool_out.get("answer") or "").strip()
-                    if _web_answer:
-                        logger.info(event="stream_web_search", session_id=session_id)
-
-                        _web_sources = _tool_out.get("sources") or []
-                        _web_titles = _tool_out.get("titles") or []
-
-                        async def web_event_stream():
-                            for piece in _stream_chunks(_web_answer):
-                                yield _sse(piece)
-                                await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
-                            # Emit the web sources (URL + article title) as a typed
-                            # sources event so the client renders them as title+domain
-                            # cards below the answer (same contract as the KB path).
-                            if _web_sources:
-                                _payload = [
-                                    {
-                                        "source": u,
-                                        "modality": "web",
-                                        "title": (_web_titles[_i] if _i < len(_web_titles) else ""),
-                                        "page_number": None,
-                                        "start_time": None,
-                                    }
-                                    for _i, u in enumerate(_web_sources)
-                                    if u
-                                ]
-                                yield f'data: {{"__type__":"sources","data":{json.dumps(_payload)}}}\n\n'
-                            yield "data: [DONE]\n\n"
-
-                        return StreamingResponse(
-                            web_event_stream(),
-                            media_type="text/event-stream",
-                            headers={
-                                "X-Request-ID": request_id,
-                                "Cache-Control": "no-cache",
-                                "X-Accel-Buffering": "no",
-                            },
-                        )
-                    # Tool ran without raising but returned nothing usable — this
-                    # previously fell through to cache/RAG completely silently
-                    # (no log, no user-visible signal), which is how a user who
-                    # explicitly toggled web search could end up looking at a
-                    # KB-sourced answer with no indication their web search
-                    # never actually happened.
-                    logger.warning(event="stream_web_search_empty", session_id=session_id)
-                    _web_failure_reason = "returned no results"
-                else:
-                    logger.warning(
-                        event="stream_web_search_tool_unavailable", session_id=session_id
-                    )
-                    _web_failure_reason = "is not configured on this server"
-            except Exception as _web_err:
-                logger.warning(
-                    event="stream_web_search_failed",
-                    error=str(_web_err),
-                    session_id=session_id,
+                return StreamingResponse(
+                    web_event_stream(),
+                    media_type="text/event-stream",
+                    headers={
+                        "X-Request-ID": request_id,
+                        "Cache-Control": "no-cache",
+                        "X-Accel-Buffering": "no",
+                    },
                 )
-                _web_failure_reason = "hit a temporary error"
 
             # request_body.force_web means the user explicitly toggled the web-
             # search button — they've deliberately excluded the knowledge base,
@@ -1348,10 +1418,7 @@ async def stream_query(
             # original graceful fall-through to cache/RAG below, since the user
             # never explicitly opted out of the KB for those.
             if request_body.force_web and _web_failure_reason:
-                _web_fail_msg = (
-                    f"Web search {_web_failure_reason} — please try again, or turn off "
-                    "web search to ask about your uploaded files instead."
-                )
+                _web_fail_msg = _web_failure_message(_web_failure_reason)
 
                 async def web_failed_stream():
                     for piece in _stream_chunks(_web_fail_msg):
@@ -1376,7 +1443,11 @@ async def stream_query(
         try:
             from app.pipeline.query_pipeline import _cache_get
 
-            cached = None if request_body.no_cache else _cache_get(session_id, query)
+            # regenerate implies no_cache — a client that asks for a fresh
+            # answer must never be handed the stored one, whether or not it
+            # also remembered to set the older flag.
+            _skip_cache = request_body.no_cache or request_body.regenerate
+            cached = None if _skip_cache else _cache_get(session_id, query)
         except Exception:
             cached = None
 
@@ -1429,6 +1500,7 @@ async def stream_query(
             session_id,
             _stream_user_id,
             request_body.sources,
+            request_body.regenerate,
         )
 
         async def event_stream():

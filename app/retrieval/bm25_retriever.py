@@ -542,6 +542,16 @@ class BM25Document:
             "row_end": p.get("row_end"),
             "frame_index": p.get("frame_index"),
             "caption": p.get("caption"),
+            # image_chunker.py stores the citation-grade chart title under
+            # "image_title" (the caption itself is a multi-paragraph analysis
+            # dump and is NOT what the chip shows) — it was never carried
+            # through BM25, so any image chunk that BM25 matched reached the
+            # citation layer as a bare filename. Same class of bug as the
+            # sheet_name / speaker fixes above. asset_path is what lets the UI
+            # render the image itself alongside the chip.
+            "image_title": p.get("image_title"),
+            "image_type": p.get("image_type"),
+            "asset_path": p.get("asset_path"),
             "speaker": p.get("speaker"),
         }
         return obj
@@ -806,6 +816,13 @@ class BM25Retriever:
             "frame_index": s.get("frame_index"),
             # ── Image / video caption ─────────────────────────────────────────
             "caption": s.get("caption"),
+            # The source chip cites an image by its title, not its caption
+            # (see rag_pipeline._build_sources_array / query_pipeline). Without
+            # this the chip fell back to a bare filename for every image chunk
+            # that arrived via BM25 — the "missing image caption" symptom.
+            "image_title": s.get("image_title"),
+            "image_type": s.get("image_type"),
+            "asset_path": s.get("asset_path"),
             # ── Misc ─────────────────────────────────────────────────────────
             "ingestion_time": s.get("ingestion_time"),
             "checksum_sha256": s.get("checksum_sha256"),

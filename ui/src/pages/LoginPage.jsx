@@ -82,12 +82,10 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
       if (code.length !== 6) { setError('Enter all 6 digits'); return }
       setLoading(true)
       try {
-        const data = await verifyOtp(otpToken, code)
-        // Save device token so this browser skips OTP next time
-        if (data.device_token) {
-          localStorage.setItem('magik_device_token', data.device_token)
-        }
-        onLogin({ token: data.access_token, refreshToken: data.refresh_token, email })
+        // The trusted-device token (if issued) comes back as an httpOnly
+        // cookie set on this response — nothing for the client to store.
+        await verifyOtp(otpToken, code)
+        onLogin({ email })
       } catch (err) {
         setError(err.message)
         setOtpCode(['', '', '', '', '', ''])
@@ -119,11 +117,8 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
         startCooldown()
         setTimeout(() => otpRefs.current[0]?.focus(), 100)
       } else {
-        // Trusted device — server skipped OTP, update stored device token if refreshed
-        if (data.device_token) {
-          localStorage.setItem('magik_device_token', data.device_token)
-        }
-        onLogin({ token: data.access_token, refreshToken: data.refresh_token, email })
+        // Trusted device — server skipped OTP; session cookies are already set.
+        onLogin({ email })
       }
     } catch (err) {
       setError(err.message)

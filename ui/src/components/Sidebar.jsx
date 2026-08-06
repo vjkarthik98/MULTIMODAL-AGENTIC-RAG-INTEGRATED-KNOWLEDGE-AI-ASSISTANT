@@ -355,7 +355,7 @@ export default function Sidebar({
   const refreshKB = async () => {
     setLoadingKB(true)
     try {
-      const files = await listKB(auth.token)
+      const files = await listKB()
       const prevNames = prevFilenamesRef.current
       const added = new Set(files.map(f => f.filename).filter(n => !prevNames.has(n)))
       if (added.size) {
@@ -372,7 +372,7 @@ export default function Sidebar({
   // genuinely failed upload — see the 'not_found' handling around _pollJobStatus.
   const _fileLandedInKB = async (filename) => {
     try {
-      const files = await listKB(auth.token)
+      const files = await listKB()
       return files.some(f => f.filename === filename)
     } catch {
       return false
@@ -410,11 +410,11 @@ export default function Sidebar({
       uploadTargets.current[filename] = 0
       setUploadProgress(prev => ({ ...prev, [filename]: 0 }))
 
-      _pollJobStatus(auth.token, jobId, filename)
+      _pollJobStatus(jobId, filename)
         .then(async ({ ok, error: pollErr, chunks }) => {
           if (ok) {
             uploadTargets.current[filename] = 100
-            addToast(`Uploaded: ${filename}${chunks ? ` (${chunks} chunks)` : ''}`, 'success')
+            addToast(`Uploaded: ${filename}`, 'success')
           } else if (pollErr === 'not_found' && await _fileLandedInKB(filename)) {
             addToast(`Uploaded: ${filename}`, 'success')
           } else {
@@ -471,7 +471,7 @@ export default function Sidebar({
   /* ── Recents (saved chat sessions) ── */
   const refreshSessions = async () => {
     try {
-      setSessions(await listChatSessions(auth.token))
+      setSessions(await listChatSessions())
     } catch {}
     setLoadingSessions(false)
   }
@@ -613,7 +613,7 @@ export default function Sidebar({
     done:       'Processing',
   }
 
-  const _pollJobStatus = async (token, jobId, filename) => {
+  const _pollJobStatus = async (jobId, filename) => {
     // Up to 4h at 1 poll/sec — a 1hr+ video's transcription/diarization/embedding
     // pipeline can run well past 30 min; short-lived jobs (everything but large
     // audio/video) return via the 'done'/'error' checks below in seconds anyway,
@@ -622,14 +622,11 @@ export default function Sidebar({
     let notFoundStreak = 0
     for (let i = 0; i < MAX_POLLS; i++) {
       await new Promise(r => setTimeout(r, INTERVAL))
-      // Re-read the access token from storage on every tick instead of using the
-      // value captured when the upload started — the silent-refresh cycle in
-      // App.jsx rotates it roughly every 20 min, and a poll loop for a large
-      // video can easily outlive that. Falls back to the passed-in token in
-      // case localStorage hasn't caught up yet.
-      const liveToken = localStorage.getItem('magik_token') || token
+      // No more re-reading a stored token: the httpOnly session cookie is
+      // always current and attaches automatically, regardless of how long
+      // this poll loop outlives a single access-token lifetime.
       try {
-        const job = await getIngestionStatus(liveToken, jobId)
+        const job = await getIngestionStatus(jobId)
         notFoundStreak = 0
         // Prefer the server's real fractional progress when it's ahead of the
         // coarse stage floor, so the bar reflects actual chunk progress.
@@ -691,11 +688,11 @@ export default function Sidebar({
           // browser crash, tab close) doesn't strand this indicator — see the
           // recovery effect below, which reattaches to still-running jobs.
           _rememberActiveUpload(authIdentity, file.name, result.job_id)
-          const { ok, error: pollErr, chunks } = await _pollJobStatus(auth.token, result.job_id, file.name)
+          const { ok, error: pollErr, chunks } = await _pollJobStatus(result.job_id, file.name)
           if (ok) {
             uploadTargets.current[file.name] = 100        // let the animator finish to 100
             await new Promise(r => setTimeout(r, 550))    // ...and let that climb render
-            addToast(`Uploaded: ${file.name}${chunks ? ` (${chunks} chunks)` : ''}`, 'success')
+            addToast(`Uploaded: ${file.name}`, 'success')
           } else if (pollErr === 'not_found' && await _fileLandedInKB(file.name)) {
             // Status record was gone, but the file made it into the knowledge
             // base anyway — treat as success instead of a false failure toast.
