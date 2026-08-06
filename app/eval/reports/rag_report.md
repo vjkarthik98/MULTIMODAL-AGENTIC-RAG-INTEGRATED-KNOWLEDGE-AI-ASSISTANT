@@ -1,21 +1,21 @@
 # RAG Eval Report — Phase 25
 
-**Generated:** 2026-08-06T11:47:39Z  
-**Git SHA:** 52a3e69  
+**Generated:** 2026-07-26T17:08:27Z  
+**Git SHA:** 50d1afc  
 
 ## Suite: `retrieval`
 
-Duration: 148.4s
+Duration: 219.3s
 
 | Metric | Value | n | Notes |
 |--------|-------|---|-------|
-| `context_precision` | nan | 0 | empty: all queries had TODO relevant_chunk_ids |
-| `hit_rate` | 0.0000 | 56 |  |
-| `mrr` | nan | 0 | empty: all queries had TODO relevant_chunk_ids |
-| `ndcg_at_10` | nan | 0 | empty: all queries had TODO relevant_chunk_ids |
-| `recall_at_10` | 0.0000 | 56 |  |
-| `recall_at_5` | 0.0000 | 56 |  |
-| `retrieval_p50_sec` | 1.2567 | 56 | min=1.18s max=52.20s |
-| `retrieval_p95_sec` | 1.6485 | 56 |  |
-| `retrieval_p99_sec` | 24.4613 | 56 |  |
+| `context_precision` | 0.0304 | 56 |  |
+| `hit_rate` | 0.8393 | 56 |  |
+| `mrr` | 0.4660 | 56 |  |
+| `ndcg_at_10` | 0.5322 | 56 |  |
+| `recall_at_10` | 0.7589 | 56 |  |
+| `recall_at_5` | 0.6786 | 56 |  |
+| `retrieval_p50_sec` | 2.4736 | 56 | min=1.05s max=58.02s |
+| `retrieval_p95_sec` | 5.9204 | 56 |  |
+| `retrieval_p99_sec` | 31.9935 | 56 |  |
 
