@@ -173,7 +173,7 @@ WAKE_URL=$(aws apigatewayv2 get-apis --region "$REGION" \
 say "Idle stop — IAM role"
 ensure_role "$IDLE_ROLE" "${AWS_DIR}/iam/lambda-idle-stop-permissions.json" "magik-idle-stop-permissions"
 
-GITHUB_REPO="${GITHUB_REPO:-vjkarthik98/multimodal-rag-assistant}"
+GITHUB_REPO="${GITHUB_REPO:-vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT}"
 GITHUB_RUNNER_LABEL="${GITHUB_RUNNER_LABEL:-gpu}"
 GITHUB_TOKEN_PARAM="${GITHUB_TOKEN_PARAM:-/magik/github_actions_pat}"
 

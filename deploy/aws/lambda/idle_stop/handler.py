@@ -84,7 +84,7 @@ DIRECT_HEALTH_URL = os.environ.get("DIRECT_HEALTH_URL") or (f"{APP_URL}/health" 
 # Administration:read (fine-grained) or `repo` scope (classic) — the same
 # minimum GitHub requires for the "list self-hosted runners" endpoint. Stored
 # in SSM the same way /magik/ghcr_pat is: never touches a GH Actions log.
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "vjkarthik98/multimodal-rag-assistant")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT")
 GITHUB_RUNNER_LABEL = os.environ.get("GITHUB_RUNNER_LABEL", "gpu")
 GITHUB_TOKEN_PARAM = os.environ.get("GITHUB_TOKEN_PARAM", "/magik/github_actions_pat")
 

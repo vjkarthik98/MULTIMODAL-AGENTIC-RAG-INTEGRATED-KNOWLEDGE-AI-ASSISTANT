@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 
 [project]
-name            = "multimodal-rag-assistant"
+name            = "MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT"
 version         = "0.29.0"
 description     = "Production Multimodal RAG + Agentic AI System — Phase 31"
 readme          = "README.md"
@@ -224,7 +224,7 @@ quality = [
 ]
 
 dev = [
-    "multimodal-rag-assistant[test,lint,typecheck,security,quality]",
+    "MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT[test,lint,typecheck,security,quality]",
     "pre-commit>=3.7",
     "detect-secrets>=1.5",
 ]

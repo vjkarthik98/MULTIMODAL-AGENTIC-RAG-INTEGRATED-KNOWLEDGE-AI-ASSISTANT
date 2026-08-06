@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import { FileText, Globe, Copy, ThumbsUp, ThumbsDown, Check, RotateCcw, Pencil,
          Image, Sheet, FileVideo, FileAudio, FileType, LetterText, File } from 'lucide-react'
 import { useToast } from '../context/ToastContext'
-import useIsMobile from '../hooks/useIsMobile'
+import { useHasHover } from '../hooks/useBreakpoint'
 import { submitFeedback } from '../api/client'
 import FinanceTable from './FinanceTable'
 
@@ -576,7 +576,11 @@ function CodeBlock({ inline, children }) {
 export default function MessageBubble({ message, isStreaming, dark, onRegenerate, onEdit, showSources = true, authToken, sessionId, precedingQuery }) {
   const isUser = message.role === 'user'
   const { addToast } = useToast()
-  const isMobile = useIsMobile()
+  // Action rows below are hover-revealed. A touch device can never hover, so
+  // they must be permanently visible there. This asks about INPUT CAPABILITY,
+  // not width — the previous `isMobile` (<560px) width check left the actions
+  // unreachable on every tablet and touchscreen laptop.
+  const hasHover = useHasHover()
   const [copied, setCopied]   = useState(false)
   const [vote, setVote]       = useState(message.vote ?? null)  // 'up' | 'down' | null — restored from session
   const [isEditing, setIsEditing] = useState(false)
@@ -622,7 +626,7 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
     if (isEditing) {
       return (
         <div className="flex justify-end">
-          <div className="flex flex-col items-end gap-2 max-w-[72%] w-full">
+          <div className="flex flex-col items-end gap-2 max-w-[88%] sm:max-w-[72%] w-full">
             <div className="w-full rounded-2xl rounded-tr-sm px-5 py-3.5"
               style={{ background: 'var(--t-ubg)', border: '1px solid var(--t-accent)' }}>
               <textarea
@@ -665,12 +669,12 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
 
     return (
       <div className="flex justify-end group">
-        <div className="flex flex-col items-end gap-1 max-w-[72%]">
+        <div className="flex flex-col items-end gap-1 max-w-[88%] sm:max-w-[72%]">
           <div className="rounded-2xl rounded-tr-sm px-5 py-3.5 text-[16px] leading-relaxed"
             style={{ background: 'var(--t-ubg)', border: '1px solid var(--t-ubd)', color: 'var(--t-tx1)' }}>
             {cleanContent}
           </div>
-          <div className={`flex items-center gap-1 transition-opacity pr-0.5 ${isMobile ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+          <div className={`flex items-center gap-1 transition-opacity pr-0.5 ${hasHover ? 'opacity-0 group-hover:opacity-100' : 'opacity-100'}`}>
             {onEdit && (
               <button
                 onClick={startEdit}
@@ -708,7 +712,7 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
   return (
     <div className="flex justify-start group">
 
-      <div className="flex-1 min-w-0 max-w-[84%]">
+      <div className="flex-1 min-w-0 max-w-full sm:max-w-[84%]">
         {/* Bubble */}
         <div className="rounded-2xl rounded-tl-sm px-5 py-3.5 text-[16px] leading-relaxed"
           style={
@@ -820,7 +824,7 @@ export default function MessageBubble({ message, isStreaming, dark, onRegenerate
 
         {/* Action row — always visible on mobile, hover-reveal on desktop */}
         {!isEmpty && !isStreaming && (
-          <div className={`flex items-center gap-1 mt-1.5 transition-opacity ${isMobile ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+          <div className={`flex items-center gap-1 mt-1.5 transition-opacity ${hasHover ? 'opacity-0 group-hover:opacity-100' : 'opacity-100'}`}>
             {/* Copy */}
             <button
               onClick={handleCopy}

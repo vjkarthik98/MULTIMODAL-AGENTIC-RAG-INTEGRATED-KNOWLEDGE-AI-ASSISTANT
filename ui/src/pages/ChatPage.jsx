@@ -9,7 +9,7 @@ import TypingIndicator from '../components/TypingIndicator'
 import { streamQuery, queryMeta, getChatSession, patchLastMessage, updateChatSession } from '../api/client'
 import { useToast } from '../context/ToastContext'
 import { uuid } from '../utils/uuid'
-import useIsMobile from '../hooks/useIsMobile'
+import { useIsCompact } from '../hooks/useBreakpoint'
 
 const CHAT_ICON = (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -79,19 +79,40 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
   const [streamingId, setStreamingId]     = useState(null)
   const [autoScroll, setAutoScroll]       = useState(true)
   const [showScrollBtn, setShowScrollBtn] = useState(false)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(
-    () => typeof window !== 'undefined' && window.innerWidth < 960
-  )
+  // Collapsed = the icon-rail sidebar. Desktop-only affordance now: below
+  // `lg` the sidebar is an overlay drawer, where "collapsed" has no meaning.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
-  const isMobile = useIsMobile()
+  // <1024px — phones AND tablets. See useBreakpoint.js for why this replaced
+  // the old 560px `isMobile`: everything from 560–1023px was getting the
+  // desktop layout, so a 768px tablet lost 320px of width to an inline sidebar.
+  const isCompact = useIsCompact()
 
-  // Auto-collapse/expand sidebar as viewport crosses 960px
+  // The previous auto-collapse effect (matchMedia 959px, guarded by !isMobile)
+  // is gone rather than rewritten: with the drawer boundary now at 1024px, its
+  // condition could never be true again — below 1024 the drawer is used and
+  // `collapsed` is ignored, above 1024 a `max-width: 959px` query never
+  // matches. Collapsing is now purely the user's own toggle.
+
+  // Close the drawer when the viewport grows past the breakpoint, so returning
+  // to desktop can't leave an invisible drawer holding the body scroll lock.
   useEffect(() => {
-    const mq = window.matchMedia('(max-width: 959px)')
-    const handler = e => { if (!isMobile) setSidebarCollapsed(e.matches) }
-    mq.addEventListener('change', handler)
-    return () => mq.removeEventListener('change', handler)
-  }, [isMobile])
+    if (!isCompact && mobileSidebarOpen) setMobileSidebarOpen(false)
+  }, [isCompact, mobileSidebarOpen])
+
+  // Drawer open: lock body scroll and allow Escape to dismiss. Without the
+  // lock, iOS scrolls the page *behind* the overlay while the drawer is open.
+  useEffect(() => {
+    if (!isCompact || !mobileSidebarOpen) return
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const onKey = e => { if (e.key === 'Escape') setMobileSidebarOpen(false) }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.body.style.overflow = prevOverflow
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [isCompact, mobileSidebarOpen])
   const [sessionId, setSessionId]         = useState(() => uuid())
   const [selectedFile, setSelectedFile]   = useState(null)
   const [showFilePicker, setShowFilePicker] = useState(false)
@@ -591,37 +612,50 @@ const handleNewChat = () => {
 
   const suggestions    = buildSuggestions(kbFiles)
 
+  // `h-dvh-screen` (index.css) is `height:100vh` followed by `height:100dvh`.
+  // Plain 100vh is measured against the LARGEST possible viewport on mobile
+  // Safari — with the address bar shown, the real visible area is shorter, so
+  // the composer at the bottom of this column was pushed off-screen behind it.
+  // dvh tracks the *dynamic* visible height. Written as a hand-rolled CSS
+  // utility rather than `h-screen h-[100dvh]` because that pair depends on
+  // Tailwind's emission order to resolve, whereas two declarations in one rule
+  // is the guaranteed fallback: browsers without dvh simply ignore the second.
   return (
-    <div className="flex h-screen overflow-hidden" style={{ background: 'var(--t-bg)' }}>
+    <div className="flex h-dvh-screen overflow-hidden" style={{ background: 'var(--t-bg)' }}>
 
-      {/* Mobile backdrop — tap anywhere outside sidebar to close */}
-      {isMobile && mobileSidebarOpen && (
+      {/* Drawer backdrop — tap outside to close (compact widths only) */}
+      {isCompact && mobileSidebarOpen && (
         <div
           className="fixed inset-0 z-30 bg-black/60"
           onClick={() => setMobileSidebarOpen(false)}
+          aria-hidden="true"
         />
       )}
 
-      {/* Sidebar — inline on desktop, slide-in overlay on mobile */}
+      {/* Sidebar — overlay drawer below lg (phones + tablets), inline at lg+.
+          Drawer is width-capped so it never fills a narrow phone edge-to-edge,
+          and hidden from a11y/tab order while closed. */}
       <div className={
-        isMobile
-          ? `fixed inset-y-0 left-0 z-40 transition-transform duration-300 ease-in-out ${mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`
+        isCompact
+          ? `fixed inset-y-0 left-0 z-40 w-[85vw] max-w-80 transition-transform duration-300 ease-in-out ${mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`
           : `flex-shrink-0 transition-all duration-300 ease-in-out overflow-hidden ${sidebarCollapsed ? 'w-[72px]' : 'w-80'}`
-      }>
+      }
+        {...(isCompact && !mobileSidebarOpen ? { inert: '', 'aria-hidden': 'true' } : {})}
+      >
         <Sidebar
           auth={auth}
           kbFiles={kbFiles}
           setKbFiles={setKbFiles}
           onLogout={onLogout}
-          onNewChat={isMobile ? () => { handleNewChat(); setMobileSidebarOpen(false) } : handleNewChat}
+          onNewChat={isCompact ? () => { handleNewChat(); setMobileSidebarOpen(false) } : handleNewChat}
           currentSessionId={sessionId}
-          onSelectSession={isMobile ? (id) => { handleLoadSession(id); setMobileSidebarOpen(false) } : handleLoadSession}
+          onSelectSession={isCompact ? (id) => { handleLoadSession(id); setMobileSidebarOpen(false) } : handleLoadSession}
           streaming={streaming}
-          collapsed={isMobile ? false : sidebarCollapsed}
-          onToggleCollapse={isMobile ? () => setMobileSidebarOpen(false) : () => setSidebarCollapsed(c => !c)}
+          collapsed={isCompact ? false : sidebarCollapsed}
+          onToggleCollapse={isCompact ? () => setMobileSidebarOpen(false) : () => setSidebarCollapsed(c => !c)}
           dark={dark}
           onToggleTheme={onToggleTheme}
-          onOpenSettings={() => { setSettingsOpen(true); if (isMobile) setMobileSidebarOpen(false) }}
+          onOpenSettings={() => { setSettingsOpen(true); if (isCompact) setMobileSidebarOpen(false) }}
           onSetUploadHandler={chatUploadRef}
           historyClearedAt={historyClearedAt}
           staleSessionId={staleSessionId}
@@ -676,9 +710,9 @@ const handleNewChat = () => {
         )}
 
         {/* Top bar — hamburger (mobile) + three-dot menu */}
-        {(isMobile || messages.length > 0) && (
+        {(isCompact || messages.length > 0) && (
           <div className="flex items-center justify-between px-3 pt-3 pb-1 flex-shrink-0">
-            {isMobile ? (
+            {isCompact ? (
               <button
                 onClick={() => setMobileSidebarOpen(true)}
                 className="w-9 h-9 flex items-center justify-center rounded-xl"
@@ -847,7 +881,7 @@ const handleNewChat = () => {
 
           </div>
         ) : (
-          <div ref={scrollAreaRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-6 py-6">
+          <div ref={scrollAreaRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-3 py-4 sm:px-6 sm:py-6">
             <div className="max-w-3xl mx-auto space-y-5">
               {messages.map((msg, i) => {
                 if (msg.pending && msg.content === '') return <TypingIndicator key={msg.id || i} />
@@ -892,7 +926,10 @@ const handleNewChat = () => {
         )}
 
         {/* Input bar */}
-        <div className="flex-shrink-0 px-6 pb-5 pt-2">
+        {/* pb-safe (see index.css) adds env(safe-area-inset-bottom) on top of
+            the base padding, so the composer clears the iPhone home indicator
+            instead of sitting under it. No-op on devices without a notch. */}
+        <div className="flex-shrink-0 px-3 pb-3 pt-2 sm:px-6 sm:pb-5 pb-safe">
           <div className="max-w-3xl mx-auto relative" ref={filePickerRef}>
 
             {/* @ file picker dropdown — opens upward */}
