@@ -13,7 +13,9 @@ from app.api.api_routes import (
     _check_prompt_injection,
     _clean,
     _compute_file_hash,
+    _is_summarize_request,
     _request_id,
+    _resolve_summarize_source,
     _size_limit,
 )
 
@@ -147,3 +149,77 @@ class TestComputeFileHash:
         f.write_bytes(data)
         expected = hashlib.sha256(data).hexdigest()
         assert _compute_file_hash(f) == expected
+
+
+# ---------------------------------------------------------------------------
+# _is_summarize_request
+# ---------------------------------------------------------------------------
+
+class TestIsSummarizeRequest:
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "summarize this",
+            "Summarize the document",
+            "summarize this file please",
+            "summarise this document",
+            "give me a summary",
+            "provide a summary of the filing",
+            "can you summarize apple_10k.pdf",
+            "tl;dr",
+            "TLDR",
+            "summarize apple_10k.pdf",
+        ],
+    )
+    def test_matches_summarize_phrasing(self, query):
+        assert _is_summarize_request(query) is True
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "what was net revenue in FY2024?",
+            "compare gross margin to last year",
+            "what did the CFO say about tax provisions?",
+        ],
+    )
+    def test_does_not_match_ordinary_questions(self, query):
+        assert _is_summarize_request(query) is False
+
+    def test_empty_query(self):
+        assert _is_summarize_request("") is False
+        assert _is_summarize_request(None) is False
+
+
+# ---------------------------------------------------------------------------
+# _resolve_summarize_source
+# ---------------------------------------------------------------------------
+
+class TestResolveSummarizeSource:
+
+    def test_prefers_explicit_single_source(self):
+        result = _resolve_summarize_source("summarize this", sources=["apple_10k.pdf"])
+        assert result == "apple_10k.pdf"
+
+    def test_ignores_multiple_explicit_sources(self):
+        # Ambiguous — more than one file selected — caller falls through to RAG.
+        result = _resolve_summarize_source(
+            "summarize this", sources=["apple_10k.pdf", "meta_10k.pdf"]
+        )
+        assert result is None
+
+    def test_falls_back_to_filename_in_query(self):
+        with patch(
+            "app.pipeline.rag_pipeline._detect_filename_scope_stream",
+            return_value=["apple_10k.pdf"],
+        ):
+            result = _resolve_summarize_source("summarize apple_10k.pdf", sources=None)
+        assert result == "apple_10k.pdf"
+
+    def test_no_resolvable_file_returns_none(self):
+        with patch(
+            "app.pipeline.rag_pipeline._detect_filename_scope_stream",
+            return_value=None,
+        ):
+            result = _resolve_summarize_source("summarize the risk factors", sources=None)
+        assert result is None

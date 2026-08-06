@@ -3745,3 +3745,66 @@ infrastructure, called out below rather than left undocumented.
   must be hand-substituted with a real bcrypt hash before each deploy that
   touches the Caddyfile. Fails safe (login simply rejects until replaced),
   but there's no CI check confirming it was actually replaced.
+
+## Conversational Response Layer & Document Summarization
+
+Accuracy across modalities was already >85%, but answers read like a strict
+extraction system reciting facts rather than a natural, conversational
+response — and there was no way to ask "summarize this file" as a
+whole-document operation instead of a top-k semantic question. Three
+additive pieces, each independently gated/revertable, none of which touch
+retrieval, chunking, embeddings, or the existing grounding/citation rules
+that the accuracy numbers depend on.
+
+### Added
+
+- **Conversational tone rewrap.** `app/pipeline/rag_pipeline.py`'s new
+  `_conversational_rewrap()` runs a second, short LLM call on the final
+  answer — strictly *after* every accuracy-critical stage (verification,
+  figure normalization, citation attachment, synth overrides) — to rephrase
+  it into natural, conversational prose. It never sees or touches the
+  citation footer (split off first via `_split_citation_footer()` and
+  reattached verbatim), and is discarded outright — falling back to the
+  original, unchanged answer — if the rewrite drops, adds, or alters any
+  number, or collapses to near-nothing. Gated by
+  `settings.CONVERSATIONAL_REWRAP_ENABLED` (default on) and
+  `settings.CONVERSATIONAL_REWRAP_MAX_TOKENS`; skipped entirely for
+  `structured`/`code` query types, which should stay terse by design, and
+  for any answer the hallucination guard already flagged.
+- **"Summarize this document" intent.** A whole-document operation, not a
+  top-k semantic question. `QdrantVectorStore.get_all_chunks_by_source()`
+  (`app/vectorstore/qdrant_store.py`) pulls every chunk of a resolved file in
+  original reading order via a tenant-scoped `scroll()`, resolving a
+  human-typed filename against its ingestion-time hash-prefixed stored value
+  through a new bounded `_resolve_exact_source()` scan (mirrors the
+  case-insensitive substring convention `hybrid_retriever.py` already uses
+  for top-k filtering). `app/pipeline/summarize.py` map-reduces over the
+  LLM's small context budget for documents too large to summarize in one
+  call. Wired into `POST /rag/query/stream` via new `_is_summarize_request()`
+  / `_resolve_summarize_source()` helpers in `app/api/api_routes.py`,
+  following the exact `_is_web_request` short-circuit pattern already used
+  for web-search routing — checked before the Redis cache lookup so a
+  summarize request never returns a stale cached Q&A answer. Falls through
+  to normal RAG when no single file can be resolved (e.g. "summarize the
+  risk factors" with no file named).
+
+### Verified, not rebuilt
+
+- **Multi-turn conversation memory** already threads correctly on the live
+  streaming path — confirmed by tracing the write side
+  (`_store_interaction()` in `api_routes.py`) through to the read side
+  (`MemoryManager.get_history(user_id=...)` in `rag_pipeline.py`'s
+  `stream()`) into `PromptBuilder.build_prompt(memory=...)`. No code change
+  needed.
+
+### Known gaps — not fixed, flagged instead of silently carried forward
+
+- The new summarize branch does not persist its turn to memory, so a
+  follow-up like "what did you just summarize?" has no prior-turn context —
+  this matches the pre-existing web-search branch's behavior in
+  `stream_query()`, not a regression introduced here.
+- The eval quality gate (`python -m app.eval.run --suite all --gate`) could
+  not be run in the development environment this was built in (no ingested
+  corpus, missing `sentencepiece` for the vision model) — verification is
+  deferred to the deployed server, where the corpus and full model stack are
+  present.
