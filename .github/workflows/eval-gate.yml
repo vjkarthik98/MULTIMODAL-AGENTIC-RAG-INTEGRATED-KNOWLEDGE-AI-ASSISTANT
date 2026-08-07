@@ -409,7 +409,7 @@ jobs:
   tier2-nightly:
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.seed != true)
     uses: ./.github/workflows/tier2-eval.yml
-    secrets: inherit
+    secrets: inherit  # pragma: allowlist secret
     with:
       container: magik-current
       previous_container: magik-previous

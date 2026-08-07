@@ -100,7 +100,8 @@ async def get_current_admin_user(
 
 
 async def optional_current_user(
-    request: Request, header_token: str | None = Depends(oauth2_scheme),
+    request: Request,
+    header_token: str | None = Depends(oauth2_scheme),
 ) -> UserPublic | None:
     """
     Like get_current_user but returns None instead of raising 401.

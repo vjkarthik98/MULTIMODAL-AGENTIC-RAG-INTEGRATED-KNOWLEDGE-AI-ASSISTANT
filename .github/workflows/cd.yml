@@ -578,7 +578,7 @@ jobs:
   tier2-staging-gate:
     needs: deploy-staging
     uses: ./.github/workflows/tier2-eval.yml
-    secrets: inherit
+    secrets: inherit  # pragma: allowlist secret
     with:
       container: magik-staging-current
       previous_container: magik-staging-previous

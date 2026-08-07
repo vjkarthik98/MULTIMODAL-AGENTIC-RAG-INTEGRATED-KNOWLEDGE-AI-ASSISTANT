@@ -550,9 +550,10 @@ async def logout(
     """Revoke the current access token — and the refresh token, if surrendered —
     immediately via the Redis blacklist, so logout fully ends the session rather
     than leaving a long-lived refresh token usable until it naturally expires."""
-    access_token = read_access_cookie(request) or request.headers.get(
-        "Authorization", ""
-    ).removeprefix("Bearer ").strip()
+    access_token = (
+        read_access_cookie(request)
+        or request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    )
     if access_token:
         try:
             payload = verify_token(access_token, expected_type="access")
