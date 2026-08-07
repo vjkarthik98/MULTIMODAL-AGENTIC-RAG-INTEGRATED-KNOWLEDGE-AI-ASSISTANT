@@ -82,7 +82,7 @@ jobs:
       - name: Run Schemathesis contract test
         run: pytest tests/api_contract/ -v --junitxml=quality-reports/api-contract/ci-run.junit.xml
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: api-contract-report
@@ -146,7 +146,7 @@ jobs:
       - name: Run k6 smoke
         run: k6 run --summary-export=quality-reports/performance/ci-smoke-summary.json perf/k6/smoke.js
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: k6-smoke-report
@@ -193,7 +193,7 @@ jobs:
       - name: Run ZAP baseline scan
         run: bash security/zap/run_baseline.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: zap-baseline-report
@@ -222,7 +222,7 @@ jobs:
       - name: Run Lighthouse CI
         run: npx --yes @lhci/cli@0.14 autorun --config=lighthouserc.json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: lighthouse-report
