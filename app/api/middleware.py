@@ -14,6 +14,7 @@ It also:
 
 from __future__ import annotations
 
+import hmac
 import time
 import uuid
 
@@ -100,8 +101,52 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 
 def _extract_bearer(request: Request) -> str | None:
+    from app.auth.cookies import read_access_cookie
+
+    cookie_token = read_access_cookie(request)
+    if cookie_token:
+        return cookie_token
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         token = auth[7:].strip()
         return token if token else None
     return None
+
+
+class CSRFMiddleware(BaseHTTPMiddleware):
+    """Double-submit CSRF check for cookie-authenticated state-changing requests.
+
+    Scope: only fires when (a) the request is a mutating method and (b) a
+    magik_access or magik_refresh cookie is actually present — i.e. only once
+    a real cookie session exists to forge. Pre-auth endpoints (login,
+    register, verify-otp, forgot/reset-password, the OAuth handshake) carry no
+    session cookie yet, so they're naturally exempt without a path allowlist.
+
+    Requests authenticated via `Authorization: Bearer` instead of a cookie are
+    also exempt: a cross-site page cannot attach a custom header to a forged
+    request, so bearer-token API/CLI/test clients are not a CSRF target by
+    construction — only the cookie-based browser session needs this.
+    """
+
+    _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        from app.auth.cookies import CSRF_COOKIE, read_access_cookie, read_refresh_cookie
+
+        if request.method not in self._SAFE_METHODS and not request.headers.get("Authorization"):
+            if read_access_cookie(request) or read_refresh_cookie(request):
+                cookie_csrf = request.cookies.get(CSRF_COOKIE, "")
+                header_csrf = request.headers.get("X-CSRF-Token", "")
+                if (
+                    not cookie_csrf
+                    or not header_csrf
+                    or not hmac.compare_digest(cookie_csrf, header_csrf)
+                ):
+                    from fastapi.responses import JSONResponse
+
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "CSRF validation failed"},
+                    )
+
+        return await call_next(request)

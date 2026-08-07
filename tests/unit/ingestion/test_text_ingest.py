@@ -142,7 +142,7 @@ class TestTextIngestAsync:
         async def _run():
             return await ingest(path, session_id="s1")
 
-        result = asyncio.get_event_loop().run_until_complete(_run())
+        result = asyncio.run(_run())
         assert isinstance(result, list)
         assert len(result) >= 1
 
@@ -154,7 +154,7 @@ class TestTextIngestAsync:
             with pytest.raises(ValueError, match="SESSION_ID_REQUIRED"):
                 await ingest(path, session_id="")
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
 
 
 # ── Internal helper functions ─────────────────────────────────────────────────

@@ -2,20 +2,29 @@
   "_comment": [
     "Trust policy for magik-deploy-role (the role cd.yml assumes via GitHub OIDC).",
     "",
-    "BOTH sub patterns are required, and the reason is the single most common",
+    "ALL THREE sub patterns are required, and the reason is the single most common",
     "GitHub-OIDC failure mode:",
     "",
-    "  * cd.yml's `deploy` job declares `environment: production`. The MOMENT a",
-    "    job references a GitHub Environment, the OIDC subject claim changes",
-    "    format to `repo:<owner>/<repo>:environment:<name>` — it NO LONGER carries",
-    "    the ref. A trust policy matching only `ref:refs/tags/*` therefore rejects",
-    "    it with 'Not authorized to perform sts:AssumeRoleWithWebIdentity',",
-    "    which is exactly what happened on CD run #6 (2026-07-29).",
+    "  * cd.yml's `promote-production` job declares `environment: production`.",
+    "    The MOMENT a job references a GitHub Environment, the OIDC subject claim",
+    "    changes format to `repo:<owner>/<repo>:environment:<name>` — it NO",
+    "    LONGER carries the ref. A trust policy matching only `ref:refs/tags/*`",
+    "    therefore rejects it with 'Not authorized to perform",
+    "    sts:AssumeRoleWithWebIdentity', which is exactly what happened on CD",
+    "    run #6 (2026-07-29).",
+    "  * cd.yml's `deploy-staging` job declares `environment: staging` for the",
+    "    same reason (staging gate, added alongside this comment) — same failure",
+    "    mode, same fix: its own explicit `environment:staging` sub pattern.",
     "  * the `ref:refs/tags/*` pattern is kept so any future job in this workflow",
     "    that does NOT use an environment still works.",
     "",
-    "Both remain tightly scoped to this one repository — a fork, another repo, or",
-    "a branch push cannot assume this role."
+    "All three remain tightly scoped to this one repository — a fork, another",
+    "repo, or a branch push cannot assume this role.",
+    "",
+    "NOTE: this file documents the intended trust policy; applying it to the",
+    "real IAM role in AWS (e.g. `aws iam update-assume-role-policy`) is a",
+    "separate, manual step — see docs/runbooks/ci-cd.md 'Staging gate'",
+    "prerequisites."
   ],
   "Version": "2012-10-17",
   "Statement": [
@@ -31,8 +40,9 @@
         },
         "StringLike": {
           "token.actions.githubusercontent.com:sub": [
-            "repo:vjkarthik98/multimodal-rag-assistant:environment:production",
-            "repo:vjkarthik98/multimodal-rag-assistant:ref:refs/tags/*"
+            "repo:vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT:environment:production",
+            "repo:vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT:environment:staging",
+            "repo:vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT:ref:refs/tags/*"
           ]
         }
       }

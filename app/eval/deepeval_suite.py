@@ -322,7 +322,7 @@ def main() -> int:
         import deepeval  # noqa: F401
     except ImportError:
         print(
-            '[deepeval-suite] FATAL: deepeval not installed — pip install "multimodal-rag-assistant[quality]"'
+            '[deepeval-suite] FATAL: deepeval not installed — pip install "MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT[quality]"'
         )
         return 2
 

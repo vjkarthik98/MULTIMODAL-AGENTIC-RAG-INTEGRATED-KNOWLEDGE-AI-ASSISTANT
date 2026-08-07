@@ -463,6 +463,16 @@ class BM25Document:
             "row_end": p.get("row_end"),
             "frame_index": p.get("frame_index"),
             "caption": p.get("caption"),
+            # Citation-grade chart title + asset for image chunks — see the
+            # matching comment in app/retrieval/bm25_retriever.py. Carried in
+            # `structure` rather than as a new __slots__ field on purpose:
+            # indexes are pickled, and adding a slot would leave every
+            # already-saved BM25 document without the attribute entirely
+            # (AttributeError on access), whereas a missing dict key is just
+            # None.
+            "image_title": p.get("image_title"),
+            "image_type": p.get("image_type"),
+            "asset_path": p.get("asset_path"),
             "speaker": p.get("speaker"),
         }
         return obj
@@ -624,6 +634,12 @@ class BaseBM25(ABC):
             "call_section": s.get("call_section"),
             "frame_index": s.get("frame_index"),
             "caption": s.get("caption"),
+            # Image citation fields — the chip cites an image by image_title,
+            # so dropping it here made every BM25-matched image chunk render
+            # as a bare filename.
+            "image_title": s.get("image_title"),
+            "image_type": s.get("image_type"),
+            "asset_path": s.get("asset_path") or s.get("source_path"),
             "ingestion_time": s.get("ingestion_time"),
             "checksum_sha256": s.get("checksum_sha256"),
         }

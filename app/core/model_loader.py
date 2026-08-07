@@ -73,6 +73,16 @@ _model_loaded = Gauge(
     "Whether a model is loaded (1=yes, 0=no)",
     ["model"],
 )
+_model_evictions = Counter(
+    "model_evictions_total",
+    "Evictable models unloaded from VRAM, by model and trigger "
+    "(idle=TTL sweep, pressure=free-VRAM watermark)",
+    ["model", "reason"],
+)
+_gpu_vram_free = Gauge(
+    "gpu_vram_free_gb",
+    "Free VRAM in GB as reported by the CUDA driver (all processes on the device)",
+)
 # embedding_latency_seconds was defined here too, colliding with
 # app/pipeline/ingestion_pipeline.py's identical metric name — removed
 # rather than unified, since it was dead code: defined but never once
@@ -207,6 +217,21 @@ class ModelLoader:
         unload_idle_models() only evicts models that are genuinely idle."""
         self._last_used[name] = time.time()
 
+    def _drop(self, name: str, reason: str) -> None:
+        """Release one evictable model's references. Caller must hold _lock.
+
+        Only clears THIS loader's references. A job that already called the
+        getter still holds its own reference, so refcounting keeps those
+        weights alive until it finishes — dropping here is never unsafe, it
+        just means the next getter reloads. app/core/model_reaper.py avoids
+        the wasteful version of that by skipping while gpu_busy().
+        """
+        for attr in self._EVICTABLE_MODELS[name]:
+            setattr(self, attr, None)
+        self._last_used.pop(name, None)
+        _model_loaded.labels(model=name).set(0)
+        _model_evictions.labels(model=name, reason=reason).inc()
+
     def unload_idle_models(self, idle_seconds: float = 300.0) -> list[str]:
         """Free any evictable model that hasn't been used in idle_seconds.
 
@@ -225,18 +250,84 @@ class ModelLoader:
                 last_used = self._last_used.get(name, 0.0)
                 if now - last_used < idle_seconds:
                     continue  # used too recently
-                for attr in attrs:
-                    setattr(self, attr, None)
-                self._last_used.pop(name, None)
-                _model_loaded.labels(model=name).set(0)
+                idle_for = round(now - last_used, 1)
+                self._drop(name, reason="idle")
                 evicted.append(name)
-                logger.info(
-                    "model_evicted_idle", model=name, idle_seconds=round(now - last_used, 1)
-                )
+                logger.info("model_evicted_idle", model=name, idle_seconds=idle_for)
 
         if evicted:
             self._oom_guard()  # actually reclaim the freed VRAM
         return evicted
+
+    def unload_until_free(self, target_free_gb: float) -> list[str]:
+        """Pressure valve: evict least-recently-used models until free VRAM
+        clears `target_free_gb`, regardless of how recently they were used.
+
+        Complements unload_idle_models(). TTL eviction alone is both too slow
+        and too eager: too slow because a model idle for 4 minutes is still
+        held while a large ingest is about to OOM, and too eager because on a
+        card with plenty of headroom it evicts models nothing was competing
+        for, paying a reload cost (~25s for a VLM) to free memory no one
+        wanted. Watermark eviction only acts when the memory is actually
+        contended, which is the signal that matters. This is the same
+        least-recently-used-under-pressure policy KServe ModelMesh applies
+        across a model pool.
+
+        LRU order comes from the existing `_last_used` bookkeeping; a loaded
+        model with no recorded use sorts oldest and is evicted first.
+
+        Re-checks free VRAM after each eviction so it stops as soon as the
+        target is met rather than dumping everything. Returns [] and does
+        nothing when free VRAM cannot be read (no CUDA / driver query
+        failed) — never evict on a guess.
+        """
+        free_gb = device_manager.free_vram_gb()
+        if free_gb is None:
+            return []
+        _gpu_vram_free.set(free_gb)
+        if free_gb >= target_free_gb:
+            return []
+
+        evicted: list[str] = []
+        with self._lock:
+            loaded = [
+                name
+                for name, attrs in self._EVICTABLE_MODELS.items()
+                if getattr(self, attrs[0]) is not None
+            ]
+            # Oldest last_used first; never-recorded (0.0) sorts oldest.
+            loaded.sort(key=lambda n: self._last_used.get(n, 0.0))
+
+            for name in loaded:
+                self._drop(name, reason="pressure")
+                evicted.append(name)
+                logger.warning(
+                    "model_evicted_pressure",
+                    model=name,
+                    free_vram_gb=round(free_gb, 2),
+                    target_free_gb=target_free_gb,
+                )
+                # Reclaim inside the loop — free_vram_gb() reads the driver,
+                # which will not reflect the drop until the allocator has
+                # actually released it.
+                self._oom_guard()
+                now_free = device_manager.free_vram_gb()
+                if now_free is not None:
+                    free_gb = now_free
+                    _gpu_vram_free.set(free_gb)
+                    if free_gb >= target_free_gb:
+                        break
+
+        return evicted
+
+    def refresh_vram_gauge(self) -> float | None:
+        """Publish current free VRAM to Prometheus. Returns the value (or
+        None if unavailable) so a caller can reuse it without a second
+        driver query."""
+        free_gb = device_manager.free_vram_gb()
+        if free_gb is not None:
+            _gpu_vram_free.set(free_gb)
+        return free_gb
 
     # OOM GUARD — flush CUDA cache + Python GC between model loads (MD spec)
 

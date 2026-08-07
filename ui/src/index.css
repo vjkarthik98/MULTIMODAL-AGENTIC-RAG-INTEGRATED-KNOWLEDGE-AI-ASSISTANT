@@ -133,6 +133,14 @@ html, body, #root {
   padding: 0;
   font-size: 0.82em;
 }
+/* Long unbreakable tokens — URLs, hashes, IDs — are the usual cause of a
+   chat message forcing the whole page to scroll sideways on a phone. `pre`
+   already scrolls internally; these cover prose text and INLINE code, which
+   do not. break-word only breaks when the token would otherwise overflow,
+   so normal prose wrapping is unaffected; `anywhere` is reserved for inline
+   code, where mid-token breaks are preferable to a broken layout. */
+.prose-chat      { overflow-wrap: break-word; }
+.prose-chat code { overflow-wrap: anywhere; }
 .prose-chat a { color: var(--t-accent); text-decoration: underline; }
 
 /* ── Markdown tables ─────────────────────────────── */
@@ -253,4 +261,41 @@ html, body, #root {
   color: var(--t-tx4);
   animation: blink-cursor 0.7s ease-in-out infinite;
   vertical-align: baseline;
+}
+
+/* ── Full-viewport height that survives mobile browser chrome ──────
+   Two declarations, deliberately: 100vh is the fallback for browsers
+   without dvh support, and 100dvh overrides it where supported. On
+   mobile Safari 100vh resolves to the viewport with the address bar
+   HIDDEN, so a bottom-anchored composer sits behind the bar until you
+   scroll. dvh tracks the currently visible height instead. */
+.h-dvh-screen {
+  height: 100vh;
+  height: 100dvh;
+}
+/* min-height variant, for pages that centre a card but must still be able to
+   grow and scroll (auth screens with the on-screen keyboard open). */
+.min-h-dvh-screen {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* ── Safe-area insets (notched / gesture-bar devices) ──────────────
+   index.html sets viewport-fit=cover so the page paints edge to edge;
+   these add the OS-reported inset ON TOP of whatever padding an element
+   already has, so content clears the notch and home indicator. They
+   resolve to 0px on hardware without insets, so they are safe to apply
+   unconditionally and need no breakpoint. */
+.pb-safe { padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.75rem); }
+.pt-safe { padding-top:    calc(env(safe-area-inset-top,    0px) + 0.75rem); }
+.pl-safe { padding-left:   env(safe-area-inset-left,  0px); }
+.pr-safe { padding-right:  env(safe-area-inset-right, 0px); }
+
+/* ── Mobile input zoom guard ───────────────────────────────────────
+   iOS Safari auto-zooms the viewport when focusing an input whose
+   font-size is below 16px, and never zooms back out — the page is left
+   scaled and horizontally scrollable. Enforcing >=16px at phone widths
+   prevents it at the source. Desktop keeps the designed sizes. */
+@media (max-width: 639px) {
+  input, textarea, select { font-size: 16px; }
 }

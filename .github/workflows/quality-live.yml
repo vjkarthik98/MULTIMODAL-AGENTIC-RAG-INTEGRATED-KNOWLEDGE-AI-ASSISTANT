@@ -57,7 +57,7 @@ jobs:
         env:
           MAGIK_LIVE_URL: ${{ secrets.MAGIK_LIVE_URL }}
         run: |
-          pip install "multimodal-rag-assistant[quality] @ ." || pip install schemathesis
+          pip install "MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT[quality] @ ." || pip install schemathesis
           bash scripts/schemathesis_live.sh
 
       - name: RAGAS report (live)

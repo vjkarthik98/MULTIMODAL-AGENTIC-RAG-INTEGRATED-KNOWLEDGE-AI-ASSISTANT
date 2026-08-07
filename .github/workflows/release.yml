@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'New version, e.g. "0.29.0" (no leading "v" — added automatically). Must be greater than the current VERSION.'
+        description: 'New version, e.g. "0.30.0" (no leading "v" — added automatically). Must be greater than the current VERSION.'
         required: true
         type: string
       title:

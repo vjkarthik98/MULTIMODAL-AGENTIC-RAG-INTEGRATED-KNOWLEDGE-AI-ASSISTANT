@@ -9,6 +9,7 @@ from opentelemetry.trace import Status, StatusCode
 from prometheus_client import Counter, Histogram
 
 from app.core.config import settings
+from app.llm.regeneration import REGENERATE_DIRECTIVE as _REGENERATE_DIRECTIVE
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -849,6 +850,7 @@ class PromptBuilder:
         memory: str = "",
         session_id: str = "default",
         scrub_pii: bool = True,
+        regenerate: bool = False,
     ) -> str:
 
         start = time.time()
@@ -911,10 +913,19 @@ class PromptBuilder:
                     f"TASK:\n{query_text}\n\n" if structured else f"QUERY:\n{query_text}\n\n"
                 )
 
+                # REGENERATE BLOCK — only present when the user explicitly
+                # asked for a different answer. Sits between the context and
+                # the query (an instruction about how to answer THIS query),
+                # never after the answer cue in output_fmt, where the model
+                # would continue the directive text instead of obeying it.
+                regen_block = _REGENERATE_DIRECTIVE if regenerate else ""
+
                 # RESIDUAL BUDGET — everything left after fixed components.
                 # This prevents the system prompt (which varies 400–900 chars)
                 # from silently compressing the context window.
-                fixed_len = len(system) + len(output_fmt) + len(query_block) + 100
+                fixed_len = (
+                    len(system) + len(output_fmt) + len(query_block) + len(regen_block) + 100
+                )
                 remaining = max(0, self.max_chars - fixed_len)
 
                 mem_budget = int(remaining * _MEM_RATIO)
@@ -927,19 +938,19 @@ class PromptBuilder:
                 mem_block = f"MEMORY:\n{memory}\n\n" if memory else ""
                 ctx_block = f"CONTEXT:\n{context}\n\n" if context else ""
 
-                prompt = system + mem_block + ctx_block + query_block + output_fmt
+                prompt = system + mem_block + ctx_block + regen_block + query_block + output_fmt
 
                 # OVERFLOW GUARD — PRESERVE SYSTEM + QUERY + FORMAT
                 if len(prompt) > self.max_chars:
-                    fixed = system + query_block + output_fmt
+                    fixed = system + regen_block + query_block + output_fmt
                     allowed = self.max_chars - len(fixed) - 20
                     middle = _truncate(mem_block + ctx_block, allowed)
-                    prompt = system + middle + query_block + output_fmt
+                    prompt = system + middle + regen_block + query_block + output_fmt
 
                     logger.warning(
                         "prompt_truncated",
                         original_size=len(
-                            system + mem_block + ctx_block + query_block + output_fmt
+                            system + mem_block + ctx_block + regen_block + query_block + output_fmt
                         ),
                         final_size=len(prompt),
                         session_id=session_id,
@@ -1023,10 +1034,13 @@ class PromptBuilder:
         memory: str = "",
         session_id: str = "default",
         scrub_pii: bool = True,
+        regenerate: bool = False,
     ) -> str:
 
         async with _semaphore:
             return await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self.build_prompt(query, context, memory, session_id, scrub_pii),
+                lambda: self.build_prompt(
+                    query, context, memory, session_id, scrub_pii, regenerate
+                ),
             )

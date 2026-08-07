@@ -419,7 +419,7 @@ class TestAgentControllerHandle:
     def test_handle_async_callable(self):
         import asyncio
         ctrl = _make_controller()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             ctrl.handle_async("What is AI?", session_id="s1")
         )
         assert "response" in result

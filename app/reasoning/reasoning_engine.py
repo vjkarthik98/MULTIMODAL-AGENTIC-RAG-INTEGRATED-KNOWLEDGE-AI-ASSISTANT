@@ -15,6 +15,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from app.core.config import settings
 from app.core.metrics import llm_call_latency as _llm_call_duration
 from app.core.metrics import reasoning_engine_duration as _reasoning_duration
+from app.llm.regeneration import REGENERATE_DIRECTIVE as _REGENERATE_DIRECTIVE
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -1718,6 +1719,7 @@ def _build_cot_prompt(
     memory: str,
     query_type: str = "factual",
     cite_keys: list[str] | None = None,
+    regenerate: bool = False,
 ) -> str:
 
     # NOTE: these instructions must NOT ask the model to show its reasoning or
@@ -1848,12 +1850,17 @@ def _build_cot_prompt(
         "Sources Used: [integer]\n"
     )
 
+    # Only on an explicit user regenerate — placed before the QUERY block, not
+    # after the output format, so the model obeys it instead of continuing it.
+    regen_block = _REGENERATE_DIRECTIVE if regenerate else ""
+
     return (
         instruction
         + citation_rules
         + memory_block
         + knowledge_block
         + example_block
+        + regen_block
         + query_block
         + output_format
     )
@@ -2290,6 +2297,7 @@ class ReasoningEngine:
         session_id: str,
         max_tokens: int | None = None,
         temperature: float = 0.0,
+        seed: int | None = None,
     ) -> str | None:
 
         if len(prompt) > self.max_prompt_chars:
@@ -2303,6 +2311,7 @@ class ReasoningEngine:
                 max_tokens=max_tokens or settings.LLM_MAX_TOKENS,
                 temperature=temperature,
                 session_id=session_id,
+                seed=seed,
             )
             llm_latency = round(time.time() - t_start, 2)
 
@@ -2340,6 +2349,7 @@ class ReasoningEngine:
         step_history: list[dict] | None = None,
         sources: list[dict[str, Any]] | None = None,
         user_id: str = "",
+        regenerate: bool = False,
     ) -> dict[str, Any]:
 
         if not query:
@@ -2433,6 +2443,7 @@ class ReasoningEngine:
                         memory,
                         query_type=query_type,
                         cite_keys=cite_keys,
+                        regenerate=regenerate,
                     )
 
                 # PROMPT BUDGET WARNING
@@ -2445,9 +2456,24 @@ class ReasoningEngine:
                         session_id=session_id,
                     )
 
-                # LLM INFERENCE
+                # LLM INFERENCE — greedy by default (temperature 0.0, no seed):
+                # a factual answer must be reproducible. On an explicit user
+                # regenerate that same determinism is what returned the
+                # previous answer verbatim, so sample off the greedy path with
+                # a fresh seed (app/llm/regeneration.py).
                 t_reason = time.time()
-                response = self._call_llm(prompt, session_id)
+                _gen_temp, _gen_seed = 0.0, None
+                if regenerate:
+                    from app.llm.regeneration import regeneration_sampling
+
+                    _gen_temp, _gen_seed = regeneration_sampling(0.0)
+                    logger.info(
+                        "reasoning_regenerate",
+                        temperature=_gen_temp,
+                        seed=_gen_seed,
+                        session_id=session_id,
+                    )
+                response = self._call_llm(prompt, session_id, temperature=_gen_temp, seed=_gen_seed)
                 reason_latency = round(time.time() - t_reason, 3)
 
                 _record_step(
@@ -2741,6 +2767,7 @@ class ReasoningEngine:
         step_history: list[dict] | None = None,
         sources: list[dict[str, Any]] | None = None,
         user_id: str = "",
+        regenerate: bool = False,
     ) -> dict[str, Any]:
 
         async with _get_semaphore():
@@ -2756,5 +2783,6 @@ class ReasoningEngine:
                     step_history,
                     sources,
                     user_id,
+                    regenerate,
                 ),
             )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# APP/MAIN.PY — MAGIK FINANCE RAG v0.29.0
+# APP/MAIN.PY — MAGIK FINANCE RAG v0.30.0
 # FASTAPI APPLICATION ENTRY POINT — WIRES EVERYTHING TOGETHER
 # SECTION 4.6 — LIFESPAN, MIDDLEWARE, OTEL, PROMETHEUS, CORS, RATE LIMIT
 # ── HF CACHE MUST BE SET BEFORE ANY TRANSFORMERS/TORCH IMPORT ──────────────
@@ -29,11 +29,13 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, Response
+from opentelemetry import trace
 
 from app.core.config import settings
-from app.utils.logger import bind_request_context, get_logger
+from app.utils.logger import _inject_otel_context, bind_request_context, get_logger
 
 logger = get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
 # Set CUDA TF32 + cuDNN benchmark flags before any model code runs
 try:
@@ -264,6 +266,17 @@ async def lifespan(app: FastAPI):
 
     background_tasks.append(asyncio.create_task(run_online_eval_loop()))
 
+    # VRAM reaper — evicts ingestion-only models (Whisper, BLIP2, Qwen2-VL,
+    # TrOCR, diarizer, NER, FinBERT) once they go idle, or sooner under VRAM
+    # pressure. The query hot set (llm/text_embedder/reranker/SigLIP) is
+    # pinned and never touched. No-op unless MODEL_IDLE_EVICTION_ENABLED.
+    # Must run in THIS process — it operates on this process's model_loader
+    # singleton and its Prometheus gauges share the registry _setup_prometheus()
+    # is already serving.
+    from app.core.model_reaper import run_model_reaper_loop
+
+    background_tasks.append(asyncio.create_task(run_model_reaper_loop()))
+
     startup_latency = round(time.time() - startup_start, 2)
     logger.info(
         event="app_ready",
@@ -316,9 +329,13 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 # Must be added AFTER CORSMiddleware and GZipMiddleware so it runs first on ingress.
 # Populates request.state.user from the Bearer JWT on every request.
 
-from app.api.middleware import AuthMiddleware
+from app.api.middleware import AuthMiddleware, CSRFMiddleware
 
 app.add_middleware(AuthMiddleware)
+# Runs before AuthMiddleware on ingress (Starlette applies middleware in
+# reverse registration order) — a forged request gets rejected before it
+# even reaches token verification.
+app.add_middleware(CSRFMiddleware)
 
 
 # GLOBAL EXCEPTION HANDLER
@@ -378,43 +395,49 @@ async def request_logger(request: Request, call_next) -> Response:
             client_ip=client_ip,
         )
 
-    try:
-        response = await call_next(request)
-        latency = round(time.time() - start, 3)
+    # Root span for the request — gives every log line emitted while handling
+    # it (via _inject_otel_context) a real trace_id, which is what lets
+    # Grafana's Loki->Tempo "derived field" correlation actually match.
+    with tracer.start_as_current_span("http_request") as span:
+        _inject_otel_context()
+        try:
+            response = await call_next(request)
+            latency = round(time.time() - start, 3)
 
-        path_str = str(request.url.path)
-        # Skip noisy probe paths — /health is hit by load balancers, IDE probes,
-        # browser tabs, and Swagger UI; logging every hit drowns out real traffic.
-        _SKIP_LOG_PATHS = ("/health", "/infra/health", "/models/health", "/metrics")
-        skip_log = path_str in _SKIP_LOG_PATHS
+            path_str = str(request.url.path)
+            # Skip noisy probe paths — /health is hit by load balancers, IDE probes,
+            # browser tabs, and Swagger UI; logging every hit drowns out real traffic.
+            _SKIP_LOG_PATHS = ("/health", "/infra/health", "/models/health", "/metrics")
+            skip_log = path_str in _SKIP_LOG_PATHS
 
-        log_kwargs = dict(
-            event="http_request",
-            id=request_id,
-            method=request.method,
-            path=path_str,
-            status=response.status_code,
-            latency=latency,
-            ip=client_ip,
-        )
+            log_kwargs = dict(
+                event="http_request",
+                id=request_id,
+                method=request.method,
+                path=path_str,
+                status=response.status_code,
+                latency=latency,
+                ip=client_ip,
+            )
 
-        if latency > settings.SLOW_REQUEST_THRESHOLD:
-            logger.warning(**log_kwargs)
-        elif not skip_log:
-            logger.info(**log_kwargs)
+            if latency > settings.SLOW_REQUEST_THRESHOLD:
+                logger.warning(**log_kwargs)
+            elif not skip_log:
+                logger.info(**log_kwargs)
 
-        response.headers[settings.CORRELATION_ID_HEADER] = request_id
-        response.headers["X-Request-ID"] = request_id
-        return response
+            response.headers[settings.CORRELATION_ID_HEADER] = request_id
+            response.headers["X-Request-ID"] = request_id
+            return response
 
-    except Exception as e:
-        logger.error(
-            event="request_failed",
-            id=request_id,
-            path=str(request.url.path),
-            error=str(e),
-        )
-        raise
+        except Exception as e:
+            span.record_exception(e)
+            logger.error(
+                event="request_failed",
+                id=request_id,
+                path=str(request.url.path),
+                error=str(e),
+            )
+            raise
 
 
 # CONCURRENCY LIMIT + REQUEST TIMEOUT MIDDLEWARE — SECTION 2.1

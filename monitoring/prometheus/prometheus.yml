@@ -40,8 +40,12 @@ scrape_configs:
       - targets: ["pushgateway:9091"]
     # Offline/CI-gate RAG-quality numbers (recall@k, MRR, nDCG, faithfulness,
     # hallucination_rate — the real thresholds.yaml-gated metrics), pushed by
-    # eval-gate.yml's tier2-full-suite job. See docker-compose.monitoring.yml's
-    # pushgateway service comment for why this exists as a push, not a scrape.
+    # tier2-eval.yml's job (called by eval-gate.yml's nightly tier2-nightly,
+    # and by cd.yml's blocking tier2-staging-gate — though only the
+    # production runner has a reachable Pushgateway; staging's push is
+    # best-effort/expected-to-fail, see tier2-eval.yml). See
+    # docker-compose.monitoring.yml's pushgateway service comment for why
+    # this exists as a push, not a scrape.
 
   - job_name: loki
     static_configs:

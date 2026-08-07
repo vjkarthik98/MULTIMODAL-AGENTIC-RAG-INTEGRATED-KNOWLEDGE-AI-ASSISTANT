@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 
+from app.auth.cookies import read_access_cookie
 from app.auth.jwt_handler import verify_token
 from app.auth.models import UserPublic, UserRole
 from app.core.config import settings
@@ -10,7 +11,19 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# auto_error=False: a missing Authorization header is not fatal here — the
+# browser client authenticates via the httpOnly magik_access cookie instead
+# (see _resolve_token below). Bearer stays supported for API/CLI/test clients.
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login/form", auto_error=False)
+
+
+def _resolve_token(request: Request, header_token: str | None) -> str | None:
+    """Cookie first (the browser SPA), Authorization header as fallback (API
+    clients, curl, CI, the test suite). Never trust both silently swapped —
+    whichever is present wins; if both are present the cookie wins since it's
+    what the browser actually sent, and a stale/forged header should not be
+    able to override a legitimate cookie session."""
+    return read_access_cookie(request) or header_token
 
 
 def _build_user_from_payload(payload: dict) -> UserPublic:
@@ -32,14 +45,18 @@ def _build_user_from_payload(payload: dict) -> UserPublic:
     )
 
 
-async def get_current_user(token: str | None = Depends(oauth2_scheme)) -> UserPublic:
+async def get_current_user(
+    request: Request, header_token: str | None = Depends(oauth2_scheme)
+) -> UserPublic:
     """
-    FastAPI dependency — extracts and verifies the JWT bearer token.
+    FastAPI dependency — extracts and verifies the JWT (from the httpOnly
+    access cookie, or an Authorization: Bearer header for non-browser clients).
     Returns the authenticated UserPublic. Raises HTTP 401 on failure.
 
     Used on every protected route to ensure user_id is always JWT-sourced,
     never from a form field or header that a caller could forge.
     """
+    token = _resolve_token(request, header_token)
     if not settings.AUTH_ENABLED:
         # Dev bypass: return the default dev user when auth is disabled
         from datetime import datetime, timezone
@@ -83,12 +100,14 @@ async def get_current_admin_user(
 
 
 async def optional_current_user(
-    token: str | None = Depends(oauth2_scheme),
+    request: Request,
+    header_token: str | None = Depends(oauth2_scheme),
 ) -> UserPublic | None:
     """
     Like get_current_user but returns None instead of raising 401.
     Use on public endpoints that behave differently when authenticated.
     """
+    token = _resolve_token(request, header_token)
     if not settings.AUTH_ENABLED or token is None:
         return None
     try:

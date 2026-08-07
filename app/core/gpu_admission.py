@@ -38,6 +38,13 @@ logger = get_logger(__name__)
 
 _semaphore: asyncio.Semaphore | None = None
 
+# Count of heavy GPU operations currently inside gpu_slot(). Tracked
+# explicitly rather than read off the semaphore, because asyncio.Semaphore
+# exposes no public "how many are held" API — only the private `_value` and
+# `locked()`, and `locked()` is False whenever ANY slot is free, which would
+# be wrong the moment MAX_CONCURRENT_GPU_JOBS is raised above 1.
+_inflight: int = 0
+
 
 def gpu_semaphore() -> asyncio.Semaphore:
     """Lazily created so it binds to the running event loop, not import
@@ -46,6 +53,20 @@ def gpu_semaphore() -> asyncio.Semaphore:
     if _semaphore is None:
         _semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_GPU_JOBS)
     return _semaphore
+
+
+def gpu_busy() -> bool:
+    """True while any heavy GPU operation holds a slot.
+
+    Read by app/core/model_reaper.py, which must never evict a model that an
+    in-flight job is part-way through using. Dropping the loader's reference
+    mid-job is memory-SAFE (the job holds its own reference, so refcounting
+    keeps the weights alive and nothing crashes), but it is wasteful: the
+    model would be reloaded on the next stage and both copies briefly coexist
+    — the opposite of what an eviction pass is for. Skipping while busy makes
+    that impossible rather than merely unlikely.
+    """
+    return _inflight > 0
 
 
 class GPUBusyError(Exception):
@@ -65,6 +86,7 @@ async def gpu_slot(operation: str) -> AsyncIterator[None]:
     shortly". Also catches a CUDA OOM that happens anyway (e.g. one request
     alone is just too large) and converts it to the same clean error.
     """
+    global _inflight
     sem = gpu_semaphore()
     try:
         await asyncio.wait_for(sem.acquire(), timeout=settings.GPU_ADMISSION_TIMEOUT_SEC)
@@ -74,6 +96,9 @@ async def gpu_slot(operation: str) -> AsyncIterator[None]:
             "The server is busy processing other requests right now. Please try again in a moment."
         ) from exc
 
+    # Incremented only AFTER the slot is acquired and decremented in the same
+    # finally that releases it, so the counter can never outlive the slot.
+    _inflight += 1
     try:
         yield
     except Exception as exc:
@@ -86,6 +111,7 @@ async def gpu_slot(operation: str) -> AsyncIterator[None]:
             ) from exc
         raise
     finally:
+        _inflight -= 1
         sem.release()
 
 

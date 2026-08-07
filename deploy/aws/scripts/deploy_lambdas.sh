@@ -30,6 +30,12 @@ APP_URL="${APP_URL:-https://magik.vk-ai.online}"
 IDLE_MINUTES="${IDLE_MINUTES:-20}"
 MIN_UPTIME_MINUTES="${MIN_UPTIME_MINUTES:-15}"
 
+# Minutes the instance can be "running" without /health going green before
+# the wake gateway stops repeating the generic "starting up" copy and shows a
+# distinct "taking longer than usual" page instead. Model loading normally
+# finishes well under this.
+STUCK_MINUTES="${STUCK_MINUTES:-6}"
+
 # Optional — empty by default, which is a strict no-op in both handlers (see
 # their KUMA_PUSH_URL guards). Set this only once the Phase F Uptime Kuma
 # host (monitoring/uptime-kuma/) exists and you have its push-monitor URL —
@@ -121,7 +127,7 @@ ensure_role "$WAKE_ROLE" "${AWS_DIR}/iam/lambda-wake-gateway-permissions.json" "
 
 say "Wake gateway — Lambda"
 deploy_fn "$WAKE_FN" "${AWS_DIR}/lambda/wake_gateway" "$WAKE_ROLE" \
-  "Variables={EC2_INSTANCE_TAG=${INSTANCE_TAG},APP_URL=${APP_URL},HEALTH_TIMEOUT_S=3,REFRESH_SECONDS=7,KUMA_PUSH_URL=${KUMA_PUSH_URL}}" \
+  "Variables={EC2_INSTANCE_TAG=${INSTANCE_TAG},APP_URL=${APP_URL},HEALTH_TIMEOUT_S=3,REFRESH_SECONDS=7,STUCK_MINUTES=${STUCK_MINUTES},KUMA_PUSH_URL=${KUMA_PUSH_URL}}" \
   15
 
 say "Wake gateway — public API Gateway HTTP API"
@@ -167,7 +173,7 @@ WAKE_URL=$(aws apigatewayv2 get-apis --region "$REGION" \
 say "Idle stop — IAM role"
 ensure_role "$IDLE_ROLE" "${AWS_DIR}/iam/lambda-idle-stop-permissions.json" "magik-idle-stop-permissions"
 
-GITHUB_REPO="${GITHUB_REPO:-vjkarthik98/multimodal-rag-assistant}"
+GITHUB_REPO="${GITHUB_REPO:-vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT}"
 GITHUB_RUNNER_LABEL="${GITHUB_RUNNER_LABEL:-gpu}"
 GITHUB_TOKEN_PARAM="${GITHUB_TOKEN_PARAM:-/magik/github_actions_pat}"
 

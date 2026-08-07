@@ -47,14 +47,14 @@ export default function KnowledgeBasePanel({ auth, onReIngest, compact = false }
   const refresh = useCallback(async () => {
     setLoading(true); setError(null)
     try {
-      const data = await listKBFiles(auth.token)
+      const data = await listKBFiles()
       setFiles(data.files || [])
     } catch (err) {
       setError(err.message)
     } finally {
       setLoading(false)
     }
-  }, [auth.token])
+  }, [])
 
   useEffect(() => { refresh() }, [refresh])
 

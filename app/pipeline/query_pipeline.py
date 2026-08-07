@@ -1157,6 +1157,7 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
     sources: list[str] | None = None,
     user_id: str | None = None,
     no_cache: bool = False,
+    regenerate: bool = False,
 ) -> dict[str, Any]:
 
     start = time.time()
@@ -1204,8 +1205,25 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
 
     query = query[: settings.MAX_PROMPT_CHARS]
 
+    def _sampling(base_temperature: float) -> tuple[float, int | None]:
+        """(temperature, seed) for this request's LLM calls.
+
+        Identity on the normal path — every branch keeps the temperature it
+        was tuned with and passes no seed. On an explicit regenerate it
+        raises the temperature to the regeneration floor and picks a fresh
+        seed, because otherwise re-running this deterministic pipeline
+        reproduces the previous answer exactly (app/llm/regeneration.py).
+        """
+        if not regenerate:
+            return base_temperature, None
+        from app.llm.regeneration import regeneration_sampling
+
+        return regeneration_sampling(base_temperature)
+
     # CACHE HIT — SECTION 4.6 (skipped when no_cache=True, e.g. regenerate)
-    cached = None if no_cache else _cache_get(session_id, query)
+    # regenerate implies no_cache: a caller asking for a different answer must
+    # never be served the stored one, even if it only set the newer flag.
+    cached = None if (no_cache or regenerate) else _cache_get(session_id, query)
     if cached:
         cached["latency"] = round(time.time() - start, 3)
         cached["cache_hit"] = True
@@ -1332,7 +1350,10 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
                             f"Based on our previous conversation:\n{mem_ctx}\n\n"
                             f"Answer this question concisely: {query}"
                         )
-                        answer = llm.generate(mem_prompt) or ""
+                        _mem_temp, _mem_seed = _sampling(settings.LLM_TEMPERATURE)
+                        answer = (
+                            llm.generate(mem_prompt, temperature=_mem_temp, seed=_mem_seed) or ""
+                        )
                     if not answer.strip():
                         answer = "I don't have a record of discussing that in our conversation."
                 except Exception as e:
@@ -1358,7 +1379,10 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
                             f"Answer the following question directly and concisely.\n"
                             f"Question: {query}\nAnswer:"
                         )
-                        answer = llm.generate(direct_prompt) or ""
+                        _dir_temp, _dir_seed = _sampling(settings.LLM_TEMPERATURE)
+                        answer = (
+                            llm.generate(direct_prompt, temperature=_dir_temp, seed=_dir_seed) or ""
+                        )
                     except Exception as e:
                         logger.warning(
                             event="direct_path_llm_failed", error=str(e), session_id=session_id
@@ -1827,11 +1851,13 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
                     "  explanations, or internal summaries after the answer.\n\n"
                     f"{_combined}\n\nQUERY:\n{query}\n\nAnswer:"
                 )
+                _hyb_temp, _hyb_seed = _sampling(0.1)
                 _raw = llm.generate(
                     _hybrid_prompt,
                     max_tokens=settings.LLM_MAX_TOKENS,
-                    temperature=0.1,
+                    temperature=_hyb_temp,
                     session_id=session_id,
+                    seed=_hyb_seed,
                 )
                 # Strip leaked internal reasoning blocks like [Based on the document, ...]
                 import re as _re
@@ -1872,6 +1898,7 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
                     modality_hint=_modality_hint,
                     filters=retrieval_filters,
                     memory_context=memory_context,
+                    regenerate=regenerate,
                 )
                 logger.info(
                     event="query_pipeline_verification_result",
@@ -1912,11 +1939,13 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
                     f"CONTEXT:\n{context[:settings.MAX_CONTEXT_CHARS]}\n\n"
                     f"QUERY:\n{query}\n\nAnswer:"
                 )
+                _fb_temp, _fb_seed = _sampling(0.2)
                 raw = llm.generate(
                     prompt,
                     max_tokens=settings.LLM_MAX_TOKENS,
-                    temperature=0.2,
+                    temperature=_fb_temp,
                     session_id=session_id,
+                    seed=_fb_seed,
                 )
                 reasoning_latency = round(time.time() - t_fallback, 3)
                 output = {
