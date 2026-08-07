@@ -47,7 +47,7 @@ jobs:
       - name: Warn this wakes the live box
         run: echo "::notice::Targeting ${{ inputs.tool }} against the live deployed URL — this wakes the AWS box if it's asleep."
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         if: contains(fromJSON('["schemathesis","ragas-report","deepeval-report"]'), inputs.tool)
         with:
           python-version: "3.11"

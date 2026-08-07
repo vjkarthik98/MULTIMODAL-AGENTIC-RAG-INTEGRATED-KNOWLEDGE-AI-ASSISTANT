@@ -73,7 +73,7 @@ jobs:
           done
           echo "API never became healthy" && docker compose logs api && exit 1
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -126,7 +126,7 @@ jobs:
           done
           echo "API never became healthy" && docker compose logs api && exit 1
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
