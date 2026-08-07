@@ -146,7 +146,7 @@ jobs:
       # Short version: caching pip here stores ~4.8GB of torch/CUDA wheels and
       # crowds cd.yml's Docker buildx cache out of the 10GB per-repo limit,
       # turning every release build into a ~1h llama-cpp-python recompile.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
