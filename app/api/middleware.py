@@ -118,9 +118,18 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
     Scope: only fires when (a) the request is a mutating method and (b) a
     magik_access or magik_refresh cookie is actually present — i.e. only once
-    a real cookie session exists to forge. Pre-auth endpoints (login,
-    register, verify-otp, forgot/reset-password, the OAuth handshake) carry no
-    session cookie yet, so they're naturally exempt without a path allowlist.
+    a real cookie session exists to forge.
+
+    Pre-auth endpoints (login, register, verify-otp/resend-otp, login/form,
+    forgot/reset-password) are explicitly path-allowlisted below rather than
+    relying on "no session cookie yet" as an implicit signal: that assumption
+    breaks the moment a browser carries a STALE magik_access/magik_refresh
+    cookie (expired token left over from a prior session, an incomplete
+    logout, a previously-tried account) — the client correctly never sends
+    X-CSRF-Token on these calls (see ui/src/api/client.js login()), so the
+    mere presence of a leftover cookie was enough to 403 a legitimate login
+    attempt with "CSRF validation failed". The OAuth handshake needs no entry
+    here — GET is already a safe method.
 
     Requests authenticated via `Authorization: Bearer` instead of a cookie are
     also exempt: a cross-site page cannot attach a custom header to a forged
@@ -130,10 +139,26 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
     _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
+    _PRE_AUTH_PATHS = frozenset(
+        (
+            "/auth/login",
+            "/auth/login/form",
+            "/auth/register",
+            "/auth/verify-otp",
+            "/auth/resend-otp",
+            "/auth/forgot-password",
+            "/auth/reset-password",
+        )
+    )
+
     async def dispatch(self, request: Request, call_next) -> Response:
         from app.auth.cookies import CSRF_COOKIE, read_access_cookie, read_refresh_cookie
 
-        if request.method not in self._SAFE_METHODS and not request.headers.get("Authorization"):
+        if (
+            request.method not in self._SAFE_METHODS
+            and not request.headers.get("Authorization")
+            and request.url.path not in self._PRE_AUTH_PATHS
+        ):
             if read_access_cookie(request) or read_refresh_cookie(request):
                 cookie_csrf = request.cookies.get(CSRF_COOKIE, "")
                 header_csrf = request.headers.get("X-CSRF-Token", "")

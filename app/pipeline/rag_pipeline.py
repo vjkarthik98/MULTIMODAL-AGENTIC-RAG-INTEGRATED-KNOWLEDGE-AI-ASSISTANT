@@ -2659,10 +2659,13 @@ _REWRAP_SKIP_QUERY_TYPES = frozenset({"structured", "code"})
 _REWRAP_PROMPT = (
     "Rewrite the following answer so it reads naturally and conversationally, "
     "the way a knowledgeable person would explain it out loud. Keep every "
-    "fact and every number EXACTLY as written — do not add, remove, or "
-    "change any figure, name, or date, and do not add any new information. "
-    "Do not add citations, brackets, or a 'Sources:' line. Output ONLY the "
-    "rewritten answer, nothing else.\n\nANSWER:\n{body}\n\nREWRITTEN:\n"
+    "fact and every number EXACTLY as written, in the SAME DIGIT FORM as the "
+    "original — never spell a number out as a word or phrase (e.g. keep "
+    "'25', not 'twenty-five' or 'a quarter'; keep '2024', not 'that year'), "
+    "and never drop a number even if repeating it feels redundant. Do not "
+    "add, remove, or change any figure, name, or date, and do not add any "
+    "new information. Do not add citations, brackets, or a 'Sources:' line. "
+    "Output ONLY the rewritten answer, nothing else.\n\nANSWER:\n{body}\n\nREWRITTEN:\n"
 )
 
 

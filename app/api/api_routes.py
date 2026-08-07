@@ -953,6 +953,16 @@ async def query_rag(
                 "latency": round(time.time() - start, 3),
             }
 
+        # FILE SCOPE REQUIRED — retrieval must be scoped to a file the user
+        # explicitly selected (the @ picker), so answers never mix content
+        # from unrelated documents in the KB. force_web is exempt (handled
+        # above); web-heuristic-only queries are not applicable to this route.
+        if not request_body.sources:
+            raise HTTPException(
+                status_code=400,
+                detail="Select a file to scope this query before sending.",
+            )
+
         pipeline_fn = _get_query_pipeline()
 
         # IN-FLIGHT JOIN — if /rag/query/stream is mid-generation for this
@@ -1497,6 +1507,31 @@ async def stream_query(
                 )
                 # Fall through to cache check / normal RAG only for the
                 # heuristic-matched (non-explicit) case.
+
+        # FILE SCOPE REQUIRED — retrieval must be scoped to a file the user
+        # explicitly selected (the @ picker), so answers never mix content
+        # from unrelated documents in the KB. Placed after web detection so
+        # force_web and heuristic-matched web queries (already returned
+        # above) are exempt; everything reaching this point — including
+        # filename-in-text summarize requests — must have an explicit scope.
+        if not request_body.sources:
+            _no_scope_msg = "Select a file to scope this query before sending."
+
+            async def no_scope_stream():
+                for piece in _stream_chunks(_no_scope_msg):
+                    yield _sse(piece)
+                    await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                no_scope_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "X-Request-ID": request_id,
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
 
         # DOCUMENT SUMMARIZE — checked before the cache so a summarize request
         # never returns a stale cached Q&A answer for the same session/query

@@ -699,15 +699,41 @@ class HybridRetriever:
 
     # VECTOR SEARCH — TEXT SPACE
 
+    def _sources_extra_filter(self, filters: dict[str, Any] | None):
+        """Build a native Qdrant pre-filter for an explicit file scope.
+
+        `filters["sources"]` values are exact stored `source` payload strings
+        (the UI's @ picker sends back what /api/kb/files returned, which
+        already includes the staging SHA prefix — see ChatPage.jsx
+        selectedFile.filename), so an exact MatchAny is correct here. This
+        narrows the ANN candidate pool itself so a scoped file's chunks can't
+        be crowded out by unrelated documents before _apply_filters ever
+        runs — _apply_filters' substring check remains as a backstop for the
+        auto-detected/meeting-scope path, which may pass bare filenames.
+        """
+        sources = filters.get("sources") if filters else None
+        if not sources:
+            return None
+        from qdrant_client.models import FieldCondition, Filter, MatchAny
+
+        return Filter(must=[FieldCondition(key="source", match=MatchAny(any=sources))])
+
     def _vector_search_text(
         self,
         q_vec: list[float],
         candidate_k: int,
         session_id: str,
         user_id: str | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[dict]:
         def _do():
-            return self.vector_store.search_text(q_vec, candidate_k, session_id, user_id=user_id)
+            return self.vector_store.search_text(
+                q_vec,
+                candidate_k,
+                session_id,
+                user_id=user_id,
+                extra_filter=self._sources_extra_filter(filters),
+            )
 
         try:
             if _PYBREAKER_AVAILABLE:
@@ -731,6 +757,7 @@ class HybridRetriever:
         candidate_k: int,
         session_id: str,
         user_id: str | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[dict]:
         """Search the embedding_alt space (markdown table / numbers-only embeddings).
 
@@ -747,6 +774,7 @@ class HybridRetriever:
                 candidate_k,
                 session_id,
                 user_id=user_id,
+                extra_filter=self._sources_extra_filter(filters),
             )
 
         try:
@@ -766,9 +794,16 @@ class HybridRetriever:
         candidate_k: int,
         session_id: str,
         user_id: str | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[dict]:
         def _do():
-            return self.vector_store.search_vision(v_vec, candidate_k, session_id, user_id=user_id)
+            return self.vector_store.search_vision(
+                v_vec,
+                candidate_k,
+                session_id,
+                user_id=user_id,
+                extra_filter=self._sources_extra_filter(filters),
+            )
 
         try:
             if _PYBREAKER_AVAILABLE:
@@ -1036,7 +1071,9 @@ class HybridRetriever:
 
             def _run_vec_lane() -> list[dict]:
                 if q_vec:
-                    return self._vector_search_text(q_vec, candidate_k, session_id, user_id)
+                    return self._vector_search_text(
+                        q_vec, candidate_k, session_id, user_id, filters
+                    )
                 return []
 
             def _run_vis_lane() -> list[dict]:
@@ -1044,7 +1081,9 @@ class HybridRetriever:
                     return []
                 try:
                     v_vec = self._embed_vision_cached(query, session_id=session_id)
-                    return self._vector_search_vision(v_vec, candidate_k, session_id, user_id)
+                    return self._vector_search_vision(
+                        v_vec, candidate_k, session_id, user_id, filters
+                    )
                 except Exception as exc:
                     logger.warning(
                         event="vision_search_skipped",
@@ -1107,7 +1146,7 @@ class HybridRetriever:
             # primary retrievers also surfaced — otherwise one generic lookup
             # table can hijack an unrelated document's citations.
             if q_type in ("tabular", "exact_numeric") and q_vec:
-                alt_res = self._vector_search_alt(q_vec, candidate_k, session_id, user_id)
+                alt_res = self._vector_search_alt(q_vec, candidate_k, session_id, user_id, filters)
                 if alt_res:
                     # Only inject an alt-only chunk if its source was ranked
                     # PROMINENTLY by the primary retrievers — not merely present

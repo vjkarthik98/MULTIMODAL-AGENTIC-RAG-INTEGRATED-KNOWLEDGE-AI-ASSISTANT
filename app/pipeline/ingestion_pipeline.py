@@ -154,8 +154,13 @@ def _malware_scan(file_path: str) -> None:
         )
         result = cd.scan_file(file_path)
         if result:
-            raise MalwareDetectedError(
-                f"MALWARE_DETECTED in {os.path.basename(file_path)}: {result}"
+            status = result.get(file_path, ("OK", ""))[0]
+            if status == "FOUND":
+                raise MalwareDetectedError(
+                    f"MALWARE_DETECTED in {os.path.basename(file_path)}: {result}"
+                )
+            logger.warning(
+                event="clamav_scan_inconclusive", file=file_path, result=result
             )
     except MalwareDetectedError:
         raise

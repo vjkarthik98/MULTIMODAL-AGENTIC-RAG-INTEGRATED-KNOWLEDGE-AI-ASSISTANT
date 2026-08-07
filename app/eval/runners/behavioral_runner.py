@@ -56,7 +56,12 @@ def run_behavioral_suite(cfg: EvalConfig) -> SuiteResult:
         q_start = time.time()
         try:
             if use_server:
-                pr = _query_via_server(row["query"], session_id, cfg.user_id, eval_auth)
+                _row_sources = row.get("relevant_doc_ids") or (
+                    [row["source_file"]] if row.get("source_file") else None
+                )
+                pr = _query_via_server(
+                    row["query"], session_id, cfg.user_id, eval_auth, sources=_row_sources
+                )
             else:
                 pr = _query_via_pipeline(row["query"], session_id, cfg.user_id)
         except Exception as exc:
