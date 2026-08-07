@@ -676,15 +676,84 @@ def _transcribe_file(
     return segments_iter, info, latency
 
 
+def _is_cuda_oom(exc: BaseException) -> bool:
+    """True for the several shapes a CUDA out-of-memory surfaces as.
+
+    faster-whisper wraps CTranslate2, which raises a plain RuntimeError with
+    "CUDA failed with error out of memory" — NOT torch.cuda.OutOfMemoryError, so
+    catching the torch type alone would miss it entirely.
+    """
+    msg = str(exc).lower()
+    return "out of memory" in msg or "cuda failed with error" in msg or "cublas" in msg
+
+
 def _transcribe_chunk_eager(
     chunk_file: str,
     session_id: str,
 ) -> tuple[list[Any], Any, float, float]:
-    """Materialize all segments within the calling thread (GPU GIL released during CTranslate2 ops)."""
-    segments_iter, info, latency = _transcribe_file(chunk_file, session_id)
-    chunk_duration = float(getattr(info, "duration", 0.0) or 0.0)
-    segments = list(segments_iter)
-    return segments, info, latency, chunk_duration
+    """Materialize all segments within the calling thread (GPU GIL released during CTranslate2 ops).
+
+    Falls back to a CPU transcription pass when the GPU is out of memory. The
+    full Tier-2 suite holds Whisper, the Qwen judge, Mistral, BGE, the reranker
+    and SigLIP resident simultaneously, and on CD run 31139999120 that tipped
+    the L40S over: EVERY chunk of the FOMC press conference raised "CUDA failed
+    with error out of memory", so ingest raised NO_VALID_AUDIO_SEGMENTS and the
+    whole audio section scored n=0 (audio_wer=nan) — a total measurement loss
+    caused by transient VRAM pressure, not by anything wrong with the audio
+    path. Transcribing on CPU is far slower but produces real output, which is
+    strictly better than none.
+    """
+    try:
+        segments_iter, info, latency = _transcribe_file(chunk_file, session_id)
+        chunk_duration = float(getattr(info, "duration", 0.0) or 0.0)
+        segments = list(segments_iter)
+        return segments, info, latency, chunk_duration
+    except Exception as exc:
+        if not _is_cuda_oom(exc):
+            raise
+
+        logger.warning(
+            event="audio_transcription_cuda_oom_cpu_fallback",
+            file=chunk_file,
+            error=str(exc),
+            session_id=session_id,
+        )
+
+        # Release whatever the failed attempt is still holding before asking for
+        # more memory, so the fallback does not immediately OOM as well.
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001 - diagnostics only, never fatal
+            pass
+
+        from faster_whisper import WhisperModel
+
+        from app.core.config import settings as _settings
+
+        cpu_model = WhisperModel(_settings.WHISPER_MODEL, device="cpu", compute_type="int8")
+        t_start = time.time()
+        segments_iter, info = cpu_model.transcribe(
+            chunk_file,
+            language=None,
+            beam_size=2,
+            word_timestamps=False,
+            vad_filter=True,
+            condition_on_previous_text=False,
+        )
+        segments = list(segments_iter)
+        latency = round(time.time() - t_start, 2)
+        chunk_duration = float(getattr(info, "duration", 0.0) or 0.0)
+        logger.info(
+            event="audio_transcription_cpu_fallback_succeeded",
+            file=chunk_file,
+            segments=len(segments),
+            latency=latency,
+            session_id=session_id,
+        )
+        return segments, info, latency, chunk_duration
 
 
 # MAIN INGEST

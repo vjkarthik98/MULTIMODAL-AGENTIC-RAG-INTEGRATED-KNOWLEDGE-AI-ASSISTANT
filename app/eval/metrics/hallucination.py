@@ -97,6 +97,34 @@ def _parse_numbers(text: str) -> list[_Num]:
     return out
 
 
+def _is_material_figure(n: _Num) -> bool:
+    """True when `n` is a quantitative CLAIM rather than prose scaffolding.
+
+    Reference answers are written as natural sentences, so they are full of
+    numbers that are not the fact under test:
+
+        "At its December 18, 2024 meeting, the FOMC lowered ... by 1/4
+         percentage point (25 basis points) ... to 4.25-4.50 percent."
+
+    `18` is a calendar day, `1` and `4` are the two halves of the fraction
+    "1/4", and `2024` is a year. Requiring an answer to restate all of those
+    verbatim tested prose style, not correctness — a perfectly right answer
+    saying "December 2024 ... a quarter point" was flagged as a hallucination.
+    Confirmed empirically against the txt-0001 gold row, which is one of the
+    flagged examples in CD run 31139999120.
+
+    A figure is material when it carries a scale word ("$3.2 billion"), a
+    percent sign, or a decimal fraction ("4.50") — the forms real financial
+    claims take. Bare small integers are deliberately NOT material: that gives
+    up flagging on things like "25 basis points" (no unit token), which is the
+    conservative direction to err, since Check 1 still verifies every answer
+    number against the retrieved context regardless.
+    """
+    if n.is_year or n.is_id:
+        return False
+    return n.has_unit or n.is_pct or ("." in n.raw)
+
+
 def _digit_match(a: str, b: str) -> bool:
     """Significant-digit containment, ignoring scale/format (handles rounding
     like 314.6 ↔ 314,623 where '3146' is a prefix of '314623')."""
@@ -228,19 +256,49 @@ def hallucination_flag_single(
         confidence = max(confidence, 0.8)
 
     # Check 2: cross-chunk consistency via reference answer (if available)
+    #
+    # Compares reference numbers to answer numbers by VALUE, not by raw substring.
+    # The previous implementation did `n not in answer.lower()` on the reference's
+    # literal token, which made this a lexical-phrasing test rather than a factual
+    # one — any answer that stated the same figure differently was flagged as a
+    # hallucination. That became systematic once the conversational rewrap layer
+    # (rag_pipeline._conversational_rewrap) started rephrasing final answers while
+    # the gold `reference_answer` fields stayed in their original terse form:
+    #
+    #   reference: "...by 1/4 percentage point (25 basis points), ... 4.25-4.50 percent"
+    #   answer:    "...a quarter-point cut, bringing the range to 4.25%-4.5%"
+    #
+    # Same facts, every number grounded — but "4.50" is not a substring of the
+    # answer, so the row was flagged with confidence 0.6 (>= the 0.3 threshold).
+    # This is what drove hallucination_rate to 0.76/0.79 on CD run 31139999120;
+    # txt-0001 (the FOMC rate-cut row) appears in that run's own flagged examples.
+    #
+    # `_value_match` already implements the correct comparison and is what Check 1
+    # uses; reusing it makes the two checks consistent. Years and identifiers are
+    # excluded for the same reason they are in Check 1 — they are not claims.
     if (
         reference_answer
         and reference_answer not in ("TODO", "")
         and "SEARCH_REQUIRED" not in reference_answer
     ):
-        ref_numbers = _extract_numbers(reference_answer)
-        ans_numbers = _extract_numbers(answer)
-        # Check if key numbers in reference are absent from answer (wrong figure)
-        ref_absent_from_ans = [n for n in ref_numbers if n not in answer.lower()]
-        if ref_absent_from_ans and ans_numbers:
-            # Answer has numbers but not the expected ones → likely wrong figure
-            reasons.append(f"missing_reference_numbers: {ref_absent_from_ans[:3]}")
-            confidence = max(confidence, 0.6)
+        ref_nums = [n for n in _parse_numbers(reference_answer) if _is_material_figure(n)]
+        ans_nums = [n for n in _parse_numbers(answer) if not n.is_year and not n.is_id]
+        if ref_nums and ans_nums:
+            ans_digits = [a.digits for a in ans_nums]
+            ans_values = [a.value for a in ans_nums]
+            missing = [
+                r.raw
+                for r in ref_nums
+                if not (
+                    any(_digit_match(r.digits, ad) for ad in ans_digits)
+                    or any(_value_match(r.value, av) for av in ans_values)
+                )
+            ]
+            if missing:
+                # Answer states figures, but not the ones the reference expects →
+                # genuinely a different (likely wrong) number, not a rewording.
+                reasons.append(f"missing_reference_numbers: {missing[:3]}")
+                confidence = max(confidence, 0.6)
 
     # Check 3: template leakage (P1-7)
     template_re = re.compile(r"\[sic\]|Sources Used: \d+|\{[a-zA-Z_]+\}", re.IGNORECASE)

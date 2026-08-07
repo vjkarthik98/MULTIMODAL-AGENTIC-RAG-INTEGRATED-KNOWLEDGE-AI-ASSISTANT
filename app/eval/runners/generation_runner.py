@@ -44,17 +44,23 @@ def _query_via_server(
     query: str,
     session_id: str,
     user_id: str,
-    access_token: str | None = None,
+    auth: Any = None,
     no_cache: bool = True,
 ) -> dict[str, Any]:
     """Call /rag/query on the running server. Reuses server's GPU models.
 
     no_cache defaults True: eval must measure the live model, never a stale
     cached answer from a previous run (same session_id+query would hit cache).
+
+    `auth` is an EvalAuth (app/eval/http_client.py), not a raw token string: the
+    full suite outlives ACCESS_TOKEN_EXPIRE_MINUTES, so a token captured once at
+    suite start expires partway through and every remaining row records a 401
+    instead of an answer. EvalAuth re-mints on demand.
     """
-    headers = {}
-    if access_token:
-        headers["Authorization"] = f"Bearer {access_token}"
+    from app.eval.http_client import EvalAuth, post_json
+
+    if auth is None:
+        auth = EvalAuth(user_id)
 
     payload = {
         "query": query,
@@ -62,14 +68,7 @@ def _query_via_server(
         "user_id": user_id,
         "no_cache": no_cache,
     }
-    with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
-        resp = client.post(
-            f"{_SERVER_URL}/rag/query",
-            json=payload,
-            headers=headers,
-        )
-        resp.raise_for_status()
-        return resp.json()
+    return post_json(f"{_SERVER_URL}/rag/query", payload, auth, timeout=int(_HTTP_TIMEOUT))
 
 
 def _query_via_pipeline(
@@ -172,7 +171,9 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
 
     # Decide execution mode
     use_server = _server_available()
-    access_token = os.getenv("EVAL_ACCESS_TOKEN", "")
+    from app.eval.http_client import EvalAuth
+
+    eval_auth = EvalAuth(cfg.user_id)
     full_ctx_retriever = _make_full_context_retriever()
 
     if use_server:
@@ -207,7 +208,7 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
                     query=query,
                     session_id=session_id,
                     user_id=cfg.user_id,
-                    access_token=access_token,
+                    auth=eval_auth,
                 )
             else:
                 pipeline_result = _query_via_pipeline(

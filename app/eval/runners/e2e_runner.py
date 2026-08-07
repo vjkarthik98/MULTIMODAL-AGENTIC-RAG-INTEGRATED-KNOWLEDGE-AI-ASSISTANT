@@ -108,9 +108,12 @@ def run_e2e_suite(cfg: EvalConfig) -> SuiteResult:
     t0 = time.time()
     result = SuiteResult(suite="e2e")
 
-    try:
-        import requests
-    except ImportError:
+    # Availability probe only — the actual HTTP calls go through
+    # app/eval/http_client.py. find_spec (rather than a bare `import requests`)
+    # keeps this a dependency check without leaving an unused binding behind.
+    import importlib.util
+
+    if importlib.util.find_spec("requests") is None:
         result.breached["import_error"] = "requests not installed; pip install requests"
         return result
 
@@ -144,10 +147,13 @@ def run_e2e_suite(cfg: EvalConfig) -> SuiteResult:
     routing_results: list[dict[str, Any]] = []
     latencies: list[float] = []
 
-    import os as _os
+    # Auth via EvalAuth, NOT a token read once from the environment. e2e runs
+    # last in the full suite, so with a static token it was the sub-suite that
+    # crossed ACCESS_TOKEN_EXPIRE_MINUTES and lost 73/90 rows to 401/429 —
+    # see app/eval/http_client.py's module docstring.
+    from app.eval.http_client import EvalAuth, post_json
 
-    _access_token = _os.getenv("EVAL_ACCESS_TOKEN", "")
-    _headers = {"Authorization": f"Bearer {_access_token}"} if _access_token else {}
+    _auth = EvalAuth(cfg.user_id)
 
     for row in rows:
         query = row["query"]
@@ -160,11 +166,7 @@ def run_e2e_suite(cfg: EvalConfig) -> SuiteResult:
 
         q_start = time.time()
         try:
-            resp = requests.post(
-                f"{base_url}/rag/query", json=payload, headers=_headers, timeout=120
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            data = post_json(f"{base_url}/rag/query", payload, _auth, timeout=120)
         except Exception as exc:
             result.breached[f"query_error_{row['id']}"] = str(exc)
             continue

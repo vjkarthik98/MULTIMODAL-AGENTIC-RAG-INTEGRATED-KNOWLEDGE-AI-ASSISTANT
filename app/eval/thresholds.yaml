@@ -28,6 +28,27 @@
 #   generation.citation_locator_accuracy  target ~0.80 (per-modality page/sheet/ts/frame)
 #   behavioral.refusal_accuracy     target ~0.90   (abstains when answer not in KB)
 #   behavioral.adversarial_pass     target ~0.90   (ignores injection / corrects false premise)
+#
+# ── KNOWN COVERAGE GAP: the eval does not exercise the conversational path ───
+# Every runner (generation, behavioral, e2e) posts to POST /rag/query, which
+# runs query_pipeline. The UI posts to POST /rag/query/stream, which runs
+# rag_pipeline.stream() — and rag_pipeline.stream() is the ONLY caller of
+# `_conversational_rewrap` (rag_pipeline.py; the tone-rewrite pass added with
+# the "Conversational Response Layer"). Consequences, both directions:
+#
+#   * No number in this file describes the text a user actually receives. A
+#     regression introduced by the rewrap layer cannot fail this gate.
+#   * Conversely, rewriting the gold `reference_answer` fields into chatty prose
+#     to "match the new style" would make things WORSE, not better: the endpoint
+#     under test does not produce chatty prose, so the references would then
+#     mismatch the very output being scored.
+#
+# The correct resolution is to make the eval measure the endpoint users hit (an
+# SSE client for /rag/query/stream), NOT to restyle the gold set. Reference
+# answers should stay factual and terse — judges compare them semantically, and
+# the metrics that did compare them LEXICALLY were the bug, now fixed (see
+# `_is_material_figure` in app/eval/metrics/hallucination.py, which stopped
+# rephrasings like "4.5%" vs "4.50 percent" from being scored as hallucinations).
 gate_enabled: false
 # ─────────────────────────────────────────────────────────────────────────────
 #
@@ -74,6 +95,53 @@ gate_enabled: false
 # answers correctly (rerank+generation recover the answer from the top set). This
 # is the honest production floor; raw exact-chunk recall is a candidate for a
 # future retrieval-quality pass (coarser chunking / better rerank), not this gate.
+# ── OPEN: v0.30.0 staging breach, 2026-08-07 (CD run 31139999120) ────────────
+# recall@5 0.4464 (<0.4835), mrr 0.3069 (<0.3380), ndcg@10 0.3642 (<0.3823).
+#
+# NOT re-baselined, deliberately. The numbers move in a pattern that a simple
+# "quality got worse" story does not explain:
+#
+#     hit_rate         0.6786 -> 0.8036   (+18%, BETTER)
+#     recall@10        0.5536 -> 0.5625   (BETTER)
+#     context_precision 0.0268 -> 0.0321  (BETTER)
+#     recall@5         0.5089 -> 0.4464   (WORSE)
+#     mrr              0.3558 -> 0.3069   (WORSE)
+#     ndcg@10          0.4024 -> 0.3642   (WORSE)
+#
+# Coverage improved while ORDERING degraded — the right chunks are being found
+# more often than before, but ranked lower. Two candidate causes, neither yet
+# confirmed, and they need different fixes:
+#
+#  (a) v0.30.0's hybrid_retriever change. `_fuse` gained
+#      `_merge_missing_metadata`, whose docstring asserts it is ranking-neutral
+#      ("ranking and every populated field stay exactly as before"). That claim
+#      does not hold end-to-end: metadata is not inert downstream. Newly-filled
+#      keys change `_apply_filters` outcomes (a chunk whose `modality` was None
+#      previously failed `meta.get("modality") != filters["modality"]` and was
+#      dropped; now it survives) and change the MODALITY BOOST, which multiplies
+#      score by 1.5-2.5x for chunks matching modality_filter. More survivors
+#      plus newly-boosted chunks reorders the top-5 — exactly this signature.
+#      NOTE: MMR is NOT implicated — the retrieval suite measures fusion only
+#      and never calls the reranker, which is the sole `_mmr` call site.
+#  (b) Baseline provenance. v5 was measured on the PRODUCTION box; this ran on
+#      STAGING. The Qdrant collection is shared, but the BM25 index is a LOCAL
+#      file whose staging copy came from an EBS snapshot of prod's data volume.
+#      If prod's index has changed since that snapshot, fusion inputs differ and
+#      the comparison is not like-for-like.
+#
+# TO ATTRIBUTE (do this before touching any number here):
+#   1. Rule out (b) first — cheapest. Run the retrieval suite on the PRODUCTION
+#      box at v0.30.0. Same box, same index as the baseline: if it reproduces
+#      the drop, the cause is code, and (b) is eliminated.
+#   2. Then bisect (a): re-run retrieval with the two v0.30.0 additions to
+#      `_fuse` reverted (the `_merge_missing_metadata` call and the `embedding`
+#      backfill). If the numbers return to v5, the metadata fix needs to be made
+#      genuinely ranking-neutral — e.g. keep filling citation fields, but stop
+#      the newly-populated `modality` from re-triggering the boost/filter.
+#
+# Re-baselining now would encode whichever of these it is as "expected", which
+# is the one outcome that must not happen: the gate exists to catch precisely
+# this. Leave it RED until attributed.
 retrieval:
   gate_enabled: true  # v5 production baseline (n=56, 2026-07-28, box + aligned gold).
   recall_at_5:
