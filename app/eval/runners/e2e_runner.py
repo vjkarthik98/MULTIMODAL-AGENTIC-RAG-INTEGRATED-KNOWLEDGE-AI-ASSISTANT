@@ -157,12 +157,27 @@ def run_e2e_suite(cfg: EvalConfig) -> SuiteResult:
 
     for row in rows:
         query = row["query"]
-        payload = {
+        payload: dict[str, Any] = {
             "query": query,
             "session_id": f"{cfg.session_prefix}_e2e_{row['id']}",
             "user_id": cfg.user_id,
             "no_cache": True,
         }
+        # /rag/query 400s on an empty scope (api_routes.py's FILE SCOPE
+        # REQUIRED gate) unless force_web is set — mirror the UI's @ picker
+        # for KB rows via relevant_doc_ids/source_file; rows with no relevant
+        # doc (pure web rows, e.g. expected_route=="search") go through
+        # force_web instead so they still exercise the web path rather than
+        # 400ing. Heuristic-only routing (no force_web, no sources) is
+        # covered separately and in-process by routing_runner.py, which
+        # calls query_pipeline() directly and never hits this HTTP gate.
+        _row_sources = row.get("relevant_doc_ids") or (
+            [row["source_file"]] if row.get("source_file") else None
+        )
+        if _row_sources:
+            payload["sources"] = _row_sources
+        elif row.get("expected_route") == "search":
+            payload["force_web"] = True
 
         q_start = time.time()
         try:

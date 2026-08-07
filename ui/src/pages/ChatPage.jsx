@@ -42,6 +42,10 @@ const isExplicitWebQuery = (q) => {
   return _WEB_PHRASES.some(p => lc.includes(p))
 }
 
+// Shared by the KB-empty guard and the file-scope-required guard so a plain
+// "hi" still gets a friendly reply instead of being blocked on either check.
+const _GREETING = /^(hi+|hello+|hey+|howdy|hiya|greetings|good\s+(morning|afternoon|evening|day))[\s!.,?]*$/i
+
 const PLACEHOLDERS = [
   'Ask anything about your files…',
 ]
@@ -331,10 +335,25 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
     // hallucinated answers when the user hasn't uploaded any files yet.
     // Skip this guard in web search mode: the search tool doesn't need a KB.
     if (kbFiles.length === 0 && !webSearchMode) {
-      const _GREETING = /^(hi+|hello+|hey+|howdy|hiya|greetings|good\s+(morning|afternoon|evening|day))[\s!.,?]*$/i
       const reply = _GREETING.test(text)
         ? `Hello! I'm your AI knowledge assistant.\n\nTo get started, please **upload your documents** using the Files panel in the left sidebar. I support:\n- PDFs, Word documents, Excel spreadsheets\n- Images, audio recordings, videos\n\nOnce your files are uploaded, I'll be ready to answer any questions about your content.`
         : `Your knowledge base is currently **empty**. Please upload documents using the **Files** panel in the left sidebar before asking questions.\n\nI can work with PDFs, Word files, Excel spreadsheets, images, audio, and video. Once your files are uploaded, I'll be able to provide accurate, source-backed answers.`
+      setMessages(prev => prev.map(m =>
+        m.id === botId ? { ...m, content: reply, pending: false, streaming: false } : m
+      ))
+      setStreaming(false)
+      setStreamingId(null)
+      onStreamingChange?.(false)
+      return
+    }
+
+    // File-scope-required guard — a file must be selected via @ before any
+    // query is sent, so retrieval is never left to search the whole KB and
+    // mix content from unrelated documents. Skipped for web search mode
+    // (no KB involved) and simple greetings (matches the KB-empty guard's
+    // precedent above).
+    if (!selectedFile && !webSearchMode && !_GREETING.test(text)) {
+      const reply = `Please select a file to scope your question — click the **@** button and choose a document.\n\nThis keeps my answer focused on that source instead of mixing content from your whole knowledge base.`
       setMessages(prev => prev.map(m =>
         m.id === botId ? { ...m, content: reply, pending: false, streaming: false } : m
       ))
@@ -640,7 +659,7 @@ const handleNewChat = () => {
           ? `fixed inset-y-0 left-0 z-40 w-[85vw] max-w-80 transition-transform duration-300 ease-in-out ${mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`
           : `flex-shrink-0 transition-all duration-300 ease-in-out overflow-hidden ${sidebarCollapsed ? 'w-[72px]' : 'w-80'}`
       }
-        {...(isCompact && !mobileSidebarOpen ? { inert: '', 'aria-hidden': 'true' } : {})}
+        {...(isCompact && !mobileSidebarOpen ? { inert: true, 'aria-hidden': 'true' } : {})}
       >
         <Sidebar
           auth={auth}

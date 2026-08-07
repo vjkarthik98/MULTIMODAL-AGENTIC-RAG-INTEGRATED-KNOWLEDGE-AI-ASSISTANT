@@ -137,6 +137,9 @@ def test_force_web_failure_does_not_fall_back_to_the_knowledge_base(client):
 
 
 def test_without_force_web_the_knowledge_base_pipeline_still_runs(client):
+    # A file scope is now required for any non-web query (see
+    # test_file_scope_required.py) — this test's own concern is only that a
+    # non-force_web query with a scope still runs the KB pipeline, not web.
     with patch("app.api.api_routes._run_web_search", new=AsyncMock()) as web, patch(
         "app.api.api_routes._get_query_pipeline"
     ) as pipeline:
@@ -145,7 +148,7 @@ def test_without_force_web_the_knowledge_base_pipeline_still_runs(client):
             "confidence": 0.8,
             "sources": [],
         }
-        r = _post(client, query="what was total revenue in the 10-K")
+        r = _post(client, query="what was total revenue in the 10-K", sources=["10k.pdf"])
 
     assert r.status_code == 200
     assert "391.0B" in r.json()["answer"]

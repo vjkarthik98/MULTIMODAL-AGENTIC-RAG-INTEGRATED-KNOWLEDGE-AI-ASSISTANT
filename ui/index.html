@@ -12,7 +12,21 @@
     <title>MAGIK</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <!-- Non-blocking font load: media="print" makes the browser fetch it at
+         low priority without making it a render-blocking resource, then
+         onload flips it to media="all" once it's actually ready. First paint
+         (and Lighthouse's FCP measurement) must never wait on a third-party
+         network round trip succeeding — a slow/unreachable fonts.googleapis.com
+         should degrade to the system font, not delay the whole page. -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
+    />
+    <noscript>
+      <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    </noscript>
   <script>
     (function(){var t=localStorage.getItem('magik_theme');if(t==='light')document.documentElement.classList.add('light')})()
   </script>

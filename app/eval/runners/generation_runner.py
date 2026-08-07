@@ -46,6 +46,7 @@ def _query_via_server(
     user_id: str,
     auth: Any = None,
     no_cache: bool = True,
+    sources: list[str] | None = None,
 ) -> dict[str, Any]:
     """Call /rag/query on the running server. Reuses server's GPU models.
 
@@ -56,18 +57,26 @@ def _query_via_server(
     full suite outlives ACCESS_TOKEN_EXPIRE_MINUTES, so a token captured once at
     suite start expires partway through and every remaining row records a 401
     instead of an answer. EvalAuth re-mints on demand.
+
+    `sources` mirrors the UI's @ picker: /rag/query 400s on an empty scope
+    (api_routes.py's FILE SCOPE REQUIRED gate), so every gold row that names a
+    real KB file must pass it here or every generation/behavioral call fails
+    with "Select a file to scope this query before sending" instead of an
+    answer.
     """
     from app.eval.http_client import EvalAuth, post_json
 
     if auth is None:
         auth = EvalAuth(user_id)
 
-    payload = {
+    payload: dict[str, Any] = {
         "query": query,
         "session_id": session_id,
         "user_id": user_id,
         "no_cache": no_cache,
     }
+    if sources:
+        payload["sources"] = sources
     return post_json(f"{_SERVER_URL}/rag/query", payload, auth, timeout=int(_HTTP_TIMEOUT))
 
 
@@ -204,11 +213,15 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
         q_start = time.time()
         try:
             if use_server:
+                _row_sources = row.get("relevant_doc_ids") or (
+                    [row["source_file"]] if row.get("source_file") else None
+                )
                 pipeline_result = _query_via_server(
                     query=query,
                     session_id=session_id,
                     user_id=cfg.user_id,
                     auth=eval_auth,
+                    sources=_row_sources,
                 )
             else:
                 pipeline_result = _query_via_pipeline(

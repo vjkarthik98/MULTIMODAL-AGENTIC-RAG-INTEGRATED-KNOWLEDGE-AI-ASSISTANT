@@ -14,6 +14,9 @@ from app.eval.config import EvalConfig
 from app.eval.datasets.gold_loader import load_gold
 from app.eval.metrics.base import MetricResult, SuiteResult
 from app.eval.metrics.ocr_metrics import ocr_metrics_batch
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def _collect_ocr_text(documents: list[Any]) -> str:
@@ -48,6 +51,26 @@ def run_ocr_suite(cfg: EvalConfig) -> SuiteResult:
     except ImportError as e:
         result.breached["import_error"] = str(e)
         return result
+
+    # Warm the image-modality models (BLIP/Qwen2-VL/TrOCR/SigLIP) before the
+    # timed ingest loop below. Calling image_ingest.ingest() directly, like
+    # this runner does, bypasses app/ingestion/router.py's own
+    # ensure_for_modality() pre-warm (real uploads go through the router and
+    # get this for free) — without it, the first distinct image's cold model
+    # load lands inside image_ingest.py's own SLO-timed window and gets
+    # logged as a 151s+ `image_slo_exceeded` against the 10s target on every
+    # single run, even though nothing is actually slow. Same fix already
+    # applied to SigLIP warm-up in retrieval_runner.py; ensure_for_modality
+    # is idempotent, so this is a no-op if something else already warmed it.
+    try:
+        from app.core.model_registry import model_registry
+
+        model_registry.ensure_for_modality("image")
+    except Exception as exc:
+        # Not a breach — a warm-up failure just means the first ingest pays
+        # the cold-start cost inline instead (the pre-fix behavior), not
+        # that OCR itself is broken.
+        logger.warning(event="ocr_suite_warmup_failed", error=str(exc))
 
     gold_rows = load_gold("image", gold_dir=cfg.gold_dir, include_todos=False)
     if not gold_rows:

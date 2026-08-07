@@ -151,6 +151,18 @@ def linux_gpu_setup() -> None:
             log(f"Installing {pkgs} via apt...")
             subprocess.run(["sudo", "apt-get", "install", "-y", *pkgs.split()], check=False)
 
+    # redis-server backs settings.LOCAL_CACHE_HOST/PORT (localhost:6379 by
+    # default — job-status polling, embedding cache, rate limits). install_cuda.sh
+    # provisions + enables it once; this is a cheap self-heal if the service
+    # ever stops (e.g. after an instance reboot with the unit not enabled).
+    if shutil.which("redis-server") is not None:
+        subprocess.run(
+            ["sudo", "systemctl", "start", "redis-server"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
 
 # ── MODELS ─────────────────────────────────────────────────────────────────
 

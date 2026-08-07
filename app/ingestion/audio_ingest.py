@@ -31,6 +31,37 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# NUMBA / TRITON LLVM COLLISION — eager triton import, order matters here.
+#
+# On CUDA torch builds, the `triton` package bundles its own LLVM; `numba`
+# (pulled in by librosa in _detect_clipping/_classify_noise) bundles a
+# separate one via llvmlite. Whichever one's native extension loads SECOND
+# in this process segfaults the interpreter outright (no Python exception —
+# confirmed live 2026-08-07, reproduced deterministically with a minimal
+# repro isolating this exact pair). torch's own has_triton_package() probe
+# (torch/utils/_triton.py, @functools.cache) triggers a first `import triton`
+# from several unrelated, hard-to-predict call sites once numba is already
+# loaded — e.g. TensorFlow/Keras 3's multi-backend init (_classify_noise)
+# and torchvision.ops's dynamo registration (pyannote diarizer, loaded
+# concurrently in _diarize's thread via get_diarizer). Patching each call
+# site individually is whack-a-mole; importing triton here, once, before
+# this module's functions ever get a chance to load numba, makes it always
+# win the race — has_triton_package()'s cache then short-circuits every
+# later probe without touching triton's loader again. try/except because
+# CPU-only torch builds (see MODELS_DEVICE_PROFILE=all_cpu) don't bundle
+# triton at all, in which case there is no collision to avoid.
+try:
+    import triton  # noqa: F401
+except ImportError:
+    pass
+
+# Must be set before TensorFlow/Keras is ever imported anywhere in this
+# process (both _get_yamnet and _classify_noise import it lazily, but env
+# vars only take effect on Keras's first import). Belt-and-suspenders with
+# the triton import above: skips Keras 3's multi-backend probe entirely
+# rather than relying on it hitting the now-harmless cached result.
+os.environ.setdefault("KERAS_BACKEND", "tensorflow")
+
 
 # SUPPORTED FORMATS
 SUPPORTED_AUDIO_FORMATS = {
@@ -682,9 +713,27 @@ def _is_cuda_oom(exc: BaseException) -> bool:
     faster-whisper wraps CTranslate2, which raises a plain RuntimeError with
     "CUDA failed with error out of memory" — NOT torch.cuda.OutOfMemoryError, so
     catching the torch type alone would miss it entirely.
+
+    Also matches "invalid device ordinal" / cudaErrorInvalidDevice: on CD run
+    31139999120 (the same VRAM-exhaustion incident this fallback exists for),
+    one chunk raised "parallel_for failed: cudaErrorInvalidDevice: invalid
+    device ordinal" instead of a literal OOM string, and — not matching any
+    pattern above — skipped the CPU fallback and just failed outright. This
+    deployment target (g6e.xlarge/L40S) is single-GPU with no device_index
+    ever passed to WhisperModel (see get_whisper() in model_loader.py), so
+    there is no code path here that could legitimately select a second,
+    nonexistent device — "invalid device ordinal" on this box can only be the
+    CUDA driver reporting a corrupted/exhausted context under the same VRAM
+    pressure as the OOM cases, never a real wrong-device bug.
     """
     msg = str(exc).lower()
-    return "out of memory" in msg or "cuda failed with error" in msg or "cublas" in msg
+    return (
+        "out of memory" in msg
+        or "cuda failed with error" in msg
+        or "cublas" in msg
+        or "invalid device ordinal" in msg
+        or "cudaerrorinvaliddevice" in msg
+    )
 
 
 def _transcribe_chunk_eager(

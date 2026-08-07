@@ -1,21 +1,15 @@
-# RAG Eval Report — Phase 25
+# RAG Eval Report â€” Phase 25
 
-**Generated:** 2026-08-06T11:47:39Z  
-**Git SHA:** 52a3e69  
+**Generated:** 2026-08-07T13:23:15Z  
+**Git SHA:** 2ad7cdd  
 
-## Suite: `retrieval`
+## Suite: `ocr`
 
-Duration: 148.4s
+Duration: 260.8s
 
 | Metric | Value | n | Notes |
 |--------|-------|---|-------|
-| `context_precision` | nan | 0 | empty: all queries had TODO relevant_chunk_ids |
-| `hit_rate` | 0.0000 | 56 |  |
-| `mrr` | nan | 0 | empty: all queries had TODO relevant_chunk_ids |
-| `ndcg_at_10` | nan | 0 | empty: all queries had TODO relevant_chunk_ids |
-| `recall_at_10` | 0.0000 | 56 |  |
-| `recall_at_5` | 0.0000 | 56 |  |
-| `retrieval_p50_sec` | 1.2567 | 56 | min=1.18s max=52.20s |
-| `retrieval_p95_sec` | 1.6485 | 56 |  |
-| `retrieval_p99_sec` | 24.4613 | 56 |  |
+| `ocr_cer` | 1.1099 | 14 |  |
+| `ocr_exact_match` | 0.0000 | 14 |  |
+| `ocr_wer` | 1.1864 | 14 |  |
 

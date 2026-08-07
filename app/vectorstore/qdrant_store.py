@@ -1370,6 +1370,7 @@ class QdrantVectorStore:
         session_id: str | None = None,
         score_threshold: float = 0.0,
         user_id: str | None = None,
+        extra_filter=None,
     ) -> list[dict[str, Any]]:
         return self._search(
             self.vision_collection,
@@ -1378,6 +1379,7 @@ class QdrantVectorStore:
             session_id,
             score_threshold,
             user_id=user_id,
+            extra_filter=extra_filter,
         )
 
     # MODALITY FILTER SETTER
