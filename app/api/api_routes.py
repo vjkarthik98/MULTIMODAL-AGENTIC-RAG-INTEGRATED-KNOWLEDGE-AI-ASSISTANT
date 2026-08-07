@@ -1524,17 +1524,13 @@ async def stream_query(
                 try:
                     _store = infra.get_vector_store()
                     _summary_chunks = (
-                        _store.get_all_chunks_by_source(_summarize_target, current_user.user_id)[
-                            :5
-                        ]
+                        _store.get_all_chunks_by_source(_summarize_target, current_user.user_id)[:5]
                         if _store
                         else []
                     )
                     _summary_sources = build_sources(_summary_chunks)
                 except Exception as _src_err:
-                    logger.warning(
-                        event="stream_summarize_sources_failed", error=str(_src_err)
-                    )
+                    logger.warning(event="stream_summarize_sources_failed", error=str(_src_err))
                     _summary_sources = []
 
                 async def summarize_event_stream():

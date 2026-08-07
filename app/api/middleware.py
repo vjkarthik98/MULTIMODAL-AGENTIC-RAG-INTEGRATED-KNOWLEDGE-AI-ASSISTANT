@@ -137,7 +137,11 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             if read_access_cookie(request) or read_refresh_cookie(request):
                 cookie_csrf = request.cookies.get(CSRF_COOKIE, "")
                 header_csrf = request.headers.get("X-CSRF-Token", "")
-                if not cookie_csrf or not header_csrf or not hmac.compare_digest(cookie_csrf, header_csrf):
+                if (
+                    not cookie_csrf
+                    or not header_csrf
+                    or not hmac.compare_digest(cookie_csrf, header_csrf)
+                ):
                     from fastapi.responses import JSONResponse
 
                     return JSONResponse(
