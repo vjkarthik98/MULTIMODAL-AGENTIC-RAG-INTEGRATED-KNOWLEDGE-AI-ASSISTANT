@@ -77,7 +77,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - run: pip install "multimodal-rag-assistant[quality,test] @ ." || pip install schemathesis pytest httpx
+      - run: pip install "MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT[quality,test] @ ." || pip install schemathesis pytest httpx
 
       - name: Run Schemathesis contract test
         run: pytest tests/api_contract/ -v --junitxml=quality-reports/api-contract/ci-run.junit.xml

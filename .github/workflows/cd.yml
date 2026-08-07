@@ -16,30 +16,41 @@ name: CD
 # whenever a dependency fails. There is no separate "rollback" job for production:
 # there is nothing to roll back, since nothing was deployed there.
 #
-# PREREQUISITES NOT YET PROVISIONED (documented here, not silently assumed — see
-# docs/runbooks/ci-cd.md "Staging gate" section). This workflow is correct but
-# CANNOT succeed end-to-end until these exist, in addition to the production
-# prerequisites already documented there:
-#   1. A second EC2 instance for staging (user has AWS quota; not yet launched).
-#   2. That instance tagged `Name=${{ vars.EC2_STAGING_INSTANCE_TAG }}` (default
-#      "magik-staging"), with the SAME instance-profile permissions as prod
-#      (deploy/aws/iam/ec2-instance-profile-permissions.json — attach it to the
-#      staging box's profile too; nothing in that file is prod-specific).
-#   3. Its security group with NO inbound rule for 80/443/8000 — deploy-staging
-#      binds the container to 127.0.0.1 only, but the security group is the second,
-#      independent layer that keeps the box unreachable even if that ever regresses.
-#   4. AWS_DEPLOY_ROLE_ARN's own IAM policy (not captured in-repo; created outside
-#      this repo) extended to cover the staging instance ID/ARN alongside prod's —
-#      same ec2:StartInstances/DescribeInstances + ssm:SendCommand actions.
-#   5. github-oidc-trust-policy.json's `environment:staging` sub pattern applied to
-#      the real IAM role (this repo file documents it; applying it to AWS is a
-#      separate step).
-#   6. A second self-hosted GitHub Actions runner registered ON the staging box,
-#      labelled `staging-gpu` (distinct from prod's `gpu` label) — until then,
-#      tier2-staging-gate skips cleanly (see vars.SELF_HOSTED_STAGING_GPU_RUNNER)
-#      rather than queueing forever, but that also means NOTHING gates promotion,
-#      so treat that variable as "off" only during initial bring-up, never in
-#      steady state.
+# STAGING PREREQUISITES — ALL PROVISIONED 2026-08-06 (see docs/runbooks/ci-cd.md
+# "Staging gate"). Recorded here because every one of them is invisible from the
+# repo alone, so a future failure in deploy-staging/tier2-staging-gate is almost
+# certainly one of these having drifted:
+#   1. EC2 instance i-0aed770229c1313c7 (g6e.xlarge, us-east-1a), tagged
+#      Name=magik-staging — which is what the `Resolve staging instance ID by
+#      tag` step below looks up (vars.EC2_STAGING_INSTANCE_TAG is unset, so the
+#      inline 'magik-staging' default is what actually applies).
+#   2. Provisioned by CLONING production, not built from scratch: root volume
+#      from an AMI of magik-prod, data volume from an EBS snapshot of
+#      magik-prod-data. That is why /opt/magik on staging already holds the
+#      models, BM25 index and .env before any deploy runs — see the host-path
+#      note on the deploy step below.
+#   3. Security group sg-0bbfb2a5141b55e87 — ZERO inbound rules (verified). SSM
+#      is the only way in; the 127.0.0.1 port binding below is the second,
+#      independent layer.
+#   4. Instance profile: magik-ec2-role, REUSED from production rather than
+#      duplicated (deploy/aws/iam/ec2-instance-profile-permissions.json is not
+#      prod-specific). A dedicated staging role is deferred hardening, not a
+#      blocker.
+#   5. magik-deploy-role updated for staging on BOTH axes — trust policy gained
+#      the `environment:staging` sub pattern (needed the moment deploy-staging
+#      declares `environment: staging`, since that changes the OIDC subject
+#      claim), and the permissions policy gained staging's instance ARN for
+#      ec2:StartInstances + ssm:SendCommand.
+#   6. Self-hosted runner `magik-staging` registered with the `staging-gpu`
+#      label, installed as a systemd service, confirmed Idle in GitHub. NOTE:
+#      the AMI clone also carried production's OWN registered runner onto this
+#      box — it was found active under production's identity and has been
+#      stopped + disabled locally (NOT de-registered, so production's copy stays
+#      valid). If staging is ever re-cloned, check for that again.
+#   7. Repo variable SELF_HOSTED_STAGING_GPU_RUNNER=true. While false,
+#      tier2-staging-gate skips cleanly rather than queueing forever — but that
+#      also means NOTHING gates promotion, so it belongs "off" only during
+#      initial bring-up, never in steady state.
 
 on:
   push:
@@ -50,8 +61,13 @@ permissions:
   packages: write
   id-token: write   # OIDC — no static AWS credentials
 
-env:
-  IMAGE: ghcr.io/${{ github.repository }}
+# NOTE: there is deliberately no workflow-level `IMAGE: ghcr.io/${{ github.repository }}`.
+# This repository's name contains UPPERCASE characters, and Docker/OCI reference
+# syntax requires the repository path to be lowercase — `docker push` rejects
+# anything else with "repository name must be lowercase". A workflow-level `env:`
+# cannot run shell, and GitHub expressions have no lowercase function, so the
+# image ref is computed once in build-push's `meta` step (via `tr`) and passed to
+# the deploy jobs as a job output. Do not reintroduce the expression form.
 
 jobs:
   # -----------------------------------------------------------------------
@@ -120,6 +136,7 @@ jobs:
       security-events: write
     outputs:
       image_tag: ${{ steps.meta.outputs.tag }}
+      image: ${{ steps.meta.outputs.image }}
     steps:
       - uses: actions/checkout@v4
 
@@ -138,8 +155,15 @@ jobs:
           docker image prune -af >/dev/null 2>&1 || true
           echo "after:";  df -h / | tail -1
 
+      # Docker/OCI requires a lowercase repository path, but this repo's name is
+      # uppercase, so `ghcr.io/${{ github.repository }}` is an invalid reference
+      # and `docker push` rejects it outright. Lowercase it here, once, and pass
+      # it on as a job output — `tr` rather than bash's `${VAR,,}` so it does not
+      # depend on the runner's shell being bash 4+.
       - id: meta
-        run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -165,8 +189,8 @@ jobs:
           target: runtime
           push: true
           tags: |
-            ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
-            ${{ env.IMAGE }}:latest
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.meta.outputs.image }}:latest
           build-args: |
             GIT_SHA=${{ github.sha }}
             IMAGE_TAG=${{ steps.meta.outputs.tag }}
@@ -193,7 +217,7 @@ jobs:
         uses: anchore/sbom-action@v0
         continue-on-error: true
         with:
-          image: ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+          image: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
           format: spdx-json
           output-file: sbom.spdx.json
           upload-artifact: false   # uploaded explicitly below, with a stable name
@@ -234,7 +258,7 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         continue-on-error: true
         with:
-          image-ref: ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+          image-ref: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
@@ -303,16 +327,27 @@ jobs:
           [ "$STATUS" = "Online" ] || { echo "::error::SSM agent not reachable after 5 min"; exit 1; }
 
       # Mirrors the production deploy script (see promote-production below) with
-      # three deliberate differences: separate /opt/magik-staging paths so this
-      # never collides with a prod deploy on a shared AMI image, a
-      # staging-scoped docker network/redis sidecar, and — the "no HTTP, no
-      # Caddy" requirement — `-p 127.0.0.1:8000:8000` instead of `-p 8000:8000`,
-      # so the app port is reachable only from inside the box itself (SSM /
-      # docker exec), never from the network. The staging box's security group
-      # is the second, independent layer enforcing the same thing.
+      # two deliberate differences: a staging-scoped docker network/redis
+      # sidecar and distinct container names (magik-staging-current/-previous),
+      # and — the "no HTTP, no Caddy" requirement — `-p 127.0.0.1:8000:8000`
+      # instead of `-p 8000:8000`, so the app port is reachable only from
+      # inside the box itself (SSM / docker exec), never from the network. The
+      # staging box's security group is the second, independent layer
+      # enforcing the same thing.
+      #
+      # HOST PATHS ARE /opt/magik ON BOTH BOXES — deliberately the same, not
+      # a staging-specific path. An earlier revision used /opt/magik
+      # "so it never collides with prod on a shared AMI image", which was
+      # wrong on its own terms: these are two separate EC2 instances with
+      # separate filesystems, so there was never a collision to avoid. The
+      # cost was real though — staging is provisioned by cloning production
+      # (AMI for the root volume, EBS snapshot for the data volume), so it
+      # arrives with the models, .env and BM25 index already at /opt/magik.
+      # Pointing at /opt/magik would have failed the preflight below
+      # on a box that is, in fact, correctly provisioned.
       - name: Deploy via SSM (pull, swap, health check, auto-rollback)
         env:
-          IMAGE_REF: ${{ env.IMAGE }}:${{ needs.build-push.outputs.image_tag }}
+          IMAGE_REF: ${{ needs.build-push.outputs.image }}:${{ needs.build-push.outputs.image_tag }}
           GH_OWNER: ${{ github.repository_owner }}
           INSTANCE_ID: ${{ steps.instance.outputs.id }}
         run: |
@@ -328,7 +363,7 @@ jobs:
           command -v docker >/dev/null 2>&1 || { log "FATAL: docker not installed"; exit 1; }
           command -v aws    >/dev/null 2>&1 || { log "FATAL: aws cli not installed"; exit 1; }
           docker info >/dev/null 2>&1       || { log "FATAL: docker daemon unreachable"; exit 1; }
-          for p in /opt/magik-staging/.env /opt/magik-staging/.hf_cache /opt/magik-staging/data /opt/magik-staging/logs; do
+          for p in /opt/magik/.env /opt/magik/.hf_cache /opt/magik/data /opt/magik/logs; do
             [ -e "$p" ] || { log "FATAL: missing required path $p"; exit 1; }
           done
           if ! docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
@@ -356,7 +391,7 @@ jobs:
           if [ "${FREE_GB:-0}" -lt 30 ]; then
             log "FATAL: only ${FREE_GB}GB free on / after cleanup; this image needs ~25GB to unpack."
             df -h / || true
-            du -sh /opt/magik-staging/* 2>/dev/null | sort -rh | head -10 || true
+            du -sh /opt/magik/* 2>/dev/null | sort -rh | head -10 || true
             docker system df || true
             exit 1
           fi
@@ -372,14 +407,14 @@ jobs:
           docker pull "$IMG" || { log "FATAL: docker pull failed"; exit 1; }
 
           # ── Committed non-secret deploy config (deploy/aws/staging.env) ────
-          echo "__STAGING_ENV_B64__" | base64 -d > /opt/magik-staging/.env.prod
+          echo "__STAGING_ENV_B64__" | base64 -d > /opt/magik/.env.prod
           log "staging.env config written"
 
           # ── App secrets from SSM (same 9 as production — see
           #    deploy/aws/README.md 'App secrets in SSM'; staging shares the
           #    real Qdrant/Redis/Mongo services, isolated by EVAL_USER_ID
           #    tenant scoping the same way Tier-2 already relies on) ─────────
-          SECRETS_ENV="/opt/magik-staging/.env.secrets"
+          SECRETS_ENV="/opt/magik/.env.secrets"
           rm -f "$SECRETS_ENV"
           : > "$SECRETS_ENV"
           chmod 600 "$SECRETS_ENV"
@@ -441,14 +476,14 @@ jobs:
             --shm-size=2g \
             --log-opt max-size=50m --log-opt max-file=3 \
             -p 127.0.0.1:8000:8000 \
-            --env-file /opt/magik-staging/.env \
-            --env-file /opt/magik-staging/.env.prod \
+            --env-file /opt/magik/.env \
+            --env-file /opt/magik/.env.prod \
             --env-file "$SECRETS_ENV" \
             -e LOCAL_CACHE_HOST=magik-staging-redis \
             -e TORCH_HOME=/app/.hf_cache/torch \
-            -v /opt/magik-staging/.hf_cache:/app/.hf_cache \
-            -v /opt/magik-staging/data:/app/data \
-            -v /opt/magik-staging/logs:/app/logs \
+            -v /opt/magik/.hf_cache:/app/.hf_cache \
+            -v /opt/magik/data:/app/data \
+            -v /opt/magik/logs:/app/logs \
             "$IMG"
           RUN_STATUS=$?
           rm -f "$SECRETS_ENV"
@@ -616,7 +651,7 @@ jobs:
       - name: Deploy via SSM (pull, swap, health check, auto-rollback)
         id: deploy
         env:
-          IMAGE_REF: ${{ env.IMAGE }}:${{ needs.build-push.outputs.image_tag }}
+          IMAGE_REF: ${{ needs.build-push.outputs.image }}:${{ needs.build-push.outputs.image_tag }}
           GH_OWNER: ${{ github.repository_owner }}
           INSTANCE_ID: ${{ steps.instance.outputs.id }}
         run: |
@@ -934,7 +969,7 @@ jobs:
           cat > /tmp/remote-monitoring.sh <<'REMOTE_EOF'
           set -uo pipefail
           REF="__GIT_REF__"
-          REPO_DIR="/home/ubuntu/multimodal-rag-assistant"
+          REPO_DIR="/home/ubuntu/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT"
           log(){ echo "[monitoring-sync] $*"; }
 
           [ -d "${REPO_DIR}/.git" ] \

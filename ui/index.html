@@ -3,7 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/logo.png" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover lets the page paint into the notch/home-indicator
+         area; the `*-safe` utilities in index.css then inset the content that
+         must not be covered. Zoom is deliberately NOT disabled (no
+         user-scalable=no / maximum-scale=1) — blocking pinch-zoom is an
+         accessibility failure and browsers increasingly ignore it anyway. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>MAGIK</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

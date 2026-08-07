@@ -136,7 +136,7 @@ class Settings:
     # OPENTELEMETRY
     OTEL_ENABLED: bool = _bool("OTEL_ENABLED", False)
     OTEL_EXPORTER_OTLP_ENDPOINT: str = _str("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
-    OTEL_SERVICE_NAME: str = _str("OTEL_SERVICE_NAME", "multimodal-rag-assistant")
+    OTEL_SERVICE_NAME: str = _str("OTEL_SERVICE_NAME", "MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT")
     OTEL_SAMPLING_RATIO: float = _float("OTEL_SAMPLING_RATIO", 1.0)
 
     # PROMETHEUS — 9464 is the OpenTelemetry/Prometheus community convention for
