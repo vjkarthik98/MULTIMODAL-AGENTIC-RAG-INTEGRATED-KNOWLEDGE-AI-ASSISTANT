@@ -40,9 +40,9 @@
         },
         "StringLike": {
           "token.actions.githubusercontent.com:sub": [
-            "repo:vjkarthik98/multimodal-rag-assistant:environment:production",
-            "repo:vjkarthik98/multimodal-rag-assistant:environment:staging",
-            "repo:vjkarthik98/multimodal-rag-assistant:ref:refs/tags/*"
+            "repo:vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT:environment:production",
+            "repo:vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT:environment:staging",
+            "repo:vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT:ref:refs/tags/*"
           ]
         }
       }

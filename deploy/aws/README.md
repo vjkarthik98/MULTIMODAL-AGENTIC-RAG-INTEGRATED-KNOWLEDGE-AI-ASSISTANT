@@ -54,8 +54,8 @@ burns a $200 credit in under a week.
 Run from **AWS CloudShell** (already authenticated — no local AWS CLI needed):
 
 ```bash
-git clone https://github.com/vjkarthik98/multimodal-rag-assistant.git
-cd multimodal-rag-assistant/deploy/aws/scripts
+git clone https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT.git
+cd MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/deploy/aws/scripts
 
 bash deploy_lambdas.sh   # APP_URL defaults to https://magik.vk-ai.online
 ```
@@ -233,7 +233,7 @@ once covers all nine app-secret ARNs plus these two.
 
 **Automated as of the `promote-production` job's "Sync + redeploy monitoring
 stack" step**: every tag that promotes to production also brings the box's
-persistent repo checkout at `/home/ubuntu/multimodal-rag-assistant` (see
+persistent repo checkout at `/home/ubuntu/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT` (see
 "Operational notes" below) to that exact tag via `git fetch` + `git reset
 --hard`, then re-runs `deploy_monitoring.sh` over SSM. This step is
 `continue-on-error: true` and gated on the app deploy having already
@@ -319,7 +319,7 @@ tonight (OAuth redirect URI, then `DEV_OTP_LOG`) before being caught.
   ~20GB of weights would re-download on every single wake. They live on the EBS
   root volume via `/opt/magik/.hf_cache`.
 - `/opt/magik/{.hf_cache,data,logs}` are **symlinks** into
-  `/home/ubuntu/multimodal-rag-assistant/`, not real directories under `/opt`.
+  `/home/ubuntu/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/`, not real directories under `/opt`.
   Fragile: deleting that checkout (e.g. to reclaim disk) silently breaks
   production. Real directories directly under `/opt/magik` would be sturdier;
   not yet migrated.

@@ -3746,6 +3746,117 @@ infrastructure, called out below rather than left undocumented.
   touches the Caddyfile. Fails safe (login simply rejects until replaced),
   but there's no CI check confirming it was actually replaced.
 
+# [Unreleased] — Staging Gate: Tier-2 Now Blocks Promotion Instead of Watching After the Fact
+
+Previously `cd.yml` deployed a tag straight to production, health-checked it,
+and only *afterward* dispatched Tier-2 (RAG-quality) eval asynchronously —
+by the time a regression was detected, it was already live. This closes that
+gap: a tag now deploys to a **private staging box** first, runs the full
+Tier-2 suite against it, and only promotes the exact same image to
+production if that suite passes. A failure alerts and rolls staging back to
+its own previous image; production is never touched, because
+`promote-production`'s `needs:` makes it skip automatically whenever
+`tier2-staging-gate` fails — there is nothing to roll back on production
+since nothing was deployed there.
+
+### Added
+
+- **`cd.yml` restructured into a 5-stage pipeline**: `wait-for-ci-green`
+  (polls the CI + Security workflow runs for the exact tagged commit before
+  building anything) → `build-push` (unchanged) → `deploy-staging` (SSM
+  deploy to the new private box, container bound to `127.0.0.1:8000` only —
+  never `0.0.0.0`) → `tier2-staging-gate` (blocking) → `promote-production`
+  (only reachable if the gate passed).
+- **`tier2-eval.yml`**, a new `workflow_call` reusable workflow — the actual
+  Tier-2 eval/rollback logic (JWT-shape token mint, BM25 preflight,
+  retrieval-section auto-rollback, Pushgateway push) extracted out of
+  `eval-gate.yml` so staging (blocking) and production's nightly informational
+  run share one implementation instead of two copies that could drift.
+- **A second EC2 GPU box for staging**, cloned from a fresh AMI of production
+  taken *after* the EBS migration below, so its root volume already carries
+  production's current, non-symlinked layout. Tagged `magik-staging`, private
+  security group with **zero inbound rules** (SSM is the only way in — no
+  Caddy, no public port, verified before use), same IAM instance profile as
+  production (`magik-ec2-role`, reused directly rather than duplicated).
+- **Staging's own self-hosted GitHub Actions runner**, labelled `staging-gpu`
+  (distinct from production's `gpu` label), installed as a systemd service.
+  Found and disabled a real hazard during setup: the AMI clone had also
+  inherited production's *actual registered runner* (credentials, `.runner`,
+  systemd service) wholesale — it was `active running` on the staging box
+  under production's identity (`ip-172-31-5-165`) the moment staging booted.
+  Stopped and disabled locally (not de-registered, so production's own copy
+  stays valid when it's started again) before registering staging's runner.
+- **`magik-deploy-role`'s IAM policy extended for staging** — both the OIDC
+  trust policy (`environment:staging` subject pattern, alongside
+  `environment:production`) and the permissions policy (`ec2:StartInstances`
+  / `ssm:SendCommand` resource lists now include staging's instance ARN).
+  Additive only; production's existing access was untouched.
+- `deploy/aws/staging.env` — `prod.env`'s non-secret-config counterpart for
+  the private box (no `GRAFANA_ROOT_URL`/`CORS_ORIGINS`/`FRONTEND_URL`,
+  since staging has no monitoring stack and is never reachable from
+  outside; same `QDRANT_URL`/`REDIS_URL`/`EVAL_USER_ID` as production,
+  isolated by tenant scoping).
+- `docs/runbooks/gpu-memory-management.md` and the "Staging gate" section of
+  `docs/runbooks/ci-cd.md`, documenting the design and the manual
+  end-to-end validation procedure.
+
+### Fixed
+
+- **Tier-2 never completed a single run.** `app/eval/judges/qwen_judge.py`
+  loaded the Qwen2.5-7B judge in-process via `llama_cpp.Llama`, silently
+  reintroducing a hazard `app/llm/gguf_model.py` already carries an explicit
+  warning against: llama.cpp's CUDA init corrupts PyTorch's CUDA context in
+  the same process, fatally so on worker threads. The `full` suite's
+  `routing` stage runs `query_pipeline` on `agent_controller.py`'s
+  `ThreadPoolExecutor`, which crashed every run at that exact boundary —
+  confirmed live via two different fatal signals on the same box (exit 139
+  SIGSEGV, exit 137 SIGKILL/OOM-killer), the telltale sign of native memory
+  corruption rather than a logic bug. Fixed by moving the judge into its own
+  subprocess (`qwen_judge_worker.py`, JSON-lines protocol over stdin/stdout),
+  the same architecture the resident LLM already uses via `llama-server`.
+- **The judge's VRAM fallback check was silently inert.** It computed free
+  memory as `total_memory - torch.cuda.memory_reserved()`, which only
+  accounts for the calling process's own PyTorch allocator — blind to the
+  separate `llama-server` process and (after the fix above) the judge's own
+  worker process. Replaced with `device_manager.free_vram_gb()`
+  (`torch.cuda.mem_get_info()`, driver-level, all processes).
+- **A crashed Tier-2 run could silently publish a stale report as current.**
+  `app/eval/reports/rag_report.{json,md}` are committed to git, so a stale
+  copy ships baked into every image; a run that died before writing its own
+  results left that old report in place for the workflow to pick up and
+  present as if it were fresh — observed live, an eight-day-old report with
+  a passing retrieval section published as the current run's result.
+  `app/eval/run.py` now deletes them before running, so "no file" is the
+  only way to signal "no result."
+- **Idle GPU models never got their memory back.** Ingestion-only models
+  (Whisper, BLIP2, Qwen2-VL, TrOCR, diarizer, NER, FinBERT) had a working
+  eviction method (`model_loader.unload_idle_models`) with exactly one
+  caller — itself only invoked when another heavy model was about to load,
+  so eviction was reactive to demand, never to idleness. A model loaded for
+  one upload stayed resident in VRAM indefinitely if nothing else used it.
+  Added `app/core/model_reaper.py`, a background sweep (skips while
+  `gpu_admission.gpu_busy()`, evicts idle models past a TTL, or
+  least-recently-used ones under a free-VRAM watermark) that makes the
+  existing eviction logic actually fire. Query-path models (LLM, embedder,
+  reranker, SigLIP) remain pinned, never evicted.
+
+### Changed
+
+- **Production's model cache moved off the root volume onto a dedicated EBS
+  volume.** Root was at 93% (179G/193G) — one contributor to the ~2-hour
+  release cycle this same effort investigated (a separate Docker
+  base/app-image-split fix, planned but not yet implemented, addresses the
+  build-time half of that). `.hf_cache`/`data`/`logs` (52G+) migrated via a
+  block-level EBS snapshot clone (not a file copy — sidesteps a hardlink
+  pitfall hit along the way: plain `rsync -a` doesn't preserve hardlinks,
+  and this project's own `qwen_judge.py::ensure_available()` hardlinks large
+  GGUF files between the HF hub cache and a flat path, so a naive copy
+  silently duplicated multi-GB models; fixed with `rsync -aH`). `/opt/magik`
+  is now a real mount (`/etc/fstab`, referenced by UUID) instead of the
+  previous symlinks into `/home/ubuntu/multimodal-rag-assistant/`, closing a
+  fragility flagged earlier: deleting that checkout no longer risks
+  silently breaking production. Staging's data volume is a clone of this
+  same migrated volume (via snapshot), not a from-scratch migration.
 ## Conversational Response Layer & Document Summarization
 
 Accuracy across modalities was already >85%, but answers read like a strict

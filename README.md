@@ -2,11 +2,11 @@
 
 **A production-grade, finance-domain retrieval-augmented generation system** that ingests text, PDF, DOCX, XLSX, images, audio, and video, routes queries through an agentic controller, retrieves with a hybrid BM25 + dense pipeline, verifies its own answers before they reach the user, and runs entirely on open-source models — no third-party LLM API required.
 
-[![CI](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/ci.yml)
-[![Eval Gate](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/eval-gate.yml/badge.svg)](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/eval-gate.yml)
-[![CD](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/cd.yml/badge.svg)](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/cd.yml)
-[![Security](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/security.yml/badge.svg)](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/security.yml)
-[![Quality](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/quality.yml/badge.svg)](https://github.com/vjkarthik98/multimodal-rag-assistant/actions/workflows/quality.yml)
+[![CI](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/ci.yml/badge.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/ci.yml)
+[![Eval Gate](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/eval-gate.yml/badge.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/eval-gate.yml)
+[![CD](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/cd.yml/badge.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/cd.yml)
+[![Security](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/security.yml/badge.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/security.yml)
+[![Quality](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/quality.yml/badge.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/quality.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 
@@ -182,7 +182,7 @@ The pipeline never imports a per-modality file directly — it dispatches throug
 ## Project Structure
 
 ```
-multimodal-rag-assistant/
+MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/
 ├── app/
 │   ├── agents/          # Query classification, routing, bounded execution, tool registry
 │   ├── api/              # FastAPI route definitions and middleware
@@ -250,8 +250,8 @@ The fastest way to see the system working end to end is [magik.vk-ai.online](htt
 **Prerequisites:** Python 3.10+, Docker, Node.js 20.19+ (for the UI — required by Vite 8), FFmpeg, Tesseract OCR.
 
 ```bash
-git clone https://github.com/vjkarthik98/multimodal-rag-assistant.git
-cd multimodal-rag-assistant
+git clone https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT.git
+cd MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT
 
 cp .env.example .env          # fill in secrets — see .env.example for what's required
 make install-dev              # runtime + lint/type/test tooling
@@ -503,4 +503,4 @@ MIT — see [LICENSE](LICENSE).
 
 ## Author
 
-**Vijaya Karthik** ([@vjkarthik98](https://github.com/vjkarthik98/multimodal-rag-assistant.git))
+**Vijaya Karthik** ([@vjkarthik98](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT.git))

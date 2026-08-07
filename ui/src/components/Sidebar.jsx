@@ -829,7 +829,11 @@ export default function Sidebar({
   /* ── EXPANDED — full sidebar ── */
   return (
     <>
-    <div className="w-80 flex-shrink-0 flex flex-col h-full select-none" style={sidebarStyle}>
+    {/* w-full, not w-80: the PARENT owns the width in both modes —
+        ChatPage renders this inside `w-80` when inline and inside
+        `w-[85vw] max-w-80` when it is a drawer. Hard-coding w-80 here
+        overflowed the drawer on any phone narrower than ~376px. */}
+    <div className="w-full flex-shrink-0 flex flex-col h-full select-none" style={sidebarStyle}>
 
       {/* Logo row */}
       <div className="flex items-center gap-3 px-5 pt-5 pb-4">
