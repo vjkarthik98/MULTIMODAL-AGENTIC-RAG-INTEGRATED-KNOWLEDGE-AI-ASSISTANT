@@ -41,10 +41,23 @@ RUN python3.12 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
 WORKDIR /build
-COPY requirements.txt pyproject.toml ./
+# ONLY requirements.txt above the pip layer — pyproject.toml is deliberately
+# copied AFTER it, and the two must never be merged back into one COPY.
+# release.yml rewrites pyproject.toml's `version = "X.Y.Z"` line on every
+# single release, so a combined `COPY requirements.txt pyproject.toml ./`
+# invalidated this layer — and therefore cuda-builder's ~30-minute nvcc
+# compile of llama-cpp-python — on EVERY tagged build, permanently, no matter
+# how the build cache is configured. Measured on CD run #v0.30.0: zero CACHED
+# layers, 88-minute build-push. Nothing in this stage reads pyproject.toml
+# (requirements.txt has no `-e .`/`.` self-install line), so splitting it out
+# is free.
+COPY requirements.txt ./
 # Default PyPI llama-cpp-python wheel here is CPU-only (BLAS) — correct
 # as-is for dev-runtime; cuda-builder overwrites it below for `runtime`.
 RUN pip install --upgrade pip && pip install -r requirements.txt
+
+# Below the expensive layer on purpose — see the note above.
+COPY pyproject.toml ./
 
 # ---------------------------------------------------------------------------
 # Stage 1a — cuda-builder: GPU-compiled llama-cpp-python (production only)

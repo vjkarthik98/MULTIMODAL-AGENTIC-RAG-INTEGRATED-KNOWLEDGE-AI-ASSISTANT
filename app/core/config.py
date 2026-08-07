@@ -530,6 +530,13 @@ class Settings:
     DB_MAX_POOL_SIZE: int = _int("DB_MAX_POOL_SIZE", 20)
     MONGO_CB_FAIL_MAX: int = _int("MONGO_CB_FAIL_MAX", 5)
     MONGO_CB_RESET_TIMEOUT: int = _int("MONGO_CB_RESET_TIMEOUT", 60)
+    # How often MongoMemory retries a connection that failed, and how often it
+    # repeats the "memory not persisting" warning while down (see
+    # app/memory/mongo_memory.py::_is_available). A failed attempt costs a full
+    # DB_TIMEOUT_MS server-selection timeout, so this trades recovery latency
+    # against one slow call per interval. 0 disables retrying entirely, which
+    # restores the old behaviour: a startup failure stays fatal until restart.
+    MONGO_RECONNECT_INTERVAL_SEC: int = _int("MONGO_RECONNECT_INTERVAL_SEC", 300)
     MONGO_MESSAGES_COLLECTION: str = _str("MONGO_MESSAGES_COLLECTION", "messages")
     MONGO_SUMMARIES_COLLECTION: str = _str("MONGO_SUMMARIES_COLLECTION", "summaries")
     MONGO_MEMORY_COLLECTION: str = _str("MONGO_MEMORY_COLLECTION", "messages")

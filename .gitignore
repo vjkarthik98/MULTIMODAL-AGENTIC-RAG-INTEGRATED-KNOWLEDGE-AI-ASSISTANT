@@ -33,6 +33,9 @@ scripts/*
 !scripts/.gitkeep
 
 mlruns/
+# MLflow's sqlite tracking backend (see app/eval/tracking/mlflow_logger.py —
+# the old mlruns/ file backend is end-of-life and now raises rather than warns).
+mlruns.db
 
 *.log
 npm-debug.log*
