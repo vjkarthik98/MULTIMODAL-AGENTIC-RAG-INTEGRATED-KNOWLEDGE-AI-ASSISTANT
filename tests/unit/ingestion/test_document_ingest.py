@@ -133,7 +133,7 @@ class TestDocumentIngestAsync:
             with pytest.raises((FileNotFoundError, ValueError, Exception)):
                 await ingest(path, session_id="s1")
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
 
     def test_empty_session_id_raises(self, tmp_path):
         from app.ingestion.pdf_ingest import ingest
@@ -144,7 +144,7 @@ class TestDocumentIngestAsync:
             with pytest.raises(ValueError):
                 await ingest(str(p), session_id="")
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
 
 
 # ── IngestedDocument schema ───────────────────────────────────────────────────

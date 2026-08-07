@@ -7,7 +7,7 @@ import {
 } from 'lucide-react'
 import { listKB, deleteKBFile, getMe, changePassword, logoutAll, deleteAccount, clearMemory, deleteAllChatSessions } from '../api/client'
 import { useToast } from '../context/ToastContext'
-import useIsMobile from '../hooks/useIsMobile'
+import { useMediaQuery } from '../hooks/useBreakpoint'
 
 const NAV = [
   { id: 'account',   label: 'Account',         Icon: User },
@@ -90,7 +90,7 @@ function AccountSection({ auth, dark, onToggleTheme, showSources, setShowSources
   const [clearingHistory, setClearingHistory] = useState(false)
   const [confirmClearHistory, setConfirmClearHistory] = useState(false)
 
-  useEffect(() => { getMe(auth.token).then(setProfile).catch(() => {}) }, [auth.token])
+  useEffect(() => { getMe().then(setProfile).catch(() => {}) }, [])
 
   const memberSince = profile?.created_at
     ? new Date(profile.created_at).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
@@ -288,6 +288,8 @@ function SecuritySection({ auth, onLogout, addToast }) {
     setSaving(true)
     try {
       await changePassword(auth.token, current, next)
+      // The server already revoked this browser's trusted-device cookie (an
+      // httpOnly cookie now — nothing client-side to clean up here).
       addToast('Password changed — signing you out everywhere…', 'success')
       setTimeout(onLogout, 1200)
     } catch (err) {
@@ -361,7 +363,6 @@ function PrivacySection({ auth, onLogout, addToast }) {
     setDeleting(true)
     try {
       await deleteAccount(auth.token)
-      localStorage.removeItem('magik_device_token')
       addToast('Your account and all data have been permanently deleted', 'success')
       setTimeout(onLogout, 1000)
     } catch (err) {
@@ -465,7 +466,12 @@ export default function SettingsModal({
 }) {
   const [section, setSection]       = useState('account')
   const [mobileView, setMobileView] = useState('nav')  // 'nav' | 'content'
-  const isMobile  = useIsMobile()
+  // Deliberately NOT the sidebar's 1024px breakpoint. This modal is capped at
+  // max-w-3xl (768px), so what decides two-pane vs master-detail is the
+  // MODAL's width, not the viewport's — tying it to 1024 would needlessly
+  // drop a perfectly usable two-pane layout on a 900px screen. Below `sm`
+  // there genuinely isn't room for nav + content side by side.
+  const isNarrow  = useMediaQuery('(max-width: 639px)')
   const { addToast } = useToast()
   const onCloseRef = useRef(onClose)
   useEffect(() => { onCloseRef.current = onClose })
@@ -483,7 +489,7 @@ export default function SettingsModal({
 
   const selectSection = (id) => {
     setSection(id)
-    if (isMobile) setMobileView('content')
+    if (isNarrow) setMobileView('content')
   }
 
   const sectionContent = (
@@ -518,11 +524,11 @@ export default function SettingsModal({
           background: 'var(--t-sur)',
           border: '1px solid var(--t-bd2)',
           display: 'flex',
-          flexDirection: isMobile ? 'column' : 'row',
+          flexDirection: isNarrow ? 'column' : 'row',
         }}
       >
         {/* ── MOBILE: nav list (full-width, shown when mobileView==='nav') ── */}
-        {isMobile && mobileView === 'nav' && (
+        {isNarrow && mobileView === 'nav' && (
           <div className="flex flex-col h-full" style={{ background: 'var(--t-sb)' }}>
             <div className="flex items-center justify-between px-5 pt-5 pb-3 flex-shrink-0">
               <h2 className="text-[17px] font-semibold" style={{ color: 'var(--t-tx1)' }}>Settings</h2>
@@ -554,7 +560,7 @@ export default function SettingsModal({
         )}
 
         {/* ── MOBILE: section content (full-width, shown when mobileView==='content') ── */}
-        {isMobile && mobileView === 'content' && (
+        {isNarrow && mobileView === 'content' && (
           <div className="flex flex-col h-full min-w-0">
             <div className="flex items-center justify-between px-4 pt-4 pb-2 flex-shrink-0">
               <button
@@ -583,7 +589,7 @@ export default function SettingsModal({
         )}
 
         {/* ── DESKTOP: side-by-side (unchanged) ── */}
-        {!isMobile && (
+        {!isNarrow && (
           <>
             {/* Left nav */}
             <div className="w-56 flex-shrink-0 flex flex-col py-5 px-3 overflow-y-auto"

@@ -1,24 +1,56 @@
 name: CD
 
-# Tag-triggered: build the production image, push to GHCR, wake/deploy to the
-# real EC2 GPU box, smoke test, roll back automatically on failure, then
-# dispatch the Tier-2 full eval suite (see eval-gate.yml).
+# Tag-triggered staging→gate→promote pipeline:
 #
-# PREREQUISITES NOT YET PROVISIONED (documented here, not silently assumed —
-# see docs/runbooks/ci-cd.md "Phase 30 handoff"). This workflow is correct
-# but CANNOT succeed end-to-end until these exist:
-#   1. The EC2 instance itself (user has AWS quota, hasn't launched it yet).
-#   2. An IAM role for GitHub OIDC (`vars.AWS_DEPLOY_ROLE_ARN`) with least-
-#      privilege ec2:StartInstances/DescribeInstances + ssm:SendCommand
-#      scoped to that one instance — no long-lived AWS keys in GH secrets.
-#   3. The instance tagged `Name=${{ vars.EC2_INSTANCE_TAG }}` (default
-#      "magik-prod") so this workflow can look it up without a hardcoded ID.
-#   4. SSM Agent running on the box (default on AWS Deep Learning AMI /
-#      standard Ubuntu AMI + amazon-ssm-agent package) and an instance
-#      profile granting it ssm:UpdateInstanceInformation etc.
-#   5. A GHCR read PAT stored in SSM Parameter Store
-#      (`/magik/ghcr_pat`) so the box can `docker pull` without the token
-#      ever touching a GH Actions log.
+#   1. wait-for-ci-green   confirm CI + Security both went green on this exact commit
+#   2. build-push          build the production image once, push to GHCR
+#   3. deploy-staging      SSM-deploy the image to the PRIVATE staging box
+#                          (no public port, no Caddy — SSM is the only way in)
+#   4. tier2-staging-gate  full Tier-2 RAG-quality suite AGAINST STAGING, blocking
+#   5. promote-production  ONLY runs if tier2-staging-gate passed — deploys the
+#                          SAME already-validated image to the real prod box
+#
+# If tier2-staging-gate fails: it alerts (Slack) and rolls staging back to its own
+# previous image on a retrieval-section breach (see tier2-eval.yml) — production is
+# never touched, because promote-production's `needs:` makes it skip automatically
+# whenever a dependency fails. There is no separate "rollback" job for production:
+# there is nothing to roll back, since nothing was deployed there.
+#
+# STAGING PREREQUISITES — ALL PROVISIONED 2026-08-06 (see docs/runbooks/ci-cd.md
+# "Staging gate"). Recorded here because every one of them is invisible from the
+# repo alone, so a future failure in deploy-staging/tier2-staging-gate is almost
+# certainly one of these having drifted:
+#   1. EC2 instance i-0aed770229c1313c7 (g6e.xlarge, us-east-1a), tagged
+#      Name=magik-staging — which is what the `Resolve staging instance ID by
+#      tag` step below looks up (vars.EC2_STAGING_INSTANCE_TAG is unset, so the
+#      inline 'magik-staging' default is what actually applies).
+#   2. Provisioned by CLONING production, not built from scratch: root volume
+#      from an AMI of magik-prod, data volume from an EBS snapshot of
+#      magik-prod-data. That is why /opt/magik on staging already holds the
+#      models, BM25 index and .env before any deploy runs — see the host-path
+#      note on the deploy step below.
+#   3. Security group sg-0bbfb2a5141b55e87 — ZERO inbound rules (verified). SSM
+#      is the only way in; the 127.0.0.1 port binding below is the second,
+#      independent layer.
+#   4. Instance profile: magik-ec2-role, REUSED from production rather than
+#      duplicated (deploy/aws/iam/ec2-instance-profile-permissions.json is not
+#      prod-specific). A dedicated staging role is deferred hardening, not a
+#      blocker.
+#   5. magik-deploy-role updated for staging on BOTH axes — trust policy gained
+#      the `environment:staging` sub pattern (needed the moment deploy-staging
+#      declares `environment: staging`, since that changes the OIDC subject
+#      claim), and the permissions policy gained staging's instance ARN for
+#      ec2:StartInstances + ssm:SendCommand.
+#   6. Self-hosted runner `magik-staging` registered with the `staging-gpu`
+#      label, installed as a systemd service, confirmed Idle in GitHub. NOTE:
+#      the AMI clone also carried production's OWN registered runner onto this
+#      box — it was found active under production's identity and has been
+#      stopped + disabled locally (NOT de-registered, so production's copy stays
+#      valid). If staging is ever re-cloned, check for that again.
+#   7. Repo variable SELF_HOSTED_STAGING_GPU_RUNNER=true. While false,
+#      tier2-staging-gate skips cleanly rather than queueing forever — but that
+#      also means NOTHING gates promotion, so it belongs "off" only during
+#      initial bring-up, never in steady state.
 
 on:
   push:
@@ -29,11 +61,68 @@ permissions:
   packages: write
   id-token: write   # OIDC — no static AWS credentials
 
-env:
-  IMAGE: ghcr.io/${{ github.repository }}
+# NOTE: there is deliberately no workflow-level `IMAGE: ghcr.io/${{ github.repository }}`.
+# This repository's name contains UPPERCASE characters, and Docker/OCI reference
+# syntax requires the repository path to be lowercase — `docker push` rejects
+# anything else with "repository name must be lowercase". A workflow-level `env:`
+# cannot run shell, and GitHub expressions have no lowercase function, so the
+# image ref is computed once in build-push's `meta` step (via `tr`) and passed to
+# the deploy jobs as a job output. Do not reintroduce the expression form.
 
 jobs:
+  # -----------------------------------------------------------------------
+  # Gate 0 — "check all the things to get green" before building or deploying
+  # anything. release.yml's version-bump commit lands on `main` moments before
+  # the tag that triggers this workflow is pushed; ci.yml/security.yml fire on
+  # that push as SEPARATE workflow runs that may still be in flight (or not yet
+  # even registered) when this job starts. Poll the Checks/Actions API for the
+  # exact commit SHA the tag points at until both conclude, and fail loudly if
+  # either isn't a success — rather than silently building and deploying an
+  # image whose lint/type/test/security status is unknown or red.
+  # -----------------------------------------------------------------------
+  wait-for-ci-green:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Wait for CI and Security workflows to go green on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          for WF in "CI" "Security"; do
+            echo "waiting for workflow '${WF}' on commit ${SHA} ..."
+            DEADLINE=$(( SECONDS + 1200 ))
+            STATUS=""
+            CONCLUSION=""
+            while [ "$SECONDS" -lt "$DEADLINE" ]; do
+              LINE=$(gh api "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=20" \
+                --jq ".workflow_runs[] | select(.name==\"${WF}\") | [.status,.conclusion] | @tsv" \
+                2>/dev/null | head -1) || LINE=""
+              STATUS="${LINE%%$'\t'*}"
+              CONCLUSION="${LINE#*$'\t'}"
+              [ "$LINE" = "" ] && { STATUS=""; CONCLUSION=""; }
+              [ "$STATUS" = "completed" ] && break
+              echo "  ... '${WF}' status=${STATUS:-not-found-yet} (${SECONDS}s elapsed)"
+              sleep 15
+            done
+            if [ "$STATUS" != "completed" ]; then
+              echo "::error title=CI gate timed out::Workflow '${WF}' did not report completed for commit ${SHA} within 20 minutes. See https://github.com/${REPO}/actions?query=workflow%3A%22${WF}%22"
+              exit 1
+            fi
+            if [ "$CONCLUSION" != "success" ]; then
+              echo "::error title=CI gate failed::Workflow '${WF}' concluded '${CONCLUSION}' (not success) on commit ${SHA}. Fix it and push a new tag — this pipeline will not build or deploy an unverified commit."
+              exit 1
+            fi
+            echo "'${WF}' is green."
+          done
+
   build-push:
+    needs: wait-for-ci-green
     runs-on: ubuntu-latest
     # Job-level override — must restate what the workflow-level block grants,
     # since a job-level `permissions:` replaces it wholesale rather than
@@ -47,6 +136,7 @@ jobs:
       security-events: write
     outputs:
       image_tag: ${{ steps.meta.outputs.tag }}
+      image: ${{ steps.meta.outputs.image }}
     steps:
       - uses: actions/checkout@v4
 
@@ -65,8 +155,15 @@ jobs:
           docker image prune -af >/dev/null 2>&1 || true
           echo "after:";  df -h / | tail -1
 
+      # Docker/OCI requires a lowercase repository path, but this repo's name is
+      # uppercase, so `ghcr.io/${{ github.repository }}` is an invalid reference
+      # and `docker push` rejects it outright. Lowercase it here, once, and pass
+      # it on as a job output — `tr` rather than bash's `${VAR,,}` so it does not
+      # depend on the runner's shell being bash 4+.
       - id: meta
-        run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -92,8 +189,8 @@ jobs:
           target: runtime
           push: true
           tags: |
-            ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
-            ${{ env.IMAGE }}:latest
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.meta.outputs.image }}:latest
           build-args: |
             GIT_SHA=${{ github.sha }}
             IMAGE_TAG=${{ steps.meta.outputs.tag }}
@@ -120,7 +217,7 @@ jobs:
         uses: anchore/sbom-action@v0
         continue-on-error: true
         with:
-          image: ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+          image: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
           format: spdx-json
           output-file: sbom.spdx.json
           upload-artifact: false   # uploaded explicitly below, with a stable name
@@ -161,7 +258,7 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         continue-on-error: true
         with:
-          image-ref: ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+          image-ref: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
@@ -179,8 +276,326 @@ jobs:
           sarif_file: trivy-results.sarif
           category: trivy-image
 
-  deploy:
+  # -----------------------------------------------------------------------
+  # STAGING — private box (no HTTP, no Caddy; SSM is the only way in). Same
+  # image that will (conditionally) reach production, deployed here FIRST so
+  # tier2-staging-gate below can evaluate it before anything user-facing sees it.
+  # -----------------------------------------------------------------------
+  deploy-staging:
     needs: build-push
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Resolve staging instance ID by tag
+        id: instance
+        run: |
+          ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${{ vars.EC2_STAGING_INSTANCE_TAG || 'magik-staging' }}" \
+                      "Name=instance-state-name,Values=stopped,running,stopping" \
+            --query "Reservations[0].Instances[0].InstanceId" --output text)
+          if [ "$ID" = "None" ] || [ -z "$ID" ]; then
+            echo "::error::No instance tagged Name=${{ vars.EC2_STAGING_INSTANCE_TAG || 'magik-staging' }} found. See docs/runbooks/ci-cd.md 'Staging gate' prerequisites."
+            exit 1
+          fi
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+
+      # Stopped-by-default for cost reasons, same as prod — waking an
+      # already-running instance is a harmless no-op.
+      - name: Wake staging instance (idempotent)
+        run: aws ec2 start-instances --instance-ids ${{ steps.instance.outputs.id }} || true
+
+      - name: Wait until running + SSM-reachable
+        run: |
+          aws ec2 wait instance-running --instance-ids ${{ steps.instance.outputs.id }}
+          for i in $(seq 1 30); do
+            STATUS=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=${{ steps.instance.outputs.id }}" \
+              --query "InstanceInformationList[0].PingStatus" --output text 2>/dev/null || echo "None")
+            [ "$STATUS" = "Online" ] && break
+            sleep 10
+          done
+          [ "$STATUS" = "Online" ] || { echo "::error::SSM agent not reachable after 5 min"; exit 1; }
+
+      # Mirrors the production deploy script (see promote-production below) with
+      # two deliberate differences: a staging-scoped docker network/redis
+      # sidecar and distinct container names (magik-staging-current/-previous),
+      # and — the "no HTTP, no Caddy" requirement — `-p 127.0.0.1:8000:8000`
+      # instead of `-p 8000:8000`, so the app port is reachable only from
+      # inside the box itself (SSM / docker exec), never from the network. The
+      # staging box's security group is the second, independent layer
+      # enforcing the same thing.
+      #
+      # HOST PATHS ARE /opt/magik ON BOTH BOXES — deliberately the same, not
+      # a staging-specific path. An earlier revision used /opt/magik
+      # "so it never collides with prod on a shared AMI image", which was
+      # wrong on its own terms: these are two separate EC2 instances with
+      # separate filesystems, so there was never a collision to avoid. The
+      # cost was real though — staging is provisioned by cloning production
+      # (AMI for the root volume, EBS snapshot for the data volume), so it
+      # arrives with the models, .env and BM25 index already at /opt/magik.
+      # Pointing at /opt/magik would have failed the preflight below
+      # on a box that is, in fact, correctly provisioned.
+      - name: Deploy via SSM (pull, swap, health check, auto-rollback)
+        env:
+          IMAGE_REF: ${{ needs.build-push.outputs.image }}:${{ needs.build-push.outputs.image_tag }}
+          GH_OWNER: ${{ github.repository_owner }}
+          INSTANCE_ID: ${{ steps.instance.outputs.id }}
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/remote-deploy.sh <<'REMOTE_EOF'
+          set -uo pipefail
+          IMG="__IMAGE_REF__"
+          OWNER="__GH_OWNER__"
+          log(){ echo "[deploy-staging] $*"; }
+
+          # ── Preflight: fail fast and legibly, BEFORE the multi-GB pull ─────
+          command -v docker >/dev/null 2>&1 || { log "FATAL: docker not installed"; exit 1; }
+          command -v aws    >/dev/null 2>&1 || { log "FATAL: aws cli not installed"; exit 1; }
+          docker info >/dev/null 2>&1       || { log "FATAL: docker daemon unreachable"; exit 1; }
+          for p in /opt/magik/.env /opt/magik/.hf_cache /opt/magik/data /opt/magik/logs; do
+            [ -e "$p" ] || { log "FATAL: missing required path $p"; exit 1; }
+          done
+          if ! docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
+            log "FATAL: '--gpus all' not functional — nvidia-container-toolkit missing/broken"
+            exit 1
+          fi
+          log "preflight OK"
+
+          # ── Reclaim disk BEFORE pulling ~20GB ─────────────────────────────
+          disk_free_gb(){ df -BG --output=avail / | tail -1 | tr -dc '0-9'; }
+          log "disk free before cleanup: $(disk_free_gb)GB"
+
+          docker image prune -f >/dev/null 2>&1 || true
+          docker builder prune -af >/dev/null 2>&1 || true
+          log "disk free after safe prune: $(disk_free_gb)GB"
+
+          if [ "$(disk_free_gb)" -lt 40 ]; then
+            log "under 40GB — dropping the rollback container to reclaim its image"
+            docker rm -f magik-staging-previous >/dev/null 2>&1 || true
+            docker image prune -af >/dev/null 2>&1 || true
+            log "disk free after full prune: $(disk_free_gb)GB"
+          fi
+
+          FREE_GB="$(disk_free_gb)"
+          if [ "${FREE_GB:-0}" -lt 30 ]; then
+            log "FATAL: only ${FREE_GB}GB free on / after cleanup; this image needs ~25GB to unpack."
+            df -h / || true
+            du -sh /opt/magik/* 2>/dev/null | sort -rh | head -10 || true
+            docker system df || true
+            exit 1
+          fi
+          log "disk OK — ${FREE_GB}GB free"
+
+          # ── Pull BEFORE touching the running container ─────────────────────
+          GHCR_PAT="$(aws ssm get-parameter --name /magik/ghcr_pat \
+                        --with-decryption --query Parameter.Value --output text)" \
+            || { log "FATAL: could not read /magik/ghcr_pat from SSM"; exit 1; }
+          echo "$GHCR_PAT" | docker login ghcr.io -u "$OWNER" --password-stdin \
+            || { log "FATAL: docker login to ghcr.io failed"; exit 1; }
+          log "pulling $IMG (multi-GB, several minutes expected)"
+          docker pull "$IMG" || { log "FATAL: docker pull failed"; exit 1; }
+
+          # ── Committed non-secret deploy config (deploy/aws/staging.env) ────
+          echo "__STAGING_ENV_B64__" | base64 -d > /opt/magik/.env.prod
+          log "staging.env config written"
+
+          # ── App secrets from SSM (same 9 as production — see
+          #    deploy/aws/README.md 'App secrets in SSM'; staging shares the
+          #    real Qdrant/Redis/Mongo services, isolated by EVAL_USER_ID
+          #    tenant scoping the same way Tier-2 already relies on) ─────────
+          SECRETS_ENV="/opt/magik/.env.secrets"
+          rm -f "$SECRETS_ENV"
+          : > "$SECRETS_ENV"
+          chmod 600 "$SECRETS_ENV"
+          SECRETS_OK="yes"
+          for PARAM_KEY in \
+            "google_client_secret:GOOGLE_CLIENT_SECRET" \
+            "smtp_password:SMTP_PASSWORD" \
+            "secret_key:SECRET_KEY" \
+            "jwt_secret_key:JWT_SECRET_KEY" \
+            "mongo_uri:MONGO_URI" \
+            "qdrant_api_key:QDRANT_API_KEY" \
+            "redis_token:REDIS_TOKEN" \
+            "hf_token:HF_TOKEN" \
+            "tavily_api_key:TAVILY_API_KEY"
+          do
+            SSM_NAME="${PARAM_KEY%%:*}"
+            ENV_KEY="${PARAM_KEY##*:}"
+            VAL="$(aws ssm get-parameter --name "/magik/${SSM_NAME}" \
+                     --with-decryption --query Parameter.Value --output text 2>/dev/null)" \
+              || { log "FATAL: could not read /magik/${SSM_NAME} from SSM"; SECRETS_OK="no"; break; }
+            echo "${ENV_KEY}=${VAL}" >> "$SECRETS_ENV"
+          done
+          if [ "$SECRETS_OK" != "yes" ]; then
+            rm -f "$SECRETS_ENV"
+            log "FATAL: app-secrets fetch from SSM failed — see deploy/aws/README.md 'App secrets in SSM'"
+            exit 1
+          fi
+          log "app secrets fetched from SSM (9/9)"
+
+          # ── Local cache sidecar (staging-scoped name/network) ──────────────
+          docker network create magik-staging-net >/dev/null 2>&1 || true
+          if ! docker ps --filter name=magik-staging-redis --filter status=running -q | grep -q .; then
+            docker rm -f magik-staging-redis >/dev/null 2>&1 || true
+            docker run -d --name magik-staging-redis \
+              --network magik-staging-net --restart unless-stopped \
+              --log-opt max-size=10m --log-opt max-file=2 \
+              redis:7-alpine redis-server \
+                --save "" --appendonly no \
+                --maxmemory 512mb --maxmemory-policy allkeys-lru \
+              || { log "FATAL: could not start magik-staging-redis sidecar"; exit 1; }
+            log "started magik-staging-redis sidecar"
+          else
+            docker network connect magik-staging-net magik-staging-redis >/dev/null 2>&1 || true
+            log "magik-staging-redis already running"
+          fi
+
+          # ── Swap ──────────────────────────────────────────────────────────
+          docker rm -f magik-staging-previous >/dev/null 2>&1 || true
+          docker stop -t 30 magik-staging-current >/dev/null 2>&1 || true
+          docker rename magik-staging-current magik-staging-previous >/dev/null 2>&1 || true
+
+          # -p 127.0.0.1:8000:8000 — NOT 0.0.0.0:8000 — is the "no HTTP, no
+          # Caddy" requirement enforced at the docker layer: nothing outside
+          # this box can reach the app port even if the security group ever
+          # regresses. --env-file ordering: later wins, same as production.
+          docker run -d --name magik-staging-current \
+            --gpus all --restart unless-stopped \
+            --network magik-staging-net \
+            --shm-size=2g \
+            --log-opt max-size=50m --log-opt max-file=3 \
+            -p 127.0.0.1:8000:8000 \
+            --env-file /opt/magik/.env \
+            --env-file /opt/magik/.env.prod \
+            --env-file "$SECRETS_ENV" \
+            -e LOCAL_CACHE_HOST=magik-staging-redis \
+            -e TORCH_HOME=/app/.hf_cache/torch \
+            -v /opt/magik/.hf_cache:/app/.hf_cache \
+            -v /opt/magik/data:/app/data \
+            -v /opt/magik/logs:/app/logs \
+            "$IMG"
+          RUN_STATUS=$?
+          rm -f "$SECRETS_ENV"
+          if [ "$RUN_STATUS" -ne 0 ]; then
+            log "FATAL: docker run failed (port 8000 already held by a non-container process?)"
+            docker rename magik-staging-previous magik-staging-current >/dev/null 2>&1 || true
+            docker start magik-staging-current >/dev/null 2>&1 || true
+            exit 1
+          fi
+
+          # ── Health check ──────────────────────────────────────────────────
+          log "waiting for /health (up to 20 min for cold model load)"
+          for i in $(seq 1 80); do
+            if curl -sf http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              log "HEALTHY after $(( i * 15 ))s"
+              docker ps --filter name=magik-staging-current --format '{{.Names}} {{.Status}}'
+              exit 0
+            fi
+            if ! docker ps -q --filter name=magik-staging-current --filter status=running | grep -q .; then
+              log "FATAL: container exited during startup — last 80 log lines:"
+              docker logs --tail 80 magik-staging-current 2>&1 || true
+              break
+            fi
+            sleep 15
+          done
+
+          log "DEPLOY_HEALTHCHECK_FAILED — last 80 log lines:"
+          docker logs --tail 80 magik-staging-current 2>&1 || true
+          docker rm -f magik-staging-current >/dev/null 2>&1 || true
+          docker rename magik-staging-previous magik-staging-current >/dev/null 2>&1 || true
+          docker start magik-staging-current >/dev/null 2>&1 || true
+          exit 1
+          REMOTE_EOF
+
+          STAGING_ENV_B64="$(base64 -w0 deploy/aws/staging.env)"
+
+          sed -i "s|__IMAGE_REF__|${IMAGE_REF}|g; s|__GH_OWNER__|${GH_OWNER}|g; s|__STAGING_ENV_B64__|${STAGING_ENV_B64}|g" /tmp/remote-deploy.sh
+          SCRIPT_B64="$(base64 -w0 /tmp/remote-deploy.sh)"
+
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "magik staging deploy ${{ needs.build-push.outputs.image_tag }}" \
+            --timeout-seconds 600 \
+            --parameters "{\"commands\":[\"echo $SCRIPT_B64 | base64 -d > /tmp/msd.sh\",\"bash /tmp/msd.sh\"],\"executionTimeout\":[\"3600\"]}" \
+            --query "Command.CommandId" --output text)
+          echo "SSM command: $CMD_ID"
+
+          DEADLINE=$(( SECONDS + 2400 ))
+          STATUS="Pending"
+          while [ "$SECONDS" -lt "$DEADLINE" ]; do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+              --query Status --output text 2>/dev/null || echo "Pending")
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            echo "  ... $STATUS ($SECONDS s elapsed)"
+            sleep 15
+          done
+
+          echo "=== remote stdout ==="
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+            --query StandardOutputContent --output text 2>/dev/null || true
+          echo "=== remote stderr ==="
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+            --query StandardErrorContent --output text 2>/dev/null || true
+
+          [ "$STATUS" = "Success" ] || { echo "::error::SSM staging deploy finished with status: $STATUS"; exit 1; }
+
+      - name: Post deploy summary
+        if: always()
+        run: |
+          echo "## Staging deploy — ${{ needs.build-push.outputs.image_tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Instance: ${{ steps.instance.outputs.id }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notify on failure (Slack, optional)
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        run: |
+          curl -sf -X POST -H "Content-Type: application/json" \
+            -d "{\"text\": \"MAGIK STAGING deploy of ${{ needs.build-push.outputs.image_tag }} FAILED — production was never touched. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "$SLACK_WEBHOOK_URL"
+
+  # -----------------------------------------------------------------------
+  # BLOCKING gate — full Tier-2 suite against staging. promote-production
+  # below `needs` this job, so a failure here (including a timeout, crash, or
+  # a scored retrieval-section breach) leaves promote-production SKIPPED —
+  # production is never deployed. See tier2-eval.yml for the eval/rollback
+  # logic itself (shared with the nightly informational run against prod).
+  # -----------------------------------------------------------------------
+  tier2-staging-gate:
+    needs: deploy-staging
+    uses: ./.github/workflows/tier2-eval.yml
+    secrets: inherit  # pragma: allowlist secret
+    with:
+      container: magik-staging-current
+      previous_container: magik-staging-previous
+      runner_label: staging-gpu
+      environment_label: staging
+      runner_available: ${{ vars.SELF_HOSTED_STAGING_GPU_RUNNER == 'true' }}
+
+  # -----------------------------------------------------------------------
+  # PRODUCTION — the champion→successor swap. Only reachable if
+  # tier2-staging-gate succeeded (default `needs` semantics: this job is
+  # skipped, not run, whenever a dependency fails) — so a bad Tier-2 result on
+  # staging makes this a no-op by construction, no extra `if:` required.
+  # Deploys the EXACT image tag already built once in build-push and already
+  # validated on staging — never rebuilt, never re-tagged.
+  # -----------------------------------------------------------------------
+  promote-production:
+    needs: [build-push, tier2-staging-gate]
     runs-on: ubuntu-latest
     environment: production
     env:
@@ -234,8 +649,9 @@ jobs:
       # JSON → shell), which is a standing source of silent breakage; this
       # form has exactly one quoting boundary.
       - name: Deploy via SSM (pull, swap, health check, auto-rollback)
+        id: deploy
         env:
-          IMAGE_REF: ${{ env.IMAGE }}:${{ needs.build-push.outputs.image_tag }}
+          IMAGE_REF: ${{ needs.build-push.outputs.image }}:${{ needs.build-push.outputs.image_tag }}
           GH_OWNER: ${{ github.repository_owner }}
           INSTANCE_ID: ${{ steps.instance.outputs.id }}
         run: |
@@ -527,12 +943,98 @@ jobs:
 
           [ "$STATUS" = "Success" ] || { echo "::error::SSM deploy finished with status: $STATUS"; exit 1; }
 
+      # ── Monitoring stack (Prometheus/Grafana/Tempo/Loki/OTel) ────────────
+      # Deliberately AFTER the app-container step above and gated on nothing
+      # but `always()` + its own `continue-on-error` — the app promotion has
+      # already succeeded or auto-rolled-back by this point, and that outcome
+      # must never depend on the monitoring box-side stack. monitoring/*.yml
+      # and docker-compose.monitoring.yml live in THIS repo, but the app
+      # deploy above never checks out the repo on the box (it only pulls the
+      # prebuilt image) — so without this step, config changes to the
+      # monitoring stack would only ever reach production by someone
+      # remembering to SSH in and re-run deploy_monitoring.sh by hand (see
+      # deploy/aws/README.md). This closes that gap: bring the box's own
+      # persistent checkout (used only by this script, not the app deploy)
+      # to the exact tag just promoted, then re-run the idempotent script.
+      - name: Sync + redeploy monitoring stack (non-blocking)
+        id: monitoring_deploy
+        if: always() && steps.deploy.outcome == 'success'
+        continue-on-error: true
+        env:
+          GIT_REF: ${{ github.ref_name }}
+          INSTANCE_ID: ${{ steps.instance.outputs.id }}
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/remote-monitoring.sh <<'REMOTE_EOF'
+          set -uo pipefail
+          REF="__GIT_REF__"
+          REPO_DIR="/home/ubuntu/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT"
+          log(){ echo "[monitoring-sync] $*"; }
+
+          [ -d "${REPO_DIR}/.git" ] \
+            || { log "FATAL: ${REPO_DIR} is not a git checkout — see deploy/aws/README.md 'Monitoring-stack secrets in SSM'"; exit 1; }
+          cd "${REPO_DIR}"
+
+          # Bring the box's checkout to the SAME tag that was just promoted —
+          # not just `git pull` on a branch — so monitoring config on the box
+          # always matches what's actually running, never a moving branch tip.
+          git fetch --tags origin >/dev/null 2>&1 \
+            || { log "FATAL: git fetch failed"; exit 1; }
+          git checkout -q "${REF}" \
+            || { log "FATAL: git checkout ${REF} failed"; exit 1; }
+          git reset -q --hard "${REF}" \
+            || { log "FATAL: git reset --hard ${REF} failed"; exit 1; }
+          log "checkout now at $(git rev-parse --short HEAD) (${REF})"
+
+          bash deploy/aws/scripts/deploy_monitoring.sh
+          REMOTE_EOF
+
+          sed -i "s|__GIT_REF__|${GIT_REF}|g" /tmp/remote-monitoring.sh
+          SCRIPT_B64="$(base64 -w0 /tmp/remote-monitoring.sh)"
+
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "magik monitoring sync ${GIT_REF}" \
+            --timeout-seconds 300 \
+            --parameters "{\"commands\":[\"echo $SCRIPT_B64 | base64 -d > /tmp/mm.sh\",\"bash /tmp/mm.sh\"],\"executionTimeout\":[\"600\"]}" \
+            --query "Command.CommandId" --output text)
+          echo "SSM command: $CMD_ID"
+
+          # Shorter cap than the app deploy's 40 min — this only pulls small
+          # config images and restarts containers already on the box, no
+          # multi-GB model pull or cold GPU load to wait through.
+          DEADLINE=$(( SECONDS + 600 ))
+          STATUS="Pending"
+          while [ "$SECONDS" -lt "$DEADLINE" ]; do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+              --query Status --output text 2>/dev/null || echo "Pending")
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            echo "  ... $STATUS ($SECONDS s elapsed)"
+            sleep 15
+          done
+
+          echo "=== remote stdout ==="
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+            --query StandardOutputContent --output text 2>/dev/null || true
+          echo "=== remote stderr ==="
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+            --query StandardErrorContent --output text 2>/dev/null || true
+
+          [ "$STATUS" = "Success" ] || { echo "::error::monitoring-stack sync finished with status: $STATUS"; exit 1; }
+
       - name: Post deploy summary
         if: always()
         run: |
-          echo "## Deploy — ${{ needs.build-push.outputs.image_tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Promote to production — ${{ needs.build-push.outputs.image_tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Validated on staging by tier2-staging-gate before this ran." >> "$GITHUB_STEP_SUMMARY"
           echo "- Instance: ${{ steps.instance.outputs.id }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- Result: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Monitoring stack sync: ${{ steps.monitoring_deploy.outcome || 'skipped (app deploy did not succeed)' }}" >> "$GITHUB_STEP_SUMMARY"
 
       # A failed deploy here may already have auto-rolled-back on the box
       # (see the SSM script's own rollback branch) — either way this is the
@@ -543,34 +1045,18 @@ jobs:
         if: failure() && env.SLACK_WEBHOOK_URL != ''
         run: |
           curl -sf -X POST -H "Content-Type: application/json" \
-            -d "{\"text\": \"MAGIK deploy of ${{ needs.build-push.outputs.image_tag }} FAILED — may have auto-rolled-back to the previous image. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            -d "{\"text\": \"MAGIK production promotion of ${{ needs.build-push.outputs.image_tag }} FAILED — may have auto-rolled-back to the previous image. Staging had already passed Tier-2. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
             "$SLACK_WEBHOOK_URL"
 
-  post-deploy-eval:
-    needs: deploy
-    runs-on: ubuntu-latest
-    # Job-level override: the workflow-level default above is `contents:
-    # read`. repository_dispatch's underlying REST call (POST /repos/{owner}/
-    # {repo}/dispatches) needs `contents: write` on the token even for a
-    # same-repo dispatch (confirmed against GitHub's own docs/community
-    # guidance, 2026-07-25 — see docs/runbooks/ci-cd.md) — without this the
-    # dispatch call 403s and Tier-2 silently never fires. GITHUB_TOKEN itself
-    # is fine here (no PAT needed): the "GITHUB_TOKEN can't trigger other
-    # workflows" restriction has an explicit exception for repository_dispatch
-    # and workflow_dispatch, and a same-repo dispatch doesn't need the
-    # cross-repo `repo`-scoped PAT that a remote-repo dispatch would.
-    permissions:
-      contents: write
-    # Tier-2 runs on `[self-hosted, gpu]`. Until that runner is registered on
-    # the box (Phase 30 Stage 5), dispatching only produces a run that sits
-    # QUEUED forever waiting for a runner that will never appear — noise, not
-    # signal. Set repo variable SELF_HOSTED_GPU_RUNNER=true once `gh runner
-    # list` shows an online `gpu` runner; until then this job skips cleanly
-    # (grey, not red) instead of queueing a phantom eval.
-    if: vars.SELF_HOSTED_GPU_RUNNER == 'true'
-    steps:
-      - name: Dispatch Tier-2 full eval suite
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          event-type: post-deploy-eval
+      # Separate from the app-deploy failure notification above: this is the
+      # monitoring stack specifically. The app promotion already succeeded
+      # (this step only runs `if: steps.deploy.outcome == 'success'`), so a
+      # failure here is a "go check Grafana/Prometheus on the box" ticket,
+      # never a "production app is down" incident — worded accordingly so
+      # on-call doesn't confuse the two at 2am.
+      - name: Notify on monitoring-sync failure (Slack, optional)
+        if: steps.monitoring_deploy.outcome == 'failure' && env.SLACK_WEBHOOK_URL != ''
+        run: |
+          curl -sf -X POST -H "Content-Type: application/json" \
+            -d "{\"text\": \"MAGIK monitoring-stack sync FAILED after promoting ${{ needs.build-push.outputs.image_tag }} — the app itself deployed fine, but Grafana/Prometheus/Loki/Tempo on the box may now be stale or down. Not a production-app incident. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "$SLACK_WEBHOOK_URL"

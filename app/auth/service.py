@@ -64,6 +64,24 @@ def _get_mongo_collection():
     return db[settings.AUTH_COLLECTION]
 
 
+def demo_account_email() -> str:
+    """Normalised address of the one fixed public demo login ("" = disabled)."""
+    return (settings.DEMO_ACCOUNT_EMAIL or "").strip().lower()
+
+
+def is_demo_account(user: UserPublic) -> bool:
+    """True when this login is the shared public demo account.
+
+    Checks the configured address as well as the stored `is_demo` flag: the
+    flag only exists once `app/bin/seed_demo_account.py` has been run against
+    that environment's Mongo, and a deploy/`git clone` doesn't do database
+    writes. Recruiters hitting a fresh environment must never be handed an
+    OTP challenge for a mailbox nobody reads.
+    """
+    demo = demo_account_email()
+    return bool(user.is_demo) or (bool(demo) and user.email.strip().lower() == demo)
+
+
 def _doc_to_public(doc: dict) -> UserPublic:
     return UserPublic(
         user_id=doc["user_id"],
@@ -270,6 +288,19 @@ class AuthService:
         col = _get_mongo_collection()
         col.update_one({"user_id": user_id}, {"$set": {"is_active": False}})
         logger.info(event="auth_user_deactivated", user_id=user_id)
+
+    def mark_demo(self, user_id: str) -> None:
+        """Persist `is_demo` on an account that matched DEMO_ACCOUNT_EMAIL.
+
+        Self-healing only — the login bypass never depends on this having
+        run (see is_demo_account); it just converges the stored document so
+        the flag is right for anything that reads it later (/auth/me, the
+        seed script's report). Best-effort by design: callers must not fail a
+        login because this write failed.
+        """
+        col = _get_mongo_collection()
+        col.update_one({"user_id": user_id}, {"$set": {"is_demo": True}})
+        logger.info(event="auth_demo_flag_backfilled", user_id=user_id)
 
     def seed_demo_user(self, email: str, password: str) -> UserPublic:
         """Create or reset the one fixed, publicly-shared demo account.

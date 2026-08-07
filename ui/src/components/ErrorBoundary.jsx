@@ -12,7 +12,10 @@ export default class ErrorBoundary extends Component {
   }
 
   componentDidCatch(error, info) {
-    console.error('[MAGIK] Unhandled render error:', error, info.componentStack)
+    // Log only the message + component stack (component names, not props/state
+    // or full error objects) — never risk printing something that embeds a
+    // URL or response body a caught error happened to carry.
+    console.error('[MAGIK] Unhandled render error:', error?.message || String(error), info.componentStack)
   }
 
   render() {

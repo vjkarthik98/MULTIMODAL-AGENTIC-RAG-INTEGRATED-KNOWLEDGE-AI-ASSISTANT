@@ -180,6 +180,18 @@ _STOP_TOKENS = [
     "<|endoftext|>",
 ]
 
+
+def _seed_kwarg(seed: int | None) -> dict[str, int]:
+    """`{"seed": n}` when a caller asked for a specific seed, `{}` otherwise.
+
+    Only regeneration passes one (app/llm/regeneration.py). Every other call
+    omits the kwarg entirely rather than sending a default, so the sampler's
+    existing behaviour on the normal answer path is byte-for-byte unchanged
+    by this parameter existing.
+    """
+    return {} if seed is None else {"seed": int(seed)}
+
+
 # ARTIFACT PREFIXES TO STRIP
 
 _STRIP_PREFIXES = [
@@ -240,6 +252,9 @@ class _LlamaServerClient:
             "min_p": kwargs.get("min_p"),
             "repeat_penalty": kwargs.get("repeat_penalty"),
             "stop": kwargs.get("stop"),
+            # Only sent when a caller explicitly asked for one (regeneration);
+            # omitted otherwise so the server keeps its own default behaviour.
+            "seed": kwargs.get("seed"),
             "stream": True,
         }
         payload = {k: v for k, v in payload.items() if v is not None}
@@ -497,6 +512,7 @@ class GGUFModel:
         top_p: float | None = None,
         retries: int = 2,
         session_id: str = "",
+        seed: int | None = None,
     ) -> str:
 
         prompt = self._normalize(prompt)
@@ -556,6 +572,7 @@ class GGUFModel:
                             repeat_penalty=settings.LLM_REPEAT_PENALTY,
                             stop=_STOP_TOKENS,
                             stream=True,
+                            **_seed_kwarg(seed),
                         ):
                             tok = chunk["choices"][0]["text"]
                             if tok:
@@ -651,6 +668,7 @@ class GGUFModel:
         temperature: float | None = None,
         top_p: float | None = None,
         session_id: str = "",
+        seed: int | None = None,
     ) -> Iterator[str]:
 
         prompt = self._normalize(prompt)
@@ -704,6 +722,7 @@ class GGUFModel:
                             repeat_penalty=settings.LLM_REPEAT_PENALTY,
                             stop=_STOP_TOKENS,
                             stream=True,
+                            **_seed_kwarg(seed),
                         ):
                             tok_q.put(chunk)
                 except RuntimeError as _re:

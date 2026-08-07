@@ -42,10 +42,16 @@ def test_xlsx_sheet_locator_from_text_prefix_legacy():
         assert chip["section_title"] == "Legacy Sheet"
 
 
-def test_image_caption_locator():
+def test_image_title_locator():
+    # An image is cited by `image_title` (the chart's own printed title), NOT
+    # by section_title: the caption is a multi-paragraph VLM analysis dump and
+    # deliberately never lands on the chip. This test still asserted the old
+    # caption->section_title contract and had been failing since that change.
     for chip in _both({"source": "gdp.jpg", "modality": "image",
-                       "caption": "Bar chart of GDP growth"}):
-        assert chip["section_title"] == "Bar chart of GDP growth"
+                       "image_title": "Bar chart of GDP growth",
+                       "caption": "A bar chart showing GDP growth. " * 20}):
+        assert chip["image_title"] == "Bar chart of GDP growth"
+        assert chip["section_title"] is None, "the caption dump must not become the locator"
 
 
 def test_audio_timestamp_locator():

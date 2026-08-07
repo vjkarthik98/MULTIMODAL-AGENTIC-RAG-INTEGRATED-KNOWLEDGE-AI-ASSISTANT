@@ -4,11 +4,18 @@ import asyncio
 import os
 import urllib.parse
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field
 
+from app.auth.cookies import (
+    clear_auth_cookies,
+    read_access_cookie,
+    read_device_cookie,
+    read_refresh_cookie,
+    set_auth_cookies,
+)
 from app.auth.dependencies import get_current_user
 from app.auth.jwt_handler import issue_tokens, refresh_access_token, verify_token
 from app.auth.mfa import MFAService, _issue_mfa_token
@@ -30,7 +37,7 @@ from app.auth.oauth import (
     get_or_create_oauth_user,
     google_oauth_enabled,
 )
-from app.auth.service import AuthService
+from app.auth.service import AuthService, is_demo_account
 from app.auth.token_blacklist import revoke_all_user_tokens, revoke_token
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -84,7 +91,7 @@ async def register(req: RegisterRequest):
 
 
 @router.post("/login")
-async def login(req: LoginRequest):
+async def login(req: LoginRequest, request: Request, response: Response):
     """
     Step 1 of login: verify email + password.
     Always returns {"otp_required": true, "otp_token": "..."} — the client
@@ -99,12 +106,22 @@ async def login(req: LoginRequest):
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
 
-    # Fixed demo account (app/bin/seed_demo_account.py) — always skips OTP.
-    # It's a single publicly-shared login with a known password, so an email
-    # round-trip would only add friction for whoever's holding the
-    # credentials, not add any real verification value.
-    if user.is_demo:
+    # Fixed demo account (settings.DEMO_ACCOUNT_EMAIL, seeded by
+    # app/bin/seed_demo_account.py) — always skips OTP. It's a single
+    # publicly-shared login with a known password, so an email round-trip
+    # would only add friction for whoever's holding the credentials, not add
+    # any real verification value. Matched on the configured address OR the
+    # stored is_demo flag, so the bypass holds even in an environment where
+    # the seed script hasn't been run against Mongo yet.
+    if is_demo_account(user):
         tokens = issue_tokens(user.user_id, user.email, user.role.value)
+        set_auth_cookies(response, tokens)
+        if not user.is_demo:
+            # Backfill the stored flag; a failed write must not fail the login.
+            try:
+                await asyncio.to_thread(_svc.mark_demo, user.user_id)
+            except Exception as exc:
+                logger.warning(event="demo_flag_backfill_failed", error=str(exc))
         logger.info(event="login_demo_account", user_id=user.user_id)
         return TokenPair(**tokens).model_dump()
 
@@ -114,20 +131,27 @@ async def login(req: LoginRequest):
     # tenant. Never the shared demo login — see UserInDB.is_load_test.
     if user.is_load_test:
         tokens = issue_tokens(user.user_id, user.email, user.role.value)
+        set_auth_cookies(response, tokens)
         logger.info(event="login_load_test_account", user_id=user.user_id)
         return TokenPair(**tokens).model_dump()
 
-    # Check for a trusted device token — skip OTP if valid
+    # Check for a trusted device token — skip OTP if valid. The browser client
+    # never puts this in the request body (it's an httpOnly cookie, path
+    # /auth, so it rides along automatically); req.device_token is kept only
+    # so non-browser callers (tests, the seeded-account tooling) can still
+    # pass it explicitly.
     from app.auth.email_service import send_otp_email
     from app.auth.otp_store import generate_otp, store_otp, verify_device_token
 
-    if req.device_token:
+    device_token = read_device_cookie(request) or req.device_token
+    if device_token:
         try:
-            trusted = await asyncio.to_thread(verify_device_token, req.device_token, user.user_id)
+            trusted = await asyncio.to_thread(verify_device_token, device_token, user.user_id)
             if trusted:
                 tokens = issue_tokens(user.user_id, user.email, user.role.value)
+                set_auth_cookies(response, tokens, device_token=device_token)
                 logger.info(event="login_trusted_device", user_id=user.user_id)
-                return {**TokenPair(**tokens).model_dump(), "device_token": req.device_token}
+                return {**TokenPair(**tokens).model_dump(), "device_token": device_token}
         except Exception:
             pass  # Redis unavailable — fall through to OTP
 
@@ -152,7 +176,7 @@ async def login(req: LoginRequest):
 
 
 @router.post("/verify-otp")
-async def verify_otp(req: OTPVerifyRequest):
+async def verify_otp(req: OTPVerifyRequest, response: Response):
     """
     Step 2 of login: submit the 6-digit OTP received by email.
     Returns a full JWT access + refresh token pair on success.
@@ -208,6 +232,7 @@ async def verify_otp(req: OTPVerifyRequest):
         device_token = None  # Redis unavailable — don't break login, just skip
 
     tokens = issue_tokens(user.user_id, user.email, user.role.value)
+    set_auth_cookies(response, tokens, device_token=device_token)
     logger.info(event="otp_verified_complete", user_id=user_id)
     return {**TokenPair(**tokens).model_dump(), "device_token": device_token}
 
@@ -281,6 +306,24 @@ async def resend_otp(req: OTPResendRequest):
     return {"sent": True, "cooldown_seconds": settings.OTP_RESEND_COOLDOWN_SECONDS}
 
 
+async def _revoke_trusted_devices(user_id: str, *, event: str) -> None:
+    """Drop every remembered-browser token for this user.
+
+    A trusted-device token is a standing OTP exemption for one browser, held
+    in Redis for 30 days and completely independent of the JWT blacklist —
+    so revoking tokens alone leaves it intact and the next login still walks
+    straight past the email code. Every "this user's trust is being reset"
+    event must therefore call both. Best-effort: Redis being down must not
+    fail the password change / logout-all that triggered it.
+    """
+    try:
+        from app.auth.otp_store import revoke_device_tokens
+
+        await asyncio.to_thread(revoke_device_tokens, user_id)
+    except Exception as exc:
+        logger.warning(event=event, user_id=user_id, error=str(exc))
+
+
 # ── Login (OAuth2 form — enables /docs "Authorize" button) ───────────────────
 
 
@@ -305,16 +348,31 @@ async def login_form(form: OAuth2PasswordRequestForm = Depends()) -> TokenPair:
 
 
 @router.post("/refresh", response_model=TokenPair)
-async def refresh(req: RefreshRequest) -> TokenPair:
-    """Exchange a valid refresh token for a new access + refresh token pair."""
+async def refresh(
+    request: Request, response: Response, req: RefreshRequest = RefreshRequest()
+) -> TokenPair:
+    """Exchange a valid refresh token for a new access + refresh token pair.
+
+    The browser client sends no body at all and relies on the httpOnly
+    magik_refresh cookie; API/CLI/test clients may still pass refresh_token
+    explicitly in the JSON body.
+    """
+    refresh_token = read_refresh_cookie(request) or req.refresh_token
+    if not refresh_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No refresh token provided",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     try:
-        tokens = await asyncio.to_thread(refresh_access_token, req.refresh_token)
+        tokens = await asyncio.to_thread(refresh_access_token, refresh_token)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(exc),
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
+    set_auth_cookies(response, tokens)
     return TokenPair(**tokens)
 
 
@@ -373,7 +431,12 @@ async def google_callback(
     """
     Step 2 — Google redirects back here with ?code=...&state=...
     Exchanges the code for user info, get-or-creates the account, issues a JWT,
-    then redirects the browser to the Gradio UI with the token in URL params.
+    sets it as an httpOnly cookie on the redirect response, then sends the
+    browser back to the frontend with NO token material in the URL — a query
+    string ends up in browser history and any proxy/server access log, so the
+    old "?magik_token=...&magik_refresh=..." handoff leaked both tokens there
+    for as long as they lived. The frontend now just detects ?oauth=1 and
+    calls /auth/me, which authenticates via the cookie this response sets.
     """
     _gradio_url = os.getenv("FRONTEND_URL", os.getenv("GRADIO_URL", "http://localhost:5173"))
 
@@ -411,13 +474,9 @@ async def google_callback(
     tokens = issue_tokens(user.user_id, user.email, user.role.value)
     logger.info(event="google_oauth_login_success", email=email, user_id=user.user_id)
 
-    redirect_url = (
-        f"{_gradio_url}"
-        f"?magik_token={urllib.parse.quote(tokens['access_token'], safe='')}"
-        f"&magik_refresh={urllib.parse.quote(tokens['refresh_token'], safe='')}"
-        f"&magik_email={urllib.parse.quote(email, safe='')}"
-    )
-    return RedirectResponse(url=redirect_url, status_code=302)
+    redirect = RedirectResponse(url=f"{_gradio_url}?oauth=1", status_code=302)
+    set_auth_cookies(redirect, tokens)
+    return redirect
 
 
 # ── Forgot password ───────────────────────────────────────────────────────────
@@ -473,12 +532,7 @@ async def reset_password(req: ResetPasswordRequest) -> dict:
 
     revoke_all_user_tokens(user_id)
     # Revoke trusted devices so all remembered browsers must re-verify after a reset
-    try:
-        from app.auth.otp_store import revoke_device_tokens
-
-        await asyncio.to_thread(revoke_device_tokens, user_id)
-    except Exception:
-        pass
+    await _revoke_trusted_devices(user_id, event="password_reset_device_revoke_failed")
     logger.info(event="password_reset_complete", user_id=user_id)
     return {"status": "ok", "message": "Password updated. Please sign in with your new password."}
 
@@ -489,17 +543,20 @@ async def reset_password(req: ResetPasswordRequest) -> dict:
 @router.post("/logout", status_code=status.HTTP_200_OK)
 async def logout(
     request: Request,
+    response: Response,
     body: LogoutRequest | None = None,
     current_user: UserPublic = Depends(get_current_user),
 ) -> dict:
     """Revoke the current access token — and the refresh token, if surrendered —
     immediately via the Redis blacklist, so logout fully ends the session rather
     than leaving a long-lived refresh token usable until it naturally expires."""
-    auth_header = request.headers.get("Authorization", "")
-    token = auth_header.removeprefix("Bearer ").strip()
-    if token:
+    access_token = (
+        read_access_cookie(request)
+        or request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    )
+    if access_token:
         try:
-            payload = verify_token(token, expected_type="access")
+            payload = verify_token(access_token, expected_type="access")
             jti = payload.get("jti", "")
             exp = payload.get("exp", 0)
             if jti:
@@ -507,9 +564,10 @@ async def logout(
         except ValueError:
             pass  # already invalid — no-op
 
-    if body and body.refresh_token:
+    refresh_token = read_refresh_cookie(request) or (body.refresh_token if body else None)
+    if refresh_token:
         try:
-            r_payload = verify_token(body.refresh_token, expected_type="refresh")
+            r_payload = verify_token(refresh_token, expected_type="refresh")
             r_jti = r_payload.get("jti", "")
             r_exp = r_payload.get("exp", 0)
             if r_jti:
@@ -517,6 +575,7 @@ async def logout(
         except ValueError:
             pass  # already invalid — no-op
 
+    clear_auth_cookies(response)
     logger.info(event="user_logged_out", user_id=current_user.user_id)
     return {"status": "ok", "message": "Logged out successfully"}
 
@@ -526,10 +585,16 @@ async def logout(
 
 @router.post("/logout-all", status_code=status.HTTP_200_OK)
 async def logout_all(
+    response: Response,
     current_user: UserPublic = Depends(get_current_user),
 ) -> dict:
     """Invalidate ALL active tokens for this user (useful if account compromised)."""
     revoke_all_user_tokens(current_user.user_id)
+    # Trusted devices too: this is the "my account is compromised" button, and
+    # leaving the attacker's browser its 30-day OTP exemption would defeat the
+    # point of pressing it.
+    await _revoke_trusted_devices(current_user.user_id, event="logout_all_device_revoke_failed")
+    clear_auth_cookies(response)
     logger.info(event="user_all_tokens_revoked", user_id=current_user.user_id)
     return {"status": "ok", "message": "All sessions have been terminated"}
 
@@ -545,6 +610,7 @@ class PasswordChangeRequest(BaseModel):
 @router.post("/password", status_code=status.HTTP_200_OK)
 async def change_password(
     req: PasswordChangeRequest,
+    response: Response,
     current_user: UserPublic = Depends(get_current_user),
 ) -> dict:
     """
@@ -563,6 +629,14 @@ async def change_password(
 
     # Invalidate all tokens — user must log in again
     revoke_all_user_tokens(current_user.user_id)
+    # …and every remembered browser, so the re-login actually re-verifies by
+    # email instead of being waved through by a device token that predates
+    # the password change. Matches /auth/reset-password, which already did
+    # both — a change from Settings is the same trust-reset event.
+    await _revoke_trusted_devices(
+        current_user.user_id, event="password_change_device_revoke_failed"
+    )
+    clear_auth_cookies(response)
     logger.info(event="password_changed", user_id=current_user.user_id)
     return {"status": "ok", "message": "Password changed. All sessions have been terminated."}
 
@@ -616,7 +690,7 @@ async def mfa_verify_enroll(
 
 
 @router.post("/mfa/verify", response_model=TokenPair)
-async def mfa_verify_login(req: MFAVerifyLoginRequest) -> TokenPair:
+async def mfa_verify_login(req: MFAVerifyLoginRequest, response: Response) -> TokenPair:
     """
     After password login returns mfa_required=true, verify the TOTP code here.
     Returns the full JWT access + refresh token pair.
@@ -635,6 +709,7 @@ async def mfa_verify_login(req: MFAVerifyLoginRequest) -> TokenPair:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
     tokens = issue_tokens(user.user_id, user.email, user.role.value)
+    set_auth_cookies(response, tokens)
     return TokenPair(**tokens)
 
 
@@ -666,6 +741,7 @@ async def mfa_status(
 @router.delete("/me", status_code=status.HTTP_200_OK)
 async def delete_me(
     request: Request,
+    response: Response,
     current_user: UserPublic = Depends(get_current_user),
 ) -> dict:
     """
@@ -739,6 +815,7 @@ async def delete_me(
     except Exception as exc:
         logger.warning(event="gdpr_user_doc_delete_failed", user_id=user_id, error=str(exc))
 
+    clear_auth_cookies(response)
     logger.info(event="gdpr_self_purge_completed", user_id=user_id)
 
     return {

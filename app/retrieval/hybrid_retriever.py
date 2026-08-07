@@ -516,6 +516,20 @@ class HybridRetriever:
 
     # FUSE INTO COMBINED MAP
 
+    @staticmethod
+    def _merge_missing_metadata(target: dict, other: dict) -> None:
+        """Fill keys `target` is missing (or has as None) from `other`.
+
+        Deliberately additive only — an existing non-None value always wins, so
+        this can never change a locator that was already resolved, only supply
+        one that was absent.
+        """
+        for k, v in (other or {}).items():
+            if v is None:
+                continue
+            if target.get(k) is None:
+                target[k] = v
+
     def _fuse(
         self,
         combined: dict[str, dict],
@@ -549,6 +563,19 @@ class HybridRetriever:
             else:
                 combined[h]["score"] += combined_score
                 combined[h]["sources"].add(source_tag)
+                # The same chunk reached us from two retrievers, and they do NOT
+                # carry identical metadata: the dense hit has the full Qdrant
+                # payload, while the BM25 hit has only the subset its index
+                # records. Keeping just the first writer's dict silently drops
+                # whatever only the other one knows — and BM25 is fused first
+                # here, so any chunk that BM25 also matched lost the dense-only
+                # citation fields (this is how image chunks lost `image_title`
+                # and rendered as a bare filename chip). Fill in only what is
+                # missing: the winner's real values are never overwritten, so
+                # ranking and every populated field stay exactly as before.
+                self._merge_missing_metadata(combined[h]["metadata"], meta)
+                if combined[h].get("embedding") is None and r.get("embedding") is not None:
+                    combined[h]["embedding"] = r.get("embedding")
 
     # METADATA FILTER
 

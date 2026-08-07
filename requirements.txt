@@ -214,6 +214,16 @@ detoxify>=0.5
 # Authentication
 # ------------------------------------------------------------------------------
 passlib[argon2]>=1.7.4
+# Upper bound pinned: passlib 1.7.4 (unmaintained) probes its bcrypt backend
+# with a >72-byte password. bcrypt 4.x truncated it; bcrypt 5.x raises
+# ValueError("password cannot be longer than 72 bytes") instead, so the whole
+# bcrypt scheme fails to initialise. Nothing errors at install time — it
+# surfaces at runtime the first time bcrypt is actually used, which here is
+# MFA backup-code hashing (app/auth/mfa.py::_generate_backup_codes) and
+# verifying any legacy bcrypt password hash. Argon2 is the primary scheme and
+# is unaffected, which is exactly why this can sit unnoticed. Confirmed live
+# 2026-08-06: 4.3.0 initialises cleanly, 5.0.0 does not.
+bcrypt>=4.0,<5
 python-jose[cryptography]>=3.3.0
 zxcvbn-python>=4.4.1
 authlib>=1.3.0

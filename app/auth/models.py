@@ -114,7 +114,10 @@ class TokenPair(BaseModel):
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str = Field(..., min_length=10)
+    # Optional: the browser client sends none and relies on the httpOnly
+    # magik_refresh cookie instead (see app/auth/router.py::refresh).
+    # API/CLI/test clients may still pass it explicitly in the body.
+    refresh_token: str | None = Field(None, min_length=10)
 
 
 class LogoutRequest(BaseModel):

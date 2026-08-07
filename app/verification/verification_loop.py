@@ -111,6 +111,7 @@ class VerificationLoop:
         modality_hint: str | None = None,
         filters: dict[str, Any] | None = None,
         memory_context: str = "",
+        regenerate: bool = False,
     ) -> tuple[str, VerificationReport]:
 
         modality_hint = normalize_modality(modality_hint) if modality_hint else modality_hint
@@ -125,6 +126,7 @@ class VerificationLoop:
                 initial_docs,
                 initial_sources,
                 memory_context,
+                regenerate,
             )
 
         start = time.time()
@@ -185,6 +187,12 @@ class VerificationLoop:
                     session_id,
                     sources,
                     user_id,
+                    # Baseline only. Attempts 1-4 are the verifier's own
+                    # targeted re-asks against a re-queried doc set; they are
+                    # already a different generation, and giving them the
+                    # "your last answer was rejected" directive would tell the
+                    # model the wrong thing about which answer was rejected.
+                    regenerate and attempt_number == 0,
                 )
             except Exception:
                 if attempt_number == 0:
@@ -313,11 +321,26 @@ class VerificationLoop:
     # INTERNALS
 
     def _passthrough(
-        self, query, session_id, user_id, reasoning_engine, docs, sources, memory_context
+        self,
+        query,
+        session_id,
+        user_id,
+        reasoning_engine,
+        docs,
+        sources,
+        memory_context,
+        regenerate: bool = False,
     ) -> tuple[str, VerificationReport]:
         """Verification disabled globally or opted out for this modality."""
         answer, cited_sources = self._generate(
-            reasoning_engine, query, docs or [], memory_context, session_id, sources, user_id
+            reasoning_engine,
+            query,
+            docs or [],
+            memory_context,
+            session_id,
+            sources,
+            user_id,
+            regenerate,
         )
         scores = ConfidenceScores(retrieval=100.0, grounding=100.0, citation=100.0, overall=100.0)
         report = VerificationReport(
@@ -334,6 +357,7 @@ class VerificationLoop:
         session_id: str,
         sources: list[dict[str, Any]] | None,
         user_id: str | None,
+        regenerate: bool = False,
     ) -> tuple[str, list[dict[str, Any]]]:
         """Returns (answer, cited_sources). `cited_sources` is
         generate_answer()'s OWN citation-filtered subset (empty for a
@@ -348,6 +372,7 @@ class VerificationLoop:
             session_id=session_id,
             sources=sources or None,
             user_id=user_id or "",
+            regenerate=regenerate,
         )
         answer = (out.get("answer") or "").strip()
         cited = out.get("sources")

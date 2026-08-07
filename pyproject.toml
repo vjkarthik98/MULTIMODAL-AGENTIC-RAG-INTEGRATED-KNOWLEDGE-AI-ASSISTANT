@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 
 [project]
-name            = "multimodal-rag-assistant"
-version         = "0.29.0"
+name            = "MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT"
+version         = "0.30.0"
 description     = "Production Multimodal RAG + Agentic AI System — Phase 31"
 readme          = "README.md"
 requires-python = ">=3.10"
@@ -197,10 +197,19 @@ test = [
     "httpx>=0.27",
 ]
 
+# Formatters are UPPER-BOUNDED on purpose. A bare `black>=24.3` resolves to
+# whatever is newest at CI time, so a new black release reformats files nobody
+# touched and turns `black --check` red on an unrelated PR — which is exactly
+# what happened (2026-08-07: CI had been green on 2026-08-03, then a newer
+# black wanted to re-wrap 5 untouched files). A formatter's output IS the
+# contract here, so its version belongs pinned to a major line. Bump these
+# deliberately, in their own commit, so the reformat diff is reviewable on its
+# own rather than buried inside a feature PR. `ruff check` (lint rules, not
+# formatting) is far less prone to this, but is bounded for the same reason.
 lint = [
-    "black>=24.3",
-    "ruff>=0.4",
-    "isort>=5.13",
+    "black>=24.3,<27",
+    "ruff>=0.4,<1",
+    "isort>=5.13,<7",
 ]
 
 typecheck = [
@@ -224,7 +233,7 @@ quality = [
 ]
 
 dev = [
-    "multimodal-rag-assistant[test,lint,typecheck,security,quality]",
+    "MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT[test,lint,typecheck,security,quality]",
     "pre-commit>=3.7",
     "detect-secrets>=1.5",
 ]
