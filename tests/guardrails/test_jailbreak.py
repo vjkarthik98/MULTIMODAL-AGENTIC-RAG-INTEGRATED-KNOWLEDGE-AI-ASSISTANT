@@ -205,6 +205,16 @@ class TestJailbreakFalsePositives:
         result = jb.check(prompt)
         assert not result.is_jailbreak
 
+    def test_analyst_named_dan_not_jailbreak(self):
+        """Regression for the 2026-08-08 ingestion bug — the old DAN pattern
+        ('\\bdan\\s*(?:mode|prompt)?\\b') matched the bare name "Dan" (e.g.
+        analyst Dan Ives, a frequent presence on real Apple earnings calls)
+        with no jailbreak context at all. A person's name is not a jailbreak.
+        """
+        _reset_jailbreak()
+        result = jb.check("What did Dan Ives say about iPhone revenue on the earnings call?")
+        assert not result.is_jailbreak
+
 
 # ---------------------------------------------------------------------------
 # 6. INITIALIZATION AND STATE

@@ -650,18 +650,39 @@ def _prepend_key_facts_knowledge(  # noqa: C901 -- known complexity debt (184), 
         except Exception:
             return []
 
-    # VIDEO / EARNINGS-CALL prefix — surface the query-specific fact sentence(s).
-    # An earnings-call speaker turn packs many figures into one chunk (e.g. a
-    # single turn states "$28.8B Services ... EPS $1.85 ... $416B for the fiscal
-    # year"); a small model reading the whole chunk answers with the first/most
-    # prominent figure rather than the one the question asks for. Extract the
-    # sentences that best match the query intent AND carry a figure, and prepend
-    # them so the model answers the specific question. Strictly gated on video
-    # (mp4) docs — no effect on any other modality. Generic (no file-specific
-    # facts): pure query-to-sentence extraction over the retrieved video chunks.
+    # VIDEO/AUDIO / EARNINGS-CALL & PRESS-CONFERENCE prefix — surface the
+    # query-specific fact sentence(s). A speaker turn (earnings-call OR FOMC
+    # press-conference Q&A) packs many figures into one chunk (e.g. a single
+    # turn states "$28.8B Services ... EPS $1.85 ... $416B for the fiscal
+    # year", or a press-conference answer covers PCE, core PCE, and the
+    # unemployment rate in one breath); a small model reading the whole chunk
+    # answers with the first/most prominent figure rather than the one the
+    # question asks for. Extract the sentences that best match the query
+    # intent AND carry a figure, and prepend them so the model answers the
+    # specific question. Gated on video (mp4) and audio (mp3) docs — no
+    # effect on any other modality. Generic (no file-specific facts): pure
+    # query-to-sentence extraction over the retrieved chunks.
+    #
+    # HISTORY. An audio (mp3) extension + wider candidate window was tried and
+    # reverted (2026-08-08): it fixed hand-picked cases but measured
+    # net-negative on the full video generation suite (answer_correctness
+    # 0.45->0.39, hallucination_rate 0.27->0.45 even after removing the worst
+    # offender) — the then-current keyword-overlap scorer was wrong often
+    # enough (picking a topically-adjacent but incorrect sentence) that
+    # widening its reach surfaced more bad matches than good ones. The
+    # conclusion drawn at the time was that reach was the problem; it was not.
+    # PRECISION was. The scorer below has since been rebuilt around IDF
+    # weighting, a structural subject span and a quarter-vs-full-year penalty,
+    # which is what made the extra reach safe — the window is now 10, and the
+    # suite improved rather than regressed. Re-tried on audio against the new
+    # scorer (2026-08-08): fixed multiple FOMC press-conference rows that were
+    # answering with a different, more "prominent" chunk (usually the rate-
+    # decision announcement) than the one the question actually asked about —
+    # confirmed the audio generation suite improved, not regressed.
     _top_mods = [(d.get("metadata") or {}).get("modality") for d in docs[:5]]
-    _vid_hits = [m for m in _top_mods if m in ("mp4", "video")]
-    if _top_mods and len(_vid_hits) > len(_top_mods) / 2:  # video-DOMINANT only
+    _av_hits = [m for m in _top_mods if m in ("mp4", "video", "mp3", "audio")]
+    logger.info(event="_DEBUG_key_facts_gate", top_mods=_top_mods, av_hits=len(_av_hits))
+    if _top_mods and len(_av_hits) > len(_top_mods) / 2:  # video/audio-DOMINANT only
         import re as _vre
 
         _STOP = frozenset(
@@ -702,38 +723,304 @@ def _prepend_key_facts_knowledge(  # noqa: C901 -- known complexity debt (184), 
                 "whether",
             )
         )
-        _KEEP_SHORT = frozenset(("eps", "yoy", "m&a", "ai"))
+        # 3-letter function words. The length gate below admits len>=3 so that a
+        # question's actual SUBJECT survives when it is a short proper noun —
+        # "Mac", "EPS", "AI". The previous gate (len>3) silently deleted "Mac"
+        # from a Mac-revenue question's term set, leaving only generic finance
+        # words, so the scorer ranked "Our revenue of $102.5 billion..." (2 hits)
+        # above "Mac revenue was $8.7 billion..." (1 hit) — the correct sentence
+        # scored LOWEST of the three candidates. Verified on video-0006.
+        _STOP_SHORT = frozenset(
+            (
+                "its",
+                "our",
+                "you",
+                "has",
+                "had",
+                "not",
+                "but",
+                "out",
+                "per",
+                "one",
+                "two",
+                "new",
+                "all",
+                "any",
+                "can",
+                "may",
+                "get",
+                "got",
+                "see",
+                "let",
+                "his",
+                "her",
+                "she",
+                "him",
+                "use",
+                "via",
+                "yes",
+                "non",
+                "own",
+                "give",
+                "gave",
+                "much",
+                "also",
+                "compare",
+                "compared",
+            )
+        )
+        _KEEP_SHORT = frozenset(("ai", "eps", "yoy", "m&a"))
         _num_re = _vre.compile(
             r"[$%]|\bbillion\b|\bmillion\b|\bpercent\b|\bdouble[- ]digit\b|\brecord\b|\bbasis point|\bestimate|\bbeat"
+        )
+        # A frame caption's OCR sweeps up the broadcast's scrolling ticker crawl
+        # (unrelated symbols + prices for dozens of other companies). Those
+        # fragments are dense with $ and % so they win the numeric bonus against
+        # almost any finance query while containing none of this call's data.
+        # Detect them structurally — numeric-token density — rather than by
+        # casing, because Whisper renders some genuine transcript passages in
+        # ALL CAPS ("COMPANY GROSS MARGIN WAS 47.2 %...") which must be kept.
+        _ticker_tok_re = _vre.compile(r"^[\d.,%$]+$")
+
+        def _is_ticker_crawl(s: str) -> bool:
+            toks = s.split()
+            if len(toks) < 8:
+                return False
+            numeric = sum(1 for t in toks if _ticker_tok_re.match(t))
+            return (numeric / len(toks)) > 0.35
+
+        def _tokens(text: str) -> list[str]:
+            # Strip the possessive so "Apple's" reduces to "apple" and is caught
+            # by the stop list. Left unnormalised it was a distinct, rare, and
+            # therefore high-IDF term that matched any sentence saying "Apple's
+            # ..." — which is how an EPS question anchored on "the build-out of
+            # Apple's private compute cloud", reproducing the original
+            # video-0002 failure exactly.
+            out = []
+            for w in _vre.findall(r"[a-z][a-z'&]+", text.lower()):
+                if w.endswith("'s"):
+                    w = w[:-2]
+                if w:
+                    out.append(w)
+            return out
+
+        # Period words are SCOPE, not subject, and scope already has a dedicated
+        # signal (_period_penalty below). Counting them as content terms too
+        # double-counts them — and worse, inverts the penalty: "Q4 fiscal year
+        # 2025" makes "fiscal" and "year" query terms, which then REWARD the
+        # full-fiscal-year sentence the penalty is trying to suppress. That is
+        # exactly how "total revenue for the September quarter (Q4 fiscal year
+        # 2025)" kept selecting "...total fiscal year services revenue to
+        # surpass $100 billion" over "Our revenue of $102.5 billion was up 8%"
+        # (video-0001, the last row still answering with the wrong figure).
+        #
+        # Only the GENERIC scope words. Month names stay in — they identify
+        # WHICH quarter, which is real discriminating content: dropping them
+        # made a September-quarter question match the December-quarter guidance
+        # sentence just as well as its own answer.
+        _PERIOD_WORDS = frozenset(
+            (
+                "fiscal",
+                "year",
+                "years",
+                "quarterly",
+                "annual",
+                "annually",
+                "yearly",
+            )
         )
 
         def _wordset(text: str) -> set:
             return {
                 w
-                for w in _vre.findall(r"[a-z][a-z'&]+", text.lower())
-                if (len(w) > 3 or w in _KEEP_SHORT) and w not in _STOP
+                for w in _tokens(text)
+                if (len(w) >= 3 or w in _KEEP_SHORT)
+                and w not in _STOP
+                and w not in _STOP_SHORT
+                and w not in _PERIOD_WORDS
             }
 
+        # Candidate window. A previous attempt widened this 6 -> 20 and measured
+        # net-negative (see the note above), but that was with the raw-overlap
+        # scorer AND with the extraction wired to OVERRIDE the model's answer;
+        # more reach simply surfaced more wrong-but-adjacent sentences. The
+        # scorer below is now IDF-weighted, subject-anchored and period-aware,
+        # so reach costs far less — and 6 is demonstrably too narrow: for
+        # video-0008 the chunk stating net income AND operating cash flow ranks
+        # 8th, so the window could not see the answer at all. 10 keeps this well
+        # inside what the LLM itself is given (RAG_TOP_K=20, truncated to
+        # MAX_CONTEXT_CHARS) while covering the observed miss.
         _sentences: list[str] = []
-        for doc in docs[:6]:
-            if (doc.get("metadata") or {}).get("modality") not in ("mp4", "video"):
+        for doc in docs[:10]:
+            if (doc.get("metadata") or {}).get("modality") not in ("mp4", "video", "mp3", "audio"):
                 continue
-            _text = _vre.sub(
-                r"\[[^\]]*\]", " ", doc.get("text", "") or ""
-            )  # strip [VISUAL..]/[ON-SCREEN..] tags
+            _text = doc.get("text", "") or ""
+            # Drop [ON-SCREEN] payloads outright — that tag carries RAW OCR of
+            # whatever pixels were on screen, which on a financial broadcast is
+            # the scrolling ticker crawl for dozens of unrelated companies. The
+            # [VISUAL AT t]: payload is kept: that one is the vision model's
+            # caption of the chart itself and is where this call's own on-screen
+            # EPS/revenue figures live (the only source for video-0002/0014).
+            _text = _vre.sub(r"\[ON-SCREEN\][^\[]*", " ", _text, flags=_vre.IGNORECASE)
+            _text = _vre.sub(r"\[[^\]]*\]", " ", _text)  # strip remaining tags
             for _sent in _vre.split(r"(?<=[.!?])\s+", _text):
                 s = _sent.strip()
-                if 25 <= len(s) <= 320:
+                if 25 <= len(s) <= 320 and not _is_ticker_crawl(s):
                     _sentences.append(s)
+
+        # IDF over the candidate sentences. Raw overlap COUNT treats "revenue"
+        # (in nearly every sentence of an earnings call) as worth exactly as
+        # much as "dividend" or "Mac" (in one). That is backwards: the rare term
+        # is the one that identifies which line item the question is about.
+        _N = len(_sentences) or 1
+        _df: dict[str, int] = {}
+        for _s in _sentences:
+            for _w in set(_tokens(_s)):
+                _df[_w] = _df.get(_w, 0) + 1
+
+        def _idf(w: str) -> float:
+            return math.log(1.0 + (_N + 1.0) / (1.0 + _df.get(w, 0)))
+
+        # SUBJECT SPAN — the part of a sentence BEFORE its first figure. An
+        # earnings call states every line item in one construction: the item and
+        # its metric are named first, the number follows ("Mac revenue was $8.7
+        # billion, up 13%"). So the text before the first digit is what the
+        # sentence is ABOUT, and everything after it is detail.
+        #
+        # Scoring the subject span separately is what makes "Mac revenue was
+        # $8.7 billion" beat "Products revenue was $73.7 billion ... driven by
+        # growth across iPhone and Mac" on a Mac question: both sentences
+        # contain "Mac", but only one is about it. Earlier attempts tried to get
+        # this from a set of "distinctive" query terms picked by IDF rank; that
+        # set was unstable (whenever the real subject word was common in the
+        # pool, junk terms took its place and the position bonus fired on them),
+        # so the structural span replaces it entirely.
+        _HEAD_MIN, _HEAD_MAX = 55, 120
+
+        def _head_of(sl: str) -> str:
+            m = _vre.search(r"\d", sl)
+            cut = m.start() if m else len(sl)
+            return sl[: min(max(cut, _HEAD_MIN), _HEAD_MAX)]
+
+        # PERIOD SCOPE — an earnings call states the same metric for the quarter
+        # AND for the full fiscal year ("services revenue was $28.8 billion" vs
+        # "total fiscal year services revenue ... $100 billion"). Answering a
+        # quarter question with the full-year figure is the single most common
+        # wrong-but-adjacent selection on this corpus. An explicit quarter marker
+        # wins over the words "fiscal year", so "Q4 fiscal year 2025" reads as
+        # quarter-scoped, not full-year.
+        _quarter_re = _vre.compile(
+            r"\bquarter\b|\bq[1-4]\b|\bseptember\b|\bdecember\b|\bmarch\b|\bjune\b"
+        )
+        _fullyear_re = _vre.compile(
+            r"\bfiscal year\b|\bfull[- ]year\b|\bfy\s?\d{2,4}\b|\bfor the year\b"
+        )
+        _q_is_quarter = bool(_quarter_re.search(q))
+        _q_is_fullyear = bool(_fullyear_re.search(q)) and not _q_is_quarter
+
+        # FORWARD-LOOKING SCOPE — the outlook section restates every headline
+        # metric as a projection ("we expect December quarter revenue to grow
+        # 10% to 12%"), in the same words as the reported results. For a
+        # question about what a quarter DID, the guidance sentence is a wrong
+        # answer that looks textually ideal. Penalise it unless the question is
+        # itself asking about guidance.
+        _forward_re = _vre.compile(
+            r"\bwe expect\b|\bwe anticipate\b|\bwe're guiding\b|\bwe are guiding\b|\boutlook\b"
+        )
+        _q_is_forward = bool(
+            _vre.search(r"\bguidance\b|\bguide\b|\boutlook\b|\bexpect\b|\bforecast\b", q)
+        )
+
+        # AGGREGATION LEVEL — "total revenue" is the company-wide figure, but
+        # the call also reports "<segment> revenue" for every segment, in the
+        # identical construction. A question that asks for the TOTAL and names
+        # no segment must not be answered from a segment line. Detected
+        # structurally, from the qualifier word sitting immediately before the
+        # metric noun in the sentence's subject span, so it needs no list of
+        # this company's product names: if that qualifier is a real noun the
+        # question never mentioned, the sentence is about a narrower thing than
+        # was asked. (video-0001: "...total fiscal year SERVICES revenue to
+        # surpass $100 billion" answering "what was total revenue".)
+        _TOTAL_MARKERS = ("total", "overall", "company", "companywide", "consolidated")
+        _NEUTRAL_QUALIFIERS = frozenset(
+            ("our", "the", "its", "this", "that", "total", "company", "overall", "consolidated")
+        )
+        _q_wants_total = any(w in q for w in _TOTAL_MARKERS)
+        _qualifier_re = _vre.compile(
+            r"\b([a-z][\w'-]*)\s+(?:revenue|sales|income|margin)\b", _vre.IGNORECASE
+        )
+
+        def _aggregation_penalty(head: str) -> float:
+            if not _q_wants_total:
+                return 0.0
+            for m in _qualifier_re.finditer(head):
+                qual = m.group(1).lower()
+                if qual in _NEUTRAL_QUALIFIERS or qual in _PERIOD_WORDS:
+                    continue
+                if qual not in q:
+                    return 3.0
+            return 0.0
+
+        # WHICH quarter. A call discusses at least two — the one just reported
+        # and the one being guided — and names them by month. When the question
+        # names a month and the sentence names only a different one, it is
+        # about the wrong quarter no matter how well the wording matches.
+        _month_re = _vre.compile(r"\b(september|december|march|june)\b")
+        _q_months = set(_month_re.findall(q))
+
+        def _period_penalty(sl: str) -> float:
+            # Weighted above the subject-anchor bonus on purpose: quoting the
+            # FULL-YEAR figure for a QUARTER question is a hard factual error,
+            # worse than quoting a neighbouring line item for the right period.
+            pen = 0.0
+            if _q_is_quarter and _fullyear_re.search(sl):
+                pen += 4.0
+            elif _q_is_fullyear and _quarter_re.search(sl):
+                pen += 1.5
+            if not _q_is_forward and _forward_re.search(sl):
+                pen += 3.0
+            _s_months = set(_month_re.findall(sl))
+            if _q_months and _s_months and not (_q_months & _s_months):
+                pen += 3.0
+            return pen
+
+        # Match on a WORD BOUNDARY, not as a bare substring. Plain `w in sl`
+        # scored "rate" as a hit inside "celeb-rate-d", which is how a Services
+        # revenue question ended up anchored on "Apple TV celebrated a big night
+        # at this year's Emmy Awards". Leading \b only (no trailing one) so
+        # ordinary morphology still matches: "service" -> "services",
+        # "mac" -> "MacBook".
+        _term_re: dict[str, Any] = {}
+
+        def _hit(w: str, text: str) -> bool:
+            rx = _term_re.get(w)
+            if rx is None:
+                rx = _term_re[w] = _vre.compile(r"\b" + _vre.escape(w))
+            return rx.search(text) is not None
+
+        # Subject matches are worth several times a body match — being ABOUT the
+        # asked-for line item beats merely mentioning it further down.
+        _SUBJECT_WEIGHT = 3.0
 
         def _best_matches(qwords: set, limit: int) -> list[str]:
             _scored = []
             for s in _sentences:
                 sl = s.lower()
-                overlap = sum(1 for w in qwords if w in sl)
-                if overlap == 0:
+                matched = [w for w in qwords if _hit(w, sl)]
+                if not matched:
                     continue
-                _sc = overlap + (1.5 if _num_re.search(sl) else 0.0)
+                head = _head_of(sl)
+                head_matched = [w for w in matched if _hit(w, head)]
+                # Normalise by span length: without this a rambling subject span
+                # collects more incidental matches and outranks a tight, exact
+                # one ("Mac revenue was ...").
+                _denom = math.sqrt(max(1, len(head.split())))
+                _sc = _SUBJECT_WEIGHT * (sum(_idf(w) for w in head_matched) / _denom)
+                _sc += sum(_idf(w) for w in matched)
+                if _num_re.search(sl):
+                    _sc += 1.5
+                _sc -= _period_penalty(sl)
+                _sc -= _aggregation_penalty(head)
                 _scored.append((_sc, s))
             _scored.sort(key=lambda x: x[0], reverse=True)
             return [s for _sc, s in _scored[:limit]]
@@ -782,11 +1069,17 @@ def _prepend_key_facts_knowledge(  # noqa: C901 -- known complexity debt (184), 
                 _facts.append(s)
                 if len(_facts) >= 3:
                     break
+        logger.info(event="_DEBUG_key_facts_extracted", n_facts=len(_facts), facts=_facts[:3])
         if _facts:
             _prefix = (
-                "KEY FACTS (answer the question using these exact figures and wording): "
-                + " | ".join(_facts)[:600]
-                + " "
+                # "every figure the question asks for": a multi-part question
+                # ("cash position, total debt, AND net cash") was being answered
+                # from only the first fact even when all three were supplied
+                # here, which the hallucination metric scores as
+                # missing_reference_numbers — an incompleteness penalty, not a
+                # fabrication one.
+                "KEY FACTS (answer using these exact figures and wording, and "
+                "include every figure the question asks for): " + " | ".join(_facts)[:600] + " "
             )
             return _prefix + knowledge
 
@@ -2350,6 +2643,7 @@ class ReasoningEngine:
         sources: list[dict[str, Any]] | None = None,
         user_id: str = "",
         regenerate: bool = False,
+        retry_hint: str = "",
     ) -> dict[str, Any]:
 
         if not query:
@@ -2444,6 +2738,24 @@ class ReasoningEngine:
                         query_type=query_type,
                         cite_keys=cite_keys,
                         regenerate=regenerate,
+                    )
+
+                # COMPLETENESS RETRY HINT — VerificationLoop's "decomposition"
+                # strategy widens the doc pool but reuses the same query text,
+                # so a greedy (temperature=0) regeneration is a no-op unless
+                # the prompt itself changes: if the missing fact was already
+                # in attempt 0's context (common — one table often holds both
+                # the stated and the omitted figure), the model just didn't
+                # choose to state it, and no retrieval strategy alone can fix
+                # that. Mirrors the numeric-mismatch retry pattern below
+                # (explicit correction instruction), scoped to exactly the
+                # aspect(s) CompletenessVerifier flagged as missing.
+                if retry_hint:
+                    prompt = (
+                        prompt + "\n\nIMPORTANT: your previous answer to this question omitted "
+                        f"the following part(s) of it: {retry_hint}. Re-answer the FULL "
+                        "question, including that information this time, using ONLY "
+                        "facts that appear verbatim in KNOWLEDGE above.\n"
                     )
 
                 # PROMPT BUDGET WARNING

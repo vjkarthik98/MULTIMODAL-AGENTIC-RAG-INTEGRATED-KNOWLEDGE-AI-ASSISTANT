@@ -390,18 +390,23 @@ class MemoryManager:
 
     # CLEAR SESSION — SECTION 4.7
 
-    def clear(self, session_id: str) -> None:
+    def clear(self, session_id: str, user_id: str | None = None) -> None:
+        # Both RedisMemory.delete() and MongoMemory.delete() refuse an
+        # unscoped delete when user_id is missing (tenant-isolation guard) —
+        # without it this silently no-ops on both stores while still logging
+        # "memory_cleared" as if it worked. Caller MUST pass the
+        # authenticated user's user_id.
         cleared: list[str] = []
         t_start = time.time()
 
         try:
             if self.redis_memory:
-                self.redis_memory.delete(session_id)
+                self.redis_memory.delete(session_id, user_id)
                 cleared.append("redis")
                 _record_op("clear", "redis")
 
             if self.mongo_memory:
-                self.mongo_memory.delete(session_id)
+                self.mongo_memory.delete(session_id, user_id)
                 cleared.append("mongo")
                 _record_op("clear", "mongo")
 
@@ -411,6 +416,7 @@ class MemoryManager:
                 event="memory_cleared",
                 stores=cleared,
                 session_id=session_id,
+                user_id=user_id,
             )
 
         except Exception as e:
@@ -433,20 +439,21 @@ class MemoryManager:
 
         logger.info(event="gdpr_purge_start", user_id=user_id)
 
-        # REDIS PURGE — delete all keys matching user prefix
+        # REDIS PURGE — delete all keys matching user prefix.
+        # NOTE: this used to call self.redis_memory.delete(user_id) — that's
+        # RedisMemory.delete(session_id, user_id=None), so it was passing
+        # user_id as the *session_id* positional arg with no actual user_id,
+        # which always hit the "refusing an unscoped key" guard and silently
+        # no-op'd. The manual .keys()/.delete() block right below was a
+        # working duplicate of what purge_user() is supposed to do — now
+        # that purge_user() is fixed (branches on Upstash vs real redis) and
+        # reports an accurate count, call it directly instead of
+        # reimplementing it here.
         if self.redis_memory:
             try:
-                self.redis_memory.delete(user_id)
-                # ALSO PURGE session-specific keys
-                if hasattr(self.redis_memory, "client") and self.redis_memory.client:
-                    prefix = f"{settings.REDIS_KEY_PREFIX}:{user_id}"
-                    try:
-                        keys = self.redis_memory.client.keys(f"{prefix}*")
-                        if keys:
-                            self.redis_memory.client.delete(*keys)
-                    except Exception:
-                        pass
+                redis_purged_count = self.redis_memory.purge_user(user_id)
                 purged["redis"] = True
+                purged["redis_keys_deleted"] = redis_purged_count
                 _record_op("gdpr_purge", "redis")
             except Exception as e:
                 purged["errors"].append(f"redis: {e}")

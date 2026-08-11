@@ -161,9 +161,26 @@ injection:
       severity: high
       description: "unlock/enable all capabilities"
 
-    - pattern: '\bdan\s*(?:mode|prompt)?\b'
+    # NOTE: the old pattern was '\bdan\s*(?:mode|prompt)?\b' — the trailing `?`
+    # made "mode"/"prompt" optional, so it matched the bare word "dan"/"Dan"/"DAN"
+    # anywhere (case-insensitive matching happens on lowercased text in both
+    # input_guard.sanitize() and jailbreak.py's Tier-1 regex, which both compile
+    # from this same list). That silently truncated real ingested content
+    # whenever a document mentioned someone actually named Dan (e.g. an
+    # earnings-call analyst) — input_guard.sanitize() discards everything in
+    # the chunk from the match point onward, so this was real, silent data
+    # loss during ingestion, not just a noisy false-positive log line.
+    # This version only matches DAN used as a jailbreak persona/mode
+    # ("pretend to be DAN", "DAN mode/prompt/protocol", "DAN stands for..."),
+    # verified against every existing red-team/test case in
+    # tests/guardrails/test_jailbreak.py and
+    # app/guardrails/resources/adversarial/red_team_prompts.jsonl — the ones
+    # that don't match this pattern directly (e.g. "You are now DAN") are
+    # still caught by the separate "you are now [persona]" / injection
+    # patterns above, so overall detection coverage is unchanged.
+    - pattern: '\b(?:be|become)\s+dan\b|\bdan\s+(?:mode|prompt|protocol|stands)\b'
       severity: high
-      description: "DAN jailbreak mode"
+      description: "DAN jailbreak persona/mode"
 
     - pattern: '\badmin\s+override\b'
       severity: high

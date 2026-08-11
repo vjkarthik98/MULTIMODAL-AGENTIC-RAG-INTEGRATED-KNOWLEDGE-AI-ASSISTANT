@@ -135,7 +135,7 @@ class ModelRegistry:
                     raise
             for name, fut in futures.items():
                 try:
-                    fut.result(timeout=settings.MODEL_TIMEOUT_SEC)
+                    fut.result(timeout=settings.MODEL_LOAD_TIMEOUT_SEC)
                     with self._lock:
                         self._loaded.add(name)
                     loaded.append(name)

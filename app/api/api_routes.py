@@ -2052,7 +2052,7 @@ async def clear_memory(
         from app.memory.memory_manager import MemoryManager
 
         manager = MemoryManager()
-        await asyncio.to_thread(manager.clear, session_id)
+        await asyncio.to_thread(manager.clear, session_id, current_user.user_id)
 
         _audit_log(
             "memory_cleared",
@@ -2563,7 +2563,7 @@ async def delete_chat_session(
         try:
             redis_mem = infra.get_memory()
             if redis_mem is not None:
-                await asyncio.to_thread(redis_mem.delete, session_id)
+                await asyncio.to_thread(redis_mem.delete, session_id, user_id)
         except Exception as exc:
             logger.warning(
                 event="session_delete_redis_failed", session_id=session_id, error=str(exc)

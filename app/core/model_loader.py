@@ -141,6 +141,7 @@ class ModelLoader:
         self._image_embedder: Any | None = None
         self._multimodal: Any | None = None
         self._whisper: Any | None = None
+        self._whisper_infer_lock = threading.Lock()
         self._reranker: Any | None = None
         self._siglip_model = None
         self._siglip_processor = None
@@ -382,7 +383,7 @@ class ModelLoader:
             span.set_attribute("device", resolved_device)
 
             try:
-                obj = future.result(timeout=settings.MODEL_TIMEOUT_SEC)
+                obj = future.result(timeout=settings.MODEL_LOAD_TIMEOUT_SEC)
                 latency = round(time.time() - start, 2)
 
                 _model_load_duration.labels(model=name).observe(latency)
@@ -647,6 +648,20 @@ class ModelLoader:
             self._whisper = self._safe_load(_load, "whisper")
 
         return self._whisper
+
+    def get_whisper_lock(self) -> threading.Lock:
+        """Serializes concurrent .transcribe() calls on the shared WhisperModel.
+
+        CTranslate2's CUDA backend crashes with `parallel_for failed:
+        cudaErrorInvalidDevice: invalid device ordinal` when two Python threads
+        call .transcribe() on the same model instance at once — the GIL is
+        released during CUDA ops (true concurrency at the Python level), but the
+        underlying device context isn't safe to enter from two threads
+        simultaneously. audio_chunker.py and video_chunker.py both run
+        ThreadPoolExecutor segments against this one singleton, so the lock must
+        live here (shared across both modality files) rather than per-file.
+        """
+        return self._whisper_infer_lock
 
     # BLIP — IMAGE CAPTIONING
 
@@ -1074,8 +1089,22 @@ class ModelLoader:
     # HEALTH CHECK
 
     def health_check(self) -> dict[str, Any]:
+        # "llm" (below) only reflects whether the GGUFModel Python wrapper
+        # has been constructed, not whether it's actually usable (e.g. in
+        # llama_server mode, the separate process could still be loading).
+        # llm_ready gives the real signal — see GGUFModel.health_check()'s
+        # "ready" field. Additive: doesn't change "llm"'s existing bool
+        # meaning, since other health-check consumers already read it.
+        llm_ready = False
+        if self._llm is not None:
+            try:
+                llm_ready = bool(self._llm.health_check().get("ready"))
+            except Exception:
+                llm_ready = False
+
         health: dict[str, Any] = {
             "llm": self._llm is not None,
+            "llm_ready": llm_ready,
             "embedder": self._text_embedder is not None,
             "siglip": self._siglip_model is not None,
             "siglip_text": self._siglip_text_embedder is not None,

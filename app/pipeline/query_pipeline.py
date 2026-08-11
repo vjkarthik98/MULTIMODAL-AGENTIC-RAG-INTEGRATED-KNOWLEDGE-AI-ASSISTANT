@@ -213,7 +213,9 @@ def _source_coherence_filter(docs: list[dict[str, Any]]) -> list[dict[str, Any]]
     return kept
 
 
-def _fetch_digitized_chart_payload(user_id: str) -> dict[str, Any]:
+def _fetch_digitized_chart_payload(
+    user_id: str, scope_sources: list[str] | None = None
+) -> dict[str, Any]:
     """Fetch the user's digitized line-chart chunk (the one carrying the
     'CHART VALUES' block) straight from the vision collection, returning its
     Qdrant payload (text + source + metadata) or {}.
@@ -225,9 +227,20 @@ def _fetch_digitized_chart_payload(user_id: str) -> dict[str, Any]:
     abstains and the deterministic chart synth never sees the data. This pulls it
     back directly (tenant-scoped by user_id). Caller-gated to chart-shaped
     queries; the synth returns None for anything it can't answer, so it's safe.
+
+    `scope_sources` is the query's active file scope. Tenant scoping ALONE is
+    not enough: this bypasses retrieval entirely, so on a KB holding more than
+    one chart it happily injected a DIFFERENT file's chart into a query the
+    caller had explicitly scoped to one document. Confirmed live (2026-08-08):
+    video-0014 asks about the on-screen chart in "Q4 2025 Earnings Call.mp4"
+    and the word "chart" in the query pulled in a standalone stock-chart image,
+    which then drove the whole answer — it reported Alphabet/GOOGL movements
+    for a question about Apple's earnings broadcast. Matching mirrors the
+    retriever's own `sources` filter: case-insensitive substring.
     """
     if not user_id:
         return {}
+    _scope = [str(s).lower() for s in (scope_sources or []) if str(s).strip()]
     try:
         from qdrant_client.models import FieldCondition, Filter, MatchValue
 
@@ -244,8 +257,13 @@ def _fetch_digitized_chart_payload(user_id: str) -> dict[str, Any]:
         )
         for p in pts:
             payload = p.payload or {}
-            if "CHART VALUES" in (payload.get("text", "") or ""):
-                return payload
+            if "CHART VALUES" not in (payload.get("text", "") or ""):
+                continue
+            if _scope:
+                _src = str(payload.get("source") or "").lower()
+                if not any(tok in _src for tok in _scope):
+                    continue
+            return payload
     except Exception:
         return {}
     return {}
@@ -819,7 +837,15 @@ def _is_peer_list_chunk(text: str) -> bool:
     distinct stock tickers in a table. NOT triggered by a single-company metrics
     summary table (Revenue | Gross Margin | ...), which has neither.
     """
-    if len(set(_COMPANY_SUFFIX_RE.findall(text))) >= 2:
+    # Strip the optional trailing "." before deduplicating: the SAME company
+    # written inconsistently across a chunk ("Apple Inc-" in a chart title
+    # line vs "Apple Inc." in its data rows — an OCR/digitization punctuation
+    # artifact, confirmed live 2026-08-08 on a digitized line-chart chunk)
+    # otherwise counts as two distinct suffixes ("Inc" and "Inc.") for a
+    # single-company chunk, wrongly classifying it as a multi-company peer
+    # list and making _orgper_grounded reject that company as ungrounded.
+    _suffixes = {m.rstrip(".") for m in _COMPANY_SUFFIX_RE.findall(text)}
+    if len(_suffixes) >= 2:
         return True
     tickers = set(re.findall(r"\b[A-Z]{3,5}\b", text))
     # drop common finance acronyms that are not tickers
@@ -875,11 +901,38 @@ def _period_ungrounded(query: str, context_low: str) -> bool:
     # (?<!\d)…(?!\d) so "FY2026"/"fiscal2026" match but digits inside larger
     # numbers (e.g. 391,035) do not.
     _yr = r"(?<!\d)(20\d{2})(?!\d)"
-    q_years = {int(y) for y in re.findall(_yr, query.lower())}
+    q_low = query.lower()
+    q_years = {int(y) for y in re.findall(_yr, q_low)}
     ctx_years = {int(y) for y in re.findall(_yr, context_low)}
     if not q_years or not ctx_years:
         return False
-    return min(q_years) > max(ctx_years)
+    if min(q_years) <= max(ctx_years):
+        return False
+
+    # FORWARD-GUIDANCE EXEMPTION. Asking what a company GUIDED for its next
+    # quarter names a period that is, by definition, in the future — an
+    # earnings call states "we expect December quarter revenue to grow 10-12%"
+    # without ever printing "2026". The year test alone therefore abstained on
+    # a question the source answers outright (video-0009, confirmed live
+    # 2026-08-08), reporting nothing found while the figure sat in the
+    # retrieved context.
+    #
+    # Kept deliberately narrow — only the NEXT period, only when the query
+    # names a QUARTER. A full-YEAR guidance question about the same future
+    # year is a different claim, and one this call genuinely does not answer,
+    # so it must keep abstaining (video-refusal-001 asks exactly that).
+    _is_guidance = any(
+        w in q_low for w in ("guidance", "guide", "outlook", "forecast", "expect", "project")
+    )
+    _names_quarter = bool(re.search(r"\bq[1-4]\b|\bquarter\b", q_low))
+    _names_full_year = bool(
+        re.search(r"\bfull[- ]year\b|\bfull fiscal year\b|\bentire year\b", q_low)
+    )
+    if _is_guidance and _names_quarter and not _names_full_year:
+        if min(q_years) <= max(ctx_years) + 1:
+            return False
+
+    return True
 
 
 def _query_entities_ungrounded(query: str, docs: list[dict[str, Any]]) -> bool:
@@ -898,6 +951,22 @@ def _query_entities_ungrounded(query: str, docs: list[dict[str, Any]]) -> bool:
         return False
 
     context = " ".join(str(d.get("text", "") or "") for d in docs)
+    # Append each doc's SOURCE FILENAME to the context used for period-
+    # grounding. A source is often dated in its own filename ("FOMC Press
+    # Conference September 18, 2024.mp3", "Q4 2025 Earnings Call.mp4") without
+    # every individual chunk restating that year in its body text — spoken
+    # transcripts especially: the meeting's own date is implicit, while an
+    # explicit comparison to an OLDER year ("back in July 2023...") often IS
+    # restated. Without this, _period_ungrounded below sees only the older
+    # comparison year in ctx_years, concludes the query's actual (current,
+    # in-source) year is impossibly "in the future", and wrongly abstains.
+    # Confirmed live (2026-08-08): a September-2024-dated audio source, asked
+    # a plain September-2024 question, abstained because the only years its
+    # top reranked chunks explicitly mentioned were 2019/2023 (historical
+    # comparisons), not 2024 itself.
+    context += " " + " ".join(
+        str((d.get("metadata") or {}).get("source") or d.get("source") or "") for d in docs
+    )
     context_low = context.lower()
     if not context_low:
         return False
@@ -1488,8 +1557,9 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
         # no explicit file scope was already requested; deeper top_k so the
         # right-aspect chunk is present. Falls back to unscoped below if the scope
         # yields too little (e.g. a month with no matching source, like "August").
+        _explicit_source_scope = bool(retrieval_filters and retrieval_filters.get("sources"))
         _meeting_scope = None
-        if not (retrieval_filters and retrieval_filters.get("sources")):
+        if not _explicit_source_scope:
             _meeting_scope = _query_meeting_month_tokens(query) or _query_call_source_tokens(query)
         _base_filters = retrieval_filters
         _scoped_filters = retrieval_filters
@@ -1502,6 +1572,25 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
             # transcript chunks, so cast a wide net to get it into the reranker's
             # input. The pool is one meeting, so a large top_k adds no cross-doc
             # noise.
+            _scoped_top_k = 50
+        elif _explicit_source_scope:
+            # An EXPLICIT file scope (the UI's "@file" picker, or the eval
+            # harness passing `sources`) narrows the pool exactly the way the
+            # meeting-scope branch above does — same rationale, stronger
+            # guarantee, because the caller named the file rather than us
+            # inferring it. Yet it used to take the unscoped path: top_k stayed
+            # at DEFAULT_TOP_K and the cross-encoder only ever saw fusion's
+            # RERANK_TOP_K-capped output, so for a 90-chunk earnings call the
+            # answer-bearing chunk frequently never entered the candidate pool
+            # at all. Confirmed live (2026-08-08) on video_gold: the Mac-revenue
+            # chunk and the dividend-declaration chunk were ABSENT from all 20
+            # final docs, and the December-guidance question abstained outright
+            # — all three answer correctly once the pool is deepened here.
+            #
+            # This is the same class of bug already fixed in hybrid_retriever's
+            # `is_vision` gate: an explicit `sources` filter was disabling an
+            # optimisation that should apply *more* strongly when the scope is
+            # explicit, not less.
             _scoped_top_k = 50
 
         def _run_retrieval(_filters, _top_k):
@@ -1528,7 +1617,13 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
             return _out
 
         retrieved = _run_retrieval(_scoped_filters, _scoped_top_k)
-        _meeting_scoped_active = bool(_meeting_scope)
+        # Both scoping routes give the cross-encoder the full single-source
+        # candidate set below. The unscoping fallback stays tied to
+        # `_meeting_scope` alone: an INFERRED month may match no source at all,
+        # but an EXPLICIT scope is the caller's stated intent — silently
+        # widening it to other files would answer from a document the user did
+        # not ask about.
+        _meeting_scoped_active = bool(_meeting_scope) or _explicit_source_scope
         # Fallback: the meeting scope matched no (or too little) content — the
         # named month isn't a KB source. Retrieve unscoped instead.
         if (
@@ -1717,6 +1812,50 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
 
         # SOURCE-COHERENCE FILTER — keep top-N files; drop cross-file noise
         final_docs = _source_coherence_filter(final_docs)
+
+        # CHART PAYLOAD EARLY FETCH — the reranker/coherence filter routinely
+        # drops the single digitized CHART VALUES chunk below text chunks (the
+        # same drop the post-generation chart-synth override already works
+        # around via _fetch_digitized_chart_payload, further below). Doing
+        # that fetch here too, BEFORE entity-grounding, matters because the
+        # abstention check runs on `final_docs` as it stands right now: for a
+        # 3-series comparison chart, an NER-tagged company like "Apple Inc."
+        # correctly enters _orgper_grounded's check, but "S&P 500"/"Dow Jones"
+        # typically aren't NER-tagged as an org at all — so if the chart chunk
+        # is missing, Apple-specific chart questions wrongly abstain
+        # ("No relevant information...") while index-only questions on the
+        # SAME chart happen to skip the check and still succeed. Confirmed
+        # live (2026-08-08, img-0001/0004/0006/0007 all abstained this way
+        # while img-0002/0003 answered correctly from the identical chart).
+        if "chart" in query.lower() and not any(
+            "CHART VALUES" in str(d.get("text", "") or "") for d in final_docs
+        ):
+            try:
+                _early_cp = _fetch_digitized_chart_payload(
+                    user_id, scope_sources=(retrieval_filters or {}).get("sources")
+                )
+                if _early_cp.get("text"):
+                    # Normalize to the same shape as every other final_docs
+                    # entry (text/source/score/metadata at predictable keys) —
+                    # _fetch_digitized_chart_payload returns the RAW Qdrant
+                    # payload (source/chunk_id/etc. all top-level, no nested
+                    # "metadata"), which downstream citation/source-building
+                    # code does not expect.
+                    final_docs = final_docs + [
+                        {
+                            "text": _early_cp.get("text", ""),
+                            "source": _early_cp.get("source", ""),
+                            "modality": _early_cp.get("modality", "image"),
+                            "score": 1.0,
+                            "metadata": _early_cp,
+                        }
+                    ]
+            except Exception as _ecpe:
+                logger.warning(
+                    event="query_pipeline_early_chart_fetch_failed",
+                    error=str(_ecpe),
+                    session_id=session_id,
+                )
 
         # ENTITY-GROUNDING ABSTENTION — if the query names a company/person/location
         # that appears in NONE of the retrieved chunks, the context is about a
@@ -2146,7 +2285,9 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
         )
         if "CHART VALUES" not in _img_context and "chart" in query.lower():
             try:
-                _cp = _fetch_digitized_chart_payload(user_id)
+                _cp = _fetch_digitized_chart_payload(
+                    user_id, scope_sources=(retrieval_filters or {}).get("sources")
+                )
                 if _cp.get("text"):
                     _img_context = (_img_context + "\n" + _cp["text"]).strip()
             except Exception as _fe:

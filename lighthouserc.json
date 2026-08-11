@@ -5,9 +5,7 @@
       "url": ["http://localhost/index.html"],
       "numberOfRuns": 3,
       "settings": {
-        "chromeFlags": "--no-sandbox --disable-dev-shm-usage --disable-gpu",
-        "maxWaitForFcp": 90000,
-        "maxWaitForLoad": 90000
+        "chromeFlags": "--no-sandbox --disable-dev-shm-usage --disable-gpu"
       }
     },
     "assert": {
@@ -17,6 +15,7 @@
         "categories:accessibility": ["warn", { "minScore": 0.85 }],
         "categories:best-practices": ["warn", { "minScore": 0.85 }],
         "categories:seo": ["off"],
+        "errors-in-console": ["warn", { "minScore": 0.9 }],
         "uses-http2": "off",
         "unused-javascript": "off",
         "csp-xss": "off",
