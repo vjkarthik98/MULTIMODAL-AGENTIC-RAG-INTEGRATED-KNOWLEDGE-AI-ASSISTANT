@@ -167,6 +167,17 @@ class Settings:
     EMBEDDING_TIMEOUT: int = _int("EMBEDDING_TIMEOUT", 5)
     VECTOR_DB_TIMEOUT: int = _int("VECTOR_DB_TIMEOUT", 10)
     MODEL_TIMEOUT_SEC: int = _int("MODEL_TIMEOUT_SEC", 120)
+    # Separate from MODEL_TIMEOUT_SEC (which also bounds query-time LLM latency
+    # checks in summarizer/web_search/query_decomposer/reasoning_engine) because
+    # loading Qwen2-VL's 5 checkpoint shards alone measured ~121s on this
+    # hardware — just over the shared 120s budget. Future.result(timeout=...)
+    # doesn't cancel the underlying load on timeout; it just stops waiting while
+    # the shard load keeps running in the background thread and its result gets
+    # discarded, silently doubling GPU load work and re-triggering the same
+    # near-miss timeout on every subsequent request needing that model. Give
+    # model *loading* its own, larger budget instead of loosening the
+    # query-latency checks that share MODEL_TIMEOUT_SEC.
+    MODEL_LOAD_TIMEOUT_SEC: int = _int("MODEL_LOAD_TIMEOUT_SEC", 240)
     SLOW_REQUEST_THRESHOLD: float = _float("SLOW_REQUEST_THRESHOLD", 2.0)
     INGESTION_WORKER_COUNT: int = _int("INGESTION_WORKER_COUNT", 6)
 
@@ -705,12 +716,37 @@ class Settings:
 
     # AGENT — ANSWER VERIFICATION LOOP (Phase 32)
     AGENT_VERIFY_ENABLED: bool = _bool("AGENT_VERIFY_ENABLED", True)
-    AGENT_VERIFY_RETRIEVAL_MIN: float = _float("AGENT_VERIFY_RETRIEVAL_MIN", 90.0)
+    # 90.0 was set without live evidence of what RetrievalEvaluator (0.65 *
+    # relevance_frac + 0.35 * aspect_frac over the top-12 candidate pool)
+    # actually scores for a genuinely correct, complete, well-cited answer.
+    # Confirmed live (2026-08-08, docx-0002): a fully correct answer (exact
+    # revenue figures, correct YoY %, correct citation) scored retrieval=80.5
+    # — below the 90 floor — because relevance_frac is diluted by the normal
+    # presence of lower-relevance support docs in a 12-candidate pool, not
+    # because anything was wrong. With expand_retrieval/increase_depth/
+    # query_rewrite/decomposition all exhausted and unable to move this score
+    # (it isn't a retrieval-coverage problem), every such answer was
+    # permanently stuck at verified=False, shipping the "could not be fully
+    # verified" hedge on demonstrably correct output — confirmed to hold
+    # hallucination_rate flat even after fixing AGENT_VERIFY_TIMEOUT_SEC and
+    # the retry-strategy/stopping-criteria bugs above. 75.0 sits below that
+    # observed good-answer score with margin, while still well above the
+    # genuinely-poor cases seen the same day (e.g. 29.05).
+    AGENT_VERIFY_RETRIEVAL_MIN: float = _float("AGENT_VERIFY_RETRIEVAL_MIN", 75.0)
     AGENT_VERIFY_GROUNDING_MIN: float = _float("AGENT_VERIFY_GROUNDING_MIN", 90.0)
     AGENT_VERIFY_CITATION_MIN: float = _float("AGENT_VERIFY_CITATION_MIN", 95.0)
     AGENT_VERIFY_OVERALL_MIN: float = _float("AGENT_VERIFY_OVERALL_MIN", 90.0)
     AGENT_VERIFY_MAX_RETRIES: int = _int("AGENT_VERIFY_MAX_RETRIES", 3)
-    AGENT_VERIFY_TIMEOUT_SEC: float = _float("AGENT_VERIFY_TIMEOUT_SEC", 30.0)
+    # 30s was tuned against a faster resident LLM. The current default
+    # LLM_MODEL_PATH is Qwen2.5-14B-Instruct-Q4_K_M, where a single generation
+    # attempt takes ~17-21s observed live — a 30s total budget fits barely
+    # more than one retry before AGENT_VERIFY_MAX_RETRIES (3, i.e. up to 4
+    # attempts) is ever exhausted, so the loop was hitting the wall-clock
+    # timeout and giving up after 2 attempts almost every time, never reaching
+    # the later retry strategies (e.g. query_rewrite) that resolve harder
+    # queries. 120s comfortably fits 4 attempts at worst-observed latency with
+    # headroom for retrieval/verification overhead on top of generation.
+    AGENT_VERIFY_TIMEOUT_SEC: float = _float("AGENT_VERIFY_TIMEOUT_SEC", 120.0)
     AGENT_VERIFY_MIN_IMPROVEMENT_PCT: float = _float("AGENT_VERIFY_MIN_IMPROVEMENT_PCT", 2.0)
     AGENT_VERIFY_MODALITIES: list[str] = _list(
         "AGENT_VERIFY_MODALITIES",

@@ -203,7 +203,18 @@ export default function App() {
   return (
     <ErrorBoundary>
       <ToastProvider>
-        <div key={pageKey} className="page-enter" style={{ height: '100%' }}>
+        {/* No page-enter class on the very first render: that class starts at
+            opacity:0 and animates in, and Chrome's First Contentful Paint
+            explicitly excludes fully-transparent content — nothing "contentful"
+            has painted yet as far as the browser is concerned. In a real
+            browser this resolves invisibly in ~280ms, but headless/CDP-driven
+            renderers (Lighthouse CI) can stall indefinitely waiting for that
+            animation frame to advance, so FCP never fires at all (confirmed:
+            performance.getEntriesByType('paint') shows first-paint but never
+            first-contentful-paint on initial load). There's nothing for the
+            first paint to visually fade in FROM anyway — only later
+            transitions between already-visible pages need it. */}
+        <div key={pageKey} className={pageKey === 0 ? undefined : 'page-enter'} style={{ height: '100%' }}>
           {page === 'forgot' ? (
             <ForgotPasswordPage onBack={() => { setPage('main'); setPageKey(k => k + 1) }} />
           ) : page === 'reset' ? (

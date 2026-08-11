@@ -87,6 +87,81 @@ _MEDIA_REFERENCE_PHRASES = frozenset(
         "according to the audio",
     }
 )
+# If any of these phrases appears, the query explicitly scopes itself to an
+# ingested DOCUMENT (as opposed to _MEDIA_REFERENCE_PHRASES' video/audio) —
+# force RAG even when the query also contains a live-market-data keyword like
+# "price target" or "rating". Without this, "What is Goldman Sachs' rating
+# and price target for Apple IN THIS REPORT?" hits _MARKET_DATA's "price
+# target" and is force-routed to live web search, answering with today's
+# real analyst consensus instead of the uploaded report's own $245.00 BUY
+# call — a wrong-document answer, not a wrong-modality one, and exactly the
+# shape of bug _REPORTED_RESULTS_BEAT_PHRASES already exists to prevent for
+# the "beat estimates" case. Also protects the refusal rows on purpose: "What
+# is Morgan Stanley's price target for Apple in this report?" must still
+# route to RAG and abstain (the report is Goldman Sachs coverage of Apple,
+# not Morgan Stanley) rather than silently fetching Morgan Stanley's real
+# live target from the web. Deliberately excludes bare "today"/"current" —
+# docx-websearch-001 ("Goldman Sachs' current rating on Apple stock today?")
+# must still route to live web data.
+_DOCUMENT_REFERENCE_PHRASES = frozenset(
+    {
+        "in this report",
+        "per this report",
+        "according to this report",
+        "in the report",
+        "per the report",
+        "according to the report",
+        "does this report",
+        "does the report",
+        "this report say",
+        "this report state",
+        "in this document",
+        "per this document",
+        "according to this document",
+        "this document say",
+        "in this filing",
+        "per this filing",
+        "according to this filing",
+        # Chart/image queries hit the same bug: "per this chart" is just as
+        # explicit a document-scope signal as "per this report", but a
+        # market-data-shaped question ("How did the S&P 500 Index perform...")
+        # was still winning the is_web hard rule and routing to live web
+        # search instead of the uploaded chart. Confirmed live (2026-08-08,
+        # img-0005): "...per this chart?" answered with real current S&P 500
+        # levels instead of the chart's actual $156->$133 pixel-read decline.
+        "in this chart",
+        "per this chart",
+        "according to this chart",
+        "on this chart",
+        "in the chart",
+        "per the chart",
+        "according to the chart",
+        "on the chart",
+        "does this chart",
+        "does the chart",
+        "this chart show",
+        "this chart say",
+        # An earnings-CALL recording scopes itself the same way. "What stock
+        # price ... appeared on the on-screen chart at the start of this call?"
+        # is unambiguously about the ingested .mp4, but "stock price" is a
+        # _MARKET_DATA keyword, so the is_web hard rule fired and the answer
+        # came back from live web news — reporting Alphabet/GOOGL movements for
+        # a question about Apple's own broadcast (video-0014, confirmed live
+        # 2026-08-08). Same failure class as "in this report" and "per this
+        # chart" above, one modality further along.
+        "on this call",
+        "in this call",
+        "during this call",
+        "during the call",
+        "on the call",
+        "on screen",
+        "on-screen",
+        "shown on screen",
+        "in this video",
+        "per this video",
+        "according to this video",
+    }
+)
 # Explicit web-request phrases — user directly asked to fetch from the internet.
 # These force a pure "search" route (not hybrid) so file citations never mix in.
 _EXPLICIT_WEB_PHRASES = frozenset(
@@ -375,6 +450,19 @@ class AgentRouter:
                 # Force pure RAG so web results never contaminate KB-grounded answers.
                 if any(phrase in query.lower() for phrase in _MEDIA_REFERENCE_PHRASES):
                     d = self._decision("rag", "media_reference_kb", 0.97, session_id)
+                    _router_decisions.labels(action="rag", method="hard_rule").inc()
+                    self._log_decision(d, signals, start, session_id)
+                    return d
+
+                # HARD RULE: DOCUMENT REFERENCE — "in this report" / "per this
+                # filing" etc. Must run BEFORE is_market_data/is_web/is_recent:
+                # "price target for Apple in this report" contains both a
+                # _MARKET_DATA phrase ("price target") and this explicit
+                # document scope — the scope must win, or every "...in this
+                # report?" question about a market-data term gets force-routed
+                # to live web search instead of the uploaded document.
+                if any(phrase in query.lower() for phrase in _DOCUMENT_REFERENCE_PHRASES):
+                    d = self._decision("rag", "document_reference_kb", 0.97, session_id)
                     _router_decisions.labels(action="rag", method="hard_rule").inc()
                     self._log_decision(d, signals, start, session_id)
                     return d

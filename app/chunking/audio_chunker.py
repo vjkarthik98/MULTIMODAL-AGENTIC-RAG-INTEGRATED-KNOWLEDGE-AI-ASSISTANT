@@ -124,14 +124,19 @@ def _run_whisper(wav_path: str) -> list[dict]:
         from app.core.model_loader import model_loader as loader
 
         model = loader.get_whisper()
-        segments, _ = model.transcribe(
-            wav_path,
-            word_timestamps=True,
-            vad_filter=True,
-            condition_on_previous_text=False,
-            initial_prompt=_WHISPER_INITIAL_PROMPT,
-            beam_size=5,
-        )
+        # faster-whisper's transcribe() returns a lazy generator — the actual
+        # CUDA decode happens during iteration, so materializing it to a list
+        # must stay inside the lock too, not just the transcribe() call itself.
+        with loader.get_whisper_lock():
+            segments, _ = model.transcribe(
+                wav_path,
+                word_timestamps=True,
+                vad_filter=True,
+                condition_on_previous_text=False,
+                initial_prompt=_WHISPER_INITIAL_PROMPT,
+                beam_size=5,
+            )
+            segments = list(segments)
         words = []
         for seg in segments:
             if hasattr(seg, "words") and seg.words:
@@ -161,9 +166,13 @@ def _transcribe_long_audio(wav_path: str, duration_sec: float) -> list[dict]:
     garbled proper nouns) compared to transcribing the same audio region in
     isolation — confirmed by direct comparison on this pipeline's FOMC test
     file. Splitting into bounded segments and transcribing each independently
-    (as the legacy ingest() path already did) avoids that drift; segments run
-    concurrently across AUDIO_TRANSCRIPTION_WORKERS since CTranslate2 releases
-    the GIL during CUDA ops.
+    (as the legacy ingest() path already did) avoids that drift; segments are
+    queued across AUDIO_TRANSCRIPTION_WORKERS threads, but the actual
+    .transcribe() call is serialized via model_loader.get_whisper_lock() —
+    letting two threads decode concurrently on the shared CTranslate2 model
+    crashes with `cudaErrorInvalidDevice: invalid device ordinal`. The worker
+    pool still helps: segment export (pydub) and queueing overlap with the
+    in-flight GPU call.
     """
     # Cap transcription-segment length at 10 min. faster-whisper's output
     # quality (capitalization, punctuation, proper nouns) is most consistent on

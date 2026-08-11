@@ -1,14 +1,15 @@
-import { useState, useEffect } from 'react'
-import { Eye, EyeOff, Loader2, CheckCircle } from 'lucide-react'
+import { useState } from 'react'
+import { Loader2, CheckCircle } from 'lucide-react'
 import { resetPassword } from '../api/client'
 
 export default function ResetPasswordPage({ token, onSuccess }) {
-  const [mounted, setMounted] = useState(false)
-  useEffect(() => { requestAnimationFrame(() => setMounted(true)) }, [])
+  // Starts visible — see LoginPage.jsx for the full Lighthouse CI NO_FCP
+  // root-cause writeup on why a deferred `useState(false)` + rAF fade breaks
+  // First Contentful Paint under headless/CDP-traced rendering.
+  const mounted = true
 
   const [password, setPassword]   = useState('')
   const [confirm, setConfirm]     = useState('')
-  const [showPass, setShowPass]       = useState(false)
   const [showConfirm, setShowConfirm] = useState(false)
   const [loading, setLoading]     = useState(false)
   const [done, setDone]           = useState(false)
@@ -97,25 +98,20 @@ export default function ResetPasswordPage({ token, onSuccess }) {
               </p>
 
               <form onSubmit={handleSubmit} className="space-y-4">
-                <div className="relative">
+                <div>
                   <input
-                    type={showPass ? 'text' : 'password'}
+                    type="text"
                     placeholder="New password"
                     value={password}
                     onChange={e => setPassword(e.target.value)}
                     required
                     autoComplete="new-password"
-                    className="w-full rounded-xl px-5 py-3.5 pr-12 text-base outline-none transition-colors t-focus"
+                    className="w-full rounded-xl px-5 py-3.5 text-base outline-none transition-colors t-focus"
                     style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx1)' }}
                   />
-                  <button type="button" onClick={() => setShowPass(v => !v)}
-                    className="absolute right-4 top-1/2 -translate-y-1/2 transition-colors"
-                    style={{ color: 'var(--t-ph)' }}>
-                    {showPass ? <EyeOff size={18} /> : <Eye size={18} />}
-                  </button>
                 </div>
 
-                <div className="relative">
+                <div>
                   <input
                     type={showConfirm ? 'text' : 'password'}
                     placeholder="Confirm new password"
@@ -123,14 +119,19 @@ export default function ResetPasswordPage({ token, onSuccess }) {
                     onChange={e => setConfirm(e.target.value)}
                     required
                     autoComplete="new-password"
-                    className="w-full rounded-xl px-5 py-3.5 pr-12 text-base outline-none transition-colors t-focus"
+                    className="w-full rounded-xl px-5 py-3.5 text-base outline-none transition-colors t-focus"
                     style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx1)' }}
                   />
-                  <button type="button" onClick={() => setShowConfirm(v => !v)}
-                    className="absolute right-4 top-1/2 -translate-y-1/2 transition-colors"
-                    style={{ color: 'var(--t-ph)' }}>
-                    {showConfirm ? <EyeOff size={18} /> : <Eye size={18} />}
-                  </button>
+                  <label className="flex items-center gap-2 mt-2 pl-1 text-sm cursor-pointer select-none" style={{ color: 'var(--t-tx4)' }}>
+                    <input
+                      type="checkbox"
+                      checked={showConfirm}
+                      onChange={e => setShowConfirm(e.target.checked)}
+                      className="w-4 h-4 rounded cursor-pointer"
+                      style={{ accentColor: 'var(--t-accent)' }}
+                    />
+                    Show password
+                  </label>
                 </div>
 
                 {error && <p className="text-sm" style={{ color: 'var(--t-danger)' }}>{error}</p>}

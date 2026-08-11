@@ -136,14 +136,19 @@ def _run_whisper_video(wav_path: str) -> list[dict]:
         from app.core.model_loader import model_loader as loader
 
         model = loader.get_whisper()
-        segments, _ = model.transcribe(
-            wav_path,
-            word_timestamps=True,
-            vad_filter=True,
-            condition_on_previous_text=False,
-            initial_prompt=_VIDEO_WHISPER_PROMPT,
-            beam_size=5,
-        )
+        # faster-whisper's transcribe() returns a lazy generator — the actual
+        # CUDA decode happens during iteration, so materializing it to a list
+        # must stay inside the lock too, not just the transcribe() call itself.
+        with loader.get_whisper_lock():
+            segments, _ = model.transcribe(
+                wav_path,
+                word_timestamps=True,
+                vad_filter=True,
+                condition_on_previous_text=False,
+                initial_prompt=_VIDEO_WHISPER_PROMPT,
+                beam_size=5,
+            )
+            segments = list(segments)
         words: list[dict] = []
         for seg in segments:
             if hasattr(seg, "words") and seg.words:

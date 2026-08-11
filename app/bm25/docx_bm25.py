@@ -36,8 +36,8 @@ class DocxBM25(BaseBM25):
 
     modality = "docx"
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, user_id: str | None = None) -> None:
+        super().__init__(user_id=user_id)
         # Separate small BM25 for definition chunks only
         self._def_docs: list[Any] = []
         self._def_index: Any | None = None

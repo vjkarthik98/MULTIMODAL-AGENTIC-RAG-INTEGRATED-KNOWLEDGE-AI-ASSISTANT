@@ -1118,17 +1118,31 @@ def _synth_answer_override(answer: str, context: str) -> str:
     if not answer or not context:
         return answer
     ctx = context.lstrip()
-    if not ctx.startswith(_SYNTH_DOC_PREFIX):
-        return answer
-    synth = ctx.split("\n\n", 1)[0][len(_SYNTH_DOC_PREFIX) :].strip()
-    # Drop the leading header up to the LAST " — "/": " within the first ~90 chars
-    # (greedy) so a two-part header like "EU State Aid Decision — Tax Impact
-    # Summary:" is fully removed, leaving only the facts.
-    synth_body = re.sub(r'^.{0,90}(?:\s[—-]\s|:\s)', '', synth, count=1).strip()
-    # Guard: only override when the synth body is a substantive fact block.
-    if len(re.findall(r'\d[\d,.]*\d', synth_body)) < 4:
-        return answer
-    return synth_body
+
+    if ctx.startswith(_SYNTH_DOC_PREFIX):
+        synth = ctx.split("\n\n", 1)[0][len(_SYNTH_DOC_PREFIX) :].strip()
+        # Drop the leading header up to the LAST " — "/": " within the first ~90 chars
+        # (greedy) so a two-part header like "EU State Aid Decision — Tax Impact
+        # Summary:" is fully removed, leaving only the facts.
+        synth_body = re.sub(r'^.{0,90}(?:\s[—-]\s|:\s)', '', synth, count=1).strip()
+        # Guard: only override when the synth body is a substantive fact block.
+        if len(re.findall(r'\d[\d,.]*\d', synth_body)) < 4:
+            return answer
+        return synth_body
+
+    # NOTE (2026-08-08): a _KEY_FACTS_PREFIX branch was added and reverted the
+    # same session. It fixed one hand-picked case (an EPS question) but,
+    # measured on the full video generation suite, made things much worse
+    # overall (answer_correctness 0.45->0.34, hallucination_rate 0.27->0.71)
+    # — the underlying keyword-matched sentence extraction is wrong often
+    # enough (picks a topically-adjacent but incorrect sentence, e.g. a
+    # question restating a topic rather than the answer addressing it) that
+    # unconditionally trusting it as an override, even gated on "the model's
+    # answer shares no number with the facts", corrupted more answers than it
+    # fixed. Re-attempt only with per-query evidence the specific extracted
+    # fact is actually correct, not just present.
+
+    return answer
 
 
 # Backwards-compatible alias (older call sites).

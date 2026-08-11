@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Eye, EyeOff, Loader2, Sun, Moon, ShieldCheck, RotateCcw } from 'lucide-react'
+import { Loader2, Sun, Moon, ShieldCheck, RotateCcw } from 'lucide-react'
 import { login, register, verifyOtp, resendOtp } from '../api/client'
 
 const GoogleG = () => (
@@ -12,8 +12,15 @@ const GoogleG = () => (
 )
 
 export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPassword }) {
-  const [mounted, setMounted] = useState(false)
-  useEffect(() => { requestAnimationFrame(() => setMounted(true)) }, [])
+  // Starts visible (not a deferred `useState(false)` + rAF-triggered fade):
+  // that pattern left the page permanently at opacity:0 under Lighthouse
+  // CI's headless/CDP-traced rendering, where rAF-driven state updates never
+  // produced a second captured compositor frame — First Contentful Paint
+  // never registered even though the DOM had real content (confirmed via
+  // performance.getEntriesByType('paint'): first-paint fired,
+  // first-contentful-paint never did, even 90+s later). There's nothing for
+  // an initial page load to visually fade in FROM anyway.
+  const mounted = true
 
   const [mode, setMode]         = useState('login')
   const [email, setEmail]       = useState('')
@@ -152,7 +159,7 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
 
   return (
     <div
-      className="relative min-h-dvh-screen flex flex-col items-center justify-center px-4 sm:px-6 transition-opacity duration-300"
+      className="relative h-dvh-screen overflow-y-auto flex flex-col items-center px-4 sm:px-6 transition-opacity duration-300"
       style={{ background: 'var(--t-bg)', opacity: mounted ? 1 : 0 }}
     >
       {/* Animated ambient background glow */}
@@ -194,25 +201,28 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
       </button>
 
       {/* Content — above the glow layer */}
-      <div className="relative z-10 w-full flex flex-col items-center">
+      <div className="relative z-10 w-full flex flex-col items-center my-auto py-4">
       {/* Brand */}
-      <div className="flex flex-col items-center mb-6 sm:mb-10 gap-3 sm:gap-4">
-        <img src="/logo.png" alt="MAGIK" className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl object-cover shadow-lg" />
+      <div className="flex flex-col items-center mb-3 sm:mb-10 gap-1.5 sm:gap-4">
+        <img src="/logo.png" alt="MAGIK" className="w-10 h-10 sm:w-16 sm:h-16 rounded-2xl object-cover shadow-lg" />
         <div className="text-center">
-          <h1 className="text-3xl sm:text-4xl font-bold tracking-tight" style={{
+          <h1 className="text-xl sm:text-4xl font-bold tracking-tight" style={{
             background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)',
             WebkitBackgroundClip: 'text',
             WebkitTextFillColor: 'transparent',
             backgroundClip: 'text',
           }}>MAGIK</h1>
-          <p className="text-sm sm:text-base mt-2" style={{ color: 'var(--t-tx4)' }}>
+          <p className="text-[11px] sm:text-base mt-0.5 sm:mt-2 leading-tight" style={{ color: 'var(--t-tx4)' }}>
             Multimodal · Agentic · RAG · Integrated · Knowledge
+          </p>
+          <p className="text-[11px] sm:text-base leading-tight" style={{ color: 'var(--t-tx4)' }}>
+            AI Assistant
           </p>
         </div>
       </div>
 
       {/* Card */}
-      <div className="w-full max-w-[440px] rounded-2xl p-6 sm:p-10"
+      <div className="w-full max-w-[440px] rounded-2xl p-4 sm:p-10"
         style={{ background: 'var(--t-card)', border: '1px solid var(--t-bd2)' }}>
 
         {otpStep ? (
@@ -296,7 +306,7 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
             <button
               type="button"
               onClick={() => { window.location.href = '/auth/google' }}
-              className="w-full flex items-center justify-center gap-3 rounded-xl py-3.5 px-4 text-base font-medium transition-colors"
+              className="w-full flex items-center justify-center gap-3 rounded-xl py-2.5 sm:py-3.5 px-4 text-sm sm:text-base font-medium transition-colors"
               style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd4)', color: 'var(--t-tx1)' }}
               onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov2)'}
               onMouseLeave={e => e.currentTarget.style.background = 'var(--t-inp)'}
@@ -306,14 +316,14 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
             </button>
 
             {/* Divider */}
-            <div className="flex items-center gap-3 my-7">
+            <div className="flex items-center gap-3 my-3 sm:my-7">
               <div className="flex-1 h-px" style={{ background: 'var(--t-bd2)' }} />
               <span className="text-sm font-medium" style={{ color: 'var(--t-ph)' }}>OR</span>
               <div className="flex-1 h-px" style={{ background: 'var(--t-bd2)' }} />
             </div>
 
             {/* Form */}
-            <form onSubmit={handleSubmit} className="space-y-4">
+            <form onSubmit={handleSubmit} className="space-y-2.5 sm:space-y-4">
               <input
                 type="email"
                 placeholder="Email address"
@@ -321,33 +331,37 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
                 onChange={e => setEmail(e.target.value)}
                 required
                 autoComplete="email"
-                className="w-full rounded-xl px-5 py-3.5 text-base outline-none transition-colors t-focus"
+                className="w-full rounded-xl px-4 sm:px-5 py-2.5 sm:py-3.5 text-sm sm:text-base outline-none transition-colors t-focus"
                 style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx1)' }}
               />
 
-              <div className="relative">
+              <div>
                 <input
-                  type={showPass ? 'text' : 'password'}
+                  type={mode === 'register' ? 'text' : (showPass ? 'text' : 'password')}
                   placeholder="Password"
                   value={password}
                   onChange={e => setPassword(e.target.value)}
                   required
                   autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-                  className="w-full rounded-xl px-5 py-3.5 pr-12 text-base outline-none transition-colors t-focus"
+                  className="w-full rounded-xl px-4 sm:px-5 py-2.5 sm:py-3.5 text-sm sm:text-base outline-none transition-colors t-focus"
                   style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx1)' }}
                 />
-                <button
-                  type="button"
-                  onClick={() => setShowPass(v => !v)}
-                  className="absolute right-4 top-1/2 -translate-y-1/2 transition-colors"
-                  style={{ color: 'var(--t-ph)' }}
-                >
-                  {showPass ? <EyeOff size={18} /> : <Eye size={18} />}
-                </button>
+                {mode === 'login' && (
+                  <label className="flex items-center gap-2 mt-1 sm:mt-2 pl-1 text-xs sm:text-sm cursor-pointer select-none" style={{ color: 'var(--t-tx4)' }}>
+                    <input
+                      type="checkbox"
+                      checked={showPass}
+                      onChange={e => setShowPass(e.target.checked)}
+                      className="w-4 h-4 rounded cursor-pointer"
+                      style={{ accentColor: 'var(--t-accent)' }}
+                    />
+                    Show password
+                  </label>
+                )}
               </div>
 
               {mode === 'register' && (
-                <div className="relative">
+                <div>
                   <input
                     type={showConfirm ? 'text' : 'password'}
                     placeholder="Confirm password"
@@ -355,17 +369,19 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
                     onChange={e => setConfirm(e.target.value)}
                     required
                     autoComplete="new-password"
-                    className="w-full rounded-xl px-5 py-3.5 pr-12 text-base outline-none transition-colors t-focus"
+                    className="w-full rounded-xl px-4 sm:px-5 py-2.5 sm:py-3.5 text-sm sm:text-base outline-none transition-colors t-focus"
                     style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx1)' }}
                   />
-                  <button
-                    type="button"
-                    onClick={() => setShowConfirm(v => !v)}
-                    className="absolute right-4 top-1/2 -translate-y-1/2 transition-colors"
-                    style={{ color: 'var(--t-ph)' }}
-                  >
-                    {showConfirm ? <EyeOff size={18} /> : <Eye size={18} />}
-                  </button>
+                  <label className="flex items-center gap-2 mt-1 sm:mt-2 pl-1 text-xs sm:text-sm cursor-pointer select-none" style={{ color: 'var(--t-tx4)' }}>
+                    <input
+                      type="checkbox"
+                      checked={showConfirm}
+                      onChange={e => setShowConfirm(e.target.checked)}
+                      className="w-4 h-4 rounded cursor-pointer"
+                      style={{ accentColor: 'var(--t-accent)' }}
+                    />
+                    Show password
+                  </label>
                 </div>
               )}
 
@@ -375,7 +391,7 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
                   <button
                     type="button"
                     onClick={onForgotPassword}
-                    className="text-sm transition-opacity hover:opacity-70"
+                    className="text-xs sm:text-sm transition-opacity hover:opacity-70"
                     style={{ color: 'var(--t-tx5)' }}
                   >
                     Forgot password?
@@ -399,7 +415,7 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full flex items-center justify-center gap-2 font-semibold rounded-xl py-3.5 text-base transition-colors disabled:opacity-60 mt-1"
+                className="w-full flex items-center justify-center gap-2 font-semibold rounded-xl py-2.5 sm:py-3.5 text-sm sm:text-base transition-colors disabled:opacity-60 mt-1"
                 style={{ background: 'var(--t-tx1)', color: 'var(--t-bg)' }}
                 onMouseEnter={e => { if (!loading) e.currentTarget.style.background = 'var(--t-tx2)' }}
                 onMouseLeave={e => e.currentTarget.style.background = 'var(--t-tx1)'}
@@ -410,7 +426,7 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
             </form>
 
             {/* Mode toggle */}
-            <p className="text-center text-base mt-6" style={{ color: 'var(--t-tx4)' }}>
+            <p className="text-center text-sm sm:text-base mt-3 sm:mt-6" style={{ color: 'var(--t-tx4)' }}>
               {mode === 'login' ? (
                 <>New here?{' '}
                   <button onClick={() => switchMode('register')} className="transition-colors hover:opacity-80" style={{ color: 'var(--t-tx3)' }}>
@@ -430,7 +446,7 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
       </div>
 
       {/* Footer */}
-      <p className="text-sm mt-7 text-center" style={{ color: 'var(--t-ph)' }}>
+      <p className="text-[10px] sm:text-sm mt-2 sm:mt-7 text-center leading-tight" style={{ color: 'var(--t-ph)' }}>
         By continuing you agree to our{' '}
         <span className="underline cursor-pointer hover:opacity-70">Terms of Service</span>
         {' '}and{' '}

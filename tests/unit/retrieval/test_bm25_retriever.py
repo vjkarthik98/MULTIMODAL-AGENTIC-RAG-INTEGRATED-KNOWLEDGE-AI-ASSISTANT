@@ -258,3 +258,61 @@ class TestBM25RetrieverSessionFilter:
             result = r.search("retrieval generation", session_id="sessA")
         for hit in result:
             assert hit["metadata"].get("session_id") == "sessA"
+
+
+# ── per-modality BM25 constructor contract ─────────────────────────────────────
+# Regression coverage for a real production bug (2026-08-08): DocxBM25 overrode
+# __init__(self) with no user_id param, diverging from BaseBM25.__init__(self,
+# user_id=None) — the contract every other per-modality class (TxtBM25, PdfBM25,
+# XlsxBM25, ImageBM25, AudioBM25, VideoBM25) honors. BM25AggregatorRetriever
+# instantiates every modality class uniformly with cls(user_id=uid), so this
+# broke KB-file deletion for every modality, not just docx — confirmed via
+# kb_delete_bm25_failed | file=fomc_dec2024.txt (a .txt file)
+# | error=DocxBM25.__init__() got an unexpected keyword argument 'user_id'.
+# There was previously zero test coverage of the per-modality classes or the
+# aggregator at all, which is exactly why this went unnoticed.
+
+class TestPerModalityBM25ConstructorContract:
+
+    def test_every_modality_class_accepts_user_id(self):
+        from app.retrieval.bm25_retriever import _MODALITY_TO_CLASS
+
+        for modality, cls in set(_MODALITY_TO_CLASS.items()):
+            instance = cls(user_id="regression_test_user")
+            assert instance.user_id == "regression_test_user", (
+                f"{cls.__name__} (modality={modality!r}) did not honor the "
+                f"user_id passed to its constructor"
+            )
+
+    def test_every_modality_class_user_id_defaults_to_none(self):
+        from app.retrieval.bm25_retriever import _MODALITY_TO_CLASS
+
+        for cls in set(_MODALITY_TO_CLASS.values()):
+            instance = cls()
+            assert instance.user_id is None
+
+
+class TestBM25AggregatorRetriever:
+    """The exact code path that crashed in production: BM25AggregatorRetriever
+    instantiating every per-modality index to purge a file by source name."""
+
+    def test_all_indexes_instantiates_every_modality_without_raising(self):
+        from app.retrieval.bm25_retriever import BM25AggregatorRetriever
+
+        agg = BM25AggregatorRetriever(user_id="regression_test_user")
+        indexes = agg._all_indexes()
+        # One instance per distinct class (7 modality classes today), not one
+        # per _MODALITY_TO_CLASS alias key (13 aliases, e.g. "txt"/"text" ->
+        # same TxtBM25 class).
+        assert len(indexes) >= 7
+        for idx in indexes:
+            assert idx.user_id == "regression_test_user"
+
+    def test_delete_by_source_does_not_raise_on_any_modality(self, tmp_path):
+        from app.retrieval.bm25_retriever import BM25AggregatorRetriever
+
+        with patch("app.utils.paths.user_dir", return_value=tmp_path):
+            agg = BM25AggregatorRetriever(user_id="regression_test_user")
+            # Empty/nonexistent index on disk — must return 0, not raise.
+            removed = agg.delete_by_source("some_file.txt", user_id="regression_test_user")
+        assert removed == 0

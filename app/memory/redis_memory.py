@@ -508,18 +508,32 @@ class RedisMemory:
 
     # GDPR PURGE — ALL DATA FOR USER_ID PREFIX
 
-    def purge_user(self, user_id: str) -> None:
+    def purge_user(self, user_id: str) -> int:
         if not self._enabled or not user_id:
-            return
+            return 0
 
         prefix = f"{self.prefix}:{user_id}:"
         purged = 0
 
         if self._is_available():
             try:
+                # upstash_redis.Redis (REST client) has no .scan_iter() —
+                # only real redis.Redis does. Every other method in this
+                # file already branches on _use_upstash (e.g.
+                # _pipeline_write); this was the one place that didn't,
+                # which meant GDPR/session purge silently failed on any
+                # Upstash-backed deployment (confirmed via
+                # redis_purge_scan_failed | error='Redis' object has no
+                # attribute 'scan_iter').
+                if self._use_upstash:
 
-                def _scan():
-                    return list(self.client.scan_iter(f"{prefix}*"))
+                    def _scan():
+                        return list(self.client.keys(f"{prefix}*"))
+
+                else:
+
+                    def _scan():
+                        return list(self.client.scan_iter(f"{prefix}*"))
 
                 keys = self._retry(_scan)
                 for key in keys:
@@ -554,6 +568,7 @@ class RedisMemory:
             user_id=user_id,
             keys_deleted=purged,
         )
+        return purged
 
     # QUERY RESULT CACHE
 
@@ -710,8 +725,8 @@ class RedisMemory:
     async def async_clear_memory(self, session_id: str, user_id: str | None = None) -> None:
         await asyncio.to_thread(self.clear_memory, session_id, user_id)
 
-    async def async_purge_user(self, user_id: str) -> None:
-        await asyncio.to_thread(self.purge_user, user_id)
+    async def async_purge_user(self, user_id: str) -> int:
+        return await asyncio.to_thread(self.purge_user, user_id)
 
     # HEALTH CHECK
 

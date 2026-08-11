@@ -145,6 +145,7 @@ class VerificationLoop:
         completeness_results = []
         strategy = "baseline"
         attempt_number = 0
+        _retry_hint = ""
 
         while True:
             t0 = time.time()
@@ -193,6 +194,7 @@ class VerificationLoop:
                     # "your last answer was rejected" directive would tell the
                     # model the wrong thing about which answer was rejected.
                     regenerate and attempt_number == 0,
+                    retry_hint=_retry_hint,
                 )
             except Exception:
                 if attempt_number == 0:
@@ -222,6 +224,11 @@ class VerificationLoop:
             completeness_res = self.completeness_verifier.check(
                 answer, aspects, query=effective_query
             )
+            # Feeds the NEXT attempt's generation call (see reasoning_engine.
+            # generate_answer's retry_hint) — an explicit, named list of what
+            # this attempt's answer omitted, so a retry can address it instead
+            # of silently reproducing the same incomplete answer.
+            _retry_hint = "; ".join(completeness_res.missing) if not completeness_res.is_complete else ""
 
             scores = self.confidence_scorer.score(
                 retrieval_res,
@@ -268,7 +275,15 @@ class VerificationLoop:
             if should_stop:
                 break
 
-            next_strategy = retry_ctrl.next_strategy()
+            # A completeness failure (a multi-part question missing one of its
+            # aspects) is a generation-shape problem, not a retrieval-coverage
+            # one — jump straight to "decomposition" (per-aspect retrieval +
+            # re-ask) rather than burning attempts on expand_retrieval/
+            # increase_depth, which only widen top_k against the same index
+            # and typically return the same docs when the fact is already in
+            # context. See RetryController.next_strategy() docstring.
+            _prioritize = "decomposition" if not completeness_res.is_complete else None
+            next_strategy = retry_ctrl.next_strategy(prioritize=_prioritize)
             if next_strategy is None:
                 break
             strategy = next_strategy
@@ -358,6 +373,7 @@ class VerificationLoop:
         sources: list[dict[str, Any]] | None,
         user_id: str | None,
         regenerate: bool = False,
+        retry_hint: str = "",
     ) -> tuple[str, list[dict[str, Any]]]:
         """Returns (answer, cited_sources). `cited_sources` is
         generate_answer()'s OWN citation-filtered subset (empty for a
@@ -373,6 +389,7 @@ class VerificationLoop:
             sources=sources or None,
             user_id=user_id or "",
             regenerate=regenerate,
+            retry_hint=retry_hint,
         )
         answer = (out.get("answer") or "").strip()
         cited = out.get("sources")

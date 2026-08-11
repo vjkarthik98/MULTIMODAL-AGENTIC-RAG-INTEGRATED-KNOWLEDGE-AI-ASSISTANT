@@ -747,7 +747,14 @@ def readiness() -> dict[str, Any]:
 
         models = model_loader.health_check()
         infra_status = infra.health_check()
-        all_ready = models.get("embedder", False)
+        # embedder must be loaded AND the LLM must be actually reachable —
+        # not just "constructed" (see model_loader.health_check()'s
+        # llm_ready / GGUFModel.health_check()'s "ready" for why the two
+        # differ). Without the llm_ready check, /ready reported "ready"
+        # during the startup window while llama-server was still loading
+        # its checkpoint shards, and a real /rag/query call in that window
+        # hit connection-refused and tripped the LLM circuit breaker.
+        all_ready = bool(models.get("embedder", False)) and bool(models.get("llm_ready", False))
 
         return {
             "status": "ready" if all_ready else "degraded",

@@ -1,10 +1,12 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { Loader2, Mail, ArrowLeft } from 'lucide-react'
 import { forgotPassword } from '../api/client'
 
 export default function ForgotPasswordPage({ onBack }) {
-  const [mounted, setMounted] = useState(false)
-  useEffect(() => { requestAnimationFrame(() => setMounted(true)) }, [])
+  // Starts visible — see LoginPage.jsx for the full Lighthouse CI NO_FCP
+  // root-cause writeup on why a deferred `useState(false)` + rAF fade breaks
+  // First Contentful Paint under headless/CDP-traced rendering.
+  const mounted = true
 
   const [email, setEmail]     = useState('')
   const [loading, setLoading] = useState(false)
