@@ -266,6 +266,15 @@ async def lifespan(app: FastAPI):
 
     background_tasks.append(asyncio.create_task(run_online_eval_loop()))
 
+    # Drift eval (monitoring Phase 3) — same "no-op unless enabled, must run
+    # in this process" reasoning as online eval directly above; pushes into
+    # the same Prometheus registry. No-op unless DRIFT_ENABLED and
+    # ONLINE_EVAL_SAMPLE_RATE > 0 (it reads the same sampled-traffic
+    # collection online eval does).
+    from app.eval.jobs.drift_eval import run_drift_eval_loop
+
+    background_tasks.append(asyncio.create_task(run_drift_eval_loop()))
+
     # VRAM reaper — evicts ingestion-only models (Whisper, BLIP2, Qwen2-VL,
     # TrOCR, diarizer, NER, FinBERT) once they go idle, or sooner under VRAM
     # pressure. The query hot set (llm/text_embedder/reranker/SigLIP) is

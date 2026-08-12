@@ -55,6 +55,13 @@ once `ONLINE_EVAL_ENABLED=true`. Alert: `monitoring/alerts/rules.yml`'s
 `magik-p95-latency-breach` fires if the live sample sustains p95 > 60000ms
 for 5 minutes.
 
+**Reranker sub-budget** (added in the second Phase 31 pass — request
+tracing/drift/Phoenix, see `docs/runbooks/phase-31-monitoring.md` §8): p95
+`reranker_latency_seconds` ≤ `settings.LATENCY_TARGET_CROSS_MODAL_MS`
+(5.0s default) — the same ceiling `app/retrieval/reranker.py`'s own
+`rerank_latency_exceeded` warning log already used, not a new number. Alert:
+`magik-reranker-latency-breach`, 5m sustained.
+
 ## 3. Retrieval quality SLO (offline, CI-gated — authoritative)
 
 From `app/eval/thresholds.yaml`'s `retrieval` section (`gate_enabled: true`,
@@ -122,7 +129,43 @@ container — plotting it alongside production numbers on the same dashboard
 would be misleading, not just redundant. Tier-1's result stays visible where
 it already belongs: the PR's own Actions run.
 
-## 7. What is explicitly NOT covered yet (documented gap, not silently dropped)
+## 7. Drift detection SLO (statistical, live traffic)
+
+`app/eval/jobs/drift_eval.py` (second Phase 31 pass — see
+`docs/runbooks/phase-31-monitoring.md` §8) compares a fixed reference-window
+snapshot against the current sampled-traffic window on 4 columns
+(`query_length`/`top1_score`/`mean_topk_score`/`latency_ms`) via a KS-test.
+
+| Signal | Target | Mechanism |
+|---|---|---|
+| Statistical significance per column | KS-test p ≥ 0.05 (not drifted) | `magik_drift_column_pvalue{column}` |
+| Dataset-level drift volume | Informational, not itself gated | `magik_drift_dataset_score` (fraction of tracked columns drifted) |
+| Severity | 0 (info) sustained | `magik_drift_severity` — CRITICAL requires BOTH high drift volume (≥ `DRIFT_CRITICAL_THRESHOLD`, provisional 0.5) AND a QUALITY column (`top1_score`/`mean_topk_score`) drifting in the DEGRADING direction; high volume alone or a quality column improving is only ever WARNING at most |
+
+**Error budget:** no hard gate — this is a live early-warning signal, not a
+CI-blocking one (nothing in `thresholds.yaml` reads these gauges). Alerts:
+`magik-drift-warning` (severity ≥1, 30m sustained) / `magik-drift-critical`
+(severity ==2, 15m sustained), both in `monitoring/alerts/rules.yml`.
+Requires `DRIFT_ENABLED=true`, `ONLINE_EVAL_SAMPLE_RATE > 0`, and a built
+reference (`python -m app.eval.jobs.drift_eval --build-reference`) — reads
+as `magik_drift_reference_size` / `_current_size` == 0 until all three are
+true, not a false "no drift" signal.
+
+## 8. Security signal SLO (guardrails + auth)
+
+| Signal | Target | Mechanism |
+|---|---|---|
+| Guardrail block rate | No hard target — volume/trend signal | `guardrail_blocks_total{guard_type,surface}` (pre-existing metric, newly alerted — `magik-guardrail-block-rate-spike`, >10 blocks/5m, provisional) |
+| Auth failure rate (login + MFA) | No hard target — volume/trend signal | `auth_login_failures_total{reason}` + `auth_mfa_failures_total` (new, `app/auth/metrics.py`) — `magik-auth-failure-spike`, >10 combined/5m, provisional |
+| Rate-limit rejections | Not alerted (deliberately) | `auth_rate_limit_rejections_total` — dashboarded only; rate-limiting firing under normal heavy use is expected behavior, alerting on it would be noise, not signal |
+| Monitoring itself must not weaken security | Zero regression | `app/guardrails/metrics.py`'s `record_block`/`record_allow`/`record_scrub` previously had no try/except at all — a Prometheus client failure would have propagated into every request's guardrail check. Fixed and pinned by `tests/unit/api/test_monitoring_outage_resilience.py::test_guardrail_still_blocks_correctly_even_with_prometheus_broken`, which asserts a malicious query is still blocked even while its own block-counter fails to record |
+
+**Error budget:** both alert thresholds above are explicitly provisional —
+no real production traffic has been measured on this box yet to calibrate
+against (same honesty convention as thresholds.yaml's own "informational
+until re-baselined" sections). Revisit once real data exists.
+
+## 9. What is explicitly NOT covered yet (documented gap, not silently dropped)
 
 - **Finance numeric fidelity on live traffic** — `online_eval.py` does not
   currently run `compute_finance_fidelity()` against sampled live answers.
@@ -136,3 +179,20 @@ it already belongs: the PR's own Actions run.
   every numeric metric generically, so a new suite/metric shows up in
   Prometheus automatically the next time it's added to `rag_report.json`.
   Only the dashboard panel itself would need adding.
+- **`magik-trace-error-spike`'s TraceQL query is unverified against a live
+  Tempo instance** — built from official Grafana/Tempo documentation (no
+  Docker daemon was available in the environment that built it), and
+  Grafana itself documents TraceQL alerting as experimental / "should not
+  be used in production environments yet" even at the v12.1+ this requires.
+  Verify it actually fires on the first real deploy to the bumped Grafana
+  version (see `docs/runbooks/phase-31-monitoring.md` §8.7, check #24).
+- **Arize Phoenix's UI is loopback-only** (`127.0.0.1:6006`), not behind the
+  Caddy reverse proxy Grafana has — SSH tunnel required for access. Adding
+  a public `/phoenix/` path is a reasonable future step, not done as part
+  of this pass to keep it scoped to what was asked.
+- **The drift reference is a manual, one-time bootstrap** —
+  `python -m app.eval.jobs.drift_eval --build-reference` is never run
+  automatically (deliberately: an unattended re-baseline could silently
+  absorb a real regression into the new "normal"). Until someone runs it
+  once, §7's drift signal reads as `reference_size == 0`, not a false "no
+  drift" — check that gauge before trusting an all-clear.

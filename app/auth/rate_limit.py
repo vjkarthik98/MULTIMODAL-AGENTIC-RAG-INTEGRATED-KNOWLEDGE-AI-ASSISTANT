@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 
+from app.auth.metrics import record_rate_limit_rejection
 from app.core.config import settings
 from app.utils.logger import get_logger
 
@@ -54,6 +55,7 @@ def check_user_rate_limit(
                 count=count,
                 limit=rpm,
             )
+            record_rate_limit_rejection()
             raise ValueError(f"Rate limit exceeded: {rpm} requests per minute")
 
     except ValueError:

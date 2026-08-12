@@ -8,6 +8,8 @@ import time
 from typing import Any
 
 import numpy as np
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -16,7 +18,11 @@ from tenacity import (
 )
 
 from app.core.config import settings
+from app.core.metrics import reranker_latency as _reranker_latency
+from app.utils import otel_attrs
 from app.utils.logger import get_logger
+
+tracer = trace.get_tracer(__name__)
 
 logger = get_logger(__name__)
 
@@ -575,6 +581,47 @@ class Reranker:
     # MAIN RERANK
 
     def rerank(
+        self,
+        query: str,
+        documents: list[dict],
+        top_k: int | None = None,
+        session_id: str = "",
+        max_inputs: int | None = None,
+    ) -> list[dict]:
+        """OTel span boundary around `_rerank_impl` — thin wrapper, tuned
+        cross-encoder logic below is untouched (same rationale as
+        HybridRetriever.search/_search_impl)."""
+        with tracer.start_as_current_span("reranker_rerank") as span:
+            span.set_attribute("input_count", len(documents or []))
+            span.set_attribute("top_k", top_k or self.top_k)
+            span.set_attribute("session.id", session_id or "-")
+            otel_attrs.set_span_kind(span, "RERANKER")
+            otel_attrs.set_input_output(span, input_value=query)
+            _wrapper_start = time.time()
+            try:
+                results = self._rerank_impl(
+                    query,
+                    documents,
+                    top_k=top_k,
+                    session_id=session_id,
+                    max_inputs=max_inputs,
+                )
+                # Success-path-only, matching the rest of this codebase's
+                # convention (e.g. qdrant_store.py's _search_duration) —
+                # error counters live on the exception path instead, a
+                # latency histogram observed on a failed/partial call would
+                # muddy the percentiles this metric is for.
+                _reranker_latency.observe(time.time() - _wrapper_start)
+                span.set_attribute("output_count", len(results))
+                otel_attrs.set_retrieval_documents(span, results)
+                span.set_status(Status(StatusCode.OK))
+                return results
+            except Exception as exc:
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                span.record_exception(exc)
+                raise
+
+    def _rerank_impl(
         self,
         query: str,
         documents: list[dict],

@@ -10,12 +10,18 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
 from app.core.config import settings
 from app.core.metrics import llm_call_latency as _shared_llm_latency
 from app.core.metrics import retrieval_latency as _shared_retrieval_latency
+from app.prompt.prompt_builder import PROMPT_VERSION
+from app.utils import otel_attrs
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 # PROMETHEUS METRICS — SECTION 6
@@ -3231,6 +3237,40 @@ class RAGPipeline:
         session_id: str = "default",
         user_id: str | None = None,
     ) -> dict[str, Any]:
+        """OTel root-span boundary around `_run_impl` — same rationale as
+        query_pipeline.py's wrapper: gives the already-instrumented spans
+        inside agent_controller.py/reasoning_engine.py/qdrant_store.py/
+        prompt_builder.py a real parent to nest under instead of each
+        becoming its own disconnected root trace."""
+        with tracer.start_as_current_span("rag_pipeline_run") as span:
+            span.set_attribute("app.version", settings.APP_VERSION)
+            span.set_attribute("git.sha", settings.GIT_SHA)
+            span.set_attribute("embedding.model", settings.EMBEDDING_MODEL)
+            span.set_attribute("reranker.model", settings.RERANKER_MODEL)
+            span.set_attribute("prompt.version", PROMPT_VERSION)
+            span.set_attribute("session.id", session_id or "-")
+            span.set_attribute("query.length", len(query or ""))
+            otel_attrs.set_span_kind(span, "CHAIN")
+            otel_attrs.set_input_output(span, input_value=query)
+            try:
+                result = self._run_impl(query, session_id=session_id, user_id=user_id)
+                span.set_attribute("decision", str(result.get("decision", "unknown")))
+                if result.get("trace_id"):
+                    span.set_attribute("request.id", str(result["trace_id"]))
+                otel_attrs.set_input_output(span, output_value=result.get("answer"))
+                span.set_status(Status(StatusCode.OK))
+                return result
+            except Exception as exc:
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                span.record_exception(exc)
+                raise
+
+    def _run_impl(
+        self,
+        query: str,
+        session_id: str = "default",
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
 
         start = time.time()
         trace_id = str(uuid.uuid4())
@@ -3503,6 +3543,15 @@ class RAGPipeline:
         sources: list[str] | None = None,
         regenerate: bool = False,
     ) -> Iterator[str]:
+        """`stream()` itself is not a generator (it just builds and returns
+        one — see `return _generator()` below), so the OTel span can't wrap
+        this method body the way query_pipeline.py/run() do: the real work
+        happens lazily, whenever the caller iterates the returned generator.
+        The span is opened inside `_traced_generator` instead, so it stays
+        open for exactly the generator's actual execution window (including
+        early `.close()` from a client disconnect) and gives the existing
+        agent/reasoning/qdrant/prompt_builder spans a real parent on this,
+        the actual live SSE path real users hit (POST /rag/query/stream)."""
 
         query = _normalize(query)
         query = _sanitize(query)
@@ -4404,7 +4453,44 @@ class RAGPipeline:
                 _record_error("stream")
                 yield "Streaming failed."
 
-        return _generator()
+        def _traced_generator() -> Iterator[str]:
+            with tracer.start_as_current_span("rag_pipeline_stream") as span:
+                span.set_attribute("app.version", settings.APP_VERSION)
+                span.set_attribute("git.sha", settings.GIT_SHA)
+                span.set_attribute("embedding.model", settings.EMBEDDING_MODEL)
+                span.set_attribute("reranker.model", settings.RERANKER_MODEL)
+                span.set_attribute("prompt.version", PROMPT_VERSION)
+                span.set_attribute("session.id", session_id or "-")
+                span.set_attribute("query.length", len(query or ""))
+                otel_attrs.set_span_kind(span, "CHAIN")
+                otel_attrs.set_input_output(span, input_value=query)
+                # Accumulated here, not read from _generator()'s internals —
+                # this wrapper owns it, so tagging OUTPUT_VALUE never means
+                # reaching into the tuned generator body above. Sentinel-
+                # prefixed control tokens (\x00SOURCES\x00 etc. — see
+                # api_routes.py's event_stream(), the real consumer of this
+                # same sentinel protocol) are skipped so the span's output
+                # text is the same thing a user actually reads, not raw
+                # protocol framing. Known imprecision: on a \x00REPLACE\x00
+                # (the guarded-answer-supersedes-the-stream path), this
+                # collects the pre-replacement tokens, not the replacement
+                # text — acceptable for best-effort span telemetry (Mongo
+                # chat history, not this span, is the source of truth for
+                # the actual served answer; see _store_interaction).
+                _answer_parts: list[str] = []
+                try:
+                    for token in _generator():
+                        if token and not token.startswith("\x00"):
+                            _answer_parts.append(token)
+                        yield token
+                    otel_attrs.set_input_output(span, output_value="".join(_answer_parts))
+                    span.set_status(Status(StatusCode.OK))
+                except Exception as exc:
+                    span.set_status(Status(StatusCode.ERROR, str(exc)))
+                    span.record_exception(exc)
+                    raise
+
+        return _traced_generator()
 
     # ASYNC STREAM — SECTION 4.6
 

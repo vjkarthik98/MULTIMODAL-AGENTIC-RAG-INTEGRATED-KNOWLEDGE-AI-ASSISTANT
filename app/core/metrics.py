@@ -67,6 +67,53 @@ def _make_gauges():
                 "Share of sampled live traffic per routing decision (rolling window)",
                 ["route"],
             ),
+            # LIVE RETRIEVAL QUALITY (monitoring Phase 6) — same
+            # online_eval.py run, same shadow-collection rows, just
+            # aggregating the retrieval fields shadow_sampler.py has stamped
+            # on every row since Phase 2 (_retrieval_stats()) instead of
+            # only reading query/answer/contexts. This is the plain rolling
+            # mean these values need alongside drift_eval.py's Phase 3
+            # p-values — a p-value says "did this change," not "what is it
+            # right now," and an operator dashboard needs both.
+            "eval_online_top1_score": Gauge(
+                "magik_eval_online_top1_score",
+                "Mean top-1 rerank score across sampled live traffic (rolling window)",
+            ),
+            "eval_online_mean_topk_score": Gauge(
+                "magik_eval_online_mean_topk_score",
+                "Mean of mean-top-k rerank scores across sampled live traffic (rolling window)",
+            ),
+            "eval_online_retrieval_count": Gauge(
+                "magik_eval_online_retrieval_count",
+                "Mean number of sources returned per query across sampled live traffic (rolling window)",
+            ),
+            # DRIFT DETECTION (monitoring Phase 3) — populated by
+            # app/eval/jobs/drift_eval.py's reference-vs-current-window
+            # comparison over the same shadow collection ONLINE_EVAL_*
+            # reads. Severity mirrors circuit_breaker_state's enum-as-gauge
+            # convention (0=info, 1=warning, 2=critical) so the same Grafana
+            # threshold-coloring/alert pattern applies unchanged.
+            "drift_severity": Gauge(
+                "magik_drift_severity",
+                "Overall drift severity from the last drift_eval run (0=info, 1=warning, 2=critical)",
+            ),
+            "drift_dataset_score": Gauge(
+                "magik_drift_dataset_score",
+                "Fraction of tracked columns flagged as drifted (KS-test p<0.05) in the last run",
+            ),
+            "drift_column_pvalue": Gauge(
+                "magik_drift_column_pvalue",
+                "KS-test p-value per tracked column, reference vs. current window (lower = more drift)",
+                ["column"],
+            ),
+            "drift_reference_size": Gauge(
+                "magik_drift_reference_size",
+                "Row count of the loaded reference window (0 if no reference file exists yet)",
+            ),
+            "drift_current_size": Gauge(
+                "magik_drift_current_size",
+                "Row count of the current production window compared in the last run",
+            ),
         }
     except Exception:
         return None
@@ -83,6 +130,14 @@ eval_online_latency_p50_ms = (_gauges or {}).get("eval_online_latency_p50_ms", _
 eval_online_latency_p95_ms = (_gauges or {}).get("eval_online_latency_p95_ms", _Noop())
 eval_online_sample_count = (_gauges or {}).get("eval_online_sample_count", _Noop())
 eval_online_route_share = (_gauges or {}).get("eval_online_route_share", _Noop())
+eval_online_top1_score = (_gauges or {}).get("eval_online_top1_score", _Noop())
+eval_online_mean_topk_score = (_gauges or {}).get("eval_online_mean_topk_score", _Noop())
+eval_online_retrieval_count = (_gauges or {}).get("eval_online_retrieval_count", _Noop())
+drift_severity = (_gauges or {}).get("drift_severity", _Noop())
+drift_dataset_score = (_gauges or {}).get("drift_dataset_score", _Noop())
+drift_column_pvalue = (_gauges or {}).get("drift_column_pvalue", _Noop())
+drift_reference_size = (_gauges or {}).get("drift_reference_size", _Noop())
+drift_current_size = (_gauges or {}).get("drift_current_size", _Noop())
 
 
 # Cross-module shared Histograms — moved here 2026-08-01 after a live Tier-2
@@ -126,6 +181,16 @@ def _make_shared_histograms():
                 "retrieval_latency_seconds",
                 "Retrieval latency by retriever type",
                 ["retriever_type"],
+            ),
+            # No caller ever observed a reranker latency metric before this
+            # (Phase 31 monitoring gap audit, 2026-08-11) — reranker.rerank()
+            # computes its own internal cross-encoder timing but never
+            # published it. Single label-free histogram since there is
+            # exactly one reranker in this deployment (BGE-reranker-large;
+            # see settings.RERANKER_MODEL) — add a label if that changes.
+            "reranker_latency": Histogram(
+                "reranker_latency_seconds",
+                "Reranker (cross-encoder) call latency",
             ),
             "reasoning_engine_duration": Histogram(
                 "reasoning_engine_duration_seconds",
@@ -186,6 +251,7 @@ _shared_counters = _make_shared_counters()
 
 llm_call_latency = (_shared_histograms or {}).get("llm_call_latency", _Noop())
 retrieval_latency = (_shared_histograms or {}).get("retrieval_latency", _Noop())
+reranker_latency = (_shared_histograms or {}).get("reranker_latency", _Noop())
 reasoning_engine_duration = (_shared_histograms or {}).get("reasoning_engine_duration", _Noop())
 file_ingestion_duration = (_shared_histograms or {}).get("file_ingestion_duration", _Noop())
 chunk_count_per_file = (_shared_histograms or {}).get("chunk_count_per_file", _Noop())

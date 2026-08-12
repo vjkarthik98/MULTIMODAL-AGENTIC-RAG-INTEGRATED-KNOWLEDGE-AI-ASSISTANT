@@ -37,6 +37,39 @@ def _is_sampled(session_id: str) -> bool:
     return bucket < rate
 
 
+def _retrieval_stats(sources: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """Retrieval/rerank-quality signal derived from the SAME sources array
+    every caller already builds and passes in — no new data collection, no
+    new call into the retriever/reranker.
+
+    `score` on each source is whatever the caller's pipeline stamped as the
+    final ranking score (post-rerank `final_score`/`_reranker_raw` — see
+    query_pipeline.py's `_build_sources_array` and rag_pipeline.py's
+    equivalent), so `top1_score` is a real retrieval-quality proxy: a
+    reference-free stand-in for "how confident was the top hit," the same
+    role thresholds.yaml's `context_precision` / retrieval `recall@5` play
+    offline, but cheap enough to compute on every sampled live request.
+    Deliberately NOT BM25-vs-dense contribution split or raw pre-rerank
+    candidate-pool stats — those live inside HybridRetriever._search_impl's
+    closure and are never returned past `.search()`'s final list, so
+    exposing them would mean restructuring the tuned retrieval body just for
+    telemetry (against this repo's own monitoring ground rules). What's
+    captured here is exactly what the architecture already surfaces.
+    """
+    scores = [
+        float(s["score"])
+        for s in (sources or [])
+        if isinstance(s, dict) and isinstance(s.get("score"), (int, float))
+    ]
+    if not scores:
+        return {"retrieval_count": len(sources or []), "top1_score": None, "mean_topk_score": None}
+    return {
+        "retrieval_count": len(sources or []),
+        "top1_score": round(max(scores), 6),
+        "mean_topk_score": round(sum(scores) / len(scores), 6),
+    }
+
+
 def sample_and_log(
     *,
     session_id: str,
@@ -86,6 +119,7 @@ def sample_and_log(
             "route": route,
             "latency_ms": latency_ms,
             "sampled_at": time.time(),
+            **_retrieval_stats(sources),
         }
         mongo.db[settings.MONGO_EVAL_SHADOW_COLLECTION].insert_one(doc)
     except Exception as exc:

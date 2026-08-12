@@ -1079,6 +1079,37 @@ async def query_rag(
             sources_count=len(sources),
         )
 
+        # ONLINE EVAL SAMPLING (Phase 31/monitoring Phase 2) — mirrors the SSE
+        # route's sample_and_log() call below, gated the same way (skips
+        # gibberish/blocked/no-answer responses, best-effort, never raises).
+        # This is the ONLY route with real agent-decision diversity to sample
+        # (rag/direct/memory/search/web) — RAGPipeline.stream() (the SSE
+        # path) is RAG-only, it never routes elsewhere, so without this call
+        # magik_eval_online_route_share would always read 100% "rag" no
+        # matter how often the agent actually picks another path.
+        #
+        # Deliberately NOT added inside query_pipeline() itself: the eval
+        # harness (generation_runner.py/routing_runner.py/e2e_runner.py)
+        # calls query_pipeline() directly, in-process, bypassing this HTTP
+        # route entirely — sampling inside the pipeline function would mix
+        # synthetic gold-set queries into what's supposed to be a live-
+        # production-only signal. This route handler is real-traffic-only.
+        if validated.response and validated.decision not in ("reject", "blocked"):
+            try:
+                from app.eval.jobs.shadow_sampler import sample_and_log
+
+                sample_and_log(
+                    session_id=session_id,
+                    user_id=user_id,
+                    query=query,
+                    answer=validated.response,
+                    sources=sources,
+                    route=validated.decision,
+                    latency_ms=latency * 1000,
+                )
+            except Exception:
+                pass
+
         return flat_response
 
     except HTTPException:

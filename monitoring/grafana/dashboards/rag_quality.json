@@ -266,6 +266,184 @@
         }
       },
       "description": "Yellow past 2 days, red past 7 — Tier-2 only runs post-deploy and (once enabled) nightly, so this is expected to sit in the hours-to-a-day range on an active release cadence, not near-zero like a scrape-based metric."
+    },
+    {
+      "id": 15,
+      "type": "text",
+      "title": "Live Retrieval Quality (online, sampled) — below this line",
+      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 47 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Monitoring Phase 6.** Rolling means from the SAME online_eval.py run as the panels above, over the SAME sampled shadow-collection rows — just aggregating the retrieval fields shadow_sampler.py has stamped on every row since Phase 2 (top1_score/mean_topk_score/retrieval_count) instead of only query/answer/contexts. Complements app/eval/jobs/drift_eval.py's p-values below (a p-value says *did this change*, not *what is it right now* — these two panels are the *now* view)."
+      }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Live top-1 / mean-top-k rerank score (rolling)",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 50 },
+      "targets": [
+        { "expr": "magik_eval_online_top1_score", "legendFormat": "top1_score", "refId": "A" },
+        {
+          "expr": "magik_eval_online_mean_topk_score",
+          "legendFormat": "mean_topk_score",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 } },
+      "description": "The same top1_score/mean_topk_score app/eval/jobs/drift_eval.py's QUALITY columns compare reference-vs-current — this is the raw trend, not the statistical-drift verdict. A steady decline here is worth investigating even before it crosses drift_eval's significance threshold."
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Live retrieval doc count (rolling)",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 50 },
+      "targets": [
+        {
+          "expr": "magik_eval_online_retrieval_count",
+          "legendFormat": "docs per query",
+          "refId": "A"
+        }
+      ],
+      "description": "Mean number of sources returned per sampled query. A sudden drop toward 0 across many queries usually means retrieval itself is failing (Qdrant/BM25), not that answers got worse — check circuit_breaker_state and monitoring/grafana/dashboards/system_health.json's infra panels first."
+    },
+    {
+      "id": 18,
+      "type": "text",
+      "title": "Agent Health — below this line",
+      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 57 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Monitoring Phase 6.** `agent_controller_*` metrics (app/agents/agent_controller.py) have existed since before this monitoring effort but were never dashboarded. Route distribution itself is already covered by the \"Routing decision share\" panel above (magik_eval_online_route_share) — this section is latency/errors/fallback/concurrency, the other half of \"agent health.\" There is no \"tool calls per request\" panel: AgentExecutor.run() is a single classify-and-dispatch, not an iterative tool-chaining loop (see CLAUDE.md's Query/RAG flow section), so that metric does not exist to show — showing one would mean inventing data the architecture doesn't produce."
+      }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Agent controller latency — p50/p95 by decision",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 60 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(agent_controller_duration_seconds_bucket[5m])) by (le, decision))",
+          "legendFormat": "p50 {{decision}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(agent_controller_duration_seconds_bucket[5m])) by (le, decision))",
+          "legendFormat": "p95 {{decision}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Agent controller errors + fallback rate",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 60 },
+      "targets": [
+        {
+          "expr": "sum(rate(agent_controller_errors_total[5m])) by (error_type)",
+          "legendFormat": "error: {{error_type}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(agent_controller_fallback_total[5m]))",
+          "legendFormat": "fallback invocations/s",
+          "refId": "B"
+        }
+      ],
+      "description": "A fallback invocation is not itself an error (see agent_controller.py's _fallback()) — it's the low-confidence catch-all path. Sustained fallback growth with flat error_type series usually means routing confidence is degrading, not that the agent is crashing."
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Active agent requests (live)",
+      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 67 },
+      "targets": [{ "expr": "agent_controller_active_requests", "refId": "A" }],
+      "options": { "textMode": "value_and_name", "colorMode": "value" }
+    },
+    {
+      "id": 22,
+      "type": "text",
+      "title": "Drift Detection — below this line",
+      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 71 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Monitoring Phase 3/6.** app/eval/jobs/drift_eval.py compares a fixed reference-window snapshot (DRIFT_REFERENCE_PATH, built via `python -m app.eval.jobs.drift_eval --build-reference`) against the current sampled-traffic window on 4 columns (query_length/top1_score/mean_topk_score/latency_ms), using a KS-test — NOT Evidently (see that module's docstring for why: every Evidently version pulls in a bundled litestar/uvicorn/plotly web-server stack for what's really a KS-test on 4 columns). Requires DRIFT_ENABLED=true and a built reference — panels below read as zero/empty until both are true. Alerts: magik-drift-warning / magik-drift-critical in monitoring/alerts/rules.yml."
+      }
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "Current drift severity",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 74 },
+      "targets": [{ "expr": "magik_drift_severity", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "Info", "color": "green" } } },
+            { "type": "value", "options": { "1": { "text": "Warning", "color": "yellow" } } },
+            { "type": "value", "options": { "2": { "text": "Critical", "color": "red" } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 2 }
+            ]
+          }
+        }
+      },
+      "options": { "textMode": "value_and_name", "colorMode": "background" }
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Drift dataset score (fraction of columns drifted)",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 74 },
+      "targets": [{ "expr": "magik_drift_dataset_score", "refId": "A" }],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 } },
+      "description": "Volume of drift alone, NOT severity — a high score here with severity still at Info means several columns moved but no QUALITY column (top1_score/mean_topk_score) moved in the degrading direction. See drift_eval.py's module docstring on why those are classified separately."
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Drift per-column p-value (lower = more drift)",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 74 },
+      "targets": [
+        {
+          "expr": "magik_drift_column_pvalue",
+          "legendFormat": "{{column}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": 0 },
+              { "color": "green", "value": 0.05 }
+            ]
+          }
+        }
+      },
+      "description": "KS-test p-value per tracked column. p < 0.05 (below the red/green threshold line) means that column's current-window distribution is statistically distinguishable from the reference window."
+    },
+    {
+      "id": 26,
+      "type": "stat",
+      "title": "Reference / current window size",
+      "gridPos": { "h": 5, "w": 12, "x": 0, "y": 80 },
+      "targets": [
+        { "expr": "magik_drift_reference_size", "legendFormat": "reference rows", "refId": "A" },
+        { "expr": "magik_drift_current_size", "legendFormat": "current rows", "refId": "B" }
+      ],
+      "options": { "textMode": "value_and_name", "colorMode": "value" },
+      "description": "Both read 0 until DRIFT_ENABLED=true, ONLINE_EVAL_SAMPLE_RATE > 0, and a reference file has been built — see the section header above."
     }
   ]
 }

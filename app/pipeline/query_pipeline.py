@@ -10,12 +10,18 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
 from app.core.config import settings
 from app.core.metrics import llm_call_latency as _shared_llm_latency
 from app.core.metrics import retrieval_latency as _shared_retrieval_latency
+from app.prompt.prompt_builder import PROMPT_VERSION
+from app.utils import otel_attrs
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 # PROMETHEUS METRICS — SECTION 6
@@ -1220,7 +1226,56 @@ async def stream_query(
 # MAIN QUERY PIPELINE
 
 
-def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-up refactor, not fixed inline to avoid changing tuned RAG query behavior
+def query_pipeline(
+    query: str,
+    session_id: str = "default",
+    sources: list[str] | None = None,
+    user_id: str | None = None,
+    no_cache: bool = False,
+    regenerate: bool = False,
+) -> dict[str, Any]:
+    """OTel root-span boundary around `_query_pipeline_impl` — the tuned
+    pipeline body below is unchanged, this only gives it a real request-level
+    trace to nest under. Before this wrapper, the per-module spans already
+    inside agent_controller.py/reasoning_engine.py/qdrant_store.py/
+    prompt_builder.py each opened as their OWN disconnected root trace (no
+    parent context was ever active), so Tempo held fragments, never one
+    coherent per-request waterfall. Version attributes here are what let a
+    quality regression be correlated back to a specific deploy."""
+    with tracer.start_as_current_span("query_pipeline") as span:
+        span.set_attribute("app.version", settings.APP_VERSION)
+        span.set_attribute("git.sha", settings.GIT_SHA)
+        span.set_attribute("embedding.model", settings.EMBEDDING_MODEL)
+        span.set_attribute("reranker.model", settings.RERANKER_MODEL)
+        span.set_attribute("prompt.version", PROMPT_VERSION)
+        span.set_attribute("session.id", session_id or "-")
+        span.set_attribute("query.length", len(query or ""))
+        otel_attrs.set_span_kind(span, "CHAIN")
+        otel_attrs.set_input_output(span, input_value=query)
+        try:
+            result = _query_pipeline_impl(
+                query,
+                session_id=session_id,
+                sources=sources,
+                user_id=user_id,
+                no_cache=no_cache,
+                regenerate=regenerate,
+            )
+            span.set_attribute("decision", str(result.get("decision", "unknown")))
+            span.set_attribute("cache_hit", bool(result.get("cache_hit", False)))
+            span.set_attribute("confidence", float(result.get("confidence") or 0.0))
+            if result.get("request_id"):
+                span.set_attribute("request.id", str(result["request_id"]))
+            otel_attrs.set_input_output(span, output_value=result.get("answer"))
+            span.set_status(Status(StatusCode.OK))
+            return result
+        except Exception as exc:
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            span.record_exception(exc)
+            raise
+
+
+def _query_pipeline_impl(  # noqa: C901 -- known complexity debt (93), tracked follow-up refactor, not fixed inline to avoid changing tuned RAG query behavior
     query: str,
     session_id: str = "default",
     sources: list[str] | None = None,
@@ -1231,7 +1286,6 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
 
     start = time.time()
     trace_id = str(uuid.uuid4())
-    # OTEL SPAN STUB
 
     if not query or not query.strip():
         return {
