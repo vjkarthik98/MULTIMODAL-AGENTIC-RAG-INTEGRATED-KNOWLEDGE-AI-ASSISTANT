@@ -10,6 +10,7 @@ class TestSettings:
     def test_defaults_are_valid(self):
         s = Settings()
         assert isinstance(s.APP_VERSION, str) and len(s.APP_VERSION) > 0
+        assert isinstance(s.GIT_SHA, str) and len(s.GIT_SHA) > 0
         assert s.TEXT_EMBEDDING_DIM == 1024
         assert s.VISION_EMBEDDING_DIM == 1152
         assert s.CHUNK_OVERLAP < s.CHUNK_SIZE

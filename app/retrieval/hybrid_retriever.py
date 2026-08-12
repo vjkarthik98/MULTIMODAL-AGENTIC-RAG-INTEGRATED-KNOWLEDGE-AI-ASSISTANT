@@ -10,11 +10,16 @@ import time
 from collections import OrderedDict
 from typing import Any
 
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
 from app.core.config import settings
 from app.core.metrics import retrieval_latency as _retrieval_duration
+from app.utils import otel_attrs
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
 # retrieval_latency_seconds is a shared singleton from app.core.metrics, not
 # defined here — this file's own copy raced against identical copies in
@@ -861,7 +866,47 @@ class HybridRetriever:
 
     # MAIN SEARCH
 
-    def search(  # noqa: C901 -- known complexity debt (66), tracked follow-up refactor, not fixed inline to avoid changing tuned hybrid-retrieval behavior
+    def search(
+        self,
+        query: str,
+        session_id: str,
+        top_k: int | None = None,
+        filters: dict[str, Any] | None = None,
+        user_id: str | None = None,
+    ) -> list[dict]:
+        """OTel span boundary around `_search_impl` — kept as a thin wrapper
+        (not merged into the tuned retrieval body below) so instrumentation
+        can never alter the retrieval logic it's observing. See app/core/
+        metrics.py's module docstring for why shared instrumentation lives at
+        a single wrapper boundary rather than scattered inline."""
+        with tracer.start_as_current_span("hybrid_retriever_search") as span:
+            span.set_attribute("query.length", len(query or ""))
+            span.set_attribute("session.id", session_id or "-")
+            span.set_attribute("top_k", top_k or settings.DEFAULT_TOP_K)
+            otel_attrs.set_span_kind(span, "RETRIEVER")
+            otel_attrs.set_input_output(span, input_value=query)
+            try:
+                results = self._search_impl(
+                    query,
+                    session_id,
+                    top_k=top_k,
+                    filters=filters,
+                    user_id=user_id,
+                )
+                span.set_attribute("results.count", len(results))
+                if results:
+                    top_score = results[0].get("score")
+                    if isinstance(top_score, (int, float)):
+                        span.set_attribute("results.top_score", float(top_score))
+                otel_attrs.set_retrieval_documents(span, results)
+                span.set_status(Status(StatusCode.OK))
+                return results
+            except Exception as exc:
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                span.record_exception(exc)
+                raise
+
+    def _search_impl(  # noqa: C901 -- known complexity debt (66), tracked follow-up refactor, not fixed inline to avoid changing tuned hybrid-retrieval behavior
         self,
         query: str,
         session_id: str,

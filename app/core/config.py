@@ -98,6 +98,12 @@ class Settings:
     APP_DESCRIPTION: str = _str(
         "APP_DESCRIPTION", "Production Multimodal Agentic RAG Integrated AI System"
     )
+    # Baked in at image build time (Dockerfile ARG/ENV GIT_SHA, set from
+    # ${{ github.sha }} in cd.yml) — read here, never shelled out to `git`
+    # on the request path. Used to tag OTel spans / online-eval rows for
+    # deploy root-cause correlation ("did quality drop right after a
+    # deploy?"). "unknown" is the Dockerfile's own default for a non-CD build.
+    GIT_SHA: str = _str("GIT_SHA", "unknown")
     ENV: str = _str("ENV", "development")
     DEBUG: bool = _bool("DEBUG", False)
 
@@ -564,6 +570,30 @@ class Settings:
     ONLINE_EVAL_SAMPLE_RATE: float = _float("ONLINE_EVAL_SAMPLE_RATE", 0.0)
     ONLINE_EVAL_ENABLED: bool = _bool("ONLINE_EVAL_ENABLED", False)
     ONLINE_EVAL_INTERVAL_SEC: int = _int("ONLINE_EVAL_INTERVAL_SEC", 1800)
+
+    # DRIFT DETECTION (monitoring Phase 3) — statistical reference-vs-current
+    # comparison over MONGO_EVAL_SHADOW_COLLECTION (same collection
+    # ONLINE_EVAL_* reads/writes; drift_eval.py never mutates it, only reads
+    # a window). Off by default, same convention as ONLINE_EVAL_ENABLED —
+    # both require ONLINE_EVAL_SAMPLE_RATE > 0 to have any data to compare.
+    DRIFT_ENABLED: bool = _bool("DRIFT_ENABLED", False)
+    # Row count, not a time window — a fixed sample size keeps the KS-test
+    # p-value comparable run over run regardless of how bursty traffic is
+    # (a KS-test's power depends on n; a wall-clock window would silently
+    # make the test more/less sensitive as traffic volume changes).
+    DRIFT_WINDOW_SIZE: int = _int("DRIFT_WINDOW_SIZE", 200)
+    DRIFT_REFERENCE_PATH: str = _str(
+        "DRIFT_REFERENCE_PATH",
+        str(PROJECT_ROOT / "app" / "eval" / "baselines" / "drift_reference.jsonl"),
+    )
+    DRIFT_CHECK_INTERVAL_SEC: int = _int("DRIFT_CHECK_INTERVAL_SEC", 3600)
+    # Fraction of tracked columns (query_length/top1_score/mean_topk_score/
+    # latency_ms) whose KS-test flags drift (p < 0.05) before paging.
+    # Provisional, like the alert thresholds in monitoring/alerts/rules.yml —
+    # no real production traffic has been measured on this box yet to
+    # calibrate against; revisit once DRIFT_ENABLED has run for real.
+    DRIFT_WARNING_THRESHOLD: float = _float("DRIFT_WARNING_THRESHOLD", 0.25)
+    DRIFT_CRITICAL_THRESHOLD: float = _float("DRIFT_CRITICAL_THRESHOLD", 0.5)
 
     # TEXT REPAIR — per-pass toggles for the broken-corpus hardening layer
     # (mojibake fix, noise-line strip, whitespace recovery, OCR normalization,
@@ -1097,6 +1127,20 @@ class Settings:
 
         if self.OTEL_SAMPLING_RATIO < 0.0 or self.OTEL_SAMPLING_RATIO > 1.0:
             errors.append(f"OTEL_SAMPLING_RATIO must be 0.0–1.0, got {self.OTEL_SAMPLING_RATIO}")
+
+        if self.DRIFT_WARNING_THRESHOLD < 0.0 or self.DRIFT_WARNING_THRESHOLD > 1.0:
+            errors.append(
+                f"DRIFT_WARNING_THRESHOLD must be 0.0–1.0, got {self.DRIFT_WARNING_THRESHOLD}"
+            )
+        if self.DRIFT_CRITICAL_THRESHOLD < 0.0 or self.DRIFT_CRITICAL_THRESHOLD > 1.0:
+            errors.append(
+                f"DRIFT_CRITICAL_THRESHOLD must be 0.0–1.0, got {self.DRIFT_CRITICAL_THRESHOLD}"
+            )
+        if self.DRIFT_CRITICAL_THRESHOLD < self.DRIFT_WARNING_THRESHOLD:
+            errors.append(
+                "DRIFT_CRITICAL_THRESHOLD must be >= DRIFT_WARNING_THRESHOLD "
+                f"(got critical={self.DRIFT_CRITICAL_THRESHOLD}, warning={self.DRIFT_WARNING_THRESHOLD})"
+            )
 
         if errors:
             formatted = "\n  - ".join(errors)
