@@ -1476,6 +1476,19 @@ class ImageChunker(BaseChunker):
                     except Exception:
                         pass
 
+                # Hallucination-reduction initiative Phase 5 (2026-08-13):
+                # EasyOCR's per-detection confidence (r[2], 0-1 scale) was
+                # already being read here only to apply the >0.3 inclusion
+                # filter (_ocr_text_from_boxes), then thrown away — mirrors
+                # the same fix already made in app/ingestion/pdf_ingest.py's
+                # _ocr_page_image for pytesseract.image_to_data. Average
+                # confidence across the boxes that actually contributed to
+                # ocr_text (same >0.3 filter). None (not a fabricated value)
+                # when boxes are empty — the TrOCR fallback path carries no
+                # per-detection confidence at all.
+                _ocr_confs = [r[2] for r in ocr_boxes if r[2] > 0.3]
+                ocr_confidence = round(sum(_ocr_confs) / len(_ocr_confs), 3) if _ocr_confs else None
+
                 # Chart/figure title from the top-of-image OCR band (reliable,
                 # human-readable — used as the citation caption for all images).
                 ocr_title = _extract_title_from_ocr_boxes(ocr_boxes, img_height)
@@ -1634,6 +1647,19 @@ class ImageChunker(BaseChunker):
                 # this doc gets BOTH BGE text embedding AND SigLIP vision embedding.
                 source_path = str(getattr(meta, "source_path", "") or "")
 
+                # Hallucination-reduction initiative Phase 5 (2026-08-13):
+                # surface low-confidence OCR into the prompt via the existing
+                # error_markers -> "⚠ ERROR_MARKERS=" mechanism (rag_pipeline.py::
+                # _build_context) — flag-only, does not affect retrieval
+                # ranking. Same OCR_CONFIDENCE_ERROR_MARKER_MIN threshold
+                # pdf_chunker.py uses (shared 0-1 confidence scale).
+                _image_error_markers = (
+                    ["low_ocr_confidence"]
+                    if ocr_confidence is not None
+                    and ocr_confidence < settings.OCR_CONFIDENCE_ERROR_MARKER_MIN
+                    else []
+                )
+
                 structure = {
                     "chunk_hash_id": chunk_hash,
                     "source_file": source,
@@ -1645,6 +1671,8 @@ class ImageChunker(BaseChunker):
                     "caption": caption_text,
                     "caption_confidence": caption_confidence,
                     "ocr_text": ocr_text,
+                    "ocr_confidence": ocr_confidence,
+                    "error_markers": _image_error_markers,
                     "extracted_numbers": extracted_numbers,
                     "time_period": time_period,
                     "data_series": data_series,

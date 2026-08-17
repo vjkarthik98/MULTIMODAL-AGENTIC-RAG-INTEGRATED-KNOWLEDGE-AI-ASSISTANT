@@ -191,6 +191,34 @@ def compute_finance_fidelity(answer: str, contexts: list[str]) -> float:
     return matched / len(answer_nums)
 
 
+# Full date expressions are stripped from the answer BEFORE fabrication
+# checking. `is_year` alone only removes the bare "2024" from a date; the
+# day-of-month in "September 18, 2024" survives _parse_numbers as its own
+# 2-digit "18" (is_year=False, is_id=False — genuinely indistinguishable from
+# a real quantitative claim by that function alone) and was then flagged as
+# an ungrounded, fabricated number whenever the transcript's spoken content
+# never restates the date as a phrase (common for audio, where speakers say
+# "at this meeting" rather than the calendar date). Live-reproduced
+# (2026-08-17): the SAME "18" from "September 18, 2024" independently
+# flagged 3 separate audio rows in one hallucination-suite run, driving
+# fabrication_rate from its v7 baseline (0.0653) to 0.0918 — enough to trip
+# the gate. Shared with _deterministic_context_recall's identical fix
+# (app/eval/metrics/generation.py), which hit this same bug from the
+# reference-answer side in the per-modality quality pass (2026-08-13); this
+# closes the parallel, previously-unfixed instance on the answer/fabrication
+# side. The day-of-month group carries a (?!\d) guard so it cannot swallow
+# the first two digits of a bare "Month YYYY" (leaving a stray last-two-
+# digits fragment as its own false "fact" — see generation.py's git history
+# for that measured regression before the guard was added).
+_CR_DATE_RE = re.compile(
+    r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?"
+    r"|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    r"(?:\s+\d{1,2}(?!\d)(?:st|nd|rd|th)?,?)?(?:\s+\d{4})?"
+    r"|\b\d{1,2}/\d{1,2}/\d{2,4}\b",
+    re.IGNORECASE,
+)
+
+
 def _numbers_grounded(answer: str, context_texts: list[str]) -> tuple[bool, list[str]]:
     """Return (all_grounded, ungrounded_numbers).
 
@@ -200,7 +228,7 @@ def _numbers_grounded(answer: str, context_texts: list[str]) -> tuple[bool, list
     they are not quantitative claims and previously drove false positives
     (e.g. '2023' and SEC accession '000121935523000039').
     """
-    ans_numbers = _parse_numbers(answer)
+    ans_numbers = _parse_numbers(_CR_DATE_RE.sub(" ", answer))
     if not ans_numbers:
         return True, []
 
@@ -234,11 +262,22 @@ def hallucination_flag_single(
             "confidence": float (0=clean, 1=likely hallucination),
             "reasons": List[str],
             "ungrounded_numbers": List[str],
+            "fabrication_flag": bool,  # Check 1 only — answer states a number
+                                       # absent from retrieved context (true
+                                       # fabrication).
+            "omission_flag": bool,    # Check 2 only — answer omits/restates
+                                       # differently a number the gold reference
+                                       # has (completeness/retrieval signal, NOT
+                                       # fabrication). See hallucination_rate()'s
+                                       # docstring for why these are tracked
+                                       # separately.
         }
     """
     reasons = []
     ungrounded_numbers: list[str] = []
     confidence = 0.0
+    fabrication_flag = False
+    omission_flag = False
 
     if not answer or not contexts:
         return {
@@ -246,6 +285,8 @@ def hallucination_flag_single(
             "confidence": 0.0,
             "reasons": ["insufficient_data"],
             "ungrounded_numbers": [],
+            "fabrication_flag": False,
+            "omission_flag": False,
         }
 
     # Check 1: numeric grounding (P0-3: numbers not in retrieved context)
@@ -254,6 +295,7 @@ def hallucination_flag_single(
         reasons.append(f"ungrounded_numbers: {ungrounded}")
         ungrounded_numbers = ungrounded
         confidence = max(confidence, 0.8)
+        fabrication_flag = True
 
     # Check 2: cross-chunk consistency via reference answer (if available)
     #
@@ -299,12 +341,16 @@ def hallucination_flag_single(
                 # genuinely a different (likely wrong) number, not a rewording.
                 reasons.append(f"missing_reference_numbers: {missing[:3]}")
                 confidence = max(confidence, 0.6)
+                omission_flag = True
 
-    # Check 3: template leakage (P1-7)
+    # Check 3: template leakage (P1-7) — a generation-artifact bug, folded into
+    # fabrication (not omission): the model produced text that was never a
+    # legitimate answer to begin with.
     template_re = re.compile(r"\[sic\]|Sources Used: \d+|\{[a-zA-Z_]+\}", re.IGNORECASE)
     if template_re.search(answer):
         reasons.append("template_leakage")
         confidence = max(confidence, 0.4)
+        fabrication_flag = True
 
     flagged = confidence >= 0.3
     return {
@@ -312,6 +358,8 @@ def hallucination_flag_single(
         "confidence": confidence,
         "reasons": reasons,
         "ungrounded_numbers": ungrounded_numbers,
+        "fabrication_flag": fabrication_flag,
+        "omission_flag": omission_flag,
     }
 
 
@@ -352,3 +400,57 @@ def hallucination_rate(eval_rows: list[dict]) -> MetricResult:
         notes += " | examples: " + "; ".join(flagged_examples[:2])
 
     return MetricResult(name="hallucination_rate", value=rate, n=total, notes=notes)
+
+
+def _split_rate(eval_rows: list[dict], flag_key: str, metric_name: str) -> MetricResult:
+    """Shared loop for fabrication_rate/omission_rate — see hallucination_rate()
+    for row shape. Split out of the blended `hallucination_rate` metric so a
+    fabrication spike (the model inventing a number) and an omission spike (the
+    model failing to state a number the reference has) can be told apart and
+    fixed differently, instead of hiding behind one blended rate."""
+    if not eval_rows:
+        return MetricResult.empty(metric_name, "no eval rows")
+
+    flagged_count = 0
+    total = 0
+    flagged_examples = []
+
+    for row in eval_rows:
+        answer = row.get("answer") or ""
+        contexts = row.get("contexts") or []
+        if isinstance(contexts, list) and contexts and isinstance(contexts[0], dict):
+            contexts = [c.get("text") or str(c) for c in contexts]
+        reference = row.get("reference_answer") or ""
+
+        if not answer:
+            continue
+        total += 1
+
+        result = hallucination_flag_single(answer, contexts, reference)
+        if result[flag_key]:
+            flagged_count += 1
+            flagged_examples.append(f"  '{row.get('query', '')[:40]}': {result['reasons']}")
+
+    if total == 0:
+        return MetricResult.empty(metric_name, "no valid answers to check")
+
+    rate = flagged_count / total
+    notes = f"flagged={flagged_count}/{total}"
+    if flagged_examples:
+        notes += " | examples: " + "; ".join(flagged_examples[:2])
+
+    return MetricResult(name=metric_name, value=rate, n=total, notes=notes)
+
+
+def fabrication_rate(eval_rows: list[dict]) -> MetricResult:
+    """Fraction of answers containing a number NOT present in retrieved context
+    (Check 1) or a template-leakage artifact (Check 3) — true fabrication, the
+    primary hallucination-safety signal. See `_split_rate`."""
+    return _split_rate(eval_rows, "fabrication_flag", "fabrication_rate")
+
+
+def omission_rate(eval_rows: list[dict]) -> MetricResult:
+    """Fraction of answers that omit or restate-differently a number the gold
+    reference has (Check 2) — a completeness/retrieval-quality signal, not
+    fabrication. See `_split_rate`."""
+    return _split_rate(eval_rows, "omission_flag", "omission_rate")

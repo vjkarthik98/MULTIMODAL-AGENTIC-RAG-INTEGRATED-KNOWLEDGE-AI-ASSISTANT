@@ -211,3 +211,59 @@ class TestHallucinationGuard:
         answer = "Quantum entanglement enables faster than light communication between particles."
         is_hallucinated, score = _hallucination_guard(answer, docs, threshold=0.9)
         assert is_hallucinated is True
+
+
+# ── _split_answer_sentences: non-sentence-ending periods ──────────────────────
+# Added 2026-08-13 (per-modality quality pass). A naive split on "." truncated
+# the claim being groundedness-scored, which the lexical check tolerated but
+# the NLI check did not. Two documented instances, both fixed by protecting
+# the period before splitting:
+#   * decimals (Phase 3): "...rose 2.5 percent" -> "...rose 2" + "5 percent..."
+#   * abbreviations (this pass): "Apple Inc. was ~$429..." -> "Apple Inc"
+#     (dropped by the >20-char filter) + a SUBJECTLESS "was ~$429...".
+#     Measured impact: NLI contradiction 0.996 -> 0.168 and grounding
+#     40.0 -> 100.0 on the real image chart chunk.
+
+from app.reasoning.reasoning_engine import _split_answer_sentences
+
+
+class TestSplitAnswerSentences:
+
+    def test_corporate_suffix_keeps_subject_with_claim(self):
+        text = "Apple Inc. was approximately $429 on September 28, 2024 per this chart."
+        sentences = _split_answer_sentences(text)
+        assert len(sentences) == 1
+        assert sentences[0].startswith("Apple Inc.")
+
+    def test_dotted_initialism_not_split(self):
+        text = "The U.S. economy grew while the U.K. lagged behind in that same period."
+        sentences = _split_answer_sentences(text)
+        assert len(sentences) == 1
+        assert "U.S." in sentences[0] and "U.K." in sentences[0]
+
+    def test_title_abbreviation_not_split(self):
+        text = "Dr. Powell said the committee would hold rates steady for the near term."
+        sentences = _split_answer_sentences(text)
+        assert len(sentences) == 1
+        assert sentences[0].startswith("Dr. Powell")
+
+    def test_decimals_still_protected(self):
+        # Phase 3 regression guard — must not be undone by the abbreviation fix.
+        text = "Total PCE prices rose 2.5 percent over the 12 months ending in November."
+        sentences = _split_answer_sentences(text)
+        assert len(sentences) == 1
+        assert "2.5 percent" in sentences[0]
+
+    def test_real_sentence_boundaries_still_split(self):
+        text = (
+            "Apple Inc. reported net sales of $383,285 million. "
+            "The S&P 500 Index rose 2.5 percent during that same year."
+        )
+        sentences = _split_answer_sentences(text)
+        assert len(sentences) == 2
+        assert sentences[0].startswith("Apple Inc.")
+        assert sentences[1].startswith("The S&P 500")
+
+    def test_no_abbreviations_unchanged(self):
+        text = "The committee lowered the target range by a quarter percentage point."
+        assert _split_answer_sentences(text) == [text.rstrip(".")]

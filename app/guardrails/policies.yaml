@@ -318,7 +318,14 @@ pii:
 # ---------------------------------------------------------------------------
 
 output:
-  groundedness_threshold: 0.30   # hallucination confidence >= this → warning
+  # groundedness_threshold removed 2026-08-13 (hallucination-reduction
+  # initiative Phase 4 consolidation): output_guard.py now calls
+  # GroundednessChecker directly and uses its own is_hallucinated verdict
+  # (lexical guard + NLI contradiction + numeric grounding — see
+  # app/verification/groundedness_checker.py) instead of comparing a raw
+  # confidence score against a separate policy threshold. Real thresholds
+  # now live in app/core/config.py's AGENT_VERIFY_*/NLI_* settings and
+  # reasoning_engine.py's HALLUCINATION_THRESHOLD.
   toxicity_threshold: 0.75       # toxicity score >= this → block output
   max_answer_chars: 16000
 

@@ -17,6 +17,12 @@
 # same pattern, different script, per this repo's own convention of inline
 # per-script SSM fetching rather than a shared abstraction.
 #
+# A dedicated escalation secret (PagerDuty, then Opsgenie) was added here
+# and removed — every free real phone/SMS escalation option hit a hard
+# external signup/paywall blocker, not something fixable in this repo. See
+# monitoring/alerts/contact-points.yml's comment for the details. ntfy is
+# the only delivery mechanism again.
+#
 # Three different delivery mechanisms are in play, not one — see the
 # comments at each step below for why.
 

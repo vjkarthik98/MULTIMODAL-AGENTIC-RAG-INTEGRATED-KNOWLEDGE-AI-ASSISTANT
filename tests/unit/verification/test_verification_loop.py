@@ -48,6 +48,30 @@ class TestVerificationLoopPassthrough:
         assert report.verified is True
         assert engine.generate_answer.call_count == 1
 
+    def test_disabled_globally_increments_passthrough_counter_and_warns(self, monkeypatch, caplog):
+        # Hardening added Phase 2 (2026-08-13, hallucination-reduction
+        # initiative): _passthrough() previously force-filled scores to
+        # 100/verified=True with no signal it had skipped the real checks.
+        import logging
+
+        from app.verification.verification_loop import _passthrough_total
+
+        monkeypatch.setattr(settings, "AGENT_VERIFY_ENABLED", False)
+        before = _passthrough_total.labels(reason="disabled_globally")._value.get()
+        loop = VerificationLoop()
+        engine = _reasoning_engine("A plain answer.")
+        with caplog.at_level(logging.WARNING):
+            loop.run(
+                "query", "sess1", "user1", retriever=MagicMock(),
+                reasoning_engine=engine, initial_docs=[_doc("some text")],
+            )
+        after = _passthrough_total.labels(reason="disabled_globally")._value.get()
+        assert after == before + 1
+        assert any(
+            "verification_passthrough" in r.message or "verification_passthrough" in str(r.msg)
+            for r in caplog.records
+        )
+
     def test_modality_opted_out_runs_single_shot(self, monkeypatch):
         monkeypatch.setattr(settings, "AGENT_VERIFY_ENABLED", True)
         monkeypatch.setattr(settings, "AGENT_VERIFY_MODALITIES", ["audio", "video"])
@@ -60,6 +84,22 @@ class TestVerificationLoopPassthrough:
         )
         assert report.verified is True
         assert engine.generate_answer.call_count == 1
+
+    def test_modality_opted_out_increments_passthrough_counter(self, monkeypatch):
+        from app.verification.verification_loop import _passthrough_total
+
+        monkeypatch.setattr(settings, "AGENT_VERIFY_ENABLED", True)
+        monkeypatch.setattr(settings, "AGENT_VERIFY_MODALITIES", ["audio", "video"])
+        before = _passthrough_total.labels(reason="modality_excluded")._value.get()
+        loop = VerificationLoop()
+        engine = _reasoning_engine("A plain answer.")
+        loop.run(
+            "query", "sess1", "user1", retriever=MagicMock(),
+            reasoning_engine=engine, initial_docs=[_doc("some text")],
+            modality_hint="pdf",
+        )
+        after = _passthrough_total.labels(reason="modality_excluded")._value.get()
+        assert after == before + 1
 
     def test_mp4_alias_normalized_to_video(self, monkeypatch):
         # Regression test (live smoke test, Phase 32): video_chunker.py tags
@@ -99,6 +139,31 @@ class TestVerificationLoopPassthrough:
             reasoning_engine=engine, initial_docs=docs, initial_sources=sources,
             modality_hint="mp3",
         )
+        assert len(report.attempts) == 1
+        assert report.attempts[0].strategy == "baseline"
+
+    def test_text_alias_normalized_to_txt(self, monkeypatch):
+        # Regression test (live SSE smoke test, hallucination-reduction
+        # initiative Phase 2, 2026-08-13): txt_ingest.py's inline
+        # IngestedDocument construction tags modality="text" while
+        # txt_chunker.py's dedicated chunker tags "txt". Confirmed against
+        # the live eval tenant's BM25 index — every indexed chunk of
+        # fomc_dec2024.txt carries modality="text" — so every real txt query
+        # silently skipped VerificationLoop before this alias was added.
+        # modality_hint="text" must be treated identically to "txt".
+        monkeypatch.setattr(settings, "AGENT_VERIFY_ENABLED", True)
+        monkeypatch.setattr(settings, "AGENT_VERIFY_MODALITIES", ["txt"])
+        loop = VerificationLoop()
+        engine = _reasoning_engine("The FOMC cut rates by a quarter point.")
+        docs = [_doc("The FOMC cut rates by a quarter point.")]
+
+        answer, report = loop.run(
+            "What did the FOMC decide?", "sess1", "user1", retriever=MagicMock(),
+            reasoning_engine=engine, initial_docs=docs,
+            modality_hint="text",
+        )
+        # If the alias weren't normalized, this would silently take the
+        # _passthrough() path (no groundedness/citation scoring at all).
         assert len(report.attempts) == 1
         assert report.attempts[0].strategy == "baseline"
 
@@ -247,3 +312,63 @@ class TestVerificationLoopFailAndRetry:
         )
         assert report.degraded is True
         assert answer  # still produced a best-effort answer
+
+
+class TestSkipRetries:
+    """Image chart-value answers and docx table-row lookups are both
+    deterministically SYNTHESIZED by the caller after this loop returns,
+    discarding whatever the LLM drafted — so retrying against the draft can
+    never change the final answer. Live-measured before this fix: 14/14
+    image queries retried for 0 eventual successes (query_pipeline.py's
+    skip_retries pre-check calls the synth functions speculatively to know
+    FOR CERTAIN synthesis will fire, then passes skip_retries=True here).
+    """
+
+    def test_skip_retries_stops_after_baseline_even_on_fail(self, monkeypatch):
+        monkeypatch.setattr(settings, "AGENT_VERIFY_ENABLED", True)
+        monkeypatch.setattr(settings, "AGENT_VERIFY_MODALITIES", ["image"])
+        monkeypatch.setattr(settings, "AGENT_VERIFY_MAX_RETRIES", 3)
+
+        loop = VerificationLoop()
+        # Every generation would normally trigger a retry (fabricated number
+        # never in context -> always FAIL) — with skip_retries=True this must
+        # still only be called ONCE.
+        engine = _reasoning_engine("The value was approximately $999999 per this chart.")
+        docs = [_doc("CHART VALUES - pixel-calibrated reads: 9/28/24: Apple Inc.=~$429")]
+        sources = [_source("[img.png chart]")]
+        retriever = MagicMock()
+        retriever.search.return_value = docs
+
+        answer, report = loop.run(
+            "What was the value on 9/28/24?", "sess1", "user1", retriever=retriever,
+            reasoning_engine=engine, initial_docs=docs, initial_sources=sources,
+            modality_hint="image", skip_retries=True,
+        )
+
+        assert len(report.attempts) == 1
+        assert engine.generate_answer.call_count == 1
+        # Verification itself still ran and still correctly failed — only
+        # the RETRY loop was skipped, not the check.
+        assert report.verified is False
+
+    def test_default_behavior_unchanged_when_skip_retries_omitted(self, monkeypatch):
+        # Same FAIL-worthy setup as test_exhausts_retries_and_returns_
+        # degraded_best_effort above — confirms skip_retries defaults to
+        # False and normal retry behavior is untouched.
+        monkeypatch.setattr(settings, "AGENT_VERIFY_ENABLED", True)
+        monkeypatch.setattr(settings, "AGENT_VERIFY_MODALITIES", ["pdf"])
+        monkeypatch.setattr(settings, "AGENT_VERIFY_MAX_RETRIES", 1)
+
+        loop = VerificationLoop()
+        engine = _reasoning_engine("Revenue was $999.9 billion. [apple.pdf p.4]")
+        docs = [_doc("Apple reported net revenue of $94.9 billion in Q4 2024.")]
+        sources = [_source("[apple.pdf p.4]")]
+        retriever = MagicMock()
+        retriever.search.return_value = docs
+
+        answer, report = loop.run(
+            "What was Q4 revenue?", "sess1", "user1", retriever=retriever,
+            reasoning_engine=engine, initial_docs=docs, initial_sources=sources,
+            modality_hint="pdf",
+        )
+        assert len(report.attempts) > 1

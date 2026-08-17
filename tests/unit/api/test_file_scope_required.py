@@ -96,6 +96,24 @@ class TestQueryRouteRequiresScope:
         assert r.status_code == 200
         assert "391.0B" in r.json()["answer"]
 
+    def test_how_are_you_gets_greeting_template_not_400(self, client):
+        r = client.post("/rag/query", json=_body(query="How are you?"))
+        assert r.status_code == 200
+        assert r.json()["decision"] == "greeting"
+        assert "select" not in r.json()["answer"].lower()
+
+    def test_meta_capability_question_gets_meta_template_not_400(self, client):
+        r = client.post(
+            "/rag/query",
+            json=_body(query="Do you know about the Financial documents stored in the Knowledge Base?"),
+        )
+        assert r.status_code == 200
+        assert r.json()["decision"] == "meta_capability"
+
+    def test_unrelated_question_without_sources_still_400s(self, client):
+        r = client.post("/rag/query", json=_body(query="What is the capital of France?"))
+        assert r.status_code == 400
+
 
 class TestStreamRouteRequiresScope:
 
@@ -124,3 +142,24 @@ class TestStreamRouteRequiresScope:
             )
         assert r.status_code == 200
         assert "select" not in _assembled_sse_text(r.text).lower()
+
+    def test_how_are_you_streams_greeting_template(self, client):
+        r = client.post("/rag/query/stream", json=_body(query="How are you?"))
+        assert r.status_code == 200
+        text = _assembled_sse_text(r.text).lower()
+        assert "select a file to scope" not in text
+        assert "@" in text  # points at the file picker
+
+    def test_meta_capability_question_streams_meta_template(self, client):
+        r = client.post("/rag/query/stream", json=_body(query="What can you do?"))
+        assert r.status_code == 200
+        text = _assembled_sse_text(r.text)
+        assert "select a file to scope" not in text.lower()
+
+    def test_greeting_no_longer_calls_agent_executor(self, client):
+        # Regression guard: the streaming route's greeting branch must be a
+        # pure template lookup now, not an LLM call.
+        with patch("app.agents.agent_controller.AgentExecutor") as mock_exec:
+            r = client.post("/rag/query/stream", json=_body(query="hi"))
+        assert r.status_code == 200
+        mock_exec.assert_not_called()

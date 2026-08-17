@@ -74,8 +74,24 @@ class ConfidenceScorer:
             reasons.append(f"unsupported numbers: {grounding.unsupported_numbers[:3]}")
         if citation.bad_citations:
             reasons.append(f"bad citations: {citation.bad_citations[:3]}")
-        if not completeness.is_complete:
-            reasons.append(f"missing aspects: {completeness.missing[:3]}")
+        # NOT a separate categorical fail (removed 2026-08-13, hallucination-
+        # reduction initiative Phase 3): `score()` above already folds
+        # completeness in proportionally via `completeness_score` (100 *
+        # covered/total) into the weakest-link `overall` formula — a missing
+        # aspect already costs real points there. Auto-failing on TOP of that
+        # for any single missing aspect double-penalized multi-part questions
+        # (common in this finance corpus: "what was X, and how did it compare
+        # to Y") and meant an answer that correctly, safely covered 2 of 3
+        # parts got the same "could not be verified" hedge as one that
+        # fabricated a number — conflating incompleteness with unsafety.
+        # Confirmed via the same live sample that justified the threshold
+        # changes above: several rows with non-empty `missing` (e.g.
+        # docx-0001, missing only "What is Goldman Sachs' rating") had
+        # grounding=100/citation=100 and zero fabrication signal — genuinely
+        # safe, just incomplete. completeness.missing is still surfaced via
+        # VerificationReport.missing_aspects either way, so callers/UI can
+        # still show what was dropped; it just no longer forces FAIL on its
+        # own.
 
         if reasons:
             return "FAIL", "; ".join(reasons)
