@@ -7,6 +7,7 @@ from app.agents.agent_controller import (
     AgentExecutor,
     _normalize,
     _sanitize,
+    is_meta_capability_question,
 )
 
 
@@ -137,6 +138,32 @@ class TestIsConversational:
 
     def test_factual_question_not_conversational(self):
         assert self.executor._is_conversational("What is the capital of France?") is False
+
+
+# ---------------------------------------------------------------------------
+# is_meta_capability_question
+# ---------------------------------------------------------------------------
+
+class TestIsMetaCapabilityQuestion:
+
+    def test_what_can_you_do(self):
+        assert is_meta_capability_question("What can you do?") is True
+
+    def test_do_you_know_about_financial_documents(self):
+        q = "Do you know about the Financial documents stored in the Knowledge Base?"
+        assert is_meta_capability_question(q) is True
+
+    def test_who_are_you(self):
+        assert is_meta_capability_question("who are you") is True
+
+    def test_what_files_do_you_have(self):
+        assert is_meta_capability_question("what files do you have") is True
+
+    def test_capital_of_france_not_meta(self):
+        assert is_meta_capability_question("What is the capital of France?") is False
+
+    def test_greeting_not_meta(self):
+        assert is_meta_capability_question("hello") is False
 
 
 # ---------------------------------------------------------------------------

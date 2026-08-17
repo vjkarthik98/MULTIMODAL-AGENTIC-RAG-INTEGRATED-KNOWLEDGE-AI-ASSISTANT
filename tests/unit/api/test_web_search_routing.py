@@ -45,6 +45,17 @@ class TestIsWebRequest:
         # the wording of the question.
         assert _is_web_request("", True) is True
 
+    def test_know_does_not_match_the_now_signal(self):
+        # Bare substring matching on "now" previously matched inside "know"/
+        # "knowledge" (e.g. "do you know about the financial documents in
+        # the knowledge base?"), silently sending a plain meta question to an
+        # uncontrolled real web search. Found 2026-08-17.
+        q = "Do you know about the Financial documents stored in the Knowledge Base?"
+        assert _is_web_request(q, False) is False
+
+    def test_knowledge_alone_does_not_match(self):
+        assert _is_web_request("what is in the knowledge base?", False) is False
+
 
 class TestWebHelpers:
 

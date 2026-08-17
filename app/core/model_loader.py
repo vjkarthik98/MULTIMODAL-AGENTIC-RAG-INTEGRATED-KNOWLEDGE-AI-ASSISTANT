@@ -143,6 +143,7 @@ class ModelLoader:
         self._whisper: Any | None = None
         self._whisper_infer_lock = threading.Lock()
         self._reranker: Any | None = None
+        self._nli: Any | None = None
         self._siglip_model = None
         self._siglip_processor = None
         self._siglip_device: str | None = None
@@ -727,6 +728,40 @@ class ModelLoader:
             self._reranker = self._safe_load(_load, "reranker")
 
         return self._reranker
+
+    # NLI — GPU ENTAILMENT SCORER (GroundednessChecker, Phase 3 of the
+    # hallucination-reduction initiative). Same CrossEncoder loading shape as
+    # get_reranker() above — deliberately, since a 3-label entailment/
+    # neutral/contradiction scorer is the same class of model as the
+    # relevance CrossEncoder, just a different checkpoint and label space.
+
+    def get_nli_model(self):
+        if self._nli:
+            return self._nli
+
+        with self._lock:
+            if self._nli:
+                return self._nli
+
+            decision = device_manager.decision_for("nli")
+
+            def _load():
+                from sentence_transformers import CrossEncoder  # local
+
+                ce = CrossEncoder(
+                    settings.NLI_MODEL,
+                    device=decision.device,
+                )
+                if decision.device == "cuda" and decision.dtype == "float16":
+                    try:
+                        ce.model.half()
+                    except Exception as exc:
+                        logger.warning("nli_fp16_failed", error=str(exc))
+                return ce
+
+            self._nli = self._safe_load(_load, "nli")
+
+        return self._nli
 
     # QWEN2-VL — VIDEO FRAME + FINANCIAL CHART CAPTIONING (2B INT8, ~2.2 GB)
 

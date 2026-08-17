@@ -183,3 +183,105 @@ def post_json(
     # Exhausted rate-limit retries — surface it rather than returning a fake row.
     resp.raise_for_status()
     return resp.json()
+
+
+def post_sse(
+    url: str,
+    payload: dict[str, Any],
+    auth: EvalAuth,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    """POST to an SSE endpoint (/rag/query/stream) and assemble the streamed
+    response into the same {"answer", "sources"} shape post_json() returns,
+    so callers don't need two code paths.
+
+    Added for the hallucination-reduction initiative (Phase 2, 2026-08-13):
+    every other eval runner posts to /rag/query (query_pipeline.py), never to
+    /rag/query/stream (rag_pipeline.stream(), the endpoint the UI actually
+    calls — which also runs `_conversational_rewrap` after verification, a
+    tone pass no other eval path exercises). See thresholds.yaml's "KNOWN
+    COVERAGE GAP" comment for the full rationale.
+
+    Parses the exact __type__ event protocol app/api/api_routes.py's
+    event_stream() emits: plain `data: "<token>"` (JSON-encoded string)
+    chunks concatenate into the answer; `{"__type__":"replace",...}`
+    supersedes them (the canonical guarded answer); `{"__type__":"sources"}`
+    carries the citation array; `{"__type__":"refusal"}` marks an explicit
+    refusal. `data: [DONE]` ends the stream (a literal sentinel, not JSON —
+    matches the API's own framing exactly).
+
+    The VerificationReport is NOT recoverable here — rag_pipeline.stream()
+    never puts it on the wire, only logs it (event=rag_stream_verification_
+    result). This mode is for grading the ANSWER TEXT real users receive
+    (post-rewrap), not for verification-metric collection — Phase 1's
+    non-streaming path already covers that.
+    """
+    import json as _json
+
+    import requests
+
+    refreshed_once = False
+    resp = None
+    for attempt in range(_RATE_LIMIT_MAX_RETRIES + 1):
+        resp = requests.post(
+            url, json=payload, headers=auth.headers(), timeout=timeout, stream=True
+        )
+
+        if resp.status_code == 401 and not refreshed_once:
+            refreshed_once = True
+            logger.warning(event="eval_token_expired_retrying", url=url)
+            resp.close()
+            auth.token(force_refresh=True)
+            continue
+
+        if resp.status_code == 429 and attempt < _RATE_LIMIT_MAX_RETRIES:
+            wait = _sleep_for_rate_limit(resp, attempt)
+            logger.warning(
+                event="eval_rate_limited_backing_off",
+                url=url,
+                attempt=attempt + 1,
+                sleep_sec=wait,
+            )
+            resp.close()
+            time.sleep(wait)
+            continue
+
+        resp.raise_for_status()
+
+        answer_parts: list[str] = []
+        final_answer: str | None = None
+        sources: list[Any] = []
+        refused = False
+        for raw_line in resp.iter_lines(decode_unicode=True):
+            if not raw_line or not raw_line.startswith("data: "):
+                continue
+            data = raw_line[len("data: ") :]
+            if data == "[DONE]":
+                break
+            if data.startswith('{"__type__"'):
+                try:
+                    evt = _json.loads(data)
+                except ValueError:
+                    continue
+                kind = evt.get("__type__")
+                if kind == "sources":
+                    sources = evt.get("data") or []
+                elif kind == "replace":
+                    final_answer = evt.get("data")
+                elif kind == "refusal":
+                    refused = True
+                continue
+            try:
+                answer_parts.append(_json.loads(data))
+            except ValueError:
+                continue
+
+        full_answer = (
+            final_answer if final_answer is not None else "".join(answer_parts)
+        ).strip()
+        return {"answer": "" if refused else full_answer, "sources": sources, "refused": refused}
+
+    # Exhausted rate-limit retries.
+    if resp is not None:
+        resp.raise_for_status()
+    return {"answer": "", "sources": [], "refused": False}

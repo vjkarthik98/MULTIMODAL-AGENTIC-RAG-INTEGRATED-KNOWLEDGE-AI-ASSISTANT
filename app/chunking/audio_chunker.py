@@ -139,9 +139,24 @@ def _run_whisper(wav_path: str) -> list[dict]:
             segments = list(segments)
         words = []
         for seg in segments:
+            # Hallucination-reduction initiative Phase 5 (2026-08-13):
+            # avg_logprob/no_speech_prob are segment-level Whisper outputs —
+            # denormalized onto every word from this segment (previously
+            # discarded entirely) so _assemble_chunks (app/chunking/av_shared.py)
+            # can aggregate them into a chunk-level hallucination_risk.
+            _avg_logprob = getattr(seg, "avg_logprob", None)
+            _no_speech_prob = getattr(seg, "no_speech_prob", None)
             if hasattr(seg, "words") and seg.words:
                 for w in seg.words:
-                    words.append({"word": w.word, "start": w.start, "end": w.end})
+                    words.append(
+                        {
+                            "word": w.word,
+                            "start": w.start,
+                            "end": w.end,
+                            "avg_logprob": _avg_logprob,
+                            "no_speech_prob": _no_speech_prob,
+                        }
+                    )
             else:
                 # Segment-level fallback when word_timestamps not available.
                 words.append(
@@ -149,6 +164,8 @@ def _run_whisper(wav_path: str) -> list[dict]:
                         "word": seg.text,
                         "start": seg.start,
                         "end": seg.end,
+                        "avg_logprob": _avg_logprob,
+                        "no_speech_prob": _no_speech_prob,
                     }
                 )
         return words
@@ -337,6 +354,20 @@ class AudioChunker(BaseChunker):
                         chunk_hash = deterministic_chunk_id(
                             source, f"audio_{ch['start']:.1f}", chunk_idx
                         )
+                        # Hallucination-reduction initiative Phase 5
+                        # (2026-08-13): surface low-confidence transcription
+                        # into the prompt via the existing error_markers ->
+                        # "⚠ ERROR_MARKERS=" mechanism (rag_pipeline.py::
+                        # _build_context) — flag-only, does not affect
+                        # retrieval ranking. hallucination_risk is aggregated
+                        # by _assemble_chunks (av_shared.py) from Whisper's
+                        # per-segment avg_logprob/no_speech_prob.
+                        _risk = ch.get("hallucination_risk", "low")
+                        _error_markers = (
+                            ["low_transcription_confidence"]
+                            if _risk in settings.MEDIA_HALLUCINATION_RISK_ERROR_MARKER_LEVELS
+                            else []
+                        )
                         structure = {
                             "chunk_hash_id": chunk_hash,
                             "source_file": source,
@@ -363,6 +394,9 @@ class AudioChunker(BaseChunker):
                             "snr": snr,
                             "snr_degraded": snr_degraded,
                             "clipping_detected": clipping_detected,
+                            "confidence": ch.get("confidence"),
+                            "hallucination_risk": _risk,
+                            "error_markers": _error_markers,
                         }
 
                         doc = self._make_doc(

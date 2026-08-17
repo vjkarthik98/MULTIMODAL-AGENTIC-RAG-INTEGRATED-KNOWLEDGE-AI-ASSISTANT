@@ -47,7 +47,7 @@ burns a $200 credit in under a week.
 | `prod.env` | Committed, non-secret deploy config (`GRAFANA_ROOT_URL`, `VRAM_BUDGET_GB`, `QDRANT_URL`, `REDIS_URL`, `GOOGLE_CLIENT_ID`, `OAUTH_REDIRECT_URI`, `FRONTEND_URL`, `SMTP_USER`, `CORS_ORIGINS`, `DEFAULT_DEV_USER_ID`, `EVAL_USER_ID`) — layered into the app container by `cd.yml`'s `promote-production` step, and into the monitoring stack's own compose substitution by `scripts/deploy_monitoring.sh`. Editing this and pushing a tag (for the app) or re-running the monitoring script is the only correct way to change these values; hand-editing `/opt/magik/.env` for them makes this file drift out of sync with what's actually live |
 | `staging.env` | Same idea as `prod.env`, but for the private staging box `cd.yml`'s `deploy-staging` step targets — no `GRAFANA_ROOT_URL`/`CORS_ORIGINS`/`FRONTEND_URL` (staging has no monitoring stack and is never reachable from outside the box), same `QDRANT_URL`/`REDIS_URL`/`VRAM_BUDGET_GB`/`EVAL_USER_ID` as prod (staging shares prod's external services, isolated by `EVAL_USER_ID` tenant scoping). See "Staging gate" below |
 | `scripts/deploy_lambdas.sh` | Idempotent one-shot deploy of both Lambdas, the API Gateway HTTP API, and the schedule |
-| `scripts/deploy_monitoring.sh` | Idempotent bring-up of the monitoring stack (`docker compose -f docker-compose.monitoring.yml up -d`), fetching `GRAFANA_ADMIN_PASSWORD`/`NTFY_WEBHOOK_URL` from SSM first — see "App secrets in SSM" below. Run this instead of a bare `docker compose up`, or the two SSM-only secrets never reach the stack |
+| `scripts/deploy_monitoring.sh` | Idempotent bring-up of the monitoring stack (`docker compose -f docker-compose.monitoring.yml up -d`), fetching `GRAFANA_ADMIN_PASSWORD`/`NTFY_WEBHOOK_URL` from SSM first — see "Monitoring-stack secrets in SSM" below. Run this instead of a bare `docker compose up`, or the two SSM-only secrets never reach the stack |
 
 ## Deploy
 
@@ -225,9 +225,20 @@ aws ssm put-parameter --name /magik/ntfy_webhook_url --type SecureString \
   --value "https://ntfy.sh/<a private, hard-to-guess topic name>" --region us-east-1
 ```
 
-The updated `iam/ec2-instance-profile-permissions.json` (now with a second
-statement, `ReadMonitoringSecretsAtDeployTime`) grants access to both — it's
-the *same* instance-profile role as the app secrets above, since
+**A dedicated on-call escalation contact point (PagerDuty, then Opsgenie)
+was tried and removed** — every free real phone/SMS escalation path hit a
+hard external blocker not fixable from this codebase: PagerDuty's trial
+signup rejects consumer email domains (a GoDaddy-forwarded business-style
+address hit the same wall), Opsgenie stopped accepting new customers as of
+2025-06-04, and Better Stack's free tier is email/Slack only — real
+escalation there needs a paid seat. `NTFY_WEBHOOK_URL` (push notification,
+no retry/escalation) is the only alert-delivery mechanism again. See
+`monitoring/alerts/contact-points.yml`'s comment and `monitoring/slo.md`'s
+Security signal SLO section for the current state.
+
+The `iam/ec2-instance-profile-permissions.json` (`ReadMonitoring
+SecretsAtDeployTime` statement) grants access to both — it's the
+*same* instance-profile role as the app secrets above, since
 `deploy_monitoring.sh` runs on this same box, so re-attaching the policy
 once covers all nine app-secret ARNs plus these two.
 

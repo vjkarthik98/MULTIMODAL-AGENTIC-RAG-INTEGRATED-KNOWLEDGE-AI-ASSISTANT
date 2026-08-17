@@ -137,9 +137,137 @@ def _extract_cite_tags(text: str, valid: list[str]) -> list[str]:
     return out
 
 
+# REFUSAL / NON-ANSWER DETECTION
+#
+# Promoted to module level from a function-local tuple inside generate_answer()
+# (2026-08-13, per-modality quality pass) so app/verification/ can reuse the
+# SAME list instead of adding yet another copy — groundedness_checker.py
+# already lazily imports this module's other answer-analysis primitives
+# (_hallucination_guard, _unsupported_numbers, _split_answer_sentences).
+#
+# DELIBERATELY NOT consolidated with the codebase's three OTHER refusal lists:
+# rag_pipeline._LLM_REFUSAL_PHRASES (should we emit a streaming REFUSAL
+# sentinel — has its own short-vs-long-answer logic), reasoning_engine's local
+# REFUSAL_MARKERS in the citation-repair block (is a broken citation excused),
+# and query_pipeline._REFUSAL_PHRASES (should we cache this answer — carries
+# domain hacks like "no acquisition"). Those answer four DIFFERENT questions
+# with deliberately different sensitivities; merging them would change three
+# unrelated behaviours. This list answers only: "does this answer assert any
+# factual claim worth groundedness-checking?"
+REFUSAL_SENTINELS = (
+    "i don't know",
+    "i dont know",
+    "insufficient knowledge",
+    "i don't have sufficient",
+    "i do not have sufficient",
+    "couldn't generate a reliable answer",
+    "couldn't generate",
+    "no answer generated",
+    "something went wrong",
+    # Phrases emitted by the post-repair refusal path in _parse_response, plus
+    # general document-doesn't-contain language the model itself may emit.
+    "no relevant information was found",
+    "not found in your knowledge base",
+    "do not contain the information",
+    "does not contain the information",
+    "do not contain this information",
+    "does not contain this information",
+    "documents do not contain",
+    "document does not contain",
+    "not provided in the document",
+    "not specified in the document",
+    "not mentioned in the document",
+)
+
+
+def is_refusal_answer(text: str | None) -> bool:
+    """True when `text` is a refusal / non-answer rather than a factual claim.
+
+    Used to keep refusals OUT of groundedness scoring: a refusal asserts
+    nothing, so it can be neither grounded nor hallucinated, and flagging one
+    as unsupported is both metrically wrong and (via VerificationLoop's
+    limitation notice) a user-facing bug.
+    """
+    if not text or not text.strip():
+        return True
+    lowered = text.lower()
+    return any(s in lowered for s in REFUSAL_SENTINELS)
+
+
 # HALLUCINATION GUARD
 # CROSS-CHECKS ANSWER AGAINST RETRIEVED CHUNKS
 # FLAGS CLAIMS NOT SUPPORTED BY ANY CHUNK
+
+
+# Periods that do NOT end a sentence. Splitting on them truncates the claim
+# being scored — see _split_answer_sentences.
+#   * corporate suffixes / titles / stock abbreviations ("Apple Inc.", "Dr.")
+#   * dotted initialisms ("U.S.", "U.K.", "E.U.", "U.S.A.")
+#   * single initials followed by another capital ("J. P. Morgan")
+_ABBREV_PERIOD_RE = re.compile(
+    r"\b(?:Inc|Corp|Ltd|Co|LLC|LLP|LP|plc|Bros|Mfg|Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St"
+    r"|No|vs|etc|approx|est|cf|al|Fig|Ref|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept|Sep|Oct|Nov|Dec)\.",
+    re.IGNORECASE,
+)
+_INITIALISM_PERIOD_RE = re.compile(r"\b(?:[A-Za-z]\.){2,}")
+_SINGLE_INITIAL_PERIOD_RE = re.compile(r"\b[A-Z]\.(?=\s+[A-Z])")
+# Sentinel is stripped of meaning to any splitter: no ".", "!", "?" or space.
+_ABBREV_DOT = "\x01ABBRDOT\x02"
+
+
+def _protect_abbreviation_periods(text: str) -> str:
+    for _re_pat in (
+        _INITIALISM_PERIOD_RE,
+        _ABBREV_PERIOD_RE,
+        _SINGLE_INITIAL_PERIOD_RE,
+    ):
+        text = _re_pat.sub(lambda m: m.group(0).replace(".", _ABBREV_DOT), text)
+    return text
+
+
+def _split_answer_sentences(answer: str) -> list[str]:
+    """Citation-stripped, length-filtered sentence split shared by every
+    groundedness check in the codebase (_hallucination_guard here, and the
+    NLI pass in app/verification/groundedness_checker.py) — extracted so the
+    two checks split sentences identically instead of drifting apart.
+
+    Protects finance-number decimals (app.chunking.finance_numbers.protect(),
+    the same utility base_chunker.py uses to keep "2.5 percent"/"$1,234.56B"
+    intact through whitespace-based splitting) before splitting on ".", then
+    restores them. Found via the NLI groundedness pass (Phase 3,
+    2026-08-13): a naive split on bare "." was chopping decimals mid-number —
+    "...rose 2.5 percent" became "...rose 2" + "5 percent..." — which the
+    lexical word-overlap check tolerated (still plenty of overlapping words in
+    either fragment) but which confused the semantic NLI check badly (a
+    fragment starting mid-number, e.g. "5 percent over the 12 months...",
+    doesn't cleanly entail against anything). Finance answers are dense with
+    exactly this pattern, so the bug was silent for the lexical check and
+    severe for the new one — protecting decimals fixes it for both.
+
+    ABBREVIATION PERIODS get the same treatment (2026-08-13, per-modality
+    quality pass) after the identical failure mode was found on image answers:
+    "Apple Inc. was approximately $429 on 9/28/24…" split at the "Inc." period,
+    leaving "Apple Inc" (9 chars — dropped by the >20 filter) and a
+    SUBJECTLESS fragment "was approximately $429 on…". Scored against a chart
+    premise listing three different series values (~$429/~$210/~$322), NLI
+    cannot tell which entity the number belongs to and returns contradiction
+    0.996, which capped the NLI penalty and pinned grounding at 40.0 for every
+    image row (grounding_success_rate 0.000) even though the lexical check
+    passed cleanly at support=1.0 with zero unsupported numbers. Not
+    image-specific: in a finance corpus, subjects ending in "Inc."/"Corp."/
+    "U.S." are pervasive, so any modality's answers could lose their subject
+    the same way.
+    """
+    from app.chunking.finance_numbers import protect, restore
+
+    cleaned = _strip_cite_tags(answer)
+    protected, mapping = protect(cleaned)
+    protected = _protect_abbreviation_periods(protected)
+    return [
+        restore(s.strip().replace(_ABBREV_DOT, "."), mapping)
+        for s in protected.replace("!", ".").replace("?", ".").split(".")
+        if len(s.strip()) > 20
+    ]
 
 
 def _hallucination_guard(
@@ -161,9 +289,6 @@ def _hallucination_guard(
     if thr is None:
         thr = float(getattr(settings, "HALLUCINATION_THRESHOLD", 0.4) or 0.4)
 
-    # STRIP CITATION TAGS BEFORE SCORING — they bias overlap and aren't claims.
-    cleaned = _strip_cite_tags(answer)
-
     # COLLECT ALL DOC TEXT
     all_doc_text = " ".join(str(d.get("text", "") or "").lower() for d in docs if d.get("text"))
 
@@ -171,11 +296,7 @@ def _hallucination_guard(
         return False, 1.0
 
     # SENTENCE-LEVEL SUPPORT CHECK
-    sentences = [
-        s.strip()
-        for s in cleaned.replace("!", ".").replace("?", ".").split(".")
-        if len(s.strip()) > 20
-    ]
+    sentences = _split_answer_sentences(answer)
 
     if not sentences:
         return False, 1.0
@@ -681,7 +802,6 @@ def _prepend_key_facts_knowledge(  # noqa: C901 -- known complexity debt (184), 
     # confirmed the audio generation suite improved, not regressed.
     _top_mods = [(d.get("metadata") or {}).get("modality") for d in docs[:5]]
     _av_hits = [m for m in _top_mods if m in ("mp4", "video", "mp3", "audio")]
-    logger.info(event="_DEBUG_key_facts_gate", top_mods=_top_mods, av_hits=len(_av_hits))
     if _top_mods and len(_av_hits) > len(_top_mods) / 2:  # video/audio-DOMINANT only
         import re as _vre
 
@@ -1069,7 +1189,6 @@ def _prepend_key_facts_knowledge(  # noqa: C901 -- known complexity debt (184), 
                 _facts.append(s)
                 if len(_facts) >= 3:
                     break
-        logger.info(event="_DEBUG_key_facts_extracted", n_facts=len(_facts), facts=_facts[:3])
         if _facts:
             _prefix = (
                 # "every figure the question asks for": a multi-part question
@@ -2048,7 +2167,10 @@ def _build_cot_prompt(
     type_instructions.get(query_type, type_instructions["factual"])
 
     instruction = (
-        "You are a strict, grounded AI assistant. Use ONLY the provided KNOWLEDGE chunks.\n"
+        "You are a knowledgeable, grounded assistant. Answer the way a "
+        "well-informed colleague would explain it — natural and "
+        "conversational, but strictly using ONLY the provided KNOWLEDGE "
+        "chunks below.\n"
         "\n"
         "ABSOLUTE RULES — VIOLATING ANY OF THESE IS A FAILURE:\n"
         "1. Every number, percentage, date, name, and proper noun in your Answer\n"
@@ -2068,7 +2190,8 @@ def _build_cot_prompt(
         "4. The MEMORY section is prior conversation context only. NEVER cite\n"
         "   MEMORY, never copy MEMORY timestamps like '[6m ago]', never list\n"
         "   MEMORY as a source.\n"
-        "5. Be concise. Answer only what the QUERY asks. Do NOT add extra sentences\n"
+        "5. Answer naturally and only what the QUERY asks — no padding, but no\n"
+        "   need to sound clipped or list-like either. Do NOT add extra sentences\n"
         "   about related topics that the QUERY did not ask for. Quote numbers and\n"
         "   names exactly as they appear in KNOWLEDGE.\n"
         "6. TEMPORAL GROUNDING — if the question asks about a specific year or period\n"
@@ -2877,20 +3000,33 @@ class ReasoningEngine:
                     parsed["cited_tags"] = []
                     cited_tags = []
 
-                # HALLUCINATION GUARD
+                # HALLUCINATION GUARD — lexical word-overlap + additive NLI
+                # contradiction penalty. Single shared implementation with
+                # GroundednessChecker/output_guard as of the hallucination-
+                # reduction initiative's Phase 4 consolidation (2026-08-13);
+                # see groundedness_checker.lexical_and_nli_verdict's docstring.
+                # Numeric grounding stays entirely separate, above — this
+                # function never re-checks numbers.
                 t_verify = time.time()
-                is_hallucinated, support_score = _hallucination_guard(
-                    parsed["answer"],
-                    retrieved_docs,
+                from app.verification.groundedness_checker import lexical_and_nli_verdict
+
+                _, is_hallucinated, support_score, _nli_contradiction, nli_contradicted = (
+                    lexical_and_nli_verdict(parsed["answer"], retrieved_docs)
                 )
                 # CITATION-BASED RELAXATION:
                 # If the LLM cited >=1 VALID tag AND no numeric mismatch remains,
-                # treat the answer as grounded regardless of surface overlap.
+                # treat the LEXICAL guard as grounded regardless of surface
+                # overlap. Does NOT relax an NLI-detected contradiction — same
+                # "citation cannot rescue a fabrication" principle already
+                # applied to numeric mismatches below.
                 if cited_tags and not bad_nums:
                     is_hallucinated = False
-                # NUMERIC MISMATCH OVERRIDES citation relaxation — citations
-                # cannot rescue an answer that contains fabricated numbers.
+                # NUMERIC MISMATCH / NLI CONTRADICTION OVERRIDE citation
+                # relaxation — citations cannot rescue an answer that contains
+                # fabricated numbers or a detected semantic contradiction.
                 if bad_nums:
+                    is_hallucinated = True
+                if nli_contradicted:
                     is_hallucinated = True
 
                 verify_latency = round(time.time() - t_verify, 3)
@@ -2948,33 +3084,10 @@ class ReasoningEngine:
                         )
 
                 # FILTERED SOURCES — subset of input sources that the LLM actually cited.
-                ans_lower = (parsed.get("answer") or "").lower()
-                _REFUSAL_SENTINELS = (
-                    "i don't know",
-                    "i dont know",
-                    "insufficient knowledge",
-                    "i don't have sufficient",
-                    "i do not have sufficient",
-                    "couldn't generate a reliable answer",
-                    "couldn't generate",
-                    "no answer generated",
-                    "something went wrong",
-                    # New: phrases emitted by the post-repair refusal path
-                    # in _parse_response, plus general document-doesn't-contain
-                    # language Mistral itself may emit.
-                    "no relevant information was found",
-                    "not found in your knowledge base",
-                    "do not contain the information",
-                    "does not contain the information",
-                    "do not contain this information",
-                    "does not contain this information",
-                    "documents do not contain",
-                    "document does not contain",
-                    "not provided in the document",
-                    "not specified in the document",
-                    "not mentioned in the document",
-                )
-                is_refusal = any(s in ans_lower for s in _REFUSAL_SENTINELS)
+                # REFUSAL_SENTINELS was promoted to module level (2026-08-13) so
+                # app/verification/groundedness_checker.py can share this exact
+                # list; behaviour here is unchanged.
+                is_refusal = is_refusal_answer(parsed.get("answer") or "")
 
                 if is_refusal:
                     # Refusals carry no real grounding — don't fake sources,

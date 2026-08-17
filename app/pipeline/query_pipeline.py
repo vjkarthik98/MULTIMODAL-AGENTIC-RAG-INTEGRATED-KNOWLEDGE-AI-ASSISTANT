@@ -595,6 +595,59 @@ def _get_hybrid(embedder: Any) -> Any:
     return _hybrid
 
 
+def _resync_verification_grounding(
+    output: dict[str, Any],
+    final_answer: str,
+    docs: list[dict[str, Any]],
+    query: str,
+    session_id: str,
+    deterministic_answer: bool = False,
+) -> None:
+    """Re-score the groundedness dimension against the answer actually being
+    shipped, when a post-verification step replaced the verified text.
+
+    VerificationLoop scores the answer it generated; a later deterministic
+    rewrite (currently only `_synthesize_image_chart_answer`) can discard that
+    text entirely, leaving `output["verification"]` describing an answer the
+    caller never sees. That silently corrupted image's grounding_success_rate
+    (0.000 measured on the discarded draft, while the shipped answer scores
+    100.0 standalone).
+
+    Mutates `output["verification"]` in place. No-op when verification never
+    ran (hybrid_web / fallback paths leave the key absent). Best-effort: any
+    failure leaves the existing report untouched rather than dropping it,
+    since a stale score is still more useful than none.
+    """
+    report = (output or {}).get("verification")
+    if not isinstance(report, dict) or not final_answer:
+        return
+    try:
+        from app.verification.groundedness_checker import GroundednessChecker
+
+        result = GroundednessChecker().check(
+            final_answer, docs, query=query, deterministic_answer=deterministic_answer
+        )
+        scores = report.get("scores")
+        if isinstance(scores, dict):
+            scores["grounding"] = result.score
+        report["unsupported_claims"] = result.unsupported_claims + [
+            f"unsupported number: {n}" for n in result.unsupported_numbers
+        ]
+        report["grounding_resynced"] = True
+        logger.info(
+            event="verification_grounding_resynced",
+            grounding=result.score,
+            is_hallucinated=result.is_hallucinated,
+            session_id=session_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            event="verification_grounding_resync_failed",
+            error=str(exc),
+            session_id=session_id,
+        )
+
+
 def _get_reasoning_components(llm: Any):
     global _reasoning, _decomposer
     if _reasoning is None or _decomposer is None:
@@ -2078,6 +2131,44 @@ def _query_pipeline_impl(  # noqa: C901 -- known complexity debt (93), tracked f
                 _modality_hint = str(
                     ((final_docs[:1] or [{}])[0].get("metadata") or {}).get("modality") or ""
                 ).lower()
+
+                # SKIP-RETRIES PRE-CHECK (2026-08-17, image retry-waste
+                # follow-up). Image chart-value/comparison answers and docx
+                # table-row lookups are both deterministically SYNTHESIZED
+                # after this loop returns, discarding whatever the LLM
+                # drafted (see the "IMAGE CHART synth override" / "DOCX
+                # TABLE-ROW synth override" blocks below) — so retrying
+                # against the draft can never change the answer the user
+                # receives. Live-measured before this fix: 14/14 image
+                # queries retried for 0 eventual successes, pure wasted
+                # latency. Both synth functions are cheap/pure (no LLM call),
+                # so calling them speculatively here to KNOW synthesis will
+                # fire — rather than guessing from a keyword heuristic — costs
+                # nothing but a few string operations either way.
+                _skip_retries = False
+                try:
+                    if _modality_hint == "docx":
+                        from app.pipeline.rag_pipeline import _synthesize_docx_table_answer
+
+                        if _synthesize_docx_table_answer(query, final_docs):
+                            _skip_retries = True
+                    elif _modality_hint == "image":
+                        from app.pipeline.rag_pipeline import _synthesize_image_chart_answer
+
+                        _precheck_ctx = "\n".join(
+                            d.get("text", "") for d in (final_docs or []) if isinstance(d, dict)
+                        )
+                        if "CHART VALUES" in _precheck_ctx and _synthesize_image_chart_answer(
+                            query, _precheck_ctx
+                        ):
+                            _skip_retries = True
+                except Exception as _skip_check_err:
+                    logger.warning(
+                        event="query_pipeline_skip_retries_precheck_failed",
+                        error=str(_skip_check_err),
+                        session_id=session_id,
+                    )
+
                 _verify_loop = VerificationLoop()
                 _verified_answer, _verify_report = _verify_loop.run(
                     query=query,
@@ -2092,6 +2183,7 @@ def _query_pipeline_impl(  # noqa: C901 -- known complexity debt (93), tracked f
                     filters=retrieval_filters,
                     memory_context=memory_context,
                     regenerate=regenerate,
+                    skip_retries=_skip_retries,
                 )
                 logger.info(
                     event="query_pipeline_verification_result",
@@ -2358,12 +2450,85 @@ def _query_pipeline_impl(  # noqa: C901 -- known complexity debt (93), tracked f
                 _img_synth = _synthesize_image_chart_answer(query, _img_context)
                 if _img_synth:
                     answer = _expand_chart_dates(_img_synth)
+                    # VERIFY WHAT WE SHIP (2026-08-13, per-modality quality pass).
+                    # VerificationLoop already ran ~270 lines above and scored
+                    # the LLM's answer — which this synthesis just DISCARDED and
+                    # replaced. Without re-scoring, output["verification"]
+                    # describes text that was never delivered. Confirmed live:
+                    # every image gold row reported grounding=0.0 (driving
+                    # image's grounding_success_rate to 0.000) while the
+                    # delivered synthesized answer independently scores 100.0
+                    # with NLI contradiction 0.0003 — the metric was measuring
+                    # the thrown-away draft, not the shipped answer.
+                    #
+                    # Only the grounding dimension is re-scored: it is the one
+                    # that is answer-dependent and cheap to recompute (lexical
+                    # overlap + one NLI batch, NO LLM call). `verified`/`overall`
+                    # are deliberately NOT recomputed — that would need the
+                    # retrieval/citation/completeness result objects, which are
+                    # not reconstructable from the serialized report without
+                    # inventing values (CompletenessResult in particular records
+                    # only `missing`, not the total aspect count). Left as a
+                    # documented limitation rather than a fabricated recompute.
+                    # deterministic_answer=True: this text was parsed straight
+                    # out of the context's own CHART VALUES block, so the NLI
+                    # entailment check is skipped (it produced false
+                    # contradictions on 11/14 image rows). Lexical + numeric
+                    # grounding still run — see lexical_and_nli_verdict().
+                    _resync_verification_grounding(
+                        output,
+                        answer,
+                        final_docs,
+                        query,
+                        session_id,
+                        deterministic_answer=True,
+                    )
                 else:
                     answer = _expand_chart_dates(answer)
             except Exception as _img_synth_err:
                 logger.warning(
                     event="query_pipeline_image_synth_failed",
                     error=str(_img_synth_err),
+                    session_id=session_id,
+                )
+
+        # DOCX TABLE-ROW synth override (2026-08-16, per-modality quality pass
+        # docx follow-up). Same rationale/self-gating as the image chart synth
+        # above: live probes showed the model restating an unrelated
+        # "Executive Summary" narrative regardless of which line item was
+        # asked, even when the correct table row ranked #1 in retrieval. A
+        # prompt-side fix was tried and measured WORSE on the full docx suite
+        # — twice, once in prompt_builder.py (which only serves the SSE
+        # streaming path, not this one) and once in reasoning_engine.py
+        # (which does serve this path) — before this deterministic extractor
+        # replaced it. See app/pipeline/rag_pipeline.py::_synthesize_docx_table_answer.
+        if any(
+            isinstance(d, dict) and (d.get("metadata") or {}).get("modality") == "docx"
+            for d in (final_docs or [])
+        ):
+            try:
+                from app.pipeline.rag_pipeline import _synthesize_docx_table_answer
+
+                _docx_synth = _synthesize_docx_table_answer(query, final_docs)
+                if _docx_synth:
+                    answer = _docx_synth
+                    # deterministic_answer=True: this text was parsed straight
+                    # out of the context's own table rows, so the NLI
+                    # entailment check is skipped — same rationale as the
+                    # image chart synth (mechanically-extracted text, not LLM
+                    # free-form generation).
+                    _resync_verification_grounding(
+                        output,
+                        answer,
+                        final_docs,
+                        query,
+                        session_id,
+                        deterministic_answer=True,
+                    )
+            except Exception as _docx_synth_err:
+                logger.warning(
+                    event="query_pipeline_docx_synth_failed",
+                    error=str(_docx_synth_err),
                     session_id=session_id,
                 )
 
@@ -2457,6 +2622,13 @@ def _query_pipeline_impl(  # noqa: C901 -- known complexity debt (93), tracked f
                     }
                 ),
                 "eval_context": _eval_context,
+                # PHASE 32 verification report (set only on the non-hybrid_web
+                # branch above, None otherwise) — previously computed and
+                # discarded here; surfaced so the eval harness can baseline
+                # thresholds.yaml's `verification.*` metrics without a
+                # duplicate verification pass. See app/verification/
+                # verification_schema.py::VerificationReport.to_dict().
+                "verification": output.get("verification"),
             },
         }
 

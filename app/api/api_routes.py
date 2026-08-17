@@ -957,7 +957,41 @@ async def query_rag(
         # explicitly selected (the @ picker), so answers never mix content
         # from unrelated documents in the KB. force_web is exempt (handled
         # above); web-heuristic-only queries are not applicable to this route.
+        # Greetings and meta/capability questions about the app/KB are also
+        # exempt from the 400 — MAGIK isn't a general-purpose AI, so both get
+        # a deterministic TEMPLATE reply (never an LLM call) instead of either
+        # a hard rejection or an LLM-improvised answer. Everything else with
+        # no scope still 400s as before.
         if not request_body.sources:
+            from app.agents.agent_controller import (
+                GREETING_REPLY_TEMPLATE,
+                META_CAPABILITY_REPLY_TEMPLATE,
+                is_conversational_greeting,
+                is_meta_capability_question,
+            )
+
+            if is_conversational_greeting(query):
+                return {
+                    "request_id": request_id,
+                    "answer": GREETING_REPLY_TEMPLATE,
+                    "confidence": 1.0,
+                    "sources": [],
+                    "cache_hit": False,
+                    "decision": "greeting",
+                    "source": "template",
+                    "latency": round(time.time() - start, 3),
+                }
+            if is_meta_capability_question(query):
+                return {
+                    "request_id": request_id,
+                    "answer": META_CAPABILITY_REPLY_TEMPLATE,
+                    "confidence": 1.0,
+                    "sources": [],
+                    "cache_hit": False,
+                    "decision": "meta_capability",
+                    "source": "template",
+                    "latency": round(time.time() - start, 3),
+                }
             raise HTTPException(
                 status_code=400,
                 detail="Select a file to scope this query before sending.",
@@ -1061,6 +1095,10 @@ async def query_rag(
             "hallucination_warning": validated.hallucination_warning,
             "memory_injected": bool(result.get("memory_injected", False)),
             "cache_hit": bool(result.get("cache_hit", False)),
+            # Phase 32 verification report, when the pipeline ran VerificationLoop
+            # (None on the hybrid_web/cached/error paths) — not shown in the UI,
+            # consumed only by the eval harness (thresholds.yaml `verification.*`).
+            "verification": (result.get("metadata") or {}).get("verification"),
         }
 
         _audit_log(
@@ -1269,14 +1307,25 @@ _REALTIME_SIGNALS = frozenset(
 )
 
 
+# Word-boundary matching, not bare substring — a bare `"now" in q` check
+# matches inside "know"/"knowledge" (e.g. "do you know about the financial
+# documents in the knowledge base?" silently triggered a real, uncontrolled
+# web search for a plain meta question, found 2026-08-17), the same class of
+# bug `is_conversational_greeting`'s own docstring already warns about
+# ("hi" matching inside "which"/"this"). `\b` on both ends is safe for the
+# multi-word phrases too (e.g. "stock price") since it only requires a
+# non-word-character (or string boundary) immediately before/after the whole
+# phrase, not around each internal space.
+_WEB_PHRASE_ALTERNATION = "|".join(
+    re.escape(p) for p in (_EXPLICIT_WEB_PHRASES | _REALTIME_SIGNALS)
+)
+_WEB_PHRASE_RE = re.compile(rf"\b(?:{_WEB_PHRASE_ALTERNATION})\b", re.IGNORECASE)
+
+
 def _is_web_request(query: str, force_web: bool) -> bool:
     """True when this query should be answered from the web rather than the KB."""
-    q = (query or "").lower()
-    return (
-        bool(force_web)
-        or any(phrase in q for phrase in _EXPLICIT_WEB_PHRASES)
-        or any(sig in q for sig in _REALTIME_SIGNALS)
-    )
+    q = query or ""
+    return bool(force_web) or bool(_WEB_PHRASE_RE.search(q))
 
 
 def _web_failure_message(reason: str) -> str:
@@ -1545,8 +1594,25 @@ async def stream_query(
         # force_web and heuristic-matched web queries (already returned
         # above) are exempt; everything reaching this point — including
         # filename-in-text summarize requests — must have an explicit scope.
+        # Greetings and meta/capability questions about the app/KB are also
+        # exempt from the generic rejection — MAGIK isn't a general-purpose
+        # AI, so both get a deterministic TEMPLATE reply (never an LLM call,
+        # matching the non-streaming /rag/query route) instead of either a
+        # hard rejection or an LLM-improvised answer.
         if not request_body.sources:
-            _no_scope_msg = "Select a file to scope this query before sending."
+            from app.agents.agent_controller import (
+                GREETING_REPLY_TEMPLATE,
+                META_CAPABILITY_REPLY_TEMPLATE,
+                is_conversational_greeting,
+                is_meta_capability_question,
+            )
+
+            if is_conversational_greeting(query):
+                _no_scope_msg = GREETING_REPLY_TEMPLATE
+            elif is_meta_capability_question(query):
+                _no_scope_msg = META_CAPABILITY_REPLY_TEMPLATE
+            else:
+                _no_scope_msg = "Select a file to scope this query before sending."
 
             async def no_scope_stream():
                 for piece in _stream_chunks(_no_scope_msg):

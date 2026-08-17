@@ -5,15 +5,27 @@
   "version": 1,
   "editable": true,
   "timezone": "browser",
-  "time": { "from": "now-7d", "to": "now" },
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
   "refresh": "5m",
-  "tags": ["magik", "phase-31", "eval"],
+  "tags": [
+    "magik",
+    "phase-31",
+    "eval"
+  ],
   "panels": [
     {
       "id": 1,
       "type": "text",
       "title": "Read this first",
-      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "options": {
         "mode": "markdown",
         "content": "**These are live-sampled, reference-free metrics** from `app/eval/jobs/online_eval.py` scoring `ONLINE_EVAL_SAMPLE_RATE` of real traffic with the lexical judge (no ground truth available on live traffic, no GPU judge call — see the module docstring). They are a drift signal, not a substitute for the gated CI gold-set suite (`app/eval/thresholds.yaml`, recall@5/MRR/nDCG/faithfulness-with-ground-truth), which only runs in `eval-gate.yml` against the curated gold set. Both empty/flat panels usually mean `ONLINE_EVAL_ENABLED`/`ONLINE_EVAL_SAMPLE_RATE` are unset (both default off) or `PROMETHEUS_ENABLED` is false."
@@ -23,24 +35,64 @@
       "id": 2,
       "type": "timeseries",
       "title": "Lexical faithfulness (rolling, sampled live traffic)",
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 3 },
-      "targets": [{ "expr": "magik_eval_online_faithfulness", "refId": "A" }],
-      "fieldConfig": { "defaults": { "min": 0, "max": 1 } }
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 3
+      },
+      "targets": [
+        {
+          "expr": "magik_eval_online_faithfulness",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1
+        }
+      }
     },
     {
       "id": 3,
       "type": "timeseries",
       "title": "Lexical answer relevancy (rolling, sampled live traffic)",
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 3 },
-      "targets": [{ "expr": "magik_eval_online_answer_relevancy", "refId": "A" }],
-      "fieldConfig": { "defaults": { "min": 0, "max": 1 } }
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 3
+      },
+      "targets": [
+        {
+          "expr": "magik_eval_online_answer_relevancy",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1
+        }
+      }
     },
     {
       "id": 4,
       "type": "timeseries",
       "title": "Hallucination flag rate (numeric-grounding check, rolling)",
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 10 },
-      "targets": [{ "expr": "magik_eval_online_hallucination_rate", "refId": "A" }],
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "targets": [
+        {
+          "expr": "magik_eval_online_hallucination_rate",
+          "refId": "A"
+        }
+      ],
       "fieldConfig": {
         "defaults": {
           "min": 0,
@@ -48,9 +100,18 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": 0 },
-              { "color": "yellow", "value": 0.4 },
-              { "color": "red", "value": 0.72 }
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 0.4
+              },
+              {
+                "color": "red",
+                "value": 0.72
+              }
             ]
           }
         }
@@ -61,17 +122,41 @@
       "id": 5,
       "type": "piechart",
       "title": "Routing decision share (rolling)",
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 10 },
-      "targets": [{ "expr": "magik_eval_online_route_share", "legendFormat": "{{route}}", "refId": "A" }]
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "targets": [
+        {
+          "expr": "magik_eval_online_route_share",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ]
     },
     {
       "id": 6,
       "type": "timeseries",
       "title": "End-to-end stream latency — p50 / p95 (sampled live traffic)",
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 17 },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
       "targets": [
-        { "expr": "magik_eval_online_latency_p50_ms", "legendFormat": "p50", "refId": "A" },
-        { "expr": "magik_eval_online_latency_p95_ms", "legendFormat": "p95", "refId": "B" }
+        {
+          "expr": "magik_eval_online_latency_p50_ms",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "magik_eval_online_latency_p95_ms",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
       ],
       "fieldConfig": {
         "defaults": {
@@ -79,8 +164,14 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": 0 },
-              { "color": "red", "value": 60000 }
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 60000
+              }
             ]
           }
         }
@@ -91,14 +182,29 @@
       "id": 7,
       "type": "stat",
       "title": "Samples scored in most recent online_eval run",
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 17 },
-      "targets": [{ "expr": "magik_eval_online_sample_count", "refId": "A" }]
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "targets": [
+        {
+          "expr": "magik_eval_online_sample_count",
+          "refId": "A"
+        }
+      ]
     },
     {
       "id": 8,
       "type": "text",
       "title": "CI Tier-2 (gated, real judge) — below this line",
-      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 24 },
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
       "options": {
         "mode": "markdown",
         "content": "**These come from `eval-gate.yml`'s `tier2-full-suite`** — the real Qwen2.5-7B-judge numbers `thresholds.yaml` actually gates on (`retrieval` is enforced; the rest are informational until re-baselined — see the header comment in `thresholds.yaml`), pushed to Prometheus Pushgateway after every post-deploy and manually-dispatched Tier-2 run (not on every PR — Tier-1 has no network path to this box and scores an ephemeral checkout, not the production container; see `.github/workflows/eval-gate.yml`'s comment on the push step). Values persist between runs (Pushgateway semantics) — a flat line between two points is real, not a gap in scraping."
@@ -108,7 +214,12 @@
       "id": 9,
       "type": "timeseries",
       "title": "Retrieval quality — recall@5 / recall@10 / hit_rate (CI Tier-2, GATED)",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 27
+      },
       "targets": [
         {
           "expr": "magik_eval_gate_metric_value{suite=\"retrieval\",metric=\"recall_at_5\"}",
@@ -132,7 +243,16 @@
           "max": 1,
           "thresholds": {
             "mode": "absolute",
-            "steps": [{ "color": "red", "value": 0 }, { "color": "green", "value": 0.4835 }]
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 0.4835
+              }
+            ]
           }
         }
       },
@@ -142,7 +262,12 @@
       "id": 10,
       "type": "timeseries",
       "title": "Retrieval ranking quality — MRR / nDCG@10 / context_precision (CI Tier-2, GATED)",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 27
+      },
       "targets": [
         {
           "expr": "magik_eval_gate_metric_value{suite=\"retrieval\",metric=\"mrr\"}",
@@ -160,14 +285,24 @@
           "refId": "C"
         }
       ],
-      "fieldConfig": { "defaults": { "min": 0, "max": 1 } },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1
+        }
+      },
       "description": "Gate floors: MRR >= 0.3380, nDCG@10 >= 0.3823, context_precision >= 0.0255 — context_precision's absolute value is low by design (thresholds.yaml flags it as a known future retrieval-quality target, not a bug in this panel)."
     },
     {
       "id": 11,
       "type": "timeseries",
       "title": "Generation quality — faithfulness / answer_relevancy / context_recall (CI Tier-2, informational)",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 35
+      },
       "targets": [
         {
           "expr": "magik_eval_gate_metric_value{suite=\"generation\",metric=\"faithfulness\"}",
@@ -185,14 +320,24 @@
           "refId": "C"
         }
       ],
-      "fieldConfig": { "defaults": { "min": 0, "max": 1 } },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1
+        }
+      },
       "description": "NOT gated — thresholds.yaml keeps `generation` informational-only pending re-baseline on the current judge (see its header comment). Real judge (Qwen2.5-7B, app/eval/judges/qwen_judge.py), unlike the lexical faithfulness panel above."
     },
     {
       "id": 12,
       "type": "timeseries",
       "title": "Hallucination rate — real judge (CI Tier-2, informational)",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 35
+      },
       "targets": [
         {
           "expr": "magik_eval_gate_metric_value{suite=\"hallucination\",metric=\"hallucination_rate\"}",
@@ -207,9 +352,18 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": 0 },
-              { "color": "yellow", "value": 0.4 },
-              { "color": "red", "value": 0.72 }
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 0.4
+              },
+              {
+                "color": "red",
+                "value": 0.72
+              }
             ]
           }
         }
@@ -220,32 +374,83 @@
       "id": 13,
       "type": "stat",
       "title": "Last Tier-2 gate result",
-      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 43 },
-      "targets": [{ "expr": "magik_eval_gate_exit_code", "refId": "A" }],
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 43
+      },
+      "targets": [
+        {
+          "expr": "magik_eval_gate_exit_code",
+          "refId": "A"
+        }
+      ],
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "type": "value", "options": { "0": { "text": "PASS", "color": "green" } } },
-            { "type": "value", "options": { "1": { "text": "THRESHOLD BREACH", "color": "red" } } },
-            { "type": "value", "options": { "2": { "text": "INFRA/DATA ERROR", "color": "orange" } } }
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "PASS",
+                  "color": "green"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "THRESHOLD BREACH",
+                  "color": "red"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "2": {
+                  "text": "INFRA/DATA ERROR",
+                  "color": "orange"
+                }
+              }
+            }
           ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": 0 },
-              { "color": "red", "value": 1 },
-              { "color": "orange", "value": 2 }
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 1
+              },
+              {
+                "color": "orange",
+                "value": 2
+              }
             ]
           }
         }
       },
-      "options": { "textMode": "value_and_name", "colorMode": "background" }
+      "options": {
+        "textMode": "value_and_name",
+        "colorMode": "background"
+      }
     },
     {
       "id": 14,
       "type": "stat",
       "title": "Last Tier-2 push age",
-      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 43 },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 43
+      },
       "targets": [
         {
           "expr": "time() - magik_eval_gate_last_run_timestamp",
@@ -258,9 +463,18 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": 0 },
-              { "color": "yellow", "value": 172800 },
-              { "color": "red", "value": 604800 }
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 172800
+              },
+              {
+                "color": "red",
+                "value": 604800
+              }
             ]
           }
         }
@@ -271,7 +485,12 @@
       "id": 15,
       "type": "text",
       "title": "Live Retrieval Quality (online, sampled) — below this line",
-      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 47 },
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
       "options": {
         "mode": "markdown",
         "content": "**Monitoring Phase 6.** Rolling means from the SAME online_eval.py run as the panels above, over the SAME sampled shadow-collection rows — just aggregating the retrieval fields shadow_sampler.py has stamped on every row since Phase 2 (top1_score/mean_topk_score/retrieval_count) instead of only query/answer/contexts. Complements app/eval/jobs/drift_eval.py's p-values below (a p-value says *did this change*, not *what is it right now* — these two panels are the *now* view)."
@@ -281,23 +500,42 @@
       "id": 16,
       "type": "timeseries",
       "title": "Live top-1 / mean-top-k rerank score (rolling)",
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 50 },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 50
+      },
       "targets": [
-        { "expr": "magik_eval_online_top1_score", "legendFormat": "top1_score", "refId": "A" },
+        {
+          "expr": "magik_eval_online_top1_score",
+          "legendFormat": "top1_score",
+          "refId": "A"
+        },
         {
           "expr": "magik_eval_online_mean_topk_score",
           "legendFormat": "mean_topk_score",
           "refId": "B"
         }
       ],
-      "fieldConfig": { "defaults": { "min": 0, "max": 1 } },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1
+        }
+      },
       "description": "The same top1_score/mean_topk_score app/eval/jobs/drift_eval.py's QUALITY columns compare reference-vs-current — this is the raw trend, not the statistical-drift verdict. A steady decline here is worth investigating even before it crosses drift_eval's significance threshold."
     },
     {
       "id": 17,
       "type": "timeseries",
       "title": "Live retrieval doc count (rolling)",
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 50 },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 50
+      },
       "targets": [
         {
           "expr": "magik_eval_online_retrieval_count",
@@ -311,7 +549,12 @@
       "id": 18,
       "type": "text",
       "title": "Agent Health — below this line",
-      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 57 },
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 57
+      },
       "options": {
         "mode": "markdown",
         "content": "**Monitoring Phase 6.** `agent_controller_*` metrics (app/agents/agent_controller.py) have existed since before this monitoring effort but were never dashboarded. Route distribution itself is already covered by the \"Routing decision share\" panel above (magik_eval_online_route_share) — this section is latency/errors/fallback/concurrency, the other half of \"agent health.\" There is no \"tool calls per request\" panel: AgentExecutor.run() is a single classify-and-dispatch, not an iterative tool-chaining loop (see CLAUDE.md's Query/RAG flow section), so that metric does not exist to show — showing one would mean inventing data the architecture doesn't produce."
@@ -321,7 +564,12 @@
       "id": 19,
       "type": "timeseries",
       "title": "Agent controller latency — p50/p95 by decision",
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 60 },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 60
+      },
       "targets": [
         {
           "expr": "histogram_quantile(0.50, sum(rate(agent_controller_duration_seconds_bucket[5m])) by (le, decision))",
@@ -339,7 +587,12 @@
       "id": 20,
       "type": "timeseries",
       "title": "Agent controller errors + fallback rate",
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 60 },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 60
+      },
       "targets": [
         {
           "expr": "sum(rate(agent_controller_errors_total[5m])) by (error_type)",
@@ -358,15 +611,33 @@
       "id": 21,
       "type": "stat",
       "title": "Active agent requests (live)",
-      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 67 },
-      "targets": [{ "expr": "agent_controller_active_requests", "refId": "A" }],
-      "options": { "textMode": "value_and_name", "colorMode": "value" }
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 67
+      },
+      "targets": [
+        {
+          "expr": "agent_controller_active_requests",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "textMode": "value_and_name",
+        "colorMode": "value"
+      }
     },
     {
       "id": 22,
       "type": "text",
       "title": "Drift Detection — below this line",
-      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 71 },
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 71
+      },
       "options": {
         "mode": "markdown",
         "content": "**Monitoring Phase 3/6.** app/eval/jobs/drift_eval.py compares a fixed reference-window snapshot (DRIFT_REFERENCE_PATH, built via `python -m app.eval.jobs.drift_eval --build-reference`) against the current sampled-traffic window on 4 columns (query_length/top1_score/mean_topk_score/latency_ms), using a KS-test — NOT Evidently (see that module's docstring for why: every Evidently version pulls in a bundled litestar/uvicorn/plotly web-server stack for what's really a KS-test on 4 columns). Requires DRIFT_ENABLED=true and a built reference — panels below read as zero/empty until both are true. Alerts: magik-drift-warning / magik-drift-critical in monitoring/alerts/rules.yml."
@@ -376,41 +647,107 @@
       "id": 23,
       "type": "stat",
       "title": "Current drift severity",
-      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 74 },
-      "targets": [{ "expr": "magik_drift_severity", "refId": "A" }],
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 74
+      },
+      "targets": [
+        {
+          "expr": "magik_drift_severity",
+          "refId": "A"
+        }
+      ],
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "type": "value", "options": { "0": { "text": "Info", "color": "green" } } },
-            { "type": "value", "options": { "1": { "text": "Warning", "color": "yellow" } } },
-            { "type": "value", "options": { "2": { "text": "Critical", "color": "red" } } }
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Info",
+                  "color": "green"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "Warning",
+                  "color": "yellow"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "2": {
+                  "text": "Critical",
+                  "color": "red"
+                }
+              }
+            }
           ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": 0 },
-              { "color": "yellow", "value": 1 },
-              { "color": "red", "value": 2 }
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
             ]
           }
         }
       },
-      "options": { "textMode": "value_and_name", "colorMode": "background" }
+      "options": {
+        "textMode": "value_and_name",
+        "colorMode": "background"
+      }
     },
     {
       "id": 24,
       "type": "timeseries",
       "title": "Drift dataset score (fraction of columns drifted)",
-      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 74 },
-      "targets": [{ "expr": "magik_drift_dataset_score", "refId": "A" }],
-      "fieldConfig": { "defaults": { "min": 0, "max": 1 } },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 74
+      },
+      "targets": [
+        {
+          "expr": "magik_drift_dataset_score",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1
+        }
+      },
       "description": "Volume of drift alone, NOT severity — a high score here with severity still at Info means several columns moved but no QUALITY column (top1_score/mean_topk_score) moved in the degrading direction. See drift_eval.py's module docstring on why those are classified separately."
     },
     {
       "id": 25,
       "type": "timeseries",
       "title": "Drift per-column p-value (lower = more drift)",
-      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 74 },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 74
+      },
       "targets": [
         {
           "expr": "magik_drift_column_pvalue",
@@ -425,8 +762,14 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": 0 },
-              { "color": "green", "value": 0.05 }
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 0.05
+              }
             ]
           }
         }
@@ -437,13 +780,123 @@
       "id": 26,
       "type": "stat",
       "title": "Reference / current window size",
-      "gridPos": { "h": 5, "w": 12, "x": 0, "y": 80 },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 80
+      },
       "targets": [
-        { "expr": "magik_drift_reference_size", "legendFormat": "reference rows", "refId": "A" },
-        { "expr": "magik_drift_current_size", "legendFormat": "current rows", "refId": "B" }
+        {
+          "expr": "magik_drift_reference_size",
+          "legendFormat": "reference rows",
+          "refId": "A"
+        },
+        {
+          "expr": "magik_drift_current_size",
+          "legendFormat": "current rows",
+          "refId": "B"
+        }
       ],
-      "options": { "textMode": "value_and_name", "colorMode": "value" },
+      "options": {
+        "textMode": "value_and_name",
+        "colorMode": "value"
+      },
       "description": "Both read 0 until DRIFT_ENABLED=true, ONLINE_EVAL_SAMPLE_RATE > 0, and a reference file has been built — see the section header above."
+    },
+    {
+      "id": 27,
+      "type": "text",
+      "title": "Answer Verification (Phase 32) — below this line",
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 85
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "`magik_verification_*` metrics (app/verification/verification_loop.py) have existed since Phase 32 but were never dashboarded. `magik_verification_passthrough_total` is new (2026-08-13, hallucination-reduction initiative Phase 2) — VerificationLoop._passthrough() previously force-filled scores to 100/verified=True with no signal it had skipped the real checks; every occurrence now increments this counter and logs a warning (event=verification_passthrough). A sustained non-zero passthrough rate means live traffic is shipping unverified answers — check AGENT_VERIFY_ENABLED and AGENT_VERIFY_MODALITIES first."
+      }
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "Verification loop outcomes (PASS / FAIL rate)",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 88
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(magik_verification_loop_total[5m])) by (decision)",
+          "legendFormat": "{{decision}}/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Verification passthrough rate (bypassed the loop entirely)",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 88
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(magik_verification_passthrough_total[5m])) by (reason)",
+          "legendFormat": "{{reason}}/s",
+          "refId": "A"
+        }
+      ],
+      "description": "Expected to read ~0 in steady state (AGENT_VERIFY_ENABLED=true, AGENT_VERIFY_MODALITIES covers all 7 modalities by default). Any sustained non-zero rate here means answers are shipping without the real verification checks and needs investigation, not just noting."
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Verification confidence scores by dimension (p50)",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 95
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(magik_verification_confidence_bucket[5m])) by (le, score_type))",
+          "legendFormat": "p50 {{score_type}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Verification loop duration — p50 / p95",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 95
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(magik_verification_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(magik_verification_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ],
+      "description": "Bounded by AGENT_VERIFY_TIMEOUT_SEC (config.py, currently 120.0s)."
     }
   ]
 }

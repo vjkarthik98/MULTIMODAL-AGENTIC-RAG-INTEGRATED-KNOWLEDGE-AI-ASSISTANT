@@ -103,3 +103,125 @@ class TestCitationVerifier:
         assert "[apple.pdf p.9]" in result.bad_citations
         assert "[apple.pdf p.4]" not in result.bad_citations
         assert result.score == 50.0
+
+
+class TestSameTagCitedMultipleTimes:
+    """citation_accuracy_v2 cross-modality follow-up (2026-08-17). A single
+    source cited more than once, for different claims, in one answer — a
+    common pattern for finance answers reusing one document/sheet across
+    several stated facts. Two bugs live-reproduced here, both now fixed:
+    (1) answer.find() alone only ever locates the FIRST occurrence, so a
+    fabricated/unrelated LATER claim under the same tag was invisible to the
+    check; (2) fixing (1) naively still let a close-together second
+    citation's 160-char lookback window bleed backward across the sentence
+    boundary into the FIRST (genuinely supported) claim's text, diluting the
+    word-overlap score with borrowed, irrelevant support.
+    """
+
+    def test_second_claim_under_same_tag_about_unrelated_topic_fails(self):
+        cv = CitationVerifier()
+        answer = (
+            "Apple's gross margin was 46.2% in FY2024 [1]. "
+            "iPhone unit shipments increased 15% year over year [1]."
+        )
+        result = cv.check(
+            answer,
+            [_doc("Apple's gross margin was 46.2% in FY2024.", chunk_id="c1")],
+            [_source("[1]", chunk_id="c1")],
+        )
+        assert "[1]" in result.bad_citations
+        assert result.score == 0.0
+
+    def test_both_claims_under_same_tag_genuinely_supported_passes(self):
+        cv = CitationVerifier()
+        answer = (
+            "Gross margin was 46.2% in FY2024 [1]. "
+            "It rose from the 44.1% prior year figure [1]."
+        )
+        result = cv.check(
+            answer,
+            [_doc("Gross margin was 46.2% in FY2024, up from 44.1% in FY2023.", chunk_id="c1")],
+            [_source("[1]", chunk_id="c1")],
+        )
+        assert result.bad_citations == []
+        assert result.score == 100.0
+
+    def test_single_use_of_a_tag_still_works(self):
+        # Regression guard: the multi-occurrence loop must not change
+        # behavior for the (overwhelmingly common) single-citation case.
+        cv = CitationVerifier()
+        answer = "Gross margin was 46.2% in FY2024 [1]."
+        result = cv.check(
+            answer,
+            [_doc("Gross margin was 46.2% in FY2024.", chunk_id="c1")],
+            [_source("[1]", chunk_id="c1")],
+        )
+        assert result.bad_citations == []
+        assert result.score == 100.0
+
+    def test_three_uses_second_bad_third_good_all_checked(self):
+        # Neither the first nor the last occurrence being fine should mask a
+        # bad claim in the middle.
+        cv = CitationVerifier()
+        answer = (
+            "Gross margin was 46.2% in FY2024 [1]. "
+            "iPhone shipments rose 15% [1]. "
+            "It was up from 44.1% the prior year [1]."
+        )
+        result = cv.check(
+            answer,
+            [_doc("Gross margin was 46.2% in FY2024, up from 44.1% the prior year.", chunk_id="c1")],
+            [_source("[1]", chunk_id="c1")],
+        )
+        assert "[1]" in result.bad_citations
+
+
+class TestCommaFormattedNumbersTokenizeAsOneWord:
+    """citation_accuracy_v2 cross-modality follow-up (2026-08-17). The old
+    tokenizer regex `[a-zA-Z0-9%$.]+` did not include ",", so a comma-grouped
+    figure like "$391,035" split into "$391" (4 chars) and "035" (3 chars) —
+    BOTH under the len(w) > 4 significance filter, making the single most
+    common financial-figure format in this domain invisible to the support
+    check. Live-reproduced against the real apple_10k.pdf corpus: a citation
+    whose chunk verbatim contained "$391,035 | $383,285 | $394,328" — exactly
+    the answer's own stated figures — scored 0.0 (flagged bad) because none
+    of those three numbers survived tokenization to be counted as a match.
+    """
+
+    def test_comma_grouped_dollar_figure_recognized_as_supporting_evidence(self):
+        cv = CitationVerifier()
+        answer = (
+            "Apple's total net sales were $391,035 million, up from $383,285 million "
+            "the prior year [apple_10k.pdf p.35]."
+        )
+        result = cv.check(
+            answer,
+            [_doc("Total net sales | $391,035 | $383,285 | $394,328", chunk_id="c35")],
+            [_source("[apple_10k.pdf p.35]", chunk_id="c35")],
+        )
+        assert result.bad_citations == []
+        assert result.score == 100.0
+
+    def test_comma_grouped_figure_genuinely_absent_still_flagged(self):
+        # The fix must not become a blanket pass — a comma-formatted figure
+        # that really isn't in the chunk must still fail.
+        cv = CitationVerifier()
+        answer = "Revenue was $999,999,999 million [apple_10k.pdf p.35]."
+        result = cv.check(
+            answer,
+            [_doc("Total net sales | $391,035 | $383,285 | $394,328", chunk_id="c35")],
+            [_source("[apple_10k.pdf p.35]", chunk_id="c35")],
+        )
+        assert "[apple_10k.pdf p.35]" in result.bad_citations
+
+    def test_percent_figures_still_tokenize_correctly(self):
+        # Regression guard: decimal/percent numbers (no commas) already
+        # worked before this fix and must keep working.
+        cv = CitationVerifier()
+        answer = "Gross margin was 46.2% in FY2024 [1]."
+        result = cv.check(
+            answer,
+            [_doc("Gross Margin % | 46.2% | 44.1%", chunk_id="c1")],
+            [_source("[1]", chunk_id="c1")],
+        )
+        assert result.bad_citations == []

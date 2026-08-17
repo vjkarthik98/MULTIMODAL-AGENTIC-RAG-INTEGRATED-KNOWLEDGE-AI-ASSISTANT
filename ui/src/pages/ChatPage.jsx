@@ -65,16 +65,6 @@ function fileModalityIcon(filename) {
   return <FileIcon size={13} style={{ color: 'var(--t-tx5)', flexShrink: 0 }} />
 }
 
-function buildSuggestions(kbFiles) {
-  if (!kbFiles.length) return []
-  return kbFiles.slice(0, 3).map((f, i) => {
-    const name = f.filename.replace(/\.[^.]+$/, '')
-    if (i === 0) return `Summarise ${name}`
-    if (i === 1) return `What does the ${name} show?`
-    return `Key trends in ${name}?`
-  })
-}
-
 export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStreamingChange }) {
   const [messages, setMessages]           = useState([])
   const [input, setInput]                 = useState('')
@@ -347,21 +337,15 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
       return
     }
 
-    // File-scope-required guard — a file must be selected via @ before any
-    // query is sent, so retrieval is never left to search the whole KB and
-    // mix content from unrelated documents. Skipped for web search mode
-    // (no KB involved) and simple greetings (matches the KB-empty guard's
-    // precedent above).
-    if (!selectedFile && !webSearchMode && !_GREETING.test(text)) {
-      const reply = `Please select a file to scope your question — click the **@** button and choose a document.\n\nThis keeps my answer focused on that source instead of mixing content from your whole knowledge base.`
-      setMessages(prev => prev.map(m =>
-        m.id === botId ? { ...m, content: reply, pending: false, streaming: false } : m
-      ))
-      setStreaming(false)
-      setStreamingId(null)
-      onStreamingChange?.(false)
-      return
-    }
+    // File-scope-required guard used to be enforced here too (client-side),
+    // exempting greetings via a local `_GREETING` regex — but that regex was
+    // narrower than the backend's classifier (missed "how are you", "thanks",
+    // "bye"), so some greetings got blocked locally before ever reaching the
+    // backend's correct logic. Removed rather than widened: the backend now
+    // owns 100% of this classification (greeting / meta-capability question /
+    // needs a file), returning a deterministic template either way, so
+    // forwarding every unscoped, non-web-search query to it is both simpler
+    // and immune to the two-implementations-drift bug that caused this.
 
     const controller = new AbortController()
     abortRef.current = controller
@@ -628,8 +612,6 @@ const handleNewChat = () => {
       setLoadingSession(false)
     }
   }, [streaming, loadingSession, sessionId, auth.token, addToast])
-
-  const suggestions    = buildSuggestions(kbFiles)
 
   // `h-dvh-screen` (index.css) is `height:100vh` followed by `height:100dvh`.
   // Plain 100vh is measured against the LARGEST possible viewport on mobile

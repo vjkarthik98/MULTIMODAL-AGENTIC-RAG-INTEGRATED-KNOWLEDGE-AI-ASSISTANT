@@ -1086,6 +1086,287 @@ def _synthesize_image_chart_answer(query: str, context: str) -> str | None:
     return None
 
 
+# DOCX TABLE-ROW EXTRACTOR — deterministic answer for line-item lookups against
+# the report's pipe-delimited financial tables ("Line Item | FY2024 | FY2023 |
+# FY2022"), bypassing free-form generation for exactly the failure mode it has
+# repeatedly gotten wrong: given several retrieved chunks — one containing the
+# correct table row with the exact requested figure, another a fluent but
+# off-topic "Executive Summary" narrative — the model defaults to restating the
+# narrative regardless of which line item was asked, even when the correct row
+# ranks #1 in retrieval. A prompt-side fix for this was tried and measured
+# WORSE on the full docx suite (twice — once in the wrong file entirely, once
+# in the file actually on this call path); see the per-modality quality pass
+# notes in thresholds.yaml. This mirrors _synthesize_image_chart_answer's
+# design: parse the deterministic structure already in the retrieved context,
+# answer from it directly, and self-gate to None (falls through to the normal
+# LLM path unchanged) whenever the match isn't confident — so this can only
+# ever ADD a correct answer, never override a case it doesn't understand.
+_DOCX_NON_CURRENT_TOKENS = frozenset({"non", "noncurrent"})
+
+# A query asking about these topics is qualitative/narrative (a risk factor, an
+# investment thesis, a strategy) — never a table-row lookup, even when it
+# happens to mention a metric name in passing (e.g. "what risk does the report
+# flag around Greater China REVENUE" is not a request for the revenue figure).
+# Checked before any row matching so it can't be defeated by an incidental
+# metric word; this is what a token-overlap match alone cannot distinguish.
+_DOCX_NARRATIVE_KEYWORDS = frozenset(
+    {
+        "risk",
+        "risks",
+        "thesis",
+        "pillar",
+        "pillars",
+        "why",
+        "explain",
+        "describe",
+        "flag",
+        "concern",
+        "outlook",
+        "strategy",
+        "identify",
+        "regulatory",
+        "rating",
+    }
+)
+
+# Row labels that reduce to exactly ONE distinctive token AND that token is
+# common enough to show up as an incidental mention in almost any finance
+# question ("what RISK does the report flag around China REVENUE") — too
+# promiscuous to trust as a confident single-token match. Multi-token rows
+# (e.g. "Gross Margin %" -> {gross, margin}) are unaffected; a row with a
+# more specific solo token (e.g. "Total Assets" -> {assets}) is unaffected.
+_DOCX_GENERIC_SOLO_TOKENS = frozenset({"revenue", "income", "margin", "growth", "cash", "sales"})
+
+# Multi-word phrases that name a TABLE/DOCUMENT, not a row — stripped before
+# tokenizing the query so e.g. "per the consolidated income statement" doesn't
+# spuriously match a row literally labeled "Operating Income" (shares the
+# token "income" with "income statement" despite asking about something else).
+_DOCX_DOC_REFERENCE_PHRASES = (
+    "income statement",
+    "balance sheet",
+    "cash flow statement",
+    "summary table",
+    "this report",
+    "the report",
+)
+
+# Generic connective words dropped before token-overlap matching — deliberately
+# excludes finance terms (even common ones like "revenue" or "total") since
+# those ARE the distinguishing signal between rows; only non-finance stopwords
+# belong here.
+_DOCX_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "apple",
+        "as",
+        "at",
+        "did",
+        "does",
+        "for",
+        "how",
+        "in",
+        "is",
+        "of",
+        "per",
+        "the",
+        "this",
+        "to",
+        "total",
+        "was",
+        "were",
+        "what",
+        "according",
+    }
+)
+
+def _tokenize_for_docx_match(text: str) -> set[str]:
+    return {t for t in re.findall(r"[a-z0-9]+", text.lower()) if t not in _DOCX_STOPWORDS}
+
+
+def _parse_docx_tables(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Parse every pipe-delimited table in the retrieved docx chunks.
+
+    Returns a list of {heading, columns: [...], rows: {label: [values...]}}.
+    Tables with fewer than 2 data rows are dropped as too weak to trust (avoids
+    matching on a stray "|" in unrelated prose).
+    """
+    tables: list[dict[str, Any]] = []
+    for d in docs or []:
+        if not isinstance(d, dict):
+            continue
+        text = d.get("text", "") or ""
+        if text.count("|") < 4:
+            continue
+        meta = d.get("metadata", {}) or {}
+        if meta.get("modality") != "docx" and ".docx" not in str(meta.get("source", "")):
+            continue
+        lines = [ln for ln in text.split("\n") if ln.strip()]
+        if not lines or "|" not in lines[0]:
+            continue
+        header = [c.strip() for c in lines[0].split("|")]
+        if len(header) < 2:
+            continue
+        rows: dict[str, list[str]] = {}
+        for ln in lines[1:]:
+            if "|" not in ln:
+                break  # table block ended (trailing prose, if any)
+            cells = [c.strip() for c in ln.split("|")]
+            if len(cells) < 2 or not cells[0]:
+                continue
+            rows[cells[0]] = cells[1:]
+        if len(rows) < 2:
+            continue
+        tables.append(
+            {
+                "heading": str(meta.get("section_title") or meta.get("heading") or ""),
+                "columns": header[1:],
+                "rows": rows,
+            }
+        )
+    return tables
+
+
+def _docx_row_match_score(row_label: str, query_tokens: set[str]) -> float | None:
+    """Fraction of the row label's distinctive tokens present in the query.
+
+    None (never returns a score) when the row is a Non-Current variant the
+    query didn't ask for — Current/Non-Current is a real bifurcation in these
+    tables (e.g. "Marketable Securities (Current)" vs "...(Non-Current)"), and
+    "current" alone is a substring of both so token overlap can't tell them
+    apart; only an explicit hard exclusion can.
+    """
+    row_tokens = _tokenize_for_docx_match(row_label)
+    if not row_tokens:
+        return None
+    if (row_tokens & _DOCX_NON_CURRENT_TOKENS) and not (query_tokens & _DOCX_NON_CURRENT_TOKENS):
+        return None
+    if len(row_tokens) == 1 and row_tokens <= _DOCX_GENERIC_SOLO_TOKENS:
+        return None
+    return len(row_tokens & query_tokens) / len(row_tokens)
+
+
+def _synthesize_docx_table_answer(query: str, docs: list[dict[str, Any]]) -> str | None:
+    """Deterministically answer a docx line-item lookup from the retrieved
+    table(s) directly. Returns None (caller falls through to the normal LLM
+    answer) whenever no row matches confidently, so this only ever adds a
+    correct, verbatim-grounded answer — never overrides an LLM answer with a
+    guess of its own.
+    """
+    tables = _parse_docx_tables(docs)
+    if not tables:
+        return None
+
+    query_lower = query.lower()
+    if set(re.findall(r"[a-z0-9]+", query_lower)) & _DOCX_NARRATIVE_KEYWORDS:
+        return None
+
+    for phrase in _DOCX_DOC_REFERENCE_PHRASES:
+        query_lower = query_lower.replace(phrase, " ")
+    query_tokens = _tokenize_for_docx_match(query_lower)
+    if not query_tokens:
+        return None
+
+    # Find every (table, row_label) pair above the match threshold, then pick
+    # ONE candidate table per row_label — preferring whichever table carries
+    # an explicit "Change"/"YoY" column (the same row can appear in more than
+    # one table at different granularities; the one with a change column lets
+    # the trend be stated with a verbatim source figure instead of computed),
+    # then the table with the higher match score.
+    _MIN_SCORE = 0.6
+    best_rank: dict[str, tuple[bool, float]] = {}
+    best_by_label: dict[str, tuple[float, dict[str, Any], list[str]]] = {}
+    for table in tables:
+        has_change_col = any(
+            "change" in c.lower() or "yoy" in c.lower() or "growth" in c.lower()
+            for c in table["columns"]
+        )
+        for label, values in table["rows"].items():
+            score = _docx_row_match_score(label, query_tokens)
+            if score is None or score < _MIN_SCORE:
+                continue
+            rank = (has_change_col, score)
+            if label not in best_rank or rank > best_rank[label]:
+                best_rank[label] = rank
+                best_by_label[label] = (score, table, values)
+
+    if not best_by_label:
+        return None
+
+    # DEDUPLICATE COMPETING ROWS — a bare metric ("Gross Margin %") and its
+    # segment-qualified siblings ("Services Gross Margin", "Products Gross
+    # Margin") can ALL cross the match threshold for an unqualified query
+    # ("gross margin percentage"), since token overlap alone can't express
+    # "the query did NOT ask for the Services-specific variant." Resolve by
+    # Jaccard similarity: rows whose token sets substantially overlap are
+    # competing for the same slot, not two different line items — keep only
+    # the highest-scoring one (the bare/unqualified row wins on a bare query
+    # since it has no unmatched qualifier token dragging its score down).
+    ranked = sorted(best_by_label.items(), key=lambda kv: kv[1][0], reverse=True)
+    kept: dict[str, tuple[float, dict[str, Any], list[str]]] = {}
+    kept_tokens: list[set[str]] = []
+    for label, entry in ranked:
+        row_tokens = _tokenize_for_docx_match(label)
+        if any(
+            len(row_tokens & other) / len(row_tokens | other) > 0.5 for other in kept_tokens
+        ):
+            continue
+        kept[label] = entry
+        kept_tokens.append(row_tokens)
+    best_by_label = kept
+
+    # At most 2 line items — every docx gold question asking for a table
+    # lookup asks for one or two; more than that is more likely a false-
+    # positive token-overlap cascade than a genuine multi-item question, so
+    # bail out and let the LLM handle it rather than risk an overlong or
+    # off-target deterministic answer.
+    if len(best_by_label) > 2:
+        return None
+
+    # Tables are newest-first by convention (system prompt rule 6 / rule 8b),
+    # so column[0] is always the period the query's headline figure belongs
+    # to. A second column, when present, is prior-period context — always
+    # verbatim and grounded, so it's included whenever available rather than
+    # gated on the query using an explicit comparison word: the docx gold set
+    # consistently expects prior-period context even on queries that only
+    # name the current period (e.g. "...as of September 28, 2024" alone still
+    # expects the September 30, 2023 comparison in must_include_facts). This
+    # only applies when the columns actually ARE time periods, though — a
+    # scenario table ("Base Case | Bull Case | Bear Case") has no "prior"
+    # column, and framing Bull Case as "versus" Base Case would misstate what
+    # the table shows.
+    parts: list[str] = []
+    for label, (_score, table, values) in best_by_label.items():
+        cols = table["columns"]
+        current_val = values[0] if values else None
+        if current_val is None:
+            continue
+        is_temporal = bool(cols) and re.search(
+            r"\d{4}|FY\d|Q[1-4]\b|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec", cols[0], re.I
+        )
+        if is_temporal and len(values) > 1 and len(cols) > 1:
+            prior_col, prior_val = cols[1], values[1]
+            change_idx = next(
+                (
+                    i
+                    for i, c in enumerate(cols)
+                    if i >= 2 and ("change" in c.lower() or "yoy" in c.lower() or "growth" in c.lower())
+                ),
+                None,
+            )
+            sentence = f"{label} was {current_val} in {cols[0]}, versus {prior_val} in {prior_col}"
+            if change_idx is not None and change_idx < len(values):
+                sentence += f" ({values[change_idx]} change)"
+            parts.append(sentence + ".")
+        else:
+            parts.append(f"{label} was {current_val} ({cols[0]}).")
+
+    if not parts:
+        return None
+    return " ".join(parts)
+
+
 # Geographic / regional markers — used to drop "net sales by region" drift from a
 # "net sales by PRODUCT CATEGORY" answer. Plain lowercase substrings (a regex \b
 # after "u.s." fails because the char after the trailing "." is not a word char).
@@ -2685,6 +2966,10 @@ _REWRAP_PROMPT = (
     "and never drop a number even if repeating it feels redundant. Do not "
     "add, remove, or change any figure, name, or date, and do not add any "
     "new information. Do not add citations, brackets, or a 'Sources:' line. "
+    "Do not add a greeting, an enthusiastic opener (e.g. 'Great question!', "
+    "'Sure!', 'Certainly!'), or a closing offer of further help — start "
+    "directly with the substantive answer, just phrased naturally instead of "
+    "like a report. "
     "Output ONLY the rewritten answer, nothing else.\n\nANSWER:\n{body}\n\nREWRITTEN:\n"
 )
 
@@ -4356,6 +4641,20 @@ class RAGPipeline:
                 # actually observed on — drawdown/plateau questions are
                 # excluded inside the function and keep using the (already
                 # correct) LLM + CHART TRENDS narrative path.
+                # KNOWN LIMITATION (2026-08-13, per-modality quality pass): like
+                # query_pipeline's copy of this override, the synthesis below
+                # discards the answer VerificationLoop already scored, so the
+                # `rag_stream_verification_result` log line and the
+                # magik_verification_* Prometheus samples for image traffic
+                # describe the thrown-away draft, not the shipped text. The
+                # non-streaming path re-scores via
+                # query_pipeline._resync_verification_grounding(); NOT mirrored
+                # here because this loop's metrics are already recorded inside
+                # VerificationLoop._record_metrics() by this point, so a
+                # re-score would double-count the histograms. User-facing text
+                # is unaffected — the replacement also drops the loop's
+                # limitation notice, which is the desired outcome for a
+                # deterministic chart read.
                 if docs and str((docs[0].get("metadata") or {}).get("modality") or "") == "image":
                     try:
                         _img_synth = _synthesize_image_chart_answer(query, context)
@@ -4370,6 +4669,28 @@ class RAGPipeline:
                     except Exception as _date_err:
                         logger.warning(
                             event="rag_stream_image_date_expand_failed", error=str(_date_err)
+                        )
+
+                # DOCX TABLE-ROW synth override (2026-08-16, per-modality
+                # quality pass docx follow-up) — same rationale as the IMAGE
+                # CHART override above, for docx line-item lookups against the
+                # report's tables. See
+                # _synthesize_docx_table_answer's module-level docstring for
+                # the measured prompt-fix failures this replaced. Self-gating
+                # (returns None whenever it isn't confident), so this can only
+                # ever add a correct answer, never override one it doesn't
+                # understand — same KNOWN LIMITATION as the image override
+                # above applies here too (not re-scored against
+                # VerificationLoop's already-recorded metrics, to avoid
+                # double-counting the histograms).
+                if docs and str((docs[0].get("metadata") or {}).get("modality") or "") == "docx":
+                    try:
+                        _docx_synth = _synthesize_docx_table_answer(query, docs)
+                        if _docx_synth:
+                            answer = _docx_synth
+                    except Exception as _docx_synth_err:
+                        logger.warning(
+                            event="rag_stream_docx_synth_failed", error=str(_docx_synth_err)
                         )
 
                 # CONVERSATIONAL REWRAP — tone-only second pass on the final,

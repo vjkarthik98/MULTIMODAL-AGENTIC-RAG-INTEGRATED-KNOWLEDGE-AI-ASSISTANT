@@ -1,91 +1,91 @@
 {
-  "generated_at": "2026-08-08T13:34:04Z",
-  "git_sha": "8484a75",
+  "generated_at": "2026-08-17T08:10:19Z",
+  "git_sha": "a931a85",
   "weaken_spec": null,
   "suites": {
-    "generation": {
-      "suite": "generation",
+    "hallucination": {
+      "suite": "hallucination",
       "metrics": {
-        "faithfulness": {
-          "name": "faithfulness",
-          "value": 0.3036,
-          "n": 14,
-          "notes": "judge=qwen2.5_7b",
-          "sub": {}
-        },
-        "answer_relevancy": {
-          "name": "answer_relevancy",
-          "value": 0.5893,
-          "n": 14,
-          "notes": "judge=qwen2.5_7b",
-          "sub": {}
-        },
-        "answer_correctness": {
-          "name": "answer_correctness",
-          "value": 0.6607,
-          "n": 14,
-          "notes": "judge=qwen2.5_7b",
-          "sub": {}
-        },
-        "context_recall": {
-          "name": "context_recall",
-          "value": 0.695,
-          "n": 10,
-          "notes": "deterministic (reference facts recoverable from context)",
-          "sub": {}
-        },
         "template_leak_rate": {
           "name": "template_leak_rate",
           "value": 0.0,
-          "n": 14,
-          "notes": "leaky=0/14",
+          "n": 98,
+          "notes": "leaky=0/98",
           "sub": {}
         },
         "citation_accuracy": {
           "name": "citation_accuracy",
           "value": 1.0,
-          "n": 14,
+          "n": 82,
           "notes": "judge=heuristic",
           "sub": {}
         },
         "hallucination_rate": {
           "name": "hallucination_rate",
-          "value": 0.42857142857142855,
-          "n": 14,
-          "notes": "flagged=6/14 | examples:   'By how much did the FOMC cut rates at th': [\"ungrounded_numbers: ['18']\"];   'What was headline PCE and core PCE infla': [\"missing_reference_numbers: ['2.2']\"]",
+          "value": 0.23711340206185566,
+          "n": 97,
+          "notes": "flagged=23/97 | examples:   'Did Chair Powell rule out a rate hike in': [\"ungrounded_numbers: ['3.9']\", \"missing_reference_numbers: ['4.3']\"];   'What was Apple's net income and diluted ': [\"missing_reference_numbers: ['$96,995 million']\"]",
           "sub": {}
         },
-        "finance_fidelity": {
-          "name": "finance_fidelity",
-          "value": 0.7202380952380952,
-          "n": 14,
-          "notes": "avg over 14 queries (strict 0.5% tol, no scale bridging)",
+        "fabrication_rate": {
+          "name": "fabrication_rate",
+          "value": 0.07216494845360824,
+          "n": 97,
+          "notes": "flagged=7/97 | examples:   'Did Chair Powell rule out a rate hike in': [\"ungrounded_numbers: ['3.9']\", \"missing_reference_numbers: ['4.3']\"];   'What obligation did Apple disclose relat': [\"ungrounded_numbers: ['14.7%']\"]",
           "sub": {}
         },
-        "generation_p50_sec": {
-          "name": "generation_p50_sec",
-          "value": 16.673691272735596,
-          "n": 14,
-          "notes": "min=10.01s max=62.34s",
+        "omission_rate": {
+          "name": "omission_rate",
+          "value": 0.18556701030927836,
+          "n": 97,
+          "notes": "flagged=18/97 | examples:   'Did Chair Powell rule out a rate hike in': [\"ungrounded_numbers: ['3.9']\", \"missing_reference_numbers: ['4.3']\"];   'What was Apple's net income and diluted ': [\"missing_reference_numbers: ['$96,995 million']\"]",
           "sub": {}
         },
-        "generation_p95_sec": {
-          "name": "generation_p95_sec",
-          "value": 38.58087646961211,
-          "n": 14,
-          "notes": "",
+        "grounding_success_rate": {
+          "name": "grounding_success_rate",
+          "value": 0.9347826086956522,
+          "n": 92,
+          "notes": "fraction of answers with zero unsupported claims (GroundednessChecker)",
           "sub": {}
         },
-        "generation_p99_sec": {
-          "name": "generation_p99_sec",
-          "value": 57.58753340244291,
-          "n": 14,
+        "citation_accuracy_v2": {
+          "name": "citation_accuracy_v2",
+          "value": 0.8478260869565217,
+          "n": 92,
+          "notes": "fraction of answers with zero bad citations (CitationVerifier)",
+          "sub": {}
+        },
+        "retry_success_rate": {
+          "name": "retry_success_rate",
+          "value": 0.2222222222222222,
+          "n": 27,
+          "notes": "retried=27/92 | eventually PASS=6",
+          "sub": {}
+        },
+        "avg_retry_count": {
+          "name": "avg_retry_count",
+          "value": 0.29347826086956524,
+          "n": 92,
+          "notes": "mean verification retries per query (cost signal)",
+          "sub": {}
+        },
+        "verification_latency_p50": {
+          "name": "verification_latency_p50",
+          "value": 2.5463,
+          "n": 92,
+          "notes": "min=1.02s max=12.54s",
+          "sub": {}
+        },
+        "verification_latency_p95": {
+          "name": "verification_latency_p95",
+          "value": 7.557070000000001,
+          "n": 92,
           "notes": "",
           "sub": {}
         }
       },
       "breached": {},
-      "duration_sec": 332.894579410553,
+      "duration_sec": 776.3091406822205,
       "judge": "qwen2.5_7b",
       "dataset_version": null
     }

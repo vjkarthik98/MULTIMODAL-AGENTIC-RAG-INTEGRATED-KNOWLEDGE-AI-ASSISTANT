@@ -107,6 +107,11 @@ class EvalConfig:
     # Optional single-modality filter (txt|pdf|docx|xlsx|image|audio|video).
     # When set, retrieval/generation/behavioral suites evaluate ONLY this modality.
     modality: str | None = None
+    # When True, run_generation_suite posts to /rag/query/stream (the endpoint
+    # the UI actually calls, incl. rag_pipeline.stream()'s post-verification
+    # _conversational_rewrap pass) instead of /rag/query. See thresholds.yaml's
+    # "KNOWN COVERAGE GAP" comment and app/eval/http_client.py::post_sse().
+    live_path: bool = False
     # Set by `app/eval/run.py` from --baseline, read by
     # app/eval/runners/regression_runner.py via getattr(). It worked (plain
     # dataclass, so the attribute could be grafted on at runtime) but was an

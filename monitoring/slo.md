@@ -165,6 +165,14 @@ no real production traffic has been measured on this box yet to calibrate
 against (same honesty convention as thresholds.yaml's own "informational
 until re-baselined" sections). Revisit once real data exists.
 
+**Delivery:** every alert in this file delivers to ntfy (push notification)
+only, with no retry or escalation if nobody sees it. A dedicated real-
+escalation path (phone/SMS via PagerDuty, then Opsgenie) was attempted and
+removed — see `docs/runbooks/phase-31-monitoring.md` §8.9 for why (every
+free option hit a hard external blocker: OSS tool archived, one provider's
+signup rejected the available email, the other stopped accepting new
+customers, a third gates real escalation behind a paid seat).
+
 ## 9. What is explicitly NOT covered yet (documented gap, not silently dropped)
 
 - **Finance numeric fidelity on live traffic** — `online_eval.py` does not

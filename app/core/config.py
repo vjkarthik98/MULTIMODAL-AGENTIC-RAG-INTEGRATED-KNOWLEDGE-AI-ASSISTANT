@@ -361,6 +361,7 @@ class Settings:
     NER_DEVICE: str = _str("NER_DEVICE", _auto_device())
     WHISPER_DEVICE: str = _str("WHISPER_DEVICE", _auto_device())
     LLM_DEVICE_HINT: str = _str("LLM_DEVICE_HINT", _auto_device())
+    NLI_DEVICE: str = _str("NLI_DEVICE", _auto_device())
 
     # VISION MODELS
     SIGLIP_MODEL: str = _str("SIGLIP_MODEL", "google/siglip-so400m-patch14-384")
@@ -762,10 +763,38 @@ class Settings:
     # the retry-strategy/stopping-criteria bugs above. 75.0 sits below that
     # observed good-answer score with margin, while still well above the
     # genuinely-poor cases seen the same day (e.g. 29.05).
-    AGENT_VERIFY_RETRIEVAL_MIN: float = _float("AGENT_VERIFY_RETRIEVAL_MIN", 75.0)
+    #
+    # RECALIBRATED FURTHER 2026-08-13 (hallucination-reduction initiative
+    # Phase 3), after retry_success_rate measured 0.0000 (0/25-39 retried
+    # queries ever eventually PASSed, across two separate eval runs) even
+    # with grounding healthy (100.0 on all 39 sampled rows — never the
+    # blocker) and after NLI landed. Root-caused by pulling the FULL
+    # retrieval/grounding/citation/overall score distribution across the 39
+    # valid gold rows (txt+pdf+docx), not just one example this time:
+    #   retrieval: min=25.9 p25=41.5 median=48.0 p75=67.5 max=100.0
+    #   overall:   min=17.6 p25=25.5 median=55.5  p75=66.3 max=100.0
+    # 75.0 (the value this comment used to justify) sits ABOVE the retrieval
+    # p75 — i.e. it was still failing 3 of every 4 real answers on retrieval
+    # alone. And retrieval genuinely wasn't the dominant blocker either:
+    # simulating retrieval>=35 with overall STILL >=90 changed the pass count
+    # not at all (3/39 either way) — `overall = 0.6*weakest + 0.4*mean`
+    # (confidence_scorer.py) means a single soft dimension (usually retrieval
+    # or completeness on a multi-part question) craters `overall` regardless
+    # of how strong grounding/citation are, and 90 is far above the observed
+    # median (55.5). Simulated retrieval>=35 AND overall>=50 (with
+    # grounding>=90, citation>=95 both held fixed — neither changed):
+    # 23/39 would newly clear every gate, ZERO of them carrying any
+    # fabrication/NLI-contradiction signal — the loosening costs no measured
+    # safety margin in this sample. See also confidence_scorer.py's decide()
+    # for the paired completeness all-or-nothing fix from the same pass.
+    AGENT_VERIFY_RETRIEVAL_MIN: float = _float("AGENT_VERIFY_RETRIEVAL_MIN", 35.0)
     AGENT_VERIFY_GROUNDING_MIN: float = _float("AGENT_VERIFY_GROUNDING_MIN", 90.0)
+    # Never the observed blocker (100.0 on citation for 33/39 sampled rows;
+    # the handful of 0.0/50.0 outliers look like a genuine CitationVerifier
+    # issue, not a miscalibrated threshold — lowering this would mask that
+    # bug rather than fix it. Flagged as a follow-up, not touched here.
     AGENT_VERIFY_CITATION_MIN: float = _float("AGENT_VERIFY_CITATION_MIN", 95.0)
-    AGENT_VERIFY_OVERALL_MIN: float = _float("AGENT_VERIFY_OVERALL_MIN", 90.0)
+    AGENT_VERIFY_OVERALL_MIN: float = _float("AGENT_VERIFY_OVERALL_MIN", 50.0)
     AGENT_VERIFY_MAX_RETRIES: int = _int("AGENT_VERIFY_MAX_RETRIES", 3)
     # 30s was tuned against a faster resident LLM. The current default
     # LLM_MODEL_PATH is Qwen2.5-14B-Instruct-Q4_K_M, where a single generation
@@ -782,6 +811,65 @@ class Settings:
         "AGENT_VERIFY_MODALITIES",
         ["txt", "pdf", "docx", "xlsx", "image", "audio", "video"],
     )
+
+    # NLI GROUNDEDNESS SCORER (hallucination-reduction initiative, Phase 3,
+    # 2026-08-13). Adds a real GPU entailment model
+    # (app/verification/groundedness_checker.py) as an ADDITIVE contradiction
+    # check on top of the existing lexical word-overlap guard — see that
+    # module's docstring for why this is additive-only (a contradiction
+    # penalty), not a replacement of the lexical support_score with raw
+    # entailment probability as originally planned: entailment probability
+    # was empirically found unreliable (attribution phrasing/pronoun shifts
+    # push a genuinely correct restatement into "neutral", not "entailment"),
+    # while contradiction probability is cleanly separable in every case
+    # tested — 0.0001-0.003 for correct/neutral answers vs. 0.9999 for a
+    # fabricated number. Validated live (2026-08-13, generation suite, n=42):
+    # grounding_success_rate 0.9744 (lexical-only) -> 0.9487 (NLI on) — the
+    # additive design barely moves the pass rate while demonstrably catching
+    # a real case neither the lexical nor numeric check catches alone (a
+    # semantic inversion: "revenue increased" vs. context's "revenue
+    # decreased", full word overlap, no numbers — see
+    # tests/unit/verification/test_groundedness_checker_nli.py::
+    # test_semantic_inversion_caught_by_nli_not_lexical). Default flipped to
+    # True on that evidence.
+    NLI_GROUNDEDNESS_ENABLED: bool = _bool("NLI_GROUNDEDNESS_ENABLED", True)
+    NLI_MODEL: str = _str("NLI_MODEL", "cross-encoder/nli-deberta-v3-base")
+    # Contradiction probability (0-1) ABOVE which a claim sentence adds a
+    # hallucination flag. 0.3 sits deep in the empirically observed gap
+    # between correct/neutral answers (0.0001-0.003) and a confirmed
+    # fabricated number (0.9999) — chosen with margin on both sides from a
+    # small manually-verified sample, not yet a full eval-measured baseline.
+    NLI_CONTRADICTION_MAX: float = _float("NLI_CONTRADICTION_MAX", 0.3)
+
+    # MODALITY CONFIDENCE -> error_markers (hallucination-reduction initiative,
+    # Phase 5, 2026-08-13). Reuses the existing error_markers -> "⚠
+    # ERROR_MARKERS=" prompt-injection mechanism (rag_pipeline.py::_build_context,
+    # prompt_builder.py's generic "treat its specific claim as suspect"
+    # instruction) already proven for txt's in-corpus error markers — no
+    # shared/prompt code changes needed, only each modality's own ingest/
+    # chunk file populates the field. Flag-only: this does NOT down-weight or
+    # drop risky chunks in retrieval ranking, deliberately — that would need
+    # its own eval-measured justification, not assumed here.
+    #
+    # Shared between audio and video (same Whisper _hallucination_risk()
+    # categorical output — "low"/"medium"/"high" — app/ingestion/audio_ingest.py)
+    # rather than two near-duplicate per-modality settings, since the
+    # underlying signal and its semantics are identical for both. Only "high"
+    # triggers a marker by default — "medium" covers confidence 0.4-0.65 or
+    # no_speech_prob 0.5-0.8, a wide band that would over-flag common,
+    # genuinely-fine transcriptions if included.
+    MEDIA_HALLUCINATION_RISK_ERROR_MARKER_LEVELS: list[str] = _list(
+        "MEDIA_HALLUCINATION_RISK_ERROR_MARKER_LEVELS", ["high"]
+    )
+    # OCR confidence (0-1 scale) BELOW which a page/image chunk gets flagged.
+    # Shared between pdf and image (same 0-1 Tesseract/EasyOCR confidence
+    # scale) rather than two near-duplicate settings.
+    OCR_CONFIDENCE_ERROR_MARKER_MIN: float = _float("OCR_CONFIDENCE_ERROR_MARKER_MIN", 0.5)
+    # Bounded-loop discipline (CLAUDE.md hard rule) applied to the per-answer
+    # NLI cost: cap sentence x best-matching-context-chunk pairs scored per
+    # answer, so a long multi-sentence answer can't turn one groundedness
+    # check into an unbounded number of GPU calls.
+    NLI_MAX_SENTENCE_PAIRS_PER_CALL: int = _int("NLI_MAX_SENTENCE_PAIRS_PER_CALL", 12)
 
     # CONVERSATIONAL REWRAP — an additive, tone-only second LLM pass that runs
     # AFTER every accuracy-critical stage (verification, citation attachment,
@@ -866,6 +954,22 @@ class Settings:
     TEMP_FILE_ENCRYPTION: bool = _bool("TEMP_FILE_ENCRYPTION", False)
 
     # HALLUCINATION
+    # Kept as a genuinely distinct threshold, NOT collapsed into
+    # AGENT_VERIFY_GROUNDING_MIN, despite the hallucination-reduction
+    # initiative's Phase 4 consolidation (2026-08-13) removing the other two
+    # redundant thresholds (output_guard.py's old `_groundedness_threshold`,
+    # and the third independent detector it compared against). Those two
+    # really were duplicates of the same verdict; this one is not: it gates
+    # `_hallucination_guard`'s raw 0-1 lexical support_score
+    # (reasoning_engine.py) — one component INSIDE
+    # GroundednessChecker.check()'s pipeline — while AGENT_VERIFY_GROUNDING_MIN
+    # gates the FINAL blended 0-100 score (lexical + NLI-contradiction penalty
+    # + numeric penalty) at the VerificationLoop decide() layer, several steps
+    # downstream. Collapsing a component-level threshold into an
+    # aggregate-level gate would conflate two different things the original
+    # plan assumed were the same only because it assumed NLI would REPLACE
+    # support_score outright — see groundedness_checker.py's module docstring
+    # for why that assumption didn't survive contact with real data.
     HALLUCINATION_THRESHOLD: float = _float("HALLUCINATION_THRESHOLD", 0.5)
 
     # CROSS-MODAL FUSION
