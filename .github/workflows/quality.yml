@@ -111,7 +111,22 @@ jobs:
         with:
           python-version: "3.11"
 
-      - run: pip install schemathesis pytest pytest-timeout httpx
+      # Pinned <5 for the same reason as pyproject.toml's [quality] extra: an
+      # unpinned `pip install schemathesis` silently upgraded to 4.x, whose
+      # removal of the top-level `from_uri` loader failed this job at
+      # collection time. This job installs schemathesis directly rather than
+      # via the extra, so the bound has to be repeated here to be effective.
+      # pytest-asyncio is NOT optional here even though nothing in
+      # tests/api_contract/ is async. pyproject.toml sets
+      # `asyncio_mode = "auto"` AND `--strict-config` in addopts, and
+      # --strict-config turns an ini option that no installed plugin claims
+      # into a hard error. Without pytest-asyncio present, this job prints
+      # "ERROR: Unknown config option: asyncio_mode", collects the tests,
+      # runs NONE of them, and exits 4 -- the same exit code as the
+      # from_uri collection error it was hiding behind. Reproduced locally
+      # against a stub API: without this package 3 tests collected / 0 ran /
+      # exit 4; with it, 3 collected / 3 ran / exit 0.
+      - run: pip install "schemathesis>=4.24,<5" pytest pytest-asyncio pytest-timeout httpx
 
       - name: Run Schemathesis contract test
         run: pytest tests/api_contract/ -v --junitxml=quality-reports/api-contract/ci-run.junit.xml

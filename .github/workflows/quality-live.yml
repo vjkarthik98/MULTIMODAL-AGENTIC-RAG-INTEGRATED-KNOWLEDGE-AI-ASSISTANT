@@ -57,7 +57,7 @@ jobs:
         env:
           MAGIK_LIVE_URL: ${{ secrets.MAGIK_LIVE_URL }}
         run: |
-          pip install schemathesis
+          pip install "schemathesis>=4.24,<5"
           bash scripts/schemathesis_live.sh
 
       - name: RAGAS report (live)

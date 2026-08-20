@@ -13,6 +13,8 @@ import re
 import time
 import unicodedata
 import uuid
+from collections.abc import Callable
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -715,13 +717,52 @@ def _extract_keywords(text: str, max_keywords: int = 5) -> list[str]:
     return []
 
 
-def _readability_score(text: str) -> float:
+@lru_cache(maxsize=1)
+def _textstat_scorer() -> Callable[[str], float] | None:
+    """Resolve textstat's Flesch scorer once, or None if it is unusable here.
+
+    textstat IMPORTS cleanly even when it cannot actually run. Since 0.7.4 its
+    English syllable counter goes through NLTK's `cmudict` corpus, which is not
+    bundled with either package -- textstat tries to DOWNLOAD it on first call.
+    Anywhere that corpus is absent and nltk's servers are unreachable (offline
+    dev, a locked-down prod container, or a CI runner that just got a
+    connection reset) the failure is a `LookupError: Resource 'cmudict' not
+    found` raised from the CALL, not from the import.
+
+    That distinction is what made this a real bug: `_readability_score` caught
+    only ImportError, so the LookupError escaped, propagated out of the
+    per-chunk loop in `ingest()`, and failed the ENTIRE .txt ingestion over an
+    optional metadata field -- with a perfectly good pure-Python approximation
+    sitting unused directly below it. Observed live as a red CI job (py3.10,
+    `Errno 104 Connection reset by peer` fetching cmudict) where py3.11 passed
+    only because its download happened to succeed; the same code would fail an
+    airgapped or egress-restricted deployment on every single upload.
+
+    Probing once here also latches the outcome: a failing corpus download is
+    attempted at most once per process instead of once per chunk. The failing
+    call measured 2.16s in CI, so on a large .txt the retries alone would have
+    dominated ingestion latency even after the crash was fixed.
+    """
     try:
         import textstat
 
-        return float(textstat.flesch_reading_ease(text))
-    except ImportError:
-        pass
+        # Probe with a trivial sentence -- this is what forces the cmudict
+        # lookup, so a broken install is detected here rather than mid-ingest.
+        textstat.flesch_reading_ease("The cat sat on the mat.")
+        return textstat.flesch_reading_ease
+    except Exception:
+        return None
+
+
+def _readability_score(text: str) -> float:
+    scorer = _textstat_scorer()
+    if scorer is not None:
+        try:
+            return float(scorer(text))
+        except Exception:
+            # Per-text failure (odd encoding, empty string) -- fall through to
+            # the approximation rather than losing the whole chunk.
+            pass
     try:
         sentences = max(text.count(".") + text.count("!") + text.count("?"), 1)
         words = max(len(text.split()), 1)
