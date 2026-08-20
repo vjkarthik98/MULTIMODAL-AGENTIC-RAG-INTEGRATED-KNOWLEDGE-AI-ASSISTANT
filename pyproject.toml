@@ -228,7 +228,12 @@ security = [
 # Uptime Kuma are external tools (Docker/binary), not pip deps — see perf/,
 # lighthouserc.json, security/zap/, monitoring/uptime-kuma/.
 quality = [
-    "schemathesis>=3.35",
+    # Upper-bounded deliberately. `>=3.35` was unbounded, so Schemathesis 4.x
+    # installed itself into CI and removed the top-level `from_uri` loader that
+    # tests/api_contract/test_schemathesis.py called -- a red PR with no code
+    # change behind it. v4 is the target (that file uses the v4 API); the <5
+    # ceiling is what stops the next major doing this again.
+    "schemathesis>=4.24,<5",
     "deepeval>=1.4",
 ]
 
