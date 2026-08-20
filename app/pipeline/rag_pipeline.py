@@ -1181,6 +1181,7 @@ _DOCX_STOPWORDS = frozenset(
     }
 )
 
+
 def _tokenize_for_docx_match(text: str) -> set[str]:
     return {t for t in re.findall(r"[a-z0-9]+", text.lower()) if t not in _DOCX_STOPWORDS}
 
@@ -1308,9 +1309,7 @@ def _synthesize_docx_table_answer(query: str, docs: list[dict[str, Any]]) -> str
     kept_tokens: list[set[str]] = []
     for label, entry in ranked:
         row_tokens = _tokenize_for_docx_match(label)
-        if any(
-            len(row_tokens & other) / len(row_tokens | other) > 0.5 for other in kept_tokens
-        ):
+        if any(len(row_tokens & other) / len(row_tokens | other) > 0.5 for other in kept_tokens):
             continue
         kept[label] = entry
         kept_tokens.append(row_tokens)
@@ -1351,7 +1350,8 @@ def _synthesize_docx_table_answer(query: str, docs: list[dict[str, Any]]) -> str
                 (
                     i
                     for i, c in enumerate(cols)
-                    if i >= 2 and ("change" in c.lower() or "yoy" in c.lower() or "growth" in c.lower())
+                    if i >= 2
+                    and ("change" in c.lower() or "yoy" in c.lower() or "growth" in c.lower())
                 ),
                 None,
             )

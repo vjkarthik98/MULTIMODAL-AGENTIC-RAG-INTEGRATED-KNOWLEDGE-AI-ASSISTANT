@@ -165,8 +165,25 @@ jobs:
       # "visible but non-blocking until paid down" precedent as mypy above,
       # applied surgically instead of via continue-on-error (which would
       # also silence genuine test failures, not just the coverage number).
-      - name: pytest -m unit
-        run: pytest tests/unit/ -m unit -q --cov=app --cov-report=xml --cov-report=term-missing --cov-fail-under=0
+      # `-m "unit and not slow"`, not a bare `-m unit`. tests/conftest.py's
+      # pytest_collection_modifyitems auto-applies the `unit` marker to
+      # EVERYTHING under tests/unit/ by directory, so a file that marks itself
+      # `pytest.mark.slow` still comes back as `unit` too and a bare `-m unit`
+      # selects it anyway. That silently broke this job's stated contract (see
+      # the header: "No models, no GPU, no external services"):
+      # tests/unit/verification/test_groundedness_checker_nli.py and
+      # test_hallucination_detector_consolidation.py (14 tests) exercise the
+      # REAL cross-encoder/nli-deberta-v3-base model and call
+      # model_loader.get_nli_model() at COLLECTION time, from their own
+      # module-level skipif — on a runner with no .hf_cache/ that is a ~400MB
+      # HuggingFace download inside a 15-minute job, and if it succeeds the
+      # tests then run and are order-dependent (they pass alone, fail after
+      # other model-loading tests in the same process). Both files already
+      # carry `pytest.mark.slow` and their own skipif; excluding `slow` here
+      # is what those markers were for. They stay runnable locally and in the
+      # Tier-2/nightly path — `make test-unit` uses this same selector.
+      - name: pytest -m "unit and not slow"
+        run: pytest tests/unit/ -m "unit and not slow" -q --cov=app --cov-report=xml --cov-report=term-missing --cov-fail-under=0
 
       - name: Upload coverage
         if: matrix.python-version == '3.11'

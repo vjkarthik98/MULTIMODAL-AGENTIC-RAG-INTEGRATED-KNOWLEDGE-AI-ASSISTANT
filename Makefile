@@ -52,7 +52,11 @@ test-unit:  ## Fast unit tests only — no external services, no real models (mo
 	# to what CI does still fails locally on the coverage gate, not on an
 	# actual test failure. Confirmed live (2026-08-01): this exact mismatch
 	# made a genuinely clean local run look red.
-	pytest tests/unit/ -m unit -q --cov=app --cov-report=term-missing --cov-fail-under=0
+	# `unit and not slow`, matching ci.yml: tests/conftest.py auto-marks every
+	# file under tests/unit/ as `unit` by directory, so a bare `-m unit` also
+	# picks up the two `pytest.mark.slow` files that load the REAL NLI model —
+	# contradicting this target's own "no real models (mocked)" contract.
+	pytest tests/unit/ -m "unit and not slow" -q --cov=app --cov-report=term-missing --cov-fail-under=0
 
 test-auth:  ## Tenant-isolation / auth test suite. Scoped directly to tests/auth/, not `tests/ -m auth` — same tests/integration/ collection-storm issue as test-unit.
 	pytest tests/auth/ -v

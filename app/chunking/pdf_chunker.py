@@ -394,8 +394,7 @@ class PdfChunker(BaseChunker):
                     prose_buf = (prose_buf + "\n\n" + text).strip() if prose_buf else text
                     _ext_ocr_conf = (ext.extra or {}).get("ocr_confidence")
                     if _ext_ocr_conf is not None and (
-                        prose_min_ocr_confidence is None
-                        or _ext_ocr_conf < prose_min_ocr_confidence
+                        prose_min_ocr_confidence is None or _ext_ocr_conf < prose_min_ocr_confidence
                     ):
                         prose_min_ocr_confidence = _ext_ocr_conf
                     continue

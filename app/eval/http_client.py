@@ -276,9 +276,7 @@ def post_sse(
             except ValueError:
                 continue
 
-        full_answer = (
-            final_answer if final_answer is not None else "".join(answer_parts)
-        ).strip()
+        full_answer = (final_answer if final_answer is not None else "".join(answer_parts)).strip()
         return {"answer": "" if refused else full_answer, "sources": sources, "refused": refused}
 
     # Exhausted rate-limit retries.
