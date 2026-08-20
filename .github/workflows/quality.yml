@@ -111,7 +111,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - run: pip install ".[quality,test]"
+      - run: pip install schemathesis pytest pytest-timeout httpx
 
       - name: Run Schemathesis contract test
         run: pytest tests/api_contract/ -v --junitxml=quality-reports/api-contract/ci-run.junit.xml
