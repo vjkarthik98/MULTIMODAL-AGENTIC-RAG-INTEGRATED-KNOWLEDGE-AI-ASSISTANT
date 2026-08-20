@@ -90,7 +90,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - run: pip install "MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT[security] @ ." || pip install bandit>=1.7
+      - run: pip install ".[security]"
 
       # BLOCKING, high-severity only (-lll = report severity HIGH and above).
       # A real run (2026-07-25) found 5 HIGH findings: 1 confirmed false
