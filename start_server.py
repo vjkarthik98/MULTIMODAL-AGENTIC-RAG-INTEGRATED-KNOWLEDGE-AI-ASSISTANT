@@ -77,6 +77,35 @@ def set_common_env() -> None:
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
+    # transformers' DebertaV2 implementation (cross-encoder/nli-deberta-v3-base,
+    # settings.NLI_MODEL — app/verification/groundedness_checker.py) decorates
+    # make_log_bucket_position() with @torch.jit.script. That function computes
+    # torch.abs() on an int64 relative-position tensor; TorchScript's CPU fuser
+    # can codegen that as a bare C++ fabs(int64_t) call, which is genuinely
+    # ambiguous (no exact overload — matches both fabs(float) and fabs(double))
+    # and fails to compile: "RuntimeError: ... more than one instance of
+    # overloaded function 'fabs' matches the argument list ... int64_t n3 =
+    # fabs(n2)". Confirmed live in production logs (2026-08-20) as
+    # nli_groundedness_failed, and independently in tests/unit/verification/
+    # test_groundedness_checker_nli.py's documented order-dependence — both
+    # point at the same root cause: something earlier in the process (pyannote/
+    # speechbrain's own torch.jit-heavy code, per the audio-ingest correlation)
+    # leaves the CPU fuser in a state where this specific scripted function's
+    # kernel compiles down to the ambiguous call. PYTORCH_JIT=0 makes
+    # @torch.jit.script a no-op process-wide (verified: make_log_bucket_position
+    # becomes a plain function, not a torch.jit.ScriptFunction), so the buggy
+    # fuser codegen path can never be reached — eager execution only, same
+    # verified-correct output (confirmed manually: true restatement scores
+    # entailment, contradicted number scores contradiction), no measurable cost
+    # for this tiny O(seq_len^2) position-bucketing step. Must be set before the
+    # first `import torch` anywhere in the process (checked by torch/jit/_state.py
+    # at torch's own init) — this function already runs before cuda_available()'s
+    # `import torch`, and start_server.py's env is inherited by the uvicorn
+    # subprocess it launches. app/main.py sets the same setdefault for the
+    # direct `uvicorn app.main:app --reload` dev path, which never goes through
+    # this file at all.
+    os.environ.setdefault("PYTORCH_JIT", "0")
+
 
 def skip_model_bootstrap() -> bool:
     """API-only mode: start uvicorn WITHOUT downloading models or running llama-server.

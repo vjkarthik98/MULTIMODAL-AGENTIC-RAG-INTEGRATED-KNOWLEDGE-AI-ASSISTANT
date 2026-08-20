@@ -1,91 +1,147 @@
 {
-  "generated_at": "2026-08-17T08:10:19Z",
-  "git_sha": "a931a85",
+  "generated_at": "2026-08-20T11:43:32Z",
+  "git_sha": "d920537",
   "weaken_spec": null,
   "suites": {
-    "hallucination": {
-      "suite": "hallucination",
+    "generation": {
+      "suite": "generation",
       "metrics": {
+        "faithfulness": {
+          "name": "faithfulness",
+          "value": 0.3929,
+          "n": 14,
+          "notes": "judge=qwen2.5_7b",
+          "sub": {}
+        },
+        "answer_relevancy": {
+          "name": "answer_relevancy",
+          "value": 0.8214,
+          "n": 14,
+          "notes": "judge=qwen2.5_7b",
+          "sub": {}
+        },
+        "answer_correctness": {
+          "name": "answer_correctness",
+          "value": 0.7857,
+          "n": 14,
+          "notes": "judge=qwen2.5_7b",
+          "sub": {}
+        },
+        "context_recall": {
+          "name": "context_recall",
+          "value": 0.8738,
+          "n": 14,
+          "notes": "deterministic (reference facts recoverable from context)",
+          "sub": {}
+        },
         "template_leak_rate": {
           "name": "template_leak_rate",
           "value": 0.0,
-          "n": 98,
-          "notes": "leaky=0/98",
+          "n": 14,
+          "notes": "leaky=0/14",
           "sub": {}
         },
         "citation_accuracy": {
           "name": "citation_accuracy",
           "value": 1.0,
-          "n": 82,
+          "n": 14,
           "notes": "judge=heuristic",
           "sub": {}
         },
         "hallucination_rate": {
           "name": "hallucination_rate",
-          "value": 0.23711340206185566,
-          "n": 97,
-          "notes": "flagged=23/97 | examples:   'Did Chair Powell rule out a rate hike in': [\"ungrounded_numbers: ['3.9']\", \"missing_reference_numbers: ['4.3']\"];   'What was Apple's net income and diluted ': [\"missing_reference_numbers: ['$96,995 million']\"]",
+          "value": 0.2857142857142857,
+          "n": 14,
+          "notes": "flagged=4/14 | examples:   'What was Apple's diluted EPS for Q4 fisc': [\"missing_reference_numbers: ['$102.466 billion', '$102.171 billion']\"];   'What was Apple's company gross margin fo': [\"missing_reference_numbers: ['$1.1 billion']\"]",
           "sub": {}
         },
         "fabrication_rate": {
           "name": "fabrication_rate",
-          "value": 0.07216494845360824,
-          "n": 97,
-          "notes": "flagged=7/97 | examples:   'Did Chair Powell rule out a rate hike in': [\"ungrounded_numbers: ['3.9']\", \"missing_reference_numbers: ['4.3']\"];   'What obligation did Apple disclose relat': [\"ungrounded_numbers: ['14.7%']\"]",
+          "value": 0.0,
+          "n": 14,
+          "notes": "flagged=0/14",
           "sub": {}
         },
         "omission_rate": {
           "name": "omission_rate",
-          "value": 0.18556701030927836,
-          "n": 97,
-          "notes": "flagged=18/97 | examples:   'Did Chair Powell rule out a rate hike in': [\"ungrounded_numbers: ['3.9']\", \"missing_reference_numbers: ['4.3']\"];   'What was Apple's net income and diluted ': [\"missing_reference_numbers: ['$96,995 million']\"]",
+          "value": 0.2857142857142857,
+          "n": 14,
+          "notes": "flagged=4/14 | examples:   'What was Apple's diluted EPS for Q4 fisc': [\"missing_reference_numbers: ['$102.466 billion', '$102.171 billion']\"];   'What was Apple's company gross margin fo': [\"missing_reference_numbers: ['$1.1 billion']\"]",
           "sub": {}
         },
         "grounding_success_rate": {
           "name": "grounding_success_rate",
-          "value": 0.9347826086956522,
-          "n": 92,
+          "value": 1.0,
+          "n": 14,
           "notes": "fraction of answers with zero unsupported claims (GroundednessChecker)",
           "sub": {}
         },
         "citation_accuracy_v2": {
           "name": "citation_accuracy_v2",
-          "value": 0.8478260869565217,
-          "n": 92,
+          "value": 0.9285714285714286,
+          "n": 14,
           "notes": "fraction of answers with zero bad citations (CitationVerifier)",
           "sub": {}
         },
         "retry_success_rate": {
           "name": "retry_success_rate",
-          "value": 0.2222222222222222,
-          "n": 27,
-          "notes": "retried=27/92 | eventually PASS=6",
+          "value": 0.0,
+          "n": 5,
+          "notes": "retried=5/14 | eventually PASS=0",
           "sub": {}
         },
         "avg_retry_count": {
           "name": "avg_retry_count",
-          "value": 0.29347826086956524,
-          "n": 92,
+          "value": 0.35714285714285715,
+          "n": 14,
           "notes": "mean verification retries per query (cost signal)",
           "sub": {}
         },
         "verification_latency_p50": {
           "name": "verification_latency_p50",
-          "value": 2.5463,
-          "n": 92,
-          "notes": "min=1.02s max=12.54s",
+          "value": 3.9717999999999996,
+          "n": 14,
+          "notes": "min=3.27s max=7.20s",
           "sub": {}
         },
         "verification_latency_p95": {
           "name": "verification_latency_p95",
-          "value": 7.557070000000001,
-          "n": 92,
+          "value": 6.922184999999999,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "finance_fidelity": {
+          "name": "finance_fidelity",
+          "value": 0.9642857142857143,
+          "n": 14,
+          "notes": "avg over 14 queries (strict 0.5% tol, no scale bridging)",
+          "sub": {}
+        },
+        "generation_p50_sec": {
+          "name": "generation_p50_sec",
+          "value": 8.568932056427002,
+          "n": 14,
+          "notes": "min=6.82s max=11.23s",
+          "sub": {}
+        },
+        "generation_p95_sec": {
+          "name": "generation_p95_sec",
+          "value": 11.030624198913575,
+          "n": 14,
+          "notes": "",
+          "sub": {}
+        },
+        "generation_p99_sec": {
+          "name": "generation_p99_sec",
+          "value": 11.186986312866212,
+          "n": 14,
           "notes": "",
           "sub": {}
         }
       },
       "breached": {},
-      "duration_sec": 776.3091406822205,
+      "duration_sec": 171.54105424880981,
       "judge": "qwen2.5_7b",
       "dataset_version": null
     }

@@ -45,7 +45,14 @@ jobs:
   api-contract:
     name: Schemathesis (API contract, GET-only)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 15 -> 20: the dev-runtime image build alone measured 800-829s (~13.3-
+    # 13.8min) with no layer cache (confirmed live, 2026-08-20 runs
+    # 32330098485/32359742368) — that leaves as little as ~1min of a 15min
+    # budget for the actual health wait + Schemathesis run, guaranteeing a
+    # cancellation regardless of whether the API comes up cleanly. Matches
+    # zap-baseline's already-20min budget below, which builds the identical
+    # image.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 

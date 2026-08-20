@@ -12,6 +12,15 @@ _os.environ["HF_HOME"] = _hf_home
 _os.environ["TRANSFORMERS_CACHE"] = _hf_home + "/hub"
 _os.environ["HF_DATASETS_CACHE"] = _hf_home + "/datasets"
 _os.environ["HF_HUB_CACHE"] = _hf_home + "/hub"
+# start_server.py's set_common_env() sets this same setdefault for the
+# production/docker path (see its comment for the full root-cause writeup):
+# transformers' DebertaV2 (settings.NLI_MODEL) has a @torch.jit.script function
+# whose CPU-fuser codegen can hit an ambiguous fabs(int64_t) compile error
+# (confirmed live, nli_groundedness_failed, 2026-08-20). Duplicated here
+# because `uvicorn app.main:app --reload` (CLAUDE.md's documented dev command)
+# imports this module directly and never goes through start_server.py — this
+# is the earliest point in THAT path, before any transformers/torch import.
+_os.environ.setdefault("PYTORCH_JIT", "0")
 # ────────────────────────────────────────────────────────────────────────────
 
 import asyncio
