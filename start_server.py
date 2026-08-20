@@ -78,6 +78,32 @@ def set_common_env() -> None:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
+def skip_model_bootstrap() -> bool:
+    """API-only mode: start uvicorn WITHOUT downloading models or running llama-server.
+
+    Off by default — production and normal local dev are unchanged. Set
+    SKIP_MODEL_BOOTSTRAP=true only where the goal is "is the HTTP surface up and
+    well-behaved", not "does inference work".
+
+    This exists for .github/workflows/quality.yml. Those jobs run the container on
+    a plain hosted runner and bind-mount an EMPTY ./.hf_cache, so main()'s normal
+    order — ensure_models() (~25GB / 17 models) -> llama-server -> uvicorn — means
+    the API is the LAST thing to start and /health never answers inside the job's
+    time budget. That, not the image build, is why every Schemathesis/ZAP run has
+    failed on "Wait for API health" since the workflow was written.
+
+    Safe for those jobs specifically: Schemathesis is GET-only contract testing and
+    ZAP's baseline is a passive crawl, so neither invokes inference. Anything that
+    DOES call the LLM (k6's smoke.js POSTs /rag/query) must run against a real
+    deployment instead — see .github/workflows/quality-live.yml.
+
+    The app itself already tolerates missing models: MODEL_CACHE_REQUIRE_MANIFEST
+    defaults to False (app/core/startup_validator.py) and WARMUP_AT_STARTUP gates
+    eager GPU preload (app/main.py), so model loading stays lazy and per-request.
+    """
+    return os.environ.get("SKIP_MODEL_BOOTSTRAP", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def set_offline_env() -> None:
     # Set AFTER ensure_models() (which needs the network), BEFORE model
     # loading. Every from_pretrained() otherwise HEAD-checks huggingface.co
@@ -308,13 +334,21 @@ def main() -> None:
     warn_missing_binaries()
     warn_redis_config()
 
-    ensure_models()
-    set_offline_env()
-    check_llama_cpp_import()
+    if skip_model_bootstrap():
+        log(
+            "SKIP_MODEL_BOOTSTRAP=true — API-only mode: no model download, no "
+            "llama-server. Generation endpoints WILL fail; health/schema/GET "
+            "routes work. Never set this in production."
+        )
+        set_offline_env()
+    else:
+        ensure_models()
+        set_offline_env()
+        check_llama_cpp_import()
 
-    llama_proc = launch_llama_server(cuda)
-    atexit.register(lambda: llama_proc.poll() is None and llama_proc.terminate())
-    wait_for_llama_server(llama_proc)
+        llama_proc = launch_llama_server(cuda)
+        atexit.register(lambda: llama_proc.poll() is None and llama_proc.terminate())
+        wait_for_llama_server(llama_proc)
 
     port = int(os.environ.get("PORT", "8000"))
     extra_args = sys.argv[1:]

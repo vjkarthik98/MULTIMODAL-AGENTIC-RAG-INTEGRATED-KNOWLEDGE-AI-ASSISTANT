@@ -8,6 +8,7 @@ import shutil
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from typing import Any
 
@@ -650,6 +651,36 @@ def _get_speaker(
     return None
 
 
+def _materialize_diarization_wav(audio: Any) -> str:
+    """Serialize the already-decoded 16 kHz mono audio to a WAV for pyannote.
+
+    Never hand pyannote the compressed original. Its speaker-embedding stage
+    (`iter_waveform_and_mask` -> `Audio.crop`) performs thousands of
+    random-access reads, and on an mp3/m4a every seek re-decodes from the
+    preceding sync point, so diarization cost explodes with file length.
+
+    Measured 2026-08-20 on the 49-min FOMC press conference: ~8 minutes of an
+    8.9-minute ingest was spent inside _diarize with the GPU at 0%, while
+    Whisper had already finished BOTH chunks on the same file in ~3.5 min.
+    A py-spy dump caught the worker parked in soundfile.seek() under
+    speaker_diarization.get_embeddings().
+
+    `audio` has already been through _to_mono()/_resample() by the time this
+    is called, so this only writes out bytes already in memory — there is no
+    second decode. The result is byte-for-byte the format that
+    video_ingest._extract_audio() (`-ar 16000 -ac 1`) already feeds this same
+    pipeline, which is precisely why the VIDEO path never exhibited this and
+    only standalone audio did.
+    """
+    from app.utils.paths import resolved_temp_dir
+
+    tmp_dir = resolved_temp_dir() / f"diarize_{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    wav_path = str(tmp_dir / "diarize.wav")
+    audio.export(wav_path, format="wav")
+    return wav_path
+
+
 # LONG AUDIO CHUNKING — SPLIT INTO 30-MIN SEGMENTS
 
 
@@ -843,6 +874,13 @@ def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
     )
 
     temp_chunk_paths: list[str] = []
+    # Temp files a worker thread may STILL be reading after we stopped waiting
+    # for it (see the transcription timeout below). Excluded from the cleanup
+    # in `finally`: unlinking a file out from under a live reader is precisely
+    # the bug app/main.py::_cleanup_temp_dirs() had. Leaking them is safe now
+    # that that sweep is age-guarded — it reclaims them on a later startup,
+    # once TEMP_ORPHAN_GRACE_SEC has passed and nothing can still hold them.
+    in_use_paths: set[str] = set()
 
     try:
         # LOAD AND VALIDATE AUDIO
@@ -924,8 +962,23 @@ def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
         diarize_future = None
         diarize_pool = None
         if not is_music and settings.DIARIZATION_ENABLED:
+            # Decode ONCE for pyannote rather than letting it re-decode the
+            # compressed source on every random-access crop — see
+            # _materialize_diarization_wav(). Falls back to the original path
+            # if the export fails: slow diarization beats no diarization.
+            diarize_source = file_path
+            try:
+                diarize_source = _materialize_diarization_wav(audio)
+                temp_chunk_paths.append(diarize_source)
+            except Exception as exc:
+                logger.warning(
+                    event="diarization_wav_export_failed",
+                    error=str(exc),
+                    file=source_name,
+                    session_id=session_id,
+                )
             diarize_pool = ThreadPoolExecutor(max_workers=1)
-            diarize_future = diarize_pool.submit(_diarize, file_path, session_id)
+            diarize_future = diarize_pool.submit(_diarize, diarize_source, session_id)
 
         # UNIVERSAL METADATA
         metadata = build_universal_metadata(
@@ -962,17 +1015,46 @@ def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
         # VRAM budget. See AUDIO_TRANSCRIPTION_WORKERS in config.py — deliberately
         # left unchanged on the g6e.xlarge/L40S (48GB) migration pending real
         # headroom measurement, per docs/runbooks/phase-30-aws-deployment.md.
+        # NOT a `with` block. ThreadPoolExecutor.__exit__ calls
+        # shutdown(wait=True), which JOINS every worker — so a single wedged
+        # chunk would hold the whole ingest (and, in the Tier-2 suite, every
+        # sub-suite behind it) no matter what timeout the .result() calls
+        # used. That is what made a stall look like a hang with no output at
+        # all. Owning the pool explicitly lets a timeout actually return.
         chunk_results: list[tuple[int, list[Any], Any, float, float]] = []
-        with ThreadPoolExecutor(max_workers=settings.AUDIO_TRANSCRIPTION_WORKERS) as pool:
+        pool = ThreadPoolExecutor(max_workers=settings.AUDIO_TRANSCRIPTION_WORKERS)
+        try:
             futures = {
-                pool.submit(_transcribe_chunk_eager, chunk_file, session_id): chunk_idx
+                pool.submit(_transcribe_chunk_eager, chunk_file, session_id): (
+                    chunk_idx,
+                    chunk_file,
+                )
                 for chunk_idx, chunk_file in enumerate(chunk_files)
             }
-            for fut, chunk_idx in futures.items():
+            deadline = time.time() + settings.AUDIO_TRANSCRIBE_TIMEOUT_SEC
+            for fut, (chunk_idx, chunk_file) in futures.items():
+                # One shared deadline across all chunks, not one per chunk:
+                # they run concurrently, so N sequential per-future timeouts
+                # would let total wait grow to N x the configured bound.
+                remaining = max(0.0, deadline - time.time())
                 try:
-                    segs, info, transcribe_latency, chunk_duration = fut.result()
+                    segs, info, transcribe_latency, chunk_duration = fut.result(timeout=remaining)
                     chunk_results.append(
                         (chunk_idx, segs, info, transcribe_latency, chunk_duration)
+                    )
+                except FuturesTimeoutError:
+                    # Abandoned, not cancelled: a running thread cannot be
+                    # killed, and it still holds this WAV open. Keep the file
+                    # so the reader does not fault, and let the age-guarded
+                    # startup sweep collect it later.
+                    in_use_paths.add(chunk_file)
+                    logger.error(
+                        event="audio_chunk_transcription_timeout",
+                        chunk=chunk_idx,
+                        file=source_name,
+                        timeout_sec=settings.AUDIO_TRANSCRIBE_TIMEOUT_SEC,
+                        detail="abandoned the worker; its temp chunk is left for the orphan sweep",
+                        session_id=session_id,
                     )
                 except Exception as exc:
                     logger.error(
@@ -982,11 +1064,35 @@ def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
                         error=str(exc),
                         session_id=session_id,
                     )
+        finally:
+            # wait=False so an abandoned worker never blocks the return. Any
+            # thread still running keeps the process alive until it finishes
+            # (concurrent.futures joins non-daemon workers at interpreter
+            # exit), but it no longer stalls this ingest or the suite.
+            pool.shutdown(wait=False)
 
         # Collect diarization result now that transcription is done.
         if diarize_future is not None:
             try:
-                speaker_map = diarize_future.result()
+                # Bounded. Diarization is enrichment: an ingest with no speaker
+                # labels is a degraded result, an ingest that never returns is a
+                # dead pipeline. A py-spy dump (2026-08-20) caught this exact
+                # `.result()` holding the main thread while the whole Tier-2 run
+                # sat idle behind it with nothing written to the log.
+                speaker_map = diarize_future.result(timeout=settings.DIARIZATION_TIMEOUT_SEC)
+            except FuturesTimeoutError:
+                # Same reasoning as the transcription timeout: the pyannote
+                # thread is abandoned, not killed, and it still holds the
+                # diarization WAV open. Leave that file for the orphan sweep.
+                if diarize_source != file_path:
+                    in_use_paths.add(diarize_source)
+                logger.error(
+                    event="diarization_timeout",
+                    timeout_sec=settings.DIARIZATION_TIMEOUT_SEC,
+                    file=source_name,
+                    detail="continuing without speaker labels; diarization is enrichment",
+                    session_id=session_id,
+                )
             except Exception as exc:
                 logger.warning(event="diarization_failed", error=str(exc), session_id=session_id)
             finally:
@@ -1215,7 +1321,24 @@ def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
         raise
     finally:
         # CLEANUP TEMP CHUNK FILES
+        #
+        # Skips anything an abandoned worker may still be reading (see
+        # in_use_paths). Deleting a file out from under a live reader is the
+        # exact failure app/main.py::_cleanup_temp_dirs() used to cause, and
+        # re-creating it here — in the one place that KNOWS a reader is still
+        # attached — would be worse. Those files are left deliberately and
+        # collected by the age-guarded startup sweep once nothing can hold
+        # them; a few leaked WAVs are cheap next to a faulting reader.
+        if in_use_paths:
+            logger.warning(
+                event="audio_temp_cleanup_deferred",
+                count=len(in_use_paths),
+                reason="worker abandoned after timeout; left for the orphan sweep",
+                session_id=session_id,
+            )
         for tmp_path in temp_chunk_paths:
+            if tmp_path in in_use_paths:
+                continue
             try:
                 if os.path.exists(tmp_path):
                     os.unlink(tmp_path)

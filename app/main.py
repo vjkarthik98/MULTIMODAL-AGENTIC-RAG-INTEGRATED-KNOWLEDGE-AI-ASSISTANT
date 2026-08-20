@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# APP/MAIN.PY — MAGIK FINANCE RAG v0.30.0
+# APP/MAIN.PY — MAGIK FINANCE RAG v0.31.0
 # FASTAPI APPLICATION ENTRY POINT — WIRES EVERYTHING TOGETHER
 # SECTION 4.6 — LIFESPAN, MIDDLEWARE, OTEL, PROMETHEUS, CORS, RATE LIMIT
 # ── HF CACHE MUST BE SET BEFORE ANY TRANSFORMERS/TORCH IMPORT ──────────────
@@ -193,17 +193,75 @@ def _cleanup_temp_dirs() -> None:
                     if p.exists():
                         sweeps.append(p)
 
+        # AGE GUARD — never delete what an ingestion may still be using.
+        #
+        # This sweep is for orphans left by a CRASHED run. It used to delete
+        # every entry unconditionally, which also destroyed the working files
+        # of ingestions running at that moment — in this process or in any
+        # other sharing the volume, since data/users/ is a shared mount and
+        # the Tier-2 eval runs as a separate `docker exec` process.
+        #
+        # Reproduced 2026-08-20: a live audio ingest lost both of its 30-min
+        # WAV chunks to a sweep fired by an unrelated FastAPI TestClient
+        # lifespan, and reported "[Errno 2] No such file or directory:
+        # .../chunk_0.wav". The audio suite then scored audio_wer=nan, which
+        # the gate SILENTLY IGNORES (check_thresholds skips NaN), so the run
+        # went green having measured nothing. The same sweep discards a real
+        # user's in-flight upload on every deploy.
+        #
+        # Skipping anything recent makes that impossible while still clearing
+        # genuine orphans. mtime of the directory itself is not enough — a
+        # chunk dir is created once and then written into, and on some
+        # filesystems the parent mtime does not follow writes to children —
+        # so take the NEWEST mtime anywhere in the subtree.
+        now = time.time()
+        grace = settings.TEMP_ORPHAN_GRACE_SEC
+        cutoff = now - grace
+
+        def _is_recent(p: Path) -> bool:
+            """True if anything in this subtree was touched within the grace
+            window. Stops at the FIRST fresh file rather than computing the
+            true maximum: the answer is already decided at that point, and
+            this runs in the startup sync fast-path (budgeted <500ms) over
+            every tenant's temp tree, where a full recursive walk of a large
+            frame directory is real latency for no extra information."""
+            try:
+                if p.stat().st_mtime >= cutoff:
+                    return True
+            except OSError:
+                return True  # unreadable -> treat as in-use, never delete
+            if p.is_dir():
+                for sub in p.rglob("*"):
+                    try:
+                        if sub.stat().st_mtime >= cutoff:
+                            return True
+                    except OSError:
+                        return True
+            return False
+
+        removed = 0
+        skipped_active = 0
         for temp_dir in sweeps:
             if temp_dir.exists():
                 for item in temp_dir.iterdir():
                     try:
+                        if _is_recent(item):
+                            skipped_active += 1
+                            continue
                         if item.is_file():
                             item.unlink()
+                            removed += 1
                         elif item.is_dir():
                             shutil.rmtree(item, ignore_errors=True)
+                            removed += 1
                     except Exception:
                         pass
-        logger.info(event="temp_dirs_cleaned")
+        logger.info(
+            event="temp_dirs_cleaned",
+            removed=removed,
+            skipped_recent=skipped_active,
+            grace_sec=grace,
+        )
 
     except Exception as e:
         logger.warning(event="temp_dir_cleanup_failed", error=str(e))
@@ -301,7 +359,20 @@ async def lifespan(app: FastAPI):
     for task in background_tasks:
         if not task.done():
             task.cancel()
-    _cleanup_temp_dirs()
+    # NO temp sweep here — deliberately. It used to run on shutdown as well as
+    # startup, and that second call was the more damaging of the two: it fired
+    # while OTHER processes sharing data/users/ were still mid-ingest (the
+    # Tier-2 eval runs as a separate `docker exec` alongside this app), and on
+    # every pytest teardown via TestClient's lifespan — 415 sweeps in a single
+    # logs/app.log, one of which deleted a live audio run's WAV chunks.
+    #
+    # It is also now provably useless: with the age guard in _cleanup_temp_dirs
+    # nothing younger than TEMP_ORPHAN_GRACE_SEC is eligible, and anything this
+    # process orphans by shutting down is by definition seconds old. So a
+    # shutdown sweep can only ever skip everything it looks at, while paying a
+    # full recursive walk of every tenant's temp tree during teardown. The
+    # startup sweep collects those same orphans on the next boot, which is
+    # exactly when it is safe to do so.
     logger.info(event="shutdown_complete")
 
 

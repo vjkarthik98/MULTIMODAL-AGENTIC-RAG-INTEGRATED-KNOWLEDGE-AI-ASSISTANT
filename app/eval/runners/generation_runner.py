@@ -82,7 +82,24 @@ def _query_via_server(
     }
     if sources:
         payload["sources"] = sources
-    return post_json(f"{_SERVER_URL}/rag/query", payload, auth, timeout=int(_HTTP_TIMEOUT))
+    data = post_json(f"{_SERVER_URL}/rag/query", payload, auth, timeout=int(_HTTP_TIMEOUT))
+
+    # Seed the per-run memo so the e2e sub-suite — which re-queries EVERY one
+    # of this suite's rows (105 of its 164) — can reuse this response instead
+    # of spending another ~26 minutes re-deriving it. See app/eval/answer_cache.
+    # Only this non-streaming path seeds it: the SSE path posts to a different
+    # endpoint and returns a differently-shaped (post-rewrap) answer, so its
+    # responses are NOT interchangeable with what e2e asks for.
+    try:
+        from app.eval import answer_cache
+
+        answer_cache.put(
+            answer_cache.make_key(query, user_id, sources=sources, force_web=False),
+            data,
+        )
+    except Exception:  # noqa: BLE001 - a memo failure must never fail a row
+        pass
+    return data
 
 
 def _query_via_stream_server(

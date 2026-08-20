@@ -179,15 +179,36 @@ def run_e2e_suite(cfg: EvalConfig) -> SuiteResult:
         elif row.get("expected_route") == "search":
             payload["force_web"] = True
 
-        q_start = time.time()
-        try:
-            data = post_json(f"{base_url}/rag/query", payload, _auth, timeout=120)
-        except Exception as exc:
-            result.breached[f"query_error_{row['id']}"] = str(exc)
-            continue
+        # Reuse an identical answer the generation sub-suite already collected
+        # in THIS run, if there is one. Measured 2026-08-20: all 105 generation
+        # rows reappear here, so `full` was issuing 269 round-trips for 164
+        # distinct queries — ~26 min of a 180-min job cap spent recomputing
+        # answers the run already had. The key pins query + tenant + scope +
+        # force_web, so anything that would reach the model differently misses
+        # and is queried normally. See app/eval/answer_cache for why this
+        # cannot reintroduce the stale-cache problem `no_cache: True` guards.
+        from app.eval import answer_cache
 
-        q_elapsed = time.time() - q_start
-        latencies.append(q_elapsed)
+        _ck = answer_cache.make_key(
+            query,
+            cfg.user_id,
+            sources=_row_sources,
+            force_web=bool(payload.get("force_web", False)),
+        )
+        _cached = answer_cache.get(_ck)
+
+        q_start = time.time()
+        if _cached is not None:
+            data = _cached
+            q_elapsed = 0.0  # reused — NOT a latency sample for this suite
+        else:
+            try:
+                data = post_json(f"{base_url}/rag/query", payload, _auth, timeout=120)
+            except Exception as exc:
+                result.breached[f"query_error_{row['id']}"] = str(exc)
+                continue
+            q_elapsed = time.time() - q_start
+            latencies.append(q_elapsed)
 
         answer = data.get("answer") or data.get("response") or ""
         sources = data.get("sources") or []
