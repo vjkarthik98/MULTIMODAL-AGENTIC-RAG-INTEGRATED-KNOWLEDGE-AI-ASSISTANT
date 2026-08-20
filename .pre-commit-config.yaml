@@ -1,6 +1,9 @@
 # Local hooks call the exact same tools/config as `make lint` and ci.yml —
 # no separate pinned-version hook repos to drift out of sync with pyproject.toml.
-# Run `make install-dev` once (installs the [dev] extra + this hook) before committing.
+# NOT installed as a git hook. `make install-dev` deliberately does not run
+# `pre-commit install` — `git commit` must just commit, with no local gate.
+# These checks are enforced in CI on every PR (.github/workflows/ci.yml).
+# To run them here on demand: `make lint` or `pre-commit run --all-files`.
 repos:
   - repo: local
     hooks:

@@ -39,6 +39,14 @@ services:
       # every `docker compose down` + `up`. Same fix as cd.yml's production
       # `docker run` already applies; mirrored here for dev-runtime parity.
       TORCH_HOME: /app/.hf_cache/torch
+      # API-only mode for CI smoke/DAST jobs — both default OFF, so a plain
+      # `docker compose up` behaves exactly as before (full model bootstrap).
+      # .github/workflows/quality.yml sets SKIP_MODEL_BOOTSTRAP=true because
+      # its runners bind-mount an EMPTY .hf_cache: without it start_server.py
+      # downloads ~25GB before uvicorn ever binds and /health never answers.
+      # See skip_model_bootstrap() in start_server.py for the full rationale.
+      SKIP_MODEL_BOOTSTRAP: ${SKIP_MODEL_BOOTSTRAP:-false}
+      WARMUP_AT_STARTUP: ${WARMUP_AT_STARTUP:-true}
     volumes:
       - ./.hf_cache:/app/.hf_cache
       - ./data:/app/data

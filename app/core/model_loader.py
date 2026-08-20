@@ -261,7 +261,7 @@ class ModelLoader:
             self._oom_guard()  # actually reclaim the freed VRAM
         return evicted
 
-    def unload_until_free(self, target_free_gb: float) -> list[str]:
+    def unload_until_free(self, target_free_gb: float, exclude: str | None = None) -> list[str]:
         """Pressure valve: evict least-recently-used models until free VRAM
         clears `target_free_gb`, regardless of how recently they were used.
 
@@ -282,6 +282,13 @@ class ModelLoader:
         target is met rather than dumping everything. Returns [] and does
         nothing when free VRAM cannot be read (no CUDA / driver query
         failed) — never evict on a guess.
+
+        `exclude` names a model that must never be dropped by this pass. It
+        exists for the _oom_guard(loading=...) caller: the whole point there
+        is to make room FOR that model, so letting LRU order pick it would be
+        self-defeating — the getter would drop the very weights it is about
+        to return whenever they were already cached by another path. This
+        mirrors the protection _touch(loading) already gives the TTL sweep.
         """
         free_gb = device_manager.free_vram_gb()
         if free_gb is None:
@@ -295,7 +302,7 @@ class ModelLoader:
             loaded = [
                 name
                 for name, attrs in self._EVICTABLE_MODELS.items()
-                if getattr(self, attrs[0]) is not None
+                if getattr(self, attrs[0]) is not None and name != exclude
             ]
             # Oldest last_used first; never-recorded (0.0) sorts oldest.
             loaded.sort(key=lambda n: self._last_used.get(n, 0.0))
@@ -341,10 +348,38 @@ class ModelLoader:
         itself moments before its own getter returns it) and runs the idle-
         eviction sweep first, so a heavy new load gets first crack at VRAM
         another model has been sitting on unused.
+
+        The idle sweep ALONE is not enough, and the gap is what made the
+        Tier-2 suite time out (reproduced 2026-08-20, and the same shape as
+        the CD run 31139999120 incident audio_ingest._transcribe_chunk_eager
+        documents). `full` hands off between modality sub-suites in well
+        under MODEL_IDLE_TIMEOUT_SEC: ocr finished at 03:12:04 and whisper
+        loaded 76s later, so every vision model (Qwen2-VL, BLIP2, TrOCR) was
+        still inside the 300s TTL and unload_idle_models() found NOTHING
+        evictable at precisely the moment the VRAM was needed. Whisper then
+        OOM'd into audio_ingest's CPU fallback — correct behaviour, but ~50x
+        slower, which is what turns a ~90-minute suite into a 3h+ timeout.
+
+        So also apply the watermark pressure valve, which evicts LRU-first
+        regardless of recency. This is the identical policy
+        app/core/model_reaper.py already runs — but the reaper only lives in
+        the server process ("operates on this process's model_loader
+        singleton"), so the eval process, which runs as a SEPARATE
+        `docker exec` and holds its own singleton, never had a pressure
+        valve at all. Putting it here covers every process that loads a
+        model, and fixes the same latent bug for a real user uploading a
+        video straight after an image.
         """
         if loading is not None:
             self._touch(loading)
             self.unload_idle_models()
+            # Recency-independent: makes room for the model about to load.
+            # No-ops when free VRAM already clears the watermark, and
+            # unload_until_free() returns [] rather than guessing when the
+            # driver query fails, so this never evicts blindly.
+            watermark = settings.MODEL_EVICT_VRAM_WATERMARK_GB
+            if watermark > 0:
+                self.unload_until_free(watermark, exclude=loading)
 
         import gc
 

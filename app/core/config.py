@@ -94,7 +94,7 @@ class Settings:
     APP_NAME: str = _str("APP_NAME", "Multimodal Agentic RAG Integrated Knowledge AI Assistant")
     # Keep in sync with /VERSION and the test assertion below by hand — nothing
     # reads /VERSION at runtime, so this drifts silently if only one is bumped.
-    APP_VERSION: str = _str("APP_VERSION", "0.30.0")
+    APP_VERSION: str = _str("APP_VERSION", "0.31.0")
     APP_DESCRIPTION: str = _str(
         "APP_DESCRIPTION", "Production Multimodal Agentic RAG Integrated AI System"
     )
@@ -431,6 +431,20 @@ class Settings:
     AUDIO_DIARIZATION_ENABLED: bool = _bool("AUDIO_DIARIZATION_ENABLED", True)
     # Pyannote speaker diarization (requires HF_TOKEN + model access approval)
     DIARIZATION_MODEL: str = _str("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
+    # Upper bound on the diarization thread before audio_ingest gives up and
+    # finishes the ingest WITHOUT speaker labels. Diarization is enrichment,
+    # never essential — but audio_ingest.ingest() collected it with a bare
+    # `.result()` and no timeout, so a wedged pyannote blocked the whole
+    # Tier-2 suite silently until the 180-min CD job cap killed it (the
+    # "stuck on audio/video with no output" symptom, 2026-08-20). 20 min is
+    # ~2.5x the slowest healthy diarization measured (8 min on a 49-min mp3
+    # BEFORE _materialize_diarization_wav removed the re-decode cost), so it
+    # only ever fires on a genuine wedge.
+    DIARIZATION_TIMEOUT_SEC: float = _float("DIARIZATION_TIMEOUT_SEC", 1200.0)
+    # Same idea for one Whisper chunk. Generous because the CUDA-OOM CPU
+    # fallback in audio_ingest._transcribe_chunk_eager is legitimately ~50x
+    # slower than GPU, and aborting real (if slow) work is worse than waiting.
+    AUDIO_TRANSCRIBE_TIMEOUT_SEC: float = _float("AUDIO_TRANSCRIBE_TIMEOUT_SEC", 2700.0)
     # Finance NER
     NER_MODEL: str = _str("NER_MODEL", "dslim/bert-base-NER")
     # FinBERT — finance-domain tone/sentiment classifier (yiyanghkust/finbert-tone)
@@ -952,6 +966,19 @@ class Settings:
     CLAMAV_HOST: str = _str("CLAMAV_HOST", "localhost")
     CLAMAV_PORT: int = _int("CLAMAV_PORT", 3310)
     TEMP_FILE_ENCRYPTION: bool = _bool("TEMP_FILE_ENCRYPTION", False)
+    # Age below which app/main.py::_cleanup_temp_dirs() leaves a per-user
+    # temp/staging/frame entry alone. That sweep exists to clear orphans left
+    # by a CRASHED ingestion, but it ran unconditionally over every user's
+    # directory on both startup and shutdown — so it also deleted the working
+    # files of any ingestion running RIGHT NOW, in this process or any other
+    # sharing the volume. Reproduced 2026-08-20: pytest's FastAPI TestClient
+    # fires the lifespan (415 sweeps in one logs/app.log), which deleted a
+    # live Tier-2 audio run's 30-min WAV chunks mid-transcription ->
+    # "[Errno 2] No such file or directory: .../chunk_0.wav" -> audio_wer=nan.
+    # In production the same sweep discards every in-flight upload on deploy.
+    # 1h is far longer than any single ingest (the slowest measured, a 55-min
+    # video, is ~15 min) and far shorter than "leave orphans forever".
+    TEMP_ORPHAN_GRACE_SEC: int = _int("TEMP_ORPHAN_GRACE_SEC", 3600)
 
     # HALLUCINATION
     # Kept as a genuinely distinct threshold, NOT collapsed into
@@ -1292,7 +1319,7 @@ class TestSettings:
 
     def test_defaults_are_valid(self):
         s = Settings()
-        assert s.APP_VERSION == "0.30.0"
+        assert s.APP_VERSION == "0.31.0"
         assert s.TEXT_EMBEDDING_DIM == 1024
         assert s.VISION_EMBEDDING_DIM > 0
         assert s.CHUNK_OVERLAP < s.CHUNK_SIZE

@@ -3676,7 +3676,9 @@ access before it's live.
   appends a raw chunk count (`"Uploaded: file.pdf (32 chunks)"`) — internal
   ingestion detail with no value to the person uploading a file.
 
-# [Unreleased] — Monitoring Stack Made Actually Live in Production
+# [v0.31.0] — Observability Live, Staging Gate, Tier-2 Reliability & Video Modality Fix
+
+## Monitoring Stack Made Actually Live in Production
 
 Phase 31 (v0.28.0) built a complete Prometheus/Grafana/Tempo/Loki/OTel stack
 with correct internal wiring — but nobody had verified it actually worked
@@ -3746,7 +3748,7 @@ infrastructure, called out below rather than left undocumented.
   touches the Caddyfile. Fails safe (login simply rejects until replaced),
   but there's no CI check confirming it was actually replaced.
 
-# [Unreleased] — Staging Gate: Tier-2 Now Blocks Promotion Instead of Watching After the Fact
+## Staging Gate: Tier-2 Now Blocks Promotion Instead of Watching After the Fact
 
 Previously `cd.yml` deployed a tag straight to production, health-checked it,
 and only *afterward* dispatched Tier-2 (RAG-quality) eval asynchronously —
@@ -3919,3 +3921,271 @@ that the accuracy numbers depend on.
   corpus, missing `sentencepiece` for the vision model) — verification is
   deferred to the deployed server, where the corpus and full model stack are
   present.
+
+## Tier-2 Staging Gate Reliability: From 3+ Hour Timeouts to a 40-Minute Clean Run
+
+The Staging Gate fixes above (subprocess judge, VRAM-aware fallback) got
+Tier-2 running at all — but `--suite full`'s `audio`/`video` sub-suites still
+failed unpredictably in CI: 3+ hour runs, silent hangs with no log output, or
+a job killed at the 180-minute `timeout-minutes` cap. Reproduced
+deterministically outside CI by rebuilding the exact CD sequence on a spare
+GPU box — app deployed and health-checked first, eval run as a genuinely
+separate process, the same shape as `docker exec <container> python -m
+app.eval.run --suite full`. Five independent, compounding bugs, each caught
+with a live repro before being fixed.
+
+### Fixed
+
+- **VRAM pressure eviction never fired for a fast sub-suite handoff — the
+  actual root cause.** `ModelLoader._oom_guard(loading=...)` only ran the
+  idle-TTL sweep (`unload_idle_models`, 300s default). The recency-independent
+  watermark valve, `unload_until_free()`, existed but was driven exclusively
+  by `app/core/model_reaper.py`, which by design runs only in the long-lived
+  SERVER process (it operates on that process's own `model_loader` singleton).
+  The Tier-2 eval runs as its own `docker exec`, holding a *separate*
+  `ModelLoader` singleton with no reaper of its own — and `full`'s sub-suites
+  hand off in far under 300s (measured live: `ocr` finished and `whisper`
+  began loading 76s later), so every vision model (Qwen2-VL, BLIP2, TrOCR)
+  still counted as "recently used" and nothing was evictable at the exact
+  moment Whisper needed VRAM. Result: `CUDA failed with error out of memory`
+  → `audio_ingest`'s existing CPU fallback (faster-whisper on 4 vCPUs, ~50x
+  slower than GPU) → the 3+ hour runs and CD job-cap kills. Fix:
+  `_oom_guard(loading=...)` now also calls `unload_until_free(watermark,
+  exclude=loading)` — `exclude` stops it evicting the very model it's making
+  room for, caught by a unit test that failed before the parameter existed.
+  Verified on the real GPU at identical 0.30GB free VRAM: pre-fix, `whisper`
+  failed after 13.1s (3 retries); fixed, it evicted `qwen2_vl` and `blip` and
+  loaded in 4.7s.
+- **`app/main.py::_cleanup_temp_dirs()` deleted files a live ingestion was
+  still using.** It swept every `data/users/*/{temp,temp_frames,staging}`
+  unconditionally on both startup AND shutdown — including while another
+  process sharing the same volume (the Tier-2 eval) was mid-ingest.
+  Reproduced live: a pytest `TestClient`'s FastAPI lifespan fired the sweep
+  mid-run and deleted a running audio ingest's 30-minute WAV chunks —
+  `[Errno 2] No such file or directory: .../chunk_0.wav` — which silently
+  scored `audio_wer=nan` (the gate skips NaN, so the run reported green
+  having measured nothing). The same code path discards a real user's
+  in-flight upload on every production deploy. Fixed with an age guard:
+  `settings.TEMP_ORPHAN_GRACE_SEC` (default 1h, comfortably longer than any
+  ingest measured — even the un-optimized pre-fix audio baseline was under 9
+  minutes) checked against the *newest* mtime anywhere in a path's subtree,
+  not the parent directory's own mtime (which doesn't reliably follow writes
+  to its children). The shutdown call site is removed outright — with the age
+  guard active it can only ever skip everything it looks at, while still
+  paying a full recursive walk of every tenant's temp tree during teardown.
+- **Audio diarization ran pyannote against the compressed source file, not
+  the decoded audio.** `_diarize()` received the raw mp3; a live py-spy stack
+  dump caught its worker thread parked in `soundfile.seek()` under pyannote's
+  `get_embeddings()`, GPU idle, well after Whisper had finished transcribing
+  the same file — pyannote's embedding stage performs thousands of
+  random-access reads, and every one re-decodes an mp3 from its preceding
+  sync point. `video_ingest.py`'s `_extract_audio()` already demuxes to
+  16kHz mono WAV before handing audio off downstream; `audio_ingest.py` just
+  wasn't doing what its sibling modality already did, despite already
+  holding that exact decoded audio in memory for chunking. Added
+  `_materialize_diarization_wav()` to export it once (measured: 0.0s for a
+  96MB file — no second decode). Measured end to end on the same 49-minute
+  recording: MP3 diarization 410.9s → WAV 49.8s (**8.24x faster**), same 20
+  speakers detected both ways.
+- **Neither diarization nor transcription had a timeout, and the
+  transcription pool joined a wedged worker regardless of one.**
+  `diarize_future.result()` and each chunk's `fut.result()` were both
+  unbounded, and the `ThreadPoolExecutor` was a `with` block — whose
+  `__exit__` calls `shutdown(wait=True)` and joins every worker no matter
+  what timeout a `.result()` call used. A single wedged pyannote or Whisper
+  call therefore held the entire ingest, and everything queued behind it in
+  the Tier-2 suite, with zero log output — indistinguishable from a hang
+  until the 180-minute CD cap killed the job. Added `DIARIZATION_TIMEOUT_SEC`
+  (1200s) and `AUDIO_TRANSCRIBE_TIMEOUT_SEC` (2700s — deliberately generous,
+  since the CPU fallback above is legitimately ~50x slower and aborting real
+  work is worse than waiting for it), a single shared deadline across all
+  concurrently-running chunks (not one per chunk, which would let total wait
+  grow to N times the bound), and explicit pool ownership
+  (`shutdown(wait=False)`) so a timeout can actually return. An abandoned
+  worker's temp file is deliberately left un-deleted — recorded in
+  `in_use_paths` — for the now-age-guarded startup sweep to reclaim once
+  nothing can still be holding it open, rather than risk unlinking a file its
+  own live thread is reading.
+- **The `e2e` sub-suite re-queried every row `generation` had already
+  answered.** `full`'s `generation` (105 rows) and `e2e` (164 rows, spanning
+  every modality plus routing) sub-suites overlap completely on
+  `generation`'s rows — measured, 269 full RAG round-trips through
+  Qwen2.5-14B for 164 distinct queries, ~25 minutes of pure duplication
+  inside a 180-minute job cap. Added `app/eval/answer_cache.py`, a per-run
+  memo cleared at the start of every `EvalRunner.run()` (so a response can
+  never leak from one run into the next) and keyed on query + tenant +
+  retrieval scope + `force_web` — deliberately strict rather than clever, so
+  any request that could reach the model differently just misses and
+  re-queries at full cost. Both call sites' `no_cache: True` are untouched:
+  the model is still exercised live for every query that actually runs.
+  Measured: `e2e` 1511.9s → 299.0s (**5.1x**, 133 of 164 responses reused).
+
+### Verified
+
+Two independent, full `--suite full` runs on a spare GPU box, both
+rebuilding the exact CD sequence (server deployed and health-checked first,
+eval as a genuinely separate process) — one at this box's own
+`VRAM_BUDGET_GB=22`, one re-run under `VRAM_BUDGET_GB=44` to match
+staging/production's actual config, the harder case since it lets every
+process claim more of the card before the eval competes for it:
+
+| | `VRAM_BUDGET_GB=22` | `VRAM_BUDGET_GB=44` (staging-matched) | pre-fix |
+|---|---|---|---|
+| total wall clock | 42.6 min | 40.0 min | killed ~2h in; audio/video never finished |
+| CUDA OOM / CPU fallback | 0 | 0 | Whisper OOM'd → CPU fallback |
+| in-flight file deleted mid-run | 0 | 0 | reproduced 3x pre-fix |
+| `audio` sub-suite | 175.3s | 170.9s | never completed |
+| `video` sub-suite | 157.0s | 156.7s | never reached |
+| gate | `exit_code=0` | `exit_code=0` | never reached |
+
+### Known gaps — not fixed, flagged instead of silently carried forward
+
+- `audio_wer`/`video_transcript_wer` now compute a real number instead of
+  silently returning NaN — the actual point of these fixes — but the number
+  itself (1.0) isn't yet meaningful: the runner compares a 12-41 word gold
+  excerpt against the ENTIRE joined ~50-minute transcript, so insertions
+  alone force WER→1.0 independent of transcription quality. Pre-existing
+  metric-design defect, unrelated to this work; making the score itself
+  meaningful is separate.
+- `video.frame_caption_recall`/`caption_repetition_rate` (`n=0`) and `ocr`'s
+  CER/WER (>1.0) are the same category of pre-existing, unrelated gap.
+- Verification ran host processes directly, not the built `runtime` Docker
+  target — container-vs-host parity (cgroup limits, `--shm-size`, the
+  image's own CUDA/driver stack) is reasoned about (paths line up:
+  `WORKDIR /app` with `/opt/magik/data` mounted at `/app/data`, so the
+  relative `data/users` path resolves identically) but not directly
+  measured.
+
+## Video Modality: Worst-Scoring to Best-Scoring
+
+`answer_correctness` on the video eval suite (Qwen2.5-7B judge, 14 gold
+rows against `Q4 2025 Earnings Call.mp4`, scoped queries): **0.4643 →
+0.8750**. `hallucination_rate` **0.2727 → 0.2143**, while the denominator
+grew from 11 to 14 — three rows that previously returned no answer at all
+(abstained or empty) now answer, so the honest comparison against the old
+11-answer baseline is 6/14 flagged-equivalent → 3/14. `answer_relevancy`
+0.5682 → 0.8214; `citation_accuracy` steady at 1.0000 but now over all 14
+rows instead of 10. `context_recall` and `finance_fidelity` were already
+high and unchanged — this was a **selection** problem, not a retrieval or
+grounding one: the right chunk was almost always present in the pool, the
+model (or the deterministic fact-injector) just wasn't picking it. Five
+root-cause fixes, none of them video-only in mechanism even though every
+one was found and verified there.
+
+1. **Explicit file scope now retrieves DEEP, not shallow.** An explicit
+   `sources` filter (the UI's @file picker, or the eval harness) used to
+   skip the meeting-scope branch entirely, so retrieval stayed at
+   `DEFAULT_TOP_K` and the cross-encoder only ever saw fusion's
+   `RERANK_TOP_K`-capped 20 candidates out of the call's ~90 transcript
+   chunks. For a 90-chunk source that is a coin flip on whether the
+   answer-bearing chunk is even in the reranker's input — confirmed live:
+   the Mac-revenue chunk and the dividend-declaration chunk were **absent
+   from all 20 final docs**, and a December-quarter-guidance question
+   abstained outright because its own answer chunk never got a candidate
+   slot. Same bug shape as the already-shipped `is_vision` fix in
+   `hybrid_retriever.py`: an explicit scope was disabling an optimization
+   that should apply *more* aggressively when the scope is explicit, not
+   less.
+2. **The KEY FACTS sentence-selection scorer was rebuilt.**
+   `reasoning_engine._prepend_key_facts_knowledge` extracts the sentence(s)
+   most likely to answer a video/earnings-call query and prepends them as a
+   hint, because a single speaker turn on an earnings call often packs 3-4
+   unrelated figures into one chunk and a 14B model reading the whole thing
+   tends to answer with the first or most prominent number rather than the
+   one actually asked for. The scorer was previously a raw keyword-overlap
+   count, which had several compounding, independently-diagnosed defects:
+   - 3-letter subject words ("Mac") were dropped by the token-length gate,
+     so a Mac-revenue question lost its own subject and matched generic
+     revenue sentences equally well.
+   - Matching was bare substring (`word in sentence`), so "rate" matched
+     inside "celeb**rate**d" and misdirected a Services-revenue query onto
+     an unrelated Emmy Awards sentence.
+   - "Apple's" survived as a distinct, high-IDF token (its possessive
+     wasn't normalized to "apple", which the stop-list catches), so an EPS
+     question anchored on an unrelated sentence about Apple's private
+     cloud buildout purely because both mentioned "Apple's".
+   - `[ON-SCREEN]` OCR tags carry the broadcast's scrolling ticker crawl —
+     unrelated tickers and prices for other companies — which is dense
+     with `$`/`%` and so won the numeric bonus against genuine call
+     content.
+   Rebuilt around: IDF weighting instead of raw overlap; a **subject
+   span** — the text before a sentence's first digit, since an earnings
+   call states every line item as "`<item> <metric> was <number>`" — scored
+   separately and weighted 3x, so "Mac revenue was $8.7B" now beats
+   "Products revenue was $73.7B ... including Mac" on a Mac question;
+   word-boundary matching; possessive stripping; ticker-crawl detection by
+   numeric-token density (not casing, since some genuine transcript is
+   ALL CAPS); and four structural penalties — quarter-vs-full-year,
+   wrong-quarter-by-month-name, forward-looking guidance answering a
+   historical question, and segment-level answering a total-company
+   question. Candidate window widened 6 → 10 docs (video-0008's answer
+   chunk ranked 8th and was invisible to the old window) — safe now that
+   precision, not reach, was the actual defect; a prior attempt at this
+   same widening (documented in a prior session, reverted at the time) had
+   concluded reach itself was the problem, which this rebuild disproves.
+3. **`_fetch_digitized_chart_payload` now respects the active file
+   scope.** This helper bypasses ranked retrieval entirely to fetch the
+   one chunk holding pixel-calibrated chart values, gated on `"chart" in
+   query`. It was tenant-scoped only, so on a KB holding more than one
+   chart it happily injected a *different file's* chart into a query
+   explicitly scoped to the earnings-call video — the on-screen-chart
+   question ended up answered with a standalone stock-chart image's
+   Alphabet/GOOGL data instead of the video's own Apple figures. Now takes
+   the query's `sources` filter and matches against it the same way the
+   retriever's own `sources` filter does (case-insensitive substring).
+4. **Forward-guidance questions no longer abstain.**
+   `query_pipeline._period_ungrounded` abstains when a query names a
+   fiscal year later than anything in the retrieved context, to block
+   answering FY2030-shaped questions from an FY2025 corpus. "What guidance
+   did Apple give for December quarter (Q1 fiscal 2026)...?" tripped it
+   for exactly the same reason — 2026 is, by construction, later than
+   every year the call's own transcript states — even though the call
+   answers the question directly. Narrow exemption: only the *next*
+   period, and only when the query names a quarter (not a bare full fiscal
+   year), so the sibling refusal row asking for full FY2026 guidance
+   (genuinely not on this call) still abstains correctly.
+5. **Router: "on this call" / "on screen" now scope to the ingested
+   video.** `agent_router._DOCUMENT_REFERENCE_PHRASES` (which already
+   covered "in this report", "per this chart", etc.) gained call/video
+   phrasing. "What stock price ... appeared on the on-screen chart at the
+   start of this call?" was hitting a `_MARKET_DATA` keyword ("stock
+   price") and force-routing to live web search — the answer came back
+   reporting real-time Alphabet/GOOGL movements for a question about
+   Apple's own earnings broadcast.
+
+### Verified — no regression on any other modality
+
+Fact-coverage A/B (`must_include_facts` containment against gold), same
+calling convention on both sides — the long-running app server still held
+the pre-fix code for the duration of this check, so it served as a live
+old-code oracle against the new code running in-process:
+
+| modality | before | after |
+|---|---|---|
+| audio | 0.438 | **0.562** (improved — same subject-span/IDF work applies) |
+| docx | 0.111 | 0.130 |
+| image | 0.905 | 0.905 (unchanged) |
+| pdf | 0.404 | 0.404 (unchanged) |
+| text | 0.688 | 0.688 (unchanged) |
+| xlsx | 0.875 | 0.875 (unchanged) |
+
+Fact coverage tracked the judge's `answer_correctness` to within ~0.01 on
+video (0.472 proxy vs. 0.464 judged pre-fix) at roughly 1/20th the cost —
+useful as a fast iteration signal, with the judge reserved for final
+confirmation.
+
+### Known gaps — not fixed, flagged instead of silently carried forward
+
+- Two pre-existing unit tests were red before this work and remain red:
+  `tests/unit/verification/test_stopping_criteria.py::test_retrieval_not_improving_stops`
+  and `::test_low_improvement_stops`. They cover `stopping_criteria.py`,
+  changed in an earlier, unrelated session; not touched here.
+- `app/eval/runners/generation_runner.py`'s direct-pipeline fallback
+  (`_query_via_pipeline`) does not pass `sources`, while its HTTP mode
+  (`_query_via_server`) does — so a direct-mode run and an HTTP-mode run
+  measure two different call shapes and are not comparable. Cost real time
+  in this session before being caught; worth aligning the two call sites.
+- The long-running app server was not restarted to pick up these fixes
+  (blocked by the local permission classifier) — all post-fix numbers
+  above were measured by calling the edited pipeline in-process. A restart
+  is still required before these fixes are live on `:8000`.
