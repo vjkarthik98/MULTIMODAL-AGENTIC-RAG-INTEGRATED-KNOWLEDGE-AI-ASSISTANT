@@ -69,6 +69,12 @@ volumes:
       # Small (a handful of KB — one tail offset per container) but still
       # persistent, so a Promtail restart resumes rather than re-ships or gaps.
       device: /opt/magik/monitoring/promtail
+  phoenix_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/magik/monitoring/phoenix
 
 services:
   prometheus:
@@ -124,6 +130,7 @@ services:
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     depends_on:
       - tempo
+      - phoenix
 
   tempo:
     image: grafana/tempo:2.6.1
@@ -135,6 +142,38 @@ services:
       - ./monitoring/tempo/tempo.yaml:/etc/tempo.yaml:ro
       - tempo_data:/var/tempo
     command: ["-config.file=/etc/tempo.yaml"]
+
+  # Arize Phoenix (Phase 31 monitoring, Phase 4) — LLM/RAG-native trace
+  # observability: embedding-space clustering for retrieval drift, per-span
+  # RAG inspection (retrieved documents + scores), on top of the SAME real
+  # spans query_pipeline.py/rag_pipeline.py/hybrid_retriever.py/reranker.py
+  # already emit for Tempo (see those files' OTel span wrappers) — the OTel
+  # collector below fans out to both, it does not re-instrument anything.
+  # SQLite working dir, not the Postgres backend Phoenix's docs also offer —
+  # this box already runs Mongo/Redis/Qdrant as its stateful services; a
+  # fourth (Postgres) for what is, at this traffic volume, a small embedded-
+  # DB workload is exactly the "don't introduce infra a gap doesn't need"
+  # call this monitoring layer has made everywhere else (see e.g. the
+  # scipy-not-evidently choice in app/eval/jobs/drift_eval.py).
+  #
+  # UI on loopback only (127.0.0.1:6006), same access pattern as Prometheus
+  # (SSH tunnel or `docker exec`) — not yet behind the Caddy reverse proxy
+  # Grafana has. Adding a public `/phoenix/` path there is a reasonable
+  # future step, not done here to keep this addition to what Phase 4 asked
+  # for. Phoenix's own Prometheus self-telemetry port (9090 in its docs) is
+  # deliberately NOT published — nothing here scrapes it yet.
+  phoenix:
+    image: arizephoenix/phoenix:version-10.10.0
+    container_name: magik-phoenix
+    restart: unless-stopped
+    networks:
+      - magik-net
+    ports:
+      - "127.0.0.1:6006:6006"
+    environment:
+      PHOENIX_WORKING_DIR: "/mnt/data"
+    volumes:
+      - phoenix_data:/mnt/data
 
   # Log aggregation — see monitoring/loki/loki-config.yaml for retention/
   # storage. Not published to the host; only Grafana and Promtail (both on
@@ -177,7 +216,14 @@ services:
       - loki
 
   grafana:
-    image: grafana/grafana:11.3.1
+    # Bumped from 11.3.1 (Phase 31) to 12.1.10 (monitoring Phase 5) —
+    # TraceQL alerting (magik-trace-error-spike in monitoring/alerts/
+    # rules.yml) requires Grafana v12.1+; it does not exist at all on
+    # 11.3.1. Verified real tag: hub.docker.com/r/grafana/grafana/tags,
+    # 12.1.10 is the latest 12.1.x patch release. TraceQL alerting is
+    # Grafana's own "experimental" feature at this version — see that
+    # alert rule's comment for the operational implications.
+    image: grafana/grafana:12.1.10
     container_name: magik-grafana
     restart: unless-stopped
     networks:
@@ -210,6 +256,13 @@ services:
       # closed) — override there if the public domain ever changes.
       GF_SERVER_ROOT_URL: "${GRAFANA_ROOT_URL:-https://magik.vk-ai.online/grafana/}"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      # Required for magik-trace-error-spike (monitoring/alerts/rules.yml)
+      # to load at all — Grafana's own TraceQL-alerting feature is gated
+      # behind this toggle even on 12.1+, and is documented by Grafana
+      # itself as experimental ("should not be used in production
+      # environments yet"). Provisioning a rule of this query type with the
+      # toggle off fails Grafana's alert-rule validation at startup.
+      GF_FEATURE_TOGGLES_ENABLE: "tempoAlerting"
     env_file:
       # /opt/magik/.env — legacy, hand-maintained, kept for anything not yet
       # migrated. .env.monitoring.secrets is the SSM-fetched throwaway file

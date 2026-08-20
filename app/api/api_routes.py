@@ -953,6 +953,50 @@ async def query_rag(
                 "latency": round(time.time() - start, 3),
             }
 
+        # FILE SCOPE REQUIRED — retrieval must be scoped to a file the user
+        # explicitly selected (the @ picker), so answers never mix content
+        # from unrelated documents in the KB. force_web is exempt (handled
+        # above); web-heuristic-only queries are not applicable to this route.
+        # Greetings and meta/capability questions about the app/KB are also
+        # exempt from the 400 — MAGIK isn't a general-purpose AI, so both get
+        # a deterministic TEMPLATE reply (never an LLM call) instead of either
+        # a hard rejection or an LLM-improvised answer. Everything else with
+        # no scope still 400s as before.
+        if not request_body.sources:
+            from app.agents.agent_controller import (
+                GREETING_REPLY_TEMPLATE,
+                META_CAPABILITY_REPLY_TEMPLATE,
+                is_conversational_greeting,
+                is_meta_capability_question,
+            )
+
+            if is_conversational_greeting(query):
+                return {
+                    "request_id": request_id,
+                    "answer": GREETING_REPLY_TEMPLATE,
+                    "confidence": 1.0,
+                    "sources": [],
+                    "cache_hit": False,
+                    "decision": "greeting",
+                    "source": "template",
+                    "latency": round(time.time() - start, 3),
+                }
+            if is_meta_capability_question(query):
+                return {
+                    "request_id": request_id,
+                    "answer": META_CAPABILITY_REPLY_TEMPLATE,
+                    "confidence": 1.0,
+                    "sources": [],
+                    "cache_hit": False,
+                    "decision": "meta_capability",
+                    "source": "template",
+                    "latency": round(time.time() - start, 3),
+                }
+            raise HTTPException(
+                status_code=400,
+                detail="Select a file to scope this query before sending.",
+            )
+
         pipeline_fn = _get_query_pipeline()
 
         # IN-FLIGHT JOIN — if /rag/query/stream is mid-generation for this
@@ -1051,6 +1095,10 @@ async def query_rag(
             "hallucination_warning": validated.hallucination_warning,
             "memory_injected": bool(result.get("memory_injected", False)),
             "cache_hit": bool(result.get("cache_hit", False)),
+            # Phase 32 verification report, when the pipeline ran VerificationLoop
+            # (None on the hybrid_web/cached/error paths) — not shown in the UI,
+            # consumed only by the eval harness (thresholds.yaml `verification.*`).
+            "verification": (result.get("metadata") or {}).get("verification"),
         }
 
         _audit_log(
@@ -1068,6 +1116,37 @@ async def query_rag(
             confidence=confidence,
             sources_count=len(sources),
         )
+
+        # ONLINE EVAL SAMPLING (Phase 31/monitoring Phase 2) — mirrors the SSE
+        # route's sample_and_log() call below, gated the same way (skips
+        # gibberish/blocked/no-answer responses, best-effort, never raises).
+        # This is the ONLY route with real agent-decision diversity to sample
+        # (rag/direct/memory/search/web) — RAGPipeline.stream() (the SSE
+        # path) is RAG-only, it never routes elsewhere, so without this call
+        # magik_eval_online_route_share would always read 100% "rag" no
+        # matter how often the agent actually picks another path.
+        #
+        # Deliberately NOT added inside query_pipeline() itself: the eval
+        # harness (generation_runner.py/routing_runner.py/e2e_runner.py)
+        # calls query_pipeline() directly, in-process, bypassing this HTTP
+        # route entirely — sampling inside the pipeline function would mix
+        # synthetic gold-set queries into what's supposed to be a live-
+        # production-only signal. This route handler is real-traffic-only.
+        if validated.response and validated.decision not in ("reject", "blocked"):
+            try:
+                from app.eval.jobs.shadow_sampler import sample_and_log
+
+                sample_and_log(
+                    session_id=session_id,
+                    user_id=user_id,
+                    query=query,
+                    answer=validated.response,
+                    sources=sources,
+                    route=validated.decision,
+                    latency_ms=latency * 1000,
+                )
+            except Exception:
+                pass
 
         return flat_response
 
@@ -1228,14 +1307,25 @@ _REALTIME_SIGNALS = frozenset(
 )
 
 
+# Word-boundary matching, not bare substring — a bare `"now" in q` check
+# matches inside "know"/"knowledge" (e.g. "do you know about the financial
+# documents in the knowledge base?" silently triggered a real, uncontrolled
+# web search for a plain meta question, found 2026-08-17), the same class of
+# bug `is_conversational_greeting`'s own docstring already warns about
+# ("hi" matching inside "which"/"this"). `\b` on both ends is safe for the
+# multi-word phrases too (e.g. "stock price") since it only requires a
+# non-word-character (or string boundary) immediately before/after the whole
+# phrase, not around each internal space.
+_WEB_PHRASE_ALTERNATION = "|".join(
+    re.escape(p) for p in (_EXPLICIT_WEB_PHRASES | _REALTIME_SIGNALS)
+)
+_WEB_PHRASE_RE = re.compile(rf"\b(?:{_WEB_PHRASE_ALTERNATION})\b", re.IGNORECASE)
+
+
 def _is_web_request(query: str, force_web: bool) -> bool:
     """True when this query should be answered from the web rather than the KB."""
-    q = (query or "").lower()
-    return (
-        bool(force_web)
-        or any(phrase in q for phrase in _EXPLICIT_WEB_PHRASES)
-        or any(sig in q for sig in _REALTIME_SIGNALS)
-    )
+    q = query or ""
+    return bool(force_web) or bool(_WEB_PHRASE_RE.search(q))
 
 
 def _web_failure_message(reason: str) -> str:
@@ -1350,7 +1440,7 @@ def _resolve_summarize_source(query: str, sources: list[str] | None) -> str | No
 
 
 @router.post("/query/stream")
-async def stream_query(
+async def stream_query(  # noqa: C901 -- known complexity debt (57), tracked follow-up refactor, not fixed inline to avoid changing the live SSE streaming path
     request_body: QueryRequest,
     request: Request,
     current_user: UserPublic = Depends(get_current_user),
@@ -1497,6 +1587,48 @@ async def stream_query(
                 )
                 # Fall through to cache check / normal RAG only for the
                 # heuristic-matched (non-explicit) case.
+
+        # FILE SCOPE REQUIRED — retrieval must be scoped to a file the user
+        # explicitly selected (the @ picker), so answers never mix content
+        # from unrelated documents in the KB. Placed after web detection so
+        # force_web and heuristic-matched web queries (already returned
+        # above) are exempt; everything reaching this point — including
+        # filename-in-text summarize requests — must have an explicit scope.
+        # Greetings and meta/capability questions about the app/KB are also
+        # exempt from the generic rejection — MAGIK isn't a general-purpose
+        # AI, so both get a deterministic TEMPLATE reply (never an LLM call,
+        # matching the non-streaming /rag/query route) instead of either a
+        # hard rejection or an LLM-improvised answer.
+        if not request_body.sources:
+            from app.agents.agent_controller import (
+                GREETING_REPLY_TEMPLATE,
+                META_CAPABILITY_REPLY_TEMPLATE,
+                is_conversational_greeting,
+                is_meta_capability_question,
+            )
+
+            if is_conversational_greeting(query):
+                _no_scope_msg = GREETING_REPLY_TEMPLATE
+            elif is_meta_capability_question(query):
+                _no_scope_msg = META_CAPABILITY_REPLY_TEMPLATE
+            else:
+                _no_scope_msg = "Select a file to scope this query before sending."
+
+            async def no_scope_stream():
+                for piece in _stream_chunks(_no_scope_msg):
+                    yield _sse(piece)
+                    await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                no_scope_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "X-Request-ID": request_id,
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
 
         # DOCUMENT SUMMARIZE — checked before the cache so a summarize request
         # never returns a stale cached Q&A answer for the same session/query
@@ -2017,7 +2149,7 @@ async def clear_memory(
         from app.memory.memory_manager import MemoryManager
 
         manager = MemoryManager()
-        await asyncio.to_thread(manager.clear, session_id)
+        await asyncio.to_thread(manager.clear, session_id, current_user.user_id)
 
         _audit_log(
             "memory_cleared",
@@ -2528,7 +2660,7 @@ async def delete_chat_session(
         try:
             redis_mem = infra.get_memory()
             if redis_mem is not None:
-                await asyncio.to_thread(redis_mem.delete, session_id)
+                await asyncio.to_thread(redis_mem.delete, session_id, user_id)
         except Exception as exc:
             logger.warning(
                 event="session_delete_redis_failed", session_id=session_id, error=str(exc)

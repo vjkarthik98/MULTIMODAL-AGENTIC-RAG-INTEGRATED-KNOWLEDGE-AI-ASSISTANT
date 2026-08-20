@@ -1,78 +1,148 @@
 {
-  "generated_at": "2026-08-06T11:47:39Z",
-  "git_sha": "52a3e69",
+  "generated_at": "2026-08-20T11:43:32Z",
+  "git_sha": "d920537",
   "weaken_spec": null,
   "suites": {
-    "retrieval": {
-      "suite": "retrieval",
+    "generation": {
+      "suite": "generation",
       "metrics": {
-        "recall_at_5": {
-          "name": "recall_at_5",
+        "faithfulness": {
+          "name": "faithfulness",
+          "value": 0.3929,
+          "n": 14,
+          "notes": "judge=qwen2.5_7b",
+          "sub": {}
+        },
+        "answer_relevancy": {
+          "name": "answer_relevancy",
+          "value": 0.8214,
+          "n": 14,
+          "notes": "judge=qwen2.5_7b",
+          "sub": {}
+        },
+        "answer_correctness": {
+          "name": "answer_correctness",
+          "value": 0.7857,
+          "n": 14,
+          "notes": "judge=qwen2.5_7b",
+          "sub": {}
+        },
+        "context_recall": {
+          "name": "context_recall",
+          "value": 0.8738,
+          "n": 14,
+          "notes": "deterministic (reference facts recoverable from context)",
+          "sub": {}
+        },
+        "template_leak_rate": {
+          "name": "template_leak_rate",
           "value": 0.0,
-          "n": 56,
-          "notes": "",
+          "n": 14,
+          "notes": "leaky=0/14",
           "sub": {}
         },
-        "recall_at_10": {
-          "name": "recall_at_10",
+        "citation_accuracy": {
+          "name": "citation_accuracy",
+          "value": 1.0,
+          "n": 14,
+          "notes": "judge=heuristic",
+          "sub": {}
+        },
+        "hallucination_rate": {
+          "name": "hallucination_rate",
+          "value": 0.2857142857142857,
+          "n": 14,
+          "notes": "flagged=4/14 | examples:   'What was Apple's diluted EPS for Q4 fisc': [\"missing_reference_numbers: ['$102.466 billion', '$102.171 billion']\"];   'What was Apple's company gross margin fo': [\"missing_reference_numbers: ['$1.1 billion']\"]",
+          "sub": {}
+        },
+        "fabrication_rate": {
+          "name": "fabrication_rate",
           "value": 0.0,
-          "n": 56,
-          "notes": "",
+          "n": 14,
+          "notes": "flagged=0/14",
           "sub": {}
         },
-        "mrr": {
-          "name": "mrr",
-          "value": NaN,
-          "n": 0,
-          "notes": "empty: all queries had TODO relevant_chunk_ids",
+        "omission_rate": {
+          "name": "omission_rate",
+          "value": 0.2857142857142857,
+          "n": 14,
+          "notes": "flagged=4/14 | examples:   'What was Apple's diluted EPS for Q4 fisc': [\"missing_reference_numbers: ['$102.466 billion', '$102.171 billion']\"];   'What was Apple's company gross margin fo': [\"missing_reference_numbers: ['$1.1 billion']\"]",
           "sub": {}
         },
-        "ndcg_at_10": {
-          "name": "ndcg_at_10",
-          "value": NaN,
-          "n": 0,
-          "notes": "empty: all queries had TODO relevant_chunk_ids",
+        "grounding_success_rate": {
+          "name": "grounding_success_rate",
+          "value": 1.0,
+          "n": 14,
+          "notes": "fraction of answers with zero unsupported claims (GroundednessChecker)",
           "sub": {}
         },
-        "context_precision": {
-          "name": "context_precision",
-          "value": NaN,
-          "n": 0,
-          "notes": "empty: all queries had TODO relevant_chunk_ids",
+        "citation_accuracy_v2": {
+          "name": "citation_accuracy_v2",
+          "value": 0.9285714285714286,
+          "n": 14,
+          "notes": "fraction of answers with zero bad citations (CitationVerifier)",
           "sub": {}
         },
-        "hit_rate": {
-          "name": "hit_rate",
+        "retry_success_rate": {
+          "name": "retry_success_rate",
           "value": 0.0,
-          "n": 56,
+          "n": 5,
+          "notes": "retried=5/14 | eventually PASS=0",
+          "sub": {}
+        },
+        "avg_retry_count": {
+          "name": "avg_retry_count",
+          "value": 0.35714285714285715,
+          "n": 14,
+          "notes": "mean verification retries per query (cost signal)",
+          "sub": {}
+        },
+        "verification_latency_p50": {
+          "name": "verification_latency_p50",
+          "value": 3.9717999999999996,
+          "n": 14,
+          "notes": "min=3.27s max=7.20s",
+          "sub": {}
+        },
+        "verification_latency_p95": {
+          "name": "verification_latency_p95",
+          "value": 6.922184999999999,
+          "n": 14,
           "notes": "",
           "sub": {}
         },
-        "retrieval_p50_sec": {
-          "name": "retrieval_p50_sec",
-          "value": 1.256672978401184,
-          "n": 56,
-          "notes": "min=1.18s max=52.20s",
+        "finance_fidelity": {
+          "name": "finance_fidelity",
+          "value": 0.9642857142857143,
+          "n": 14,
+          "notes": "avg over 14 queries (strict 0.5% tol, no scale bridging)",
           "sub": {}
         },
-        "retrieval_p95_sec": {
-          "name": "retrieval_p95_sec",
-          "value": 1.6485041379928589,
-          "n": 56,
+        "generation_p50_sec": {
+          "name": "generation_p50_sec",
+          "value": 8.568932056427002,
+          "n": 14,
+          "notes": "min=6.82s max=11.23s",
+          "sub": {}
+        },
+        "generation_p95_sec": {
+          "name": "generation_p95_sec",
+          "value": 11.030624198913575,
+          "n": 14,
           "notes": "",
           "sub": {}
         },
-        "retrieval_p99_sec": {
-          "name": "retrieval_p99_sec",
-          "value": 24.461308479309224,
-          "n": 56,
+        "generation_p99_sec": {
+          "name": "generation_p99_sec",
+          "value": 11.186986312866212,
+          "n": 14,
           "notes": "",
           "sub": {}
         }
       },
       "breached": {},
-      "duration_sec": 148.36237978935242,
-      "judge": null,
+      "duration_sec": 171.54105424880981,
+      "judge": "qwen2.5_7b",
       "dataset_version": null
     }
   }

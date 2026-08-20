@@ -21,10 +21,15 @@ import httpx
 
 from app.eval.config import EvalConfig
 from app.eval.datasets.gold_loader import load_all_gold
-from app.eval.metrics.base import SuiteResult
+from app.eval.metrics.base import MetricResult, SuiteResult
 from app.eval.metrics.generation import compute_generation_metrics
-from app.eval.metrics.hallucination import compute_finance_fidelity, hallucination_rate
-from app.eval.metrics.latency import latency_stats
+from app.eval.metrics.hallucination import (
+    compute_finance_fidelity,
+    fabrication_rate,
+    hallucination_rate,
+    omission_rate,
+)
+from app.eval.metrics.latency import _pct, latency_stats
 
 _SERVER_URL = os.getenv("EVAL_SERVER_URL", "http://127.0.0.1:8000")
 _HTTP_TIMEOUT = 300
@@ -44,32 +49,90 @@ def _query_via_server(
     query: str,
     session_id: str,
     user_id: str,
-    access_token: str | None = None,
+    auth: Any = None,
     no_cache: bool = True,
+    sources: list[str] | None = None,
 ) -> dict[str, Any]:
     """Call /rag/query on the running server. Reuses server's GPU models.
 
     no_cache defaults True: eval must measure the live model, never a stale
     cached answer from a previous run (same session_id+query would hit cache).
-    """
-    headers = {}
-    if access_token:
-        headers["Authorization"] = f"Bearer {access_token}"
 
-    payload = {
+    `auth` is an EvalAuth (app/eval/http_client.py), not a raw token string: the
+    full suite outlives ACCESS_TOKEN_EXPIRE_MINUTES, so a token captured once at
+    suite start expires partway through and every remaining row records a 401
+    instead of an answer. EvalAuth re-mints on demand.
+
+    `sources` mirrors the UI's @ picker: /rag/query 400s on an empty scope
+    (api_routes.py's FILE SCOPE REQUIRED gate), so every gold row that names a
+    real KB file must pass it here or every generation/behavioral call fails
+    with "Select a file to scope this query before sending" instead of an
+    answer.
+    """
+    from app.eval.http_client import EvalAuth, post_json
+
+    if auth is None:
+        auth = EvalAuth(user_id)
+
+    payload: dict[str, Any] = {
         "query": query,
         "session_id": session_id,
         "user_id": user_id,
         "no_cache": no_cache,
     }
-    with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
-        resp = client.post(
-            f"{_SERVER_URL}/rag/query",
-            json=payload,
-            headers=headers,
+    if sources:
+        payload["sources"] = sources
+    data = post_json(f"{_SERVER_URL}/rag/query", payload, auth, timeout=int(_HTTP_TIMEOUT))
+
+    # Seed the per-run memo so the e2e sub-suite — which re-queries EVERY one
+    # of this suite's rows (105 of its 164) — can reuse this response instead
+    # of spending another ~26 minutes re-deriving it. See app/eval/answer_cache.
+    # Only this non-streaming path seeds it: the SSE path posts to a different
+    # endpoint and returns a differently-shaped (post-rewrap) answer, so its
+    # responses are NOT interchangeable with what e2e asks for.
+    try:
+        from app.eval import answer_cache
+
+        answer_cache.put(
+            answer_cache.make_key(query, user_id, sources=sources, force_web=False),
+            data,
         )
-        resp.raise_for_status()
-        return resp.json()
+    except Exception:  # noqa: BLE001 - a memo failure must never fail a row
+        pass
+    return data
+
+
+def _query_via_stream_server(
+    query: str,
+    session_id: str,
+    user_id: str,
+    auth: Any = None,
+    no_cache: bool = True,
+    sources: list[str] | None = None,
+) -> dict[str, Any]:
+    """Call /rag/query/stream (SSE) on the running server — the endpoint the
+    UI actually posts to, running rag_pipeline.stream() incl. the post-
+    verification `_conversational_rewrap` tone pass that /rag/query never
+    exercises. See app/eval/http_client.py::post_sse() for the SSE parsing
+    and thresholds.yaml's "KNOWN COVERAGE GAP" comment for why this exists.
+
+    Same payload/scoping rules as `_query_via_server` (FILE SCOPE REQUIRED
+    gate applies here too — api_routes.py:1546).
+    """
+    from app.eval.http_client import EvalAuth, post_sse
+
+    if auth is None:
+        auth = EvalAuth(user_id)
+
+    payload: dict[str, Any] = {
+        "query": query,
+        "session_id": session_id,
+        "user_id": user_id,
+        "no_cache": no_cache,
+    }
+    if sources:
+        payload["sources"] = sources
+    return post_sse(f"{_SERVER_URL}/rag/query/stream", payload, auth, timeout=int(_HTTP_TIMEOUT))
 
 
 def _query_via_pipeline(
@@ -84,9 +147,19 @@ def _query_via_pipeline(
 
 
 def _load_eval_rows(cfg: EvalConfig) -> list[dict[str, Any]]:
-    """Load gold rows with real reference answers. Defaults to text/pdf/docx;
-    a --modality filter narrows to a single modality (any of the 7)."""
-    _mods = [cfg.modality] if getattr(cfg, "modality", None) else ["txt", "pdf", "docx"]
+    """Load gold rows with real reference answers. Defaults to ALL 7
+    modalities; a --modality filter narrows to a single one.
+
+    COVERAGE FIX (2026-08-13, per-modality quality pass): this defaulted to
+    ["txt","pdf","docx"] — only 3 of 7 — which meant the `hallucination:
+    gate_enabled: true` gate enabled in the prior initiative's Phase 6 was
+    structurally blind to xlsx/image/audio/video. That is exactly where the
+    worst scores live (measured per-modality: image grounding_success_rate
+    0.000, xlsx 0.417, audio context_recall 0.583 / citation_accuracy_v2
+    0.692), so the gate could not have caught any of it. n goes 42 -> 98.
+    """
+    _ALL_MODALITIES = ["txt", "pdf", "docx", "xlsx", "image", "audio", "video"]
+    _mods = [cfg.modality] if getattr(cfg, "modality", None) else _ALL_MODALITIES
     gold = load_all_gold(
         gold_dir=cfg.gold_dir,
         modalities=_mods,
@@ -150,15 +223,101 @@ def _make_full_context_retriever():
         return None
 
 
-def _full_contexts(retriever, query: str, user_id: str, session_id: str) -> list[str]:
-    """Full-text chunks for the query (untruncated), for faithful judge grading."""
+def _full_contexts(
+    retriever, query: str, user_id: str, session_id: str, sources: list[str] | None = None
+) -> list[str]:
+    """Full-text chunks for the query (untruncated), for faithful judge grading.
+
+    Must mirror the file scope the real answer was generated under (`sources`,
+    same as `_query_via_server`'s payload) — an unscoped search here can pull
+    in chunks from OTHER files in the KB that the LLM never saw, so faithfulness/
+    hallucination end up graded against contamination instead of the answer's
+    actual evidence. Confirmed live on the audio suite: unscoped grading context
+    for a query explicitly scoped to one FOMC press-conference file included an
+    unrelated XLSX sheet and a different FOMC recording's Q&A.
+    """
     if retriever is None:
         return []
     try:
-        docs = retriever.search(query=query, session_id=session_id, top_k=8, user_id=user_id)
+        filters = {"sources": sources} if sources else None
+        docs = retriever.search(
+            query=query, session_id=session_id, top_k=8, user_id=user_id, filters=filters
+        )
         return [str(d.get("text") or "") for d in docs if (d.get("text") or "").strip()]
     except Exception:
         return []
+
+
+def _verification_metrics(eval_rows: list[dict]) -> list[MetricResult]:
+    """First-ever baseline for thresholds.yaml's `verification.*` section.
+
+    Reuses the VerificationReport already produced by the live VerificationLoop
+    pass for each row (see the "verification" key set on eval_rows in
+    run_generation_suite) — no duplicate verification call. Rows without a
+    report (hybrid_web path, or a server that predates this wiring) are
+    excluded, not treated as failures.
+    """
+    reports = [r["verification"] for r in eval_rows if r.get("verification")]
+    if not reports:
+        return [
+            MetricResult.empty(name, "no VerificationReport on any row")
+            for name in (
+                "grounding_success_rate",
+                "citation_accuracy_v2",
+                "retry_success_rate",
+                "avg_retry_count",
+                "verification_latency_p50",
+                "verification_latency_p95",
+            )
+        ]
+
+    n = len(reports)
+    grounded = sum(1 for r in reports if not r.get("unsupported_claims"))
+    cited_ok = sum(1 for r in reports if not r.get("bad_citations"))
+    retried = [r for r in reports if len(r.get("attempts") or []) > 1]
+    retry_successes = sum(1 for r in retried if r.get("verified"))
+    retry_counts = [max(len(r.get("attempts") or []) - 1, 0) for r in reports]
+    durations_sec = sorted((r.get("total_duration_ms") or 0.0) / 1000.0 for r in reports)
+
+    metrics = [
+        MetricResult(
+            name="grounding_success_rate",
+            value=grounded / n,
+            n=n,
+            notes="fraction of answers with zero unsupported claims (GroundednessChecker)",
+        ),
+        MetricResult(
+            name="citation_accuracy_v2",
+            value=cited_ok / n,
+            n=n,
+            notes="fraction of answers with zero bad citations (CitationVerifier)",
+        ),
+        MetricResult(
+            name="retry_success_rate",
+            value=(retry_successes / len(retried)) if retried else float("nan"),
+            n=len(retried),
+            notes=f"retried={len(retried)}/{n} | eventually PASS={retry_successes}",
+        ),
+        MetricResult(
+            name="avg_retry_count",
+            value=sum(retry_counts) / n,
+            n=n,
+            notes="mean verification retries per query (cost signal)",
+        ),
+        MetricResult(
+            name="verification_latency_p50",
+            value=_pct(durations_sec, 50),
+            n=n,
+            notes=f"min={durations_sec[0]:.2f}s max={durations_sec[-1]:.2f}s",
+        ),
+        MetricResult(
+            name="verification_latency_p95",
+            value=_pct(durations_sec, 95),
+            n=n,
+            notes="",
+        ),
+    ]
+    return metrics
 
 
 def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
@@ -172,12 +331,20 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
 
     # Decide execution mode
     use_server = _server_available()
-    access_token = os.getenv("EVAL_ACCESS_TOKEN", "")
+    from app.eval.http_client import EvalAuth
+
+    eval_auth = EvalAuth(cfg.user_id)
     full_ctx_retriever = _make_full_context_retriever()
 
-    if use_server:
+    if use_server and getattr(cfg, "live_path", False):
+        print(f"[eval] Server reachable at {_SERVER_URL} — using SSE /rag/query/stream (live path)")
+    elif use_server:
         print(f"[eval] Server reachable at {_SERVER_URL} — using HTTP mode (no GPU duplication)")
     else:
+        if getattr(cfg, "live_path", False):
+            print(
+                "[eval] WARNING: --live-path requires the server; falling back to direct pipeline (no SSE coverage this run)"
+            )
         print("[eval] Server not reachable — falling back to direct pipeline mode")
         try:
             from app.pipeline.query_pipeline import query_pipeline  # noqa: F401
@@ -200,14 +367,27 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
         query = row["query"]
         session_id = f"{cfg.session_prefix}_gen_{row['id']}"
 
+        _row_sources = row.get("relevant_doc_ids") or (
+            [row["source_file"]] if row.get("source_file") else None
+        )
+
         q_start = time.time()
         try:
-            if use_server:
+            if use_server and getattr(cfg, "live_path", False):
+                pipeline_result = _query_via_stream_server(
+                    query=query,
+                    session_id=session_id,
+                    user_id=cfg.user_id,
+                    auth=eval_auth,
+                    sources=_row_sources,
+                )
+            elif use_server:
                 pipeline_result = _query_via_server(
                     query=query,
                     session_id=session_id,
                     user_id=cfg.user_id,
-                    access_token=access_token,
+                    auth=eval_auth,
+                    sources=_row_sources,
                 )
             else:
                 pipeline_result = _query_via_pipeline(
@@ -226,7 +406,9 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
         answer = _strip_verification_hedge(answer)
         sources = pipeline_result.get("sources") or []
         # Grade against FULL retrieved chunks, not the 200-char API source snippets.
-        context_texts = _full_contexts(full_ctx_retriever, query, cfg.user_id, session_id)
+        context_texts = _full_contexts(
+            full_ctx_retriever, query, cfg.user_id, session_id, sources=_row_sources
+        )
         if not context_texts:  # fallback: truncated API sources
             context_texts = [s.get("text") or "" for s in sources if isinstance(s, dict)]
 
@@ -241,6 +423,12 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
                 "finance_fidelity": fidelity,
                 "row_id": row["id"],
                 "tags": row.get("tags", []),
+                # Phase 32 VerificationReport.to_dict(), when present. HTTP mode
+                # (api_routes.py) surfaces it top-level; the direct-pipeline
+                # fallback returns query_pipeline()'s raw response dict, which
+                # nests it under "metadata" instead — check both.
+                "verification": pipeline_result.get("verification")
+                or (pipeline_result.get("metadata") or {}).get("verification"),
             }
         )
 
@@ -250,12 +438,15 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
             result.add(m)
 
         result.add(hallucination_rate(eval_rows))
+        result.add(fabrication_rate(eval_rows))
+        result.add(omission_rate(eval_rows))
+
+        for m in _verification_metrics(eval_rows):
+            result.add(m)
 
         # Finance numeric fidelity — fraction of cited numbers grounded in context
         fidelity_scores = [r["finance_fidelity"] for r in eval_rows if "finance_fidelity" in r]
         if fidelity_scores:
-            from app.eval.metrics.base import MetricResult
-
             avg_fidelity = sum(fidelity_scores) / len(fidelity_scores)
             result.add(
                 MetricResult(
@@ -274,13 +465,33 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
 
 
 def run_hallucination_suite(cfg: EvalConfig) -> SuiteResult:
-    """Standalone hallucination suite — runs generation and focuses on ungrounded claims."""
+    """Standalone hallucination suite — runs generation and focuses on ungrounded claims.
+
+    The filter below is also what determines GATING (app/eval/runner.py::
+    check_thresholds() gates by suite name, i.e. `result.suite` — set to
+    "hallucination" here — not by which top-level thresholds.yaml section a
+    metric's threshold happens to live in). fabrication_rate/omission_rate
+    (Phase 1) and the verification.* metrics (grounding_success_rate,
+    citation_accuracy_v2, retry_success_rate, avg_retry_count,
+    verification_latency_p50/p95 — Phase 1/3) must be included here or their
+    thresholds.yaml `hallucination: gate_enabled: true` never actually gates
+    them: `--suite generation` alone reports these as informational only
+    (suite name stays "generation", whose own gate_enabled is deliberately
+    still false — see the file's stale-v3-baseline header).
+    """
     result = run_generation_suite(cfg)
     result.suite = "hallucination"
     h_metrics = {
         k: v
         for k, v in result.metrics.items()
-        if "halluc" in k or "template" in k or "citation" in k
+        if "halluc" in k
+        or "template" in k
+        or "citation" in k
+        or "fabrication" in k
+        or "omission" in k
+        or "grounding" in k
+        or "retry" in k
+        or "verification_latency" in k
     }
     result.metrics = h_metrics
     return result

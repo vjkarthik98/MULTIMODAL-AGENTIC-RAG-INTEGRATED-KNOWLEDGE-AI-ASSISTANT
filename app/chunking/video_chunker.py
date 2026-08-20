@@ -136,21 +136,50 @@ def _run_whisper_video(wav_path: str) -> list[dict]:
         from app.core.model_loader import model_loader as loader
 
         model = loader.get_whisper()
-        segments, _ = model.transcribe(
-            wav_path,
-            word_timestamps=True,
-            vad_filter=True,
-            condition_on_previous_text=False,
-            initial_prompt=_VIDEO_WHISPER_PROMPT,
-            beam_size=5,
-        )
+        # faster-whisper's transcribe() returns a lazy generator — the actual
+        # CUDA decode happens during iteration, so materializing it to a list
+        # must stay inside the lock too, not just the transcribe() call itself.
+        with loader.get_whisper_lock():
+            segments, _ = model.transcribe(
+                wav_path,
+                word_timestamps=True,
+                vad_filter=True,
+                condition_on_previous_text=False,
+                initial_prompt=_VIDEO_WHISPER_PROMPT,
+                beam_size=5,
+            )
+            segments = list(segments)
         words: list[dict] = []
         for seg in segments:
+            # Hallucination-reduction initiative Phase 5 (2026-08-13):
+            # avg_logprob/no_speech_prob are segment-level Whisper outputs —
+            # denormalized onto every word from this segment (previously
+            # discarded entirely) so _assemble_chunks (app/chunking/av_shared.py)
+            # can aggregate them into a chunk-level hallucination_risk. Mirrors
+            # audio_chunker._run_whisper's identical fix.
+            _avg_logprob = getattr(seg, "avg_logprob", None)
+            _no_speech_prob = getattr(seg, "no_speech_prob", None)
             if hasattr(seg, "words") and seg.words:
                 for w in seg.words:
-                    words.append({"word": w.word, "start": w.start, "end": w.end})
+                    words.append(
+                        {
+                            "word": w.word,
+                            "start": w.start,
+                            "end": w.end,
+                            "avg_logprob": _avg_logprob,
+                            "no_speech_prob": _no_speech_prob,
+                        }
+                    )
             else:
-                words.append({"word": seg.text, "start": seg.start, "end": seg.end})
+                words.append(
+                    {
+                        "word": seg.text,
+                        "start": seg.start,
+                        "end": seg.end,
+                        "avg_logprob": _avg_logprob,
+                        "no_speech_prob": _no_speech_prob,
+                    }
+                )
         return words
     except Exception as exc:
         logger.warning(event="video_whisper_failed", error=str(exc))
@@ -493,6 +522,21 @@ class VideoChunker(BaseChunker):
                                 slide_numbers_covered.append(int(m.group(1)))
 
                         _words_in_chunk = transcript.split()
+                        # Hallucination-reduction initiative Phase 5
+                        # (2026-08-13): surface low-confidence transcription
+                        # into the prompt via the existing error_markers ->
+                        # "⚠ ERROR_MARKERS=" mechanism (rag_pipeline.py::
+                        # _build_context) — flag-only, does not affect
+                        # retrieval ranking. hallucination_risk is aggregated
+                        # by _assemble_chunks (av_shared.py) from Whisper's
+                        # per-segment avg_logprob/no_speech_prob. Mirrors
+                        # audio_chunker.py's identical wiring.
+                        _risk = ch.get("hallucination_risk", "low")
+                        _error_markers = (
+                            ["low_transcription_confidence"]
+                            if _risk in settings.MEDIA_HALLUCINATION_RISK_ERROR_MARKER_LEVELS
+                            else []
+                        )
                         structure = {
                             "chunk_hash_id": chunk_hash,
                             "source_file": source,
@@ -523,6 +567,9 @@ class VideoChunker(BaseChunker):
                             "snr": _snr,
                             "snr_degraded": _snr_degraded,
                             "clipping_detected": _clipping_detected,
+                            "confidence": ch.get("confidence"),
+                            "hallucination_risk": _risk,
+                            "error_markers": _error_markers,
                         }
 
                         doc = self._make_doc(

@@ -17,6 +17,12 @@
 # same pattern, different script, per this repo's own convention of inline
 # per-script SSM fetching rather than a shared abstraction.
 #
+# A dedicated escalation secret (PagerDuty, then Opsgenie) was added here
+# and removed — every free real phone/SMS escalation option hit a hard
+# external signup/paywall blocker, not something fixable in this repo. See
+# monitoring/alerts/contact-points.yml's comment for the details. ntfy is
+# the only delivery mechanism again.
+#
 # Three different delivery mechanisms are in play, not one — see the
 # comments at each step below for why.
 
@@ -80,11 +86,11 @@ cat "${AWS_DIR}/prod.env" "${SECRETS_ENV}" > "${COMPOSE_ENV}"
 
 # ── Ensure persistent EBS-backed host paths exist ───────────────────────────
 # docker-compose.monitoring.yml mounts these as `driver: local, o: bind`
-# volumes (prometheus/grafana/tempo/loki/promtail) — a bind-type local volume
+# volumes (prometheus/grafana/tempo/loki/promtail/phoenix) — a bind-type local volume
 # with a non-existent host directory fails `docker compose up` outright, so
 # this must run before the first `up` on a fresh box (or after an EBS/AMI
 # rebuild that dropped /opt/magik/monitoring).
-for d in prometheus grafana tempo loki promtail; do
+for d in prometheus grafana tempo loki promtail phoenix; do
   mkdir -p "/opt/magik/monitoring/${d}"
 done
 log "host volume directories present under /opt/magik/monitoring"
@@ -98,6 +104,37 @@ if docker compose --env-file "${COMPOSE_ENV}" -f docker-compose.monitoring.yml u
 else
   log "FATAL: docker compose up failed"
   RC=1
+fi
+
+# ── Grafana deployment annotation ────────────────────────────────────────────
+# Without this, a step-change on a dashboard (recall/faithfulness/latency)
+# can't be told apart from an unrelated incident at a glance — someone has to
+# cross-reference git log by hand. This script already runs at every promote
+# (cd.yml's "Sync + redeploy monitoring stack" step) with the repo checked
+# out to the exact tag just promoted, so the current HEAD here IS the
+# deployed version — no new GIT_REF plumbing needed. Grafana's own port,
+# not the Caddy-fronted public URL (GF_SERVER_ROOT_URL): this script runs on
+# the box itself, and 127.0.0.1:3001 is the same host-loopback mapping
+# Prometheus/Pushgateway already use for local, non-Caddy access (see
+# docker-compose.monitoring.yml's grafana `ports:`).
+#
+# Best-effort only — RC (the actual deploy result) is untouched by this
+# block's outcome, matching the rest of this script's monitoring-must-never-
+# block-the-real-deploy stance (see cd.yml's `continue-on-error: true` on the
+# step that calls this whole script).
+if [ "${RC}" = "0" ]; then
+  DEPLOYED_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  DEPLOYED_TAG="$(git describe --tags --exact-match 2>/dev/null || true)"
+  ANNOTATION_TEXT="Deploy: ${DEPLOYED_SHA}${DEPLOYED_TAG:+ (${DEPLOYED_TAG})}"
+  if curl -fsS -m 5 -u "admin:${GRAFANA_ADMIN_PASSWORD}" \
+       -X POST "http://127.0.0.1:3001/api/annotations" \
+       -H "Content-Type: application/json" \
+       -d "{\"text\": \"${ANNOTATION_TEXT}\", \"tags\": [\"deploy\", \"magik\"]}" \
+       >/dev/null 2>&1; then
+    log "grafana deployment annotation posted (${DEPLOYED_SHA})"
+  else
+    log "WARN: grafana deployment annotation failed (non-fatal — Grafana may still be starting up)"
+  fi
 fi
 
 # ── Cleanup — same fetch-use-delete lifecycle as cd.yml's app secrets.

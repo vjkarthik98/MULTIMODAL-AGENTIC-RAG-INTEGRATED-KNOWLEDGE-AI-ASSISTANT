@@ -265,7 +265,16 @@ jobs:
           echo "::warning title=Tier-2 retrieval-section failure — auto-rolling back::retrieval breached its gated threshold (or errored) on the ${ENVIRONMENT_LABEL} image. Reverting ${CONTAINER} to ${PREVIOUS_CONTAINER}."
 
           if ! docker inspect "$PREVIOUS_CONTAINER" >/dev/null 2>&1; then
-            echo "::error title=Auto-rollback FAILED::retrieval section failed but no ${PREVIOUS_CONTAINER} image exists to roll back to (first deploy ever, or it was pruned under disk pressure). Manual intervention required."
+            # NOT a malfunction of the rollback mechanism — it correctly
+            # determined there is no prior version to revert to. Expected on a
+            # box's first-ever deploy (exactly what happened on staging in CD
+            # run 31139999120), and possible later if deploy-staging's
+            # under-40GB branch dropped ${PREVIOUS_CONTAINER} to reclaim disk.
+            #
+            # Still fails the step deliberately: ${CONTAINER} is LEFT RUNNING
+            # THE REGRESSED IMAGE, so this must stay loud and must not let a
+            # green-looking gate promote anything.
+            echo "::error title=Cannot auto-rollback — no previous version exists::retrieval breached on ${ENVIRONMENT_LABEL}, but there is no ${PREVIOUS_CONTAINER} to revert to (first deploy on this box, or it was pruned under disk pressure by deploy's <40GB branch). ${ENVIRONMENT_LABEL} IS STILL RUNNING THE REGRESSED IMAGE — it was not reverted and is not healthy-by-omission. To recover: redeploy the last known-good tag, e.g. re-run the CD workflow on that tag, or on the box: docker pull <last-good-image> && docker rm -f ${CONTAINER} && <re-run the deploy run command with that image>. Production was NOT touched: promote-production skips automatically whenever this job fails."
             exit 1
           fi
 

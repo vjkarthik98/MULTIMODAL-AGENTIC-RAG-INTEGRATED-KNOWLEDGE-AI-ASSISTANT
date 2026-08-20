@@ -397,13 +397,13 @@ export async function getIngestionStatus(jobId) {
 }
 
 export async function listKBFiles() {
-  const res = await fetch(`${API}/api/kb/files`, { credentials: 'include' })
+  const res = await fetch(`${API}/rag/api/kb/files`, { credentials: 'include' })
   if (!res.ok) throw new Error(`KB list failed (${res.status})`)
   return res.json()  // { files: [{ file_hash, filename, modality, chunk_count, ingested_at }] }
 }
 
 export async function deleteKBFileByHash(csrf, fileHash) {
-  const res = await fetch(`${API}/api/kb/files/${encodeURIComponent(fileHash)}`, {
+  const res = await fetch(`${API}/rag/api/kb/files/${encodeURIComponent(fileHash)}`, {
     method: 'DELETE',
     credentials: 'include',
     headers: csrfHeaders(csrf),
@@ -416,7 +416,7 @@ export async function deleteKBFileByHash(csrf, fileHash) {
 }
 
 export async function getTranscript(fileHash) {
-  const res = await fetch(`${API}/api/transcript/${encodeURIComponent(fileHash)}`, {
+  const res = await fetch(`${API}/rag/api/transcript/${encodeURIComponent(fileHash)}`, {
     credentials: 'include',
   })
   if (!res.ok) throw new Error(`Transcript fetch failed (${res.status})`)
@@ -424,7 +424,7 @@ export async function getTranscript(fileHash) {
 }
 
 export async function getChunkMeta(chunkId) {
-  const res = await fetch(`${API}/api/sources/${encodeURIComponent(chunkId)}`, {
+  const res = await fetch(`${API}/rag/api/sources/${encodeURIComponent(chunkId)}`, {
     credentials: 'include',
   })
   if (!res.ok) throw new Error(`Chunk metadata fetch failed (${res.status})`)

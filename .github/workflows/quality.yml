@@ -1,7 +1,7 @@
 name: Quality & Performance (local)
 
 # Local-mode-only checks from the testing & quality reporting initiative:
-# API contract testing (Schemathesis), k6 smoke load, OWASP ZAP baseline DAST,
+# API contract testing (Schemathesis), OWASP ZAP baseline DAST,
 # and Lighthouse browser performance — all against the local docker-compose
 # stack (api + qdrant + redis + mongo), never the live deployed URL. See
 # quality-reports/README.md for the full initiative and why local vs. live is
@@ -25,11 +25,14 @@ on:
       - "app/main.py"
       - "app/auth/**"
       - "ui/**"
-      - "perf/k6/**"
       - "security/zap/**"
       - "tests/api_contract/**"
       - "lighthouserc.json"
       - "docker-compose.yml"
+      # These jobs boot the api container, whose startup path (and the
+      # SKIP_MODEL_BOOTSTRAP branch they depend on) lives here. perf/k6/**
+      # was removed alongside the k6 job — nothing in this workflow reads it.
+      - "start_server.py"
 
 concurrency:
   group: quality-${{ github.workflow }}-${{ github.ref }}
@@ -42,7 +45,14 @@ jobs:
   api-contract:
     name: Schemathesis (API contract, GET-only)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 15 -> 20: the dev-runtime image build alone measured 800-829s (~13.3-
+    # 13.8min) with no layer cache (confirmed live, 2026-08-20 runs
+    # 32330098485/32359742368) — that leaves as little as ~1min of a 15min
+    # budget for the actual health wait + Schemathesis run, guaranteeing a
+    # cancellation regardless of whether the API comes up cleanly. Matches
+    # zap-baseline's already-20min budget below, which builds the identical
+    # image.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -63,21 +73,60 @@ jobs:
           sudo chown -R 10001:10001 .hf_cache data logs
 
       - name: Start local stack
+        # SKIP_MODEL_BOOTSTRAP: .hf_cache is bind-mounted from the checkout and
+        # is EMPTY here, so the container's default start_server.py path would
+        # download ~25GB of models and launch llama-server BEFORE uvicorn ever
+        # binds — which is precisely why every run of this workflow has failed
+        # on "Wait for API health" (17 runs, 0 successes, since it was written).
+        # This job is GET-only contract / passive-DAST surface testing; it never
+        # invokes inference. WARMUP_AT_STARTUP=false keeps model loading lazy.
+        env:
+          SKIP_MODEL_BOOTSTRAP: "true"
+          WARMUP_AT_STARTUP: "false"
         run: docker compose up -d api qdrant redis mongo
 
       - name: Wait for API health
+        # --max-time/--connect-timeout are load-bearing, not cosmetic. Without
+        # them curl blocks indefinitely once the port is open but the app is
+        # not answering, so this "30 x 5s = 150s" loop actually consumed the
+        # whole job: ZAP (timeout-minutes: 20) burned 15.7 min in here before
+        # its 30 iterations finished. Bounded per attempt, the worst case is
+        # now ~60 x (3 + 5) = 8 min, and a healthy API answers in seconds.
+        # `docker compose ps` on failure distinguishes "container crashed" from
+        # "container up but app not listening" without reading the whole log.
         run: |
-          for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:8000/health && exit 0
+          for i in $(seq 1 60); do
+            if curl -sf --connect-timeout 3 --max-time 5 http://127.0.0.1:8000/health; then
+              echo "API healthy after $((i * 5))s"
+              exit 0
+            fi
             sleep 5
           done
-          echo "API never became healthy" && docker compose logs api && exit 1
+          echo "API never became healthy"
+          docker compose ps
+          docker compose logs --tail=200 api
+          exit 1
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - run: pip install "MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT[quality,test] @ ." || pip install schemathesis pytest httpx
+      # Pinned <5 for the same reason as pyproject.toml's [quality] extra: an
+      # unpinned `pip install schemathesis` silently upgraded to 4.x, whose
+      # removal of the top-level `from_uri` loader failed this job at
+      # collection time. This job installs schemathesis directly rather than
+      # via the extra, so the bound has to be repeated here to be effective.
+      # pytest-asyncio is NOT optional here even though nothing in
+      # tests/api_contract/ is async. pyproject.toml sets
+      # `asyncio_mode = "auto"` AND `--strict-config` in addopts, and
+      # --strict-config turns an ini option that no installed plugin claims
+      # into a hard error. Without pytest-asyncio present, this job prints
+      # "ERROR: Unknown config option: asyncio_mode", collects the tests,
+      # runs NONE of them, and exits 4 -- the same exit code as the
+      # from_uri collection error it was hiding behind. Reproduced locally
+      # against a stub API: without this package 3 tests collected / 0 ran /
+      # exit 4; with it, 3 collected / 3 ran / exit 0.
+      - run: pip install "schemathesis>=4.24,<5" pytest pytest-asyncio pytest-timeout httpx
 
       - name: Run Schemathesis contract test
         run: pytest tests/api_contract/ -v --junitxml=quality-reports/api-contract/ci-run.junit.xml
@@ -92,69 +141,16 @@ jobs:
       - run: docker compose down -v
         if: always()
 
-  k6-smoke:
-    name: k6 smoke test
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Prepare bind-mounted directories for the non-root container
-        # docker-compose.yml bind-mounts ./.hf_cache, ./data, ./logs from the
-        # runner's checkout — actions/checkout and Docker's own auto-create-
-        # on-first-mount both leave these owned by the runner's default user
-        # (or root), not the container's non-root `appuser` (uid/gid 10001,
-        # set in Dockerfile). Without this, start_server.py fails immediately
-        # with PermissionError on /app/logs/llama_server.log and every
-        # /app/.hf_cache/* subdirectory it tries to write to — this is the
-        # real reason "Wait for API health" never saw the API come up, once
-        # the earlier Dockerfile build issue was fixed and jobs got far
-        # enough to actually reach this step for the first time (confirmed
-        # live via the real failure log, 2026-08-01).
-        run: |
-          mkdir -p .hf_cache data logs
-          sudo chown -R 10001:10001 .hf_cache data logs
-
-      - name: Start local stack
-        run: docker compose up -d api qdrant redis mongo
-
-      - name: Wait for API health
-        run: |
-          for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:8000/health && exit 0
-            sleep 5
-          done
-          echo "API never became healthy" && docker compose logs api && exit 1
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Seed CI test tenants
-        # Full requirements.txt, not a minimal extra — app.auth.service pulls
-        # in app.core.config's wider import chain. Same install shape as
-        # ci.yml's lint-type-test job, for the same reason: unverified
-        # shortcuts here would be a guess, not a tested fast path.
-        run: |
-          pip install -r requirements.txt
-          pip install -e .
-          python -m app.bin.seed_test_tenants --count 3
-          echo "MAGIK_TEST_TENANTS=$(cat .magik_test_tenants.json)" >> "$GITHUB_ENV"
-
-      - uses: grafana/setup-k6-action@v1
-
-      - name: Run k6 smoke
-        run: k6 run --summary-export=quality-reports/performance/ci-smoke-summary.json perf/k6/smoke.js
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: k6-smoke-report
-          path: quality-reports/performance/ci-smoke-summary.json
-          retention-days: 30
-
-      - run: docker compose down -v
-        if: always()
+  # k6 smoke test REMOVED (2026-08-20) — it could never pass here, and never did.
+  # perf/k6/smoke.js POSTs /rag/query, which requires real LLM inference: the
+  # ~25GB model stack plus llama-server. That does not fit on a hosted
+  # ubuntu-latest runner, so no amount of caching or timeout-raising fixes it.
+  # A load test belongs against a real deployment with models resident, which
+  # is exactly what .github/workflows/quality-live.yml already does (k6 against
+  # secrets.MAGIK_LIVE_URL). Keeping a permanently-red job on every PR trains
+  # people to ignore the whole check list, so it is deleted rather than muted.
+  # The two jobs that remain (Schemathesis GET-only, ZAP passive) genuinely do
+  # not need inference and run with SKIP_MODEL_BOOTSTRAP=true.
 
   zap-baseline:
     name: OWASP ZAP baseline (passive DAST)
@@ -180,15 +176,39 @@ jobs:
           sudo chown -R 10001:10001 .hf_cache data logs
 
       - name: Start local stack
+        # SKIP_MODEL_BOOTSTRAP: .hf_cache is bind-mounted from the checkout and
+        # is EMPTY here, so the container's default start_server.py path would
+        # download ~25GB of models and launch llama-server BEFORE uvicorn ever
+        # binds — which is precisely why every run of this workflow has failed
+        # on "Wait for API health" (17 runs, 0 successes, since it was written).
+        # This job is GET-only contract / passive-DAST surface testing; it never
+        # invokes inference. WARMUP_AT_STARTUP=false keeps model loading lazy.
+        env:
+          SKIP_MODEL_BOOTSTRAP: "true"
+          WARMUP_AT_STARTUP: "false"
         run: docker compose up -d api qdrant redis mongo
 
       - name: Wait for API health
+        # --max-time/--connect-timeout are load-bearing, not cosmetic. Without
+        # them curl blocks indefinitely once the port is open but the app is
+        # not answering, so this "30 x 5s = 150s" loop actually consumed the
+        # whole job: ZAP (timeout-minutes: 20) burned 15.7 min in here before
+        # its 30 iterations finished. Bounded per attempt, the worst case is
+        # now ~60 x (3 + 5) = 8 min, and a healthy API answers in seconds.
+        # `docker compose ps` on failure distinguishes "container crashed" from
+        # "container up but app not listening" without reading the whole log.
         run: |
-          for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:8000/health && exit 0
+          for i in $(seq 1 60); do
+            if curl -sf --connect-timeout 3 --max-time 5 http://127.0.0.1:8000/health; then
+              echo "API healthy after $((i * 5))s"
+              exit 0
+            fi
             sleep 5
           done
-          echo "API never became healthy" && docker compose logs api && exit 1
+          echo "API never became healthy"
+          docker compose ps
+          docker compose logs --tail=200 api
+          exit 1
 
       - name: Run ZAP baseline scan
         run: bash security/zap/run_baseline.sh

@@ -619,7 +619,54 @@ def grade_metric(metric: str, row: dict[str, t.Any]) -> float | None:
     query = (row.get("query") or "").strip()
     answer = (row.get("answer") or "").strip()
     contexts = row.get("contexts") or []
-    _CTX_CHAR_BUDGET = 5000
+    # The prior 5000-char judge budget silently scored faithfulness against
+    # LESS than a third of what the production model actually saw (settings.
+    # MAX_CONTEXT_CHARS=16000): any fact drawn from context beyond the first
+    # ~5000 chars of the (retrieval-ranked, highest-relevance-first) chunk
+    # list looked "unfaithful" purely because the judge couldn't see its own
+    # support. Per-modality quality pass (2026-08-13) flagged this as a
+    # likely explanation for faithfulness scoring roughly half of
+    # answer_correctness across the board (e.g. video 0.393 vs 0.839) — image
+    # was the one modality NOT confounded, because its median context
+    # (~2000 chars) rarely reached the old cap at all.
+    #
+    # NOT simply raised to 16000 to match, though — for the faithfulness
+    # branch below, ctx_text is inserted into the prompt TWICE (once as
+    # {instruction}'s "Context provided to the assistant", again as
+    # graded_reference, since faithfulness treats the context itself as the
+    # Direct-Assessment "reference answer" — there is no separate gold
+    # answer to grade groundedness against). Live-measured (2026-08-17): at
+    # 16000, ~32000 chars (~8000 tokens) of DUPLICATED context alone filled
+    # essentially the entire n_ctx=8192 judge window, leaving no room for the
+    # system prompt/rubric/response/output — the judge's raw output stopped
+    # matching the expected "[RESULT] N" format on most rows (measured n
+    # collapsed from 14/14 to 2/14 on the video suite; most likely silently
+    # truncated mid-generation). The safe ceiling is also MODALITY-DEPENDENT
+    # (pdf's dense financial tables pack more content per char than video's
+    # transcript prose — pdf's n started dropping at 7000 while video was
+    # still clean at 10000), so this can't be tuned against one modality
+    # alone. Checked all 7: at 6000, txt/docx/pdf/video/image hold n=14; xlsx
+    # and audio drop ONE row each to n=13 (both confirmed n=14 at the old
+    # 5000, so this is a real, if minor, cost of raising the budget — not
+    # pre-existing). Judged worth it: a single row's reduced sample size on
+    # 2 of 7 modalities against a real faithfulness improvement on the other
+    # 5, versus 0 improvement anywhere at 5000.
+    #
+    # Deliberately NOT claiming a precise faithfulness delta here: repeat
+    # runs at an UNCHANGED budget swung ~0.05-0.15 on their own (retrieval/
+    # judge non-determinism upstream of this function, despite temperature=0
+    # in the judge call itself), which is the same order of magnitude as the
+    # differences seen between budget values — properly separating "the
+    # budget helped" from "run-to-run noise" needs this session's own N=3-
+    # averaging policy, not attempted here given time already spent. More
+    # context can only let the judge see MORE of what the model actually
+    # used, never less, so the DIRECTION of the effect is not in question —
+    # only its exact magnitude, which a future N=3 pass should pin down.
+    # generation.* is NOT gated (stale v3 baseline, informational only), so
+    # raising this is safe without breaking CI; a full generation.*
+    # re-baseline is still a separate follow-up so the reported numbers mean
+    # something comparable going forward.
+    _CTX_CHAR_BUDGET = 6000
     ctx_text = "\n---\n".join(c for c in contexts if c).strip()[:_CTX_CHAR_BUDGET]
     reference = (row.get("reference_answer") or "").strip()
 

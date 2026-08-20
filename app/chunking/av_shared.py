@@ -508,13 +508,37 @@ def _assemble_chunks(
     def speaker_at(t: float) -> str:
         return _label_at_time(t, _diar_starts, diarization)
 
-    def _flush(buf: list[str], start: float, end: float, spk: str, overlap_seed: str) -> dict:
+    # Hallucination-reduction initiative Phase 5 (2026-08-13): aggregate
+    # per-word Whisper confidence into a chunk-level hallucination_risk,
+    # reusing app.ingestion.audio_ingest's _compute_confidence/
+    # _hallucination_risk (not reimplemented) — same intra-modality
+    # ingest<->chunk import precedent as video_ingest.py already uses for
+    # audio_ingest.ingest. Shared here (not per-modality) since both audio_
+    # chunker.py and video_chunker.py call this same function with words
+    # carrying the same avg_logprob/no_speech_prob shape from their own
+    # (per-modality, not shared) Whisper-calling code.
+    from app.ingestion.audio_ingest import _compute_confidence, _hallucination_risk
+
+    def _flush(
+        buf: list[str],
+        start: float,
+        end: float,
+        spk: str,
+        overlap_seed: str,
+        buf_confidences: list[float],
+        buf_no_speech_probs: list[float],
+    ) -> dict:
         raw = " ".join(buf)
         text = _remove_fillers(raw)
         role, name = role_map.get(spk, (None, None))
         topic = _TOPIC_TRANSITIONS.search(raw)
         # Prepend overlap sentence (context bridge, not counted in word_count)
         display = f"{overlap_seed} {text}".strip() if overlap_seed else text
+        # Worst (minimum) confidence / (maximum) no_speech_prob among the
+        # buffered words' source segments — the chunk is only as reliable as
+        # its least-confident contributing segment.
+        _min_conf = min(buf_confidences) if buf_confidences else 1.0
+        _max_nsp = max(buf_no_speech_probs) if buf_no_speech_probs else 0.0
         return {
             "transcript": display,
             "start": start,
@@ -524,10 +548,14 @@ def _assemble_chunks(
             "name": name,
             "call_section": _detect_call_section(raw),
             "topic_section": topic.group(0).replace(" ", "_") if topic else None,
+            "confidence": _min_conf,
+            "hallucination_risk": _hallucination_risk(_min_conf, _max_nsp),
         }
 
     chunks: list[dict] = []
     buf_words: list[str] = []
+    buf_confidences: list[float] = []
+    buf_no_speech_probs: list[float] = []
     buf_start = words[0]["start"]
     buf_end = words[0]["end"]
     buf_speaker = speaker_at(buf_start)
@@ -545,17 +573,43 @@ def _assemble_chunks(
 
         if over_max or speaker_changed or topic_hit:
             if buf_words:
-                chunk = _flush(buf_words, buf_start, buf_end, buf_speaker, overlap_seed)
+                chunk = _flush(
+                    buf_words,
+                    buf_start,
+                    buf_end,
+                    buf_speaker,
+                    overlap_seed,
+                    buf_confidences,
+                    buf_no_speech_probs,
+                )
                 overlap_seed = _last_sentence(chunk["transcript"])
                 chunks.append(chunk)
             buf_words = []
+            buf_confidences = []
+            buf_no_speech_probs = []
             buf_start = word_start
             buf_speaker = current_speaker
 
         buf_words.append(word_text)
         buf_end = word_end
+        _avg_logprob = w.get("avg_logprob")
+        if _avg_logprob is not None:
+            buf_confidences.append(_compute_confidence(_avg_logprob))
+        _nsp = w.get("no_speech_prob")
+        if _nsp is not None:
+            buf_no_speech_probs.append(_nsp)
 
     if buf_words:
-        chunks.append(_flush(buf_words, buf_start, buf_end, buf_speaker, overlap_seed))
+        chunks.append(
+            _flush(
+                buf_words,
+                buf_start,
+                buf_end,
+                buf_speaker,
+                overlap_seed,
+                buf_confidences,
+                buf_no_speech_probs,
+            )
+        )
 
     return chunks

@@ -33,7 +33,16 @@ if SERVER_UP:
     import schemathesis
     from hypothesis import HealthCheck, settings
 
-    schema = schemathesis.from_uri(f"{BASE_URL}/openapi.json").include(method="GET")
+    # schemathesis.openapi.from_url, NOT the v3-era schemathesis.from_uri.
+    # The top-level `from_uri` loader was REMOVED in Schemathesis 4.0 (loaders
+    # moved under the per-spec `schemathesis.openapi` namespace). Both this
+    # job and pyproject's [quality] extra installed schemathesis unbounded
+    # (`>=3.35`), so 4.x landed on its own and broke this file at COLLECTION
+    # time -- `AttributeError: module 'schemathesis' has no attribute
+    # 'from_uri'`, exit code 4, zero tests run -- with no code change on our
+    # side. Both pins are now `>=4.24,<5` so the next major can't repeat it.
+    # `.include(method="GET")` is unchanged in v4 and still filters to GET.
+    schema = schemathesis.openapi.from_url(f"{BASE_URL}/openapi.json").include(method="GET")
 
     # max_examples kept modest: this exercises N GET operations x 5 examples
     # each against a real (possibly GPU-warming) server, not a pure-function
@@ -47,7 +56,7 @@ if SERVER_UP:
         # not_a_server_error is the one check that matters here: malformed
         # query/path params must produce a clean 4xx (or a 401 on protected
         # routes, since fuzzed requests carry no auth token), never a 500.
-        case.call_and_validate(checks=(schemathesis.checks.not_a_server_error,))
+        case.call_and_validate(checks=[schemathesis.checks.not_a_server_error])
 
 else:
 

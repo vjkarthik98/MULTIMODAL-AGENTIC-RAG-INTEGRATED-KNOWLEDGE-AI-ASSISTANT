@@ -119,33 +119,119 @@ def _guard_output(response: str, session_id: str = "", correlation_id: str = "")
         return response
 
 
+# Whole-word greeting tokens. Substring matching previously caused "hi"
+# to match "which", "this", "while" — routing factual questions to direct.
+# Module-level (not just AgentExecutor-internal) so api_routes.py's file-scope-
+# required guard can exempt greetings without instantiating a full
+# AgentExecutor/AgentRouter — same check, same single source of truth.
+_CONVERSATIONAL_TOKENS = frozenset(
+    {
+        "hello",
+        "hi",
+        "hey",
+        "thanks",
+        "bye",
+        "goodbye",
+    }
+)
+_CONVERSATIONAL_PHRASES = frozenset(
+    {
+        "thank you",
+        "how are you",
+        "good morning",
+        "good afternoon",
+        "good evening",
+    }
+)
+
+
+def is_conversational_greeting(query: str) -> bool:
+    lower = query.lower().strip().rstrip("?!.,")
+    tokens = set(lower.split())
+    if tokens & _CONVERSATIONAL_TOKENS and len(tokens) <= 4:
+        return True
+    if any(p == lower or lower.startswith(p + " ") for p in _CONVERSATIONAL_PHRASES):
+        return True
+    return False
+
+
+# Meta/capability questions ABOUT the app or its knowledge base ("what can you
+# do", "do you know about the financial documents...") — not greetings, not
+# document questions. Substring containment (not exact/prefix like the
+# greeting check above) since these are longer, more variably phrased
+# questions. Both false positives and false negatives degrade gracefully: the
+# reply template for this case and the generic no-scope fallback both end by
+# pointing the user at the @ file picker.
+_META_CAPABILITY_TOKENS = frozenset({"capabilities", "capability"})
+_META_CAPABILITY_PHRASES = frozenset(
+    {
+        "what can you do",
+        "what do you do",
+        "who are you",
+        "what are you",
+        "what is this",
+        "what is this app",
+        "what is this tool",
+        "how do you work",
+        "how does this work",
+        "what files do you have",
+        "what files are in",
+        "what documents do you have",
+        "what documents are in",
+        "what's in the knowledge base",
+        "whats in the knowledge base",
+        "what is in the knowledge base",
+        "what's in my knowledge base",
+        "do you know about",
+        "can you tell me about",
+        "what can i ask you",
+        "what can i ask",
+    }
+)
+
+
+def is_meta_capability_question(query: str) -> bool:
+    lower = query.lower().strip().rstrip("?!.,")
+    if any(p in lower for p in _META_CAPABILITY_PHRASES):
+        return True
+    tokens = set(lower.split())
+    if tokens & _META_CAPABILITY_TOKENS:
+        return True
+    return False
+
+
+# Deterministic reply templates for the two cases above — NOT LLM-generated,
+# so responses are 100% predictable and can never claim a capability the app
+# doesn't have. Both end by pointing at the @ picker, the one real action
+# available in either case. Used only by api_routes.py's file-scope-required
+# guard (when no @ file is selected and the query isn't RAG/websearch-bound);
+# AgentExecutor's own LLM-based greeting fast path (below) is untouched and
+# still used when a greeting arrives WITH a file already scoped.
+GREETING_REPLY_TEMPLATE = (
+    "Hey, good to see you! I'm here to help you work through your documents — "
+    "click the **@** button whenever you're ready and pick a file, and I'll "
+    "answer using exactly what's in it."
+)
+
+META_CAPABILITY_REPLY_TEMPLATE = (
+    "Good question — I only answer from documents you've actually uploaded, "
+    "not from general knowledge, so I can't speak to what's in your knowledge "
+    "base until you point me at it. Click the **@** button and pick a file "
+    "(or a few), and I'll answer using exactly what's in them."
+)
+
+
 class AgentExecutor:
     """Delegates routing to AgentRouter. Only handles routes that bypass RAG
     (direct/search/memory). RAG/hybrid routes return a thin signal so the
     pipeline performs retrieval — this executor must NEVER fabricate an answer
     to a factual document question."""
 
-    # Whole-word greeting tokens. Substring matching previously caused "hi"
-    # to match "which", "this", "while" — routing factual questions to direct.
-    _CONVERSATIONAL_TOKENS = frozenset(
-        {
-            "hello",
-            "hi",
-            "hey",
-            "thanks",
-            "bye",
-            "goodbye",
-        }
-    )
-    _CONVERSATIONAL_PHRASES = frozenset(
-        {
-            "thank you",
-            "how are you",
-            "good morning",
-            "good afternoon",
-            "good evening",
-        }
-    )
+    # Kept as class attributes (delegating to the module-level ones above) so
+    # existing callers/tests referencing AgentExecutor._CONVERSATIONAL_TOKENS
+    # keep working unchanged.
+    _CONVERSATIONAL_TOKENS = _CONVERSATIONAL_TOKENS
+    _CONVERSATIONAL_PHRASES = _CONVERSATIONAL_PHRASES
 
     def __init__(self) -> None:
         from app.agents.agent_router import AgentRouter
@@ -153,13 +239,7 @@ class AgentExecutor:
         self._router = AgentRouter()
 
     def _is_conversational(self, query: str) -> bool:
-        lower = query.lower().strip().rstrip("?!.,")
-        tokens = set(lower.split())
-        if tokens & self._CONVERSATIONAL_TOKENS and len(tokens) <= 4:
-            return True
-        if any(p == lower or lower.startswith(p + " ") for p in self._CONVERSATIONAL_PHRASES):
-            return True
-        return False
+        return is_conversational_greeting(query)
 
     def run(self, query: str, session_id: str = "default") -> dict[str, Any]:
         # Cheap fast-path for genuine greetings (whole-word, short query only)

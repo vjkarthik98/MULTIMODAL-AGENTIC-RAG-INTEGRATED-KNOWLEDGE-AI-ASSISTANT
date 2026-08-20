@@ -77,6 +77,61 @@ def set_common_env() -> None:
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
+    # transformers' DebertaV2 implementation (cross-encoder/nli-deberta-v3-base,
+    # settings.NLI_MODEL — app/verification/groundedness_checker.py) decorates
+    # make_log_bucket_position() with @torch.jit.script. That function computes
+    # torch.abs() on an int64 relative-position tensor; TorchScript's CPU fuser
+    # can codegen that as a bare C++ fabs(int64_t) call, which is genuinely
+    # ambiguous (no exact overload — matches both fabs(float) and fabs(double))
+    # and fails to compile: "RuntimeError: ... more than one instance of
+    # overloaded function 'fabs' matches the argument list ... int64_t n3 =
+    # fabs(n2)". Confirmed live in production logs (2026-08-20) as
+    # nli_groundedness_failed, and independently in tests/unit/verification/
+    # test_groundedness_checker_nli.py's documented order-dependence — both
+    # point at the same root cause: something earlier in the process (pyannote/
+    # speechbrain's own torch.jit-heavy code, per the audio-ingest correlation)
+    # leaves the CPU fuser in a state where this specific scripted function's
+    # kernel compiles down to the ambiguous call. PYTORCH_JIT=0 makes
+    # @torch.jit.script a no-op process-wide (verified: make_log_bucket_position
+    # becomes a plain function, not a torch.jit.ScriptFunction), so the buggy
+    # fuser codegen path can never be reached — eager execution only, same
+    # verified-correct output (confirmed manually: true restatement scores
+    # entailment, contradicted number scores contradiction), no measurable cost
+    # for this tiny O(seq_len^2) position-bucketing step. Must be set before the
+    # first `import torch` anywhere in the process (checked by torch/jit/_state.py
+    # at torch's own init) — this function already runs before cuda_available()'s
+    # `import torch`, and start_server.py's env is inherited by the uvicorn
+    # subprocess it launches. app/main.py sets the same setdefault for the
+    # direct `uvicorn app.main:app --reload` dev path, which never goes through
+    # this file at all.
+    os.environ.setdefault("PYTORCH_JIT", "0")
+
+
+def skip_model_bootstrap() -> bool:
+    """API-only mode: start uvicorn WITHOUT downloading models or running llama-server.
+
+    Off by default — production and normal local dev are unchanged. Set
+    SKIP_MODEL_BOOTSTRAP=true only where the goal is "is the HTTP surface up and
+    well-behaved", not "does inference work".
+
+    This exists for .github/workflows/quality.yml. Those jobs run the container on
+    a plain hosted runner and bind-mount an EMPTY ./.hf_cache, so main()'s normal
+    order — ensure_models() (~25GB / 17 models) -> llama-server -> uvicorn — means
+    the API is the LAST thing to start and /health never answers inside the job's
+    time budget. That, not the image build, is why every Schemathesis/ZAP run has
+    failed on "Wait for API health" since the workflow was written.
+
+    Safe for those jobs specifically: Schemathesis is GET-only contract testing and
+    ZAP's baseline is a passive crawl, so neither invokes inference. Anything that
+    DOES call the LLM (k6's smoke.js POSTs /rag/query) must run against a real
+    deployment instead — see .github/workflows/quality-live.yml.
+
+    The app itself already tolerates missing models: MODEL_CACHE_REQUIRE_MANIFEST
+    defaults to False (app/core/startup_validator.py) and WARMUP_AT_STARTUP gates
+    eager GPU preload (app/main.py), so model loading stays lazy and per-request.
+    """
+    return os.environ.get("SKIP_MODEL_BOOTSTRAP", "").strip().lower() in ("1", "true", "yes", "on")
+
 
 def set_offline_env() -> None:
     # Set AFTER ensure_models() (which needs the network), BEFORE model
@@ -150,6 +205,18 @@ def linux_gpu_setup() -> None:
         if shutil.which(exe) is None:
             log(f"Installing {pkgs} via apt...")
             subprocess.run(["sudo", "apt-get", "install", "-y", *pkgs.split()], check=False)
+
+    # redis-server backs settings.LOCAL_CACHE_HOST/PORT (localhost:6379 by
+    # default — job-status polling, embedding cache, rate limits). install_cuda.sh
+    # provisions + enables it once; this is a cheap self-heal if the service
+    # ever stops (e.g. after an instance reboot with the unit not enabled).
+    if shutil.which("redis-server") is not None:
+        subprocess.run(
+            ["sudo", "systemctl", "start", "redis-server"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
 
 # ── MODELS ─────────────────────────────────────────────────────────────────
@@ -296,13 +363,21 @@ def main() -> None:
     warn_missing_binaries()
     warn_redis_config()
 
-    ensure_models()
-    set_offline_env()
-    check_llama_cpp_import()
+    if skip_model_bootstrap():
+        log(
+            "SKIP_MODEL_BOOTSTRAP=true — API-only mode: no model download, no "
+            "llama-server. Generation endpoints WILL fail; health/schema/GET "
+            "routes work. Never set this in production."
+        )
+        set_offline_env()
+    else:
+        ensure_models()
+        set_offline_env()
+        check_llama_cpp_import()
 
-    llama_proc = launch_llama_server(cuda)
-    atexit.register(lambda: llama_proc.poll() is None and llama_proc.terminate())
-    wait_for_llama_server(llama_proc)
+        llama_proc = launch_llama_server(cuda)
+        atexit.register(lambda: llama_proc.poll() is None and llama_proc.terminate())
+        wait_for_llama_server(llama_proc)
 
     port = int(os.environ.get("PORT", "8000"))
     extra_args = sys.argv[1:]

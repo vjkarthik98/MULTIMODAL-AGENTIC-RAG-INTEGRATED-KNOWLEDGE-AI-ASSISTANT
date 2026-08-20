@@ -84,6 +84,11 @@ class MongoMemory:
     def __init__(self) -> None:
         self._enabled: bool = bool(settings.MONGO_URI) and settings.USE_MONGO
         self._mongo_ok: bool = False
+        # Timestamps for the lazy-reconnect / log-throttle logic in
+        # _is_available(). Without these, a connection that fails at startup
+        # stayed failed for the life of the PROCESS — see _is_available().
+        self._last_connect_attempt: float = 0.0
+        self._unavailable_logged_at: float = 0.0
         self.client = None
         self.db = None
         self.messages = None
@@ -104,6 +109,9 @@ class MongoMemory:
     # CONNECTION
 
     def _connect(self) -> None:
+        # Recorded BEFORE the attempt so a slow failure (Atlas server-selection
+        # timeout is DB_TIMEOUT_MS, ~5s) still throttles correctly.
+        self._last_connect_attempt = time.time()
         try:
             self.client = MongoClient(
                 settings.MONGO_URI,
@@ -141,6 +149,41 @@ class MongoMemory:
     # AVAILABILITY CHECK
 
     def _is_available(self) -> bool:
+        """True when Mongo is usable, retrying a dead connection periodically.
+
+        `_connect()` used to run exactly once, from __init__. Any startup
+        failure therefore became PERMANENT for the life of the process: the
+        flag it sets was never revisited, so even after the backend recovered,
+        every write kept short-circuiting until someone restarted the
+        container. Observed live on staging (CD run 31139999120): one
+        `mongo_connection_failed` (Atlas TLS handshake rejected on all three
+        replica-set members) followed by 40 x `mongo_store_skipped_unavailable`
+        — i.e. conversation memory silently not persisting for the whole run.
+
+        Retry is throttled to MONGO_RECONNECT_INTERVAL_SEC because a failed
+        attempt costs a full server-selection timeout (~5s). At the default
+        that is one slow call every 5 minutes in the worst case, which buys
+        automatic recovery without a redeploy; set the interval higher if that
+        trade is wrong for a given environment.
+        """
+        if self._mongo_ok and self.messages is not None:
+            return True
+
+        if not self._enabled or not _PYMONGO_AVAILABLE:
+            return False
+
+        interval = getattr(settings, "MONGO_RECONNECT_INTERVAL_SEC", 300)
+        # <= 0 means "never retry" (the pre-existing behaviour). Without this
+        # guard a 0 would make the comparison below always true and reconnect
+        # on EVERY call — a ~5s server-selection timeout per write, the exact
+        # opposite of what disabling should do.
+        if interval <= 0:
+            return False
+
+        if (time.time() - self._last_connect_attempt) >= interval:
+            logger.info(event="mongo_reconnect_attempt")
+            self._connect()
+
         return self._mongo_ok and self.messages is not None
 
     # PING WITH CIRCUIT BREAKER
@@ -335,10 +378,21 @@ class MongoMemory:
             return
 
         if not self._is_available():
-            logger.warning(
-                event="mongo_store_skipped_unavailable",
-                session_id=session_id,
-            )
+            # Throttled: this fires on EVERY write while Mongo is down, which
+            # produced 40 identical lines in a single Tier-2 run and buried the
+            # one line that explains why (`mongo_connection_failed`, with the
+            # actual TLS/DNS/auth error). One line per reconnect window is
+            # enough to know memory is not persisting.
+            _now = time.time()
+            _interval = getattr(settings, "MONGO_RECONNECT_INTERVAL_SEC", 300)
+            if (_now - self._unavailable_logged_at) >= _interval:
+                self._unavailable_logged_at = _now
+                logger.warning(
+                    event="mongo_store_skipped_unavailable",
+                    session_id=session_id,
+                    hint="Mongo unreachable — conversation memory is NOT being persisted. "
+                    "See the preceding mongo_connection_failed event for the cause.",
+                )
             return
 
         try:

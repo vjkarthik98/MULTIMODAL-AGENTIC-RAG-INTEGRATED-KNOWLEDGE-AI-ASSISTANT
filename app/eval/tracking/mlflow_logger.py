@@ -18,7 +18,28 @@ from typing import Any
 
 from app.eval.metrics.base import SuiteResult
 
-MLFLOW_TRACKING_URI = "mlruns"  # file-backend; override with env var MLFLOW_TRACKING_URI
+# SQLite, not a bare "mlruns" directory. Current MLflow REFUSES the filesystem
+# tracking backend outright rather than merely warning about it:
+#
+#   [WARN] MLflow logging failed (non-fatal): The filesystem tracking backend
+#   (e.g., './mlruns') is in maintenance mode and will not receive further
+#   updates. Please migrate to a database backend ...
+#
+# — raised on every run of the Tier-2 suite (CD run 31139999120). Because
+# app/eval/run.py catches it and prints "[WARN] ... (non-fatal)", the failure
+# was cosmetic-looking but total: NOTHING was ever logged to MLflow. Every
+# param, metric and artifact this module exists to record was silently
+# discarded, so the experiment-tracking history has a hole for the entire
+# period the installed MLflow has enforced this.
+#
+# sqlite is the migration path MLflow's own message recommends, needs no
+# server, and keeps the store a single gitignored file next to the old
+# directory. MLFLOW_TRACKING_URI still overrides it, so pointing at a hosted
+# tracking server later remains a one-variable swap (Phase 30).
+#
+# NOT using MLFLOW_ALLOW_FILE_STORE=true — that opt-out keeps a backend
+# upstream has declared end-of-life, which only defers this.
+MLFLOW_TRACKING_URI = "sqlite:///mlruns.db"
 EXPERIMENT_NAME = "multimodal-rag-eval"
 
 

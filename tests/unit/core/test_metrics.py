@@ -35,3 +35,13 @@ class TestMetricsImport:
         except Exception as exc:
             # Only Prometheus registration errors are acceptable — not AttributeErrors
             assert "already" in str(exc).lower() or isinstance(exc, ValueError)
+
+    def test_reranker_latency_importable(self):
+        from app.core.metrics import reranker_latency
+        assert reranker_latency is not None
+
+    def test_reranker_latency_observe_does_not_raise(self):
+        from app.core.metrics import reranker_latency
+        # No labels() call needed — it's a single, unlabeled histogram
+        # (exactly one reranker in this deployment).
+        reranker_latency.observe(0.123)

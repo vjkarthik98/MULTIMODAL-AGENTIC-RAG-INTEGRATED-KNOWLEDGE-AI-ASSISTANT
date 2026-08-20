@@ -35,7 +35,6 @@ logger = get_logger(__name__)
 _policy: dict = {}
 _template_patterns: list[re.Pattern] = []
 _toxicity_threshold: float = 0.75
-_groundedness_threshold: float = 0.30
 _max_answer_chars: int = 16000
 _citation_validation: bool = True
 _refusal_templates: dict = {}
@@ -54,7 +53,7 @@ _policy_loaded = False
 
 def _load_policy() -> None:
     global _policy, _template_patterns, _toxicity_threshold
-    global _groundedness_threshold, _max_answer_chars, _citation_validation
+    global _max_answer_chars, _citation_validation
     global _refusal_templates, _policy_loaded
     if _policy_loaded:
         return
@@ -64,7 +63,6 @@ def _load_policy() -> None:
         _policy = get_policy()
         out = _policy.get("output", {})
         _toxicity_threshold = float(out.get("toxicity_threshold", 0.75))
-        _groundedness_threshold = float(out.get("groundedness_threshold", 0.30))
         _max_answer_chars = int(out.get("max_answer_chars", 16000))
         _citation_validation = bool(out.get("citation_validation", True))
         _refusal_templates = out.get("refusal_templates", {})
@@ -173,13 +171,22 @@ def _check_groundedness(
     context_chunks: list[str],
     session_id: str,
 ) -> tuple[bool, dict | None]:
-    """Reuse Phase 25 hallucination detector. Returns (flagged, detail)."""
+    """GroundednessChecker — the same lexical + NLI-contradiction + numeric
+    check used by reasoning_engine.generate_answer() and VerificationLoop as
+    of the hallucination-reduction initiative's Phase 4 consolidation
+    (2026-08-13). Previously called a THIRD, independent implementation
+    (app.eval.metrics.hallucination.hallucination_flag_single, the "Phase 25"
+    detector) with its own separate threshold — the three could and did
+    disagree with each other on the same answer. `is_hallucinated` is
+    GroundednessChecker's own verdict directly; no separate threshold
+    comparison needed here anymore (see the retired `_groundedness_threshold`
+    below). Returns (flagged, detail)."""
     try:
-        from app.eval.metrics.hallucination import hallucination_flag_single
+        from app.verification.groundedness_checker import GroundednessChecker
 
-        result = hallucination_flag_single(answer, context_chunks)
-        flagged = result.get("confidence", 0.0) >= _groundedness_threshold
-        return flagged, result
+        docs = [{"text": c} for c in context_chunks]
+        result = GroundednessChecker().check(answer, docs)
+        return result.is_hallucinated, result.model_dump()
     except Exception as e:
         logger.warning("output_guard_groundedness_failed", error=str(e))
         return False, None

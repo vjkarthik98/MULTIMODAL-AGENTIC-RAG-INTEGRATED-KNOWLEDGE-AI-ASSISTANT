@@ -20,7 +20,19 @@ from typing import Any
 
 from app.verification.verification_schema import CitationCheckResult
 
-_CLAIM_WORD_RE = re.compile(r"[a-zA-Z0-9%$.]+")
+# Two alternatives: a run of letters (plain words), OR a numeric token that
+# may carry a leading $, thousands-separator commas, a decimal part, and a
+# trailing % — e.g. "$391,035" or "46.2%". The old single character class
+# `[a-zA-Z0-9%$.]+` did not include ",", so a comma-grouped figure like
+# "$391,035" split into "$391" (4 chars) and "035" (3 chars) — BOTH under the
+# `len(w) > 4` significance filter below, making the most common financial
+# number format in this domain invisible to the support check regardless of
+# whether the cited chunk actually contains it. Live-reproduced (2026-08-17,
+# citation_accuracy_v2 cross-modality follow-up): a citation whose chunk
+# verbatim contained "$391,035 | $383,285 | $394,328" — exactly the answer's
+# own stated figures — still scored 0.0 (flagged bad) because none of those
+# three numbers survived tokenization to be counted as a match.
+_CLAIM_WORD_RE = re.compile(r"[a-zA-Z]+|\$?\d[\d,]*\.?\d*%?")
 _CLAIM_WINDOW_CHARS = 160
 _MIN_CLAIM_SUPPORT_FRAC = 0.20
 
@@ -52,7 +64,7 @@ class CitationVerifier:
             if not chunk_text:
                 bad.append(key)
                 continue
-            if not self._claim_supported(answer, key, chunk_text):
+            if not self._all_occurrences_supported(answer, key, chunk_text):
                 bad.append(key)
 
         checked = len(cited)
@@ -82,10 +94,42 @@ class CitationVerifier:
             out[key] = (doc.get("text") if doc else None) or s.get("snippet") or ""
         return out
 
-    @staticmethod
-    def _claim_supported(answer: str, cite_key: str, chunk_text: str) -> bool:
+    @classmethod
+    def _all_occurrences_supported(cls, answer: str, cite_key: str, chunk_text: str) -> bool:
+        """Every USE of this cite_key must be supported, not just the first.
+
+        Two bugs, both live-reproduced (2026-08-17, citation_accuracy_v2
+        cross-modality follow-up) with a source cited twice for two
+        different claims under the same tag ("Gross margin was 46.2% [1].
+        iPhone shipments increased 15% [1]."), the second claim being about
+        a topic the cited chunk never mentions at all:
+        1. answer.find() alone only ever locates the FIRST occurrence, so
+           only the first claim's window was ever checked — a fabricated or
+           unrelated second claim under the same tag was invisible to this
+           check entirely (scored 100.0, zero bad_citations).
+        2. Fixing (1) alone by scanning every occurrence still wasn't enough
+           when two citations of the same key are close together: the fixed
+           160-char lookback window for the SECOND citation still reached
+           backward across the sentence boundary into the FIRST claim's
+           (genuinely supported) text, diluting the word-overlap score with
+           borrowed support that has nothing to do with the second claim.
+           window_start (anchored to just after the PREVIOUS occurrence of
+           this same key) stops each window at its own claim's boundary.
+        """
         idx = answer.find(cite_key)
-        window = answer[max(0, idx - _CLAIM_WINDOW_CHARS) : idx] if idx >= 0 else answer
+        if idx < 0:
+            return True
+        window_start = 0
+        while idx >= 0:
+            if not cls._claim_supported(answer, idx, chunk_text, window_start):
+                return False
+            window_start = idx + len(cite_key)
+            idx = answer.find(cite_key, window_start)
+        return True
+
+    @staticmethod
+    def _claim_supported(answer: str, idx: int, chunk_text: str, window_start: int = 0) -> bool:
+        window = answer[max(window_start, idx - _CLAIM_WINDOW_CHARS) : idx]
         words = [w.lower() for w in _CLAIM_WORD_RE.findall(window) if len(w) > 4]
         if not words:
             # No substantive claim text before the tag (e.g. tag opens the

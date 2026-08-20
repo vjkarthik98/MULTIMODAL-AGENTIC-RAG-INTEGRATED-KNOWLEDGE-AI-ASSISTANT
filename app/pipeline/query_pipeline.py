@@ -10,12 +10,18 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
 from app.core.config import settings
 from app.core.metrics import llm_call_latency as _shared_llm_latency
 from app.core.metrics import retrieval_latency as _shared_retrieval_latency
+from app.prompt.prompt_builder import PROMPT_VERSION
+from app.utils import otel_attrs
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 # PROMETHEUS METRICS — SECTION 6
@@ -213,7 +219,9 @@ def _source_coherence_filter(docs: list[dict[str, Any]]) -> list[dict[str, Any]]
     return kept
 
 
-def _fetch_digitized_chart_payload(user_id: str) -> dict[str, Any]:
+def _fetch_digitized_chart_payload(
+    user_id: str, scope_sources: list[str] | None = None
+) -> dict[str, Any]:
     """Fetch the user's digitized line-chart chunk (the one carrying the
     'CHART VALUES' block) straight from the vision collection, returning its
     Qdrant payload (text + source + metadata) or {}.
@@ -225,9 +233,20 @@ def _fetch_digitized_chart_payload(user_id: str) -> dict[str, Any]:
     abstains and the deterministic chart synth never sees the data. This pulls it
     back directly (tenant-scoped by user_id). Caller-gated to chart-shaped
     queries; the synth returns None for anything it can't answer, so it's safe.
+
+    `scope_sources` is the query's active file scope. Tenant scoping ALONE is
+    not enough: this bypasses retrieval entirely, so on a KB holding more than
+    one chart it happily injected a DIFFERENT file's chart into a query the
+    caller had explicitly scoped to one document. Confirmed live (2026-08-08):
+    video-0014 asks about the on-screen chart in "Q4 2025 Earnings Call.mp4"
+    and the word "chart" in the query pulled in a standalone stock-chart image,
+    which then drove the whole answer — it reported Alphabet/GOOGL movements
+    for a question about Apple's earnings broadcast. Matching mirrors the
+    retriever's own `sources` filter: case-insensitive substring.
     """
     if not user_id:
         return {}
+    _scope = [str(s).lower() for s in (scope_sources or []) if str(s).strip()]
     try:
         from qdrant_client.models import FieldCondition, Filter, MatchValue
 
@@ -244,8 +263,13 @@ def _fetch_digitized_chart_payload(user_id: str) -> dict[str, Any]:
         )
         for p in pts:
             payload = p.payload or {}
-            if "CHART VALUES" in (payload.get("text", "") or ""):
-                return payload
+            if "CHART VALUES" not in (payload.get("text", "") or ""):
+                continue
+            if _scope:
+                _src = str(payload.get("source") or "").lower()
+                if not any(tok in _src for tok in _scope):
+                    continue
+            return payload
     except Exception:
         return {}
     return {}
@@ -571,6 +595,59 @@ def _get_hybrid(embedder: Any) -> Any:
     return _hybrid
 
 
+def _resync_verification_grounding(
+    output: dict[str, Any],
+    final_answer: str,
+    docs: list[dict[str, Any]],
+    query: str,
+    session_id: str,
+    deterministic_answer: bool = False,
+) -> None:
+    """Re-score the groundedness dimension against the answer actually being
+    shipped, when a post-verification step replaced the verified text.
+
+    VerificationLoop scores the answer it generated; a later deterministic
+    rewrite (currently only `_synthesize_image_chart_answer`) can discard that
+    text entirely, leaving `output["verification"]` describing an answer the
+    caller never sees. That silently corrupted image's grounding_success_rate
+    (0.000 measured on the discarded draft, while the shipped answer scores
+    100.0 standalone).
+
+    Mutates `output["verification"]` in place. No-op when verification never
+    ran (hybrid_web / fallback paths leave the key absent). Best-effort: any
+    failure leaves the existing report untouched rather than dropping it,
+    since a stale score is still more useful than none.
+    """
+    report = (output or {}).get("verification")
+    if not isinstance(report, dict) or not final_answer:
+        return
+    try:
+        from app.verification.groundedness_checker import GroundednessChecker
+
+        result = GroundednessChecker().check(
+            final_answer, docs, query=query, deterministic_answer=deterministic_answer
+        )
+        scores = report.get("scores")
+        if isinstance(scores, dict):
+            scores["grounding"] = result.score
+        report["unsupported_claims"] = result.unsupported_claims + [
+            f"unsupported number: {n}" for n in result.unsupported_numbers
+        ]
+        report["grounding_resynced"] = True
+        logger.info(
+            event="verification_grounding_resynced",
+            grounding=result.score,
+            is_hallucinated=result.is_hallucinated,
+            session_id=session_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            event="verification_grounding_resync_failed",
+            error=str(exc),
+            session_id=session_id,
+        )
+
+
 def _get_reasoning_components(llm: Any):
     global _reasoning, _decomposer
     if _reasoning is None or _decomposer is None:
@@ -819,7 +896,15 @@ def _is_peer_list_chunk(text: str) -> bool:
     distinct stock tickers in a table. NOT triggered by a single-company metrics
     summary table (Revenue | Gross Margin | ...), which has neither.
     """
-    if len(set(_COMPANY_SUFFIX_RE.findall(text))) >= 2:
+    # Strip the optional trailing "." before deduplicating: the SAME company
+    # written inconsistently across a chunk ("Apple Inc-" in a chart title
+    # line vs "Apple Inc." in its data rows — an OCR/digitization punctuation
+    # artifact, confirmed live 2026-08-08 on a digitized line-chart chunk)
+    # otherwise counts as two distinct suffixes ("Inc" and "Inc.") for a
+    # single-company chunk, wrongly classifying it as a multi-company peer
+    # list and making _orgper_grounded reject that company as ungrounded.
+    _suffixes = {m.rstrip(".") for m in _COMPANY_SUFFIX_RE.findall(text)}
+    if len(_suffixes) >= 2:
         return True
     tickers = set(re.findall(r"\b[A-Z]{3,5}\b", text))
     # drop common finance acronyms that are not tickers
@@ -875,11 +960,38 @@ def _period_ungrounded(query: str, context_low: str) -> bool:
     # (?<!\d)…(?!\d) so "FY2026"/"fiscal2026" match but digits inside larger
     # numbers (e.g. 391,035) do not.
     _yr = r"(?<!\d)(20\d{2})(?!\d)"
-    q_years = {int(y) for y in re.findall(_yr, query.lower())}
+    q_low = query.lower()
+    q_years = {int(y) for y in re.findall(_yr, q_low)}
     ctx_years = {int(y) for y in re.findall(_yr, context_low)}
     if not q_years or not ctx_years:
         return False
-    return min(q_years) > max(ctx_years)
+    if min(q_years) <= max(ctx_years):
+        return False
+
+    # FORWARD-GUIDANCE EXEMPTION. Asking what a company GUIDED for its next
+    # quarter names a period that is, by definition, in the future — an
+    # earnings call states "we expect December quarter revenue to grow 10-12%"
+    # without ever printing "2026". The year test alone therefore abstained on
+    # a question the source answers outright (video-0009, confirmed live
+    # 2026-08-08), reporting nothing found while the figure sat in the
+    # retrieved context.
+    #
+    # Kept deliberately narrow — only the NEXT period, only when the query
+    # names a QUARTER. A full-YEAR guidance question about the same future
+    # year is a different claim, and one this call genuinely does not answer,
+    # so it must keep abstaining (video-refusal-001 asks exactly that).
+    _is_guidance = any(
+        w in q_low for w in ("guidance", "guide", "outlook", "forecast", "expect", "project")
+    )
+    _names_quarter = bool(re.search(r"\bq[1-4]\b|\bquarter\b", q_low))
+    _names_full_year = bool(
+        re.search(r"\bfull[- ]year\b|\bfull fiscal year\b|\bentire year\b", q_low)
+    )
+    if _is_guidance and _names_quarter and not _names_full_year:
+        if min(q_years) <= max(ctx_years) + 1:
+            return False
+
+    return True
 
 
 def _query_entities_ungrounded(query: str, docs: list[dict[str, Any]]) -> bool:
@@ -898,6 +1010,22 @@ def _query_entities_ungrounded(query: str, docs: list[dict[str, Any]]) -> bool:
         return False
 
     context = " ".join(str(d.get("text", "") or "") for d in docs)
+    # Append each doc's SOURCE FILENAME to the context used for period-
+    # grounding. A source is often dated in its own filename ("FOMC Press
+    # Conference September 18, 2024.mp3", "Q4 2025 Earnings Call.mp4") without
+    # every individual chunk restating that year in its body text — spoken
+    # transcripts especially: the meeting's own date is implicit, while an
+    # explicit comparison to an OLDER year ("back in July 2023...") often IS
+    # restated. Without this, _period_ungrounded below sees only the older
+    # comparison year in ctx_years, concludes the query's actual (current,
+    # in-source) year is impossibly "in the future", and wrongly abstains.
+    # Confirmed live (2026-08-08): a September-2024-dated audio source, asked
+    # a plain September-2024 question, abstained because the only years its
+    # top reranked chunks explicitly mentioned were 2019/2023 (historical
+    # comparisons), not 2024 itself.
+    context += " " + " ".join(
+        str((d.get("metadata") or {}).get("source") or d.get("source") or "") for d in docs
+    )
     context_low = context.lower()
     if not context_low:
         return False
@@ -1151,7 +1279,56 @@ async def stream_query(
 # MAIN QUERY PIPELINE
 
 
-def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-up refactor, not fixed inline to avoid changing tuned RAG query behavior
+def query_pipeline(
+    query: str,
+    session_id: str = "default",
+    sources: list[str] | None = None,
+    user_id: str | None = None,
+    no_cache: bool = False,
+    regenerate: bool = False,
+) -> dict[str, Any]:
+    """OTel root-span boundary around `_query_pipeline_impl` — the tuned
+    pipeline body below is unchanged, this only gives it a real request-level
+    trace to nest under. Before this wrapper, the per-module spans already
+    inside agent_controller.py/reasoning_engine.py/qdrant_store.py/
+    prompt_builder.py each opened as their OWN disconnected root trace (no
+    parent context was ever active), so Tempo held fragments, never one
+    coherent per-request waterfall. Version attributes here are what let a
+    quality regression be correlated back to a specific deploy."""
+    with tracer.start_as_current_span("query_pipeline") as span:
+        span.set_attribute("app.version", settings.APP_VERSION)
+        span.set_attribute("git.sha", settings.GIT_SHA)
+        span.set_attribute("embedding.model", settings.EMBEDDING_MODEL)
+        span.set_attribute("reranker.model", settings.RERANKER_MODEL)
+        span.set_attribute("prompt.version", PROMPT_VERSION)
+        span.set_attribute("session.id", session_id or "-")
+        span.set_attribute("query.length", len(query or ""))
+        otel_attrs.set_span_kind(span, "CHAIN")
+        otel_attrs.set_input_output(span, input_value=query)
+        try:
+            result = _query_pipeline_impl(
+                query,
+                session_id=session_id,
+                sources=sources,
+                user_id=user_id,
+                no_cache=no_cache,
+                regenerate=regenerate,
+            )
+            span.set_attribute("decision", str(result.get("decision", "unknown")))
+            span.set_attribute("cache_hit", bool(result.get("cache_hit", False)))
+            span.set_attribute("confidence", float(result.get("confidence") or 0.0))
+            if result.get("request_id"):
+                span.set_attribute("request.id", str(result["request_id"]))
+            otel_attrs.set_input_output(span, output_value=result.get("answer"))
+            span.set_status(Status(StatusCode.OK))
+            return result
+        except Exception as exc:
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            span.record_exception(exc)
+            raise
+
+
+def _query_pipeline_impl(  # noqa: C901 -- known complexity debt (93), tracked follow-up refactor, not fixed inline to avoid changing tuned RAG query behavior
     query: str,
     session_id: str = "default",
     sources: list[str] | None = None,
@@ -1162,7 +1339,6 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
 
     start = time.time()
     trace_id = str(uuid.uuid4())
-    # OTEL SPAN STUB
 
     if not query or not query.strip():
         return {
@@ -1488,8 +1664,9 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
         # no explicit file scope was already requested; deeper top_k so the
         # right-aspect chunk is present. Falls back to unscoped below if the scope
         # yields too little (e.g. a month with no matching source, like "August").
+        _explicit_source_scope = bool(retrieval_filters and retrieval_filters.get("sources"))
         _meeting_scope = None
-        if not (retrieval_filters and retrieval_filters.get("sources")):
+        if not _explicit_source_scope:
             _meeting_scope = _query_meeting_month_tokens(query) or _query_call_source_tokens(query)
         _base_filters = retrieval_filters
         _scoped_filters = retrieval_filters
@@ -1502,6 +1679,25 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
             # transcript chunks, so cast a wide net to get it into the reranker's
             # input. The pool is one meeting, so a large top_k adds no cross-doc
             # noise.
+            _scoped_top_k = 50
+        elif _explicit_source_scope:
+            # An EXPLICIT file scope (the UI's "@file" picker, or the eval
+            # harness passing `sources`) narrows the pool exactly the way the
+            # meeting-scope branch above does — same rationale, stronger
+            # guarantee, because the caller named the file rather than us
+            # inferring it. Yet it used to take the unscoped path: top_k stayed
+            # at DEFAULT_TOP_K and the cross-encoder only ever saw fusion's
+            # RERANK_TOP_K-capped output, so for a 90-chunk earnings call the
+            # answer-bearing chunk frequently never entered the candidate pool
+            # at all. Confirmed live (2026-08-08) on video_gold: the Mac-revenue
+            # chunk and the dividend-declaration chunk were ABSENT from all 20
+            # final docs, and the December-guidance question abstained outright
+            # — all three answer correctly once the pool is deepened here.
+            #
+            # This is the same class of bug already fixed in hybrid_retriever's
+            # `is_vision` gate: an explicit `sources` filter was disabling an
+            # optimisation that should apply *more* strongly when the scope is
+            # explicit, not less.
             _scoped_top_k = 50
 
         def _run_retrieval(_filters, _top_k):
@@ -1528,7 +1724,13 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
             return _out
 
         retrieved = _run_retrieval(_scoped_filters, _scoped_top_k)
-        _meeting_scoped_active = bool(_meeting_scope)
+        # Both scoping routes give the cross-encoder the full single-source
+        # candidate set below. The unscoping fallback stays tied to
+        # `_meeting_scope` alone: an INFERRED month may match no source at all,
+        # but an EXPLICIT scope is the caller's stated intent — silently
+        # widening it to other files would answer from a document the user did
+        # not ask about.
+        _meeting_scoped_active = bool(_meeting_scope) or _explicit_source_scope
         # Fallback: the meeting scope matched no (or too little) content — the
         # named month isn't a KB source. Retrieve unscoped instead.
         if (
@@ -1718,6 +1920,50 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
         # SOURCE-COHERENCE FILTER — keep top-N files; drop cross-file noise
         final_docs = _source_coherence_filter(final_docs)
 
+        # CHART PAYLOAD EARLY FETCH — the reranker/coherence filter routinely
+        # drops the single digitized CHART VALUES chunk below text chunks (the
+        # same drop the post-generation chart-synth override already works
+        # around via _fetch_digitized_chart_payload, further below). Doing
+        # that fetch here too, BEFORE entity-grounding, matters because the
+        # abstention check runs on `final_docs` as it stands right now: for a
+        # 3-series comparison chart, an NER-tagged company like "Apple Inc."
+        # correctly enters _orgper_grounded's check, but "S&P 500"/"Dow Jones"
+        # typically aren't NER-tagged as an org at all — so if the chart chunk
+        # is missing, Apple-specific chart questions wrongly abstain
+        # ("No relevant information...") while index-only questions on the
+        # SAME chart happen to skip the check and still succeed. Confirmed
+        # live (2026-08-08, img-0001/0004/0006/0007 all abstained this way
+        # while img-0002/0003 answered correctly from the identical chart).
+        if "chart" in query.lower() and not any(
+            "CHART VALUES" in str(d.get("text", "") or "") for d in final_docs
+        ):
+            try:
+                _early_cp = _fetch_digitized_chart_payload(
+                    user_id, scope_sources=(retrieval_filters or {}).get("sources")
+                )
+                if _early_cp.get("text"):
+                    # Normalize to the same shape as every other final_docs
+                    # entry (text/source/score/metadata at predictable keys) —
+                    # _fetch_digitized_chart_payload returns the RAW Qdrant
+                    # payload (source/chunk_id/etc. all top-level, no nested
+                    # "metadata"), which downstream citation/source-building
+                    # code does not expect.
+                    final_docs = final_docs + [
+                        {
+                            "text": _early_cp.get("text", ""),
+                            "source": _early_cp.get("source", ""),
+                            "modality": _early_cp.get("modality", "image"),
+                            "score": 1.0,
+                            "metadata": _early_cp,
+                        }
+                    ]
+            except Exception as _ecpe:
+                logger.warning(
+                    event="query_pipeline_early_chart_fetch_failed",
+                    error=str(_ecpe),
+                    session_id=session_id,
+                )
+
         # ENTITY-GROUNDING ABSTENTION — if the query names a company/person/location
         # that appears in NONE of the retrieved chunks, the context is about a
         # different subject; abstain instead of answering with the wrong entity's
@@ -1885,6 +2131,44 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
                 _modality_hint = str(
                     ((final_docs[:1] or [{}])[0].get("metadata") or {}).get("modality") or ""
                 ).lower()
+
+                # SKIP-RETRIES PRE-CHECK (2026-08-17, image retry-waste
+                # follow-up). Image chart-value/comparison answers and docx
+                # table-row lookups are both deterministically SYNTHESIZED
+                # after this loop returns, discarding whatever the LLM
+                # drafted (see the "IMAGE CHART synth override" / "DOCX
+                # TABLE-ROW synth override" blocks below) — so retrying
+                # against the draft can never change the answer the user
+                # receives. Live-measured before this fix: 14/14 image
+                # queries retried for 0 eventual successes, pure wasted
+                # latency. Both synth functions are cheap/pure (no LLM call),
+                # so calling them speculatively here to KNOW synthesis will
+                # fire — rather than guessing from a keyword heuristic — costs
+                # nothing but a few string operations either way.
+                _skip_retries = False
+                try:
+                    if _modality_hint == "docx":
+                        from app.pipeline.rag_pipeline import _synthesize_docx_table_answer
+
+                        if _synthesize_docx_table_answer(query, final_docs):
+                            _skip_retries = True
+                    elif _modality_hint == "image":
+                        from app.pipeline.rag_pipeline import _synthesize_image_chart_answer
+
+                        _precheck_ctx = "\n".join(
+                            d.get("text", "") for d in (final_docs or []) if isinstance(d, dict)
+                        )
+                        if "CHART VALUES" in _precheck_ctx and _synthesize_image_chart_answer(
+                            query, _precheck_ctx
+                        ):
+                            _skip_retries = True
+                except Exception as _skip_check_err:
+                    logger.warning(
+                        event="query_pipeline_skip_retries_precheck_failed",
+                        error=str(_skip_check_err),
+                        session_id=session_id,
+                    )
+
                 _verify_loop = VerificationLoop()
                 _verified_answer, _verify_report = _verify_loop.run(
                     query=query,
@@ -1899,6 +2183,7 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
                     filters=retrieval_filters,
                     memory_context=memory_context,
                     regenerate=regenerate,
+                    skip_retries=_skip_retries,
                 )
                 logger.info(
                     event="query_pipeline_verification_result",
@@ -2146,7 +2431,9 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
         )
         if "CHART VALUES" not in _img_context and "chart" in query.lower():
             try:
-                _cp = _fetch_digitized_chart_payload(user_id)
+                _cp = _fetch_digitized_chart_payload(
+                    user_id, scope_sources=(retrieval_filters or {}).get("sources")
+                )
                 if _cp.get("text"):
                     _img_context = (_img_context + "\n" + _cp["text"]).strip()
             except Exception as _fe:
@@ -2163,12 +2450,85 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
                 _img_synth = _synthesize_image_chart_answer(query, _img_context)
                 if _img_synth:
                     answer = _expand_chart_dates(_img_synth)
+                    # VERIFY WHAT WE SHIP (2026-08-13, per-modality quality pass).
+                    # VerificationLoop already ran ~270 lines above and scored
+                    # the LLM's answer — which this synthesis just DISCARDED and
+                    # replaced. Without re-scoring, output["verification"]
+                    # describes text that was never delivered. Confirmed live:
+                    # every image gold row reported grounding=0.0 (driving
+                    # image's grounding_success_rate to 0.000) while the
+                    # delivered synthesized answer independently scores 100.0
+                    # with NLI contradiction 0.0003 — the metric was measuring
+                    # the thrown-away draft, not the shipped answer.
+                    #
+                    # Only the grounding dimension is re-scored: it is the one
+                    # that is answer-dependent and cheap to recompute (lexical
+                    # overlap + one NLI batch, NO LLM call). `verified`/`overall`
+                    # are deliberately NOT recomputed — that would need the
+                    # retrieval/citation/completeness result objects, which are
+                    # not reconstructable from the serialized report without
+                    # inventing values (CompletenessResult in particular records
+                    # only `missing`, not the total aspect count). Left as a
+                    # documented limitation rather than a fabricated recompute.
+                    # deterministic_answer=True: this text was parsed straight
+                    # out of the context's own CHART VALUES block, so the NLI
+                    # entailment check is skipped (it produced false
+                    # contradictions on 11/14 image rows). Lexical + numeric
+                    # grounding still run — see lexical_and_nli_verdict().
+                    _resync_verification_grounding(
+                        output,
+                        answer,
+                        final_docs,
+                        query,
+                        session_id,
+                        deterministic_answer=True,
+                    )
                 else:
                     answer = _expand_chart_dates(answer)
             except Exception as _img_synth_err:
                 logger.warning(
                     event="query_pipeline_image_synth_failed",
                     error=str(_img_synth_err),
+                    session_id=session_id,
+                )
+
+        # DOCX TABLE-ROW synth override (2026-08-16, per-modality quality pass
+        # docx follow-up). Same rationale/self-gating as the image chart synth
+        # above: live probes showed the model restating an unrelated
+        # "Executive Summary" narrative regardless of which line item was
+        # asked, even when the correct table row ranked #1 in retrieval. A
+        # prompt-side fix was tried and measured WORSE on the full docx suite
+        # — twice, once in prompt_builder.py (which only serves the SSE
+        # streaming path, not this one) and once in reasoning_engine.py
+        # (which does serve this path) — before this deterministic extractor
+        # replaced it. See app/pipeline/rag_pipeline.py::_synthesize_docx_table_answer.
+        if any(
+            isinstance(d, dict) and (d.get("metadata") or {}).get("modality") == "docx"
+            for d in (final_docs or [])
+        ):
+            try:
+                from app.pipeline.rag_pipeline import _synthesize_docx_table_answer
+
+                _docx_synth = _synthesize_docx_table_answer(query, final_docs)
+                if _docx_synth:
+                    answer = _docx_synth
+                    # deterministic_answer=True: this text was parsed straight
+                    # out of the context's own table rows, so the NLI
+                    # entailment check is skipped — same rationale as the
+                    # image chart synth (mechanically-extracted text, not LLM
+                    # free-form generation).
+                    _resync_verification_grounding(
+                        output,
+                        answer,
+                        final_docs,
+                        query,
+                        session_id,
+                        deterministic_answer=True,
+                    )
+            except Exception as _docx_synth_err:
+                logger.warning(
+                    event="query_pipeline_docx_synth_failed",
+                    error=str(_docx_synth_err),
                     session_id=session_id,
                 )
 
@@ -2262,6 +2622,13 @@ def query_pipeline(  # noqa: C901 -- known complexity debt (93), tracked follow-
                     }
                 ),
                 "eval_context": _eval_context,
+                # PHASE 32 verification report (set only on the non-hybrid_web
+                # branch above, None otherwise) — previously computed and
+                # discarded here; surfaced so the eval harness can baseline
+                # thresholds.yaml's `verification.*` metrics without a
+                # duplicate verification pass. See app/verification/
+                # verification_schema.py::VerificationReport.to_dict().
+                "verification": output.get("verification"),
             },
         }
 

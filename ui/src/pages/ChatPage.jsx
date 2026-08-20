@@ -42,6 +42,10 @@ const isExplicitWebQuery = (q) => {
   return _WEB_PHRASES.some(p => lc.includes(p))
 }
 
+// Shared by the KB-empty guard and the file-scope-required guard so a plain
+// "hi" still gets a friendly reply instead of being blocked on either check.
+const _GREETING = /^(hi+|hello+|hey+|howdy|hiya|greetings|good\s+(morning|afternoon|evening|day))[\s!.,?]*$/i
+
 const PLACEHOLDERS = [
   'Ask anything about your files…',
 ]
@@ -59,16 +63,6 @@ function fileModalityIcon(filename) {
   if (ext === 'TXT')                                        return <FileType   size={13} style={{ color: '#94a3b8', flexShrink: 0 }} />
   if (['DOC','DOCX'].includes(ext))                         return <LetterText size={13} style={{ color: '#60a5fa', flexShrink: 0 }} />
   return <FileIcon size={13} style={{ color: 'var(--t-tx5)', flexShrink: 0 }} />
-}
-
-function buildSuggestions(kbFiles) {
-  if (!kbFiles.length) return []
-  return kbFiles.slice(0, 3).map((f, i) => {
-    const name = f.filename.replace(/\.[^.]+$/, '')
-    if (i === 0) return `Summarise ${name}`
-    if (i === 1) return `What does the ${name} show?`
-    return `Key trends in ${name}?`
-  })
 }
 
 export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStreamingChange }) {
@@ -331,7 +325,6 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
     // hallucinated answers when the user hasn't uploaded any files yet.
     // Skip this guard in web search mode: the search tool doesn't need a KB.
     if (kbFiles.length === 0 && !webSearchMode) {
-      const _GREETING = /^(hi+|hello+|hey+|howdy|hiya|greetings|good\s+(morning|afternoon|evening|day))[\s!.,?]*$/i
       const reply = _GREETING.test(text)
         ? `Hello! I'm your AI knowledge assistant.\n\nTo get started, please **upload your documents** using the Files panel in the left sidebar. I support:\n- PDFs, Word documents, Excel spreadsheets\n- Images, audio recordings, videos\n\nOnce your files are uploaded, I'll be ready to answer any questions about your content.`
         : `Your knowledge base is currently **empty**. Please upload documents using the **Files** panel in the left sidebar before asking questions.\n\nI can work with PDFs, Word files, Excel spreadsheets, images, audio, and video. Once your files are uploaded, I'll be able to provide accurate, source-backed answers.`
@@ -343,6 +336,16 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
       onStreamingChange?.(false)
       return
     }
+
+    // File-scope-required guard used to be enforced here too (client-side),
+    // exempting greetings via a local `_GREETING` regex — but that regex was
+    // narrower than the backend's classifier (missed "how are you", "thanks",
+    // "bye"), so some greetings got blocked locally before ever reaching the
+    // backend's correct logic. Removed rather than widened: the backend now
+    // owns 100% of this classification (greeting / meta-capability question /
+    // needs a file), returning a deterministic template either way, so
+    // forwarding every unscoped, non-web-search query to it is both simpler
+    // and immune to the two-implementations-drift bug that caused this.
 
     const controller = new AbortController()
     abortRef.current = controller
@@ -610,8 +613,6 @@ const handleNewChat = () => {
     }
   }, [streaming, loadingSession, sessionId, auth.token, addToast])
 
-  const suggestions    = buildSuggestions(kbFiles)
-
   // `h-dvh-screen` (index.css) is `height:100vh` followed by `height:100dvh`.
   // Plain 100vh is measured against the LARGEST possible viewport on mobile
   // Safari — with the address bar shown, the real visible area is shorter, so
@@ -640,7 +641,7 @@ const handleNewChat = () => {
           ? `fixed inset-y-0 left-0 z-40 w-[85vw] max-w-80 transition-transform duration-300 ease-in-out ${mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`
           : `flex-shrink-0 transition-all duration-300 ease-in-out overflow-hidden ${sidebarCollapsed ? 'w-[72px]' : 'w-80'}`
       }
-        {...(isCompact && !mobileSidebarOpen ? { inert: '', 'aria-hidden': 'true' } : {})}
+        {...(isCompact && !mobileSidebarOpen ? { inert: true, 'aria-hidden': 'true' } : {})}
       >
         <Sidebar
           auth={auth}

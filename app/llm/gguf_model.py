@@ -832,8 +832,33 @@ class GGUFModel:
     def health_check(self) -> dict[str, Any]:
         model_exists = os.path.exists(self._model_path)
         model_size = os.path.getsize(self._model_path) if model_exists else 0
+
+        # "loaded" only means the Python wrapper was constructed — in
+        # llama_server mode that's near-instant (_LlamaServerClient.__init__
+        # does no network call, see its docstring), so it stayed True the
+        # instant a caller touched self._llm, regardless of whether the
+        # separate llama-server *process* had actually finished loading its
+        # checkpoint shards yet. That gap is exactly what let /ready report
+        # readiness while a real /rag/query call hit connection-refused and
+        # tripped the circuit breaker. server_reachable does a real,
+        # bounded-timeout check via the client's own .health() (a GET
+        # /v1/models) so callers can tell "wrapper exists" apart from
+        # "server is actually answering".
+        server_reachable = None
+        if self._llm is not None and hasattr(self._llm, "health"):
+            server_reachable = self._llm.health()
+
+        # Unify both deployment modes into one "ready" signal: in
+        # llama_server mode, existence of the wrapper is not enough — the
+        # server must actually answer. In in-process mode there is no
+        # separate server to reach, so the (slow, real) model object
+        # existing already means the weight load completed.
+        ready = server_reachable if server_reachable is not None else self._llm is not None
+
         return {
             "loaded": self._llm is not None,
+            "server_reachable": server_reachable,
+            "ready": ready,
             "model_path": self._model_path,
             "model_name": self._model_name,
             "model_exists": model_exists,

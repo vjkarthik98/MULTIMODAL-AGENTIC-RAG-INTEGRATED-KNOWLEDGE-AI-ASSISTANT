@@ -49,6 +49,18 @@ class EvalRunner:
         """Run named suites and return {suite_name: SuiteResult}."""
         results: dict[str, SuiteResult] = {}
 
+        # Scope the cross-sub-suite answer memo to THIS run. It only ever
+        # holds responses collected moments ago by this same invocation, but
+        # resetting here means a long-lived process (pytest, a REPL, two
+        # runner.run() calls back to back) can never carry an answer from one
+        # run into the next — which is the only way this could distort a gate.
+        try:
+            from app.eval import answer_cache
+
+            answer_cache.clear()
+        except Exception:  # noqa: BLE001 - never fail a run over the memo
+            pass
+
         for suite in suites:
             print(f"\n{'='*60}")
             print(f"  Running suite: {suite}")
@@ -77,6 +89,21 @@ class EvalRunner:
             if suite_result.breached:
                 for k, v in suite_result.breached.items():
                     print(f"  [BREACH/ERROR] {k}: {v}")
+
+        # Make the reuse auditable: a reader of the log can confirm how many
+        # round-trips were skipped rather than taking it on trust.
+        try:
+            from app.eval import answer_cache
+
+            _s = answer_cache.stats()
+            if _s["hits"]:
+                print(
+                    f"\n  [answer-cache] reused {_s['hits']} response(s) already "
+                    f"collected this run ({_s['entries']} cached, {_s['misses']} miss)"
+                )
+            answer_cache.log_stats(where="runner.run")
+        except Exception:  # noqa: BLE001
+            pass
 
         return results
 

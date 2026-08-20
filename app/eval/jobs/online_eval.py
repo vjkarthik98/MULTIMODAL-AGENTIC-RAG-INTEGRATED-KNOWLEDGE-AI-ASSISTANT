@@ -54,6 +54,13 @@ def _score_batch(rows: list[dict[str, Any]]) -> dict[str, Any]:
     scored = 0
     latencies: list[float] = []
     route_counts: dict[str, int] = {}
+    # Retrieval-quality fields (monitoring Phase 6) — stamped on every
+    # shadow-collection row since Phase 2 by shadow_sampler.py's
+    # _retrieval_stats(), read here alongside query/answer/contexts rather
+    # than in a separate pass over the same rows.
+    top1_scores: list[float] = []
+    mean_topk_scores: list[float] = []
+    retrieval_counts: list[float] = []
 
     for row in rows:
         query = row.get("query") or ""
@@ -79,6 +86,16 @@ def _score_batch(rows: list[dict[str, Any]]) -> dict[str, Any]:
         route = row.get("route") or "unknown"
         route_counts[route] = route_counts.get(route, 0) + 1
 
+        top1 = row.get("top1_score")
+        if isinstance(top1, (int, float)):
+            top1_scores.append(float(top1))
+        mean_topk = row.get("mean_topk_score")
+        if isinstance(mean_topk, (int, float)):
+            mean_topk_scores.append(float(mean_topk))
+        ret_count = row.get("retrieval_count")
+        if isinstance(ret_count, (int, float)):
+            retrieval_counts.append(float(ret_count))
+
     return {
         "scored": scored,
         "faithfulness": (
@@ -91,6 +108,13 @@ def _score_batch(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "latency_p50_ms": _percentile(latencies, 0.50) if latencies else None,
         "latency_p95_ms": _percentile(latencies, 0.95) if latencies else None,
         "route_counts": route_counts,
+        "top1_score": (sum(top1_scores) / len(top1_scores)) if top1_scores else None,
+        "mean_topk_score": (
+            (sum(mean_topk_scores) / len(mean_topk_scores)) if mean_topk_scores else None
+        ),
+        "retrieval_count": (
+            (sum(retrieval_counts) / len(retrieval_counts)) if retrieval_counts else None
+        ),
     }
 
 
@@ -112,6 +136,13 @@ def _push_gauges(result: dict[str, Any]) -> None:
     total = sum(result["route_counts"].values()) or 1
     for route, count in result["route_counts"].items():
         m.eval_online_route_share.labels(route=route).set(count / total)
+
+    if result["top1_score"] is not None:
+        m.eval_online_top1_score.set(result["top1_score"])
+    if result["mean_topk_score"] is not None:
+        m.eval_online_mean_topk_score.set(result["mean_topk_score"])
+    if result["retrieval_count"] is not None:
+        m.eval_online_retrieval_count.set(result["retrieval_count"])
 
 
 def run_online_eval_once(batch_size: int = _DEFAULT_BATCH_SIZE) -> dict[str, Any]:

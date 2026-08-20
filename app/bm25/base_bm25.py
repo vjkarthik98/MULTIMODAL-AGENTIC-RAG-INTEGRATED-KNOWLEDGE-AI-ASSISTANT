@@ -905,8 +905,34 @@ class BaseBM25(ABC):
             logger.error(event="bm25_score_failed", modality=self.modality, error=str(exc))
             return []
 
+        # Explicit file scope: restrict the candidate pool to matching
+        # sources BEFORE top-k selection, not after. Selecting top-k over
+        # the whole corpus first can fill every slot with other-file chunks
+        # and silently drop an in-scope chunk that would rank #1 within the
+        # scoped subset. Same case-insensitive substring convention as
+        # hybrid_retriever._apply_filters, since self.documents also stores
+        # the SHA-prefixed source string.
+        allowed_sources = filters.get("sources") if filters else None
+        eligible: list[int] | None = None
+        if allowed_sources:
+            eligible = [
+                i
+                for i, doc in enumerate(self.documents)
+                if any(
+                    s.lower() in str(self._metadata(doc).get("source", "")).lower()
+                    for s in allowed_sources
+                    if s
+                )
+            ]
+            if not eligible:
+                return []
+            raw = [raw[i] for i in eligible]
+
         norm = self._norm_scores(raw)
-        idxs = self._topk(norm, top_k)
+        local_top_k = min(top_k, len(raw))
+        idxs = self._topk(norm, local_top_k)
+        if eligible is not None:
+            idxs = [eligible[i] for i in idxs]
         _mw = getattr(
             settings,
             "BM25_MODALITY_WEIGHTS",

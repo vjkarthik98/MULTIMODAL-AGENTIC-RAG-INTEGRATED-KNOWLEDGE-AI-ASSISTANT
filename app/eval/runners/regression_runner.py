@@ -95,13 +95,15 @@ def run_regression_suite(cfg: EvalConfig) -> SuiteResult:
                 msg = f"{name}: {m.value:.4f} < baseline {baseline_val:.4f} * 0.{int((1-REGRESSION_TOLERANCE)*100):02d}"
                 result.breached[f"regression.{name}"] = msg
 
-    result.add(
-        MetricResult(
-            name="baseline_path",
-            value=0.0,
-            n=0,
-            notes=str(baseline_path),
-        )
-    )
+    # Provenance, NOT a metric. This used to be emitted as
+    # MetricResult(name="baseline_path", value=0.0), which made a file path
+    # masquerade as a measurement: it printed in the report as
+    # `regression.baseline_path = 0.0000 (n=0) /app/.../rag_report_v1.json`,
+    # and — because tier2-eval.yml's Pushgateway step forwards every numeric
+    # metric that is neither None nor NaN — it was also published to Prometheus
+    # as a real time series pinned at 0.0. `dataset_version` is the field that
+    # already exists for "which reference data did this suite run against", is
+    # serialized by SuiteResult.to_dict(), and is not treated as a number.
+    result.dataset_version = str(baseline_path)
 
     return result

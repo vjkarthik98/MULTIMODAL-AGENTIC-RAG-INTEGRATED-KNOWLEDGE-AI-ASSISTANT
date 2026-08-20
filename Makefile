@@ -15,7 +15,12 @@ install:  ## Install runtime dependencies only
 
 install-dev:  ## Install runtime + lint/type/test tooling (no ML model weights)
 	$(PYTHON) -m pip install -e ".[dev]"
-	pre-commit install
+	# Deliberately does NOT run `pre-commit install`. Commits are not gated
+	# locally — `git commit` must just commit. Lint (ruff/black/isort), types
+	# and unit tests are enforced in CI on every PR (.github/workflows/ci.yml),
+	# which is the single source of truth for whether a change is clean.
+	# .pre-commit-config.yaml is kept for anyone who wants to run the same
+	# checks on demand via `make lint` or `pre-commit run --all-files`.
 
 lint:  ## Ruff + black --check + isort --check (matches ci.yml exactly; ui/ is JS/React, not linted here)
 	ruff check app/
@@ -52,7 +57,11 @@ test-unit:  ## Fast unit tests only — no external services, no real models (mo
 	# to what CI does still fails locally on the coverage gate, not on an
 	# actual test failure. Confirmed live (2026-08-01): this exact mismatch
 	# made a genuinely clean local run look red.
-	pytest tests/unit/ -m unit -q --cov=app --cov-report=term-missing --cov-fail-under=0
+	# `unit and not slow`, matching ci.yml: tests/conftest.py auto-marks every
+	# file under tests/unit/ as `unit` by directory, so a bare `-m unit` also
+	# picks up the two `pytest.mark.slow` files that load the REAL NLI model —
+	# contradicting this target's own "no real models (mocked)" contract.
+	pytest tests/unit/ -m "unit and not slow" -q --cov=app --cov-report=term-missing --cov-fail-under=0
 
 test-auth:  ## Tenant-isolation / auth test suite. Scoped directly to tests/auth/, not `tests/ -m auth` — same tests/integration/ collection-storm issue as test-unit.
 	pytest tests/auth/ -v

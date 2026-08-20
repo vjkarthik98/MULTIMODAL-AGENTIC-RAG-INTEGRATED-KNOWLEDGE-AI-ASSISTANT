@@ -84,6 +84,16 @@ Examples:
         action="store_true",
         help="Skip writing rag_report files",
     )
+    parser.add_argument(
+        "--live-path",
+        action="store_true",
+        help=(
+            "Generation suite only: post to /rag/query/stream (rag_pipeline.stream(), "
+            "the endpoint the UI actually calls, incl. _conversational_rewrap) instead "
+            "of /rag/query. Slower — SSE parsing, one extra LLM pass. Recommended: "
+            "nightly/on-demand, not every CI gate run."
+        ),
+    )
     args = parser.parse_args()
 
     # Build config
@@ -101,6 +111,10 @@ Examples:
     if args.modality:
         cfg.modality = args.modality
         print(f"[MODALITY FILTER] evaluating only: {args.modality}")
+
+    if args.live_path:
+        cfg.live_path = True
+        print("[LIVE PATH] generation suite posting to /rag/query/stream (SSE)")
 
     if args.baseline:
         cfg._baseline_path = Path(args.baseline)  # regression runner picks this up

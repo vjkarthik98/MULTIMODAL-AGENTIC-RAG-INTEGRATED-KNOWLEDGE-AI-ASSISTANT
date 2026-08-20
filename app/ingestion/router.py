@@ -306,7 +306,7 @@ def _clamav_scan(path: Path) -> None:
                     surface="ingestion",
                     guard_type="malware",
                 )
-    except ValueError:
+    except (ValueError, GuardrailBlocked):
         raise
     except Exception as exc:
         logger.warning("clamav_scan_failed", path=str(path), error=str(exc))

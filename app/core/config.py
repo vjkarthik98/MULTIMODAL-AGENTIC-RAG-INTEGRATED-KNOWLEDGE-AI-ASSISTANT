@@ -94,10 +94,16 @@ class Settings:
     APP_NAME: str = _str("APP_NAME", "Multimodal Agentic RAG Integrated Knowledge AI Assistant")
     # Keep in sync with /VERSION and the test assertion below by hand — nothing
     # reads /VERSION at runtime, so this drifts silently if only one is bumped.
-    APP_VERSION: str = _str("APP_VERSION", "0.30.0")
+    APP_VERSION: str = _str("APP_VERSION", "0.31.0")
     APP_DESCRIPTION: str = _str(
         "APP_DESCRIPTION", "Production Multimodal Agentic RAG Integrated AI System"
     )
+    # Baked in at image build time (Dockerfile ARG/ENV GIT_SHA, set from
+    # ${{ github.sha }} in cd.yml) — read here, never shelled out to `git`
+    # on the request path. Used to tag OTel spans / online-eval rows for
+    # deploy root-cause correlation ("did quality drop right after a
+    # deploy?"). "unknown" is the Dockerfile's own default for a non-CD build.
+    GIT_SHA: str = _str("GIT_SHA", "unknown")
     ENV: str = _str("ENV", "development")
     DEBUG: bool = _bool("DEBUG", False)
 
@@ -167,6 +173,17 @@ class Settings:
     EMBEDDING_TIMEOUT: int = _int("EMBEDDING_TIMEOUT", 5)
     VECTOR_DB_TIMEOUT: int = _int("VECTOR_DB_TIMEOUT", 10)
     MODEL_TIMEOUT_SEC: int = _int("MODEL_TIMEOUT_SEC", 120)
+    # Separate from MODEL_TIMEOUT_SEC (which also bounds query-time LLM latency
+    # checks in summarizer/web_search/query_decomposer/reasoning_engine) because
+    # loading Qwen2-VL's 5 checkpoint shards alone measured ~121s on this
+    # hardware — just over the shared 120s budget. Future.result(timeout=...)
+    # doesn't cancel the underlying load on timeout; it just stops waiting while
+    # the shard load keeps running in the background thread and its result gets
+    # discarded, silently doubling GPU load work and re-triggering the same
+    # near-miss timeout on every subsequent request needing that model. Give
+    # model *loading* its own, larger budget instead of loosening the
+    # query-latency checks that share MODEL_TIMEOUT_SEC.
+    MODEL_LOAD_TIMEOUT_SEC: int = _int("MODEL_LOAD_TIMEOUT_SEC", 240)
     SLOW_REQUEST_THRESHOLD: float = _float("SLOW_REQUEST_THRESHOLD", 2.0)
     INGESTION_WORKER_COUNT: int = _int("INGESTION_WORKER_COUNT", 6)
 
@@ -344,6 +361,7 @@ class Settings:
     NER_DEVICE: str = _str("NER_DEVICE", _auto_device())
     WHISPER_DEVICE: str = _str("WHISPER_DEVICE", _auto_device())
     LLM_DEVICE_HINT: str = _str("LLM_DEVICE_HINT", _auto_device())
+    NLI_DEVICE: str = _str("NLI_DEVICE", _auto_device())
 
     # VISION MODELS
     SIGLIP_MODEL: str = _str("SIGLIP_MODEL", "google/siglip-so400m-patch14-384")
@@ -413,6 +431,20 @@ class Settings:
     AUDIO_DIARIZATION_ENABLED: bool = _bool("AUDIO_DIARIZATION_ENABLED", True)
     # Pyannote speaker diarization (requires HF_TOKEN + model access approval)
     DIARIZATION_MODEL: str = _str("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
+    # Upper bound on the diarization thread before audio_ingest gives up and
+    # finishes the ingest WITHOUT speaker labels. Diarization is enrichment,
+    # never essential — but audio_ingest.ingest() collected it with a bare
+    # `.result()` and no timeout, so a wedged pyannote blocked the whole
+    # Tier-2 suite silently until the 180-min CD job cap killed it (the
+    # "stuck on audio/video with no output" symptom, 2026-08-20). 20 min is
+    # ~2.5x the slowest healthy diarization measured (8 min on a 49-min mp3
+    # BEFORE _materialize_diarization_wav removed the re-decode cost), so it
+    # only ever fires on a genuine wedge.
+    DIARIZATION_TIMEOUT_SEC: float = _float("DIARIZATION_TIMEOUT_SEC", 1200.0)
+    # Same idea for one Whisper chunk. Generous because the CUDA-OOM CPU
+    # fallback in audio_ingest._transcribe_chunk_eager is legitimately ~50x
+    # slower than GPU, and aborting real (if slow) work is worse than waiting.
+    AUDIO_TRANSCRIBE_TIMEOUT_SEC: float = _float("AUDIO_TRANSCRIBE_TIMEOUT_SEC", 2700.0)
     # Finance NER
     NER_MODEL: str = _str("NER_MODEL", "dslim/bert-base-NER")
     # FinBERT — finance-domain tone/sentiment classifier (yiyanghkust/finbert-tone)
@@ -530,6 +562,13 @@ class Settings:
     DB_MAX_POOL_SIZE: int = _int("DB_MAX_POOL_SIZE", 20)
     MONGO_CB_FAIL_MAX: int = _int("MONGO_CB_FAIL_MAX", 5)
     MONGO_CB_RESET_TIMEOUT: int = _int("MONGO_CB_RESET_TIMEOUT", 60)
+    # How often MongoMemory retries a connection that failed, and how often it
+    # repeats the "memory not persisting" warning while down (see
+    # app/memory/mongo_memory.py::_is_available). A failed attempt costs a full
+    # DB_TIMEOUT_MS server-selection timeout, so this trades recovery latency
+    # against one slow call per interval. 0 disables retrying entirely, which
+    # restores the old behaviour: a startup failure stays fatal until restart.
+    MONGO_RECONNECT_INTERVAL_SEC: int = _int("MONGO_RECONNECT_INTERVAL_SEC", 300)
     MONGO_MESSAGES_COLLECTION: str = _str("MONGO_MESSAGES_COLLECTION", "messages")
     MONGO_SUMMARIES_COLLECTION: str = _str("MONGO_SUMMARIES_COLLECTION", "summaries")
     MONGO_MEMORY_COLLECTION: str = _str("MONGO_MEMORY_COLLECTION", "messages")
@@ -546,6 +585,30 @@ class Settings:
     ONLINE_EVAL_SAMPLE_RATE: float = _float("ONLINE_EVAL_SAMPLE_RATE", 0.0)
     ONLINE_EVAL_ENABLED: bool = _bool("ONLINE_EVAL_ENABLED", False)
     ONLINE_EVAL_INTERVAL_SEC: int = _int("ONLINE_EVAL_INTERVAL_SEC", 1800)
+
+    # DRIFT DETECTION (monitoring Phase 3) — statistical reference-vs-current
+    # comparison over MONGO_EVAL_SHADOW_COLLECTION (same collection
+    # ONLINE_EVAL_* reads/writes; drift_eval.py never mutates it, only reads
+    # a window). Off by default, same convention as ONLINE_EVAL_ENABLED —
+    # both require ONLINE_EVAL_SAMPLE_RATE > 0 to have any data to compare.
+    DRIFT_ENABLED: bool = _bool("DRIFT_ENABLED", False)
+    # Row count, not a time window — a fixed sample size keeps the KS-test
+    # p-value comparable run over run regardless of how bursty traffic is
+    # (a KS-test's power depends on n; a wall-clock window would silently
+    # make the test more/less sensitive as traffic volume changes).
+    DRIFT_WINDOW_SIZE: int = _int("DRIFT_WINDOW_SIZE", 200)
+    DRIFT_REFERENCE_PATH: str = _str(
+        "DRIFT_REFERENCE_PATH",
+        str(PROJECT_ROOT / "app" / "eval" / "baselines" / "drift_reference.jsonl"),
+    )
+    DRIFT_CHECK_INTERVAL_SEC: int = _int("DRIFT_CHECK_INTERVAL_SEC", 3600)
+    # Fraction of tracked columns (query_length/top1_score/mean_topk_score/
+    # latency_ms) whose KS-test flags drift (p < 0.05) before paging.
+    # Provisional, like the alert thresholds in monitoring/alerts/rules.yml —
+    # no real production traffic has been measured on this box yet to
+    # calibrate against; revisit once DRIFT_ENABLED has run for real.
+    DRIFT_WARNING_THRESHOLD: float = _float("DRIFT_WARNING_THRESHOLD", 0.25)
+    DRIFT_CRITICAL_THRESHOLD: float = _float("DRIFT_CRITICAL_THRESHOLD", 0.5)
 
     # TEXT REPAIR — per-pass toggles for the broken-corpus hardening layer
     # (mojibake fix, noise-line strip, whitespace recovery, OCR normalization,
@@ -698,17 +761,129 @@ class Settings:
 
     # AGENT — ANSWER VERIFICATION LOOP (Phase 32)
     AGENT_VERIFY_ENABLED: bool = _bool("AGENT_VERIFY_ENABLED", True)
-    AGENT_VERIFY_RETRIEVAL_MIN: float = _float("AGENT_VERIFY_RETRIEVAL_MIN", 90.0)
+    # 90.0 was set without live evidence of what RetrievalEvaluator (0.65 *
+    # relevance_frac + 0.35 * aspect_frac over the top-12 candidate pool)
+    # actually scores for a genuinely correct, complete, well-cited answer.
+    # Confirmed live (2026-08-08, docx-0002): a fully correct answer (exact
+    # revenue figures, correct YoY %, correct citation) scored retrieval=80.5
+    # — below the 90 floor — because relevance_frac is diluted by the normal
+    # presence of lower-relevance support docs in a 12-candidate pool, not
+    # because anything was wrong. With expand_retrieval/increase_depth/
+    # query_rewrite/decomposition all exhausted and unable to move this score
+    # (it isn't a retrieval-coverage problem), every such answer was
+    # permanently stuck at verified=False, shipping the "could not be fully
+    # verified" hedge on demonstrably correct output — confirmed to hold
+    # hallucination_rate flat even after fixing AGENT_VERIFY_TIMEOUT_SEC and
+    # the retry-strategy/stopping-criteria bugs above. 75.0 sits below that
+    # observed good-answer score with margin, while still well above the
+    # genuinely-poor cases seen the same day (e.g. 29.05).
+    #
+    # RECALIBRATED FURTHER 2026-08-13 (hallucination-reduction initiative
+    # Phase 3), after retry_success_rate measured 0.0000 (0/25-39 retried
+    # queries ever eventually PASSed, across two separate eval runs) even
+    # with grounding healthy (100.0 on all 39 sampled rows — never the
+    # blocker) and after NLI landed. Root-caused by pulling the FULL
+    # retrieval/grounding/citation/overall score distribution across the 39
+    # valid gold rows (txt+pdf+docx), not just one example this time:
+    #   retrieval: min=25.9 p25=41.5 median=48.0 p75=67.5 max=100.0
+    #   overall:   min=17.6 p25=25.5 median=55.5  p75=66.3 max=100.0
+    # 75.0 (the value this comment used to justify) sits ABOVE the retrieval
+    # p75 — i.e. it was still failing 3 of every 4 real answers on retrieval
+    # alone. And retrieval genuinely wasn't the dominant blocker either:
+    # simulating retrieval>=35 with overall STILL >=90 changed the pass count
+    # not at all (3/39 either way) — `overall = 0.6*weakest + 0.4*mean`
+    # (confidence_scorer.py) means a single soft dimension (usually retrieval
+    # or completeness on a multi-part question) craters `overall` regardless
+    # of how strong grounding/citation are, and 90 is far above the observed
+    # median (55.5). Simulated retrieval>=35 AND overall>=50 (with
+    # grounding>=90, citation>=95 both held fixed — neither changed):
+    # 23/39 would newly clear every gate, ZERO of them carrying any
+    # fabrication/NLI-contradiction signal — the loosening costs no measured
+    # safety margin in this sample. See also confidence_scorer.py's decide()
+    # for the paired completeness all-or-nothing fix from the same pass.
+    AGENT_VERIFY_RETRIEVAL_MIN: float = _float("AGENT_VERIFY_RETRIEVAL_MIN", 35.0)
     AGENT_VERIFY_GROUNDING_MIN: float = _float("AGENT_VERIFY_GROUNDING_MIN", 90.0)
+    # Never the observed blocker (100.0 on citation for 33/39 sampled rows;
+    # the handful of 0.0/50.0 outliers look like a genuine CitationVerifier
+    # issue, not a miscalibrated threshold — lowering this would mask that
+    # bug rather than fix it. Flagged as a follow-up, not touched here.
     AGENT_VERIFY_CITATION_MIN: float = _float("AGENT_VERIFY_CITATION_MIN", 95.0)
-    AGENT_VERIFY_OVERALL_MIN: float = _float("AGENT_VERIFY_OVERALL_MIN", 90.0)
+    AGENT_VERIFY_OVERALL_MIN: float = _float("AGENT_VERIFY_OVERALL_MIN", 50.0)
     AGENT_VERIFY_MAX_RETRIES: int = _int("AGENT_VERIFY_MAX_RETRIES", 3)
-    AGENT_VERIFY_TIMEOUT_SEC: float = _float("AGENT_VERIFY_TIMEOUT_SEC", 30.0)
+    # 30s was tuned against a faster resident LLM. The current default
+    # LLM_MODEL_PATH is Qwen2.5-14B-Instruct-Q4_K_M, where a single generation
+    # attempt takes ~17-21s observed live — a 30s total budget fits barely
+    # more than one retry before AGENT_VERIFY_MAX_RETRIES (3, i.e. up to 4
+    # attempts) is ever exhausted, so the loop was hitting the wall-clock
+    # timeout and giving up after 2 attempts almost every time, never reaching
+    # the later retry strategies (e.g. query_rewrite) that resolve harder
+    # queries. 120s comfortably fits 4 attempts at worst-observed latency with
+    # headroom for retrieval/verification overhead on top of generation.
+    AGENT_VERIFY_TIMEOUT_SEC: float = _float("AGENT_VERIFY_TIMEOUT_SEC", 120.0)
     AGENT_VERIFY_MIN_IMPROVEMENT_PCT: float = _float("AGENT_VERIFY_MIN_IMPROVEMENT_PCT", 2.0)
     AGENT_VERIFY_MODALITIES: list[str] = _list(
         "AGENT_VERIFY_MODALITIES",
         ["txt", "pdf", "docx", "xlsx", "image", "audio", "video"],
     )
+
+    # NLI GROUNDEDNESS SCORER (hallucination-reduction initiative, Phase 3,
+    # 2026-08-13). Adds a real GPU entailment model
+    # (app/verification/groundedness_checker.py) as an ADDITIVE contradiction
+    # check on top of the existing lexical word-overlap guard — see that
+    # module's docstring for why this is additive-only (a contradiction
+    # penalty), not a replacement of the lexical support_score with raw
+    # entailment probability as originally planned: entailment probability
+    # was empirically found unreliable (attribution phrasing/pronoun shifts
+    # push a genuinely correct restatement into "neutral", not "entailment"),
+    # while contradiction probability is cleanly separable in every case
+    # tested — 0.0001-0.003 for correct/neutral answers vs. 0.9999 for a
+    # fabricated number. Validated live (2026-08-13, generation suite, n=42):
+    # grounding_success_rate 0.9744 (lexical-only) -> 0.9487 (NLI on) — the
+    # additive design barely moves the pass rate while demonstrably catching
+    # a real case neither the lexical nor numeric check catches alone (a
+    # semantic inversion: "revenue increased" vs. context's "revenue
+    # decreased", full word overlap, no numbers — see
+    # tests/unit/verification/test_groundedness_checker_nli.py::
+    # test_semantic_inversion_caught_by_nli_not_lexical). Default flipped to
+    # True on that evidence.
+    NLI_GROUNDEDNESS_ENABLED: bool = _bool("NLI_GROUNDEDNESS_ENABLED", True)
+    NLI_MODEL: str = _str("NLI_MODEL", "cross-encoder/nli-deberta-v3-base")
+    # Contradiction probability (0-1) ABOVE which a claim sentence adds a
+    # hallucination flag. 0.3 sits deep in the empirically observed gap
+    # between correct/neutral answers (0.0001-0.003) and a confirmed
+    # fabricated number (0.9999) — chosen with margin on both sides from a
+    # small manually-verified sample, not yet a full eval-measured baseline.
+    NLI_CONTRADICTION_MAX: float = _float("NLI_CONTRADICTION_MAX", 0.3)
+
+    # MODALITY CONFIDENCE -> error_markers (hallucination-reduction initiative,
+    # Phase 5, 2026-08-13). Reuses the existing error_markers -> "⚠
+    # ERROR_MARKERS=" prompt-injection mechanism (rag_pipeline.py::_build_context,
+    # prompt_builder.py's generic "treat its specific claim as suspect"
+    # instruction) already proven for txt's in-corpus error markers — no
+    # shared/prompt code changes needed, only each modality's own ingest/
+    # chunk file populates the field. Flag-only: this does NOT down-weight or
+    # drop risky chunks in retrieval ranking, deliberately — that would need
+    # its own eval-measured justification, not assumed here.
+    #
+    # Shared between audio and video (same Whisper _hallucination_risk()
+    # categorical output — "low"/"medium"/"high" — app/ingestion/audio_ingest.py)
+    # rather than two near-duplicate per-modality settings, since the
+    # underlying signal and its semantics are identical for both. Only "high"
+    # triggers a marker by default — "medium" covers confidence 0.4-0.65 or
+    # no_speech_prob 0.5-0.8, a wide band that would over-flag common,
+    # genuinely-fine transcriptions if included.
+    MEDIA_HALLUCINATION_RISK_ERROR_MARKER_LEVELS: list[str] = _list(
+        "MEDIA_HALLUCINATION_RISK_ERROR_MARKER_LEVELS", ["high"]
+    )
+    # OCR confidence (0-1 scale) BELOW which a page/image chunk gets flagged.
+    # Shared between pdf and image (same 0-1 Tesseract/EasyOCR confidence
+    # scale) rather than two near-duplicate settings.
+    OCR_CONFIDENCE_ERROR_MARKER_MIN: float = _float("OCR_CONFIDENCE_ERROR_MARKER_MIN", 0.5)
+    # Bounded-loop discipline (CLAUDE.md hard rule) applied to the per-answer
+    # NLI cost: cap sentence x best-matching-context-chunk pairs scored per
+    # answer, so a long multi-sentence answer can't turn one groundedness
+    # check into an unbounded number of GPU calls.
+    NLI_MAX_SENTENCE_PAIRS_PER_CALL: int = _int("NLI_MAX_SENTENCE_PAIRS_PER_CALL", 12)
 
     # CONVERSATIONAL REWRAP — an additive, tone-only second LLM pass that runs
     # AFTER every accuracy-critical stage (verification, citation attachment,
@@ -791,8 +966,37 @@ class Settings:
     CLAMAV_HOST: str = _str("CLAMAV_HOST", "localhost")
     CLAMAV_PORT: int = _int("CLAMAV_PORT", 3310)
     TEMP_FILE_ENCRYPTION: bool = _bool("TEMP_FILE_ENCRYPTION", False)
+    # Age below which app/main.py::_cleanup_temp_dirs() leaves a per-user
+    # temp/staging/frame entry alone. That sweep exists to clear orphans left
+    # by a CRASHED ingestion, but it ran unconditionally over every user's
+    # directory on both startup and shutdown — so it also deleted the working
+    # files of any ingestion running RIGHT NOW, in this process or any other
+    # sharing the volume. Reproduced 2026-08-20: pytest's FastAPI TestClient
+    # fires the lifespan (415 sweeps in one logs/app.log), which deleted a
+    # live Tier-2 audio run's 30-min WAV chunks mid-transcription ->
+    # "[Errno 2] No such file or directory: .../chunk_0.wav" -> audio_wer=nan.
+    # In production the same sweep discards every in-flight upload on deploy.
+    # 1h is far longer than any single ingest (the slowest measured, a 55-min
+    # video, is ~15 min) and far shorter than "leave orphans forever".
+    TEMP_ORPHAN_GRACE_SEC: int = _int("TEMP_ORPHAN_GRACE_SEC", 3600)
 
     # HALLUCINATION
+    # Kept as a genuinely distinct threshold, NOT collapsed into
+    # AGENT_VERIFY_GROUNDING_MIN, despite the hallucination-reduction
+    # initiative's Phase 4 consolidation (2026-08-13) removing the other two
+    # redundant thresholds (output_guard.py's old `_groundedness_threshold`,
+    # and the third independent detector it compared against). Those two
+    # really were duplicates of the same verdict; this one is not: it gates
+    # `_hallucination_guard`'s raw 0-1 lexical support_score
+    # (reasoning_engine.py) — one component INSIDE
+    # GroundednessChecker.check()'s pipeline — while AGENT_VERIFY_GROUNDING_MIN
+    # gates the FINAL blended 0-100 score (lexical + NLI-contradiction penalty
+    # + numeric penalty) at the VerificationLoop decide() layer, several steps
+    # downstream. Collapsing a component-level threshold into an
+    # aggregate-level gate would conflate two different things the original
+    # plan assumed were the same only because it assumed NLI would REPLACE
+    # support_score outright — see groundedness_checker.py's module docstring
+    # for why that assumption didn't survive contact with real data.
     HALLUCINATION_THRESHOLD: float = _float("HALLUCINATION_THRESHOLD", 0.5)
 
     # CROSS-MODAL FUSION
@@ -1055,6 +1259,20 @@ class Settings:
         if self.OTEL_SAMPLING_RATIO < 0.0 or self.OTEL_SAMPLING_RATIO > 1.0:
             errors.append(f"OTEL_SAMPLING_RATIO must be 0.0–1.0, got {self.OTEL_SAMPLING_RATIO}")
 
+        if self.DRIFT_WARNING_THRESHOLD < 0.0 or self.DRIFT_WARNING_THRESHOLD > 1.0:
+            errors.append(
+                f"DRIFT_WARNING_THRESHOLD must be 0.0–1.0, got {self.DRIFT_WARNING_THRESHOLD}"
+            )
+        if self.DRIFT_CRITICAL_THRESHOLD < 0.0 or self.DRIFT_CRITICAL_THRESHOLD > 1.0:
+            errors.append(
+                f"DRIFT_CRITICAL_THRESHOLD must be 0.0–1.0, got {self.DRIFT_CRITICAL_THRESHOLD}"
+            )
+        if self.DRIFT_CRITICAL_THRESHOLD < self.DRIFT_WARNING_THRESHOLD:
+            errors.append(
+                "DRIFT_CRITICAL_THRESHOLD must be >= DRIFT_WARNING_THRESHOLD "
+                f"(got critical={self.DRIFT_CRITICAL_THRESHOLD}, warning={self.DRIFT_WARNING_THRESHOLD})"
+            )
+
         if errors:
             formatted = "\n  - ".join(errors)
             raise ValueError(
@@ -1101,7 +1319,7 @@ class TestSettings:
 
     def test_defaults_are_valid(self):
         s = Settings()
-        assert s.APP_VERSION == "0.30.0"
+        assert s.APP_VERSION == "0.31.0"
         assert s.TEXT_EMBEDDING_DIM == 1024
         assert s.VISION_EMBEDDING_DIM > 0
         assert s.CHUNK_OVERLAP < s.CHUNK_SIZE

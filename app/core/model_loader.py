@@ -141,7 +141,9 @@ class ModelLoader:
         self._image_embedder: Any | None = None
         self._multimodal: Any | None = None
         self._whisper: Any | None = None
+        self._whisper_infer_lock = threading.Lock()
         self._reranker: Any | None = None
+        self._nli: Any | None = None
         self._siglip_model = None
         self._siglip_processor = None
         self._siglip_device: str | None = None
@@ -259,7 +261,7 @@ class ModelLoader:
             self._oom_guard()  # actually reclaim the freed VRAM
         return evicted
 
-    def unload_until_free(self, target_free_gb: float) -> list[str]:
+    def unload_until_free(self, target_free_gb: float, exclude: str | None = None) -> list[str]:
         """Pressure valve: evict least-recently-used models until free VRAM
         clears `target_free_gb`, regardless of how recently they were used.
 
@@ -280,6 +282,13 @@ class ModelLoader:
         target is met rather than dumping everything. Returns [] and does
         nothing when free VRAM cannot be read (no CUDA / driver query
         failed) — never evict on a guess.
+
+        `exclude` names a model that must never be dropped by this pass. It
+        exists for the _oom_guard(loading=...) caller: the whole point there
+        is to make room FOR that model, so letting LRU order pick it would be
+        self-defeating — the getter would drop the very weights it is about
+        to return whenever they were already cached by another path. This
+        mirrors the protection _touch(loading) already gives the TTL sweep.
         """
         free_gb = device_manager.free_vram_gb()
         if free_gb is None:
@@ -293,7 +302,7 @@ class ModelLoader:
             loaded = [
                 name
                 for name, attrs in self._EVICTABLE_MODELS.items()
-                if getattr(self, attrs[0]) is not None
+                if getattr(self, attrs[0]) is not None and name != exclude
             ]
             # Oldest last_used first; never-recorded (0.0) sorts oldest.
             loaded.sort(key=lambda n: self._last_used.get(n, 0.0))
@@ -339,10 +348,38 @@ class ModelLoader:
         itself moments before its own getter returns it) and runs the idle-
         eviction sweep first, so a heavy new load gets first crack at VRAM
         another model has been sitting on unused.
+
+        The idle sweep ALONE is not enough, and the gap is what made the
+        Tier-2 suite time out (reproduced 2026-08-20, and the same shape as
+        the CD run 31139999120 incident audio_ingest._transcribe_chunk_eager
+        documents). `full` hands off between modality sub-suites in well
+        under MODEL_IDLE_TIMEOUT_SEC: ocr finished at 03:12:04 and whisper
+        loaded 76s later, so every vision model (Qwen2-VL, BLIP2, TrOCR) was
+        still inside the 300s TTL and unload_idle_models() found NOTHING
+        evictable at precisely the moment the VRAM was needed. Whisper then
+        OOM'd into audio_ingest's CPU fallback — correct behaviour, but ~50x
+        slower, which is what turns a ~90-minute suite into a 3h+ timeout.
+
+        So also apply the watermark pressure valve, which evicts LRU-first
+        regardless of recency. This is the identical policy
+        app/core/model_reaper.py already runs — but the reaper only lives in
+        the server process ("operates on this process's model_loader
+        singleton"), so the eval process, which runs as a SEPARATE
+        `docker exec` and holds its own singleton, never had a pressure
+        valve at all. Putting it here covers every process that loads a
+        model, and fixes the same latent bug for a real user uploading a
+        video straight after an image.
         """
         if loading is not None:
             self._touch(loading)
             self.unload_idle_models()
+            # Recency-independent: makes room for the model about to load.
+            # No-ops when free VRAM already clears the watermark, and
+            # unload_until_free() returns [] rather than guessing when the
+            # driver query fails, so this never evicts blindly.
+            watermark = settings.MODEL_EVICT_VRAM_WATERMARK_GB
+            if watermark > 0:
+                self.unload_until_free(watermark, exclude=loading)
 
         import gc
 
@@ -382,7 +419,7 @@ class ModelLoader:
             span.set_attribute("device", resolved_device)
 
             try:
-                obj = future.result(timeout=settings.MODEL_TIMEOUT_SEC)
+                obj = future.result(timeout=settings.MODEL_LOAD_TIMEOUT_SEC)
                 latency = round(time.time() - start, 2)
 
                 _model_load_duration.labels(model=name).observe(latency)
@@ -648,6 +685,20 @@ class ModelLoader:
 
         return self._whisper
 
+    def get_whisper_lock(self) -> threading.Lock:
+        """Serializes concurrent .transcribe() calls on the shared WhisperModel.
+
+        CTranslate2's CUDA backend crashes with `parallel_for failed:
+        cudaErrorInvalidDevice: invalid device ordinal` when two Python threads
+        call .transcribe() on the same model instance at once — the GIL is
+        released during CUDA ops (true concurrency at the Python level), but the
+        underlying device context isn't safe to enter from two threads
+        simultaneously. audio_chunker.py and video_chunker.py both run
+        ThreadPoolExecutor segments against this one singleton, so the lock must
+        live here (shared across both modality files) rather than per-file.
+        """
+        return self._whisper_infer_lock
+
     # BLIP — IMAGE CAPTIONING
 
     def get_blip(self) -> tuple:
@@ -712,6 +763,40 @@ class ModelLoader:
             self._reranker = self._safe_load(_load, "reranker")
 
         return self._reranker
+
+    # NLI — GPU ENTAILMENT SCORER (GroundednessChecker, Phase 3 of the
+    # hallucination-reduction initiative). Same CrossEncoder loading shape as
+    # get_reranker() above — deliberately, since a 3-label entailment/
+    # neutral/contradiction scorer is the same class of model as the
+    # relevance CrossEncoder, just a different checkpoint and label space.
+
+    def get_nli_model(self):
+        if self._nli:
+            return self._nli
+
+        with self._lock:
+            if self._nli:
+                return self._nli
+
+            decision = device_manager.decision_for("nli")
+
+            def _load():
+                from sentence_transformers import CrossEncoder  # local
+
+                ce = CrossEncoder(
+                    settings.NLI_MODEL,
+                    device=decision.device,
+                )
+                if decision.device == "cuda" and decision.dtype == "float16":
+                    try:
+                        ce.model.half()
+                    except Exception as exc:
+                        logger.warning("nli_fp16_failed", error=str(exc))
+                return ce
+
+            self._nli = self._safe_load(_load, "nli")
+
+        return self._nli
 
     # QWEN2-VL — VIDEO FRAME + FINANCIAL CHART CAPTIONING (2B INT8, ~2.2 GB)
 
@@ -1074,8 +1159,22 @@ class ModelLoader:
     # HEALTH CHECK
 
     def health_check(self) -> dict[str, Any]:
+        # "llm" (below) only reflects whether the GGUFModel Python wrapper
+        # has been constructed, not whether it's actually usable (e.g. in
+        # llama_server mode, the separate process could still be loading).
+        # llm_ready gives the real signal — see GGUFModel.health_check()'s
+        # "ready" field. Additive: doesn't change "llm"'s existing bool
+        # meaning, since other health-check consumers already read it.
+        llm_ready = False
+        if self._llm is not None:
+            try:
+                llm_ready = bool(self._llm.health_check().get("ready"))
+            except Exception:
+                llm_ready = False
+
         health: dict[str, Any] = {
             "llm": self._llm is not None,
+            "llm_ready": llm_ready,
             "embedder": self._text_embedder is not None,
             "siglip": self._siglip_model is not None,
             "siglip_text": self._siglip_text_embedder is not None,
