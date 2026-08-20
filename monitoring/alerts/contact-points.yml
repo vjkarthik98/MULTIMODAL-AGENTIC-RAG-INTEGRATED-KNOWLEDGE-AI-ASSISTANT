@@ -11,6 +11,15 @@
 # provisioning fatally (crash-loops the whole Grafana container), even
 # though the receiver is otherwise unused. "webhook" has no such requirement
 # beyond a non-empty url, so keep NTFY_WEBHOOK_URL set at all times.
+#
+# A dedicated escalation contact point (PagerDuty, then Opsgenie) was tried
+# and removed — every free real phone/SMS escalation option hit a hard
+# external blocker not fixable from this codebase (PagerDuty's trial signup
+# rejects consumer email domains and GoDaddy-forwarded business-style
+# addresses hit the same wall; Opsgenie stopped accepting new customers
+# 2025-06-04; Better Stack's free tier is email/Slack only, real escalation
+# needs a paid seat). ntfy push is the only delivery mechanism again — see
+# monitoring/slo.md's Security signal SLO section for the current state.
 
 apiVersion: 1
 

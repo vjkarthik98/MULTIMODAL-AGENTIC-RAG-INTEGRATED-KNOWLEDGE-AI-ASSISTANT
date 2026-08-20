@@ -4,8 +4,14 @@
 # settings.OTEL_EXPORTER_OTLP_ENDPOINT — must be set to
 # http://otel-collector:4317 in /opt/magik/.env, NOT the code default of
 # localhost:4317, since the app and this collector are separate containers
-# on the magik-net docker network). Exports traces to Tempo for storage,
-# viewable in Grafana Explore (see monitoring/grafana/provisioning/datasources.yml).
+# on the magik-net docker network). Exports the SAME spans to two places —
+# no re-instrumentation, just two exporters on one pipeline:
+#   - Tempo: storage/waterfall view in Grafana Explore (see monitoring/
+#     grafana/provisioning/datasources.yml).
+#   - Phoenix (Phase 31 monitoring, Phase 4): LLM/RAG-native trace UI —
+#     embedding-space clustering, per-span retrieved-document inspection —
+#     on the query_pipeline.py/rag_pipeline.py/hybrid_retriever.py/
+#     reranker.py spans already OpenInference-attribute-enriched for it.
 
 receivers:
   otlp:
@@ -29,6 +35,10 @@ processors:
 exporters:
   otlp/tempo:
     endpoint: tempo:4317
+    tls:
+      insecure: true
+  otlp/phoenix:
+    endpoint: phoenix:4317
     tls:
       insecure: true
   # Prometheus-format re-export of whatever the app sends this collector via
@@ -56,7 +66,7 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [otlp/tempo]
+      exporters: [otlp/tempo, otlp/phoenix]
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, batch]

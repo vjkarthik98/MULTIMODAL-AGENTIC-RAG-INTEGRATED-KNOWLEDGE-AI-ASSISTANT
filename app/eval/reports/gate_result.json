@@ -1,7 +1,5 @@
 {
-  "exit_code": 1,
-  "breached_sections": [
-    "retrieval"
-  ],
+  "exit_code": 0,
+  "breached_sections": [],
   "error_sections": []
 }

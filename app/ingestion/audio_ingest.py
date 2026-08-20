@@ -8,6 +8,7 @@ import shutil
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,37 @@ from app.ingestion.schema import (
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# NUMBA / TRITON LLVM COLLISION — eager triton import, order matters here.
+#
+# On CUDA torch builds, the `triton` package bundles its own LLVM; `numba`
+# (pulled in by librosa in _detect_clipping/_classify_noise) bundles a
+# separate one via llvmlite. Whichever one's native extension loads SECOND
+# in this process segfaults the interpreter outright (no Python exception —
+# confirmed live 2026-08-07, reproduced deterministically with a minimal
+# repro isolating this exact pair). torch's own has_triton_package() probe
+# (torch/utils/_triton.py, @functools.cache) triggers a first `import triton`
+# from several unrelated, hard-to-predict call sites once numba is already
+# loaded — e.g. TensorFlow/Keras 3's multi-backend init (_classify_noise)
+# and torchvision.ops's dynamo registration (pyannote diarizer, loaded
+# concurrently in _diarize's thread via get_diarizer). Patching each call
+# site individually is whack-a-mole; importing triton here, once, before
+# this module's functions ever get a chance to load numba, makes it always
+# win the race — has_triton_package()'s cache then short-circuits every
+# later probe without touching triton's loader again. try/except because
+# CPU-only torch builds (see MODELS_DEVICE_PROFILE=all_cpu) don't bundle
+# triton at all, in which case there is no collision to avoid.
+try:
+    import triton  # noqa: F401
+except ImportError:
+    pass
+
+# Must be set before TensorFlow/Keras is ever imported anywhere in this
+# process (both _get_yamnet and _classify_noise import it lazily, but env
+# vars only take effect on Keras's first import). Belt-and-suspenders with
+# the triton import above: skips Keras 3's multi-backend probe entirely
+# rather than relying on it hitting the now-harmless cached result.
+os.environ.setdefault("KERAS_BACKEND", "tensorflow")
 
 
 # SUPPORTED FORMATS
@@ -619,6 +651,36 @@ def _get_speaker(
     return None
 
 
+def _materialize_diarization_wav(audio: Any) -> str:
+    """Serialize the already-decoded 16 kHz mono audio to a WAV for pyannote.
+
+    Never hand pyannote the compressed original. Its speaker-embedding stage
+    (`iter_waveform_and_mask` -> `Audio.crop`) performs thousands of
+    random-access reads, and on an mp3/m4a every seek re-decodes from the
+    preceding sync point, so diarization cost explodes with file length.
+
+    Measured 2026-08-20 on the 49-min FOMC press conference: ~8 minutes of an
+    8.9-minute ingest was spent inside _diarize with the GPU at 0%, while
+    Whisper had already finished BOTH chunks on the same file in ~3.5 min.
+    A py-spy dump caught the worker parked in soundfile.seek() under
+    speaker_diarization.get_embeddings().
+
+    `audio` has already been through _to_mono()/_resample() by the time this
+    is called, so this only writes out bytes already in memory — there is no
+    second decode. The result is byte-for-byte the format that
+    video_ingest._extract_audio() (`-ar 16000 -ac 1`) already feeds this same
+    pipeline, which is precisely why the VIDEO path never exhibited this and
+    only standalone audio did.
+    """
+    from app.utils.paths import resolved_temp_dir
+
+    tmp_dir = resolved_temp_dir() / f"diarize_{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    wav_path = str(tmp_dir / "diarize.wav")
+    audio.export(wav_path, format="wav")
+    return wav_path
+
+
 # LONG AUDIO CHUNKING — SPLIT INTO 30-MIN SEGMENTS
 
 
@@ -676,15 +738,102 @@ def _transcribe_file(
     return segments_iter, info, latency
 
 
+def _is_cuda_oom(exc: BaseException) -> bool:
+    """True for the several shapes a CUDA out-of-memory surfaces as.
+
+    faster-whisper wraps CTranslate2, which raises a plain RuntimeError with
+    "CUDA failed with error out of memory" — NOT torch.cuda.OutOfMemoryError, so
+    catching the torch type alone would miss it entirely.
+
+    Also matches "invalid device ordinal" / cudaErrorInvalidDevice: on CD run
+    31139999120 (the same VRAM-exhaustion incident this fallback exists for),
+    one chunk raised "parallel_for failed: cudaErrorInvalidDevice: invalid
+    device ordinal" instead of a literal OOM string, and — not matching any
+    pattern above — skipped the CPU fallback and just failed outright. This
+    deployment target (g6e.xlarge/L40S) is single-GPU with no device_index
+    ever passed to WhisperModel (see get_whisper() in model_loader.py), so
+    there is no code path here that could legitimately select a second,
+    nonexistent device — "invalid device ordinal" on this box can only be the
+    CUDA driver reporting a corrupted/exhausted context under the same VRAM
+    pressure as the OOM cases, never a real wrong-device bug.
+    """
+    msg = str(exc).lower()
+    return (
+        "out of memory" in msg
+        or "cuda failed with error" in msg
+        or "cublas" in msg
+        or "invalid device ordinal" in msg
+        or "cudaerrorinvaliddevice" in msg
+    )
+
+
 def _transcribe_chunk_eager(
     chunk_file: str,
     session_id: str,
 ) -> tuple[list[Any], Any, float, float]:
-    """Materialize all segments within the calling thread (GPU GIL released during CTranslate2 ops)."""
-    segments_iter, info, latency = _transcribe_file(chunk_file, session_id)
-    chunk_duration = float(getattr(info, "duration", 0.0) or 0.0)
-    segments = list(segments_iter)
-    return segments, info, latency, chunk_duration
+    """Materialize all segments within the calling thread (GPU GIL released during CTranslate2 ops).
+
+    Falls back to a CPU transcription pass when the GPU is out of memory. The
+    full Tier-2 suite holds Whisper, the Qwen judge, Mistral, BGE, the reranker
+    and SigLIP resident simultaneously, and on CD run 31139999120 that tipped
+    the L40S over: EVERY chunk of the FOMC press conference raised "CUDA failed
+    with error out of memory", so ingest raised NO_VALID_AUDIO_SEGMENTS and the
+    whole audio section scored n=0 (audio_wer=nan) — a total measurement loss
+    caused by transient VRAM pressure, not by anything wrong with the audio
+    path. Transcribing on CPU is far slower but produces real output, which is
+    strictly better than none.
+    """
+    try:
+        segments_iter, info, latency = _transcribe_file(chunk_file, session_id)
+        chunk_duration = float(getattr(info, "duration", 0.0) or 0.0)
+        segments = list(segments_iter)
+        return segments, info, latency, chunk_duration
+    except Exception as exc:
+        if not _is_cuda_oom(exc):
+            raise
+
+        logger.warning(
+            event="audio_transcription_cuda_oom_cpu_fallback",
+            file=chunk_file,
+            error=str(exc),
+            session_id=session_id,
+        )
+
+        # Release whatever the failed attempt is still holding before asking for
+        # more memory, so the fallback does not immediately OOM as well.
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001 - diagnostics only, never fatal
+            pass
+
+        from faster_whisper import WhisperModel
+
+        from app.core.config import settings as _settings
+
+        cpu_model = WhisperModel(_settings.WHISPER_MODEL, device="cpu", compute_type="int8")
+        t_start = time.time()
+        segments_iter, info = cpu_model.transcribe(
+            chunk_file,
+            language=None,
+            beam_size=2,
+            word_timestamps=False,
+            vad_filter=True,
+            condition_on_previous_text=False,
+        )
+        segments = list(segments_iter)
+        latency = round(time.time() - t_start, 2)
+        chunk_duration = float(getattr(info, "duration", 0.0) or 0.0)
+        logger.info(
+            event="audio_transcription_cpu_fallback_succeeded",
+            file=chunk_file,
+            segments=len(segments),
+            latency=latency,
+            session_id=session_id,
+        )
+        return segments, info, latency, chunk_duration
 
 
 # MAIN INGEST
@@ -725,6 +874,13 @@ def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
     )
 
     temp_chunk_paths: list[str] = []
+    # Temp files a worker thread may STILL be reading after we stopped waiting
+    # for it (see the transcription timeout below). Excluded from the cleanup
+    # in `finally`: unlinking a file out from under a live reader is precisely
+    # the bug app/main.py::_cleanup_temp_dirs() had. Leaking them is safe now
+    # that that sweep is age-guarded — it reclaims them on a later startup,
+    # once TEMP_ORPHAN_GRACE_SEC has passed and nothing can still hold them.
+    in_use_paths: set[str] = set()
 
     try:
         # LOAD AND VALIDATE AUDIO
@@ -806,8 +962,23 @@ def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
         diarize_future = None
         diarize_pool = None
         if not is_music and settings.DIARIZATION_ENABLED:
+            # Decode ONCE for pyannote rather than letting it re-decode the
+            # compressed source on every random-access crop — see
+            # _materialize_diarization_wav(). Falls back to the original path
+            # if the export fails: slow diarization beats no diarization.
+            diarize_source = file_path
+            try:
+                diarize_source = _materialize_diarization_wav(audio)
+                temp_chunk_paths.append(diarize_source)
+            except Exception as exc:
+                logger.warning(
+                    event="diarization_wav_export_failed",
+                    error=str(exc),
+                    file=source_name,
+                    session_id=session_id,
+                )
             diarize_pool = ThreadPoolExecutor(max_workers=1)
-            diarize_future = diarize_pool.submit(_diarize, file_path, session_id)
+            diarize_future = diarize_pool.submit(_diarize, diarize_source, session_id)
 
         # UNIVERSAL METADATA
         metadata = build_universal_metadata(
@@ -844,17 +1015,46 @@ def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
         # VRAM budget. See AUDIO_TRANSCRIPTION_WORKERS in config.py — deliberately
         # left unchanged on the g6e.xlarge/L40S (48GB) migration pending real
         # headroom measurement, per docs/runbooks/phase-30-aws-deployment.md.
+        # NOT a `with` block. ThreadPoolExecutor.__exit__ calls
+        # shutdown(wait=True), which JOINS every worker — so a single wedged
+        # chunk would hold the whole ingest (and, in the Tier-2 suite, every
+        # sub-suite behind it) no matter what timeout the .result() calls
+        # used. That is what made a stall look like a hang with no output at
+        # all. Owning the pool explicitly lets a timeout actually return.
         chunk_results: list[tuple[int, list[Any], Any, float, float]] = []
-        with ThreadPoolExecutor(max_workers=settings.AUDIO_TRANSCRIPTION_WORKERS) as pool:
+        pool = ThreadPoolExecutor(max_workers=settings.AUDIO_TRANSCRIPTION_WORKERS)
+        try:
             futures = {
-                pool.submit(_transcribe_chunk_eager, chunk_file, session_id): chunk_idx
+                pool.submit(_transcribe_chunk_eager, chunk_file, session_id): (
+                    chunk_idx,
+                    chunk_file,
+                )
                 for chunk_idx, chunk_file in enumerate(chunk_files)
             }
-            for fut, chunk_idx in futures.items():
+            deadline = time.time() + settings.AUDIO_TRANSCRIBE_TIMEOUT_SEC
+            for fut, (chunk_idx, chunk_file) in futures.items():
+                # One shared deadline across all chunks, not one per chunk:
+                # they run concurrently, so N sequential per-future timeouts
+                # would let total wait grow to N x the configured bound.
+                remaining = max(0.0, deadline - time.time())
                 try:
-                    segs, info, transcribe_latency, chunk_duration = fut.result()
+                    segs, info, transcribe_latency, chunk_duration = fut.result(timeout=remaining)
                     chunk_results.append(
                         (chunk_idx, segs, info, transcribe_latency, chunk_duration)
+                    )
+                except FuturesTimeoutError:
+                    # Abandoned, not cancelled: a running thread cannot be
+                    # killed, and it still holds this WAV open. Keep the file
+                    # so the reader does not fault, and let the age-guarded
+                    # startup sweep collect it later.
+                    in_use_paths.add(chunk_file)
+                    logger.error(
+                        event="audio_chunk_transcription_timeout",
+                        chunk=chunk_idx,
+                        file=source_name,
+                        timeout_sec=settings.AUDIO_TRANSCRIBE_TIMEOUT_SEC,
+                        detail="abandoned the worker; its temp chunk is left for the orphan sweep",
+                        session_id=session_id,
                     )
                 except Exception as exc:
                     logger.error(
@@ -864,11 +1064,35 @@ def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
                         error=str(exc),
                         session_id=session_id,
                     )
+        finally:
+            # wait=False so an abandoned worker never blocks the return. Any
+            # thread still running keeps the process alive until it finishes
+            # (concurrent.futures joins non-daemon workers at interpreter
+            # exit), but it no longer stalls this ingest or the suite.
+            pool.shutdown(wait=False)
 
         # Collect diarization result now that transcription is done.
         if diarize_future is not None:
             try:
-                speaker_map = diarize_future.result()
+                # Bounded. Diarization is enrichment: an ingest with no speaker
+                # labels is a degraded result, an ingest that never returns is a
+                # dead pipeline. A py-spy dump (2026-08-20) caught this exact
+                # `.result()` holding the main thread while the whole Tier-2 run
+                # sat idle behind it with nothing written to the log.
+                speaker_map = diarize_future.result(timeout=settings.DIARIZATION_TIMEOUT_SEC)
+            except FuturesTimeoutError:
+                # Same reasoning as the transcription timeout: the pyannote
+                # thread is abandoned, not killed, and it still holds the
+                # diarization WAV open. Leave that file for the orphan sweep.
+                if diarize_source != file_path:
+                    in_use_paths.add(diarize_source)
+                logger.error(
+                    event="diarization_timeout",
+                    timeout_sec=settings.DIARIZATION_TIMEOUT_SEC,
+                    file=source_name,
+                    detail="continuing without speaker labels; diarization is enrichment",
+                    session_id=session_id,
+                )
             except Exception as exc:
                 logger.warning(event="diarization_failed", error=str(exc), session_id=session_id)
             finally:
@@ -1097,7 +1321,24 @@ def ingest(file_path: str, session_id: str) -> list[IngestedDocument]:
         raise
     finally:
         # CLEANUP TEMP CHUNK FILES
+        #
+        # Skips anything an abandoned worker may still be reading (see
+        # in_use_paths). Deleting a file out from under a live reader is the
+        # exact failure app/main.py::_cleanup_temp_dirs() used to cause, and
+        # re-creating it here — in the one place that KNOWS a reader is still
+        # attached — would be worse. Those files are left deliberately and
+        # collected by the age-guarded startup sweep once nothing can hold
+        # them; a few leaked WAVs are cheap next to a faulting reader.
+        if in_use_paths:
+            logger.warning(
+                event="audio_temp_cleanup_deferred",
+                count=len(in_use_paths),
+                reason="worker abandoned after timeout; left for the orphan sweep",
+                session_id=session_id,
+            )
         for tmp_path in temp_chunk_paths:
+            if tmp_path in in_use_paths:
+                continue
             try:
                 if os.path.exists(tmp_path):
                     os.unlink(tmp_path)

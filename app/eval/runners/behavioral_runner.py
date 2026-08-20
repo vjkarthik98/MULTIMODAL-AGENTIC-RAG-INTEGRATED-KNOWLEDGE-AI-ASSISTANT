@@ -36,13 +36,13 @@ def _load_behavioral_rows(cfg: EvalConfig) -> list[dict[str, Any]]:
 
 
 def run_behavioral_suite(cfg: EvalConfig) -> SuiteResult:
-    import os
-
     t0 = time.time()
     result = SuiteResult(suite="behavioral", judge=cfg.judge_model)
 
     use_server = _server_available()
-    access_token = os.getenv("EVAL_ACCESS_TOKEN", "")
+    from app.eval.http_client import EvalAuth
+
+    eval_auth = EvalAuth(cfg.user_id)
     gold_rows = _load_behavioral_rows(cfg)
     if not gold_rows:
         result.breached["no_behavioral_data"] = "No refusal/adversarial gold rows found."
@@ -56,7 +56,12 @@ def run_behavioral_suite(cfg: EvalConfig) -> SuiteResult:
         q_start = time.time()
         try:
             if use_server:
-                pr = _query_via_server(row["query"], session_id, cfg.user_id, access_token)
+                _row_sources = row.get("relevant_doc_ids") or (
+                    [row["source_file"]] if row.get("source_file") else None
+                )
+                pr = _query_via_server(
+                    row["query"], session_id, cfg.user_id, eval_auth, sources=_row_sources
+                )
             else:
                 pr = _query_via_pipeline(row["query"], session_id, cfg.user_id)
         except Exception as exc:

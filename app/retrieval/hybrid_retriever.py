@@ -10,11 +10,16 @@ import time
 from collections import OrderedDict
 from typing import Any
 
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
 from app.core.config import settings
 from app.core.metrics import retrieval_latency as _retrieval_duration
+from app.utils import otel_attrs
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
 # retrieval_latency_seconds is a shared singleton from app.core.metrics, not
 # defined here — this file's own copy raced against identical copies in
@@ -205,6 +210,13 @@ _VISION_KEYWORDS = {
     "show",
     "display",
     "depict",
+    # "on-screen"/"on screen" is a very common phrasing for a video's own
+    # visual overlay (a stock-price/EPS chart shown during an earnings call)
+    # — plain exact-token matching against "screen"/"screen?" doesn't fire on
+    # "show"/"shown" alone. Confirmed live 2026-08-08: a video query asking
+    # about a figure "shown on screen during the call" never matched any
+    # existing keyword here.
+    "screen",
 }
 
 # AUDIO QUERY KEYWORDS
@@ -699,15 +711,41 @@ class HybridRetriever:
 
     # VECTOR SEARCH — TEXT SPACE
 
+    def _sources_extra_filter(self, filters: dict[str, Any] | None):
+        """Build a native Qdrant pre-filter for an explicit file scope.
+
+        `filters["sources"]` values are exact stored `source` payload strings
+        (the UI's @ picker sends back what /api/kb/files returned, which
+        already includes the staging SHA prefix — see ChatPage.jsx
+        selectedFile.filename), so an exact MatchAny is correct here. This
+        narrows the ANN candidate pool itself so a scoped file's chunks can't
+        be crowded out by unrelated documents before _apply_filters ever
+        runs — _apply_filters' substring check remains as a backstop for the
+        auto-detected/meeting-scope path, which may pass bare filenames.
+        """
+        sources = filters.get("sources") if filters else None
+        if not sources:
+            return None
+        from qdrant_client.models import FieldCondition, Filter, MatchAny
+
+        return Filter(must=[FieldCondition(key="source", match=MatchAny(any=sources))])
+
     def _vector_search_text(
         self,
         q_vec: list[float],
         candidate_k: int,
         session_id: str,
         user_id: str | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[dict]:
         def _do():
-            return self.vector_store.search_text(q_vec, candidate_k, session_id, user_id=user_id)
+            return self.vector_store.search_text(
+                q_vec,
+                candidate_k,
+                session_id,
+                user_id=user_id,
+                extra_filter=self._sources_extra_filter(filters),
+            )
 
         try:
             if _PYBREAKER_AVAILABLE:
@@ -731,6 +769,7 @@ class HybridRetriever:
         candidate_k: int,
         session_id: str,
         user_id: str | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[dict]:
         """Search the embedding_alt space (markdown table / numbers-only embeddings).
 
@@ -747,6 +786,7 @@ class HybridRetriever:
                 candidate_k,
                 session_id,
                 user_id=user_id,
+                extra_filter=self._sources_extra_filter(filters),
             )
 
         try:
@@ -766,9 +806,16 @@ class HybridRetriever:
         candidate_k: int,
         session_id: str,
         user_id: str | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[dict]:
         def _do():
-            return self.vector_store.search_vision(v_vec, candidate_k, session_id, user_id=user_id)
+            return self.vector_store.search_vision(
+                v_vec,
+                candidate_k,
+                session_id,
+                user_id=user_id,
+                extra_filter=self._sources_extra_filter(filters),
+            )
 
         try:
             if _PYBREAKER_AVAILABLE:
@@ -819,7 +866,47 @@ class HybridRetriever:
 
     # MAIN SEARCH
 
-    def search(  # noqa: C901 -- known complexity debt (66), tracked follow-up refactor, not fixed inline to avoid changing tuned hybrid-retrieval behavior
+    def search(
+        self,
+        query: str,
+        session_id: str,
+        top_k: int | None = None,
+        filters: dict[str, Any] | None = None,
+        user_id: str | None = None,
+    ) -> list[dict]:
+        """OTel span boundary around `_search_impl` — kept as a thin wrapper
+        (not merged into the tuned retrieval body below) so instrumentation
+        can never alter the retrieval logic it's observing. See app/core/
+        metrics.py's module docstring for why shared instrumentation lives at
+        a single wrapper boundary rather than scattered inline."""
+        with tracer.start_as_current_span("hybrid_retriever_search") as span:
+            span.set_attribute("query.length", len(query or ""))
+            span.set_attribute("session.id", session_id or "-")
+            span.set_attribute("top_k", top_k or settings.DEFAULT_TOP_K)
+            otel_attrs.set_span_kind(span, "RETRIEVER")
+            otel_attrs.set_input_output(span, input_value=query)
+            try:
+                results = self._search_impl(
+                    query,
+                    session_id,
+                    top_k=top_k,
+                    filters=filters,
+                    user_id=user_id,
+                )
+                span.set_attribute("results.count", len(results))
+                if results:
+                    top_score = results[0].get("score")
+                    if isinstance(top_score, (int, float)):
+                        span.set_attribute("results.top_score", float(top_score))
+                otel_attrs.set_retrieval_documents(span, results)
+                span.set_status(Status(StatusCode.OK))
+                return results
+            except Exception as exc:
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                span.record_exception(exc)
+                raise
+
+    def _search_impl(  # noqa: C901 -- known complexity debt (66), tracked follow-up refactor, not fixed inline to avoid changing tuned hybrid-retrieval behavior
         self,
         query: str,
         session_id: str,
@@ -843,8 +930,30 @@ class HybridRetriever:
         # based modality detection must not override that intent.  A query like
         # "what revenue was earned" against @aapl_10k_2023.txt must not boost
         # video/audio chunks just because a heuristic fires on a word like "earn".
+        #
+        # EXCEPTION for is_vision: when the explicitly-scoped source(s) ARE
+        # themselves visual (a .mp4/.jpg/etc., or an earnings-call video), the
+        # rationale above doesn't apply — the source genuinely IS the video,
+        # so its own vision frames are exactly what should be weighted, not
+        # suppressed. Without this, any explicit-sources query against a video
+        # or image file unconditionally zeroed out vision-lane weighting, so
+        # its 20 frame-caption chunks were fetched (vision_count=20 in the
+        # logs) but never survived fusion/rerank into the final candidate
+        # pool — confirmed live (2026-08-08): an on-screen-EPS-chart question
+        # scoped to "Q4 2025 Earnings Call.mp4" answered from an unrelated
+        # transcript chunk because the chart's own frame caption (which
+        # states the exact EPS figures) never got a fair shot at ranking.
         _explicit_sources = bool(filters and filters.get("sources"))
-        is_vision = (not _explicit_sources) and self._is_vision_query(query)
+        _explicit_visual_source = _explicit_sources and any(
+            str(s)
+            .lower()
+            .endswith((".mp4", ".mov", ".m4v", ".jpg", ".jpeg", ".png", ".gif", ".webp"))
+            or "earnings call" in str(s).lower()
+            for s in (filters.get("sources") or [])
+        )
+        is_vision = (not _explicit_sources or _explicit_visual_source) and self._is_vision_query(
+            query
+        )
         is_audio = (not _explicit_sources) and self._is_audio_query(query)
         is_video = (not _explicit_sources) and self._is_video_query(query)
 
@@ -1036,7 +1145,9 @@ class HybridRetriever:
 
             def _run_vec_lane() -> list[dict]:
                 if q_vec:
-                    return self._vector_search_text(q_vec, candidate_k, session_id, user_id)
+                    return self._vector_search_text(
+                        q_vec, candidate_k, session_id, user_id, filters
+                    )
                 return []
 
             def _run_vis_lane() -> list[dict]:
@@ -1044,7 +1155,9 @@ class HybridRetriever:
                     return []
                 try:
                     v_vec = self._embed_vision_cached(query, session_id=session_id)
-                    return self._vector_search_vision(v_vec, candidate_k, session_id, user_id)
+                    return self._vector_search_vision(
+                        v_vec, candidate_k, session_id, user_id, filters
+                    )
                 except Exception as exc:
                     logger.warning(
                         event="vision_search_skipped",
@@ -1107,7 +1220,7 @@ class HybridRetriever:
             # primary retrievers also surfaced — otherwise one generic lookup
             # table can hijack an unrelated document's citations.
             if q_type in ("tabular", "exact_numeric") and q_vec:
-                alt_res = self._vector_search_alt(q_vec, candidate_k, session_id, user_id)
+                alt_res = self._vector_search_alt(q_vec, candidate_k, session_id, user_id, filters)
                 if alt_res:
                     # Only inject an alt-only chunk if its source was ranked
                     # PROMINENTLY by the primary retrievers — not merely present
@@ -1312,6 +1425,31 @@ class HybridRetriever:
                         # but NOT the exact "383,285" — these cause the LLM to use
                         # rounded figures even when exact ones are in other chunks.
                         r["score"] = r["score"] * 0.35
+                fused.sort(key=lambda x: x["score"], reverse=True)
+
+            # XLSX REFERENCE-SHEET DEMOTION — a workbook's "how to use this"
+            # index/notes sheets (e.g. Damodaran's "Country Lookup": "To look
+            # up the equity risk premium for a country, use this worksheet...")
+            # share the SAME boilerplate column structure as every per-country
+            # data row, so BM25/dense scoring can't reliably tell a specific
+            # country query apart from the generic instructions sheet — and a
+            # workbook only has 1-2 such meta sheets vs 100+ data rows, so
+            # once one starts winning it tends to win broadly. Confirmed live
+            # (2026-08-08, xlsx_gold.jsonl): "Country Lookup" (chunk_id=3) and
+            # "Summary of Most Recent Update" (chunk_id=2) placed in the top-3
+            # for India/Brazil/Switzerland/mature-market queries that have
+            # nothing to do with either sheet, dragging retrieval hit_rate@10
+            # from a measured-good 0.643 down to 0.286. Demoted, not excluded,
+            # so a genuine "how do I look up..." / "what does the update note
+            # say" question can still surface them.
+            _XLSX_META_SHEETS = {"country lookup", "summary of most recent update"}
+            _xlsx_meta_demoted = False
+            for r in fused:
+                _sheet = str((r.get("metadata") or {}).get("sheet_name") or "").strip().lower()
+                if _sheet in _XLSX_META_SHEETS:
+                    r["score"] = r["score"] * 0.25
+                    _xlsx_meta_demoted = True
+            if _xlsx_meta_demoted:
                 fused.sort(key=lambda x: x["score"], reverse=True)
 
             # NOTE: We deliberately do NOT clip to top_k here. The downstream

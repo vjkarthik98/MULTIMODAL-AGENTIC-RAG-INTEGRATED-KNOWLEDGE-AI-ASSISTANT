@@ -33,7 +33,25 @@ class RetryController:
     def __init__(self) -> None:
         self.used: list[str] = []
 
-    def next_strategy(self) -> str | None:
+    def next_strategy(self, prioritize: str | None = None) -> str | None:
+        """`prioritize`: jump straight to this strategy if it hasn't run yet
+        (still respects `self.used` / never-repeat).
+
+        Without this, the fixed STRATEGY_ORDER means expand_retrieval always
+        runs first regardless of WHY the baseline failed. That's fine for a
+        genuine retrieval-coverage gap, but for a completeness failure
+        (multi-part question, one aspect missing from the answer) the
+        necessary fact is often already in the retrieved context — widening
+        top_k returns the same top docs, retrieval score plateaus, and
+        StoppingCriteria's rule 4 (retrieval AND overall both flat) ends the
+        loop before it ever reaches "decomposition", the one strategy built
+        for exactly this failure (per-aspect retrieval + re-ask). Letting the
+        caller name the strategy suited to the failure it just observed
+        avoids burning the whole retry budget on a lever that can't move a
+        completeness gap.
+        """
+        if prioritize and prioritize not in self.used and prioritize in STRATEGY_ORDER:
+            return prioritize
         for s in STRATEGY_ORDER:
             if s not in self.used:
                 return s

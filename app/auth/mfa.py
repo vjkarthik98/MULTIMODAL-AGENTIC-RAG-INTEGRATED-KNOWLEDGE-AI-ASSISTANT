@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 import pyotp
 
+from app.auth.metrics import record_mfa_failure
 from app.core.config import settings
 from app.utils.logger import get_logger
 
@@ -227,6 +228,7 @@ class MFAService:
             return user_id
 
         logger.warning(event="mfa_login_failed", user_id=user_id)
+        record_mfa_failure()
         raise ValueError("Invalid MFA code")
 
     def disable(self, user_id: str, code: str) -> None:

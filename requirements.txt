@@ -101,6 +101,14 @@ langchain-text-splitters>=0.0.1
 numpy>=1.26,<2.0.0
 scikit-learn>=1.4
 pandas>=2.2
+# Already an installed transitive dependency (via scikit-learn) before this
+# pin — app/eval/jobs/drift_eval.py now imports it directly (ks_2samp for
+# monitoring Phase 3 drift detection), so it's pinned explicitly rather than
+# left an unreviewable transitive install. Deliberately NOT `evidently`:
+# every evidently version (including the older 0.4.x API) unconditionally
+# pulls in a bundled litestar/uvicorn/plotly web-server stack — ~15 extra
+# packages — for what drift_eval.py needs as a KS-test on 4 numeric columns.
+scipy>=1.11
 
 # ------------------------------------------------------------------------------
 # Web Search & HTTP
@@ -188,6 +196,13 @@ PyYAML>=6.0
 opentelemetry-api>=1.24
 opentelemetry-sdk>=1.24
 opentelemetry-exporter-otlp-proto-grpc>=1.24
+# Phase 4 (Arize Phoenix): pure constant definitions (span-attribute key
+# names), no transitive deps of its own — NOT the same weight class as the
+# evidently dependency this monitoring layer deliberately avoided elsewhere
+# (see app/eval/jobs/drift_eval.py's module docstring). Used by
+# app/utils/otel_attrs.py to tag the existing Phase 0 spans so Phoenix's
+# RAG-native UI (retrieved documents, embedding clusters) has real data.
+openinference-semantic-conventions>=0.1.32
 prometheus-client>=0.20
 structlog>=24.1
 

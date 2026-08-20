@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from passlib.context import CryptContext
 
+from app.auth.metrics import record_login_failure
 from app.auth.models import RegisterRequest, UserInDB, UserPublic
 from app.core.config import settings
 from app.utils.logger import get_logger
@@ -184,6 +185,7 @@ class AuthService:
 
             if not has_email_provider or not has_password:
                 logger.warning(event="auth_login_failed_no_password", email=email)
+                record_login_failure("no_password")
                 raise ValueError(
                     "This account was created with Google sign-in and has no password. "
                     "Sign in with Google, or use the registration form with this email "
@@ -196,10 +198,12 @@ class AuthService:
             dummy = "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
             _verify_password(password, dummy)
             logger.warning(event="auth_login_failed_no_account", email=email)
+            record_login_failure("no_account")
             raise ValueError("No account found with this email. Please create an account first.")
 
         if not _verify_password(password, doc["hashed_password"]):
             logger.warning(event="auth_login_failed_wrong_password", email=email)
+            record_login_failure("wrong_password")
             raise ValueError("Incorrect password. Please try again.")
 
         if not doc.get("is_active", True):

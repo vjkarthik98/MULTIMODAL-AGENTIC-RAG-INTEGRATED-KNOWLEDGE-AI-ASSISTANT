@@ -54,7 +54,23 @@ logger = get_logger(__name__)
 # happens to be a frame/vision chunk (confirmed via live smoke test,
 # Phase 32) — same alias set the pre-Phase-32 code defensively checked
 # (`m in ("audio", "mp3", "video", "mp4")`).
-_MODALITY_ALIASES = {"mp4": "video", "mp3": "audio"}
+#
+# "text" -> "txt": found the SAME class of bug via a live SSE smoke test
+# (hallucination-reduction initiative Phase 2, 2026-08-13). txt_ingest.py's
+# inline IngestedDocument construction (~line 1649) tags modality="text",
+# while txt_chunker.py's dedicated chunker (the documented per-modality path)
+# tags "txt". Confirmed against the live eval tenant's BM25 index: all 99
+# indexed chunks of fomc_dec2024.txt carry modality="text" — so every real
+# txt query silently skipped VerificationLoop entirely (_av_dominant False,
+# never even reaching _passthrough()'s now-logged/counted path — this was a
+# THIRD, upstream silent-skip site). This alias fixes gating for all
+# currently-indexed "text"-tagged chunks immediately, without re-ingestion.
+# The underlying ingestion-time tag inconsistency (txt_ingest.py vs
+# txt_chunker.py, and similar scattered modality="text"/"table" values found
+# in pdf_ingest.py/docx_ingest.py/xlsx_ingest.py's own inline IngestedDocument
+# construction) is NOT fixed here — that's a separate ingestion-layer
+# consistency pass, out of scope for the verification loop.
+_MODALITY_ALIASES = {"mp4": "video", "mp3": "audio", "text": "txt"}
 
 
 def normalize_modality(modality: str | None) -> str:
@@ -87,6 +103,13 @@ _duration_hist = Histogram(
     "magik_verification_duration_seconds",
     "Verification loop total duration",
 )
+_passthrough_total = Counter(
+    "magik_verification_passthrough_total",
+    "Answers that bypassed the verification loop entirely (_passthrough) — "
+    "these ship with scores force-filled to 100/verified=True, not a real "
+    "check. Was previously silent; every occurrence should be visible here.",
+    ["reason"],
+)
 
 
 class VerificationLoop:
@@ -112,12 +135,23 @@ class VerificationLoop:
         filters: dict[str, Any] | None = None,
         memory_context: str = "",
         regenerate: bool = False,
+        skip_retries: bool = False,
     ) -> tuple[str, VerificationReport]:
 
         modality_hint = normalize_modality(modality_hint) if modality_hint else modality_hint
-        if not settings.AGENT_VERIFY_ENABLED or (
+        _disabled = not settings.AGENT_VERIFY_ENABLED
+        _modality_excluded = bool(
             modality_hint and modality_hint not in settings.AGENT_VERIFY_MODALITIES
-        ):
+        )
+        if _disabled or _modality_excluded:
+            _reason = "disabled_globally" if _disabled else "modality_excluded"
+            _passthrough_total.labels(reason=_reason).inc()
+            logger.warning(
+                event="verification_passthrough",
+                reason=_reason,
+                modality_hint=modality_hint,
+                session_id=session_id,
+            )
             return self._passthrough(
                 query,
                 session_id,
@@ -145,6 +179,7 @@ class VerificationLoop:
         completeness_results = []
         strategy = "baseline"
         attempt_number = 0
+        _retry_hint = ""
 
         while True:
             t0 = time.time()
@@ -193,6 +228,7 @@ class VerificationLoop:
                     # "your last answer was rejected" directive would tell the
                     # model the wrong thing about which answer was rejected.
                     regenerate and attempt_number == 0,
+                    retry_hint=_retry_hint,
                 )
             except Exception:
                 if attempt_number == 0:
@@ -221,6 +257,13 @@ class VerificationLoop:
             citation_res = self.citation_verifier.check(answer, docs, sources)
             completeness_res = self.completeness_verifier.check(
                 answer, aspects, query=effective_query
+            )
+            # Feeds the NEXT attempt's generation call (see reasoning_engine.
+            # generate_answer's retry_hint) — an explicit, named list of what
+            # this attempt's answer omitted, so a retry can address it instead
+            # of silently reproducing the same incomplete answer.
+            _retry_hint = (
+                "; ".join(completeness_res.missing) if not completeness_res.is_complete else ""
             )
 
             scores = self.confidence_scorer.score(
@@ -268,7 +311,32 @@ class VerificationLoop:
             if should_stop:
                 break
 
-            next_strategy = retry_ctrl.next_strategy()
+            # skip_retries: the CALLER already knows this answer will be
+            # discarded and replaced by a deterministic synthesis regardless
+            # of what this loop decides (image chart-value/comparison
+            # questions -> rag_pipeline._synthesize_image_chart_answer, docx
+            # table-row lookups -> _synthesize_docx_table_answer). Retrying
+            # against the LLM's draft can never change the answer the user
+            # receives, so it was pure wasted latency — live-measured
+            # (2026-08-13, per-modality quality pass) at 14/14 image queries
+            # retrying for 0 eventual successes. The baseline attempt is
+            # still generated and scored normally (grounding/citation/
+            # completeness all still run and are re-synced against the real
+            # synthesized answer afterward, see query_pipeline.
+            # _resync_verification_grounding) — only the retry LOOP is
+            # skipped, not verification itself.
+            if skip_retries:
+                break
+
+            # A completeness failure (a multi-part question missing one of its
+            # aspects) is a generation-shape problem, not a retrieval-coverage
+            # one — jump straight to "decomposition" (per-aspect retrieval +
+            # re-ask) rather than burning attempts on expand_retrieval/
+            # increase_depth, which only widen top_k against the same index
+            # and typically return the same docs when the fact is already in
+            # context. See RetryController.next_strategy() docstring.
+            _prioritize = "decomposition" if not completeness_res.is_complete else None
+            next_strategy = retry_ctrl.next_strategy(prioritize=_prioritize)
             if next_strategy is None:
                 break
             strategy = next_strategy
@@ -283,6 +351,18 @@ class VerificationLoop:
         best_completeness = completeness_results[best_idx]
 
         total_ms = round((time.time() - start) * 1000, 1)
+
+        # A refusal ("No relevant information was found…", "I couldn't generate
+        # a reliable answer.") must never carry the limitation notice: the
+        # notice reads "…treat the figures above with caution" and a refusal
+        # contains no figures at all. Confirmed live on xlsx gold rows before
+        # this fix (2026-08-13, per-modality quality pass). The loop may still
+        # legitimately mark such an attempt unverified and retry it — this
+        # only suppresses the nonsensical user-facing text.
+        from app.reasoning.reasoning_engine import is_refusal_answer
+
+        _is_refusal = is_refusal_answer(final_answer)
+        _notice_applies = (not verified) and not _is_refusal
 
         report = VerificationReport(
             verified=verified,
@@ -300,11 +380,11 @@ class VerificationLoop:
             attempts=attempts,
             total_duration_ms=total_ms,
             degraded=not verified,
-            limitation_notice=None if verified else _LIMITATION_NOTICE,
+            limitation_notice=_LIMITATION_NOTICE if _notice_applies else None,
             cited_sources=cited_sources_per_attempt[best_idx],
         )
 
-        if not verified and final_answer:
+        if _notice_applies and final_answer:
             final_answer = f"{final_answer.rstrip()}\n\n{_LIMITATION_NOTICE}"
 
         self._record_metrics(verified, attempts, total_ms)
@@ -358,6 +438,7 @@ class VerificationLoop:
         sources: list[dict[str, Any]] | None,
         user_id: str | None,
         regenerate: bool = False,
+        retry_hint: str = "",
     ) -> tuple[str, list[dict[str, Any]]]:
         """Returns (answer, cited_sources). `cited_sources` is
         generate_answer()'s OWN citation-filtered subset (empty for a
@@ -373,6 +454,7 @@ class VerificationLoop:
             sources=sources or None,
             user_id=user_id or "",
             regenerate=regenerate,
+            retry_hint=retry_hint,
         )
         answer = (out.get("answer") or "").strip()
         cited = out.get("sources")

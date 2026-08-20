@@ -108,9 +108,12 @@ def run_e2e_suite(cfg: EvalConfig) -> SuiteResult:
     t0 = time.time()
     result = SuiteResult(suite="e2e")
 
-    try:
-        import requests
-    except ImportError:
+    # Availability probe only — the actual HTTP calls go through
+    # app/eval/http_client.py. find_spec (rather than a bare `import requests`)
+    # keeps this a dependency check without leaving an unused binding behind.
+    import importlib.util
+
+    if importlib.util.find_spec("requests") is None:
         result.breached["import_error"] = "requests not installed; pip install requests"
         return result
 
@@ -144,33 +147,68 @@ def run_e2e_suite(cfg: EvalConfig) -> SuiteResult:
     routing_results: list[dict[str, Any]] = []
     latencies: list[float] = []
 
-    import os as _os
+    # Auth via EvalAuth, NOT a token read once from the environment. e2e runs
+    # last in the full suite, so with a static token it was the sub-suite that
+    # crossed ACCESS_TOKEN_EXPIRE_MINUTES and lost 73/90 rows to 401/429 —
+    # see app/eval/http_client.py's module docstring.
+    from app.eval.http_client import EvalAuth, post_json
 
-    _access_token = _os.getenv("EVAL_ACCESS_TOKEN", "")
-    _headers = {"Authorization": f"Bearer {_access_token}"} if _access_token else {}
+    _auth = EvalAuth(cfg.user_id)
 
     for row in rows:
         query = row["query"]
-        payload = {
+        payload: dict[str, Any] = {
             "query": query,
             "session_id": f"{cfg.session_prefix}_e2e_{row['id']}",
             "user_id": cfg.user_id,
             "no_cache": True,
         }
+        # /rag/query 400s on an empty scope (api_routes.py's FILE SCOPE
+        # REQUIRED gate) unless force_web is set — mirror the UI's @ picker
+        # for KB rows via relevant_doc_ids/source_file; rows with no relevant
+        # doc (pure web rows, e.g. expected_route=="search") go through
+        # force_web instead so they still exercise the web path rather than
+        # 400ing. Heuristic-only routing (no force_web, no sources) is
+        # covered separately and in-process by routing_runner.py, which
+        # calls query_pipeline() directly and never hits this HTTP gate.
+        _row_sources = row.get("relevant_doc_ids") or (
+            [row["source_file"]] if row.get("source_file") else None
+        )
+        if _row_sources:
+            payload["sources"] = _row_sources
+        elif row.get("expected_route") == "search":
+            payload["force_web"] = True
+
+        # Reuse an identical answer the generation sub-suite already collected
+        # in THIS run, if there is one. Measured 2026-08-20: all 105 generation
+        # rows reappear here, so `full` was issuing 269 round-trips for 164
+        # distinct queries — ~26 min of a 180-min job cap spent recomputing
+        # answers the run already had. The key pins query + tenant + scope +
+        # force_web, so anything that would reach the model differently misses
+        # and is queried normally. See app/eval/answer_cache for why this
+        # cannot reintroduce the stale-cache problem `no_cache: True` guards.
+        from app.eval import answer_cache
+
+        _ck = answer_cache.make_key(
+            query,
+            cfg.user_id,
+            sources=_row_sources,
+            force_web=bool(payload.get("force_web", False)),
+        )
+        _cached = answer_cache.get(_ck)
 
         q_start = time.time()
-        try:
-            resp = requests.post(
-                f"{base_url}/rag/query", json=payload, headers=_headers, timeout=120
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as exc:
-            result.breached[f"query_error_{row['id']}"] = str(exc)
-            continue
-
-        q_elapsed = time.time() - q_start
-        latencies.append(q_elapsed)
+        if _cached is not None:
+            data = _cached
+            q_elapsed = 0.0  # reused — NOT a latency sample for this suite
+        else:
+            try:
+                data = post_json(f"{base_url}/rag/query", payload, _auth, timeout=120)
+            except Exception as exc:
+                result.breached[f"query_error_{row['id']}"] = str(exc)
+                continue
+            q_elapsed = time.time() - q_start
+            latencies.append(q_elapsed)
 
         answer = data.get("answer") or data.get("response") or ""
         sources = data.get("sources") or []

@@ -14,6 +14,7 @@ from app.chunking.finance_numbers import (
     deterministic_chunk_id,
     extract_finance_entities,
 )
+from app.core.config import settings
 from app.ingestion.schema import IngestedDocument, RawExtract, UniversalMetadata
 from app.utils.logger import get_logger, modality_var
 
@@ -187,11 +188,25 @@ class PdfChunker(BaseChunker):
             prose_footnotes: list[str] = []
             pending_table_rows: list[RawExtract] = []
             seen_hashes: set = set()
+            # Hallucination-reduction initiative Phase 5 (2026-08-13): worst
+            # (minimum) ocr_confidence seen among the extracts contributing to
+            # the currently-buffered prose page — pdf_ingest.py computes this
+            # per-page (extra["ocr_confidence"]) but it was previously never
+            # read here. Tracked across possibly-several extracts feeding one
+            # flush, since flush_prose() only retains the concatenated text,
+            # not the individual RawExtract objects.
+            prose_min_ocr_confidence: float | None = None
 
             def flush_prose() -> None:
-                nonlocal prose_buf, prose_footnotes
+                nonlocal prose_buf, prose_footnotes, prose_min_ocr_confidence
                 if not prose_buf.strip():
                     return
+                _error_markers = (
+                    ["low_ocr_confidence"]
+                    if prose_min_ocr_confidence is not None
+                    and prose_min_ocr_confidence < settings.OCR_CONFIDENCE_ERROR_MARKER_MIN
+                    else []
+                )
                 for piece in self._split_text(prose_buf):
                     if not piece.strip():
                         continue
@@ -223,6 +238,8 @@ class PdfChunker(BaseChunker):
                         "finance_entities": fin_entities,
                         "char_start": char_offset[0],
                         "char_end": char_offset[0] + len(piece),
+                        "ocr_confidence": prose_min_ocr_confidence,
+                        "error_markers": _error_markers,
                     }
                     doc = self._make_doc(
                         text=piece,
@@ -241,6 +258,7 @@ class PdfChunker(BaseChunker):
                         char_offset[0] += len(piece) + 1
                 prose_buf = ""
                 prose_footnotes = []
+                prose_min_ocr_confidence = None
 
             def flush_table() -> None:
                 nonlocal pending_table_rows
@@ -374,6 +392,11 @@ class PdfChunker(BaseChunker):
                         flush_prose()
                         prose_page = ext.page
                     prose_buf = (prose_buf + "\n\n" + text).strip() if prose_buf else text
+                    _ext_ocr_conf = (ext.extra or {}).get("ocr_confidence")
+                    if _ext_ocr_conf is not None and (
+                        prose_min_ocr_confidence is None or _ext_ocr_conf < prose_min_ocr_confidence
+                    ):
+                        prose_min_ocr_confidence = _ext_ocr_conf
                     continue
 
                 if etype == "scanned_page":
@@ -383,6 +406,13 @@ class PdfChunker(BaseChunker):
                     ocr_text = _ocr_bytes(raw) if raw else (ext.text or "")
                     if not ocr_text.strip():
                         continue
+                    _page_ocr_conf = (ext.extra or {}).get("ocr_confidence")
+                    _scanned_error_markers = (
+                        ["low_ocr_confidence"]
+                        if _page_ocr_conf is not None
+                        and _page_ocr_conf < settings.OCR_CONFIDENCE_ERROR_MARKER_MIN
+                        else []
+                    )
                     for piece in self._split_text(ocr_text):
                         if not piece.strip():
                             continue
@@ -407,6 +437,8 @@ class PdfChunker(BaseChunker):
                             "finance_entities": fin_entities,
                             "char_start": char_offset[0],
                             "char_end": char_offset[0] + len(piece),
+                            "ocr_confidence": _page_ocr_conf,
+                            "error_markers": _scanned_error_markers,
                         }
                         doc = self._make_doc(
                             text=piece,

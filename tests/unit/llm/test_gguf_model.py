@@ -97,3 +97,64 @@ class TestConstruction:
     def test_model_name_derived_from_path(self):
         model = GGUFModel(model_path="/some/dir/My-Model-Q4.gguf")
         assert model._model_name == "My-Model-Q4.gguf"
+
+
+class TestHealthCheck:
+    """Regression coverage for a real production bug (2026-08-08): in
+    llama_server mode, self._llm being non-None only means the thin
+    _LlamaServerClient wrapper was constructed (no network call at
+    __init__) — it does NOT mean the separate llama-server process has
+    finished loading and is actually answering. A real /rag/query hit
+    connection-refused + tripped the circuit breaker during exactly that
+    window, while nothing reported it as not-ready. health_check()'s
+    "loaded" field alone can't distinguish these; "server_reachable"/"ready"
+    must.
+    """
+
+    class _FakeServerClient:
+        """Stands in for _LlamaServerClient — has .health(), matching its
+        real API surface, without a real HTTP call."""
+
+        def __init__(self, reachable: bool):
+            self._reachable = reachable
+
+        def health(self) -> bool:
+            return self._reachable
+
+    class _FakeInProcessModel:
+        """Stands in for a loaded llama_cpp.Llama object — no .health()
+        method at all, matching the in-process (non-server) deployment
+        mode's real API surface."""
+
+    def setup_method(self):
+        self.model = GGUFModel()
+
+    def test_not_loaded_is_not_ready(self):
+        result = self.model.health_check()
+        assert result["loaded"] is False
+        assert result["server_reachable"] is None
+        assert result["ready"] is False
+
+    def test_server_mode_wrapper_constructed_but_unreachable_is_not_ready(self):
+        """The exact bug: wrapper exists, server isn't actually up yet."""
+        self.model._llm = self._FakeServerClient(reachable=False)
+        result = self.model.health_check()
+        assert result["loaded"] is True
+        assert result["server_reachable"] is False
+        assert result["ready"] is False
+
+    def test_server_mode_reachable_is_ready(self):
+        self.model._llm = self._FakeServerClient(reachable=True)
+        result = self.model.health_check()
+        assert result["loaded"] is True
+        assert result["server_reachable"] is True
+        assert result["ready"] is True
+
+    def test_in_process_mode_loaded_is_ready(self):
+        """No separate server to reach in this mode — the (slow, real)
+        model object existing already means the weight load completed."""
+        self.model._llm = self._FakeInProcessModel()
+        result = self.model.health_check()
+        assert result["loaded"] is True
+        assert result["server_reachable"] is None
+        assert result["ready"] is True

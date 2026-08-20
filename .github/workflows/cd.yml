@@ -41,6 +41,27 @@ name: CD
 #      declares `environment: staging`, since that changes the OIDC subject
 #      claim), and the permissions policy gained staging's instance ARN for
 #      ec2:StartInstances + ssm:SendCommand.
+#      ROOT-CAUSED 2026-08-07 — and it was NOT a missing staging entry, which
+#      is the answer this comment block previously (wrongly) implied. v0.30.0
+#      failed at `Configure AWS credentials (OIDC)` with "Not authorized to
+#      perform sts:AssumeRoleWithWebIdentity" while the live trust policy
+#      demonstrably DID contain a correct `environment:staging` sub. The real
+#      cause: GitHub migrated this repo to IMMUTABLE (ID-qualified) OIDC
+#      subject claims, so the `sub` presented to STS became
+#         repo:vjkarthik98@218363746/MULTIMODAL-...@1180642349:environment:staging
+#      and no longer matched the plain `repo:<owner>/<repo>:...` patterns.
+#      Nothing in this repo or in IAM changed — v0.29.0's `deploy` job used
+#      `environment: production` and assumed this same role fine on
+#      2026-08-03; the claim format changed underneath us by 2026-08-07.
+#      Fix: deploy/aws/iam/github-oidc-trust-policy.json now lists BOTH the
+#      ID-qualified and legacy forms (see its own comment for the full
+#      reasoning and the `gh api .../actions/oidc/customization/sub` command
+#      that reports the live format). Applying it is still a MANUAL
+#      `aws iam update-assume-role-policy`.
+#      DIAGNOSTIC LESSON: a trust policy that "looks correct" proves nothing
+#      here — always compare it against the ACTUAL emitted sub, not the
+#      documented one. Re-running the job is a waste of a cycle; the failure
+#      is deterministic.
 #   6. Self-hosted runner `magik-staging` registered with the `staging-gpu`
 #      label, installed as a systemd service, confirmed Idle in GitHub. NOTE:
 #      the AMI clone also carried production's OWN registered runner onto this
@@ -194,15 +215,48 @@ jobs:
           build-args: |
             GIT_SHA=${{ github.sha }}
             IMAGE_TAG=${{ steps.meta.outputs.tag }}
-          # Explicit shared scope. The default gha cache scope is derived from
-          # the git ref, so a TAG build cannot read a cache written by a
-          # different tag or by a branch build — which is why v0.26.1 recompiled
-          # llama-cpp-python from source for 1h21m despite v0.26.0 having built
-          # the identical layer minutes earlier. A fixed scope pools them.
-          cache-from: type=gha,scope=magik-cuda-runtime
-          cache-to: type=gha,mode=max,scope=magik-cuda-runtime
+          # REGISTRY cache, not `type=gha`. The fixed-scope gha cache that used
+          # to live here was measured doing active harm on v0.30.0:
+          #
+          #   * `#42 exporting to GitHub Actions Cache ... DONE 2872.4s` — 48
+          #     minutes, over half of that job's 88-minute runtime, spent
+          #     UPLOADING a cache.
+          #   * ...that then produced ZERO `CACHED` layers on the next build.
+          #     GitHub Actions Cache is capped at 10GB per repository; a
+          #     `mode=max` export of a CUDA image with the full ML stack is many
+          #     times that, so the manifest survives (the log shows `#17
+          #     importing cache manifest from gha:...`) while the blobs it points
+          #     at have already been LRU-evicted. A cache that imports cleanly
+          #     and hits nothing is the worst of both worlds.
+          #   * staging the export also consumed the runner's disk — 112GB free
+          #     after the cleanup step above, and Trivy still died with "no space
+          #     left on device" further down.
+          #
+          # GHCR has no such cap, dedupes against the image layers this same step
+          # just pushed, and keeps the cache in exactly one place with exactly one
+          # credential (the docker/login-action above). `image-manifest=true,
+          # oci-mediatypes=true` are REQUIRED for GHCR — without them buildkit
+          # writes a non-image manifest type that GHCR rejects.
+          #
+          # `:buildcache` is a real tag in the same GHCR package as the release
+          # tags. That is intentional and normal; do not "clean it up".
+          cache-from: type=registry,ref=${{ steps.meta.outputs.image }}:buildcache
+          cache-to: type=registry,ref=${{ steps.meta.outputs.image }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
           sbom: true
           provenance: mode=max
+
+      # The image is pushed and the build cache is in GHCR by this point, so
+      # everything buildkit is still holding on local disk is dead weight — and
+      # it is what starved Trivy on v0.30.0 ("no space left on device" with
+      # 112GB free before the build started). Reclaim it here, between the push
+      # and the two steps that need to unpack a ~20GB image locally.
+      - name: Reclaim disk before scanning
+        if: always()
+        run: |
+          echo "before:"; df -h / | tail -1
+          docker buildx prune -af >/dev/null 2>&1 || true
+          docker system prune -af --volumes >/dev/null 2>&1 || true
+          echo "after:";  df -h / | tail -1
 
       # ── Supply-chain: SBOM artifact ──────────────────────────────────────
       # NON-BLOCKING, same treatment as the Trivy scan below: an SBOM is a
@@ -213,14 +267,31 @@ jobs:
       # though docker/build-push-action above had already succeeded and the
       # image was genuinely in GHCR. An SBOM generation hiccup must never
       # block shipping a working, already-built image.
-      - name: Generate SBOM (SPDX JSON)
-        uses: anchore/sbom-action@v0
+      #
+      # This EXTRACTS the SPDX attestation that `sbom: true` on the build step
+      # above already attached to the pushed image, rather than re-deriving one
+      # with Syft. anchore/sbom-action did the same job in 15 minutes (measured
+      # on v0.30.0) by pulling and unpacking the whole ~20GB image a second
+      # time — cost that bought nothing, since buildkit had already produced an
+      # SBOM of the identical artifact during the build. imagetools reads it
+      # straight out of the registry manifest in seconds and, unlike a fresh
+      # scan, cannot disagree with what actually shipped.
+      - name: Extract SBOM (SPDX JSON) from image attestation
         continue-on-error: true
-        with:
-          image: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
-          format: spdx-json
-          output-file: sbom.spdx.json
-          upload-artifact: false   # uploaded explicitly below, with a stable name
+        run: |
+          set -uo pipefail
+          IMG="${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}"
+          docker buildx imagetools inspect "$IMG" \
+            --format '{{ json .SBOM.SPDX }}' > sbom.spdx.json || true
+          # A missing/absent attestation yields the literal "null" or an empty
+          # file. Drop it so the `hashFiles` guard below skips cleanly rather
+          # than publishing a junk artifact named like a real SBOM.
+          if [ ! -s sbom.spdx.json ] || [ "$(tr -d '[:space:]' < sbom.spdx.json)" = "null" ]; then
+            echo "::warning title=SBOM::No SPDX attestation found on ${IMG}; skipping SBOM artifact."
+            rm -f sbom.spdx.json
+          else
+            echo "SBOM extracted: $(wc -c < sbom.spdx.json) bytes"
+          fi
 
       - name: Upload SBOM
         # Skip cleanly (grey) rather than fail-but-ignore (orange) when Syft
@@ -264,13 +335,28 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "0"   # informational until calibrated — see note above
+          # Vulnerability scanning ONLY. Trivy's secret scanner is on by
+          # default and roughly doubles the layer extraction this step has to
+          # do — for a check security.yml's `secrets-scan` job (detect-secrets
+          # against .secrets.baseline) already performs on the source these
+          # layers were built from. Trivy's own log recommends exactly this
+          # flag. Halving the extraction also halves the disk footprint that
+          # made this step fail on v0.30.0.
+          scanners: vuln
 
       # Public repo, so GitHub code scanning is free — findings land in the
       # repo's Security tab with per-CVE history instead of being buried in
       # a job log nobody re-reads.
+      #
+      # `hashFiles` guard, matching the SBOM upload above: the scan step is
+      # continue-on-error, so when it fails there is no SARIF to upload and
+      # this step used to fail the job with a bare "Path does not exist:
+      # trivy-results.sarif" (v0.30.0) — an error that says nothing about the
+      # actual cause several steps earlier. Skip cleanly instead; the real
+      # failure is already reported by the scan step itself.
       - name: Upload Trivy results to code scanning
         uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        if: always() && hashFiles('trivy-results.sarif') != ''
         continue-on-error: true
         with:
           sarif_file: trivy-results.sarif
@@ -969,12 +1055,37 @@ jobs:
           cat > /tmp/remote-monitoring.sh <<'REMOTE_EOF'
           set -uo pipefail
           REF="__GIT_REF__"
-          REPO_DIR="/home/ubuntu/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT"
           log(){ echo "[monitoring-sync] $*"; }
 
-          [ -d "${REPO_DIR}/.git" ] \
-            || { log "FATAL: ${REPO_DIR} is not a git checkout — see deploy/aws/README.md 'Monitoring-stack secrets in SSM'"; exit 1; }
+          # The box's persistent checkout is the ONE thing in this pipeline
+          # named after the repository, so it is the one thing a repo RENAME
+          # can break. This repo was renamed multimodal-rag-assistant ->
+          # MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT; the
+          # production and staging boxes predate that (staging is an AMI clone
+          # of production, so it inherited whatever directory name prod had).
+          # Probe both instead of hardcoding one: a stale directory name would
+          # otherwise make this step fail on every promote — and because the
+          # step is continue-on-error, it would fail SILENTLY, leaving
+          # monitoring config frozen at whatever tag was last synced while the
+          # app itself kept deploying fine. Nothing else here is name-derived:
+          # the app deploy only pulls the prebuilt image, whose ref is computed
+          # from GITHUB_REPOSITORY at runtime and is therefore always current.
+          REPO_DIR=""
+          for d in "/home/ubuntu/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT" \
+                   "/home/ubuntu/multimodal-rag-assistant"; do
+            if [ -d "${d}/.git" ]; then REPO_DIR="$d"; break; fi
+          done
+          [ -n "${REPO_DIR}" ] \
+            || { log "FATAL: no git checkout found at /home/ubuntu/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT or /home/ubuntu/multimodal-rag-assistant — see deploy/aws/README.md 'Monitoring-stack secrets in SSM'"; exit 1; }
+          log "using checkout ${REPO_DIR}"
           cd "${REPO_DIR}"
+
+          # A renamed repo keeps working over GitHub's redirect, but pin the
+          # remote to the current URL anyway so the redirect is not a
+          # permanent dependency.
+          git remote set-url origin \
+            "https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT.git" \
+            >/dev/null 2>&1 || true
 
           # Bring the box's checkout to the SAME tag that was just promoted —
           # not just `git pull` on a branch — so monitoring config on the box

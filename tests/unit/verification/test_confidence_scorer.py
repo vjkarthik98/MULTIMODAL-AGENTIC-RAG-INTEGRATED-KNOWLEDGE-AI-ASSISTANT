@@ -60,14 +60,37 @@ class TestConfidenceScorer:
         assert decision == "FAIL"
         assert "unsupported numbers" in reason
 
-    def test_missing_aspects_forces_fail(self):
+    def test_partial_completeness_no_longer_categorically_fails(self):
+        # Changed 2026-08-13 (hallucination-reduction initiative Phase 3):
+        # a single missing aspect used to force FAIL regardless of scores,
+        # double-penalizing multi-part questions that were otherwise safe
+        # (see confidence_scorer.py's decide() comment for the full
+        # rationale + live evidence). completeness_score still costs real
+        # points in `overall` (100*1/2=50 here -> overall=65, still above
+        # the recalibrated AGENT_VERIFY_OVERALL_MIN=50) — proportional, not
+        # categorical.
         scorer = ConfidenceScorer()
         retrieval, grounding, citation, _ = _perfect()
         completeness = CompletenessResult(aspects=["a", "b"], covered=["a"], missing=["b"])
         scores = scorer.score(retrieval, grounding, citation, completeness)
         decision, reason = scorer.decide(scores, grounding, citation, completeness)
+        assert decision == "PASS"
+        assert "missing aspects" not in reason
+
+    def test_severe_incompleteness_still_fails_via_overall_score(self):
+        # The proportional mechanism still catches genuinely bad completeness
+        # — it just goes through the score, not a categorical override.
+        scorer = ConfidenceScorer()
+        retrieval, grounding, citation, _ = _perfect()
+        completeness = CompletenessResult(
+            aspects=["a", "b", "c", "d"], covered=["a"], missing=["b", "c", "d"]
+        )
+        scores = scorer.score(retrieval, grounding, citation, completeness)
+        # completeness_score=25 -> weakest=25, mean=(100*3+25)/4=81.25,
+        # overall=0.6*25+0.4*81.25=15+32.5=47.5 < 50 -> FAIL
+        decision, reason = scorer.decide(scores, grounding, citation, completeness)
         assert decision == "FAIL"
-        assert "missing aspects" in reason
+        assert "overall" in reason
 
     def test_bad_citations_forces_fail(self):
         scorer = ConfidenceScorer()

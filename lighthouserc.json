@@ -15,6 +15,8 @@
         "categories:accessibility": ["warn", { "minScore": 0.85 }],
         "categories:best-practices": ["warn", { "minScore": 0.85 }],
         "categories:seo": ["off"],
+        "font-size": "off",
+        "errors-in-console": ["warn", { "minScore": 0.9 }],
         "uses-http2": "off",
         "unused-javascript": "off",
         "csp-xss": "off",

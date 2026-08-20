@@ -1639,13 +1639,25 @@ if __name__ == "__main__":
         if _user_id
         else None
     )
-    _points, _ = _qs.client.scroll(
-        collection_name=settings.TEXT_COLLECTION_NAME,
-        with_payload=True,
-        limit=5000,
-        scroll_filter=_filter,
-    )
-    _docs = [BM25Document.from_payload(pt.payload or {}) for pt in _points]
+    # Paginate to exhaustion instead of a single limit=5000 scroll — a single
+    # call silently truncates any tenant with more than 5000 text chunks (no
+    # error, no warning; build_index() just gets fed a partial corpus and the
+    # rebuild reports success), which would degrade Tier-2 retrieval exactly
+    # like the missing-index case this script exists to fix.
+    _all_points = []
+    _offset = None
+    while True:
+        _points, _offset = _qs.client.scroll(
+            collection_name=settings.TEXT_COLLECTION_NAME,
+            with_payload=True,
+            limit=1000,
+            offset=_offset,
+            scroll_filter=_filter,
+        )
+        _all_points.extend(_points)
+        if _offset is None:
+            break
+    _docs = [BM25Document.from_payload(pt.payload or {}) for pt in _all_points]
     _docs = [d for d in _docs if d.text]
     _bm25.build_index(_docs, user_id=_user_id)
     print(f"Rebuilt BM25 index for user '{_user_id}': {len(_bm25.documents)} docs indexed.")

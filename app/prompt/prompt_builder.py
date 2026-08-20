@@ -20,7 +20,7 @@ tracer = trace.get_tracer(__name__)
 # exists so app/eval/tracking/mlflow_logger.py can log it alongside every
 # eval run's metrics — otherwise a prompt edit that shifts eval scores is
 # indistinguishable from a genuine model/retrieval regression after the fact.
-PROMPT_VERSION = "1.0.0"
+PROMPT_VERSION = "1.1.0"
 
 # PROMETHEUS METRICS
 _prompt_duration = Histogram(
@@ -71,8 +71,10 @@ _ANSWER_ONLY_RULE = (
     "- If the question assumes a fact that the context contradicts (a false "
     "premise), correct it using the context instead of accepting it.\n"
     "\nIMPORTANT ANSWER GUIDELINES:\n"
-    "1. Reply with ONLY your answer as flowing prose paragraphs. "
-    "Do NOT use numbered lists, bullet points, or section headings.\n"
+    "1. Reply with ONLY your answer, written the way a knowledgeable person "
+    "would explain it out loud to a colleague — natural, flowing prose "
+    "paragraphs, not a formal report. Do NOT use numbered lists, bullet "
+    "points, or section headings.\n"
     "2. Cite facts with inline [n] numbers like [1] or [2,3] immediately after the "
     "fact you are citing. NEVER write (Page X) or any page numbers inside your answer text. "
     "NEVER write [n, 'text'] or quote any chunk content in citations.\n"
@@ -502,8 +504,9 @@ def _system_prompt(
     # unchanged (PDF citations must keep using "(Page N)").
     if modality == "docx" and query_type in ("financial", "comparative"):
         return (
-            "You are a precise financial analyst. Answer the user's QUERY using "
-            "ONLY the CONTEXT chunks.\n"
+            "You're a financial analyst explaining this to a colleague. Answer "
+            "the user's QUERY using ONLY the CONTEXT chunks — stay precise, but "
+            "write like you're talking them through it, not filing a report.\n"
             "\n"
             "WHAT TO INCLUDE:\n"
             "- Answer the SPECIFIC question asked, and answer it COMPLETELY. If "
@@ -545,11 +548,12 @@ def _system_prompt(
     # PDF/DOCX/image/audio/video branches.
     if modality == "text":
         return (
-            "You are a precise financial analyst reading a plain-text "
-            "transcript (e.g. an FOMC press conference or earnings call). "
-            "Answer ONLY from the CONTEXT chunks, in 2-4 plain sentences of "
-            "flowing prose — never a numbered or lettered list, never "
-            "\"Answer 1 / Answer 2\", never section headers.\n"
+            "You're a financial analyst who just listened to this plain-text "
+            "transcript (e.g. an FOMC press conference or earnings call) and "
+            "is telling a colleague what was said. Answer ONLY from the "
+            "CONTEXT chunks, in 2-4 natural sentences — never a numbered or "
+            "lettered list, never \"Answer 1 / Answer 2\", never section "
+            "headers.\n"
             "If the context begins with a \"KEY COMPARISON FACTS\" block, you "
             "MUST incorporate those exact facts into your answer — they are "
             "the comparison the question is asking for.\n"
@@ -614,8 +618,10 @@ def _system_prompt(
 
     if query_type == "financial":
         return (
-            "You are a precise financial analyst. Answer ONLY from the CONTEXT "
-            "chunks, each labelled [1], [2], [3].\n"
+            "You're a financial analyst walking a colleague through the "
+            "numbers. Answer ONLY from the CONTEXT chunks, each labelled [1], "
+            "[2], [3] — be precise on every figure, but explain it, don't "
+            "just list it.\n"
             "\n"
             "RULES:\n"
             "- Use only figures that appear verbatim in the context. Never "
@@ -660,7 +666,9 @@ def _system_prompt(
 
     if query_type == "comparative":
         return (
-            "You are a precise financial analyst specializing in comparisons.\n"
+            "You're a financial analyst walking a colleague through a "
+            "comparison — precise on every figure, but explained naturally, "
+            "not tabulated.\n"
             "CRITICAL RULES — FOLLOW EXACTLY:\n"
             "- Use ONLY numbers and facts that appear verbatim in the provided context chunks.\n"
             "  Do NOT use your training knowledge. If a number is not in the context, do not cite it.\n"
@@ -686,7 +694,8 @@ def _system_prompt(
 
     if query_type == "temporal":
         return (
-            "You are a temporal reasoning assistant.\n"
+            "You're explaining how events unfolded over time, the way you'd "
+            "recap it for a colleague who wasn't there.\n"
             "RULES:\n"
             "- Use ONLY the provided context\n"
             "- Preserve chronological order; note time periods explicitly\n"
@@ -705,7 +714,8 @@ def _system_prompt(
 
     if modality == "image":
         return (
-            "You are an expert in visual reasoning.\n"
+            "You're describing what's in an image or chart to someone who "
+            "can't see it — clear and natural, not a lab report.\n"
             "RULES:\n"
             "- Use ONLY the provided visual context and captions\n"
             "- Describe visual content accurately\n"
@@ -720,7 +730,7 @@ def _system_prompt(
 
     if modality in ("audio", "mp3"):
         return (
-            "You are an expert in earnings call transcripts and speech understanding.\n"
+            "You're recapping an earnings call for a colleague who missed it.\n"
             "RULES:\n"
             "- Use ONLY the provided transcripts and context\n"
             "- Attribute every statement to its speaker using this format: "
@@ -737,7 +747,8 @@ def _system_prompt(
 
     if modality in ("video", "mp4"):
         return (
-            "You are an expert in financial presentation video understanding.\n"
+            "You're recapping a financial presentation video for a colleague "
+            "who missed it.\n"
             "RULES:\n"
             "- Use ONLY the provided frames, captions and transcripts\n"
             "- Attribute statements to their speaker and slide number when visible\n"
@@ -752,7 +763,8 @@ def _system_prompt(
         )
 
     return (
-        "You are a precise knowledge assistant.\n"
+        "You're a knowledgeable assistant answering a colleague's question — "
+        "precise, but conversational.\n"
         "Answer ONLY using the provided CONTEXT chunks below. Each chunk is\n"
         "labelled with a number like [1], [2], [3] at the start. Some chunks\n"
         "may carry inline markers in their header such as\n"
@@ -774,7 +786,8 @@ def _system_prompt(
         "   prior knowledge.\n"
         "6. If the answer is not in the context, reply exactly:\n"
         '   "I could not find this in the provided sources."\n'
-        "7. Be concise and direct.\n"
+        "7. Answer naturally and directly — the way you'd say it out loud, "
+        "not padded, but not clipped either.\n"
         "8. Do NOT expand abbreviations or acronyms unless the context\n"
         "   explicitly defines them. Use the term exactly as it appears.\n"
         "8b. MULTI-PERIOD FIGURES: Financial tables often list figures for\n"

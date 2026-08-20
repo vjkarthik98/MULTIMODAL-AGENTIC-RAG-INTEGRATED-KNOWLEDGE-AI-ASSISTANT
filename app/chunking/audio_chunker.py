@@ -124,19 +124,39 @@ def _run_whisper(wav_path: str) -> list[dict]:
         from app.core.model_loader import model_loader as loader
 
         model = loader.get_whisper()
-        segments, _ = model.transcribe(
-            wav_path,
-            word_timestamps=True,
-            vad_filter=True,
-            condition_on_previous_text=False,
-            initial_prompt=_WHISPER_INITIAL_PROMPT,
-            beam_size=5,
-        )
+        # faster-whisper's transcribe() returns a lazy generator — the actual
+        # CUDA decode happens during iteration, so materializing it to a list
+        # must stay inside the lock too, not just the transcribe() call itself.
+        with loader.get_whisper_lock():
+            segments, _ = model.transcribe(
+                wav_path,
+                word_timestamps=True,
+                vad_filter=True,
+                condition_on_previous_text=False,
+                initial_prompt=_WHISPER_INITIAL_PROMPT,
+                beam_size=5,
+            )
+            segments = list(segments)
         words = []
         for seg in segments:
+            # Hallucination-reduction initiative Phase 5 (2026-08-13):
+            # avg_logprob/no_speech_prob are segment-level Whisper outputs —
+            # denormalized onto every word from this segment (previously
+            # discarded entirely) so _assemble_chunks (app/chunking/av_shared.py)
+            # can aggregate them into a chunk-level hallucination_risk.
+            _avg_logprob = getattr(seg, "avg_logprob", None)
+            _no_speech_prob = getattr(seg, "no_speech_prob", None)
             if hasattr(seg, "words") and seg.words:
                 for w in seg.words:
-                    words.append({"word": w.word, "start": w.start, "end": w.end})
+                    words.append(
+                        {
+                            "word": w.word,
+                            "start": w.start,
+                            "end": w.end,
+                            "avg_logprob": _avg_logprob,
+                            "no_speech_prob": _no_speech_prob,
+                        }
+                    )
             else:
                 # Segment-level fallback when word_timestamps not available.
                 words.append(
@@ -144,6 +164,8 @@ def _run_whisper(wav_path: str) -> list[dict]:
                         "word": seg.text,
                         "start": seg.start,
                         "end": seg.end,
+                        "avg_logprob": _avg_logprob,
+                        "no_speech_prob": _no_speech_prob,
                     }
                 )
         return words
@@ -161,9 +183,13 @@ def _transcribe_long_audio(wav_path: str, duration_sec: float) -> list[dict]:
     garbled proper nouns) compared to transcribing the same audio region in
     isolation — confirmed by direct comparison on this pipeline's FOMC test
     file. Splitting into bounded segments and transcribing each independently
-    (as the legacy ingest() path already did) avoids that drift; segments run
-    concurrently across AUDIO_TRANSCRIPTION_WORKERS since CTranslate2 releases
-    the GIL during CUDA ops.
+    (as the legacy ingest() path already did) avoids that drift; segments are
+    queued across AUDIO_TRANSCRIPTION_WORKERS threads, but the actual
+    .transcribe() call is serialized via model_loader.get_whisper_lock() —
+    letting two threads decode concurrently on the shared CTranslate2 model
+    crashes with `cudaErrorInvalidDevice: invalid device ordinal`. The worker
+    pool still helps: segment export (pydub) and queueing overlap with the
+    in-flight GPU call.
     """
     # Cap transcription-segment length at 10 min. faster-whisper's output
     # quality (capitalization, punctuation, proper nouns) is most consistent on
@@ -328,6 +354,20 @@ class AudioChunker(BaseChunker):
                         chunk_hash = deterministic_chunk_id(
                             source, f"audio_{ch['start']:.1f}", chunk_idx
                         )
+                        # Hallucination-reduction initiative Phase 5
+                        # (2026-08-13): surface low-confidence transcription
+                        # into the prompt via the existing error_markers ->
+                        # "⚠ ERROR_MARKERS=" mechanism (rag_pipeline.py::
+                        # _build_context) — flag-only, does not affect
+                        # retrieval ranking. hallucination_risk is aggregated
+                        # by _assemble_chunks (av_shared.py) from Whisper's
+                        # per-segment avg_logprob/no_speech_prob.
+                        _risk = ch.get("hallucination_risk", "low")
+                        _error_markers = (
+                            ["low_transcription_confidence"]
+                            if _risk in settings.MEDIA_HALLUCINATION_RISK_ERROR_MARKER_LEVELS
+                            else []
+                        )
                         structure = {
                             "chunk_hash_id": chunk_hash,
                             "source_file": source,
@@ -354,6 +394,9 @@ class AudioChunker(BaseChunker):
                             "snr": snr,
                             "snr_degraded": snr_degraded,
                             "clipping_detected": clipping_detected,
+                            "confidence": ch.get("confidence"),
+                            "hallucination_risk": _risk,
+                            "error_markers": _error_markers,
                         }
 
                         doc = self._make_doc(

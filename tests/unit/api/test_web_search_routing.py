@@ -45,6 +45,17 @@ class TestIsWebRequest:
         # the wording of the question.
         assert _is_web_request("", True) is True
 
+    def test_know_does_not_match_the_now_signal(self):
+        # Bare substring matching on "now" previously matched inside "know"/
+        # "knowledge" (e.g. "do you know about the financial documents in
+        # the knowledge base?"), silently sending a plain meta question to an
+        # uncontrolled real web search. Found 2026-08-17.
+        q = "Do you know about the Financial documents stored in the Knowledge Base?"
+        assert _is_web_request(q, False) is False
+
+    def test_knowledge_alone_does_not_match(self):
+        assert _is_web_request("what is in the knowledge base?", False) is False
+
 
 class TestWebHelpers:
 
@@ -137,6 +148,9 @@ def test_force_web_failure_does_not_fall_back_to_the_knowledge_base(client):
 
 
 def test_without_force_web_the_knowledge_base_pipeline_still_runs(client):
+    # A file scope is now required for any non-web query (see
+    # test_file_scope_required.py) — this test's own concern is only that a
+    # non-force_web query with a scope still runs the KB pipeline, not web.
     with patch("app.api.api_routes._run_web_search", new=AsyncMock()) as web, patch(
         "app.api.api_routes._get_query_pipeline"
     ) as pipeline:
@@ -145,7 +159,7 @@ def test_without_force_web_the_knowledge_base_pipeline_still_runs(client):
             "confidence": 0.8,
             "sources": [],
         }
-        r = _post(client, query="what was total revenue in the 10-K")
+        r = _post(client, query="what was total revenue in the 10-K", sources=["10k.pdf"])
 
     assert r.status_code == 200
     assert "391.0B" in r.json()["answer"]

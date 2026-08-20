@@ -10,6 +10,7 @@ export default defineConfig({
       '/auth': { target: 'http://localhost:8000', changeOrigin: true },
       '/rag':  { target: 'http://localhost:8000', changeOrigin: true },
       '/admin':{ target: 'http://localhost:8000', changeOrigin: true },
+      '/api':  { target: 'http://localhost:8000', changeOrigin: true },
     },
   },
   // sourcemap explicitly off (this is already Vite's default, but stated so a

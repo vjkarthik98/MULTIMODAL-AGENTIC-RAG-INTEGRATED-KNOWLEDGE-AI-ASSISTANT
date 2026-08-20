@@ -39,6 +39,32 @@ services:
       # every `docker compose down` + `up`. Same fix as cd.yml's production
       # `docker run` already applies; mirrored here for dev-runtime parity.
       TORCH_HOME: /app/.hf_cache/torch
+      # API-only mode for CI smoke/DAST jobs — both default OFF, so a plain
+      # `docker compose up` behaves exactly as before (full model bootstrap).
+      # .github/workflows/quality.yml sets SKIP_MODEL_BOOTSTRAP=true because
+      # its runners bind-mount an EMPTY .hf_cache: without it start_server.py
+      # downloads ~25GB before uvicorn ever binds and /health never answers.
+      # See skip_model_bootstrap() in start_server.py for the full rationale.
+      SKIP_MODEL_BOOTSTRAP: ${SKIP_MODEL_BOOTSTRAP:-false}
+      WARMUP_AT_STARTUP: ${WARMUP_AT_STARTUP:-true}
+      # Settings.validate() (app/core/config.py) requires JWT_SECRET_KEY >= 32
+      # chars whenever AUTH_ENABLED is true (the default) — independent of ENV.
+      # Locally this is a non-issue: env_file above loads the real value from
+      # .env. In CI there IS no .env (gitignored, not checked out), so
+      # JWT_SECRET_KEY fell back to config.py's own "CHANGE_ME_IN_PRODUCTION"
+      # default (23 chars) and the app crashed at import time on every single
+      # `docker compose up` — confirmed live via `docker compose logs api`
+      # (2026-08-20, run 32359742368): "ValueError: Config validation failed
+      # ... JWT_SECRET_KEY must be at least 32 characters long", raised before
+      # uvicorn ever bound the port, which is what "Wait for API health"
+      # actually saw as connection-refused for its whole timeout window.
+      # ci.yml's lint-type-test job hit the identical validate() gap and
+      # already documents + placeholders it the same way; mirrored here.
+      # `${JWT_SECRET_KEY:-...}` is compose's own interpolation (reads the
+      # project-root .env or shell env, same file env_file loads at runtime),
+      # so a real local .env value passes through unchanged — this only ever
+      # supplies the placeholder when nothing else set it.
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-ci-test-only-placeholder-jwt-secret-not-a-real-credential}
     volumes:
       - ./.hf_cache:/app/.hf_cache
       - ./data:/app/data

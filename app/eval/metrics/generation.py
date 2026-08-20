@@ -194,21 +194,57 @@ def compute_generation_metrics_lexical(
 
 
 # specific facts = numbers with >=2 digits, decimals, or percentages — reliable to match
-_CR_SPECIFIC = re.compile(r"\d[\d,]*\.?\d*\s?%?|\d+\.\d+")
+# (_CR_SPECIFIC removed 2026-08-13 — _deterministic_context_recall now reuses
+# hallucination._parse_numbers, which classifies years/identifiers correctly
+# instead of treating any >=2-digit token as a fact.)
+#
+# _CR_DATE_RE moved to app/eval/metrics/hallucination.py (2026-08-17) — the
+# SAME date-embedded-number bug it fixes here on the reference-answer side
+# (context_recall) was independently found unfixed on the answer/fabrication
+# side (_numbers_grounded, which drives the GATED fabrication_rate metric);
+# hallucination.py already had the lower-level _parse_numbers this reuses, so
+# the regex lives there now and both modules share the one definition instead
+# of drifting into two copies. See hallucination.py's docstring on it for the
+# full reproduction (the day-of-month in "September 18, 2024" independently
+# flagging 3 separate audio rows as fabrication in one suite run).
 
 
 def _deterministic_context_recall(reference: str, contexts: list[str]) -> float | None:
     """Fraction of the reference answer's specific facts (numbers/percentages) that
     appear in the retrieved context. Replaces the mis-framed Prometheus context_recall
-    (which graded the raw context as an 'answer'). None when unmeasurable."""
+    (which graded the raw context as an 'answer'). None when unmeasurable.
+
+    CALENDAR YEARS AND IDENTIFIERS ARE EXCLUDED (2026-08-13, per-modality
+    quality pass). The old ">=2 digits is a specific fact" rule counted "2024"
+    as a fact to be recovered, which systematically punished modalities whose
+    CONTEXT does not restate the year even though it is on-topic. Measured on
+    audio (FOMC press conferences), where speakers say "this year"/"in August"
+    while the gold reference writes the full "September 18, 2024": 8 of the 10
+    measurable audio rows were missing ONLY a year or date fragment
+    (['2024'], ['2024,'], ['2024.'], ['18,', '2024']), holding audio's
+    context_recall at 0.583 — the worst of all 7 modalities — for a date
+    convention rather than any retrieval failure. Document modalities are
+    unaffected because a 10-K's text repeats the year everywhere, so this was
+    an apples-to-oranges comparison across modalities.
+
+    Reuses app/eval/metrics/hallucination.py's `_parse_numbers`, whose _Num
+    already carries the correct `is_year` (bare 4-digit 1900-2099, no unit/
+    decimal/%) and `is_id` (>=7-digit bare integer, e.g. SEC accession)
+    classification — the same exclusions that module's own numeric-grounding
+    checks apply. Deliberately does NOT reuse its stricter
+    `_is_material_figure`, which additionally requires a unit/percent/decimal
+    and would drop genuine bare figures like "116,000" payroll jobs.
+    """
     if not reference or not contexts:
         return None
+    from app.eval.metrics.hallucination import _CR_DATE_RE, _parse_numbers
+
+    _ref_no_dates = _CR_DATE_RE.sub(" ", reference)
     facts = [
-        f.strip()
-        for f in _CR_SPECIFIC.findall(reference)
-        if any(ch.isdigit() for ch in f) and len(f.strip()) >= 2
+        n.raw.strip()
+        for n in _parse_numbers(_ref_no_dates)
+        if not n.is_year and not n.is_id and len(re.sub(r"\D", "", n.raw)) >= 2
     ]
-    facts = [f for f in facts if len(re.sub(r"\D", "", f)) >= 2]  # >=2 digits → specific
     if not facts:
         return None
     ctx = " ".join(contexts)

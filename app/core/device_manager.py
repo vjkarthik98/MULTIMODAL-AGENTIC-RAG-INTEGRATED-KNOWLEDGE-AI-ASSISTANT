@@ -59,9 +59,16 @@ MODEL_NAMES = (
     "ner",
     "whisper",
     "reranker",
+    "nli",
 )
 
 # Hybrid profile: heavy attention models on GPU, tiny models on CPU.
+# "nli" is GPU even in hybrid (unlike the CPU-hybrid reranker): at ~184M
+# params / fp16 it costs nothing against the L40S's ~32.7GB static headroom
+# (see module docstring), and putting a semantic groundedness check on GPU is
+# the entire point of the hallucination-reduction initiative's Phase 3
+# (docs/Phase_32_Agentic_Answer_Verification.md; app/verification/
+# groundedness_checker.py).
 _HYBRID_MAP: dict[str, str] = {
     "llm": "cuda",
     "siglip": "cuda",
@@ -71,6 +78,7 @@ _HYBRID_MAP: dict[str, str] = {
     "diarizer": "cuda",
     "ner": "cuda",
     "whisper": "cuda",
+    "nli": "cuda",
     "text_embedder": "cpu",
     "reranker": "cpu",
 }
@@ -211,6 +219,7 @@ class DeviceManager:
             "diarizer": settings.DIARIZER_DEVICE,
             "ner": settings.NER_DEVICE,
             "whisper": settings.WHISPER_DEVICE,
+            "nli": settings.NLI_DEVICE,
         }
         return (overrides.get(name) or "").strip().lower()
 
@@ -263,7 +272,7 @@ class DeviceManager:
                 return "float32"  # pyannote does its own dtype management
             if name == "text_embedder" and settings.EMBEDDER_HALF_PRECISION:
                 return "float16"
-            if name == "reranker":
+            if name in ("reranker", "nli"):
                 return "float16"
             # LLM dtype is irrelevant — llama.cpp uses GGUF quant internally
             return "float32"

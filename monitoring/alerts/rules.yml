@@ -3,6 +3,27 @@
 # host with one fewer container. Mounted into the Grafana container at
 # /etc/grafana/provisioning/alerting/ alongside contact-points.yml and
 # notification-policies.yml in this same directory.
+#
+# Three datasources back these rules: Prometheus (most rules), Loki
+# (magik-error-log-spike, LogQL), and Tempo (magik-trace-error-spike,
+# TraceQL). Prometheus/Loki rules use the datasourceUid + instant:true +
+# threshold-reducer shape (2 steps: raw query -> threshold). The Tempo rule
+# needs a 3rd step: TraceQL metrics queries return a time series, not a
+# scalar the way an `instant: true` Prometheus/Loki query does, so a
+# `type: reduce` expression sits between the raw query and the threshold
+# (see magik-trace-error-spike below).
+#
+# TraceQL alerting requires Grafana v12.1+ (bumped from 11.3.1 for exactly
+# this — see docker-compose.monitoring.yml's grafana image comment) and its
+# own feature toggle (GF_FEATURE_TOGGLES_ENABLE=tempoAlerting, same file) —
+# without both, provisioning magik-trace-error-spike fails Grafana's
+# alert-rule validation at startup. Grafana documents TraceQL alerting
+# itself as experimental / "should not be used in production environments
+# yet" even at v12.1 — this rule is included because it was explicitly
+# requested with that tradeoff accepted, not because the risk went away;
+# verify it actually fires (e.g. force a guardrail block, confirm the
+# alert state changes) after the first real deploy on the new Grafana
+# version, same as any other unverified-until-live change.
 
 apiVersion: 1
 
@@ -92,6 +113,234 @@ groups:
           summary: "Sampled live p95 latency exceeds the 60s offline-gate ceiling (thresholds.yaml latency.p95_sec)."
           description: "Requires ONLINE_EVAL_ENABLED=true and a nonzero ONLINE_EVAL_SAMPLE_RATE to have data — see monitoring/slo.md."
 
+      - uid: magik-gpu-vram-critical
+        title: "GPU VRAM critically low"
+        condition: C
+        for: 5m
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 300, to: 0 }
+            model:
+              expr: "gpu_vram_free_gb"
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # gpu_vram_free_gb already exists (app/core/model_loader.py,
+              # refreshed every MODEL_REAPER_INTERVAL_SEC by the model reaper
+              # loop) but was never alerted on. The reaper itself already
+              # acts at MODEL_EVICT_VRAM_WATERMARK_GB (6.0 GB default) —
+              # alerting at that same line would fire on routine eviction
+              # pressure, not a real problem. 2.0 GB is below the watermark:
+              # sustained for 5 minutes despite the reaper's own eviction
+              # sweep means nothing evictable is left (the pinned query hot
+              # set — llm/text_embedder/reranker/SigLIP — is the only thing
+              # left in VRAM) and the next allocation risks an OOM kill.
+              conditions:
+                - evaluator: { type: lt, params: [2.0] }
+              refId: C
+        labels:
+          severity: critical
+        annotations:
+          summary: "Free GPU VRAM below 2.0 GB for 5 minutes — the model reaper's own eviction watermark (6.0 GB) is no longer enough headroom."
+          description: "See app/core/model_reaper.py and docs/runbooks/gpu-memory-management.md. Check for a stuck/leaked allocation outside the model_loader-tracked pool (e.g. the llama-server child process) before assuming eviction will resolve it."
+
+      - uid: magik-reranker-latency-breach
+        title: "Reranker p95 latency breach"
+        condition: C
+        for: 5m
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 300, to: 0 }
+            model:
+              expr: "histogram_quantile(0.95, sum(rate(reranker_latency_seconds_bucket[5m])) by (le))"
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # settings.LATENCY_TARGET_CROSS_MODAL_MS (default 5000ms) —
+              # the SAME ceiling app/retrieval/reranker.py's own
+              # rerank_latency_exceeded warning log already uses (see
+              # `if model_latency * 1000 > settings.LATENCY_TARGET_CROSS_MODAL_MS`),
+              # not a newly invented number for this alert.
+              conditions:
+                - evaluator: { type: gt, params: [5.0] }
+              refId: C
+        labels:
+          severity: high
+        annotations:
+          summary: "Reranker p95 latency sustained above the 5s cross-modal latency target for 5 minutes."
+          description: "Check GPU contention (gpu_vram_free_gb, circuit_breaker_state) and monitoring/grafana/dashboards/system_health.json's reranker latency panel for the p50/p95 trend."
+
+      # First LOG-based (Loki, not Prometheus) rule in this file — same
+      # datasourceUid + instant:true + threshold-reducer shape as every
+      # Prometheus rule above, just pointed at the `loki` datasource
+      # (monitoring/grafana/provisioning/datasources.yml) with a LogQL
+      # metric query instead of PromQL. Requires LOG_JSON=true (already a
+      # documented requirement for this whole stack — see docker-compose.
+      # monitoring.yml's header comment) so `| json` can parse the `level`
+      # field out of each line. A genuinely NEW signal, not a duplicate of
+      # magik-error-rate-spike above: that one only sees the 7 modality
+      # extract counters; this sees every ERROR/CRITICAL structlog line
+      # app-wide, including code paths that log an error without also
+      # incrementing a Prometheus counter for it.
+      - uid: magik-error-log-spike
+        title: "Application error log rate spike (Loki)"
+        condition: C
+        for: 5m
+        data:
+          - refId: A
+            datasourceUid: loki
+            relativeTimeRange: { from: 300, to: 0 }
+            model:
+              expr: 'count_over_time({container="magik-current"} | json | level=~"ERROR|CRITICAL" [5m])'
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # Provisional, same rationale as the other not-yet-traffic-
+              # calibrated thresholds in this file (guardrail block rate,
+              # auth failure spike) — no measured baseline on this box yet.
+              conditions:
+                - evaluator: { type: gt, params: [20] }
+              refId: C
+        labels:
+          severity: high
+        annotations:
+          summary: "More than 20 ERROR/CRITICAL log lines from the app container in 5 minutes."
+          description: "Open Grafana Explore -> Loki, query {container=\"magik-current\"} | json | level=~\"ERROR|CRITICAL\", and use each line's trace_id (via the Loki->Tempo derived field, see datasources.yml) to jump straight to the failing trace."
+
+      - uid: magik-trace-error-spike
+        title: "Span error rate spike (Tempo/TraceQL)"
+        condition: C
+        for: 5m
+        data:
+          - refId: A
+            datasourceUid: tempo
+            relativeTimeRange: { from: 300, to: 0 }
+            model:
+              queryType: traceql
+              query: "{status=error} | count_over_time()"
+              refId: A
+          # TraceQL metrics queries return a time series (one point per
+          # step interval within the 5m window), not a single scalar the
+          # way an `instant: true` Prometheus/Loki query does — this Reduce
+          # step is what turns that into one number the threshold step
+          # below can compare. `sum`, not `last`: summing every returned
+          # bucket's count gives the true total error-span count across the
+          # whole window regardless of how many buckets Tempo's query
+          # engine happens to return, where `last` would silently undercount
+          # by only looking at the final bucket.
+          - refId: B
+            datasourceUid: "__expr__"
+            model:
+              type: reduce
+              expression: A
+              reducer: sum
+              refId: B
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: B
+              # Provisional and deliberately lower than magik-error-log-
+              # spike's 20 — a span explicitly marked ERROR status (see the
+              # OTel span wrappers in query_pipeline.py/rag_pipeline.py/
+              # hybrid_retriever.py/reranker.py/agent_controller.py/
+              # reasoning_engine.py/qdrant_store.py/prompt_builder.py) is a
+              # rarer, more specific signal than a generic ERROR log line —
+              # not every logged error marks its span as failed, and not
+              # every span failure necessarily logs at ERROR.
+              conditions:
+                - evaluator: { type: gt, params: [5] }
+              refId: C
+        labels:
+          severity: high
+        annotations:
+          summary: "More than 5 error-status spans across the traced request pipeline in 5 minutes."
+          description: "Open Grafana Explore -> Tempo, run {status=error}, and inspect the failing spans directly (query_pipeline/rag_pipeline_run/rag_pipeline_stream/hybrid_retriever_search/reranker_rerank/agent_controller_handle/reasoning_generate_answer/qdrant_search/prompt_builder) — each carries span.record_exception() detail. Cross-check against magik-error-log-spike above; agreement between the two is a stronger signal than either alone."
+
+  - orgId: 1
+    name: magik-security
+    folder: MAGIK
+    interval: 1m
+    rules:
+      - uid: magik-guardrail-block-rate-spike
+        title: "Guardrail block rate spike"
+        condition: C
+        for: 5m
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 300, to: 0 }
+            model:
+              expr: "sum(increase(guardrail_blocks_total[5m]))"
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # Provisional, not traffic-calibrated (this deployment has no
+              # measured baseline block rate yet — see thresholds.yaml's own
+              # "informational until re-baselined" convention for the same
+              # honesty about an unmeasured number). 10 blocks in 5 minutes
+              # is conservative for this box's traffic volume; revisit once
+              # real production block-rate data exists.
+              conditions:
+                - evaluator: { type: gt, params: [10] }
+              refId: C
+        labels:
+          severity: high
+        annotations:
+          summary: "More than 10 guardrail blocks (prompt injection / policy violation) in 5 minutes."
+          description: "Could be a scripted jailbreak/injection campaign or a single confused client retrying. Check monitoring/grafana/dashboards for the surface/guard_type breakdown (app/guardrails/metrics.py labels) and logs/audit.log."
+
+      - uid: magik-auth-failure-spike
+        title: "Auth failure spike (login + MFA)"
+        condition: C
+        for: 5m
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 300, to: 0 }
+            model:
+              expr: "sum(increase(auth_login_failures_total[5m])) + sum(increase(auth_mfa_failures_total[5m]))"
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # Provisional threshold, same rationale as the guardrail block
+              # rate alert above — no measured baseline yet on this box.
+              # auth_rate_limit_rejections_total is deliberately NOT part of
+              # this alert: rate-limiting firing under normal heavy usage is
+              # expected behavior, not itself a security signal, and folding
+              # it in here would make this alert noisy rather than
+              # correlated — it's dashboarded (Grafana) but not paged on.
+              conditions:
+                - evaluator: { type: gt, params: [10] }
+              refId: C
+        labels:
+          severity: high
+        annotations:
+          summary: "More than 10 combined failed logins + failed MFA attempts in 5 minutes."
+          description: "Check app/auth/metrics.py's reason label (no_password/no_account/wrong_password) for whether this looks like credential stuffing (many distinct reasons/accounts) vs. one user locked out (repeated wrong_password)."
+
   - orgId: 1
     name: magik-rag-quality
     folder: MAGIK
@@ -125,3 +374,70 @@ groups:
         annotations:
           summary: "Sampled live hallucination flag rate sustained above 0.72 for 15 minutes."
           description: "Cross-check against a recent deploy or corpus change; re-run the offline gold-set suite (python -m app.eval.run --suite all --gate) to confirm before treating this as a real regression — this is a lexical-judge signal on live traffic, not the CI gate itself."
+
+      - uid: magik-drift-warning
+        title: "Production traffic drift: WARNING"
+        condition: C
+        for: 30m
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 1800, to: 0 }
+            model:
+              expr: "magik_drift_severity"
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # >=1 catches BOTH warning (1) and critical (2) — this rule
+              # exists specifically to surface the "some columns drifted,
+              # but no quality column both drifted AND degraded" case that
+              # magik-drift-critical below deliberately never pages on (see
+              # that rule's comment). Longer sustain (30m vs. critical's
+              # 15m) and a softer severity label — this is a heads-up to
+              # investigate at the next opportunity, not a page.
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+              refId: C
+        labels:
+          severity: medium
+        annotations:
+          summary: "Production traffic has statistically drifted from the reference window (not yet correlated with a quality regression)."
+          description: "Check magik_drift_dataset_score and magik_drift_column_pvalue{column=...} to see which columns moved. This is informational at warning level — see magik-drift-critical for the page-worthy version of this signal."
+
+      - uid: magik-drift-critical
+        title: "Production traffic drift: CRITICAL"
+        condition: C
+        for: 15m
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 900, to: 0 }
+            model:
+              expr: "magik_drift_severity"
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # 2 == critical (app/eval/jobs/drift_eval.py's _severity_to_int:
+              # 0=info, 1=warning, 2=critical). Critical specifically means a
+              # QUALITY column (top1_score/mean_topk_score) drifted AND
+              # degraded — not just "some column looks different" — see that
+              # module's docstring on why this isn't a single-test alert.
+              # 15m sustained, not instant: DRIFT_CHECK_INTERVAL_SEC defaults
+              # to 1h, so a single stale/transient reading should not page
+              # before at least one more run has a chance to confirm it.
+              conditions:
+                - evaluator: { type: gt, params: [1] }
+              refId: C
+        labels:
+          severity: high
+        annotations:
+          summary: "Live retrieval/answer quality has statistically drifted from the reference window, in the degrading direction."
+          description: "Requires DRIFT_ENABLED=true and a built reference (python -m app.eval.jobs.drift_eval --build-reference). Check magik_drift_column_pvalue{column=~\"top1_score|mean_topk_score\"} for which column moved, then cross-check against a recent deploy/corpus change before treating this as a real regression — same caution as the hallucination-drift alert above."

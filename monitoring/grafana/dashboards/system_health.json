@@ -127,6 +127,75 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "GPU VRAM free (gpu_vram_free_gb)",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 28 },
+      "targets": [
+        { "expr": "gpu_vram_free_gb", "legendFormat": "free VRAM (GB)", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decgbytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 2.0 },
+              { "color": "green", "value": 6.0 }
+            ]
+          }
+        }
+      },
+      "options": { "textMode": "value_and_name", "colorMode": "background" }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Reranker latency (p50/p95) — reranker_latency_seconds",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 28 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(reranker_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(reranker_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Security: guardrail blocks + auth failures (5m rate)",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 28 },
+      "targets": [
+        {
+          "expr": "sum(rate(guardrail_blocks_total[5m]))",
+          "legendFormat": "guardrail blocks/s",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(auth_login_failures_total[5m]))",
+          "legendFormat": "login failures/s",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(auth_mfa_failures_total[5m]))",
+          "legendFormat": "mfa failures/s",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(auth_rate_limit_rejections_total[5m]))",
+          "legendFormat": "rate-limit rejections/s",
+          "refId": "D"
+        }
+      ]
     }
   ]
 }
