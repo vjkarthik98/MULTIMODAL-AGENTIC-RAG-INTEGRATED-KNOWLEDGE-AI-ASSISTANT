@@ -945,11 +945,15 @@ class HybridRetriever:
         # states the exact EPS figures) never got a fair shot at ranking.
         _explicit_sources = bool(filters and filters.get("sources"))
         _explicit_visual_source = _explicit_sources and any(
-            str(s).lower().endswith((".mp4", ".mov", ".m4v", ".jpg", ".jpeg", ".png", ".gif", ".webp"))
+            str(s)
+            .lower()
+            .endswith((".mp4", ".mov", ".m4v", ".jpg", ".jpeg", ".png", ".gif", ".webp"))
             or "earnings call" in str(s).lower()
             for s in (filters.get("sources") or [])
         )
-        is_vision = (not _explicit_sources or _explicit_visual_source) and self._is_vision_query(query)
+        is_vision = (not _explicit_sources or _explicit_visual_source) and self._is_vision_query(
+            query
+        )
         is_audio = (not _explicit_sources) and self._is_audio_query(query)
         is_video = (not _explicit_sources) and self._is_video_query(query)
 

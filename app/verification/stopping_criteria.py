@@ -1,12 +1,14 @@
-"""StoppingCriteria — the 5 termination conditions (docs/Phase_32_Agentic_Answer_Verification.md §5).
+"""StoppingCriteria — loop termination conditions (docs/Phase_32_Agentic_Answer_Verification.md §5).
 
-Terminate the verification loop on ANY of:
+Terminate the verification loop on ANY of (4 conditions since 2026-08-08,
+when the former rules 4 and 5 were merged into a single conjunction):
 1. Verified.
 2. Max retries reached (settings.AGENT_VERIFY_MAX_RETRIES).
 3. Wall-clock timeout exceeded (settings.AGENT_VERIFY_TIMEOUT_SEC).
-4. Retrieval confidence did not improve AND overall confidence did not improve
-   vs. the previous attempt (both, not either — see note below).
-5. Overall-confidence improvement < settings.AGENT_VERIFY_MIN_IMPROVEMENT_PCT.
+4. Retrieval confidence did not improve AND overall-confidence improvement is
+   below settings.AGENT_VERIFY_MIN_IMPROVEMENT_PCT vs. the previous attempt.
+   This is ONE conjunction (both, not either) — what were once rules 4 and 5
+   were merged; neither half stops the loop on its own. See the note below.
 
 NOTE on rule 4 (2026-08-08): originally fired on retrieval-alone stalling,
 independent of rule 5. RetryController's 4 strategies are NOT all

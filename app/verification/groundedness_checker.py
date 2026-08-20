@@ -99,7 +99,9 @@ _XLSX_GENERIC_ROW_LABELS = frozenset(
 # not the entity the answer is actually about. _find_tabular_row_premise
 # tries excluding these first so a genuine entity-name match (a country,
 # company, ticker — not a grade) always wins when both exist.
-_XLSX_RATING_CODE_RE = re.compile(r"^(?:AAA|AA|A|BBB|BB|B|CCC|CC|C|D|NR|N/A)[+-]?$|^[ABC]a{0,2}[123]?$", re.I)
+_XLSX_RATING_CODE_RE = re.compile(
+    r"^(?:AAA|AA|A|BBB|BB|B|CCC|CC|C|D|NR|N/A)[+-]?$|^[ABC]a{0,2}[123]?$", re.I
+)
 
 
 def _narrow_tabular_premise(text: str, sentence: str, exclude_rating_codes: bool = False) -> str:
@@ -200,7 +202,9 @@ def _find_tabular_row_premise(answer: str, docs: list[dict[str, Any]]) -> str | 
         answer_numbers = set(re.findall(r"\d+\.?\d*%?", answer))
         if not answer_numbers:
             return candidates[0]
-        return max(candidates, key=lambda c: len(answer_numbers & set(re.findall(r"\d+\.?\d*%?", c))))
+        return max(
+            candidates, key=lambda c: len(answer_numbers & set(re.findall(r"\d+\.?\d*%?", c)))
+        )
 
     # Pass 1: entity-name matches only (rating codes excluded) — a genuine
     # country/company/ticker row always wins over an unrelated table whose
@@ -402,9 +406,13 @@ class GroundednessChecker:
 
         from app.reasoning.reasoning_engine import _unsupported_numbers
 
-        is_hallucinated, lexical_hallucinated, support_score, nli_contradiction, nli_contradicted = (
-            lexical_and_nli_verdict(answer, docs, deterministic_answer=deterministic_answer)
-        )
+        (
+            is_hallucinated,
+            lexical_hallucinated,
+            support_score,
+            nli_contradiction,
+            nli_contradicted,
+        ) = lexical_and_nli_verdict(answer, docs, deterministic_answer=deterministic_answer)
         bad_numbers = _unsupported_numbers(answer, docs, query=query)
 
         # Blend sentence-level support (0-1) with a numeric-fidelity penalty

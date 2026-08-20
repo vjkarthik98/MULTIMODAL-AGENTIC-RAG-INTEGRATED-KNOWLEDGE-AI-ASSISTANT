@@ -6,6 +6,19 @@ slow (model download/load on first run) and needs a working
 sentence-transformers/torch install, so marked `slow` and skipped if the
 model can't be loaded in this environment (e.g. no network).
 
+KNOWN ORDER DEPENDENCE (diagnosed 2026-08-20, not yet fixed): these pass when
+run alone (`pytest tests/unit/verification/`) but 4 of them fail when
+tests/unit/ingestion/test_audio_ingest.py has run earlier in the SAME process,
+with `nli_groundedness_failed | error=The following operation failed in the
+TorchScript interpreter`. The audio-ingest path pulls in the
+pyannote/speechbrain/faster-whisper stack, which uses torch.jit heavily and
+leaves interpreter state that breaks this cross-encoder's later load. Bisected
+per-file; no other tests/unit/ subdirectory reproduces it. This is a real
+latent bug in test isolation, NOT a bug in the NLI pass itself. It no longer
+reaches CI — ci.yml and `make test-unit` select `-m "unit and not slow"`, and
+this file is marked `slow` — but keep it in mind when running the whole
+tests/unit/ tree locally without that filter.
+
 Tests the design actually shipped, not the original plan: NLI contributes an
 ADDITIVE contradiction penalty on top of the unchanged lexical guard, not a
 replacement of support_score with raw entailment probability. See the
@@ -169,9 +182,7 @@ class TestDeterministicAnswerExemption:
         # The exemption must NOT become a blanket pass: a figure absent from
         # context is still caught (this is what would catch a synthesizer bug).
         answer = "Apple Inc. was approximately $99999 on 9/28/24 per this chart."
-        result = GroundednessChecker().check(
-            answer, self._CHART_DOC, deterministic_answer=True
-        )
+        result = GroundednessChecker().check(answer, self._CHART_DOC, deterministic_answer=True)
         assert result.is_hallucinated is True
         assert any("99999" in n for n in result.unsupported_numbers)
 
@@ -214,9 +225,7 @@ class TestNarrowedPremiseFixesFalseContradiction:
     )
 
     def test_verbatim_correct_country_row_not_flagged_as_contradiction(self):
-        answer = (
-            "The Sovereign Ratings sheet lists Canada at S&P AAA, Fitch AA+, and Moody's Aaa."
-        )
+        answer = "The Sovereign Ratings sheet lists Canada at S&P AAA, Fitch AA+, and Moody's Aaa."
         result = GroundednessChecker().check(answer, [self._DENSE_SHEET])
         assert result.is_hallucinated is False
         assert not any("NLI contradiction" in c for c in result.unsupported_claims)

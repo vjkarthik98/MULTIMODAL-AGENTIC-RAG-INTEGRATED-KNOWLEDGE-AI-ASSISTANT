@@ -21,7 +21,7 @@ import httpx
 
 from app.eval.config import EvalConfig
 from app.eval.datasets.gold_loader import load_all_gold
-from app.eval.metrics.base import SuiteResult
+from app.eval.metrics.base import MetricResult, SuiteResult
 from app.eval.metrics.generation import compute_generation_metrics
 from app.eval.metrics.hallucination import (
     compute_finance_fidelity,
@@ -231,7 +231,7 @@ def _full_contexts(
         return []
 
 
-def _verification_metrics(eval_rows: list[dict]) -> list["MetricResult"]:
+def _verification_metrics(eval_rows: list[dict]) -> list[MetricResult]:
     """First-ever baseline for thresholds.yaml's `verification.*` section.
 
     Reuses the VerificationReport already produced by the live VerificationLoop
@@ -240,8 +240,6 @@ def _verification_metrics(eval_rows: list[dict]) -> list["MetricResult"]:
     report (hybrid_web path, or a server that predates this wiring) are
     excluded, not treated as failures.
     """
-    from app.eval.metrics.base import MetricResult
-
     reports = [r["verification"] for r in eval_rows if r.get("verification")]
     if not reports:
         return [
@@ -327,7 +325,9 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
         print(f"[eval] Server reachable at {_SERVER_URL} — using HTTP mode (no GPU duplication)")
     else:
         if getattr(cfg, "live_path", False):
-            print("[eval] WARNING: --live-path requires the server; falling back to direct pipeline (no SSE coverage this run)")
+            print(
+                "[eval] WARNING: --live-path requires the server; falling back to direct pipeline (no SSE coverage this run)"
+            )
         print("[eval] Server not reachable — falling back to direct pipeline mode")
         try:
             from app.pipeline.query_pipeline import query_pipeline  # noqa: F401
@@ -430,8 +430,6 @@ def run_generation_suite(cfg: EvalConfig) -> SuiteResult:
         # Finance numeric fidelity — fraction of cited numbers grounded in context
         fidelity_scores = [r["finance_fidelity"] for r in eval_rows if "finance_fidelity" in r]
         if fidelity_scores:
-            from app.eval.metrics.base import MetricResult
-
             avg_fidelity = sum(fidelity_scores) / len(fidelity_scores)
             result.add(
                 MetricResult(

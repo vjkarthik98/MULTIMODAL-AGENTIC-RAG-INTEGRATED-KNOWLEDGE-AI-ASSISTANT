@@ -1440,7 +1440,7 @@ def _resolve_summarize_source(query: str, sources: list[str] | None) -> str | No
 
 
 @router.post("/query/stream")
-async def stream_query(
+async def stream_query(  # noqa: C901 -- known complexity debt (57), tracked follow-up refactor, not fixed inline to avoid changing the live SSE streaming path
     request_body: QueryRequest,
     request: Request,
     current_user: UserPublic = Depends(get_current_user),

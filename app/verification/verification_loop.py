@@ -262,7 +262,9 @@ class VerificationLoop:
             # generate_answer's retry_hint) — an explicit, named list of what
             # this attempt's answer omitted, so a retry can address it instead
             # of silently reproducing the same incomplete answer.
-            _retry_hint = "; ".join(completeness_res.missing) if not completeness_res.is_complete else ""
+            _retry_hint = (
+                "; ".join(completeness_res.missing) if not completeness_res.is_complete else ""
+            )
 
             scores = self.confidence_scorer.score(
                 retrieval_res,
