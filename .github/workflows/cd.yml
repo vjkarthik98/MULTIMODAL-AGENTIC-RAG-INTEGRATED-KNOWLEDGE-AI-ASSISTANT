@@ -16,62 +16,65 @@ name: CD
 # whenever a dependency fails. There is no separate "rollback" job for production:
 # there is nothing to roll back, since nothing was deployed there.
 #
-# STAGING PREREQUISITES — ALL PROVISIONED 2026-08-06 (see docs/runbooks/ci-cd.md
-# "Staging gate"). Recorded here because every one of them is invisible from the
-# repo alone, so a future failure in deploy-staging/tier2-staging-gate is almost
-# certainly one of these having drifted:
-#   1. EC2 instance i-0aed770229c1313c7 (g6e.xlarge, us-east-1a), tagged
-#      Name=magik-staging — which is what the `Resolve staging instance ID by
-#      tag` step below looks up (vars.EC2_STAGING_INSTANCE_TAG is unset, so the
-#      inline 'magik-staging' default is what actually applies).
-#   2. Provisioned by CLONING production, not built from scratch: root volume
-#      from an AMI of magik-prod, data volume from an EBS snapshot of
-#      magik-prod-data. That is why /opt/magik on staging already holds the
-#      models, BM25 index and .env before any deploy runs — see the host-path
-#      note on the deploy step below.
-#   3. Security group sg-0bbfb2a5141b55e87 — ZERO inbound rules (verified). SSM
-#      is the only way in; the 127.0.0.1 port binding below is the second,
-#      independent layer.
-#   4. Instance profile: magik-ec2-role, REUSED from production rather than
-#      duplicated (deploy/aws/iam/ec2-instance-profile-permissions.json is not
-#      prod-specific). A dedicated staging role is deferred hardening, not a
-#      blocker.
-#   5. magik-deploy-role updated for staging on BOTH axes — trust policy gained
-#      the `environment:staging` sub pattern (needed the moment deploy-staging
-#      declares `environment: staging`, since that changes the OIDC subject
-#      claim), and the permissions policy gained staging's instance ARN for
-#      ec2:StartInstances + ssm:SendCommand.
-#      ROOT-CAUSED 2026-08-07 — and it was NOT a missing staging entry, which
-#      is the answer this comment block previously (wrongly) implied. v0.30.0
-#      failed at `Configure AWS credentials (OIDC)` with "Not authorized to
-#      perform sts:AssumeRoleWithWebIdentity" while the live trust policy
-#      demonstrably DID contain a correct `environment:staging` sub. The real
-#      cause: GitHub migrated this repo to IMMUTABLE (ID-qualified) OIDC
-#      subject claims, so the `sub` presented to STS became
-#         repo:vjkarthik98@218363746/MULTIMODAL-...@1180642349:environment:staging
-#      and no longer matched the plain `repo:<owner>/<repo>:...` patterns.
-#      Nothing in this repo or in IAM changed — v0.29.0's `deploy` job used
-#      `environment: production` and assumed this same role fine on
-#      2026-08-03; the claim format changed underneath us by 2026-08-07.
-#      Fix: deploy/aws/iam/github-oidc-trust-policy.json now lists BOTH the
-#      ID-qualified and legacy forms (see its own comment for the full
-#      reasoning and the `gh api .../actions/oidc/customization/sub` command
-#      that reports the live format). Applying it is still a MANUAL
-#      `aws iam update-assume-role-policy`.
-#      DIAGNOSTIC LESSON: a trust policy that "looks correct" proves nothing
-#      here — always compare it against the ACTUAL emitted sub, not the
-#      documented one. Re-running the job is a waste of a cycle; the failure
-#      is deterministic.
-#   6. Self-hosted runner `magik-staging` registered with the `staging-gpu`
-#      label, installed as a systemd service, confirmed Idle in GitHub. NOTE:
-#      the AMI clone also carried production's OWN registered runner onto this
-#      box — it was found active under production's identity and has been
-#      stopped + disabled locally (NOT de-registered, so production's copy stays
-#      valid). If staging is ever re-cloned, check for that again.
-#   7. Repo variable SELF_HOSTED_STAGING_GPU_RUNNER=true. While false,
-#      tier2-staging-gate skips cleanly rather than queueing forever — but that
-#      also means NOTHING gates promotion, so it belongs "off" only during
-#      initial bring-up, never in steady state.
+# STAGING + PRODUCTION PREREQUISITES — REBUILT 2026-08-21 in a NEW AWS account
+# (857194222592, was 537557168406) after the prior EC2 fleet + EBS volumes were
+# manually deleted. Rebuilt via Terraform this time (deploy/aws/terraform/) —
+# see its README section in docs/runbooks/phase-30-aws-deployment.md Appendix E
+# for the full as-built resource list. Recorded here because every one of these
+# is invisible from the repo alone, so a future failure in deploy-staging/
+# tier2-staging-gate is almost certainly one of these having drifted:
+#   1. Production: EC2 instance i-09831ac06b063d36f, Elastic IP 184.73.239.9,
+#      tagged Name=magik-prod. Staging: EC2 instance i-09a14af803649d70d, no
+#      Elastic IP (never needed one — resolved fresh by tag on every run),
+#      tagged Name=magik-staging. Both g6e.xlarge in us-east-1a. These are
+#      exactly what the `Resolve instance ID by tag` steps below look up
+#      (vars.EC2_INSTANCE_TAG / vars.EC2_STAGING_INSTANCE_TAG default to
+#      'magik-prod' / 'magik-staging' when the repo variable is unset).
+#   2. EBS layout changed from the original single-volume design: each box now
+#      has a dedicated 100GiB model-cache volume (mounted at
+#      /opt/magik/.hf_cache) SEPARATE from the 100GiB root volume (OS, Docker,
+#      /opt/magik/{data,logs,.env}) — see deploy/aws/scripts/bootstrap_instance.sh.
+#      Staging's model volume was first cloned from a snapshot of production's
+#      (matching the old clone-based design), but that hit EBS's snapshot
+#      lazy-load penalty hard enough (scattered app reads capped near 5MB/s)
+#      that it was rebuilt as a blank volume + direct HF download instead —
+#      faster in practice, and what's actually live now. Both boxes downloaded
+#      their own models directly; there is no clone relationship between them
+#      going forward.
+#   3. Security groups: magik-prod-sg (22 from an admin CIDR, 80/443 public),
+#      magik-staging-sg (ZERO inbound rules, matching the design intent from
+#      before — SSM is the only way in; the 127.0.0.1 port binding below is
+#      the second, independent layer).
+#   4. Instance profile: magik-ec2-role, one shared role/profile for both boxes
+#      (deploy/aws/iam/ec2-instance-profile-permissions.json is not
+#      prod-specific), created fresh by Terraform in the new account.
+#   5. magik-deploy-role (GitHub OIDC) created fresh by Terraform
+#      (deploy/aws/terraform/iam.tf), trust policy built from BOTH the
+#      ID-qualified and legacy `sub` forms (same defensive pattern as the
+#      original hand-maintained deploy/aws/iam/github-oidc-trust-policy.json,
+#      now just Terraform-managed instead of a manual
+#      `aws iam update-assume-role-policy`). Verified live 2026-08-21 against
+#      `gh api .../actions/oidc/customization/sub` — this repo currently emits
+#      the LEGACY (non-ID-qualified) subject format
+#      (`use_immutable_subject: false`), and both forms are present regardless
+#      so a future format flip on GitHub's side won't silently break this
+#      again. GitHub repo variable AWS_DEPLOY_ROLE_ARN updated to point at the
+#      new account's role.
+#   6. Self-hosted runners re-registered from scratch: `magik-prod-runner`
+#      (label `gpu`) and `magik-staging-runner` (label `staging-gpu`), both
+#      installed as systemd services, confirmed Online in GitHub. Production's
+#      runner goes `offline` whenever the box is stopped (idle-stop / manual
+#      cost-saving stop) and comes back automatically when promote-production
+#      wakes the instance (systemd service is enabled, starts on boot).
+#   7. Repo variable SELF_HOSTED_STAGING_GPU_RUNNER=true (and
+#      SELF_HOSTED_GPU_RUNNER=true). While false, tier2-staging-gate skips
+#      cleanly rather than queueing forever — but that also means NOTHING
+#      gates promotion, so it belongs "off" only during initial bring-up,
+#      never in steady state.
+#   8. Both boxes' BM25 index (data/users/<EVAL_USER_ID>/bm25_index/bm25.pkl,
+#      required by tier2-eval.yml's own preflight) was rebuilt from Qdrant
+#      payloads post-rebuild (no GPU/re-embedding needed — the vectors
+#      themselves live in Qdrant Cloud, untouched by the AWS account change).
 
 on:
   push:
@@ -671,6 +674,42 @@ jobs:
       runner_label: staging-gpu
       environment_label: staging
       runner_available: ${{ vars.SELF_HOSTED_STAGING_GPU_RUNNER == 'true' }}
+
+  # -----------------------------------------------------------------------
+  # Stop staging the moment we're done with it — deterministic, not the
+  # idle-stop Lambda's NetworkIn heuristic (which only ever watches
+  # magik-prod; staging carries zero real user traffic for that heuristic to
+  # measure anyway). deploy-staging wakes staging unconditionally; until this
+  # job existed, nothing ever stopped it again — it would run (and bill)
+  # indefinitely after every single tagged deploy. `if: always()` so this
+  # still runs whether tier2-staging-gate passed, failed, or was skipped
+  # (SELF_HOSTED_STAGING_GPU_RUNNER != 'true') — we're done with the box
+  # either way once this point is reached.
+  # -----------------------------------------------------------------------
+  stop-staging:
+    needs: [deploy-staging, tier2-staging-gate]
+    if: always()
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Resolve staging instance ID by tag
+        id: instance
+        run: |
+          ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${{ vars.EC2_STAGING_INSTANCE_TAG || 'magik-staging' }}" \
+                      "Name=instance-state-name,Values=running,pending" \
+            --query "Reservations[0].Instances[0].InstanceId" --output text)
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+
+      - name: Stop staging instance
+        if: steps.instance.outputs.id != '' && steps.instance.outputs.id != 'None'
+        run: aws ec2 stop-instances --instance-ids ${{ steps.instance.outputs.id }}
 
   # -----------------------------------------------------------------------
   # PRODUCTION — the champion→successor swap. Only reachable if

@@ -15,9 +15,14 @@
 set -euo pipefail
 
 # ── Configuration ────────────────────────────────────────────────────────────
-ACCOUNT_ID="${ACCOUNT_ID:-537557168406}"
+ACCOUNT_ID="${ACCOUNT_ID:-857194222592}"
 REGION="${AWS_REGION:-us-east-1}"
-INSTANCE_ID="${INSTANCE_ID:-i-02efa81c8876a014e}"
+# Rebuilt 2026-08-21 in a new AWS account (was 537557168406) after the prior
+# EC2 fleet + EBS volumes were deleted. New magik-prod instance from
+# deploy/aws/terraform/'s production_instance_id output. Only used for this
+# script's own printed verification commands (the Lambdas resolve the
+# instance by tag at runtime, not this default).
+INSTANCE_ID="${INSTANCE_ID:-i-09831ac06b063d36f}"
 INSTANCE_TAG="${INSTANCE_TAG:-magik-prod}"
 
 # Where the wake gateway redirects to once /health answers. HTTPS via Caddy
