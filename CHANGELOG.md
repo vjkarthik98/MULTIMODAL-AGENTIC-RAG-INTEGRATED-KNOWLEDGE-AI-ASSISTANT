@@ -4189,3 +4189,220 @@ confirmation.
   (blocked by the local permission classifier) — all post-fix numbers
   above were measured by calling the edited pipeline in-process. A restart
   is still required before these fixes are live on `:8000`.
+
+## Auth Pages: Mobile Layout Parity & Password-Visibility Fixes
+
+`LoginPage.jsx` got a mobile-compaction pass earlier in this cycle
+(`h-dvh-screen overflow-y-auto` + `my-auto` centering, `sm:`-scaled
+padding/type/gaps) after reports of needing to scroll to reach the Sign In
+button on phones. `ForgotPasswordPage.jsx` and `ResetPasswordPage.jsx` never
+received the same pass and still shipped the old fixed sizing (`p-6` card
+padding, `w-14 h-14`/`text-3xl` brand block, unscaled `py-3.5` inputs,
+`space-y-4` gaps) with `min-h-dvh-screen ... justify-center` and no scroll
+fallback on the flex wrapper — genuinely overflowing the viewport on small
+phones. Brought both in line with `LoginPage.jsx`'s pattern and sizing.
+
+Separately, `App.jsx`'s auth-check spinner and `ErrorBoundary.jsx`'s crash
+screen centered their content with plain `min-h-screen`. On mobile Safari
+`100vh` resolves against the *largest* possible viewport (address bar
+hidden); centered content in that box can render below the actually-visible
+screen while the address bar is still shown. Switched both to the existing
+`.min-h-dvh-screen` utility, which tracks the real visible viewport.
+
+### Fixed
+
+- **`ForgotPasswordPage.jsx` / `ResetPasswordPage.jsx` overflowed on small
+  phones.** Retrofitted with the same `h-dvh-screen overflow-y-auto` +
+  `my-auto` centering and `sm:`-scaled brand/card/input/button sizing as
+  `LoginPage.jsx`, so short content centers cleanly and tall content
+  scrolls gracefully instead of clipping past the fold.
+- **`App.jsx` / `ErrorBoundary.jsx` used `min-h-screen` instead of the dvh
+  utility**, reintroducing the same mobile-Safari address-bar overflow this
+  cycle's `LoginPage.jsx` fix already solved elsewhere. Switched both to
+  `min-h-dvh-screen`.
+- **Register-mode password field was hardcoded to `type="text"`** —
+  `LoginPage.jsx`'s password `<input>` read
+  `mode === 'register' ? 'text' : (showPass ? 'text' : 'password')`, so the
+  field rendered unmasked during account creation regardless of the
+  show/hide toggle's state. Now uses `showPass` in both modes.
+- **`ResetPasswordPage.jsx`'s new-password field had no masking at all** —
+  unconditional `type="text"`, no toggle, unlike its own confirm-password
+  field two lines below. Given its own `showPass` state and toggle, matching
+  the confirm field.
+
+### Changed
+
+- **Password visibility reverted from a "Show password" checkbox row back
+  to an inline eye-icon toggle**, applied consistently across Sign in,
+  Create account, and Password change: `LoginPage.jsx`'s password field
+  (login mode) and password + confirm-password fields (register mode), and
+  `ResetPasswordPage.jsx`'s password + confirm-password fields. Each input
+  is wrapped in a `relative` container with an absolutely-positioned
+  `Eye`/`EyeOff` (`lucide-react`) button (`aria-label`d "Show
+  password"/"Hide password") in place of the separate checkbox+label row,
+  which also trims a little vertical space back out of the mobile layout
+  fixed above.
+
+## Full AWS Infrastructure Rebuild — New Account, Terraform-Codified
+
+The entire prior EC2 fleet and every EBS volume were manually deleted, and
+the AWS account itself changed (`857194222592`, was `537557168406`) — every
+IAM role, SSM parameter, Lambda, API Gateway, and EventBridge rule that used
+to live in that account had to be recreated from nothing, not just the two
+GPU boxes. This time the compute/network/IAM layer that was previously
+hand-clicked through the console (`docs/runbooks/phase-30-aws-deployment.md`
+Stage 2) is codified in Terraform (`deploy/aws/terraform/`), so a repeat of
+this exact scenario is a `terraform apply`, not another from-scratch rebuild.
+
+### Added
+
+- **`deploy/aws/terraform/`** — new. `network.tf` (VPC/subnet/IGW/route
+  table — the new account had no default VPC at all), `security_groups.tf`
+  (production: 22/80/443; staging: zero inbound, unchanged design intent),
+  `iam.tf` (GitHub OIDC provider + `magik-deploy-role` with both the
+  ID-qualified and legacy subject-claim forms, dynamic account ID via
+  `data.aws_caller_identity` instead of ever hardcoding it again; shared
+  `magik-ec2-role` instance profile), `ec2.tf`, `key_pair.tf`,
+  `state_backup.tf` (private/versioned/encrypted S3 bucket,
+  `magik-terraform-state-857194222592`, for manual state backups — this
+  project stays on local Terraform state by design, single-operator, not a
+  team backend).
+- **Split EBS layout, per explicit design goal ("models never at risk from
+  a code-level operation")**: each box now gets a dedicated 100GiB model
+  volume (`/opt/magik/.hf_cache`) *separate* from the 100GiB root volume
+  (OS, Docker, `/opt/magik/{data,logs,.env}`), mounted by UUID via
+  `deploy/aws/scripts/bootstrap_instance.sh` (new) — not the fragile
+  symlink-into-a-git-checkout layout `deploy/aws/README.md` used to
+  document. `bootstrap_instance.sh` also chowns both host directories to
+  `10001:10001` up front, closing a gap found live (see Fixed below).
+- **`launch.vk-ai.online`** — a new subdomain, backed by an ACM certificate
+  and an API Gateway custom domain, fronting the wake-gateway Lambda. The
+  portfolio site's "launch demo" link points here instead of the raw
+  `execute-api.amazonaws.com` URL. Deliberately a *different* hostname from
+  `magik.vk-ai.online` (the gateway's own redirect target) — pointing the
+  gateway at its own final destination would loop.
+- Production and staging's self-hosted GitHub Actions runners
+  (`magik-prod-runner` / `gpu`, `magik-staging-runner` / `staging-gpu`)
+  re-registered from scratch as systemd services.
+- All 11 SSM SecureString parameters (9 app secrets + 2 monitoring secrets)
+  plus the GHCR pull token and a new `/magik/github_actions_pat` (idle-stop's
+  runner-busy-check token, previously undocumented as a real gap) reseeded
+  in the new account.
+
+### Fixed
+
+- **The app container couldn't write its own model cache or logs on first
+  boot.** The Dockerfile's `appuser` runs as uid/gid `10001` by design
+  (defense in depth) — but a bind-mounted host directory keeps its *host*
+  ownership inside the container, and `bootstrap_instance.sh`'s `mkdir -p`
+  (run as root) left both `/opt/magik/.hf_cache` and `/opt/magik/data` owned
+  `root:root`. Every model download and the GGUF log file failed with
+  `PermissionError` on the very first deploy. Fixed by chowning both
+  directories to `10001:10001` in the bootstrap script itself, so this can't
+  recur on the next rebuild.
+- **Staging's model volume, cloned via EBS snapshot from production, hit a
+  severe lazy-load penalty.** A volume created from a snapshot fetches
+  blocks from S3-backed snapshot storage on first read; staging's scattered,
+  small application-level reads (checksumming 17 model files one at a time)
+  measured as low as ~5MB/s at 100% disk utilization — over an hour
+  projected for the full ~33GB cache. Root-caused via `iostat` + `strace`
+  (confirmed genuine disk I/O, not a hung process). Rebuilt staging's model
+  volume blank instead and let it download directly from Hugging Face
+  (~8 minutes, matching production's own original bring-up) — faster in
+  practice than fighting the snapshot penalty, and this repo no longer
+  relies on the prod→staging clone relationship for the model cache
+  specifically going forward.
+- **`tier2-staging-gate` would have failed at its own preflight check on a
+  freshly rebuilt box.** `tier2-eval.yml` requires
+  `data/users/<EVAL_USER_ID>/bm25_index/bm25.pkl` to exist inside the
+  container before it will even attempt an eval run — a fresh
+  `/opt/magik/data` has no such file. Rebuilt on both staging and production
+  from Qdrant payloads (`python3.12 -m app.retrieval.bm25_retriever
+  --user_id <EVAL_USER_ID>`, no GPU/re-embedding needed since the vectors
+  themselves live in Qdrant Cloud, untouched by the AWS account change) —
+  1198 docs indexed on each.
+- **`cd.yml`'s header comment described instance IDs, security groups, and
+  an IAM incident narrative from the deleted account** — stale enough to
+  actively mislead the next person debugging a `deploy-staging` failure.
+  Rewritten to describe the current, live resources.
+- **Terraform's saved plan files (`tfplan*`) were not gitignored** — these
+  are binary and can embed sensitive resource values (this config's own
+  `tls_private_key` SSH key material) even where `terraform plan`'s
+  human-readable output redacts them. Added to `deploy/aws/terraform/.gitignore`.
+
+### Known gaps — not fixed, flagged instead of silently carried forward
+
+- **Monitoring stack (Prometheus/Grafana/Tempo/Loki/OTel) is not deployed to
+  the rebuilt production box yet.** `cd.yml`'s "Sync + redeploy monitoring
+  stack" step needs a persistent git checkout at
+  `/home/ubuntu/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT` on
+  the box, which doesn't exist yet on the fresh instance — the step is
+  `continue-on-error: true` so this won't surface as a red pipeline, just a
+  silent no-op on the next promotion until that checkout is created by hand.
+- **Idle-stop's runner-busy-check has a token now (`/magik/github_actions_pat`,
+  `repo`-scope classic PAT) but hasn't been exercised against a genuinely
+  idle, running instance yet** — every test this session hit either a
+  stopped instance (short-circuits before the check) or was deliberately
+  followed by a manual stop. The IAM/SSM plumbing is confirmed correct; the
+  actual auto-stop behavior is unverified live.
+- **Uptime Kuma is still not provisioned in the new account** — same gap
+  v0.31.0 already flagged above, unchanged by this rebuild.
+- **A real, transient AWS `InsufficientInstanceCapacity` for `g6e.xlarge` in
+  `us-east-1a`** was hit live while testing the wake gateway post-rebuild —
+  confirmed genuine via CloudWatch logs, not a bug in this rebuild's code.
+  This is exactly the scenario the wake-gateway redesign below now surfaces
+  as a distinct, clearly-worded state instead of a generic failure, but
+  there is no retry-to-a-different-AZ fallback — if `us-east-1a` is out of
+  capacity, the demo is down until AWS's capacity frees up or someone
+  manually re-provisions in a different AZ.
+
+## Wake Gateway Redesigned: Live Multi-Step Status Instead of a Blind Refresh
+
+The wake gateway previously served one full HTML page on every hit, refreshed
+via a bare `<meta http-equiv="refresh">` — every ~7s the whole page flashed
+and re-rendered, and every reload looked identical to the last one regardless
+of what was actually happening underneath (booting vs. loading models vs.
+genuinely stuck vs. AWS capacity-constrained were all the same "starting up"
+paragraph). A hiring manager watching this live had no signal anything was
+progressing.
+
+### Added
+
+- **AJAX-polled live status page**: the first hit still renders a full page,
+  but every update after that comes from that page's own
+  `fetch('?check=1')` against the same Lambda URL, which now returns a small
+  JSON status object instead of HTML. The DOM updates in place (a 3-step
+  progress indicator — waking the GPU server, loading AI models, redirecting
+  to sign-in — plus a message panel) with no page flash, and a client-side
+  `location.replace()` fires the moment status is `"ready"`.
+- **A real state machine** (`_compute_status()` in
+  `lambda/wake_gateway/handler.py`) distinguishing `waking` / `loading` /
+  `stuck` / `capacity` / `error` / `ready` — `capacity`
+  (`InsufficientInstanceCapacity`) and `error` (misconfiguration, instance
+  not found) are now visually and textually distinct from ordinary loading,
+  each with its own retry cadence (capacity backs off to a 20s poll interval
+  instead of the normal 7s, to avoid hammering `StartInstances` during a
+  real AWS-side shortage; hard config errors on the very first load render
+  once with no poll loop at all, since nothing will change without a human).
+- Documented the full custom-domain setup
+  (`launch.vk-ai.online`: ACM cert request → DNS validation CNAME →
+  API Gateway custom domain → API mapping → routing CNAME) in
+  `deploy/aws/README.md`, since none of it is covered by
+  `deploy_lambdas.sh` or Terraform — same category as the existing
+  `magik.vk-ai.online` A record: AWS-side steps are scriptable, GoDaddy DNS
+  isn't.
+
+### Fixed
+
+- **The progress-step spinner never actually appeared.** The CSS rule
+  targeting the active step's spinner set its border/animation but never
+  overrode the element's own inline `display:none`, so the numeral just sat
+  there unanimated regardless of state. Restructured each step's dot into
+  separate `.num`/`.spin` spans with CSS toggling which one is visible based
+  on the `.active` class, caught and fixed before this shipped to a real
+  visitor.
+- **Status messages were interpolated into the initial page's HTML with no
+  escaping.** Every message today is a fixed, server-authored string with no
+  special characters, so this wasn't exploitable yet — but added
+  `html.escape()` as defense-in-depth rather than leaving a latent gap for
+  the day a message embeds a raw AWS error code or similar.

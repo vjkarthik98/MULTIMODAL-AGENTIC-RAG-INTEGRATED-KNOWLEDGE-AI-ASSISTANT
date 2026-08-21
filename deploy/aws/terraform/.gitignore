@@ -1,0 +1,13 @@
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.pem
+crash.log
+crash.*.log
+# Saved plan files are binary and can embed sensitive resource values
+# (e.g. tls_private_key's private key material) even for resources marked
+# "sensitive" in `terraform plan`'s human-readable output — the underlying
+# .tfplan binary is not redacted the same way. Never commit these.
+tfplan*

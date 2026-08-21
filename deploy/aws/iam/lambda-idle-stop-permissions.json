@@ -6,7 +6,14 @@
     "reads require a wildcard resource (neither GetMetricStatistics nor ListCommands",
     "supports resource-level scoping), but both are read-only.",
     "GetParameter IS scoped to the single github_actions_pat parameter -- this",
-    "role must not be able to read any other secret in Parameter Store."
+    "role must not be able to read any other secret in Parameter Store.",
+    "",
+    "UPDATED 2026-08-21: rebuilt in a NEW AWS account (857194222592, was",
+    "537557168406) after the prior account's EC2 instances + EBS volumes were",
+    "deleted. The instance ARN below is a PLACEHOLDER -- fill in the real",
+    "magik-prod instance ID from `terraform output production_instance_arn`",
+    "(deploy/aws/terraform/) after the first `terraform apply`, before running",
+    "deploy_lambdas.sh."
   ],
   "Version": "2012-10-17",
   "Statement": [
@@ -20,7 +27,7 @@
       "Sid": "StopOnlyTheDemoInstance",
       "Effect": "Allow",
       "Action": "ec2:StopInstances",
-      "Resource": "arn:aws:ec2:us-east-1:537557168406:instance/i-02efa81c8876a014e"
+      "Resource": "arn:aws:ec2:us-east-1:857194222592:instance/i-09831ac06b063d36f"
     },
     {
       "Sid": "ReadIdleSignals",
@@ -32,7 +39,7 @@
       "Sid": "ReadGithubRunnerCheckToken",
       "Effect": "Allow",
       "Action": "ssm:GetParameter",
-      "Resource": "arn:aws:ssm:us-east-1:537557168406:parameter/magik/github_actions_pat"
+      "Resource": "arn:aws:ssm:us-east-1:857194222592:parameter/magik/github_actions_pat"
     }
   ]
 }

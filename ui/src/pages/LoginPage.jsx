@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Loader2, Sun, Moon, ShieldCheck, RotateCcw } from 'lucide-react'
+import { Eye, EyeOff, Loader2, Sun, Moon, ShieldCheck, RotateCcw } from 'lucide-react'
 import { login, register, verifyOtp, resendOtp } from '../api/client'
 
 const GoogleG = () => (
@@ -335,33 +335,30 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
                 style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx1)' }}
               />
 
-              <div>
+              <div className="relative">
                 <input
-                  type={mode === 'register' ? 'text' : (showPass ? 'text' : 'password')}
+                  type={showPass ? 'text' : 'password'}
                   placeholder="Password"
                   value={password}
                   onChange={e => setPassword(e.target.value)}
                   required
                   autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-                  className="w-full rounded-xl px-4 sm:px-5 py-2.5 sm:py-3.5 text-sm sm:text-base outline-none transition-colors t-focus"
+                  className="w-full rounded-xl px-4 sm:px-5 py-2.5 sm:py-3.5 pr-11 sm:pr-12 text-sm sm:text-base outline-none transition-colors t-focus"
                   style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx1)' }}
                 />
-                {mode === 'login' && (
-                  <label className="flex items-center gap-2 mt-1 sm:mt-2 pl-1 text-xs sm:text-sm cursor-pointer select-none" style={{ color: 'var(--t-tx4)' }}>
-                    <input
-                      type="checkbox"
-                      checked={showPass}
-                      onChange={e => setShowPass(e.target.checked)}
-                      className="w-4 h-4 rounded cursor-pointer"
-                      style={{ accentColor: 'var(--t-accent)' }}
-                    />
-                    Show password
-                  </label>
-                )}
+                <button
+                  type="button"
+                  onClick={() => setShowPass(v => !v)}
+                  className="absolute right-3.5 sm:right-4 top-1/2 -translate-y-1/2 transition-colors"
+                  style={{ color: 'var(--t-ph)' }}
+                  aria-label={showPass ? 'Hide password' : 'Show password'}
+                >
+                  {showPass ? <EyeOff size={17} /> : <Eye size={17} />}
+                </button>
               </div>
 
               {mode === 'register' && (
-                <div>
+                <div className="relative">
                   <input
                     type={showConfirm ? 'text' : 'password'}
                     placeholder="Confirm password"
@@ -369,19 +366,18 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
                     onChange={e => setConfirm(e.target.value)}
                     required
                     autoComplete="new-password"
-                    className="w-full rounded-xl px-4 sm:px-5 py-2.5 sm:py-3.5 text-sm sm:text-base outline-none transition-colors t-focus"
+                    className="w-full rounded-xl px-4 sm:px-5 py-2.5 sm:py-3.5 pr-11 sm:pr-12 text-sm sm:text-base outline-none transition-colors t-focus"
                     style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx1)' }}
                   />
-                  <label className="flex items-center gap-2 mt-1 sm:mt-2 pl-1 text-xs sm:text-sm cursor-pointer select-none" style={{ color: 'var(--t-tx4)' }}>
-                    <input
-                      type="checkbox"
-                      checked={showConfirm}
-                      onChange={e => setShowConfirm(e.target.checked)}
-                      className="w-4 h-4 rounded cursor-pointer"
-                      style={{ accentColor: 'var(--t-accent)' }}
-                    />
-                    Show password
-                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirm(v => !v)}
+                    className="absolute right-3.5 sm:right-4 top-1/2 -translate-y-1/2 transition-colors"
+                    style={{ color: 'var(--t-ph)' }}
+                    aria-label={showConfirm ? 'Hide password' : 'Show password'}
+                  >
+                    {showConfirm ? <EyeOff size={17} /> : <Eye size={17} />}
+                  </button>
                 </div>
               )}
 
