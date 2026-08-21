@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Loader2, CheckCircle } from 'lucide-react'
+import { Eye, EyeOff, Loader2, CheckCircle } from 'lucide-react'
 import { resetPassword } from '../api/client'
 
 export default function ResetPasswordPage({ token, onSuccess }) {
@@ -10,6 +10,7 @@ export default function ResetPasswordPage({ token, onSuccess }) {
 
   const [password, setPassword]   = useState('')
   const [confirm, setConfirm]     = useState('')
+  const [showPass, setShowPass]       = useState(false)
   const [showConfirm, setShowConfirm] = useState(false)
   const [loading, setLoading]     = useState(false)
   const [done, setDone]           = useState(false)
@@ -17,7 +18,7 @@ export default function ResetPasswordPage({ token, onSuccess }) {
 
   if (!token) {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: 'var(--t-bg)' }}>
+      <div className="min-h-dvh-screen flex items-center justify-center px-4" style={{ background: 'var(--t-bg)' }}>
         <p style={{ color: 'var(--t-danger)' }}>Invalid or missing reset token.</p>
       </div>
     )
@@ -41,7 +42,7 @@ export default function ResetPasswordPage({ token, onSuccess }) {
 
   return (
     <div
-      className="relative min-h-dvh-screen flex flex-col items-center justify-center px-4 sm:px-6 transition-opacity duration-300"
+      className="relative h-dvh-screen overflow-y-auto flex flex-col items-center px-4 sm:px-6 transition-opacity duration-300"
       style={{ background: 'var(--t-bg)', opacity: mounted ? 1 : 0 }}
     >
       {/* Ambient glow */}
@@ -55,33 +56,33 @@ export default function ResetPasswordPage({ token, onSuccess }) {
         }} />
       </div>
 
-      <div className="relative z-10 w-full flex flex-col items-center">
+      <div className="relative z-10 w-full flex flex-col items-center my-auto py-4">
         {/* Brand */}
-        <div className="flex flex-col items-center mb-8 gap-3">
-          <img src="/logo.png" alt="MAGIK" className="w-14 h-14 rounded-2xl object-cover shadow-lg" />
-          <h1 className="text-3xl font-bold tracking-tight" style={{
+        <div className="flex flex-col items-center mb-3 sm:mb-8 gap-1.5 sm:gap-3">
+          <img src="/logo.png" alt="MAGIK" className="w-10 h-10 sm:w-14 sm:h-14 rounded-2xl object-cover shadow-lg" />
+          <h1 className="text-xl sm:text-3xl font-bold tracking-tight" style={{
             background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)',
             WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text',
           }}>MAGIK</h1>
         </div>
 
-        <div className="w-full max-w-[440px] rounded-2xl p-6 sm:p-10"
+        <div className="w-full max-w-[440px] rounded-2xl p-4 sm:p-10"
           style={{ background: 'var(--t-card)', border: '1px solid var(--t-bd2)' }}>
 
           {done ? (
             /* Success state */
-            <div className="text-center space-y-4">
-              <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto"
+            <div className="text-center space-y-3 sm:space-y-4">
+              <div className="w-12 h-12 sm:w-16 sm:h-16 rounded-2xl flex items-center justify-center mx-auto"
                 style={{ background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)' }}>
-                <CheckCircle size={28} style={{ color: '#22c55e' }} />
+                <CheckCircle size={24} style={{ color: '#22c55e' }} />
               </div>
-              <h2 className="text-xl font-bold" style={{ color: 'var(--t-tx1)' }}>Password updated</h2>
+              <h2 className="text-lg sm:text-xl font-bold" style={{ color: 'var(--t-tx1)' }}>Password updated</h2>
               <p className="text-sm" style={{ color: 'var(--t-tx4)' }}>
                 Your password has been changed. All previous sessions have been signed out.
               </p>
               <button
                 onClick={onSuccess}
-                className="w-full font-semibold rounded-xl py-3.5 text-base transition-colors mt-2"
+                className="w-full font-semibold rounded-xl py-2.5 sm:py-3.5 text-sm sm:text-base transition-colors mt-2"
                 style={{ background: 'var(--t-tx1)', color: 'var(--t-bg)' }}
                 onMouseEnter={e => e.currentTarget.style.background = 'var(--t-tx2)'}
                 onMouseLeave={e => e.currentTarget.style.background = 'var(--t-tx1)'}
@@ -92,26 +93,35 @@ export default function ResetPasswordPage({ token, onSuccess }) {
           ) : (
             /* Reset form */
             <>
-              <h2 className="text-xl font-bold mb-1" style={{ color: 'var(--t-tx1)' }}>Set new password</h2>
-              <p className="text-sm mb-7" style={{ color: 'var(--t-tx4)' }}>
+              <h2 className="text-lg sm:text-xl font-bold mb-1" style={{ color: 'var(--t-tx1)' }}>Set new password</h2>
+              <p className="text-xs sm:text-sm mb-4 sm:mb-7" style={{ color: 'var(--t-tx4)' }}>
                 Choose a strong password — at least 8 characters.
               </p>
 
-              <form onSubmit={handleSubmit} className="space-y-4">
-                <div>
+              <form onSubmit={handleSubmit} className="space-y-2.5 sm:space-y-4">
+                <div className="relative">
                   <input
-                    type="text"
+                    type={showPass ? 'text' : 'password'}
                     placeholder="New password"
                     value={password}
                     onChange={e => setPassword(e.target.value)}
                     required
                     autoComplete="new-password"
-                    className="w-full rounded-xl px-5 py-3.5 text-base outline-none transition-colors t-focus"
+                    className="w-full rounded-xl px-4 sm:px-5 py-2.5 sm:py-3.5 pr-11 sm:pr-12 text-sm sm:text-base outline-none transition-colors t-focus"
                     style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx1)' }}
                   />
+                  <button
+                    type="button"
+                    onClick={() => setShowPass(v => !v)}
+                    className="absolute right-3.5 sm:right-4 top-1/2 -translate-y-1/2 transition-colors"
+                    style={{ color: 'var(--t-ph)' }}
+                    aria-label={showPass ? 'Hide password' : 'Show password'}
+                  >
+                    {showPass ? <EyeOff size={17} /> : <Eye size={17} />}
+                  </button>
                 </div>
 
-                <div>
+                <div className="relative">
                   <input
                     type={showConfirm ? 'text' : 'password'}
                     placeholder="Confirm new password"
@@ -119,19 +129,18 @@ export default function ResetPasswordPage({ token, onSuccess }) {
                     onChange={e => setConfirm(e.target.value)}
                     required
                     autoComplete="new-password"
-                    className="w-full rounded-xl px-5 py-3.5 text-base outline-none transition-colors t-focus"
+                    className="w-full rounded-xl px-4 sm:px-5 py-2.5 sm:py-3.5 pr-11 sm:pr-12 text-sm sm:text-base outline-none transition-colors t-focus"
                     style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx1)' }}
                   />
-                  <label className="flex items-center gap-2 mt-2 pl-1 text-sm cursor-pointer select-none" style={{ color: 'var(--t-tx4)' }}>
-                    <input
-                      type="checkbox"
-                      checked={showConfirm}
-                      onChange={e => setShowConfirm(e.target.checked)}
-                      className="w-4 h-4 rounded cursor-pointer"
-                      style={{ accentColor: 'var(--t-accent)' }}
-                    />
-                    Show password
-                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirm(v => !v)}
+                    className="absolute right-3.5 sm:right-4 top-1/2 -translate-y-1/2 transition-colors"
+                    style={{ color: 'var(--t-ph)' }}
+                    aria-label={showConfirm ? 'Hide password' : 'Show password'}
+                  >
+                    {showConfirm ? <EyeOff size={17} /> : <Eye size={17} />}
+                  </button>
                 </div>
 
                 {error && <p className="text-sm" style={{ color: 'var(--t-danger)' }}>{error}</p>}
@@ -139,7 +148,7 @@ export default function ResetPasswordPage({ token, onSuccess }) {
                 <button
                   type="submit"
                   disabled={loading || !password || !confirm}
-                  className="w-full flex items-center justify-center gap-2 font-semibold rounded-xl py-3.5 text-base transition-colors disabled:opacity-60"
+                  className="w-full flex items-center justify-center gap-2 font-semibold rounded-xl py-2.5 sm:py-3.5 text-sm sm:text-base transition-colors disabled:opacity-60"
                   style={{ background: 'var(--t-tx1)', color: 'var(--t-bg)' }}
                   onMouseEnter={e => { if (!loading) e.currentTarget.style.background = 'var(--t-tx2)' }}
                   onMouseLeave={e => e.currentTarget.style.background = 'var(--t-tx1)'}
