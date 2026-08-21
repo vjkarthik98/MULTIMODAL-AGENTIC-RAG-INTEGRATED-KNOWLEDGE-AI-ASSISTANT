@@ -23,7 +23,7 @@ export default class ErrorBoundary extends Component {
 
     return (
       <div
-        className="min-h-screen flex flex-col items-center justify-center px-6 text-center"
+        className="min-h-dvh-screen flex flex-col items-center justify-center px-6 text-center"
         style={{ background: 'var(--t-bg, #0a0a0a)' }}
       >
         <img src="/logo.png" alt="MAGIK" className="w-16 h-16 rounded-2xl object-cover shadow-lg mb-6" />

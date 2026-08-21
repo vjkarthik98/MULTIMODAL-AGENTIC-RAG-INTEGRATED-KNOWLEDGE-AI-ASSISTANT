@@ -192,7 +192,7 @@ export default function App() {
   if (checking) {
     return (
       <ToastProvider>
-        <div className="min-h-screen flex items-center justify-center" style={{ background: 'var(--t-bg)' }}>
+        <div className="min-h-dvh-screen flex items-center justify-center" style={{ background: 'var(--t-bg)' }}>
           <div className="w-8 h-8 border-2 border-t-transparent rounded-full animate-spin"
             style={{ borderColor: 'var(--t-accent)', borderTopColor: 'transparent' }} />
         </div>

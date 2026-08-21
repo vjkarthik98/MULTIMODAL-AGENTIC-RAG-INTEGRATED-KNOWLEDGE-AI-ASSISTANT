@@ -53,14 +53,24 @@
     "is ever issued a pre-migration token. Both stay pinned to this one repo —",
     "numeric IDs are globally unique and cannot be re-registered, so the",
     "ID-qualified form is in fact the STRICTER of the two (a deleted-and-",
-    "recreated repo of the same name would not match it)."
+    "recreated repo of the same name would not match it).",
+    "",
+    "UPDATED 2026-08-21: rebuilt in a NEW AWS account (857194222592, was",
+    "537557168406) after the prior account's EC2 instances + EBS volumes were",
+    "deleted. THIS FILE IS NOW HISTORICAL/NARRATIVE ONLY -- the actual applied",
+    "trust policy is deploy/aws/terraform/iam.tf's",
+    "data.aws_iam_policy_document.deploy_role_trust, which builds the same six",
+    "sub patterns against a freshly created aws_iam_openid_connect_provider in",
+    "the new account. The owner/repo numeric IDs (218363746 / 1180642349) are",
+    "unchanged -- they're GitHub-side identifiers, not AWS-side, and survive an",
+    "AWS account change untouched."
   ],
   "Version": "2012-10-17",
   "Statement": [
     {
       "Effect": "Allow",
       "Principal": {
-        "Federated": "arn:aws:iam::537557168406:oidc-provider/token.actions.githubusercontent.com"
+        "Federated": "arn:aws:iam::857194222592:oidc-provider/token.actions.githubusercontent.com"
       },
       "Action": "sts:AssumeRoleWithWebIdentity",
       "Condition": {

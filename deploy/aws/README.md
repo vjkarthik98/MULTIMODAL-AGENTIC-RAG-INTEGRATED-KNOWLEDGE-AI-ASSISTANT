@@ -1,5 +1,15 @@
 # `deploy/aws` — Phase 30 scale-to-zero infrastructure
 
+> **REBUILD NOTE (2026-08-21):** the entire prior EC2 fleet + EBS volumes were
+> deleted and rebuilt in a **new AWS account (857194222592, was
+> 537557168406)** via `deploy/aws/terraform/` (see that directory's own README
+> section in `docs/runbooks/phase-30-aws-deployment.md` Appendix E). Every
+> instance ID / Elastic IP example below is now current as of the rebuild
+> (production: `i-09831ac06b063d36f`, EIP `184.73.239.9`) — but if this ever
+> gets rebuilt again, re-run `terraform output` and update these examples
+> again rather than trusting them blindly. The architecture, Lambda behavior,
+> and DNS/monitoring design described here are otherwise unchanged.
+
 Everything needed to run MAGIK's public demo on a GPU box that is **stopped by
 default** and wakes on demand.
 
@@ -63,16 +73,78 @@ bash deploy_lambdas.sh   # APP_URL defaults to https://magik.vk-ai.online
 Safe to re-run; it updates in place. The script prints the API Gateway
 endpoint and a verification checklist when it finishes.
 
+## Custom domain for the wake gateway (`launch.vk-ai.online`)
+
+The raw API Gateway endpoint (`https://<api-id>.execute-api.us-east-1.amazonaws.com`)
+works fine on its own, but a `vk-ai.online`-branded link is what's actually
+pasted into the portfolio site. This is a manual, one-time setup per rebuild
+(not covered by `deploy_lambdas.sh` or Terraform — same category as the
+`magik.vk-ai.online` A record below: AWS-side pieces are scriptable, the
+GoDaddy DNS side isn't).
+
+**Why `launch.` and not `magik.` itself:** `magik.vk-ai.online` is the FINAL
+destination (`APP_URL`) the gateway redirects to once the app is healthy —
+pointing the gateway at that same hostname would have it redirect to itself.
+The gateway needs its own, different hostname.
+
+1. **Request an ACM certificate** for the subdomain (must be in the SAME
+   region as the API Gateway — `us-east-1` here):
+   ```bash
+   aws acm request-certificate --region us-east-1 \
+     --domain-name launch.vk-ai.online --validation-method DNS
+   ```
+2. **Add the DNS validation CNAME** ACM gives you
+   (`aws acm describe-certificate ... DomainValidationOptions[0].ResourceRecord`)
+   in GoDaddy. **Keep this record permanently** — the certificate silently
+   auto-renews using it every ~13 months; deleting it breaks renewal later,
+   not immediately.
+3. **Wait for validation**: `aws acm wait certificate-validated --certificate-arn <arn>`.
+4. **Create the API Gateway custom domain**, pointing at the now-validated cert:
+   ```bash
+   aws apigatewayv2 create-domain-name --region us-east-1 \
+     --domain-name launch.vk-ai.online \
+     --domain-name-configurations CertificateArn=<cert-arn>,EndpointType=REGIONAL
+   ```
+   This returns a target hostname (`ApiGatewayDomainName`, e.g.
+   `d-xxxxxxxxxx.execute-api.us-east-1.amazonaws.com`) — different from the
+   certificate validation target in step 2.
+5. **Map the wake-gateway API to it**:
+   ```bash
+   aws apigatewayv2 create-api-mapping --region us-east-1 \
+     --domain-name launch.vk-ai.online \
+     --api-id <the wake-gateway API's ApiId> --stage '$default'
+   ```
+6. **Add the routing CNAME** in GoDaddy: `launch` → the `ApiGatewayDomainName`
+   from step 4. This is the record that actually makes the domain resolve
+   anywhere — separate from, and in addition to, the validation CNAME from
+   step 2.
+
+## Live status page (redesigned 2026-08-21)
+
+The wake gateway no longer serves a bare `<meta http-equiv="refresh">` page
+that flashes and re-renders identically on every reload. The first hit
+renders a full page with an inlined JS/CSS shell; every update after that is
+driven by that page's own `fetch('?check=1')` poll against this same Lambda,
+which returns a small JSON status object instead of HTML — the DOM updates
+in place (3-step progress indicator, message text) with no page flash, and a
+client-side `location.replace()` fires the moment status is `"ready"`. See
+`lambda/wake_gateway/handler.py`'s own header comment and `_compute_status()`
+for the full state machine (`waking` / `loading` / `stuck` / `capacity` /
+`error` / `ready`) — `capacity` (AWS's `InsufficientInstanceCapacity`) is a
+distinct, clearly-worded state now instead of a generic failure, which
+matters more than it might look: this genuinely happens for `g6e.xlarge` in
+`us-east-1a` from time to time, confirmed live during this rebuild.
+
 ## Verify
 
 ```bash
 # 1. Cold start
-aws ec2 stop-instances --instance-ids i-02efa81c8876a014e
+aws ec2 stop-instances --instance-ids i-09831ac06b063d36f
 #    then open the API Gateway endpoint — expect the interstitial, then a redirect
 
 # 2. Idle stop (watch for ~25 min after the box has been up 15+ min)
 aws logs tail /aws/lambda/magik-idle-stop --follow
-aws ec2 describe-instances --instance-ids i-02efa81c8876a014e \
+aws ec2 describe-instances --instance-ids i-09831ac06b063d36f \
   --query 'Reservations[0].Instances[0].State.Name' --output text
 ```
 
@@ -91,7 +163,7 @@ symptom visible; it can't fix an app that won't come up. Diagnose from here:
 aws logs tail /aws/lambda/magik-wake-gateway --follow
 
 # What the app itself is doing once EC2 is up — SSM into the box, no SSH key needed
-aws ssm start-session --target i-02efa81c8876a014e
+aws ssm start-session --target i-09831ac06b063d36f
 sudo journalctl -u magik -n 200 --no-pager   # or: docker compose logs --tail 200, per how it's actually run
 curl -s localhost:8000/health               # bypasses Caddy — isolates "app is fine" vs "Caddy/TLS is the problem"
 curl -sI https://magik.vk-ai.online/health  # the exact request the Lambda makes, from the box itself
@@ -302,7 +374,7 @@ which staging never receives. It:
 `magik.vk-ai.online` → A record → the Elastic IP, HTTPS via Caddy + Let's
 Encrypt on the box. Completed 2026-07-30:
 
-1. GoDaddy DNS: A record, name `magik`, value `3.208.159.124`.
+1. GoDaddy DNS: A record, name `magik`, value `184.73.239.9`.
 2. Ports 80 (ACME challenge) and 443 opened in the security group.
 3. Caddy installed on the box (`apt` via Cloudsmith's repo), config at
    `/etc/caddy/Caddyfile` — the site address is written as `https://

@@ -4,7 +4,13 @@
     "Attach ALONGSIDE the AWS-managed AWSLambdaBasicExecutionRole (CloudWatch Logs).",
     "StartInstances is scoped to the single demo instance — this role is reachable",
     "from a public, unauthenticated API Gateway endpoint, so it must not be able to start",
-    "anything else in the account."
+    "anything else in the account.",
+    "",
+    "UPDATED 2026-08-21: rebuilt in a NEW AWS account (857194222592, was",
+    "537557168406). The instance ARN below is a PLACEHOLDER -- fill in the real",
+    "magik-prod instance ID from `terraform output production_instance_arn`",
+    "(deploy/aws/terraform/) after the first `terraform apply`, before running",
+    "deploy_lambdas.sh."
   ],
   "Version": "2012-10-17",
   "Statement": [
@@ -18,7 +24,7 @@
       "Sid": "StartOnlyTheDemoInstance",
       "Effect": "Allow",
       "Action": "ec2:StartInstances",
-      "Resource": "arn:aws:ec2:us-east-1:537557168406:instance/i-02efa81c8876a014e"
+      "Resource": "arn:aws:ec2:us-east-1:857194222592:instance/i-09831ac06b063d36f"
     }
   ]
 }
