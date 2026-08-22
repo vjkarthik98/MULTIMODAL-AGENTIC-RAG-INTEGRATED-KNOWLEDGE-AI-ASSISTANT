@@ -639,9 +639,29 @@ class RedisMemory:
                 logger.warning(event="redis_cache_delete_failed", error=str(exc))
         self._fallback.delete(cache_key)
 
-    def cache_flush_query_cache(self) -> int:
-        """Delete all query-response cache entries (keys prefixed 'qresp:').
-        Uses SCAN to avoid blocking. Returns number of keys deleted."""
+    def _cache_entry_references_file(self, raw: str, filename: str) -> bool:
+        try:
+            entry = json.loads(raw)
+        except Exception:
+            return False
+        for s in entry.get("sources") or []:
+            if not isinstance(s, dict):
+                continue
+            if s.get("source") == filename or s.get("filename") == filename:
+                return True
+        return False
+
+    def cache_flush_query_cache(self, filename: str | None = None) -> int:
+        """Delete query-response cache entries (keys prefixed 'qresp:').
+
+        With `filename` given, only deletes entries whose stored `sources`
+        actually reference that file — a KB delete must not evict every other
+        session's unrelated cached answers just because some file, anywhere,
+        was removed. With `filename=None` (the explicit /cache/clear admin
+        route's use case), deletes everything, as documented there.
+
+        Uses SCAN to avoid blocking. Returns number of keys deleted.
+        """
         deleted = 0
         if self._is_available():
             try:
@@ -655,11 +675,15 @@ class RedisMemory:
                         break
                     if keys:
                         for k in keys:
+                            if filename is not None:
+                                raw = self.client.get(k)
+                                if not raw or not self._cache_entry_references_file(raw, filename):
+                                    continue
                             self.client.delete(k)
-                        deleted += len(keys)
+                            deleted += 1
                     if int(cursor) == 0:
                         break
-                logger.info(event="query_cache_flushed", deleted=deleted)
+                logger.info(event="query_cache_flushed", deleted=deleted, filename=filename)
                 return deleted
             except Exception as exc:
                 logger.warning(event="query_cache_flush_failed", error=str(exc))
@@ -667,8 +691,12 @@ class RedisMemory:
         # Fallback in-memory: delete keys starting with qresp:
         fallback_keys = [k for k in list(self._fallback._store.keys()) if k.startswith("qresp:")]
         for k in fallback_keys:
+            if filename is not None:
+                raw = self._fallback.get(k)
+                if not raw or not self._cache_entry_references_file(raw, filename):
+                    continue
             self._fallback.delete(k)
-        deleted += len(fallback_keys)
+            deleted += 1
         return deleted
 
     # EMBEDDING CACHE

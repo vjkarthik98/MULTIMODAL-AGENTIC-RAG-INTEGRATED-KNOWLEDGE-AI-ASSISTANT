@@ -1638,6 +1638,86 @@ class QdrantVectorStore:
 
         return stats
 
+    # SNAPSHOTS — MLOps: Qdrant is otherwise pure mutable runtime state with no
+    # point-in-time recovery (see the audit that added this — 2026-08-21).
+    # Manual/on-demand by design, not a scheduled job: at this project's scale a
+    # cron snapshot would just accumulate storage cost for windows nobody asked
+    # to protect. Call create_snapshot() yourself before a risky operation
+    # (bulk re-ingest, a schema change, testing a new chunker) and you have a
+    # real rollback point; skip it and Qdrant behaves exactly as before.
+
+    def create_snapshot(self, collection_name: str | None = None) -> dict[str, str]:
+        """Trigger a server-side snapshot for one collection, or both text_collection
+        and vision_collection if none is given. Returns {collection: snapshot_name}
+        for whatever succeeded — a failure on one collection doesn't block the other.
+        """
+        targets = (
+            [collection_name] if collection_name else [self.text_collection, self.vision_collection]
+        )
+        created: dict[str, str] = {}
+        for name in targets:
+            try:
+                result = self._retry(self.client.create_snapshot, collection_name=name)
+                if result is not None:
+                    created[name] = result.name
+                    logger.info("qdrant_snapshot_created", collection=name, snapshot=result.name)
+            except Exception as exc:
+                logger.warning("qdrant_snapshot_create_failed", collection=name, error=str(exc))
+        return created
+
+    def list_snapshots(self, collection_name: str | None = None) -> dict[str, list[dict[str, Any]]]:
+        """List available snapshots per collection (both, if none given)."""
+        targets = (
+            [collection_name] if collection_name else [self.text_collection, self.vision_collection]
+        )
+        out: dict[str, list[dict[str, Any]]] = {}
+        for name in targets:
+            try:
+                snaps = self._retry(self.client.list_snapshots, collection_name=name)
+                out[name] = [
+                    {
+                        "name": s.name,
+                        "creation_time": s.creation_time,
+                        "size": s.size,
+                    }
+                    for s in (snaps or [])
+                ]
+            except Exception as exc:
+                logger.warning("qdrant_snapshot_list_failed", collection=name, error=str(exc))
+                out[name] = []
+        return out
+
+    def recover_snapshot(self, collection_name: str, snapshot_name: str) -> bool:
+        """Restore a collection from one of its own previously created snapshots.
+        DESTRUCTIVE: replaces the collection's current contents with the
+        snapshot's — never call this without deliberately intending a rollback.
+        Uses the same-cluster restore path (location = this cluster's own
+        snapshot URL), so nothing needs downloading first.
+        """
+        location = f"{settings.QDRANT_URL}/collections/{collection_name}/snapshots/{snapshot_name}"
+        try:
+            result = self._retry(
+                self.client.recover_snapshot,
+                collection_name=collection_name,
+                location=location,
+                api_key=settings.QDRANT_API_KEY or None,
+            )
+            logger.info(
+                "qdrant_snapshot_recovered",
+                collection=collection_name,
+                snapshot=snapshot_name,
+                success=bool(result),
+            )
+            return bool(result)
+        except Exception as exc:
+            logger.error(
+                "qdrant_snapshot_recover_failed",
+                collection=collection_name,
+                snapshot=snapshot_name,
+                error=str(exc),
+            )
+            return False
+
     # HEALTH CHECK
 
     def health_check(self) -> dict[str, Any]:

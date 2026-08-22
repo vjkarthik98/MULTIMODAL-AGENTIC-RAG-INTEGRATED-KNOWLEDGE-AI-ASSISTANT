@@ -41,6 +41,30 @@ WHAT THIS FIXES
 `EVAL_ACCESS_TOKEN` is still honoured as a fallback so anything driving the eval
 from OUTSIDE the container (a laptop against a remote server, where jwt_handler
 has no usable secret) keeps working exactly as before.
+
+CORRECTION (found 2026-08-22, quality-live.yml's ragas-report/deepeval-report
+jobs): the paragraph above is only half true. It assumed minting OUTSIDE the
+container fails with an exception (missing dependency, unreachable import),
+which correctly falls back to EVAL_ACCESS_TOKEN. That assumption breaks the
+moment the caller has ALSO run `pip install -r requirements.txt` (exactly what
+quality-live.yml already did before this fix) — `issue_tokens()` then imports
+and signs successfully, using whatever JWT_SECRET_KEY happens to be present in
+that environment, which is NOT the real server's secret. The result is a
+syntactically valid token with the wrong signature: every request gets a real
+401, `post_json()`'s one 401-retry re-mints an equally-wrong token, and the
+whole run fails end to end with no report ever produced — which is exactly why
+quality-reports/ragas/ and quality-reports/deepeval/ have only ever held a
+`.gitkeep`. `_can_mint` only ever measured "did minting throw", never "did the
+server actually accept what we minted", so this failure mode never self-healed.
+
+Fixed by giving EvalAuth a genuine third path, not just a better fallback:
+EVAL_REPORTER_EMAIL / EVAL_REPORTER_PASSWORD, when both are set, make it call
+the real POST /auth/login on EVAL_SERVER_URL instead of minting in-process —
+producing a token the server issued itself, so it is correct by construction
+regardless of what JWT_SECRET_KEY (if any) is present locally. This is the
+supported way to run the eval suite against a real deployed server from
+outside its container/secret boundary; EVAL_ACCESS_TOKEN remains for the case
+where a token was obtained some other way and handed in directly.
 """
 
 from __future__ import annotations
@@ -79,10 +103,58 @@ class EvalAuth:
         # our own; it carries no expiry we can read without decoding, so it is
         # treated as "valid until something 401s".
         self._static_token: str = os.getenv("EVAL_ACCESS_TOKEN", "").strip()
+        # Real login credentials for a dedicated, non-interactive eval-reporter
+        # account (see app/bin/seed_eval_reporter.py). When both are set, _mint()
+        # calls the real POST /auth/login instead of minting in-process — the
+        # only path that is correct-by-construction when this process does not
+        # share the server's own JWT_SECRET_KEY. Takes priority over in-process
+        # minting (checked first in _mint()), never over an explicit EVAL_ACCESS_TOKEN
+        # someone deliberately handed in — this class does not second-guess that.
+        self._login_email: str = os.getenv("EVAL_REPORTER_EMAIL", "").strip()
+        self._login_password: str = os.getenv("EVAL_REPORTER_PASSWORD", "")
         self._can_mint: bool = True
 
+    def _login(self) -> bool:
+        """Fetch a real token via POST /auth/login against EVAL_SERVER_URL.
+
+        Used instead of in-process minting when EVAL_REPORTER_EMAIL /
+        EVAL_REPORTER_PASSWORD are set — the token the server hands back is
+        correct by construction (the server signed it itself), unlike an
+        in-process mint outside the server's own secret boundary, which signs
+        with the wrong key and gets silently, permanently rejected. See this
+        module's docstring "CORRECTION" note for the incident that found this.
+        """
+        try:
+            import requests
+
+            from app.eval.runners.generation_runner import _SERVER_URL
+
+            resp = requests.post(
+                f"{_SERVER_URL}/auth/login",
+                json={"email": self._login_email, "password": self._login_password},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            token = resp.json().get("access_token")
+            if not token:
+                raise ValueError("login response had no access_token")
+        except Exception as exc:
+            logger.error(event="eval_login_failed", error=str(exc))
+            return False
+
+        self._token = token
+        self._expires_at = time.time() + (settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+        logger.info(
+            event="eval_token_login",
+            expires_in_sec=int(self._expires_at - time.time()),
+        )
+        return True
+
     def _mint(self) -> bool:
-        """Mint a fresh access token in-process. Returns True on success."""
+        """Obtain a fresh access token. Returns True on success."""
+        if self._login_email and self._login_password:
+            return self._login()
+
         try:
             from app.auth.jwt_handler import issue_tokens
 

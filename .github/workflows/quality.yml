@@ -107,7 +107,7 @@ jobs:
           docker compose logs --tail=200 api
           exit 1
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -131,7 +131,7 @@ jobs:
       - name: Run Schemathesis contract test
         run: pytest tests/api_contract/ -v --junitxml=quality-reports/api-contract/ci-run.junit.xml
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: api-contract-report
@@ -213,7 +213,7 @@ jobs:
       - name: Run ZAP baseline scan
         run: bash security/zap/run_baseline.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: zap-baseline-report
@@ -230,7 +230,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: "npm"
@@ -242,7 +242,7 @@ jobs:
       - name: Run Lighthouse CI
         run: npx --yes @lhci/cli@0.14 autorun --config=lighthouserc.json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: lighthouse-report

@@ -7,8 +7,17 @@
          area; the `*-safe` utilities in index.css then inset the content that
          must not be covered. Zoom is deliberately NOT disabled (no
          user-scalable=no / maximum-scale=1) — blocking pinch-zoom is an
-         accessibility failure and browsers increasingly ignore it anyway. -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+         accessibility failure and browsers increasingly ignore it anyway.
+         interactive-widget=resizes-content opts back into the classic
+         behavior where the on-screen keyboard shrinks the LAYOUT viewport
+         (what `dvh` is defined against), not just the visual one. Modern
+         Chromium's (and so Brave's) *default* is now resizes-visual —
+         layout viewport stays full height, keyboard just overlays on top —
+         which is exactly why `.h-dvh-screen` (100dvh) stopped tracking the
+         keyboard and left a gap between the composer and the keyboard on
+         Android. This is the platform-level fix Chrome's own docs recommend
+         for chat-style composers; no JS measurement needed once it's set. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>MAGIK</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

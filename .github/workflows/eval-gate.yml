@@ -146,7 +146,7 @@ jobs:
       # Short version: caching pip here stores ~4.8GB of torch/CUDA wheels and
       # crowds cd.yml's Docker buildx cache out of the 10GB per-repo limit,
       # turning every release build into a ~1h llama-cpp-python recompile.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -209,7 +209,7 @@ jobs:
       # happily fall back to the very poisoned entry we are escaping.
       - name: Restore eval BM25 index
         id: bm25_cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: data/users/${{ env.EVAL_USER_ID }}/bm25_index
           key: bm25-eval-index-v2-${{ hashFiles('app/eval/datasets/gold/**') }}
@@ -299,7 +299,7 @@ jobs:
       - name: Save rebuilt BM25 index to cache
         if: steps.bm25_rebuild.outcome == 'success'
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: data/users/${{ env.EVAL_USER_ID }}/bm25_index
           key: bm25-eval-index-v2-${{ hashFiles('app/eval/datasets/gold/**') }}
@@ -333,7 +333,7 @@ jobs:
 
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rag-report-tier1-${{ github.event.pull_request.number }}
           path: app/eval/reports/
@@ -387,7 +387,7 @@ jobs:
       # here was written to a key tier1 would never read. Harmless only because
       # tier1 self-heals by rebuilding from Qdrant; still a dead cache write.
       - name: Publish BM25 index cache
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: data/users/${{ env.EVAL_USER_ID }}/bm25_index
           key: bm25-eval-index-v2-${{ hashFiles('app/eval/datasets/gold/**') }}
