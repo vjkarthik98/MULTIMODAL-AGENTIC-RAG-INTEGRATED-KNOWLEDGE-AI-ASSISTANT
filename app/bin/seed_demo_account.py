@@ -26,9 +26,7 @@ from app.core.config import settings
 # Single source of truth — /auth/login's OTP bypass matches this same address,
 # so seeding a different one would produce an account that still asks for OTP.
 DEFAULT_EMAIL = settings.DEMO_ACCOUNT_EMAIL or "magikaiassistant@gmail.com"
-DEFAULT_PASSWORD = (
-    "Demo@2026"  # pragma: allowlist secret — intentionally public demo credential, not a real secret
-)
+DEFAULT_PASSWORD = "Demo@2026"  # pragma: allowlist secret — intentionally public demo credential, not a real secret
 
 # Bundled finance benchmark files already used for accuracy testing —
 # reasonable defaults to upload for a finance-RAG demo walkthrough.
