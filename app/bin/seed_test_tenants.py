@@ -2,7 +2,7 @@
 """Create or reset the dedicated test-tenant accounts used by automated quality
 tooling (k6 load/stress/multi-user simulation, live-mode Schemathesis, ZAP).
 
-These are NEVER the shared public demo login (testuser@ragdev.local, seeded by
+These are NEVER the shared public demo login (magikaiassistant@gmail.com, seeded by
 app/bin/seed_demo_account.py) — that account is a single, publicly-known login
 real recruiters use, and its rate-limit bucket (RATE_LIMIT_RPM=60/min) and
 login-attempt bucket (AUTH_LOGIN_RATE_LIMIT_PER_MIN=5) would be contended by
