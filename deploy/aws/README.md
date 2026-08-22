@@ -216,6 +216,35 @@ after the eval had already failed on its own — it did not kill a healthy run.
 Tightening this further (e.g. a liveness heartbeat independent of GitHub's own
 runner-status reporting) is a real improvement, not yet built.
 
+## Verifying / restoring SSM secrets
+
+`deploy/aws/scripts/restore_ssm_secrets.py` is the one authoritative manifest
+of every `/magik/*` SSM parameter this project depends on (all 13 — the 9
+app secrets and 4 more below, in one place). Use it instead of hand-typing
+`aws ssm put-parameter` commands, which is exactly what the two sections
+below still show as historical reference:
+
+```bash
+# Check what's actually present right now, write nothing:
+pip install boto3   # not a project dependency — this script's only need
+python deploy/aws/scripts/restore_ssm_secrets.py --check-only --profile magik-admin
+
+# Restore the 10 app-level secrets from a live, healthy app container
+# (reads its own already-loaded environment — no value ever hand-typed):
+docker exec magik-current env | grep -q JWT_SECRET_KEY  # sanity check first
+python deploy/aws/scripts/restore_ssm_secrets.py --from-env --group app --profile magik-admin
+
+# True disaster recovery — no running container at all, from an offline
+# backup file (KEY=VALUE lines, kept in a password manager, never committed):
+python deploy/aws/scripts/restore_ssm_secrets.py --from-file secrets.env --group all --profile magik-admin
+```
+
+Uses boto3 directly, deliberately not the AWS CLI — no shell in the path
+means no Git-Bash/MSYS2 argument mangling (the exact bug that corrupted the
+very first attempt at these `put-parameter` commands on Windows, turning
+`/magik/jwt_secret_key` into `C:/Program Files/Git/magik/jwt_secret_key`,
+caught and redone at the time — see the script's own docstring).
+
 ## App secrets in SSM (Phase 31 — closes the secrets-management gap)
 
 Nine values used to live as plaintext in `/opt/magik/.env` indefinitely:

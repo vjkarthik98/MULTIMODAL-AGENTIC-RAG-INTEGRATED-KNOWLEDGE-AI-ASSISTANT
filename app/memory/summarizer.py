@@ -311,10 +311,11 @@ def _persist_summary(
     session_id: str,
     mongo_memory: Any,
     keywords: list[str] | None = None,
+    user_id: str | None = None,
 ) -> None:
     try:
         if mongo_memory and hasattr(mongo_memory, "store_summary"):
-            mongo_memory.store_summary(session_id, summary)
+            mongo_memory.store_summary(session_id, summary, user_id=user_id)
         if keywords:
             logger.debug(
                 "summary_keywords_extracted",
@@ -338,6 +339,7 @@ def summarize_conversation(
     session_id: str = "default",
     mongo_memory: Any = None,
     existing_summary: str | None = None,
+    user_id: str | None = None,
 ) -> str:
 
     if not history:
@@ -434,7 +436,7 @@ def summarize_conversation(
 
             # AUTO-PERSIST TO MONGO
             if mongo_memory:
-                _persist_summary(summary, session_id, mongo_memory, keywords)
+                _persist_summary(summary, session_id, mongo_memory, keywords, user_id=user_id)
 
             latency = round(time.time() - start, 2)
 
@@ -488,6 +490,7 @@ async def summarize_conversation_async(
     session_id: str = "default",
     mongo_memory: Any = None,
     existing_summary: str | None = None,
+    user_id: str | None = None,
 ) -> str:
 
     async with _semaphore:
@@ -499,6 +502,7 @@ async def summarize_conversation_async(
                 session_id,
                 mongo_memory,
                 existing_summary,
+                user_id,
             ),
         )
 

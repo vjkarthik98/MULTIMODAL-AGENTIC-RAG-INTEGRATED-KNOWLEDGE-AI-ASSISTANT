@@ -1,0 +1,1505 @@
+# MAGIK dependency lock — every transitive package pinned to an exact
+# resolved version (generated with `pip-compile` / pip-tools from
+# requirements.txt, 2026-08-21 MLOps reproducibility pass).
+#
+# NOT for `pip install -r` directly in place of requirements.txt on the real
+# CUDA deployment target — torch/torchvision/torchaudio/llama-cpp-python are
+# DELIBERATELY EXCLUDED from this file. Those four are platform/GPU-build
+# specific and already exactly pinned outside pip's normal resolution:
+#   - llama-cpp-python==0.3.30           -> Dockerfile (cuda-builder stage),
+#                                            install_cuda.sh
+#   - torch==2.12.1 / torchvision==0.27.1
+#     / torchaudio==2.11.0               -> install_cuda.sh, requirements.txt
+#                                            header comment
+# Compiling them here (on a non-Linux/non-CUDA machine) would record the
+# wrong build entirely — actively misleading rather than helpful. This lock
+# WAS still compiled with those three as hard --constraint pins (not just
+# excluded), so every transitive dependency below that needs torch (e.g.
+# pyannote's torch-audiomentations/torch-pitch-shift/torchmetrics) is
+# confirmed compatible with the exact torch/torchvision/torchaudio versions
+# actually deployed — a real verification, not a guess.
+#
+# Regenerate after any requirements.txt change:
+#   grep -vE '^(llama-cpp-python|torch|torchvision|torchaudio)([><=! ]|$)' requirements.txt > /tmp/requirements_for_lock.txt
+#   pip-compile /tmp/requirements_for_lock.txt \
+#     --constraint <(printf 'torch==2.12.1\ntorchvision==0.27.1\ntorchaudio==2.11.0\nllama-cpp-python==0.3.30\n') \
+#     --output-file requirements.lock.txt --no-header --allow-unsafe
+# Update the constraint versions above first if install_cuda.sh's pins change.
+
+absl-py==2.5.0
+    # via
+    #   keras
+    #   mediapipe
+    #   tensorflow
+accelerate==1.14.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+aiofiles==25.1.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+aiohappyeyeballs==2.7.1
+    # via aiohttp
+aiohttp==3.14.3
+    # via
+    #   deepeval
+    #   fsspec
+    #   langchain
+    #   langchain-community
+    #   mlflow
+aiosignal==1.4.0
+    # via aiohttp
+alembic==1.19.1
+    # via
+    #   mlflow
+    #   optuna
+annotated-doc==0.0.5
+    # via
+    #   fastapi
+    #   typer
+annotated-types==0.8.0
+    # via pydantic
+antlr4-python3-runtime==4.9.3
+    # via omegaconf
+anyio==4.14.2
+    # via
+    #   httpx
+    #   openai
+    #   sse-starlette
+    #   starlette
+    #   watchfiles
+appdirs==1.4.4
+    # via ragas
+argon2-cffi==25.1.0
+    # via passlib
+argon2-cffi-bindings==26.1.0
+    # via argon2-cffi
+ast-serialize==0.8.0
+    # via mypy
+asteroid-filterbanks==0.4.0
+    # via pyannote-audio
+astunparse==1.6.3
+    # via tensorflow
+async-timeout==4.0.3
+    # via
+    #   aiohttp
+    #   langchain
+    #   redis
+attrs==26.1.0
+    # via aiohttp
+audioread==3.1.0
+    # via librosa
+authlib==1.7.2
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+av==17.1.0
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   faster-whisper
+    #   qwen-vl-utils
+backoff==2.2.1
+    # via posthog
+backports-asyncio-runner==1.2.0
+    # via pytest-asyncio
+bandit==1.9.4
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+bcrypt==4.3.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+bitsandbytes==0.50.1
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+black==26.5.1
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+bleach==6.4.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+blinker==1.9.0
+    # via flask
+blis==1.3.3
+    # via thinc
+boolean-py==5.0
+    # via license-expression
+cachecontrol[filecache]==0.14.4
+    # via
+    #   cachecontrol
+    #   pip-audit
+cachetools==7.1.7
+    # via
+    #   mlflow-skinny
+    #   mlflow-tracing
+cairocffi==1.7.1
+    # via cairosvg
+cairosvg==2.9.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+camelot-py[cv]==2.0.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+catalogue==2.0.10
+    # via
+    #   spacy
+    #   srsly
+    #   thinc
+certifi==2026.7.22
+    # via
+    #   httpcore
+    #   httpx
+    #   mediapipe
+    #   requests
+cffi==2.1.1
+    # via
+    #   argon2-cffi-bindings
+    #   cairocffi
+    #   cryptography
+    #   sounddevice
+    #   soundfile
+cfgv==3.5.0
+    # via pre-commit
+chardet==7.6.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+charset-normalizer==3.5.1
+    # via
+    #   pdfminer-six
+    #   requests
+clamd==1.0.2
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+click==8.3.3
+    # via
+    #   black
+    #   camelot-py
+    #   deepeval
+    #   flask
+    #   jiwer
+    #   mlflow-skinny
+    #   nltk
+    #   presidio-analyzer
+    #   scenedetect
+    #   spacy
+    #   uvicorn
+    #   yake
+cloudpathlib==0.24.0
+    # via weasel
+cloudpickle==3.1.2
+    # via mlflow-skinny
+colorama==0.4.6
+    # via
+    #   bandit
+    #   click
+    #   colorlog
+    #   pytest
+    #   qrcode
+    #   tqdm
+    #   typer
+    #   wasabi
+coloredlogs==15.0.1
+    # via onnxruntime
+colorlog==6.12.0
+    # via optuna
+confection==1.3.3
+    # via
+    #   spacy
+    #   thinc
+    #   weasel
+contourpy==1.3.2
+    # via matplotlib
+coverage[toml]==7.15.4
+    # via pytest-cov
+cryptography==48.0.1
+    # via
+    #   authlib
+    #   google-auth
+    #   joserfc
+    #   mlflow
+    #   pdfminer-six
+    #   presidio-anonymizer
+    #   python-jose
+cssselect2==0.9.0
+    # via cairosvg
+ctranslate2==4.8.1
+    # via faster-whisper
+cycler==0.12.1
+    # via matplotlib
+cyclonedx-python-lib==11.12.0
+    # via pip-audit
+cymem==2.0.13
+    # via
+    #   preshed
+    #   spacy
+    #   thinc
+databricks-sdk==0.133.0
+    # via
+    #   mlflow-skinny
+    #   mlflow-tracing
+dataclasses-json==0.6.7
+    # via langchain-community
+datasets==5.0.1
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   ragas
+decorator==5.3.1
+    # via librosa
+deepeval==4.1.10
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+defusedxml==0.7.1
+    # via
+    #   cairosvg
+    #   nltk
+    #   py-serializable
+detect-secrets==1.5.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+detoxify==0.5.2
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+dill==0.4.1
+    # via
+    #   datasets
+    #   multiprocess
+distlib==0.4.3
+    # via virtualenv
+distro==1.9.0
+    # via
+    #   openai
+    #   posthog
+dnspython==2.8.0
+    # via pymongo
+docker==7.2.0
+    # via mlflow
+docopt==0.6.2
+    # via
+    #   pyannote-metrics
+    #   pyannote-pipeline
+easyocr==1.7.2
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+ecdsa==0.19.2
+    # via python-jose
+einops==0.8.2
+    # via pyannote-audio
+et-xmlfile==2.0.0
+    # via openpyxl
+exceptiongroup==1.3.1
+    # via
+    #   anyio
+    #   pytest
+execnet==2.1.2
+    # via pytest-xdist
+fastapi==0.141.1
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   mlflow-skinny
+faster-whisper==1.2.1
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+filelock==3.32.3
+    # via
+    #   cachecontrol
+    #   datasets
+    #   huggingface-hub
+    #   pyannote-pipeline
+    #   python-discovery
+    #   tldextract
+    #   torch
+    #   transformers
+    #   virtualenv
+flask==3.1.3
+    # via
+    #   flask-cors
+    #   mlflow
+flask-cors==6.0.5
+    # via mlflow
+flatbuffers==25.12.19
+    # via
+    #   mediapipe
+    #   onnxruntime
+    #   tensorflow
+fonttools==4.63.0
+    # via matplotlib
+frozenlist==1.8.0
+    # via
+    #   aiohttp
+    #   aiosignal
+fsspec[http]==2026.6.0
+    # via
+    #   datasets
+    #   huggingface-hub
+    #   lightning
+    #   pytorch-lightning
+    #   torch
+ftfy==6.3.1
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   wordfreq
+gast==0.7.0
+    # via tensorflow
+gitdb==4.0.12
+    # via gitpython
+gitpython==3.1.59
+    # via mlflow-skinny
+google-auth==2.56.3
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   databricks-sdk
+google-pasta==0.2.0
+    # via tensorflow
+googleapis-common-protos==1.75.1
+    # via opentelemetry-exporter-otlp-proto-grpc
+graphene==3.4.3
+    # via mlflow
+graphql-core==3.2.11
+    # via
+    #   graphene
+    #   graphql-relay
+graphql-relay==3.2.0
+    # via graphene
+greenlet==3.5.5
+    # via sqlalchemy
+grpcio==1.83.0
+    # via
+    #   deepeval
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   qdrant-client
+    #   tensorflow
+h11==0.16.0
+    # via
+    #   httpcore
+    #   uvicorn
+h2==4.4.1
+    # via httpx
+h5py==3.14.0
+    # via
+    #   keras
+    #   tensorflow
+hpack==4.2.0
+    # via h2
+httpcore==1.0.9
+    # via httpx
+httptools==0.8.0
+    # via uvicorn
+httpx[http2]==0.28.1
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   datasets
+    #   langsmith
+    #   openai
+    #   qdrant-client
+    #   tavily-python
+    #   upstash-redis
+    #   weasel
+huey==3.3.4
+    # via mlflow
+huggingface-hub==0.36.2
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   accelerate
+    #   datasets
+    #   faster-whisper
+    #   pyannote-audio
+    #   sentence-transformers
+    #   speechbrain
+    #   tokenizers
+    #   transformers
+humanfriendly==10.0
+    # via coloredlogs
+hyperframe==6.1.0
+    # via h2
+hyperpyyaml==1.2.3
+    # via speechbrain
+identify==2.6.19
+    # via pre-commit
+idna==3.19
+    # via
+    #   anyio
+    #   httpx
+    #   requests
+    #   tldextract
+    #   yarl
+imagehash==4.3.2
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+imageio==2.37.4
+    # via scikit-image
+imageio-ffmpeg==0.6.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+importlib-metadata==9.0.0
+    # via mlflow-skinny
+iniconfig==2.3.0
+    # via pytest
+isort==8.0.1
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+itsdangerous==2.2.0
+    # via flask
+jellyfish==1.2.1
+    # via yake
+jinja2==3.1.6
+    # via
+    #   deepeval
+    #   flask
+    #   spacy
+    #   torch
+jiter==0.16.0
+    # via openai
+jiwer==4.0.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+joblib==1.5.3
+    # via
+    #   librosa
+    #   nltk
+    #   scikit-learn
+    #   speechbrain
+joserfc==1.7.4
+    # via authlib
+jsonpatch==1.33
+    # via langchain-core
+jsonpointer==3.1.1
+    # via jsonpatch
+julius==0.2.8
+    # via torch-audiomentations
+keras==3.12.4
+    # via tensorflow
+keybert==0.9.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+kiwisolver==1.5.0
+    # via matplotlib
+langchain==0.2.17
+    # via
+    #   langchain-community
+    #   ragas
+langchain-community==0.2.19
+    # via ragas
+langchain-core==0.2.43
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   langchain
+    #   langchain-community
+    #   langchain-openai
+    #   langchain-text-splitters
+    #   ragas
+langchain-openai==0.1.25
+    # via ragas
+langchain-text-splitters==0.2.4
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   langchain
+langcodes==3.5.1
+    # via wordfreq
+langsmith==0.1.147
+    # via
+    #   langchain
+    #   langchain-community
+    #   langchain-core
+lazy-loader==0.5
+    # via
+    #   librosa
+    #   scikit-image
+libclang==18.1.1
+    # via tensorflow
+librosa==0.11.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+librt==0.15.0
+    # via mypy
+license-expression==30.4.4
+    # via cyclonedx-python-lib
+lightning==2.6.5
+    # via pyannote-audio
+lightning-utilities==0.15.3
+    # via
+    #   lightning
+    #   pytorch-lightning
+    #   torchmetrics
+lingua-language-detector==2.1.1
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+llvmlite==0.49.0
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   numba
+locate==1.1.1
+    # via wordfreq
+lxml==6.1.2
+    # via python-docx
+mako==1.4.1
+    # via alembic
+markdown-it-py==4.2.0
+    # via rich
+markupsafe==3.0.3
+    # via
+    #   flask
+    #   jinja2
+    #   mako
+    #   werkzeug
+marshmallow==3.26.2
+    # via dataclasses-json
+matplotlib==3.10.9
+    # via
+    #   mediapipe
+    #   mlflow
+    #   pyannote-metrics
+mdurl==0.1.2
+    # via markdown-it-py
+mediapipe==1.0.1
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+ml-dtypes==0.5.4
+    # via
+    #   keras
+    #   tensorflow
+mlflow==3.15.1
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+mlflow-skinny==3.15.1
+    # via mlflow
+mlflow-tracing==3.15.1
+    # via mlflow
+mpmath==1.3.0
+    # via sympy
+msgpack==1.2.1
+    # via
+    #   cachecontrol
+    #   librosa
+    #   wordfreq
+multidict==6.7.1
+    # via
+    #   aiohttp
+    #   yarl
+multiprocess==0.70.19
+    # via datasets
+murmurhash==1.0.15
+    # via
+    #   preshed
+    #   spacy
+    #   thinc
+mutagen==1.48.1
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+mypy==2.3.1
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+mypy-extensions==1.1.0
+    # via
+    #   black
+    #   mypy
+    #   playa-pdf
+    #   typing-inspect
+namex==0.1.0
+    # via keras
+nest-asyncio==1.6.0
+    # via
+    #   deepeval
+    #   ragas
+networkx==3.4.2
+    # via
+    #   scikit-image
+    #   torch
+    #   yake
+ninja==1.13.0
+    # via easyocr
+nltk==3.10.3
+    # via textstat
+nodeenv==1.10.0
+    # via pre-commit
+numba==0.67.0
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   librosa
+numpy==1.26.4
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   accelerate
+    #   asteroid-filterbanks
+    #   bitsandbytes
+    #   blis
+    #   camelot-py
+    #   contourpy
+    #   ctranslate2
+    #   datasets
+    #   easyocr
+    #   h5py
+    #   imagehash
+    #   imageio
+    #   keras
+    #   keybert
+    #   langchain
+    #   langchain-community
+    #   librosa
+    #   matplotlib
+    #   mediapipe
+    #   ml-dtypes
+    #   mlflow
+    #   numba
+    #   onnxruntime
+    #   opencv-contrib-python
+    #   opencv-python
+    #   opencv-python-headless
+    #   optuna
+    #   pandas
+    #   presidio-analyzer
+    #   pyannote-core
+    #   pyannote-metrics
+    #   pytorch-metric-learning
+    #   pywavelets
+    #   qdrant-client
+    #   ragas
+    #   rank-bm25
+    #   rawpy
+    #   scenedetect
+    #   scikit-image
+    #   scikit-learn
+    #   scipy
+    #   sentence-transformers
+    #   shapely
+    #   skops
+    #   soundfile
+    #   soxr
+    #   spacy
+    #   speechbrain
+    #   tensorboardx
+    #   tensorflow
+    #   tensorflow-hub
+    #   thinc
+    #   tifffile
+    #   torchmetrics
+    #   torchvision
+    #   transformers
+    #   yake
+omegaconf==2.3.1
+    # via pyannote-audio
+onnxruntime==1.23.2
+    # via faster-whisper
+openai==1.109.1
+    # via
+    #   deepeval
+    #   langchain-openai
+    #   ragas
+opencv-contrib-python==4.11.0.86
+    # via mediapipe
+opencv-python==4.11.0.86
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   scenedetect
+opencv-python-headless==4.11.0.86
+    # via
+    #   camelot-py
+    #   easyocr
+openinference-semantic-conventions==0.1.32
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+openpyxl==3.1.5
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   camelot-py
+opentelemetry-api==1.44.0
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   deepeval
+    #   mlflow-skinny
+    #   mlflow-tracing
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-sdk
+    #   opentelemetry-semantic-conventions
+opentelemetry-exporter-otlp-proto-common==1.44.0
+    # via opentelemetry-exporter-otlp-proto-grpc
+opentelemetry-exporter-otlp-proto-grpc==1.44.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+opentelemetry-proto==1.44.0
+    # via
+    #   mlflow-skinny
+    #   mlflow-tracing
+    #   opentelemetry-exporter-otlp-proto-common
+    #   opentelemetry-exporter-otlp-proto-grpc
+opentelemetry-sdk==1.44.0
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   deepeval
+    #   mlflow-skinny
+    #   mlflow-tracing
+    #   opentelemetry-exporter-otlp-proto-grpc
+opentelemetry-semantic-conventions==0.65b0
+    # via opentelemetry-sdk
+opt-einsum==3.4.0
+    # via tensorflow
+optree==0.20.0
+    # via keras
+optuna==4.9.0
+    # via pyannote-pipeline
+orjson==3.12.0
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   langsmith
+packageurl-python==0.17.6
+    # via cyclonedx-python-lib
+packaging==24.2
+    # via
+    #   accelerate
+    #   bitsandbytes
+    #   black
+    #   datasets
+    #   huggingface-hub
+    #   keras
+    #   langchain-core
+    #   lazy-loader
+    #   lightning
+    #   lightning-utilities
+    #   marshmallow
+    #   matplotlib
+    #   mlflow-skinny
+    #   mlflow-tracing
+    #   onnxruntime
+    #   optuna
+    #   pip-audit
+    #   pip-requirements-parser
+    #   pooch
+    #   pytesseract
+    #   pytest
+    #   pytest-rerunfailures
+    #   pytorch-lightning
+    #   qwen-vl-utils
+    #   scikit-image
+    #   skops
+    #   spacy
+    #   speechbrain
+    #   tensorboardx
+    #   tensorflow
+    #   thinc
+    #   torch-pitch-shift
+    #   torchmetrics
+    #   transformers
+    #   weasel
+    #   wheel
+pandas==2.3.3
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   camelot-py
+    #   datasets
+    #   mlflow
+    #   pyannote-database
+    #   pyannote-metrics
+passlib[argon2]==1.7.4
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+pathspec==1.1.1
+    # via
+    #   black
+    #   mypy
+pdfminer-six==20260107
+    # via pdfplumber
+pdfplumber==0.11.10
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+phonenumbers==9.0.37
+    # via presidio-analyzer
+pillow==12.3.0
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   cairosvg
+    #   camelot-py
+    #   easyocr
+    #   imagehash
+    #   imageio
+    #   matplotlib
+    #   pdfplumber
+    #   pillow-heif
+    #   pytesseract
+    #   qrcode
+    #   qwen-vl-utils
+    #   scikit-image
+    #   torchvision
+pillow-heif==1.5.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+pip-api==0.0.34
+    # via pip-audit
+pip-audit==2.10.1
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+pip-licenses==5.5.5
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+pip-requirements-parser==32.0.1
+    # via pip-audit
+platformdirs==4.11.3
+    # via
+    #   black
+    #   pip-audit
+    #   pooch
+    #   scenedetect
+    #   virtualenv
+playa-pdf==1.1.0
+    # via camelot-py
+pluggy==1.6.0
+    # via
+    #   pytest
+    #   pytest-cov
+pooch==1.9.0
+    # via librosa
+portalocker==3.2.0
+    # via
+    #   deepeval
+    #   qdrant-client
+posthog==7.42.0
+    # via deepeval
+pre-commit==4.6.2
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+preshed==3.0.13
+    # via
+    #   spacy
+    #   thinc
+presidio-analyzer==2.2.364
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+presidio-anonymizer==2.2.364
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+prettytable==3.18.0
+    # via
+    #   pip-licenses
+    #   skops
+primepy==1.3
+    # via torch-pitch-shift
+prometheus-client==0.26.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+prompt-toolkit==3.0.53
+    # via questionary
+propcache==0.5.2
+    # via
+    #   aiohttp
+    #   yarl
+protobuf==6.33.6
+    # via
+    #   databricks-sdk
+    #   googleapis-common-protos
+    #   mlflow-skinny
+    #   mlflow-tracing
+    #   onnxruntime
+    #   opentelemetry-proto
+    #   qdrant-client
+    #   tensorboardx
+    #   tensorflow
+    #   tensorflow-hub
+psutil==7.2.2
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   accelerate
+py-serializable==2.1.0
+    # via cyclonedx-python-lib
+pyannote-audio==3.4.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+pyannote-core==5.0.0
+    # via
+    #   pyannote-audio
+    #   pyannote-database
+    #   pyannote-metrics
+    #   pyannote-pipeline
+pyannote-database==5.1.3
+    # via
+    #   pyannote-audio
+    #   pyannote-metrics
+    #   pyannote-pipeline
+pyannote-metrics==3.2.1
+    # via pyannote-audio
+pyannote-pipeline==3.0.1
+    # via pyannote-audio
+pyarrow==25.0.1
+    # via
+    #   datasets
+    #   mlflow
+pyasn1==0.6.4
+    # via
+    #   pyasn1-modules
+    #   python-jose
+    #   rsa
+pyasn1-modules==0.4.2
+    # via google-auth
+pybreaker==1.4.1
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+pyclamd==0.4.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+pyclipper==1.4.0
+    # via easyocr
+pycparser==3.0
+    # via cffi
+pydantic==2.13.4
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   deepeval
+    #   fastapi
+    #   langchain
+    #   langchain-core
+    #   langsmith
+    #   mlflow-skinny
+    #   mlflow-tracing
+    #   openai
+    #   presidio-analyzer
+    #   pydantic-settings
+    #   qdrant-client
+    #   spacy
+    #   thinc
+    #   weasel
+pydantic-core==2.46.4
+    # via pydantic
+pydantic-settings==2.15.0
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   deepeval
+pydub==0.25.1
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+pyfiglet==1.0.4
+    # via deepeval
+pygments==2.21.0
+    # via
+    #   pytest
+    #   rich
+pymongo==4.17.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+pymupdf==1.28.2
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+pyotp==2.10.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+pyparsing==3.3.2
+    # via
+    #   matplotlib
+    #   pip-requirements-parser
+pypdfium2==5.13.0
+    # via
+    #   camelot-py
+    #   pdfplumber
+pyphen==0.18.1
+    # via textstat
+pyreadline3==3.5.6
+    # via humanfriendly
+pysbd==0.3.4
+    # via ragas
+pystemmer==3.1.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+pytesseract==0.3.13
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+pytest==9.1.1
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   deepeval
+    #   pytest-asyncio
+    #   pytest-cov
+    #   pytest-randomly
+    #   pytest-repeat
+    #   pytest-rerunfailures
+    #   pytest-timeout
+    #   pytest-xdist
+pytest-asyncio==1.4.0
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   deepeval
+pytest-cov==7.1.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+pytest-randomly==4.1.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+pytest-repeat==0.9.4
+    # via deepeval
+pytest-rerunfailures==16.6
+    # via deepeval
+pytest-timeout==2.4.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+pytest-xdist==3.8.0
+    # via deepeval
+python-bidi==0.6.11
+    # via easyocr
+python-dateutil==2.9.0.post0
+    # via
+    #   graphene
+    #   matplotlib
+    #   pandas
+python-discovery==1.5.2
+    # via virtualenv
+python-docx==1.2.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+python-dotenv==1.2.3
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   deepeval
+    #   mlflow-skinny
+    #   pydantic-settings
+    #   uvicorn
+python-jose[cryptography]==3.5.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+python-magic-bin==0.4.14 ; sys_platform == "win32"
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+python-multipart==0.0.32
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+pytokens==0.4.1
+    # via black
+pytorch-lightning==2.6.5
+    # via lightning
+pytorch-metric-learning==2.9.0
+    # via pyannote-audio
+pytz==2026.3.post1
+    # via pandas
+pywavelets==1.8.0
+    # via imagehash
+pywin32==312
+    # via
+    #   docker
+    #   portalocker
+pyyaml==6.0.3
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   accelerate
+    #   bandit
+    #   ctranslate2
+    #   datasets
+    #   detect-secrets
+    #   easyocr
+    #   huggingface-hub
+    #   hyperpyyaml
+    #   langchain
+    #   langchain-community
+    #   langchain-core
+    #   lightning
+    #   mlflow-skinny
+    #   omegaconf
+    #   optuna
+    #   pre-commit
+    #   presidio-analyzer
+    #   pyannote-database
+    #   pyannote-pipeline
+    #   pytorch-lightning
+    #   transformers
+    #   uvicorn
+qdrant-client==1.19.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+qrcode[pil]==8.2
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+questionary==2.1.1
+    # via deepeval
+qwen-vl-utils==0.0.14
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+ragas==0.1.21
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+rank-bm25==0.2.2
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+rapidfuzz==3.14.5
+    # via jiwer
+rawpy==0.27.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+redis==8.1.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+regex==2026.7.19
+    # via
+    #   nltk
+    #   presidio-analyzer
+    #   segtok
+    #   tiktoken
+    #   transformers
+    #   wordfreq
+requests==2.34.2
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   cachecontrol
+    #   databricks-sdk
+    #   datasets
+    #   deepeval
+    #   detect-secrets
+    #   docker
+    #   huggingface-hub
+    #   langchain
+    #   langchain-community
+    #   langsmith
+    #   mlflow-skinny
+    #   pip-audit
+    #   pooch
+    #   posthog
+    #   qwen-vl-utils
+    #   requests-file
+    #   requests-toolbelt
+    #   resend
+    #   spacy
+    #   speechbrain
+    #   tavily-python
+    #   tensorflow
+    #   tiktoken
+    #   tldextract
+    #   transformers
+requests-file==3.0.1
+    # via tldextract
+requests-toolbelt==1.0.0
+    # via langsmith
+resend==2.39.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+rich==14.3.4
+    # via
+    #   bandit
+    #   deepeval
+    #   keras
+    #   keybert
+    #   pip-audit
+    #   pyannote-audio
+    #   typer
+rsa==4.9.1
+    # via python-jose
+ruamel-yaml==0.18.17
+    # via hyperpyyaml
+ruamel-yaml-clib==0.2.15
+    # via ruamel-yaml
+ruff==0.16.4
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+safetensors==0.8.0
+    # via
+    #   accelerate
+    #   transformers
+scenedetect[opencv]==0.7.1
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+scikit-image==0.25.2
+    # via easyocr
+scikit-learn==1.7.2
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   keybert
+    #   librosa
+    #   mlflow
+    #   pyannote-metrics
+    #   pyannote-pipeline
+    #   pytorch-metric-learning
+    #   sentence-transformers
+    #   skops
+scipy==1.15.3
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   easyocr
+    #   imagehash
+    #   librosa
+    #   mlflow
+    #   pyannote-core
+    #   pyannote-metrics
+    #   scikit-image
+    #   scikit-learn
+    #   sentence-transformers
+    #   skops
+    #   speechbrain
+segtok==1.5.11
+    # via yake
+semver==3.0.4
+    # via pyannote-audio
+sentence-transformers==5.7.0
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   keybert
+sentencepiece==0.2.2
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   detoxify
+    #   speechbrain
+shapely==2.1.2
+    # via easyocr
+shellingham==1.5.4
+    # via typer
+six==1.17.0
+    # via
+    #   astunparse
+    #   ecdsa
+    #   google-pasta
+    #   python-dateutil
+    #   tensorflow
+skops==0.14.0
+    # via mlflow
+smart-open==8.0.1
+    # via weasel
+smmap==5.0.3
+    # via gitdb
+sniffio==1.3.1
+    # via openai
+sortedcontainers==2.4.0
+    # via
+    #   cyclonedx-python-lib
+    #   pyannote-core
+sounddevice==0.5.6
+    # via mediapipe
+soundfile==0.14.0
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   librosa
+    #   pyannote-audio
+    #   speechbrain
+soxr==1.1.0
+    # via librosa
+spacy==3.8.15
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   presidio-analyzer
+spacy-legacy==3.0.12
+    # via spacy
+spacy-loggers==1.0.5
+    # via spacy
+speechbrain==1.1.0
+    # via pyannote-audio
+sqlalchemy==2.0.52
+    # via
+    #   alembic
+    #   langchain
+    #   langchain-community
+    #   mlflow
+    #   optuna
+sqlparse==0.6.0
+    # via mlflow-skinny
+srsly==2.5.3
+    # via
+    #   spacy
+    #   thinc
+    #   weasel
+sse-starlette==3.4.8
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+starlette==1.6.0
+    # via
+    #   fastapi
+    #   mlflow-skinny
+    #   sse-starlette
+    #   starlette-context
+starlette-context==0.5.1
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+stevedore==5.8.0
+    # via bandit
+structlog==26.1.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+sympy==1.14.0
+    # via
+    #   onnxruntime
+    #   pyannote-metrics
+    #   torch
+tabulate==0.9.0
+    # via
+    #   camelot-py
+    #   deepeval
+    #   pyannote-metrics
+    #   yake
+tavily-python==0.7.27
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+tenacity==8.5.0
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   deepeval
+    #   langchain
+    #   langchain-community
+    #   langchain-core
+tensorboardx==2.6.5
+    # via pyannote-audio
+tensorflow==2.21.0 ; sys_platform != "linux"
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   tf-keras
+tensorflow-hub==0.16.1
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+termcolor==3.3.0
+    # via tensorflow
+textstat==0.7.13
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+tf-keras==2.21.0
+    # via tensorflow-hub
+thinc==8.3.13
+    # via spacy
+threadpoolctl==3.6.0
+    # via scikit-learn
+tifffile==2025.5.10
+    # via scikit-image
+tiktoken==0.14.0
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   langchain-openai
+    #   ragas
+    #   tavily-python
+tinycss2==1.5.1
+    # via
+    #   cairosvg
+    #   cssselect2
+tldextract==5.3.2
+    # via presidio-analyzer
+tokenizers==0.22.2
+    # via
+    #   faster-whisper
+    #   sentence-transformers
+    #   transformers
+tomli==2.4.1
+    # via
+    #   alembic
+    #   black
+    #   coverage
+    #   mypy
+    #   pip-audit
+    #   pip-licenses
+    #   pytest
+tomli-w==1.2.0
+    # via pip-audit
+torch==2.12.1
+    # via
+    #   -c C:/Users/karth/AppData/Local/Temp/claude/c--Users-karth-Desktop-Project/50637cce-4281-4a34-9e56-85c680d08d64/scratchpad/pin_constraints.txt
+    #   accelerate
+    #   asteroid-filterbanks
+    #   bitsandbytes
+    #   detoxify
+    #   easyocr
+    #   julius
+    #   lightning
+    #   pyannote-audio
+    #   pytorch-lightning
+    #   pytorch-metric-learning
+    #   sentence-transformers
+    #   speechbrain
+    #   torch-audiomentations
+    #   torch-pitch-shift
+    #   torchmetrics
+    #   torchvision
+torch-audiomentations==0.12.0
+    # via pyannote-audio
+torch-pitch-shift==1.2.5
+    # via torch-audiomentations
+torchaudio==2.11.0
+    # via
+    #   -c C:/Users/karth/AppData/Local/Temp/claude/c--Users-karth-Desktop-Project/50637cce-4281-4a34-9e56-85c680d08d64/scratchpad/pin_constraints.txt
+    #   pyannote-audio
+    #   speechbrain
+    #   torch-audiomentations
+    #   torch-pitch-shift
+torchmetrics==1.9.0
+    # via
+    #   lightning
+    #   pyannote-audio
+    #   pytorch-lightning
+torchvision==0.27.1
+    # via
+    #   -c C:/Users/karth/AppData/Local/Temp/claude/c--Users-karth-Desktop-Project/50637cce-4281-4a34-9e56-85c680d08d64/scratchpad/pin_constraints.txt
+    #   easyocr
+tqdm==4.70.0
+    # via
+    #   datasets
+    #   deepeval
+    #   faster-whisper
+    #   huggingface-hub
+    #   lightning
+    #   nltk
+    #   openai
+    #   optuna
+    #   pyannote-pipeline
+    #   pytorch-lightning
+    #   pytorch-metric-learning
+    #   scenedetect
+    #   sentence-transformers
+    #   spacy
+    #   speechbrain
+    #   transformers
+transformers==4.57.6
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   detoxify
+    #   sentence-transformers
+typer==0.27.1
+    # via
+    #   deepeval
+    #   pyannote-database
+    #   spacy
+    #   weasel
+typing-extensions==4.16.0
+    # via
+    #   aiohttp
+    #   aiosignal
+    #   alembic
+    #   anyio
+    #   asteroid-filterbanks
+    #   black
+    #   camelot-py
+    #   cloudpathlib
+    #   confection
+    #   cryptography
+    #   cyclonedx-python-lib
+    #   exceptiongroup
+    #   fastapi
+    #   flask-cors
+    #   graphene
+    #   grpcio
+    #   huggingface-hub
+    #   langchain-core
+    #   librosa
+    #   lightning
+    #   lightning-utilities
+    #   mlflow-skinny
+    #   multidict
+    #   mypy
+    #   openai
+    #   opentelemetry-api
+    #   opentelemetry-exporter-otlp-proto-grpc
+    #   opentelemetry-sdk
+    #   opentelemetry-semantic-conventions
+    #   optree
+    #   posthog
+    #   pyannote-core
+    #   pydantic
+    #   pydantic-core
+    #   pytest-asyncio
+    #   python-docx
+    #   pytorch-lightning
+    #   resend
+    #   sentence-transformers
+    #   soundfile
+    #   sqlalchemy
+    #   starlette
+    #   structlog
+    #   tensorflow
+    #   torch
+    #   typing-inspect
+    #   typing-inspection
+    #   uvicorn
+    #   virtualenv
+typing-inspect==0.9.0
+    # via dataclasses-json
+typing-inspection==0.4.4
+    # via
+    #   fastapi
+    #   pydantic
+    #   pydantic-settings
+tzdata==2026.3
+    # via pandas
+upstash-redis==1.7.0
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+urllib3==2.7.0
+    # via
+    #   databricks-sdk
+    #   docker
+    #   qdrant-client
+    #   requests
+uvicorn[standard]==0.52.4
+    # via
+    #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+    #   mlflow-skinny
+virtualenv==21.7.4
+    # via pre-commit
+waitress==3.0.2
+    # via mlflow
+wasabi==1.1.3
+    # via
+    #   spacy
+    #   thinc
+    #   weasel
+watchfiles==1.2.0
+    # via uvicorn
+wcwidth==0.8.2
+    # via
+    #   ftfy
+    #   prettytable
+    #   prompt-toolkit
+weasel==1.0.0
+    # via spacy
+webencodings==0.6.1
+    # via
+    #   bleach
+    #   cssselect2
+    #   tinycss2
+websockets==16.1.1
+    # via uvicorn
+werkzeug==3.1.8
+    # via
+    #   flask
+    #   flask-cors
+wheel==0.48.0
+    # via
+    #   astunparse
+    #   deepeval
+wordfreq==3.1.1
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+wordsegment==1.3.1
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+wrapt==2.3.0
+    # via
+    #   smart-open
+    #   tensorflow
+xxhash==4.0.1
+    # via datasets
+yake==0.7.3
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+yarl==1.24.5
+    # via aiohttp
+zipp==4.1.0
+    # via importlib-metadata
+zxcvbn-python==4.4.24
+    # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
+
+# The following packages are considered to be unsafe in a requirements file:
+pip==26.2.1
+    # via pip-api
+setuptools==81.0.0
+    # via
+    #   ctranslate2
+    #   deepeval
+    #   spacy
+    #   tensorflow
+    #   textstat
+    #   thinc
+    #   torch

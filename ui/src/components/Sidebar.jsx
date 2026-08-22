@@ -872,6 +872,21 @@ export default function Sidebar({
         </button>
       </div>
 
+      {/* Recents + Knowledge Base share ONE continuous scroll region — like
+          ChatGPT's sidebar, not two independently-scrolling boxes stacked on
+          top of each other. Previously Recents was capped at its own
+          `max-h-[38vh] overflow-y-auto` and the KB file list was a separate
+          `flex-1 overflow-y-auto` sibling; with many chats AND many KB files
+          that produced two cramped, nested scrollboxes fighting for the
+          little space left after the fixed header/New-Chat/KB-dropzone rows.
+          `min-h-0` here is load-bearing, not decorative: a flex item's
+          default `min-height` is `auto` (content-based), so without it this
+          `flex-1` region would refuse to shrink below its own content's
+          height and just overflow the drawer's fixed height instead of
+          scrolling internally — the actual mechanism behind the cut-off
+          layout this replaces. */}
+      <div className="flex-1 overflow-y-auto min-h-0">
+
       {/* Recents */}
       <div className="px-4 mb-1">
           <div className="px-1 mb-2 flex items-center justify-between gap-2">
@@ -900,7 +915,7 @@ export default function Sidebar({
               </button>
             )}
           </div>
-          <div className="max-h-[38vh] overflow-y-auto space-y-0.5 pr-0.5">
+          <div className="space-y-0.5">
             {loadingSessions && sessions.length === 0 && (
               [0, 1].map(i => (
                 <div key={i} className="skeleton h-9 mx-1 mb-1" style={{ opacity: 1 - i * 0.25 }} />
@@ -1019,7 +1034,7 @@ export default function Sidebar({
       </div>
 
       {/* File list */}
-      <div className="flex-1 overflow-y-auto px-4 pb-2 space-y-0.5">
+      <div className="px-4 pb-2 space-y-0.5">
 
         {/* Skeleton while loading */}
         {loadingKB && kbFiles.length === 0 && (
@@ -1160,6 +1175,9 @@ export default function Sidebar({
           </div>
         )}
       </div>
+
+      </div>
+      {/* end shared Recents+KB scroll region */}
 
       {/* Bottom section — real user row */}
       <div ref={menuRef} className="relative px-4 py-3.5" style={{ borderTop: '1px solid var(--t-bd1)' }}>

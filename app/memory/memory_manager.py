@@ -516,6 +516,7 @@ class MemoryManager:
                 history=history,
                 session_id=session_id,
                 mongo_memory=self.mongo_memory,
+                user_id=user_id,
             )
 
             logger.info(

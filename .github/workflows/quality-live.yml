@@ -17,6 +17,16 @@ name: Quality & Performance (live)
 # MAGIK_TEST_TENANTS (JSON from app/bin/seed_test_tenants.py — dedicated test
 # tenants, never the shared public demo login). Set these once in
 # Settings -> Secrets and variables -> Actions before the first run.
+#
+# ragas-report / deepeval-report additionally require EVAL_REPORTER_EMAIL and
+# EVAL_REPORTER_PASSWORD (from app/bin/seed_eval_reporter.py, run once against
+# the real deployed Mongo). These jobs run on a bare runner, outside the
+# server's own container — app/eval/http_client.py's EvalAuth cannot mint a
+# token in-process there (it would sign with the wrong secret and get
+# rejected, see that module's docstring), so it logs in for a real one
+# instead. EVAL_USER_ID is not a secret (same literal value already committed
+# in deploy/aws/prod.env) — it is the tenant that owns the ingested gold-set
+# corpus these reports grade against.
 on:
   workflow_dispatch:
     inputs:
@@ -64,6 +74,9 @@ jobs:
         if: inputs.tool == 'ragas-report'
         env:
           EVAL_SERVER_URL: ${{ secrets.MAGIK_LIVE_URL }}
+          EVAL_USER_ID: "5ead49e7-42f0-4368-80ac-8014595c3980"
+          EVAL_REPORTER_EMAIL: ${{ secrets.EVAL_REPORTER_EMAIL }}
+          EVAL_REPORTER_PASSWORD: ${{ secrets.EVAL_REPORTER_PASSWORD }}
         run: |
           pip install -r requirements.txt
           pip install -e .
@@ -73,6 +86,9 @@ jobs:
         if: inputs.tool == 'deepeval-report'
         env:
           EVAL_SERVER_URL: ${{ secrets.MAGIK_LIVE_URL }}
+          EVAL_USER_ID: "5ead49e7-42f0-4368-80ac-8014595c3980"
+          EVAL_REPORTER_EMAIL: ${{ secrets.EVAL_REPORTER_EMAIL }}
+          EVAL_REPORTER_PASSWORD: ${{ secrets.EVAL_REPORTER_PASSWORD }}
         run: |
           pip install -r requirements.txt
           pip install -e ".[quality]"
