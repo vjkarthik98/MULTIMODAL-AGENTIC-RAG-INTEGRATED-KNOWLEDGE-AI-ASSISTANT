@@ -77,6 +77,18 @@ jobs:
           EVAL_USER_ID: "5ead49e7-42f0-4368-80ac-8014595c3980"
           EVAL_REPORTER_EMAIL: ${{ secrets.EVAL_REPORTER_EMAIL }}
           EVAL_REPORTER_PASSWORD: ${{ secrets.EVAL_REPORTER_PASSWORD }}
+          # `python -m app.eval.ragas_report` imports app.core.config, which
+          # builds and validates a local Settings object at import time —
+          # same requirement ci.yml's lint-type-test job and eval-gate.yml's
+          # tier1-retrieval job already guard against. This job never
+          # actually uses this local Settings object for anything real: it
+          # authenticates to the live server over HTTP via
+          # EVAL_REPORTER_EMAIL/PASSWORD, not by minting a JWT in-process.
+          # Placeholder values only, never used to sign anything real.
+          ENV: test
+          AUTH_ENABLED: "false"
+          SECRET_KEY: "ci-test-only-placeholder-secret-not-a-real-credential"  # pragma: allowlist secret
+          JWT_SECRET_KEY: "ci-test-only-placeholder-jwt-secret-not-a-real-credential"  # pragma: allowlist secret
         run: |
           pip install -r requirements.txt
           pip install -e .
@@ -89,6 +101,12 @@ jobs:
           EVAL_USER_ID: "5ead49e7-42f0-4368-80ac-8014595c3980"
           EVAL_REPORTER_EMAIL: ${{ secrets.EVAL_REPORTER_EMAIL }}
           EVAL_REPORTER_PASSWORD: ${{ secrets.EVAL_REPORTER_PASSWORD }}
+          # Same import-time Settings.validate() requirement as the RAGAS
+          # step above — see that step's comment.
+          ENV: test
+          AUTH_ENABLED: "false"
+          SECRET_KEY: "ci-test-only-placeholder-secret-not-a-real-credential"  # pragma: allowlist secret
+          JWT_SECRET_KEY: "ci-test-only-placeholder-jwt-secret-not-a-real-credential"  # pragma: allowlist secret
         run: |
           pip install -r requirements.txt
           pip install -e ".[quality]"
