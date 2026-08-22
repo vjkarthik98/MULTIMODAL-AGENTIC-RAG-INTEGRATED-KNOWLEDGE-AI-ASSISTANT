@@ -14,6 +14,8 @@
 
 The demo runs on a scale-to-zero AWS GPU box. If it's asleep, the link shows a live status page (waking → loading models → ready) and redirects automatically — first load after idle typically takes 60–90 seconds. See [Deployment](#deployment) for why.
 
+**Demo login:** `magikaiassistant@gmail.com` / `Demo@2026` — a fixed account, pre-loaded with a real finance knowledge base (10-K, earnings call, transcript, spreadsheet) and chat history, so citations and answers are genuine retrieval, not scripted. It skips the email OTP step so a recruiter can log in immediately.
+
 ---
 
 ## Table of Contents

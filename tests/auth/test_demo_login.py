@@ -18,12 +18,12 @@ from app.auth.models import UserInDB, UserPublic, UserRole
 from app.auth.service import AuthService, _hash_password, is_demo_account
 from app.core.config import settings
 
-DEMO_PASSWORD = "Test@123"  # pragma: allowlist secret — public demo credential
+DEMO_PASSWORD = "Demo@2026"  # pragma: allowlist secret — public demo credential
 
 
 @pytest.fixture
 def demo_email():
-    return (settings.DEMO_ACCOUNT_EMAIL or "testuser@ragdev.local").strip().lower()
+    return (settings.DEMO_ACCOUNT_EMAIL or "magikaiassistant@gmail.com").strip().lower()
 
 
 @pytest.fixture

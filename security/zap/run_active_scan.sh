@@ -10,7 +10,7 @@
 #
 #   - Scoped to a DEDICATED TEST TENANT (app/bin/seed_test_tenants.py),
 #     authenticated via the Authorization header replacer below — never the
-#     shared public demo account (testuser@ragdev.local).
+#     shared public demo account (magikaiassistant@gmail.com).
 #   - EXCLUDES /auth/register, /rag/ingest, /rag/upload, and other
 #     mutating/expensive routes from the active attack context (see
 #     EXCLUDE_REGEX below) — these either create real side effects (spam
