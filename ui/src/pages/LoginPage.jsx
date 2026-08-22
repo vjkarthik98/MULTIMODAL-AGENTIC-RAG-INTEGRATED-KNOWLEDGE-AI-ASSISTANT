@@ -159,7 +159,7 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
 
   return (
     <div
-      className="relative h-dvh-screen overflow-y-auto flex flex-col items-center px-4 sm:px-6 transition-opacity duration-300"
+      className="relative h-dvh-screen overflow-y-auto flex flex-col items-center px-4 roomy:px-6 transition-opacity duration-300"
       style={{ background: 'var(--t-bg)', opacity: mounted ? 1 : 0 }}
     >
       {/* Animated ambient background glow */}
@@ -203,26 +203,26 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
       {/* Content — above the glow layer */}
       <div className="relative z-10 w-full flex flex-col items-center my-auto py-4">
       {/* Brand */}
-      <div className="flex flex-col items-center mb-3 sm:mb-10 gap-1.5 sm:gap-4">
-        <img src="/logo.png" alt="MAGIK" className="w-10 h-10 sm:w-16 sm:h-16 rounded-2xl object-cover shadow-lg" />
+      <div className="flex flex-col items-center mb-3 roomy:mb-10 gap-1.5 roomy:gap-4">
+        <img src="/logo.png" alt="MAGIK" className="w-10 h-10 roomy:w-16 roomy:h-16 rounded-2xl object-cover shadow-lg" />
         <div className="text-center">
-          <h1 className="text-xl sm:text-4xl font-bold tracking-tight" style={{
+          <h1 className="text-xl roomy:text-4xl font-bold tracking-tight" style={{
             background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)',
             WebkitBackgroundClip: 'text',
             WebkitTextFillColor: 'transparent',
             backgroundClip: 'text',
           }}>MAGIK</h1>
-          <p className="text-[11px] sm:text-base mt-0.5 sm:mt-2 leading-tight" style={{ color: 'var(--t-tx4)' }}>
+          <p className="text-[11px] roomy:text-base mt-0.5 roomy:mt-2 leading-tight" style={{ color: 'var(--t-tx4)' }}>
             Multimodal · Agentic · RAG · Integrated · Knowledge
           </p>
-          <p className="text-[11px] sm:text-base leading-tight" style={{ color: 'var(--t-tx4)' }}>
+          <p className="text-[11px] roomy:text-base leading-tight" style={{ color: 'var(--t-tx4)' }}>
             AI Assistant
           </p>
         </div>
       </div>
 
       {/* Card */}
-      <div className="w-full max-w-[440px] rounded-2xl p-4 sm:p-10"
+      <div className="w-full max-w-[440px] rounded-2xl p-4 roomy:p-10"
         style={{ background: 'var(--t-card)', border: '1px solid var(--t-bd2)' }}>
 
         {otpStep ? (
@@ -306,7 +306,7 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
             <button
               type="button"
               onClick={() => { window.location.href = '/auth/google' }}
-              className="w-full flex items-center justify-center gap-3 rounded-xl py-2.5 sm:py-3.5 px-4 text-sm sm:text-base font-medium transition-colors"
+              className="w-full flex items-center justify-center gap-3 rounded-xl py-2.5 roomy:py-3.5 px-4 text-sm roomy:text-base font-medium transition-colors"
               style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd4)', color: 'var(--t-tx1)' }}
               onMouseEnter={e => e.currentTarget.style.background = 'var(--t-hov2)'}
               onMouseLeave={e => e.currentTarget.style.background = 'var(--t-inp)'}
@@ -316,14 +316,14 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
             </button>
 
             {/* Divider */}
-            <div className="flex items-center gap-3 my-3 sm:my-7">
+            <div className="flex items-center gap-3 my-3 roomy:my-7">
               <div className="flex-1 h-px" style={{ background: 'var(--t-bd2)' }} />
               <span className="text-sm font-medium" style={{ color: 'var(--t-ph)' }}>OR</span>
               <div className="flex-1 h-px" style={{ background: 'var(--t-bd2)' }} />
             </div>
 
             {/* Form */}
-            <form onSubmit={handleSubmit} className="space-y-2.5 sm:space-y-4">
+            <form onSubmit={handleSubmit} className="space-y-2.5 roomy:space-y-4">
               <input
                 type="email"
                 placeholder="Email address"
@@ -331,7 +331,7 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
                 onChange={e => setEmail(e.target.value)}
                 required
                 autoComplete="email"
-                className="w-full rounded-xl px-4 sm:px-5 py-2.5 sm:py-3.5 text-sm sm:text-base outline-none transition-colors t-focus"
+                className="w-full rounded-xl px-4 roomy:px-5 py-2.5 roomy:py-3.5 text-sm roomy:text-base outline-none transition-colors t-focus"
                 style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx1)' }}
               />
 
@@ -343,13 +343,13 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
                   onChange={e => setPassword(e.target.value)}
                   required
                   autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-                  className="w-full rounded-xl px-4 sm:px-5 py-2.5 sm:py-3.5 pr-11 sm:pr-12 text-sm sm:text-base outline-none transition-colors t-focus"
+                  className="w-full rounded-xl px-4 roomy:px-5 py-2.5 roomy:py-3.5 pr-11 roomy:pr-12 text-sm roomy:text-base outline-none transition-colors t-focus"
                   style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx1)' }}
                 />
                 <button
                   type="button"
                   onClick={() => setShowPass(v => !v)}
-                  className="absolute right-3.5 sm:right-4 top-1/2 -translate-y-1/2 transition-colors"
+                  className="absolute right-3.5 roomy:right-4 top-1/2 -translate-y-1/2 transition-colors"
                   style={{ color: 'var(--t-ph)' }}
                   aria-label={showPass ? 'Hide password' : 'Show password'}
                 >
@@ -366,13 +366,13 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
                     onChange={e => setConfirm(e.target.value)}
                     required
                     autoComplete="new-password"
-                    className="w-full rounded-xl px-4 sm:px-5 py-2.5 sm:py-3.5 pr-11 sm:pr-12 text-sm sm:text-base outline-none transition-colors t-focus"
+                    className="w-full rounded-xl px-4 roomy:px-5 py-2.5 roomy:py-3.5 pr-11 roomy:pr-12 text-sm roomy:text-base outline-none transition-colors t-focus"
                     style={{ background: 'var(--t-inp)', border: '1px solid var(--t-bd2)', color: 'var(--t-tx1)' }}
                   />
                   <button
                     type="button"
                     onClick={() => setShowConfirm(v => !v)}
-                    className="absolute right-3.5 sm:right-4 top-1/2 -translate-y-1/2 transition-colors"
+                    className="absolute right-3.5 roomy:right-4 top-1/2 -translate-y-1/2 transition-colors"
                     style={{ color: 'var(--t-ph)' }}
                     aria-label={showConfirm ? 'Hide password' : 'Show password'}
                   >
@@ -387,7 +387,7 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
                   <button
                     type="button"
                     onClick={onForgotPassword}
-                    className="text-xs sm:text-sm transition-opacity hover:opacity-70"
+                    className="text-xs roomy:text-sm transition-opacity hover:opacity-70"
                     style={{ color: 'var(--t-tx5)' }}
                   >
                     Forgot password?
@@ -411,7 +411,7 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full flex items-center justify-center gap-2 font-semibold rounded-xl py-2.5 sm:py-3.5 text-sm sm:text-base transition-colors disabled:opacity-60 mt-1"
+                className="w-full flex items-center justify-center gap-2 font-semibold rounded-xl py-2.5 roomy:py-3.5 text-sm roomy:text-base transition-colors disabled:opacity-60 mt-1"
                 style={{ background: 'var(--t-tx1)', color: 'var(--t-bg)' }}
                 onMouseEnter={e => { if (!loading) e.currentTarget.style.background = 'var(--t-tx2)' }}
                 onMouseLeave={e => e.currentTarget.style.background = 'var(--t-tx1)'}
@@ -422,7 +422,7 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
             </form>
 
             {/* Mode toggle */}
-            <p className="text-center text-sm sm:text-base mt-3 sm:mt-6" style={{ color: 'var(--t-tx4)' }}>
+            <p className="text-center text-sm roomy:text-base mt-3 roomy:mt-6" style={{ color: 'var(--t-tx4)' }}>
               {mode === 'login' ? (
                 <>New here?{' '}
                   <button onClick={() => switchMode('register')} className="transition-colors hover:opacity-80" style={{ color: 'var(--t-tx3)' }}>
@@ -442,7 +442,7 @@ export default function LoginPage({ onLogin, dark, onToggleTheme, onForgotPasswo
       </div>
 
       {/* Footer */}
-      <p className="text-[10px] sm:text-sm mt-2 sm:mt-7 text-center leading-tight" style={{ color: 'var(--t-ph)' }}>
+      <p className="text-[10px] roomy:text-sm mt-2 roomy:mt-7 text-center leading-tight" style={{ color: 'var(--t-ph)' }}>
         By continuing you agree to our{' '}
         <span className="underline cursor-pointer hover:opacity-70">Terms of Service</span>
         {' '}and{' '}

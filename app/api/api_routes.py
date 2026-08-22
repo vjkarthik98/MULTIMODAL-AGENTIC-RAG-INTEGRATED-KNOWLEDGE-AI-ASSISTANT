@@ -453,6 +453,22 @@ def _cleanup_file(file_path: Path | None) -> None:
             )
 
 
+def _cleanup_kb_copy(kb_path: Path | None) -> None:
+    """Remove a just-created KB disk copy when ITS OWN upload request has just
+    definitively failed ingestion — the one place that can know for certain,
+    unlike a later GET that has to guess from a Qdrant snapshot. Never called
+    from anywhere else, and never called for a file whose upload succeeded."""
+    if kb_path and kb_path.exists():
+        try:
+            kb_path.unlink()
+        except Exception as exc:
+            logger.warning(
+                event="kb_failed_upload_cleanup_failed",
+                path=str(kb_path),
+                error=str(exc),
+            )
+
+
 # SHA-256 FILE HASH FOR DEDUP
 
 
@@ -1531,12 +1547,67 @@ async def stream_query(  # noqa: C901 -- known complexity debt (57), tracked fol
         # When triggered the web tool is called directly and ONLY web source
         # chips are emitted — no KB file sources are shown at all.
         if _is_web_request(query, request_body.force_web):
+            # WEB CACHE CHECK — same Redis-backed qresp cache the KB path uses
+            # below, but namespaced ("__web__:") so a web answer can never be
+            # served for what should be a KB query or vice versa, even when
+            # the raw query text is identical. Same session_id + same
+            # question within REDIS_QUERY_CACHE_TTL (1hr default) now returns
+            # the identical answer instead of re-hitting Tavily every time —
+            # closes both the "same query gives different answers" report and
+            # the "every repeat burns a fresh search-API credit" waste behind
+            # it (see CHANGELOG: Tavily monthly quota exhausted same day).
+            _web_skip_cache = request_body.no_cache or request_body.regenerate
+            _web_cached = None
+            if not _web_skip_cache:
+                try:
+                    from app.pipeline.query_pipeline import _cache_get
+
+                    _web_cached = _cache_get(session_id, f"__web__:{query}")
+                except Exception:
+                    _web_cached = None
+
+            if _web_cached and _web_cached.get("answer"):
+                _web_answer = str(_web_cached["answer"])
+                _web_payload = _web_cached.get("sources") or []
+                logger.debug(event="stream_web_cache_hit", session_id=session_id)
+
+                async def web_cached_stream():
+                    for piece in _stream_chunks(_web_answer):
+                        yield _sse(piece)
+                        await asyncio.sleep(_STREAM_CHUNK_DELAY_SEC)
+                    if _web_payload:
+                        yield f'data: {{"__type__":"sources","data":{json.dumps(_web_payload)}}}\n\n'
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(
+                    web_cached_stream(),
+                    media_type="text/event-stream",
+                    headers={
+                        "X-Request-ID": request_id,
+                        "X-Cache": "HIT",
+                        "Cache-Control": "no-cache",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+
             _web_answer, _web_sources, _web_titles, _web_failure_reason = await _run_web_search(
                 query, session_id
             )
             if _web_answer:
                 logger.info(event="stream_web_search", session_id=session_id)
                 _web_payload = _web_source_payload(_web_sources, _web_titles)
+
+                if not _web_skip_cache:
+                    try:
+                        from app.pipeline.query_pipeline import _cache_set
+
+                        _cache_set(
+                            session_id,
+                            f"__web__:{query}",
+                            {"answer": _web_answer, "sources": _web_payload},
+                        )
+                    except Exception:
+                        pass
 
                 async def web_event_stream():
                     for piece in _stream_chunks(_web_answer):
@@ -1953,6 +2024,7 @@ async def upload_file(
     start = time.time()
     request_id = _request_id()
     file_path: Path | None = None
+    kb_path: Path | None = None
     user_id = current_user.user_id
 
     try:
@@ -2050,6 +2122,7 @@ async def upload_file(
             result = await process_file_async(str(file_path), session_id, user_id)
         except GPUBusyError as exc:
             logger.warning(event="api_upload_gpu_busy", request_id=request_id, error=str(exc))
+            _cleanup_kb_copy(kb_path)
             return JSONResponse(
                 status_code=503,
                 content={"request_id": request_id, "detail": str(exc)},
@@ -2059,6 +2132,7 @@ async def upload_file(
             err_str = str(exc).removeprefix("INGESTION_FAILED: ").strip()
             if any(err_str.startswith(p) for p in _INGEST_422_PREFIXES):
                 error_code = err_str.split(":")[0].strip()
+                _cleanup_kb_copy(kb_path)
                 return JSONResponse(
                     status_code=422,
                     content={
@@ -2121,6 +2195,7 @@ async def upload_file(
         raise
 
     except Exception as exc:
+        _cleanup_kb_copy(kb_path)
         logger.error(
             event="api_upload_failed",
             request_id=request_id,
@@ -2376,46 +2451,6 @@ def model_health(current_user=Depends(get_current_user)) -> dict[str, Any]:
 # ─── KNOWLEDGE BASE ───────────────────────────────────────────────────────────
 
 
-def _qdrant_embedded_sources(user_id: str) -> set:
-    """Return the set of source filenames that have at least one point in Qdrant for this user.
-
-    Uses a single scroll (limit=1000) — fast and sufficient for any realistic KB size.
-    Returns empty set on any error so callers degrade gracefully.
-    """
-    try:
-        vs = infra.get_vector_store()
-        if vs is None or not hasattr(vs, "client"):
-            return set()
-        from qdrant_client.http.models import FieldCondition, Filter, MatchValue
-
-        sources: set = set()
-        for collection in (vs.text_collection, vs.vision_collection):
-            if collection not in getattr(vs, "_collection_cache", {}):
-                continue
-            offset = None
-            while True:
-                points, next_offset = vs.client.scroll(
-                    collection_name=collection,
-                    scroll_filter=Filter(
-                        must=[FieldCondition(key="user_id", match=MatchValue(value=user_id))]
-                    ),
-                    with_payload=True,
-                    with_vectors=False,
-                    limit=500,
-                    offset=offset,
-                )
-                for pt in points:
-                    src = (pt.payload or {}).get("source")
-                    if src:
-                        sources.add(src)
-                if next_offset is None:
-                    break
-                offset = next_offset
-        return sources
-    except Exception:
-        return set()
-
-
 @router.get("/knowledge-base")
 async def list_knowledge_base(
     request: Request,
@@ -2427,22 +2462,21 @@ async def list_knowledge_base(
 
     kb_dir = user_knowledge_base_dir(user_id)
 
-    # Get the set of filenames that actually have embeddings in Qdrant.
-    # Files on disk but absent from Qdrant are orphaned (upload failed mid-run).
-    # We delete them silently so they stop showing in the sidebar.
-    embedded = await asyncio.to_thread(_qdrant_embedded_sources, user_id)
-
+    # Pure listing, no side effects. A file that made it to disk stays until
+    # the user explicitly deletes it (DELETE /knowledge-base/{filename}) or a
+    # failed upload cleans up its own copy at the point of failure (see
+    # upload_file()'s except blocks). This endpoint used to also silently
+    # unlink() any disk file it couldn't find embedded in Qdrant at that exact
+    # instant — a single Qdrant scroll result is not trustworthy enough to
+    # permanently delete someone's file on: a fresh process's collection cache
+    # still warming up, Qdrant Cloud replication lag right after an upsert, or
+    # a transient network blip could all be misread as "orphaned." A GET
+    # request must never destroy user data on a guess. Found 2026-08-21: this
+    # exact bug erased 6 of 7 files a user uploaded to their demo KB, discovered
+    # only because Qdrant still had all 7 files' chunks intact while disk had 1.
     files = []
     for f in sorted(kb_dir.iterdir()):
         if not f.is_file():
-            continue
-        # Prune orphans: file on disk but no Qdrant points.
-        if embedded and f.name not in embedded:
-            try:
-                f.unlink(missing_ok=True)
-                logger.info(event="kb_orphan_removed", user_id=user_id, file=f.name)
-            except Exception:
-                pass
             continue
         stat = f.stat()
         files.append(
@@ -2534,12 +2568,19 @@ async def delete_knowledge_base_file(
         logger.warning(event="kb_delete_bm25_failed", file=safe_name, error=str(exc))
 
     # FLUSH QUERY CACHE — stale cached answers that referenced this file must not
-    # be served after deletion. Flush all qresp:* entries for this user's session.
+    # be served after deletion. Scoped to entries whose sources actually
+    # reference this file — NOT a full cache flush: this route runs on every
+    # KB delete regardless of who's asking, and wiping every other session's
+    # unrelated cached answers each time was itself the bug (found 2026-08-21:
+    # RAG query caching looked totally broken because routine file cleanup
+    # kept nuking the whole qresp:* keyspace out from under it).
     cache_flushed = 0
     try:
         memory = infra.get_memory()
         if memory and hasattr(memory, "cache_flush_query_cache"):
-            cache_flushed = await asyncio.to_thread(memory.cache_flush_query_cache)
+            cache_flushed = await asyncio.to_thread(
+                memory.cache_flush_query_cache, safe_name
+            )
             logger.info(event="kb_delete_cache_flushed", file=safe_name, entries=cache_flushed)
     except Exception as exc:
         logger.warning(event="kb_delete_cache_flush_failed", file=safe_name, error=str(exc))

@@ -1,4 +1,4 @@
-# MAGIK — Multimodal Agentic RAG Integrated Knowledge Assistant
+# MAGIK — Multimodal Agentic RAG Integrated Knowledge AI Assistant
 
 **A production-grade, finance-domain retrieval-augmented generation system** that ingests text, PDF, DOCX, XLSX, images, audio, and video, routes queries through an agentic controller, retrieves with a hybrid BM25 + dense pipeline, verifies its own answers before they reach the user, and runs entirely on open-source models — no third-party LLM API required.
 
@@ -10,9 +10,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 
-**Live demo:** (https://xhty16t7dj.execute-api.us-east-1.amazonaws.com)
+**Live demo:** [launch.vk-ai.online](https://launch.vk-ai.online) → redirects to [magik.vk-ai.online](https://magik.vk-ai.online)
 
-The demo runs on a scale-to-zero AWS GPU box — it may take 60-90 seconds to wake up from a cold stop on the first request. See [Deployment](#deployment) for why.
+The demo runs on a scale-to-zero AWS GPU box. If it's asleep, the link shows a live status page (waking → loading models → ready) and redirects automatically — first load after idle typically takes 60–90 seconds. See [Deployment](#deployment) for why.
 
 ---
 
@@ -64,7 +64,7 @@ Each of the sections below exists because one of these questions had a real, som
 
 **Multimodal ingestion** — seven independent pipelines (text, PDF, DOCX, XLSX, image, audio, video), each with dedicated extraction, chunking, embedding, and BM25 indexing code. A bug in the XLSX pipeline cannot break the audio pipeline; they share no per-modality state.
 
-**Agentic query routing** — an `AgentController` classifies every query into `rag`, `web`, `hybrid_web`, `direct`, or a finance-specific tool call (`financial_calculator`, `sec_edgar_search`) before deciding how to answer it, under an enforced timeout and token budget.
+**Agentic query routing** — an `AgentController` classifies every query into `rag`, `web`, `hybrid_web`, `direct`, or a finance-specific tool call (`financial_calculator`, `sec_edgar_search`) before deciding how to answer it, under an enforced timeout and token budget. Two of these are intentionally not left to inference alone: a RAG query requires an explicit file selection, so every answer has unambiguous document provenance rather than a guessed source; web search is heuristic by default (real-time-signal phrases route automatically) with an explicit toggle for a deterministic contract — a real web failure surfaces as an explicit error instead of silently falling back to a knowledge-base answer.
 
 **Hybrid retrieval** — BM25 (finance-aware tokenizer) and dense Qdrant search are fused, then reranked with a cross-encoder (`BGE-reranker-large`) and diversified with MMR. Cross-modal search (text query against image/video content) goes through a separate SigLIP text encoder.
 
@@ -85,6 +85,8 @@ Each of the sections below exists because one of these questions had a real, som
 **A real evaluation harness** — ten evaluation suites (retrieval, generation, hallucination, finance, OCR, audio, video, routing, e2e, verification) with regression thresholds derived from measured production baselines, wired into CI as a merge gate.
 
 **Cost-aware GPU deployment** — the production system runs on a single AWS GPU instance that stops itself after 20 minutes of idle traffic and wakes on the next request, cutting infrastructure cost by roughly two orders of magnitude versus an always-on box.
+
+**Reproducible by design** — every HuggingFace-hosted model is pinned to an exact commit SHA (not a moving default branch), Python dependencies are fully locked (`requirements.lock.txt`), infrastructure is codified in Terraform, and Qdrant collections can be snapshotted and restored on demand — a fresh box today builds the same system as the one that was evaluated.
 
 ## Architecture
 
@@ -210,14 +212,15 @@ MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/
 ├── ui/                      # React + Vite + Tailwind frontend (never imports from app/)
 │   └── src/{api,components,context,hooks,pages,utils}/
 │
-├── tests/                   # 99 test files
-│   ├── unit/                # Fast, mocked, no external services — mirrors app/ structure
-│   ├── auth/                 # JWT, MFA, tenant isolation, admin, GDPR purge
-│   ├── guardrails/            # Red-team injection/jailbreak/SSRF/PII suite
-│   ├── integration/           # Live Qdrant/Redis/Mongo required
-│   ├── eval/                  # Eval-harness correctness tests
-│   ├── pipeline/               # End-to-end pipeline behavior
-│   └── video/                  # Video-modality end-to-end test
+├── tests/                   # 137 test files
+│   ├── unit/                # Fast, mocked, no external services — mirrors app/ structure (89)
+│   ├── integration/           # Live Qdrant/Redis/Mongo required (13)
+│   ├── eval/                  # Eval-harness correctness tests (14)
+│   ├── auth/                 # JWT, MFA, tenant isolation, admin, GDPR purge (10)
+│   ├── guardrails/            # Red-team injection/jailbreak/SSRF/PII suite (7)
+│   ├── pipeline/               # End-to-end pipeline behavior (2)
+│   ├── video/                  # Video-modality end-to-end test (1)
+│   └── api_contract/           # Schemathesis property-based API fuzzing (1)
 │
 ├── docs/
 │   ├── runbooks/              # CI/CD, deployment, and monitoring runbooks
@@ -227,14 +230,13 @@ MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/
 ├── deploy/aws/                  # Lambda wake/idle-stop, IAM policies, Caddy config, deploy scripts
 ├── scripts/                      # Accuracy benchmarks and quality audits per modality
 ├── data/                          # Runtime state (BM25 indexes, uploads) — gitignored
-├── notebooks/                      # Experimentation
 │
 ├── docker-compose.yml               # Local CPU-only dev stack (API + Qdrant + Redis + Mongo)
 ├── docker-compose.monitoring.yml    # Prometheus/Grafana/Loki/Tempo/OTel stack
 ├── Dockerfile                        # Multi-stage: CUDA build, CUDA runtime, CPU dev-runtime
 ├── Makefile                           # install, lint, test, eval, docker, release targets
 ├── start_server.py                     # Cross-platform launcher (auto-detects CPU vs CUDA)
-├── pyproject.toml / requirements.txt
+├── pyproject.toml / requirements.txt / requirements.lock.txt
 ├── CHANGELOG.md                         # Full version history with root-caused bug write-ups
 └── LICENSE
 ```
@@ -243,7 +245,7 @@ MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/
 
 ### Try it live
 
-The fastest way to see the system working end to end is [magik.vk-ai.online](https://magik.vk-ai.online) — no setup required. First request after idle may take 60-90 seconds while the GPU box wakes.
+The fastest way to see the system working end to end is [launch.vk-ai.online](https://launch.vk-ai.online) — no setup required. It shows a live wake-up status page if the GPU box is asleep and redirects automatically once it's ready (typically 60-90 seconds on a cold start).
 
 ### Run it locally
 
@@ -372,19 +374,65 @@ Measured on the production box (AWS g6e.xlarge / L40S), n=56 gold queries, 2026-
 | Routing accuracy | ≥ 0.917 | Baseline: 12/12 correct |
 | p95 end-to-end latency | ≤ 60s | Production-observed ceiling |
 
-### Per-modality accuracy, measured after targeted fixes
+### Per-modality scorecard (2026-08-20)
 
-| Modality | Key result |
-|---|---|
-| Text | Retrieval hit rate 1.00, finance fidelity 0.875 |
-| PDF | Finance fidelity 0.929 |
-| DOCX | Retrieval hit rate 0.79 to 1.00 after fixing a structural-embedding bug |
-| XLSX | Retrieval hit rate 0.29 to 0.64; answer correctness 0.00 to 0.79 |
-| Image (charts) | Answer correctness 0.29 to 0.86 with a deterministic chart digitizer |
-| Audio | Answer correctness 0.20 to 0.38 after scoping retrieval to the correct meeting |
-| Video | Answer correctness 0.07 to 0.41 after scoping retrieval to the correct call |
+A live, LLM-judged run (Qwen2.5-7B-Instruct) against the current codebase, one gold set per modality (n=14 rows each). This is a single-run snapshot for a detailed per-metric picture — not the N=3-averaged number the CI retrieval gate above enforces — and it is reported here exactly as measured, anomalies included.
 
-Full write-ups per modality live in `docs/EVAL_*.md`; the harness itself is documented in [`app/eval/README.md`](app/eval/README.md).
+**Generation quality**
+
+| Modality | Faithfulness | Answer Relevancy | Answer Correctness | Context Recall |
+|---|---|---|---|---|
+| Text | 0.4545 | 0.7045 | 0.6591 | 1.0000 |
+| PDF | 0.5714 | 0.7679 | 0.8571 | 0.2846 |
+| DOCX | 0.6429 | 0.8077 | 0.7857 | 0.7667 |
+| XLSX | 0.6154 | 0.7143 | 0.7321 | 0.7917 |
+| Image | 0.8036 | 0.8393 | 0.8929 | 1.0000 |
+| Audio | 0.3929 | 0.6429 | 0.6786 | 0.8000 |
+| Video | 0.3929 | 0.8214 | 0.7857 | 0.8738 |
+
+**Hallucination & safety**
+
+| Modality | Hallucination Rate | Fabrication Rate | Omission Rate | Template Leak Rate | Citation Accuracy |
+|---|---|---|---|---|---|
+| Text | 0.0909 | 0.0909 | 0.0909 | 0.0000 | 1.0000 |
+| PDF | 0.5000 | 0.1429 | 0.3571 | 0.0000 | N/A* |
+| DOCX | 0.4286 | 0.0714 | 0.3571 | 0.0000 | 1.0000 |
+| XLSX | 0.1429 | 0.0000 | 0.1429 | 0.0000 | 1.0000 |
+| Image | 0.0714 | 0.0714 | 0.0000 | 0.0000 | 1.0000 |
+| Audio | 0.1429 | 0.0714 | 0.1429 | 0.0000 | 1.0000 |
+| Video | 0.2857 | 0.0000 | 0.2857 | 0.0000 | 1.0000 |
+
+<sup>*PDF's heuristic citation-accuracy metric had zero measurable rows this run (n=0) — excluded rather than shown as a false 0 or 100.</sup>
+
+**Verification loop (grounding / citation / retry)**
+
+| Modality | Grounding Success | Citation Accuracy v2 | Retry Success | Avg Retry Count |
+|---|---|---|---|---|
+| Text | 1.0000 | 0.8889 | 0.5000 | 0.2222 |
+| PDF | 0.9286 | 0.7857 | 0.3333 | 0.4286 |
+| DOCX | 1.0000 | 0.6923 | 0.0000 | 0.1538 |
+| XLSX | 0.9167 | 1.0000 | 0.0000 | 0.0833 |
+| Image | 0.9286 | 0.9286 | 0.0000 | 0.0714 |
+| Audio | 0.7692 | 0.5385 | 0.2727 | 0.9231 |
+| Video | 1.0000 | 0.9286 | 0.0000 | 0.3571 |
+
+**Finance fidelity & latency**
+
+| Modality | Finance Fidelity | Verification p50 | Verification p95 | Generation p50 | Generation p95 | Generation p99 |
+|---|---|---|---|---|---|---|
+| Text | 0.9091 | 4.01s | 11.62s | 11.81s | 34.07s | 44.15s |
+| PDF | 0.8433 | 7.13s | 13.95s | 9.70s | 19.36s | 20.52s |
+| DOCX | 0.8125 | 3.91s | 9.02s | 6.69s | 10.91s | 11.53s |
+| XLSX | 0.9286 | 4.37s | 9.18s | 10.20s | 14.86s | 16.65s |
+| Image | 0.9929 | 3.14s | 4.89s | 4.33s | 6.05s | 6.54s |
+| Audio | 0.6310 | 9.21s | 15.34s | 12.89s | 19.29s | 22.57s |
+| Video | 0.9643 | 3.97s | 6.92s | 8.57s | 11.03s | 11.19s |
+
+**Reading it, honestly:** Image is the strongest all-around modality — best correctness, faithfulness, finance fidelity, and latency. Audio is the weakest on citation accuracy (0.5385) and retry cost (0.92 retries/query on average) — a known, partially-fixed issue, not fully closed. PDF's context recall (0.2846) is a clear outlier against every other modality and against PDF's own earlier measurements — flagged here as a genuine open question, not yet root-caused.
+
+One measurement-integrity note, kept rather than smoothed over: partway through this run, the app server hit a broken internal process state (repeated I/O errors, unrelated to any modality under test); it was diagnosed to the process level, the GPU and LLM backend were confirmed healthy independently, and the affected process was restarted. Every figure above was captured after that recovery, on a verified-healthy server.
+
+Source: `app/eval/run.py --suite generation --modality <name>`, full report in `docs/modality_scorecard_2026-08-20.pdf`. Full write-ups per modality also live in `docs/EVAL_*.md`; the harness itself is documented in [`app/eval/README.md`](app/eval/README.md).
 
 ## Security & Guardrails
 
@@ -408,7 +456,7 @@ pytest tests/ -m "not slow" --ignore=tests/integration/test_document_pipeline.py
 
 Always scope pytest to a specific subdirectory (`tests/unit/`, `tests/auth/`, `tests/guardrails/`) rather than running bare `pytest tests/ -m <marker>` — pytest collects every file under `testpaths` regardless of marker filtering, and one broken file under `tests/integration/` is enough to abort collection for the entire run.
 
-99 test files across seven categories: unit (mirrors `app/`'s module structure), auth, guardrails, integration (requires live Qdrant/Redis/Mongo), eval-harness correctness, pipeline, and a dedicated video end-to-end suite.
+137 test files across eight categories: unit (89 files, mirrors `app/`'s module structure), integration (13, requires live Qdrant/Redis/Mongo), eval-harness correctness (14), auth (10), guardrails (7), pipeline (2), plus a dedicated video end-to-end suite and an API-contract (Schemathesis) suite.
 
 ## CI/CD
 
@@ -493,7 +541,8 @@ Documented here deliberately, rather than left implicit — a system that only l
 - **`hybrid_web` routing does not yet execute a live web search** on the hybrid path — a known open issue, currently thresholded at 0.0 rather than silently passing.
 - **Generation, hallucination, and end-to-end eval suites are informational, not CI-gated** — they route through an LLM judge over HTTP against a live server, which is a heavier re-baselining exercise than the CPU-only retrieval suite; re-baselining and gating them is in progress.
 - **Finance numeric fidelity is measured offline, not sampled from live traffic** — the CI gate applies at merge time; continuous live-traffic sampling of this specific metric is a documented gap.
-- **Answer-verification metrics have no baseline yet** — the verification loop (groundedness, citation accuracy v2, retry success rate) is live in the request path but not yet scored by the eval harness.
+- **PDF's context recall (0.2846) is an unexplained outlier** in the 2026-08-20 per-modality scorecard, well below every other modality and PDF's own earlier measurements — flagged for a follow-up investigation, not yet root-caused.
+- **Audio is the weakest modality on citation accuracy (0.5385) and retry cost** (0.92 retries/query on average, same scorecard) — a known issue, partially fixed, not fully closed.
 
 The full, unfiltered engineering history — including root-caused production incidents — is in [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -503,4 +552,4 @@ MIT — see [LICENSE](LICENSE).
 
 ## Author
 
-**Vijaya Karthik** ([@vjkarthik98](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT.git))
+**Vijaya Karthik** ([@vjkarthik98](https://github.com/vjkarthik98))

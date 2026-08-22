@@ -346,7 +346,9 @@ class AuthService:
         logger.info(event="auth_demo_user_created", email=email, user_id=user.user_id)
         return _doc_to_public(user.model_dump())
 
-    def seed_load_test_user(self, email: str, password: str) -> UserPublic:
+    def seed_load_test_user(
+        self, email: str, password: str, user_id: str | None = None
+    ) -> UserPublic:
         """Create or reset one dedicated automated-test-tooling account.
 
         Idempotent, same shape as seed_demo_user — but sets is_load_test, not
@@ -358,17 +360,26 @@ class AuthService:
         any other account); the only special-case is the OTP skip at login,
         needed because this account is driven by non-interactive tooling
         (k6, Schemathesis live-mode, ZAP) that cannot solve an email OTP.
+
+        `user_id`, when given, pins the account to that exact tenant ID instead
+        of generating a fresh one — used by app/bin/seed_eval_reporter.py to
+        make the pre-existing settings.EVAL_USER_ID tenant loginable (it
+        already owns the ingested gold-set corpus in Qdrant/BM25; a fresh
+        random tenant would only ever see an empty knowledge base). Looks up
+        by user_id rather than email in that case, since the tenant identity —
+        not the email address — is the thing that must stay fixed.
         """
         _check_password_strength(password, email)
         col = _get_mongo_collection()
-        existing = col.find_one({"email": email})
+        existing = col.find_one({"user_id": user_id}) if user_id else col.find_one({"email": email})
         hashed = _hash_password(password)
 
         if existing:
             col.update_one(
-                {"email": email},
+                {"user_id": existing["user_id"]},
                 {
                     "$set": {
+                        "email": email,
                         "hashed_password": hashed,
                         "is_active": True,
                         "is_load_test": True,
@@ -377,15 +388,18 @@ class AuthService:
                 },
             )
             logger.info(event="auth_load_test_user_reset", email=email, user_id=existing["user_id"])
-            return _doc_to_public(col.find_one({"email": email}))
+            return _doc_to_public(col.find_one({"user_id": existing["user_id"]}))
 
-        user = UserInDB(
+        user_kwargs: dict = dict(
             email=email,
             hashed_password=hashed,
             auth_providers=["email"],
             is_active=True,
             is_load_test=True,
         )
+        if user_id:
+            user_kwargs["user_id"] = user_id
+        user = UserInDB(**user_kwargs)
         col.insert_one(user.model_dump())
         logger.info(event="auth_load_test_user_created", email=email, user_id=user.user_id)
         return _doc_to_public(user.model_dump())
