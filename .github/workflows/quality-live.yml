@@ -87,8 +87,8 @@ jobs:
           # Placeholder values only, never used to sign anything real.
           ENV: test
           AUTH_ENABLED: "false"
-          SECRET_KEY: "ci-test-only-placeholder-secret-not-a-real-credential"
-          JWT_SECRET_KEY: "ci-test-only-placeholder-jwt-secret-not-a-real-credential"
+          SECRET_KEY: "ci-test-only-placeholder-secret-not-a-real-credential"  # pragma: allowlist secret
+          JWT_SECRET_KEY: "ci-test-only-placeholder-jwt-secret-not-a-real-credential"  # pragma: allowlist secret
         run: |
           pip install -r requirements.txt
           pip install -e .
@@ -105,8 +105,8 @@ jobs:
           # step above — see that step's comment.
           ENV: test
           AUTH_ENABLED: "false"
-          SECRET_KEY: "ci-test-only-placeholder-secret-not-a-real-credential"
-          JWT_SECRET_KEY: "ci-test-only-placeholder-jwt-secret-not-a-real-credential"
+          SECRET_KEY: "ci-test-only-placeholder-secret-not-a-real-credential"  # pragma: allowlist secret
+          JWT_SECRET_KEY: "ci-test-only-placeholder-jwt-secret-not-a-real-credential"  # pragma: allowlist secret
         run: |
           pip install -r requirements.txt
           pip install -e ".[quality]"
