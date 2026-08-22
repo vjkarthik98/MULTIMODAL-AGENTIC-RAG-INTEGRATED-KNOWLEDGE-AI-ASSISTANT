@@ -2578,9 +2578,7 @@ async def delete_knowledge_base_file(
     try:
         memory = infra.get_memory()
         if memory and hasattr(memory, "cache_flush_query_cache"):
-            cache_flushed = await asyncio.to_thread(
-                memory.cache_flush_query_cache, safe_name
-            )
+            cache_flushed = await asyncio.to_thread(memory.cache_flush_query_cache, safe_name)
             logger.info(event="kb_delete_cache_flushed", file=safe_name, entries=cache_flushed)
     except Exception as exc:
         logger.warning(event="kb_delete_cache_flush_failed", file=safe_name, error=str(exc))
