@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import {
   X, User, Database, ShieldCheck, ShieldAlert, Sun, Moon,
   Loader2, Trash2, FileText, LogOut, RotateCcw, AlertTriangle, ChevronRight, ChevronLeft,
-  Keyboard,
+  Keyboard, Eye, EyeOff,
 } from 'lucide-react'
 import { listKB, deleteKBFile, getMe, changePassword, logoutAll, deleteAccount, clearMemory, deleteAllChatSessions } from '../api/client'
 import { useToast } from '../context/ToastContext'
@@ -277,7 +277,9 @@ function SecuritySection({ auth, onLogout, addToast }) {
   const [current, setCurrent]       = useState('')
   const [next, setNext]             = useState('')
   const [confirm, setConfirm]       = useState('')
-  const [reveal, setReveal]         = useState(false)
+  const [showCurrent, setShowCurrent] = useState(false)
+  const [showNext, setShowNext]       = useState(false)
+  const [showConfirm, setShowConfirm] = useState(false)
   const [saving, setSaving]         = useState(false)
   const [signingOut, setSigningOut] = useState(false)
 
@@ -314,19 +316,36 @@ function SecuritySection({ auth, onLogout, addToast }) {
     <div className="space-y-5">
       <Card title="Change password">
         <form onSubmit={submitPassword} className="py-4 space-y-3">
-          <input type={reveal ? 'text' : 'password'} placeholder="Current password" value={current}
-            onChange={e => setCurrent(e.target.value)} required autoComplete="current-password"
-            className={inputCls} style={inputStyle} />
-          <input type={reveal ? 'text' : 'password'} placeholder="New password" value={next}
-            onChange={e => setNext(e.target.value)} required autoComplete="new-password"
-            className={inputCls} style={inputStyle} />
-          <input type={reveal ? 'text' : 'password'} placeholder="Confirm new password" value={confirm}
-            onChange={e => setConfirm(e.target.value)} required autoComplete="new-password"
-            className={inputCls} style={inputStyle} />
-          <label className="flex items-center gap-2 text-[12.5px] cursor-pointer select-none" style={{ color: 'var(--t-tx5)' }}>
-            <input type="checkbox" checked={reveal} onChange={e => setReveal(e.target.checked)} className="accent-violet-500" />
-            Show passwords
-          </label>
+          <div className="relative">
+            <input type={showCurrent ? 'text' : 'password'} placeholder="Current password" value={current}
+              onChange={e => setCurrent(e.target.value)} required autoComplete="current-password"
+              className={`${inputCls} pr-11`} style={inputStyle} />
+            <button type="button" onClick={() => setShowCurrent(v => !v)}
+              className="absolute right-3.5 top-1/2 -translate-y-1/2 transition-colors" style={{ color: 'var(--t-ph)' }}
+              aria-label={showCurrent ? 'Hide password' : 'Show password'}>
+              {showCurrent ? <EyeOff size={16} /> : <Eye size={16} />}
+            </button>
+          </div>
+          <div className="relative">
+            <input type={showNext ? 'text' : 'password'} placeholder="New password" value={next}
+              onChange={e => setNext(e.target.value)} required autoComplete="new-password"
+              className={`${inputCls} pr-11`} style={inputStyle} />
+            <button type="button" onClick={() => setShowNext(v => !v)}
+              className="absolute right-3.5 top-1/2 -translate-y-1/2 transition-colors" style={{ color: 'var(--t-ph)' }}
+              aria-label={showNext ? 'Hide password' : 'Show password'}>
+              {showNext ? <EyeOff size={16} /> : <Eye size={16} />}
+            </button>
+          </div>
+          <div className="relative">
+            <input type={showConfirm ? 'text' : 'password'} placeholder="Confirm new password" value={confirm}
+              onChange={e => setConfirm(e.target.value)} required autoComplete="new-password"
+              className={`${inputCls} pr-11`} style={inputStyle} />
+            <button type="button" onClick={() => setShowConfirm(v => !v)}
+              className="absolute right-3.5 top-1/2 -translate-y-1/2 transition-colors" style={{ color: 'var(--t-ph)' }}
+              aria-label={showConfirm ? 'Hide password' : 'Show password'}>
+              {showConfirm ? <EyeOff size={16} /> : <Eye size={16} />}
+            </button>
+          </div>
           <div className="flex items-center gap-3 pt-1">
             <button type="submit" disabled={saving}
               className="flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium text-white transition-opacity disabled:opacity-60"

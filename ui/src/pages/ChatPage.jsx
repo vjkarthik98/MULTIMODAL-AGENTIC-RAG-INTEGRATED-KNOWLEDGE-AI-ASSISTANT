@@ -621,6 +621,20 @@ const handleNewChat = () => {
   // utility rather than `h-screen h-[100dvh]` because that pair depends on
   // Tailwind's emission order to resolve, whereas two declarations in one rule
   // is the guaranteed fallback: browsers without dvh simply ignore the second.
+  //
+  // The on-screen-keyboard transition specifically is handled at the
+  // platform level, not here: index.html's viewport meta sets
+  // `interactive-widget=resizes-content`, which makes the browser shrink
+  // the LAYOUT viewport itself for the keyboard (so `dvh` above already
+  // accounts for it) instead of the modern Chromium default
+  // (`resizes-visual`) where only the *visual* viewport shrinks and the
+  // layout viewport — what `dvh` and `position:fixed` are both defined
+  // against — stays full height, leaving a gap between the composer and
+  // the keyboard. An earlier attempt at this fix used
+  // `window.visualViewport` + `position:fixed` to work around that in JS;
+  // reproduced live on Android/Brave and the gap persisted, so it was
+  // reverted in favor of this single, platform-native meta tag instead of
+  // layering more unverified JS on an approach already shown not to work.
   return (
     <div className="flex h-dvh-screen overflow-hidden" style={{ background: 'var(--t-bg)' }}>
 

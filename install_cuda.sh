@@ -153,8 +153,19 @@ echo "[install_cuda] Upgrading pip / setuptools / wheel..."
 pip install --upgrade pip setuptools wheel --quiet
 
 # ── PyTorch CUDA 13.0 ─────────────────────────────────────────────────────────
+# Pinned 2026-08-21 (MLOps reproducibility pass) — this was a fully unpinned
+# `pip install torch torchvision torchaudio` with no version at all, silently
+# pulling whatever cu130 wheel was newest on every fresh provisioning run.
+# torch==2.12.1 / torchvision==0.27.1 is PyTorch's own documented official
+# pairing for cu130 (https://pytorch.org/get-started/previous-versions/,
+# "v2.12.1" section) — matches this script's own header comment ("PyTorch
+# cu130 wheels work perfectly (torch 2.12.1+cu130)"), so this pin freezes
+# CURRENT validated behavior, it does not change it. torchaudio==2.11.0 is
+# NOT part of that same official pairing — torchaudio's release cadence has
+# fallen behind torch's (no 2.12.x cu130 build exists yet at all); 2.11.0 is
+# simply the newest cu130 torchaudio wheel currently published.
 echo "[install_cuda] Installing PyTorch with CUDA 13.0 wheels..."
-pip install torch torchvision torchaudio \
+pip install torch==2.12.1 torchvision==0.27.1 torchaudio==2.11.0 \
     --index-url "${TORCH_INDEX_URL}" \
     --quiet
 
@@ -165,6 +176,11 @@ print(f"[install_cuda] PyTorch {torch.__version__} | CUDA {torch.version.cuda} |
 EOF
 
 # ── llama-cpp-python with GGML_CUDA via system CUDA 12.8 toolkit ─────────────
+# Pinned 2026-08-21 — was a loose ">=0.2.60" that could silently drift to a
+# different llama-cpp-python version than the one this box was validated
+# against, and diverged from the Dockerfile's own exact "==0.3.30" pin
+# (Dockerfile, cuda-builder stage) for no reason — same binding, same version,
+# now consistent across both provisioning paths (bare-metal + container).
 echo "[install_cuda] Building llama-cpp-python with GGML_CUDA=on (CUDA ${CUDA_HOME})..."
 export CUDA_HOME CUDA_PATH="${CUDA_HOME}"
 export PATH="${CUDA_HOME}/bin:${PATH}"
@@ -172,8 +188,7 @@ export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
 
 CMAKE_ARGS="-DGGML_CUDA=on -DCUDA_TOOLKIT_ROOT_DIR=${CUDA_HOME}" \
 FORCE_CMAKE=1 \
-    pip install "llama-cpp-python>=0.2.60" \
-        --upgrade \
+    pip install "llama-cpp-python==0.3.30" \
         --force-reinstall \
         --no-cache-dir
 

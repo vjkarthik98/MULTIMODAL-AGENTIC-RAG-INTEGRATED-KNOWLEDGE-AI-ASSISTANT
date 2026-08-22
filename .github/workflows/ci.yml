@@ -79,7 +79,7 @@ jobs:
       #
       # The trade is lopsided in the obvious direction: this costs ~2-3 min of
       # pip downloads per run and buys back ~60 min per release build.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -187,7 +187,7 @@ jobs:
 
       - name: Upload coverage
         if: matrix.python-version == '3.11'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-xml
           path: coverage.xml
