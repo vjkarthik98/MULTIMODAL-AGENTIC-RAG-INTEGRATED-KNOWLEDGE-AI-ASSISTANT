@@ -5,9 +5,41 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc1] - 2026-08-22
+
+Release candidate for the first stable release. RAG system behavior is
+unchanged from [0.32.0] below — v0.32.0 was itself framed as "final
+hardening pass before v1.0.0-rc1," and no retrieval, agent, guardrail, or memory
+logic has changed since. This candidate adds release-readiness governance
+docs and fixes a CI gap found while trying to populate real quality reports
+for the first time. Validating this build (staging deploy + Tier-2 gate,
+plus live-mode RAGAS/DeepEval/security/performance reports) before tagging
+the final v1.0.0.
+
+### Added
+- `SECURITY.md` — private vulnerability disclosure process, supported
+  versions, scope.
+- `CONTRIBUTING.md` — branch workflow, commit conventions, pre-PR checklist.
+- `.github/PULL_REQUEST_TEMPLATE.md`.
+
+### Fixed
+- `quality-live.yml`'s `ragas-report`/`deepeval-report` jobs crashed at
+  import time (`JWT_SECRET_KEY must be at least 32 characters long`) on
+  every run — the jobs never set the placeholder `SECRET_KEY`/
+  `JWT_SECRET_KEY` env vars that `ci.yml` and `eval-gate.yml` already carry
+  for the identical `Settings.validate()` import-time requirement. Neither
+  job had ever completed successfully before this fix, which is why
+  `quality-reports/ragas/` and `quality-reports/deepeval/` had only ever
+  held a `.gitkeep`.
+
+### Known limitations carried forward
+
+Unchanged from [0.32.0] below — see README.md's Known Limitations &
+Roadmap section.
+
 ## [0.32.0] - 2026-08-22
 
-Final hardening pass before v1.0.0. Found and fixed live against the running
+Final hardening pass before v1.0.0-rc1. Found and fixed live against the running
 v0.31.0 production system.
 
 ### Added
