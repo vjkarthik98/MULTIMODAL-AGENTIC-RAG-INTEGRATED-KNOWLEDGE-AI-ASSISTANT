@@ -89,7 +89,9 @@ def main() -> int:
     print(f"  gh secret set EVAL_REPORTER_PASSWORD --body '{password}'")
     print()
     print("Never commit this password. Re-run this script (same --email) to rotate it —")
-    print("it always resets the password on the existing account rather than creating a second one.")
+    print(
+        "it always resets the password on the existing account rather than creating a second one."
+    )
     return 0
 
 

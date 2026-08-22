@@ -1651,7 +1651,9 @@ class QdrantVectorStore:
         and vision_collection if none is given. Returns {collection: snapshot_name}
         for whatever succeeded — a failure on one collection doesn't block the other.
         """
-        targets = [collection_name] if collection_name else [self.text_collection, self.vision_collection]
+        targets = (
+            [collection_name] if collection_name else [self.text_collection, self.vision_collection]
+        )
         created: dict[str, str] = {}
         for name in targets:
             try:
@@ -1665,7 +1667,9 @@ class QdrantVectorStore:
 
     def list_snapshots(self, collection_name: str | None = None) -> dict[str, list[dict[str, Any]]]:
         """List available snapshots per collection (both, if none given)."""
-        targets = [collection_name] if collection_name else [self.text_collection, self.vision_collection]
+        targets = (
+            [collection_name] if collection_name else [self.text_collection, self.vision_collection]
+        )
         out: dict[str, list[dict[str, Any]]] = {}
         for name in targets:
             try:
