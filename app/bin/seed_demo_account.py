@@ -25,10 +25,8 @@ from app.core.config import settings
 
 # Single source of truth — /auth/login's OTP bypass matches this same address,
 # so seeding a different one would produce an account that still asks for OTP.
-DEFAULT_EMAIL = settings.DEMO_ACCOUNT_EMAIL or "testuser@ragdev.local"
-DEFAULT_PASSWORD = (
-    "Test@123"  # pragma: allowlist secret — intentionally public demo credential, not a real secret
-)
+DEFAULT_EMAIL = settings.DEMO_ACCOUNT_EMAIL or "magikaiassistant@gmail.com"
+DEFAULT_PASSWORD = "Demo@2026"  # pragma: allowlist secret — intentionally public demo credential, not a real secret
 
 # Bundled finance benchmark files already used for accuracy testing —
 # reasonable defaults to upload for a finance-RAG demo walkthrough.
@@ -59,7 +57,7 @@ def main() -> int:
         "--email", default=DEFAULT_EMAIL, help=f"Demo account email (default: {DEFAULT_EMAIL})"
     )
     parser.add_argument(
-        "--password", default=DEFAULT_PASSWORD, help="Demo account password (default: Test@123)"
+        "--password", default=DEFAULT_PASSWORD, help="Demo account password (default: Demo@2026)"
     )
     args = parser.parse_args()
 

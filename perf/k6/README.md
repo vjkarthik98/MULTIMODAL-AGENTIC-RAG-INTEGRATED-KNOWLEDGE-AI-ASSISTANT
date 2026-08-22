@@ -25,7 +25,7 @@ URL deliberately (see "Live mode" below).
 ## One-time setup: test tenants
 
 Every script authenticates as one or more dedicated test-tenant accounts —
-**never** the shared public demo login (`testuser@ragdev.local`). See
+**never** the shared public demo login (`magikaiassistant@gmail.com`). See
 `app/auth/models.py`'s `is_load_test` field and `app/bin/seed_test_tenants.py`
 for why.
 

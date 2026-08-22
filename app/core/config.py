@@ -1051,7 +1051,7 @@ class Settings:
     # (or an account that predated the flag) would silently fall back to
     # asking a recruiter for an OTP they can't receive. Set to "" to disable
     # the bypass entirely.
-    DEMO_ACCOUNT_EMAIL: str = _str("DEMO_ACCOUNT_EMAIL", "testuser@ragdev.local")
+    DEMO_ACCOUNT_EMAIL: str = _str("DEMO_ACCOUNT_EMAIL", "magikaiassistant@gmail.com")
 
     # EMAIL (Gmail SMTP) — OTP + password-reset
     SMTP_HOST: str = _str("SMTP_HOST", "smtp.gmail.com")
