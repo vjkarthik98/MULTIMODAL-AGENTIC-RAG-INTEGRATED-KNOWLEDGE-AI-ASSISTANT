@@ -111,7 +111,7 @@ jobs:
           MAGIK_TEST_TENANTS: ${{ secrets.MAGIK_TEST_TENANTS }}
         run: k6 run --vus 5 --iterations 15 perf/k6/multi_user_tenant.js
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: inputs.tool == 'lighthouse'
         with:
           node-version: "20"
