@@ -109,7 +109,7 @@ MODELS: list[dict] = [
         "type": "sentence-transformers",
         "size_gb": 1.35,
         "gated": False,
-        "revision": "d4aa6901d3a41ba39fb536a557fa166f842b0e09",
+        "revision": "d4aa6901d3a41ba39fb536a557fa166f842b0e09",  # pragma: allowlist secret
     },
     {
         "key": "reranker",
@@ -117,7 +117,7 @@ MODELS: list[dict] = [
         "type": "sentence-transformers",
         "size_gb": 1.34,
         "gated": False,
-        "revision": "55611d7bca2a7133960a6d3b71e083071bbfc312",
+        "revision": "55611d7bca2a7133960a6d3b71e083071bbfc312",  # pragma: allowlist secret
     },
     {
         "key": "ner",
@@ -125,7 +125,7 @@ MODELS: list[dict] = [
         "type": "token-classification",
         "size_gb": 0.43,
         "gated": False,
-        "revision": "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc",
+        "revision": "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc",  # pragma: allowlist secret
     },
     {
         "key": "finbert",
@@ -133,7 +133,7 @@ MODELS: list[dict] = [
         "type": "sequence-classification",
         "size_gb": 0.44,
         "gated": False,
-        "revision": "4921590d3c0c3832c0efea24c8381ce0bda7844b",
+        "revision": "4921590d3c0c3832c0efea24c8381ce0bda7844b",  # pragma: allowlist secret
     },
     {
         "key": "keybert",
@@ -141,7 +141,7 @@ MODELS: list[dict] = [
         "type": "sentence-transformers",
         "size_gb": 0.09,
         "gated": False,
-        "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+        "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",  # pragma: allowlist secret
     },
     # ── Vision ────────────────────────────────────────────────────────────────
     {
@@ -150,7 +150,7 @@ MODELS: list[dict] = [
         "type": "transformers",
         "size_gb": 1.76,
         "gated": False,
-        "revision": "9fdffc58afc957d1a03a25b10dba0329ab15c2a3",
+        "revision": "9fdffc58afc957d1a03a25b10dba0329ab15c2a3",  # pragma: allowlist secret
     },
     {
         "key": "blip",
@@ -158,7 +158,7 @@ MODELS: list[dict] = [
         "type": "blip-captioning",
         "size_gb": 0.90,
         "gated": False,
-        "revision": "353689b859fcf0523410b1806dace5fb46ecdf41",
+        "revision": "353689b859fcf0523410b1806dace5fb46ecdf41",  # pragma: allowlist secret
     },
     {
         "key": "qwen2vl",
@@ -166,7 +166,7 @@ MODELS: list[dict] = [
         "type": "qwen2vl",
         "size_gb": 2.20,
         "gated": False,
-        "revision": "895c3a49bc3fa70a340399125c650a463535e71c",
+        "revision": "895c3a49bc3fa70a340399125c650a463535e71c",  # pragma: allowlist secret
     },
     {
         "key": "trocr",
@@ -174,7 +174,7 @@ MODELS: list[dict] = [
         "type": "vision-encoder-decoder",
         "size_gb": 0.36,
         "gated": False,
-        "revision": "9ff792d8e7c22061f2ee67e1ed2246b1f9ef1e98",
+        "revision": "9ff792d8e7c22061f2ee67e1ed2246b1f9ef1e98",  # pragma: allowlist secret
     },
     # ── Audio ─────────────────────────────────────────────────────────────────
     {
@@ -191,7 +191,7 @@ MODELS: list[dict] = [
         "size_gb": 0.60,
         "gated": True,
         "optional": True,
-        "revision": "84fd25912480287da0247647c3d2b4853cb3ee5d",
+        "revision": "84fd25912480287da0247647c3d2b4853cb3ee5d",  # pragma: allowlist secret
     },
     {
         "key": "seg30",
@@ -200,7 +200,7 @@ MODELS: list[dict] = [
         "size_gb": 0.20,
         "gated": True,
         "optional": True,
-        "revision": "e66f3d3b9eb0873085418a7b813d3b369bf160bb",
+        "revision": "e66f3d3b9eb0873085418a7b813d3b369bf160bb",  # pragma: allowlist secret
     },
     {
         "key": "wespeaker",
@@ -209,7 +209,7 @@ MODELS: list[dict] = [
         "size_gb": 0.10,
         "gated": True,
         "optional": True,
-        "revision": "837717ddb9ff5507820346191109dc79c958d614",
+        "revision": "837717ddb9ff5507820346191109dc79c958d614",  # pragma: allowlist secret
     },
     # ── Guardrails ────────────────────────────────────────────────────────────
     {
@@ -275,7 +275,7 @@ GGUF_MODELS: list[dict] = [
         "gguf_filename": "Qwen2.5-14B-Instruct-Q4_K_M.gguf",
         "size_gb": 9.0,
         "gated": False,
-        "revision": "05244aa5d871c661c80082a15d3bce44714d068d",
+        "revision": "05244aa5d871c661c80082a15d3bce44714d068d",  # pragma: allowlist secret
     },
     {
         "key": "qwen_judge",
@@ -294,7 +294,7 @@ GGUF_MODELS: list[dict] = [
         "size_gb": 4.7,
         "gated": False,
         "optional": True,
-        "revision": "8911e8a47f92bac19d6f5c64a2e2095bd2f7d031",
+        "revision": "8911e8a47f92bac19d6f5c64a2e2095bd2f7d031",  # pragma: allowlist secret
         # Loaded only by app/eval/judges/qwen_judge.py during a Tier-2
         # eval run (also backs the Ragas report and DeepEval — MAGIK's
         # single eval judge) — never touched during normal request serving,
