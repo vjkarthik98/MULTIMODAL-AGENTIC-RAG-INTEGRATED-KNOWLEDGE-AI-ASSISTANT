@@ -107,7 +107,7 @@ jobs:
           docker compose logs --tail=200 api
           exit 1
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
