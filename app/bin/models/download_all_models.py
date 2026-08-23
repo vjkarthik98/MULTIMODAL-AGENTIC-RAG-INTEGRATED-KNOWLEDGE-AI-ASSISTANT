@@ -169,6 +169,21 @@ MODELS: list[dict] = [
         "revision": "895c3a49bc3fa70a340399125c650a463535e71c",  # pragma: allowlist secret
     },
     {
+        # settings.QWEN2_VL_MODEL's default (image/financial-chart captioning) —
+        # a separate, larger checkpoint from VIDEO_QWEN2_VL_MODEL's 2B above.
+        # Missing from this manifest until 2026-08-22: startup_validator.py's
+        # REQUIRED_MODELS has required it all along, but nothing ever downloaded
+        # or checksum-verified it here, so it was silently absent from
+        # download_manifest.json — invisible until MODEL_CACHE_REQUIRE_MANIFEST
+        # was turned on for the first time in this same release.
+        "key": "qwen2vl_7b",
+        "model_id": "Qwen/Qwen2-VL-7B-Instruct",
+        "type": "qwen2vl",
+        "size_gb": 16.59,
+        "gated": False,
+        "revision": "eed13092ef92e448dd6875b2a00151bd3f7db0ac",  # pragma: allowlist secret
+    },
+    {
         "key": "trocr",
         "model_id": "microsoft/trocr-large-printed",
         "type": "vision-encoder-decoder",

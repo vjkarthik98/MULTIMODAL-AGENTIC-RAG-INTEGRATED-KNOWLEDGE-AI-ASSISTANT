@@ -81,3 +81,15 @@ variable "staging_model_snapshot_id" {
   default     = null
 }
 
+variable "create_uptime_kuma" {
+  description = "Whether to create the small, separate, always-on Uptime Kuma host (see monitoring/uptime-kuma/README.md). A real recurring cost (~$3-8/mo) — flip to true deliberately, in its own apply."
+  type        = bool
+  default     = false
+}
+
+variable "uptime_kuma_instance_type" {
+  description = "Instance type for the Uptime Kuma host — deliberately tiny, it only runs Kuma + Caddy and receives passive pushes."
+  type        = string
+  default     = "t3.micro"
+}
+

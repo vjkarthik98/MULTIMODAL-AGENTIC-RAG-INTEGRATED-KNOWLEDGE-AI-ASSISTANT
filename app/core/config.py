@@ -94,7 +94,7 @@ class Settings:
     APP_NAME: str = _str("APP_NAME", "Multimodal Agentic RAG Integrated Knowledge AI Assistant")
     # Keep in sync with /VERSION and the test assertion below by hand — nothing
     # reads /VERSION at runtime, so this drifts silently if only one is bumped.
-    APP_VERSION: str = _str("APP_VERSION", "1.0.0-rc1")
+    APP_VERSION: str = _str("APP_VERSION", "0.33.0")
     APP_DESCRIPTION: str = _str(
         "APP_DESCRIPTION", "Production Multimodal Agentic RAG Integrated AI System"
     )
@@ -1319,7 +1319,7 @@ class TestSettings:
 
     def test_defaults_are_valid(self):
         s = Settings()
-        assert s.APP_VERSION == "1.0.0-rc1"
+        assert s.APP_VERSION == "0.33.0"
         assert s.TEXT_EMBEDDING_DIM == 1024
         assert s.VISION_EMBEDDING_DIM > 0
         assert s.CHUNK_OVERLAP < s.CHUNK_SIZE
