@@ -199,13 +199,25 @@ MODELS: list[dict] = [
         "size_gb": 1.55,
         "gated": False,
     },
+    # ── Diarization (pyannote) ───────────────────────────────────────────────
+    # Gated, but deliberately NOT optional: startup_validator.py's
+    # REQUIRED_MODELS requires all three. Marking them optional here let a
+    # skipped/failed gated download finish this script with a green summary
+    # while leaving no download_manifest.json entry — and the app then
+    # hard-fails at startup with `Required models not cached`, crash-looping
+    # the container. That is the exact failure class that cost two production
+    # promotions to diagnose (v0.33.0 and v1.0.0-rc1, on qwen2vl_7b). Failing
+    # loudly HERE — where the summary already prints the `set HF_TOKEN for
+    # gated models` hint — is strictly more debuggable than a healthy-looking
+    # provisioning run followed by a container that will not stay up.
+    # tests/unit/core/test_model_manifest_contract.py pins this invariant so
+    # REQUIRED_MODELS and this list cannot drift apart again.
     {
         "key": "diarizer",
         "model_id": "pyannote/speaker-diarization-3.1",
         "type": "pyannote",
         "size_gb": 0.60,
         "gated": True,
-        "optional": True,
         "revision": "84fd25912480287da0247647c3d2b4853cb3ee5d",  # pragma: allowlist secret
     },
     {
@@ -214,7 +226,6 @@ MODELS: list[dict] = [
         "type": "pyannote",
         "size_gb": 0.20,
         "gated": True,
-        "optional": True,
         "revision": "e66f3d3b9eb0873085418a7b813d3b369bf160bb",  # pragma: allowlist secret
     },
     {
@@ -223,7 +234,6 @@ MODELS: list[dict] = [
         "type": "pyannote",
         "size_gb": 0.10,
         "gated": True,
-        "optional": True,
         "revision": "837717ddb9ff5507820346191109dc79c958d614",  # pragma: allowlist secret
     },
     # ── Guardrails ────────────────────────────────────────────────────────────
