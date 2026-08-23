@@ -5,6 +5,36 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc1] - 2026-08-23
+
+Release candidate — deploying today, monitoring production for one week
+before promoting to the final v1.0.0 tag. v0.33.0's own tagged build also
+failed to reach production; that failure surfaced a second, deeper bug in
+the same area as v0.33.0's original fix, documented below. RAG system
+retrieval, agent, guardrail, and memory logic is unchanged from
+[0.33.0]/[0.32.0] below — every fix in this release closes gaps found
+during two consecutive real production promotion attempts, not new
+product behavior.
+
+### Fixed
+- `app/bin/models/download_all_models.py`'s "already cached" fast path
+  (`_handle_cached()`) verified a model's on-disk checksum but never wrote
+  a `download_manifest.json` entry for it. A model whose files were
+  already present — including `Qwen/Qwen2-VL-7B-Instruct` itself, left on
+  disk by v0.33.0's own crash-and-restart cycle — stayed permanently
+  invisible to `startup_validator.py`'s strict manifest check: every
+  deploy attempt found the files, skipped re-downloading, and never fixed
+  the manifest, so the exact same `Required models not cached` crash
+  repeated on every restart with no way to self-heal. `_handle_cached()`
+  now writes the manifest entry the first time it finds a model cached
+  with no existing record, reusing the checksum it already computes —
+  self-healing on the next deploy, no manual box intervention needed.
+
+### Known limitations carried forward
+
+Unchanged from [0.33.0]/[0.32.0] below — see README.md's Known
+Limitations & Roadmap section.
+
 ## [0.33.0] - 2026-08-23
 
 Fixes a real deploy-blocking gap discovered when v0.32.0's tagged build was
