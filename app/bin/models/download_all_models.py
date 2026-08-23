@@ -645,21 +645,35 @@ def _model_checksum(
 
 def _verify_or_record_checksum(
     model_id: str, mtype: str, gguf_filename: str | None = None
-) -> tuple[str | None, bool]:
-    """Returns (sha256, mismatch). mismatch=True means a file recorded at the
-    last download is missing or its content changed — silent corruption or
-    an unexpected upstream swap, not assumed-safe. Files that appeared in
-    the directory AFTER that download (e.g. written by the model-loading
-    code the first time the app actually used it) are never part of this
-    comparison — see _sha256_dir's docstring for why re-enumerating
-    "whatever's there now" produced permanent false-positive mismatches for
-    every HF-hub-cached model that gets touched at load time (confirmed
-    live 2026-08-01: embedder/reranker/ner/finbert/keybert/siglip/blip/
-    qwen2vl/trocr/whisper flagged MISMATCH on every single boot despite
-    loading and working fine at runtime)."""
+) -> tuple[str | None, bool, list[str] | None, bool]:
+    """Returns (sha256, mismatch, files, had_entry). mismatch=True means a
+    file recorded at the last download is missing or its content changed —
+    silent corruption or an unexpected upstream swap, not assumed-safe.
+    Files that appeared in the directory AFTER that download (e.g. written
+    by the model-loading code the first time the app actually used it) are
+    never part of this comparison — see _sha256_dir's docstring for why
+    re-enumerating "whatever's there now" produced permanent false-positive
+    mismatches for every HF-hub-cached model that gets touched at load time
+    (confirmed live 2026-08-01: embedder/reranker/ner/finbert/keybert/siglip/
+    blip/qwen2vl/trocr/whisper flagged MISMATCH on every single boot despite
+    loading and working fine at runtime).
+
+    had_entry=False means no manifest entry exists yet for this model_id —
+    the caller (_handle_cached) writes one even though no download happened
+    this run. Without this, a model whose files are already on disk (e.g.
+    an interrupted prior run that downloaded successfully but was killed —
+    a container restart from validate_model_manifest()'s own crash counts —
+    before _write_manifest() ran) stays "missing" per startup_validator.py
+    forever: every future run's fast-cache-check finds the files, routes
+    here instead of the fresh-download path, and this function used to
+    report "no mismatch" (there was nothing to compare against) without
+    ever writing the entry that would actually satisfy the startup check.
+    Confirmed live 2026-08-23 on qwen2vl_7b — files present, zero manifest
+    entry, `Required models not cached` on every boot."""
     manifest_path = Path(_hf_home) / "download_manifest.json"
     recorded_files: list[str] | None = None
     recorded_sha: str | None = None
+    had_entry = False
     if manifest_path.exists():
         try:
             entries = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -669,16 +683,17 @@ def _verify_or_record_checksum(
             if e.get("model_id") == model_id and e.get("sha256"):
                 recorded_sha = e["sha256"]
                 recorded_files = e.get("files")  # None for pre-fix manifest entries
+                had_entry = True
                 break
 
-    current, _hashed_files = _model_checksum(
+    current, hashed_files = _model_checksum(
         model_id, mtype, gguf_filename=gguf_filename, only_files=recorded_files
     )
     if current is None:
-        return None, False
+        return None, False, hashed_files, had_entry
     if recorded_sha is None:
-        return current, False
-    return current, recorded_sha != current
+        return current, False, hashed_files, had_entry
+    return current, recorded_sha != current, hashed_files, had_entry
 
 
 # ── manifest ──────────────────────────────────────────────────────────────────
@@ -778,16 +793,37 @@ def _dispatch_download(
 
 
 def _handle_cached(
-    model_id: str, mtype: str, optional: bool, gguf_filename: str | None = None
+    model_id: str,
+    mtype: str,
+    optional: bool,
+    size_gb: float,
+    revision: str | None,
+    gguf_filename: str | None = None,
 ) -> str:
     """Model already on disk — verify its checksum instead of re-downloading.
     Returns "ok", "mismatch_skip" (optional model, don't fail the run), or
-    "mismatch_fail" (required model, caller should record it as failed)."""
-    _current_sha, mismatch = _verify_or_record_checksum(
+    "mismatch_fail" (required model, caller should record it as failed).
+
+    Also writes the manifest entry if one didn't already exist — see
+    _verify_or_record_checksum's docstring for why this matters (files can
+    be on disk with zero manifest entry after an interrupted prior run)."""
+    current_sha, mismatch, files, had_entry = _verify_or_record_checksum(
         model_id, mtype, gguf_filename=gguf_filename
     )
     if not mismatch:
-        print("  Already cached — checksum OK, skipping.\n")
+        if not had_entry and current_sha:
+            _write_manifest(
+                model_id,
+                size_gb,
+                mtype,
+                current_sha,
+                revision,
+                gguf_filename=gguf_filename,
+                files=files,
+            )
+            print("  Already cached — checksum OK, manifest entry was missing, wrote it now.\n")
+        else:
+            print("  Already cached — checksum OK, skipping.\n")
         return "ok"
     print(
         f"  CHECKSUM MISMATCH — {model_id} on disk no longer matches the "
@@ -881,7 +917,9 @@ def main() -> None:
             else _is_hub_cached(model_id, mtype=mtype)
         )
         if cached:
-            result = _handle_cached(model_id, mtype, optional, gguf_filename=gguf_filename)
+            result = _handle_cached(
+                model_id, mtype, optional, m["size_gb"], revision, gguf_filename=gguf_filename
+            )
             if result == "ok":
                 ok += 1
                 skipped += 1

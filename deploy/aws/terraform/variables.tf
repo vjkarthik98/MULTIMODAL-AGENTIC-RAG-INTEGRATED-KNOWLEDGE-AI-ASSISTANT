@@ -88,8 +88,8 @@ variable "create_uptime_kuma" {
 }
 
 variable "uptime_kuma_instance_type" {
-  description = "Instance type for the Uptime Kuma host — deliberately tiny, it only runs Kuma + Caddy and receives passive pushes."
+  description = "Instance type for the Uptime Kuma host — deliberately tiny, it only runs Kuma + Caddy and receives passive pushes. t4g (Graviton/arm64) is ~19% cheaper than the t3 (x86_64) equivalent for identical specs; both Kuma and Caddy publish multi-arch images so this costs nothing in compatibility."
   type        = string
-  default     = "t3.micro"
+  default     = "t4g.micro"
 }
 

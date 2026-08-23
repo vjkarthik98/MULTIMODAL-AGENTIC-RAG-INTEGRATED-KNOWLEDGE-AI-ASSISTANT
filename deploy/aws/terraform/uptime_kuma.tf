@@ -24,6 +24,24 @@ data "aws_ami" "small_linux" {
   }
 }
 
+# arm64 variant for the t4g (Graviton) family — a t4g instance cannot boot an
+# x86_64 AMI, so this is a separate lookup, not a filter tweak on the one
+# above.
+data "aws_ami" "small_linux_arm64" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-arm64"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
 resource "aws_security_group" "uptime_kuma" {
   count = var.create_uptime_kuma ? 1 : 0
 
@@ -94,7 +112,7 @@ resource "aws_iam_instance_profile" "uptime_kuma" {
 resource "aws_instance" "uptime_kuma" {
   count = var.create_uptime_kuma ? 1 : 0
 
-  ami                    = data.aws_ami.small_linux.id
+  ami                    = startswith(var.uptime_kuma_instance_type, "t4g") ? data.aws_ami.small_linux_arm64.id : data.aws_ami.small_linux.id
   instance_type          = var.uptime_kuma_instance_type
   availability_zone      = var.availability_zone
   subnet_id              = aws_subnet.magik_public.id
