@@ -38,3 +38,12 @@ output "ssh_private_key_path" {
 output "github_oidc_provider_arn" {
   value = aws_iam_openid_connect_provider.github.arn
 }
+
+output "uptime_kuma_instance_id" {
+  value = var.create_uptime_kuma ? aws_instance.uptime_kuma[0].id : null
+}
+
+output "uptime_kuma_public_ip" {
+  description = "Point the status.vk-ai.online (or your chosen subdomain) A record at this."
+  value       = var.create_uptime_kuma ? aws_eip.uptime_kuma[0].public_ip : null
+}
