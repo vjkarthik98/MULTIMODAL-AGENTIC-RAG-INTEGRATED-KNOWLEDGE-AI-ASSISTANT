@@ -5,16 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [1.0.0-rc1] - 2026-08-22
+## [0.33.0] - 2026-08-23
 
-Release candidate for the first stable release. RAG system behavior is
-unchanged from [0.32.0] below — v0.32.0 was itself framed as "final
-hardening pass before v1.0.0-rc1," and no retrieval, agent, guardrail, or memory
-logic has changed since. This candidate adds release-readiness governance
-docs and fixes a CI gap found while trying to populate real quality reports
-for the first time. Validating this build (staging deploy + Tier-2 gate,
-plus live-mode RAGAS/DeepEval/security/performance reports) before tagging
-the final v1.0.0.
+Fixes a real deploy-blocking gap discovered when v0.32.0's tagged build was
+actually promoted to production for the first time, plus release-readiness
+governance docs and a CI fix found in the same pass. RAG system retrieval,
+agent, guardrail, and memory logic is unchanged from [0.32.0] below — this
+release is about closing gaps found during v0.32.0's real production
+promotion attempt, not new product behavior.
 
 ### Added
 - `SECURITY.md` — private vulnerability disclosure process, supported
@@ -23,6 +21,18 @@ the final v1.0.0.
 - `.github/PULL_REQUEST_TEMPLATE.md`.
 
 ### Fixed
+- `app/bin/models/download_all_models.py` was missing `Qwen/Qwen2-VL-7B-Instruct`
+  from its manifest entirely, even though `startup_validator.py`'s
+  `REQUIRED_MODELS` has required it all along — silently absent until
+  `MODEL_CACHE_REQUIRE_MANIFEST` was turned on for the first time in
+  v0.32.0. v0.32.0's real production promotion failed at container startup
+  as a direct, correct consequence (`RuntimeError: Required models not
+  cached (1 missing): Qwen/Qwen2-VL-7B-Instruct`) — the strict manifest
+  check did exactly what it was built for, refusing to serve rather than
+  degrading silently, and surfaced a gap that had been invisible until this
+  release turned the check on. Added the missing manifest entry
+  (`qwen2vl_7b`, 16.59GB, revision-pinned) so the model downloads and
+  checksum-verifies like every other required model.
 - `quality-live.yml`'s `ragas-report`/`deepeval-report` jobs crashed at
   import time (`JWT_SECRET_KEY must be at least 32 characters long`) on
   every run — the jobs never set the placeholder `SECRET_KEY`/
@@ -31,6 +41,12 @@ the final v1.0.0.
   job had ever completed successfully before this fix, which is why
   `quality-reports/ragas/` and `quality-reports/deepeval/` had only ever
   held a `.gitkeep`.
+- `detect-secrets` flagged the two placeholder `SECRET_KEY`/`JWT_SECRET_KEY`
+  lines added above as unaudited "Secret Keyword" findings — the same
+  literal strings already exist safely in `ci.yml`/`eval-gate.yml`, but this
+  was a new file location the baseline hadn't seen. Allowlisted inline with
+  `pragma: allowlist secret` rather than regenerating the baseline for two
+  known-fake values.
 
 ### Known limitations carried forward
 
@@ -39,7 +55,7 @@ Roadmap section.
 
 ## [0.32.0] - 2026-08-22
 
-Final hardening pass before v1.0.0-rc1. Found and fixed live against the running
+Final hardening pass before v1.0.0. Found and fixed live against the running
 v0.31.0 production system.
 
 ### Added
