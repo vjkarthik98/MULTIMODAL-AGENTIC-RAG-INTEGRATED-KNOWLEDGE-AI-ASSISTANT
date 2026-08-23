@@ -5,6 +5,44 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc2] - 2026-08-23
+
+v1.0.0-rc1 never reached production. Its own fix was correct, but the tag
+was cut from a commit that predated it: both `v0.33.0` and `v1.0.0-rc1`
+point at the same pre-fix commit, so CD built and promoted the identical
+broken image twice, each time failing `promote-production`'s health check
+on `Required models not cached: Qwen/Qwen2-VL-7B-Instruct` and
+auto-rolling back to v0.31.0. No code change was needed to fix that —
+only tagging a commit that actually contains the rc1 fix. This release is
+that tag, plus the one latent bug found while verifying it.
+
+### Fixed
+- The three gated pyannote diarization models (`speaker-diarization-3.1`,
+  `segmentation-3.0`, `wespeaker-voxceleb-resnet34-LM`) were marked
+  `optional: True` in `app/bin/models/download_all_models.py` while
+  `startup_validator.py`'s `REQUIRED_MODELS` required all three. `optional`
+  means "skip on failure and still exit 0", so a gated download failure
+  (an expired/unaccepted `HF_TOKEN` being the likely trigger) would have
+  finished provisioning with a green summary, written no manifest entry,
+  and left the app crash-looping at startup — the exact failure class as
+  the qwen2vl_7b bug above, waiting on a token change. They are no longer
+  optional: a failure now stops the provisioning run where the summary
+  already prints the `set HF_TOKEN for gated models` hint.
+
+### Added
+- `tests/unit/core/test_model_manifest_contract.py` pins the contract
+  between the downloader and `startup_validator.py` — the two files have no
+  import relationship and drifted apart twice in three releases. Covers both
+  directions: every `REQUIRED_MODELS` id must be a non-optional, non-eval-only
+  downloader entry, and the already-cached fast path must self-heal a missing
+  manifest entry, stay idempotent, preserve sibling entries, and still fail
+  on checksum mismatch.
+
+### Known limitations carried forward
+
+Unchanged from [1.0.0-rc1]/[0.33.0]/[0.32.0] below — see README.md's Known
+Limitations & Roadmap section.
+
 ## [1.0.0-rc1] - 2026-08-23
 
 Release candidate — deploying today, monitoring production for one week
