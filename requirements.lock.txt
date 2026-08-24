@@ -8,7 +8,7 @@
 # specific and already exactly pinned outside pip's normal resolution:
 #   - llama-cpp-python==0.3.30           -> Dockerfile (cuda-builder stage),
 #                                            install_cuda.sh
-#   - torch==2.12.1 / torchvision==0.27.1
+#   - torch==2.13.0 / torchvision==0.28.0
 #     / torchaudio==2.11.0               -> install_cuda.sh, requirements.txt
 #                                            header comment
 # Compiling them here (on a non-Linux/non-CUDA machine) would record the
@@ -56,7 +56,7 @@ annotated-doc==0.0.5
     #   typer
 annotated-types==0.8.0
     # via pydantic
-antlr4-python3-runtime==4.9.3
+antlr4-python3-runtime==4.13.2
     # via omegaconf
 anyio==4.14.2
     # via
@@ -155,7 +155,7 @@ charset-normalizer==3.5.1
     #   requests
 clamd==1.0.2
     # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
-click==8.3.3
+click==8.4.2
     # via
     #   black
     #   camelot-py
@@ -307,7 +307,7 @@ frozenlist==1.8.0
     # via
     #   aiohttp
     #   aiosignal
-fsspec[http]==2026.6.0
+fsspec[http]==2026.7.0
     # via
     #   datasets
     #   huggingface-hub
@@ -354,7 +354,7 @@ h11==0.16.0
     #   uvicorn
 h2==4.4.1
     # via httpx
-h5py==3.14.0
+h5py==3.16.0
     # via
     #   keras
     #   tensorflow
@@ -452,7 +452,7 @@ langchain==0.2.17
     # via
     #   langchain-community
     #   ragas
-langchain-community==0.2.19
+langchain-community==0.4.2
     # via ragas
 langchain-core==0.2.43
     # via
@@ -470,7 +470,7 @@ langchain-text-splitters==0.2.4
     #   langchain
 langcodes==3.5.1
     # via wordfreq
-langsmith==0.1.147
+langsmith==0.11.1
     # via
     #   langchain
     #   langchain-community
@@ -525,7 +525,7 @@ mdurl==0.1.2
     # via markdown-it-py
 mediapipe==1.0.1
     # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
-ml-dtypes==0.5.4
+ml-dtypes==0.6.0
     # via
     #   keras
     #   tensorflow
@@ -535,7 +535,7 @@ mlflow-skinny==3.15.1
     # via mlflow
 mlflow-tracing==3.15.1
     # via mlflow
-mpmath==1.3.0
+mpmath==1.4.1
     # via sympy
 msgpack==1.2.1
     # via
@@ -646,7 +646,7 @@ numpy==1.26.4
     #   yake
 omegaconf==2.3.1
     # via pyannote-audio
-onnxruntime==1.23.2
+onnxruntime==1.24.3
     # via faster-whisper
 openai==1.109.1
     # via
@@ -909,7 +909,7 @@ pydantic==2.13.4
     #   spacy
     #   thinc
     #   weasel
-pydantic-core==2.46.4
+pydantic-core==2.48.0
     # via pydantic
 pydantic-settings==2.15.0
     # via
@@ -1045,7 +1045,7 @@ questionary==2.1.1
     # via deepeval
 qwen-vl-utils==0.0.14
     # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
-ragas==0.1.21
+ragas==0.4.3
     # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
 rank-bm25==0.2.2
     # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
@@ -1108,7 +1108,7 @@ rich==14.3.4
     #   typer
 rsa==4.9.1
     # via python-jose
-ruamel-yaml==0.18.17
+ruamel-yaml==0.19.1
     # via hyperpyyaml
 ruamel-yaml-clib==0.2.15
     # via ruamel-yaml
@@ -1236,7 +1236,7 @@ sympy==1.14.0
     #   onnxruntime
     #   pyannote-metrics
     #   torch
-tabulate==0.9.0
+tabulate==0.10.0
     # via
     #   camelot-py
     #   deepeval
@@ -1283,7 +1283,7 @@ tinycss2==1.5.1
     #   cssselect2
 tldextract==5.3.2
     # via presidio-analyzer
-tokenizers==0.22.2
+tokenizers==0.23.1
     # via
     #   faster-whisper
     #   sentence-transformers
@@ -1299,7 +1299,7 @@ tomli==2.4.1
     #   pytest
 tomli-w==1.2.0
     # via pip-audit
-torch==2.12.1
+torch==2.13.0
     # via
     #   -c C:/Users/karth/AppData/Local/Temp/claude/c--Users-karth-Desktop-Project/50637cce-4281-4a34-9e56-85c680d08d64/scratchpad/pin_constraints.txt
     #   accelerate
@@ -1334,7 +1334,7 @@ torchmetrics==1.9.0
     #   lightning
     #   pyannote-audio
     #   pytorch-lightning
-torchvision==0.27.1
+torchvision==0.28.0
     # via
     #   -c C:/Users/karth/AppData/Local/Temp/claude/c--Users-karth-Desktop-Project/50637cce-4281-4a34-9e56-85c680d08d64/scratchpad/pin_constraints.txt
     #   easyocr
