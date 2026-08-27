@@ -41,7 +41,7 @@ python-dotenv>=1.0
 # llama.cpp runs as a separate process (llama-server), not in-process — see
 # install_cuda.sh for the CUDA-enabled build required on GPU deployments.
 # ------------------------------------------------------------------------------
-llama-cpp-python==0.3.30
+llama-cpp-python==0.3.35
 sse-starlette>=2.0
 starlette-context>=0.3
 huggingface_hub>=0.22
@@ -261,7 +261,7 @@ psutil>=5.9
 # langchain constraint chain used by app/eval/judges/. Do not bump casually —
 # it changes every generation metric; re-baseline the eval suite if upgraded.
 # ------------------------------------------------------------------------------
-ragas==0.1.21
+ragas==0.4.3
 # Upper-bounded for the same reason as schemathesis in pyproject.toml's
 # [quality] extra: `>=1.4` was unbounded, so DeepEval 4.x installed itself
 # (requirements.lock.txt resolves 4.1.10) three majors past what
