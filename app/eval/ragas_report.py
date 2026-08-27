@@ -34,11 +34,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from urllib.parse import urlparse
 
 from app.eval.config import EvalConfig, load_config
+from app.eval.http_client import EvalAuth
 from app.eval.metrics.generation import compute_generation_metrics_ragas
 from app.eval.metrics.hallucination import compute_finance_fidelity, hallucination_rate
 from app.eval.runners.generation_runner import (
@@ -55,6 +57,20 @@ REPORTS_DIR = Path(__file__).resolve().parents[2] / "quality-reports" / "ragas"
 
 
 def _mode_tag(server_url: str) -> str:
+    """Which deployment the graded ANSWERS came from — "live" or "local".
+
+    EVAL_MODE_TAG overrides the URL sniff, because the URL stopped being a
+    reliable proxy for it. cd.yml's report-quality-metrics runs on the
+    production box's own self-hosted runner and reaches the production
+    container over `http://127.0.0.1:8000` (the same loopback call
+    tier2-eval.yml makes) — a real production measurement that the sniff below
+    would stamp `local`, on the report filename AND on the public shields.io
+    badge. The transport says nothing about what was measured; only the caller
+    knows, so the caller may say.
+    """
+    override = os.getenv("EVAL_MODE_TAG", "").strip()
+    if override:
+        return override
     host = urlparse(server_url).hostname or ""
     return "local" if host in ("127.0.0.1", "localhost") else "live"
 
@@ -75,9 +91,16 @@ async def _build_eval_rows(cfg: EvalConfig) -> tuple[list[dict], list[str]]:
             "run app.eval.datasets.build_gold_set --ingest and review TODO rows first."
         )
 
-    import os
-
-    access_token = os.getenv("EVAL_ACCESS_TOKEN", "")
+    # EvalAuth, not a raw EVAL_ACCESS_TOKEN string. `_query_via_server` takes
+    # `auth=` and has for some time; this module still passed `access_token=`,
+    # so EVERY row raised
+    #     TypeError: got an unexpected keyword argument 'access_token'
+    # straight into `errors` and the report was written with zero rows. It went
+    # unnoticed because the module crashed earlier still, at import, on
+    # Settings.validate() (see cd.yml's report-quality-metrics env block) — the
+    # import crash masked this one. Matches behavioral_runner.py:45,63 and
+    # generation_runner.py:378-383, the two callers that were already correct.
+    eval_auth = EvalAuth(cfg.user_id)
     full_ctx_retriever = _make_full_context_retriever()
     eval_rows: list[dict] = []
     errors: list[str] = []
@@ -85,12 +108,19 @@ async def _build_eval_rows(cfg: EvalConfig) -> tuple[list[dict], list[str]]:
     for row in gold_rows:
         query = row["query"]
         session_id = f"{cfg.session_prefix}_ragas_{row['id']}"
+        # /rag/query 400s on an empty scope (api_routes.py's FILE SCOPE REQUIRED
+        # gate), so an unscoped row never gets an answer at all. 133 of the 164
+        # gold rows carry the scope needed to satisfy it.
+        _row_sources = row.get("relevant_doc_ids") or (
+            [row["source_file"]] if row.get("source_file") else None
+        )
         try:
             result = _query_via_server(
                 query=query,
                 session_id=session_id,
                 user_id=cfg.user_id,
-                access_token=access_token,
+                auth=eval_auth,
+                sources=_row_sources,
             )
         except Exception as exc:
             errors.append(f"{row['id']}: {exc}")
@@ -98,7 +128,13 @@ async def _build_eval_rows(cfg: EvalConfig) -> tuple[list[dict], list[str]]:
 
         answer = _strip_verification_hedge(result.get("answer") or result.get("response") or "")
         sources = result.get("sources") or []
-        context_texts = _full_contexts(full_ctx_retriever, query, cfg.user_id, session_id)
+        # Grading context must mirror the scope the answer was generated under —
+        # see _full_contexts' docstring for the live case where unscoped grading
+        # context pulled in a different file entirely and faithfulness was scored
+        # against contamination.
+        context_texts = _full_contexts(
+            full_ctx_retriever, query, cfg.user_id, session_id, sources=_row_sources
+        )
         if not context_texts:
             context_texts = [s.get("text") or "" for s in sources if isinstance(s, dict)]
 

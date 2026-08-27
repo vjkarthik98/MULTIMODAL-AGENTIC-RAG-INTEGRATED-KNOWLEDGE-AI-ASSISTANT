@@ -32,6 +32,14 @@ logs/*
 
 scripts/*
 !scripts/.gitkeep
+# Tracked despite the blanket scripts/* above: cd.yml's report-quality-metrics
+# job runs this on every production promotion. It was never carved out, so the
+# file existed only on the author's machine and the "Regenerate quality badges"
+# step died with "No such file or directory" on every run that reached it —
+# confirmed 2026-08-23, CD run 32633959840, the first promotion that ever got
+# that far. Anything else added under scripts/ that CI invokes needs the same
+# explicit negation here.
+!scripts/generate_quality_badges.py
 
 mlruns/
 # MLflow's sqlite tracking backend (see app/eval/tracking/mlflow_logger.py —
