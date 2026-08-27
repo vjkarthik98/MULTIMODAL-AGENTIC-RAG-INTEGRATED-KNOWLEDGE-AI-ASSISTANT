@@ -1217,80 +1217,208 @@ jobs:
   # healthy from promote-production, so this costs no extra wake), never
   # blocks or rolls back the deploy it follows.
   #
-  # Runs on a bare runner, outside the server's own container/secret
-  # boundary — app/eval/http_client.py's EvalAuth cannot mint a token
-  # in-process there (it would sign with the wrong JWT_SECRET_KEY and get
-  # silently rejected forever, see that module's docstring for the incident
-  # that found this), so it logs in as a dedicated eval-reporter account
-  # instead (app/bin/seed_eval_reporter.py, run once against production's
-  # real Mongo — see that script's own output for the exact secrets to set).
-  # Until EVAL_REPORTER_EMAIL/PASSWORD are configured, both eval calls below
-  # fail cleanly (real 401s, an honest error in the report) rather than
-  # silently faking a result — continue-on-error covers exactly that gap.
-  # ---------------------------------------------------------------------
+  # ── Why this runs ON THE BOX, in the deployed container ──────────────────
+  # It used to run on a bare ubuntu-latest runner against the public URL. That
+  # could never have produced a number, for reasons only visible once the
+  # import-time crash in front of them was fixed (CD run 32633959840):
+  #
+  #   1. The judge is LOCAL BY DESIGN. app/eval/judges/qwen_judge.py runs
+  #      Qwen2.5-7B-Instruct Q4_K_M as its own process, deliberately NOT the
+  #      served model — DeepEval used to judge the RAG server with itself, a
+  #      real self-evaluation-bias problem fixed by giving the judge its own
+  #      checkpoint. A hosted runner has no GPU and no ~4.7GB GGUF, so it would
+  #      auto-download the model and then grade ~98 gold rows on 4 vCPUs. That
+  #      does not finish. On this box the GGUF is already in the mounted
+  #      .hf_cache and the GPU runs it in seconds.
+  #   2. No QDRANT_URL/QDRANT_API_KEY in a bare shell, so
+  #      generation_runner._make_full_context_retriever() returns None and
+  #      faithfulness/context_recall get graded against the 200-char source
+  #      snippets /rag/query returns instead of the full retrieved chunks.
+  #      In-container, the retriever is the real one.
+  #   3. No BM25 index — actions/checkout runs `git clean -ffdx`, and the index
+  #      lives in gitignored data/ on the box's mounted volume.
+  #
+  # Same three reasons tier2-eval.yml already runs in-container; see its
+  # "Why this runs INSIDE the deployed container" note. This job is the
+  # non-gating sibling of that one, pointed at production after promotion.
+  #
+  # Auth: EvalAuth (app/eval/http_client.py) mints in-process here, which is
+  # correct-by-construction inside the container — it signs with the container's
+  # own JWT_SECRET_KEY and re-mints proactively, so a long run can never present
+  # an expired token (the 2026-08-07 failure that module exists to prevent).
+  # EVAL_REPORTER_EMAIL/PASSWORD are deliberately NOT passed: those exist for
+  # driving a server from OUTSIDE its secret boundary, and setting them here
+  # would send EvalAuth down the HTTP-login path for no benefit, reintroducing a
+  # dependency on a seeded account that this path does not need.
   report-quality-metrics:
     needs: [build-push, promote-production]
-    if: needs.promote-production.result == 'success'
-    runs-on: ubuntu-latest
+    # The runner guard mirrors tier2-eval.yml's `runner_available` input: with no
+    # registered production runner this skips grey rather than queueing a job no
+    # machine will ever pick up.
+    if: >-
+      needs.promote-production.result == 'success' &&
+      vars.SELF_HOSTED_GPU_RUNNER == 'true'
+    runs-on: [self-hosted, gpu]
+    # Backstop only — each eval step carries its own, smaller timeout-minutes so a
+    # slow judge fails THAT STEP (absorbed by continue-on-error) instead of
+    # cancelling the job and turning a post-release report into a red release.
+    timeout-minutes: 150
     permissions:
-      contents: write
+      contents: read
+    env:
+      CONTAINER: magik-current
+      EVAL_USER_ID: ${{ vars.EVAL_USER_ID || 'eval_default' }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install eval + report dependencies
+      # Non-fatal by design, like everything else in this job: a container that
+      # is not serving is a real problem, but it is promote-production's problem
+      # — this job reports on it and leaves the release alone.
+      - name: Preflight — production container is running and healthy
+        id: preflight
+        continue-on-error: true
         run: |
-          pip install -r requirements.txt
-          pip install -e ".[quality]"
+          set -uo pipefail
+          if ! docker ps --filter "name=^/${CONTAINER}$" --filter status=running -q | grep -q .; then
+            echo "::warning title=Quality report skipped::Container '${CONTAINER}' is not running; nothing to measure."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          ok=""
+          for _ in $(seq 1 20); do
+            if docker exec "$CONTAINER" curl -sf http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              ok="yes"; break
+            fi
+            sleep 15
+          done
+          if [ -z "$ok" ]; then
+            echo "::warning title=Quality report skipped::/health did not answer within 5 minutes inside '${CONTAINER}'."
+            docker logs --tail 60 "$CONTAINER" 2>&1 || true
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          # Same corpus check tier2-eval.yml's preflight makes, and for the same
+          # reason: without this index HybridRetriever silently degrades to
+          # dense-only, so faithfulness/context_recall would be graded against a
+          # half-retrieved corpus. tier2 treats that as a hard failure because a
+          # false number is worse than no number — that goes double here, where
+          # the number ends up on a public shields.io badge. Skip and stay grey
+          # instead. Path: app/utils/paths.py's DATA_ROOT is RELATIVE
+          # ("data/users"), resolved against the process CWD — /app inside the
+          # container, where the box's /opt/magik/data is mounted.
+          if ! docker exec "$CONTAINER" \
+               test -f "/app/data/users/${EVAL_USER_ID}/bm25_index/bm25.pkl"; then
+            echo "::warning title=Quality report skipped::Missing /app/data/users/${EVAL_USER_ID}/bm25_index/bm25.pkl inside '${CONTAINER}'. Retrieval would degrade to dense-only and the report would publish a falsely-low score. Rebuild from Qdrant payloads (no GPU, no re-embedding): docker exec ${CONTAINER} python3.12 -m app.retrieval.bm25_retriever --user_id ${EVAL_USER_ID}"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+          echo "preflight OK — ${CONTAINER} healthy, eval corpus present"
 
-      - name: RAGAS report (post-release, live)
+      # EVAL_MODE_TAG=live: the call is over loopback, but the thing being
+      # measured is production. Without it _mode_tag() sniffs 127.0.0.1 and
+      # stamps "local" on both the report filename and the public badge.
+      - name: RAGAS report (post-release, in-container)
         id: ragas
+        if: steps.preflight.outputs.ok == 'true'
         continue-on-error: true
-        env:
-          EVAL_SERVER_URL: "https://magik.vk-ai.online"
-          EVAL_USER_ID: "5ead49e7-42f0-4368-80ac-8014595c3980"
-          EVAL_REPORTER_EMAIL: ${{ secrets.EVAL_REPORTER_EMAIL }}
-          EVAL_REPORTER_PASSWORD: ${{ secrets.EVAL_REPORTER_PASSWORD }}
-        run: python -m app.eval.ragas_report
+        timeout-minutes: 75
+        run: |
+          docker exec \
+            -e EVAL_USER_ID="${EVAL_USER_ID}" \
+            -e EVAL_SERVER_URL="http://127.0.0.1:8000" \
+            -e EVAL_MODE_TAG="live" \
+            "$CONTAINER" python3.12 -m app.eval.ragas_report
 
-      - name: DeepEval report (post-release, live)
+      - name: DeepEval report (post-release, in-container)
         id: deepeval
+        if: steps.preflight.outputs.ok == 'true'
         continue-on-error: true
-        env:
-          EVAL_SERVER_URL: "https://magik.vk-ai.online"
-          EVAL_USER_ID: "5ead49e7-42f0-4368-80ac-8014595c3980"
-          EVAL_REPORTER_EMAIL: ${{ secrets.EVAL_REPORTER_EMAIL }}
-          EVAL_REPORTER_PASSWORD: ${{ secrets.EVAL_REPORTER_PASSWORD }}
-        run: python -m app.eval.deepeval_suite --limit 10
+        timeout-minutes: 45
+        run: |
+          docker exec \
+            -e EVAL_USER_ID="${EVAL_USER_ID}" \
+            -e EVAL_SERVER_URL="http://127.0.0.1:8000" \
+            -e EVAL_MODE_TAG="live" \
+            "$CONTAINER" python3.12 -m app.eval.deepeval_suite --limit 10
+
+      # Both writers put their .json/.md under <repo root>/quality-reports/<tool>/,
+      # which inside the image is /app/quality-reports (the Dockerfile chowns /app
+      # to appuser, so _write_report's mkdir succeeds). Copy them into the
+      # workspace so the badge step and the artifact can see them.
+      - name: Extract reports from container
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p "${GITHUB_WORKSPACE}/quality-reports"
+          docker cp "${CONTAINER}:/app/quality-reports/." "${GITHUB_WORKSPACE}/quality-reports/" 2>/dev/null \
+            || echo "no reports produced (both eval steps failed before writing)"
 
       - name: Regenerate quality badges
-        run: python scripts/generate_quality_badges.py
+        if: always()
+        run: python3 scripts/generate_quality_badges.py --summary-md "${RUNNER_TEMP}/quality-summary.md"
 
-      - name: Commit report + badges (only if something actually changed)
-        env:
-          IMAGE_TAG: ${{ needs.build-push.outputs.image_tag }}
+      # Published, never committed. The previous version of this step ran
+      # `git commit` + `git push origin main`, which could not have worked and
+      # should not have been attempted:
+      #   * `main` carries branch protection with 7 required status checks, so
+      #     GITHUB_TOKEN's direct push is rejected outright — and the commit
+      #     message said `[skip ci]`, so those checks would never have run to
+      #     satisfy it either. (It never actually executed: the badge step above
+      #     failed first on every run, leaving this one skipped.)
+      #   * quality-reports/README.md states the policy plainly — "Committing is
+      #     always a manual `git add`, never automatic ... that applies doubly to
+      #     CI" — and CLAUDE.md's "never commit or push without explicit user
+      #     instruction" says the same thing.
+      # So the run publishes its evidence as an artifact and a job summary; a
+      # human decides which reports are worth committing, on `development`, the
+      # same way every other change reaches `main`.
+      - name: Upload report + badges
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: quality-report-${{ needs.build-push.outputs.image_tag }}
+          path: |
+            quality-reports/ragas
+            quality-reports/deepeval
+            quality-badges
+          if-no-files-found: warn
+          retention-days: 90
+
+      # The reports live inside a container the NEXT release replaces. Leaving
+      # them there would let a later run's docker cp pick up an older release's
+      # numbers if its own eval failed, so the container is left clean and the
+      # artifact above is the only copy that outlives the run.
+      - name: Clear in-container reports
+        if: always()
         run: |
-          set -euo pipefail
-          git config user.name "magik-bot"
-          git config user.email "actions@users.noreply.github.com"
-          git add quality-reports/ragas quality-reports/deepeval quality-badges
-          if git diff --cached --quiet; then
-            echo "No new report content — nothing to commit."
-          else
-            git commit -m "chore: post-release quality report ${IMAGE_TAG} [skip ci]"
-            git push origin main
-          fi
+          docker exec "$CONTAINER" rm -rf /app/quality-reports >/dev/null 2>&1 \
+            || echo "nothing to clear"
 
       - name: Post summary
         if: always()
         run: |
-          echo "## Post-release quality report — ${{ needs.build-push.outputs.image_tag }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Ragas: ${{ steps.ragas.outcome }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- DeepEval: ${{ steps.deepeval.outcome }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Non-blocking — never affects the release itself." >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Post-release quality report — ${{ needs.build-push.outputs.image_tag }}"
+            echo "- Measured: production \`${CONTAINER}\` in-container over loopback; judge on this box's GPU"
+            echo "- Ragas: ${{ steps.ragas.outcome }}"
+            echo "- DeepEval: ${{ steps.deepeval.outcome }}"
+            echo "- Non-blocking — never affects the release itself."
+            echo "- Reports + badges are attached to this run as an artifact; nothing is committed automatically."
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Written by the badge step above; absent only if that step itself died.
+          if [ -f "${RUNNER_TEMP}/quality-summary.md" ]; then
+            cat "${RUNNER_TEMP}/quality-summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # continue-on-error keeps a failed report from blocking the release —
+          # it must not also make one look like a pass. On 2026-08-23 both steps
+          # died at import and still rendered as 2-second green ticks; the run
+          # read as healthy and the gap survived a whole release. An explicit
+          # annotation puts it at the top of the run page instead.
+          for tool in "Ragas:${{ steps.ragas.outcome }}" "DeepEval:${{ steps.deepeval.outcome }}"; do
+            name="${tool%%:*}"
+            outcome="${tool##*:}"
+            if [ "$outcome" != "success" ]; then
+              echo "::warning title=${name} report did not run::outcome=${outcome} — badges stay 'not yet measured' for this release. Open the step log above; this did NOT affect the deploy."
+            fi
+          done
