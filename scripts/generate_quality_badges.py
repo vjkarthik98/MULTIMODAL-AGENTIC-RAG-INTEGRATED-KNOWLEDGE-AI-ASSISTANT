@@ -101,6 +101,22 @@ def _score_color(value: float, good: float, ok: float) -> str:
     return RED
 
 
+def _is_fallback_judge(entry: dict) -> bool:
+    """True when this metric was scored by the lexical fallback, not the judge.
+
+    `compute_generation_metrics_ragas` catches ANY Ragas failure and silently
+    re-scores with the crude lexical judge, stamping
+    `notes="judge=lexical_fallback (ragas_error: ...)"`
+    (app/eval/metrics/generation.py). The value that comes back is a real
+    number from real code, so every guard in this file passed it straight
+    through — v1.0.0-rc3 published "ragas faithfulness 0.87" in bright green
+    off a run where `ragas.evaluate()` had never executed at all. A number
+    measured by something other than the thing named on the badge is exactly
+    the kind of claim this script exists not to make.
+    """
+    return "lexical_fallback" in str(entry.get("notes") or "")
+
+
 def ragas_badge() -> dict:
     data = _latest_json("ragas")
     if not isinstance(data, dict):
@@ -109,9 +125,29 @@ def ragas_badge() -> dict:
     if not isinstance(metrics, dict):
         return {**NOT_YET, "label": "ragas"}
     entry = metrics.get("faithfulness")
-    faith = _finite(entry.get("value")) if isinstance(entry, dict) else None
+    if not isinstance(entry, dict):
+        return {**NOT_YET, "label": "ragas"}
+    if _is_fallback_judge(entry):
+        return {**NOT_YET, "label": "ragas", "message": "judge unavailable"}
+    faith = _finite(entry.get("value"))
     if faith is None:
         return {**NOT_YET, "label": "ragas"}
+
+    # Same coverage floor as the DeepEval badge below, for the same reason: a
+    # mean over a handful of gradeable rows is not a measurement of the run.
+    # `faithfulness` now excludes rows the NLI judge could not grade instead of
+    # scoring them 1.0 (app/eval/metrics/generation.py), so a low `n` against
+    # `n_queries` is the signal that most of the suite failed to grade.
+    scored = entry.get("n")
+    total = data.get("n_queries")
+    if isinstance(scored, int) and isinstance(total, int) and total > 0:
+        if scored * 2 < total:
+            return {
+                **NOT_YET,
+                "label": "ragas",
+                "message": f"insufficient data ({scored}/{total} rows)",
+            }
+
     mode = data.get("mode", "?")
     return _badge("ragas faithfulness", f"{faith:.2f} ({mode})", _score_color(faith, 0.7, 0.4))
 
@@ -121,21 +157,44 @@ def deepeval_badge() -> dict:
     if not isinstance(data, dict):
         return {**NOT_YET, "label": "deepeval"}
     summary = data.get("summary")
-    if not isinstance(summary, dict):
+    if not isinstance(summary, dict) or not summary:
         return {**NOT_YET, "label": "deepeval"}
+
     # summary[name]["mean"] is None whenever every row of that metric errored
     # (app/eval/deepeval_suite.py) — a metric with no successful rows must not
     # drag the average, so drop it rather than counting it as zero.
-    means = [
-        m
+    scored = [
+        (m, int(s.get("n") or 0))
         for s in summary.values()
         if isinstance(s, dict) and (m := _finite(s.get("mean"))) is not None
     ]
-    if not means:
-        return {**NOT_YET, "label": "deepeval"}
-    avg = sum(means) / len(means)
+
+    # ...but dropping them cannot be the whole story either. In v1.0.0-rc3, 5 of
+    # 6 metrics errored on every row and the 6th scored exactly ONE row of 10;
+    # excluding the empties left a single lucky score, published as
+    # "deepeval avg 1.00" in bright green. An average is only worth showing if
+    # enough of the suite actually ran, so require both a majority of metrics
+    # to have scored and half of all metric-row slots to be filled.
+    rows = len(data.get("per_row") or [])
+    n_metrics = len(summary)
+    slots = rows * n_metrics
+    filled = sum(n for _, n in scored)
+    coverage = (filled / slots) if slots else 0.0
+
+    if not scored or len(scored) * 2 < n_metrics or coverage < 0.5:
+        return {
+            **NOT_YET,
+            "label": "deepeval",
+            "message": f"insufficient data ({len(scored)}/{n_metrics} metrics)",
+        }
+
+    avg = sum(m for m, _ in scored) / len(scored)
     mode = data.get("mode", "?")
-    return _badge("deepeval avg", f"{avg:.2f} ({mode})", _score_color(avg, 0.7, 0.4))
+    return _badge(
+        "deepeval avg",
+        f"{avg:.2f} ({mode}, {len(scored)}/{n_metrics} metrics)",
+        _score_color(avg, 0.7, 0.4),
+    )
 
 
 def generic_not_yet(label: str) -> dict:

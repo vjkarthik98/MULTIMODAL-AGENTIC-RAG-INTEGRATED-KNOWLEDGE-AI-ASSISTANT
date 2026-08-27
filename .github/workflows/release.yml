@@ -13,61 +13,129 @@ name: Release
 # Tagging here (`vX.Y.Z`) is what actually kicks off cd.yml's build/push/
 # deploy pipeline (cd.yml triggers on `push: tags: ["v*"]") — this workflow
 # is the deliberate front door to that, not a replacement for it.
+#
+# TWO MODES, because `main` is protected and a release therefore cannot be one
+# atomic action. The previous single-shot version ended with
+# `git push origin HEAD:<dispatched ref>`, which could never work as intended:
+# dispatched on `main` the push is rejected outright (PR + status checks are
+# required), and dispatched on `development` the bump AND the tag both landed
+# on `development`, so the release tag never pointed at `main` at all. Neither
+# matched this repo's own flow (development -> PR -> main -> tag, see
+# CONTRIBUTING.md), which is why every release to date was cut by hand and why
+# there is no `chore(release):` commit anywhere in the history.
+#
+#   1. mode=prepare  — run from `development` (or any branch holding the work).
+#                      Bumps VERSION + pyproject.toml, inserts the CHANGELOG
+#                      section, pushes a `release/vX.Y.Z` branch and opens a PR
+#                      into `main`. Touches no protected branch. Review, let CI
+#                      go green, merge.
+#   2. mode=tag      — run from `main` AFTER that PR merges. Verifies main
+#                      really is at this version, tags the merge commit, and
+#                      publishes the GitHub Release using the notes already in
+#                      CHANGELOG.md. Annotated tags are not blocked by branch
+#                      protection (a tag protection rule, if one is ever added,
+#                      would need to allow this workflow).
+#
+# Only VERSION and pyproject.toml carry the version now — app/core/config.py
+# resolves APP_VERSION from pyproject.toml at runtime
+# (config._read_project_version()), so there is no third or fourth copy for
+# this workflow to forget.
 
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: "prepare = bump + changelog + PR into main (run from development). tag = tag main + publish the release (run from main, after that PR merges)."
+        required: true
+        type: choice
+        options: [prepare, tag]
+        default: prepare
       version:
-        description: 'New version, e.g. "0.30.0" (no leading "v" — added automatically). Must be greater than the current VERSION.'
+        description: 'Version, e.g. "0.30.0" or "1.0.0-rc4" (no leading "v" — added automatically). prepare: must be greater than the current VERSION by SemVer precedence. tag: must equal the VERSION already on main.'
         required: true
         type: string
       title:
-        description: "Short release title, e.g. \"MLOps, LLMOps & CI/CD Foundation\" — becomes the CHANGELOG.md section heading and GitHub Release title."
+        description: 'Short release title, e.g. "MLOps, LLMOps & CI/CD Foundation" — becomes the CHANGELOG.md section heading and the GitHub Release title.'
         required: true
         type: string
       changelog_notes:
-        description: "Changelog body in Markdown (### Added / ### Improved / ### Fixed subsections + bullets — see CHANGELOG.md for the established format). Used verbatim in both CHANGELOG.md and the GitHub Release notes."
-        required: true
+        description: "prepare only: changelog body in Markdown (### Added / ### Fixed subsections + bullets — see CHANGELOG.md for the established format). Ignored in tag mode, which reads the notes back out of CHANGELOG.md."
+        required: false
         type: string
       prerelease:
-        description: "Mark this as a pre-release on GitHub (does not affect versioning or cd.yml — that still fires on any vX.Y.Z tag push)."
+        description: "tag only: mark this as a pre-release on GitHub (does not affect versioning or cd.yml — that still fires on any vX.Y.Z tag push)."
         required: false
         type: boolean
         default: false
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: release-${{ github.workflow }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  prepare:
+    if: inputs.mode == 'prepare'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # need full history to check the tag doesn't already exist
+          fetch-depth: 0 # need full history to check the tag doesn't already exist
 
-      - name: Validate version
+      - name: Validate version is a genuine SemVer bump
         env:
           NEW_VERSION: ${{ inputs.version }}
         run: |
-          if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::version must be plain X.Y.Z (no 'v' prefix, no suffix) — got '$NEW_VERSION'"
-            exit 1
-          fi
           if git rev-parse "v$NEW_VERSION" >/dev/null 2>&1; then
             echo "::error::tag v$NEW_VERSION already exists"
             exit 1
           fi
+          # SemVer precedence, NOT `sort -V`. GNU version-sort has no concept of
+          # a pre-release: it ranks `1.0.0` BELOW `1.0.0-rc3`, so the old check
+          # rejected the actual 1.0.0 release as "not greater than" its own
+          # release candidate and this workflow could not have cut it at all.
+          # The old X.Y.Z-only regex also rejected every `-rcN` version outright.
           CURRENT=$(cat VERSION)
-          # Simple lexicographic-of-tuples comparison, good enough for X.Y.Z.
-          HIGHEST=$(printf '%s\n%s\n' "$CURRENT" "$NEW_VERSION" | sort -V | tail -1)
-          if [ "$HIGHEST" != "$NEW_VERSION" ] || [ "$CURRENT" == "$NEW_VERSION" ]; then
-            echo "::error::$NEW_VERSION is not greater than the current VERSION ($CURRENT)"
+          NEW_VERSION="$NEW_VERSION" CURRENT="$CURRENT" python3 - <<'PYEOF'
+          import os, re, sys
+
+          SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z][0-9A-Za-z.-]*))?$")
+
+          def key(v, what):
+              m = SEMVER.match(v)
+              if not m:
+                  sys.exit(f"::error::{what} must be X.Y.Z or X.Y.Z-prerelease "
+                           f"(no 'v' prefix) — got '{v}'")
+              core = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+              pre = m.group(4)
+              if pre is None:
+                  # A release outranks any pre-release of the same core version.
+                  return (core, (1,))
+              parts = [(0, int(p), "") if p.isdigit() else (1, 0, p)
+                       for p in pre.split(".")]
+              return (core, (0, parts))
+
+          new, cur = os.environ["NEW_VERSION"], os.environ["CURRENT"]
+          if key(new, "version") <= key(cur, "current VERSION"):
+              sys.exit(
+                  f"::error::{new} is not greater than the current VERSION ({cur}). "
+                  "Note SemVer compares alphanumeric pre-release identifiers "
+                  "lexically, so 'rc10' sorts BELOW 'rc9' — use dot-separated "
+                  "'rc.10' if you need to go past 9."
+              )
+          print(f"{new} > {cur} — OK")
+          PYEOF
+
+      - name: Require changelog notes
+        env:
+          NOTES: ${{ inputs.changelog_notes }}
+        run: |
+          if [ -z "${NOTES//[[:space:]]/}" ]; then
+            echo "::error::changelog_notes is required in prepare mode"
             exit 1
           fi
 
@@ -78,7 +146,7 @@ jobs:
           echo "$NEW_VERSION" > VERSION
           # pyproject.toml's version line is `version         = "X.Y.Z"` — match
           # loosely on whitespace since the file uses aligned `=` columns.
-          python - <<'PYEOF'
+          python3 - <<'PYEOF'
           import re, os
           v = os.environ["NEW_VERSION"]
           path = "pyproject.toml"
@@ -89,39 +157,174 @@ jobs:
           open(path, "w", encoding="utf-8").write(new_text)
           PYEOF
 
-      - name: Append CHANGELOG.md section
+      # Keep a Changelog order: NEWEST FIRST. The previous implementation was a
+      # plain `>> CHANGELOG.md` append, which put each new release at the very
+      # BOTTOM of the file — below [0.1.0] — under an `# [vX.Y.Z] — Title`
+      # heading that matched nothing else in the file (H1 not H2, a stray `v`
+      # inside the brackets, and no date). CHANGELOG.md was deliberately
+      # normalised to `## [X.Y.Z] - YYYY-MM-DD` in v0.32.0; this now writes that
+      # form and inserts it above the most recent existing entry.
+      - name: Insert CHANGELOG.md section
         env:
           NEW_VERSION: ${{ inputs.version }}
           TITLE: ${{ inputs.title }}
           NOTES: ${{ inputs.changelog_notes }}
         run: |
-          {
-            echo ""
-            echo "# [v${NEW_VERSION}] — ${TITLE}"
-            echo ""
-            echo "$NOTES"
-          } >> CHANGELOG.md
+          python3 - <<'PYEOF'
+          import datetime, os, re
 
-      - name: Commit version bump
+          version = os.environ["NEW_VERSION"]
+          title = os.environ["TITLE"].strip()
+          notes = os.environ["NOTES"].strip()
+          today = datetime.date.today().isoformat()
+
+          path = "CHANGELOG.md"
+          text = open(path, encoding="utf-8").read()
+
+          section = f"## [{version}] - {today}\n\n"
+          if title:
+              section += f"{title}\n\n"
+          section += f"{notes}\n\n"
+
+          # Insert directly above the first existing release heading, so the
+          # file's intro preamble stays on top and entries stay newest-first.
+          m = re.search(r"^## \[", text, re.MULTILINE)
+          if m:
+              text = text[: m.start()] + section + text[m.start():]
+          else:
+              text = text.rstrip("\n") + "\n\n" + section
+          open(path, "w", encoding="utf-8").write(text)
+          print(f"inserted [{version}] - {today}")
+          PYEOF
+
+      - name: Push release branch and open PR into main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_VERSION: ${{ inputs.version }}
+          TITLE: ${{ inputs.title }}
+          SOURCE_REF: ${{ github.ref_name }}
+        run: |
+          BRANCH="release/v${NEW_VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add VERSION pyproject.toml CHANGELOG.md
+          git commit -m "chore(release): v${NEW_VERSION}"
+          git push origin "$BRANCH"
+
+          # --body-file, not --body "...": interpolating a free-text input
+          # straight into a shell command is a script-injection footgun (a title
+          # containing a quote or $(...) would be executed by the runner).
+          # Everything user-supplied reaches the CLI through env vars or a file.
+          {
+            printf '%s\n\n' "Release prep for \`v${NEW_VERSION}\` — ${TITLE}"
+            printf '%s\n' "Cut from \`${SOURCE_REF}\` by the Release workflow (mode=prepare)."
+            printf '%s\n\n' "Bumps VERSION + pyproject.toml and inserts the CHANGELOG.md section."
+            printf '%s\n' "After this merges, re-run Release with **mode=tag** from \`main\` to tag and publish."
+          } > pr-body.md
+
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore(release): v${NEW_VERSION} — ${TITLE}" \
+            --body-file pr-body.md
+
+      - name: Summary
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+        run: |
+          {
+            echo "## Release prepared — v${NEW_VERSION}"
+            echo "- Branch \`release/v${NEW_VERSION}\` pushed, PR opened into \`main\`."
+            echo "- **Next:** merge that PR, then re-run this workflow from \`main\` with \`mode=tag\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  tag:
+    if: inputs.mode == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Verify main is at this version and the tag is free
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "${{ github.ref_name }}" != "main" ]; then
+            echo "::error::mode=tag must be dispatched from main (got '${{ github.ref_name }}'). Run mode=prepare first and merge its PR."
+            exit 1
+          fi
+          if git rev-parse "v$NEW_VERSION" >/dev/null 2>&1; then
+            echo "::error::tag v$NEW_VERSION already exists"
+            exit 1
+          fi
+          CURRENT=$(cat VERSION)
+          if [ "$CURRENT" != "$NEW_VERSION" ]; then
+            echo "::error::main is at VERSION $CURRENT, not $NEW_VERSION — has the prepare PR been merged?"
+            exit 1
+          fi
+          echo "main is at $CURRENT, tag v$NEW_VERSION is free — OK"
+
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+        run: |
+          # Single source for the notes: whatever prepare mode already wrote and
+          # a human reviewed in the PR, rather than asking for the same prose a
+          # second time and letting the two drift.
+          python3 - <<'PYEOF'
+          import os, re, sys
+
+          version = os.environ["NEW_VERSION"]
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          pattern = rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)"
+          m = re.search(pattern, text, re.DOTALL | re.MULTILINE)
+          if not m:
+              sys.exit(f"::error::CHANGELOG.md has no '## [{version}]' section")
+          body = m.group(1).strip()
+          if not body:
+              sys.exit(f"::error::the '## [{version}]' section in CHANGELOG.md is empty")
+          open("release-notes.md", "w", encoding="utf-8").write(body + "\n")
+          print(f"extracted {len(body.splitlines())} lines of notes for {version}")
+          PYEOF
+
+      - name: Tag main
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+          TITLE: ${{ inputs.title }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add VERSION pyproject.toml CHANGELOG.md
-          git commit -m "chore(release): v${{ inputs.version }}"
-          git push origin HEAD:${{ github.ref_name }}
-
-      - name: Tag
-        run: |
-          git tag -a "v${{ inputs.version }}" -m "${{ inputs.title }}"
-          git push origin "v${{ inputs.version }}"
+          # -m "$TITLE" via env, never inline ${{ }} interpolation — see the
+          # script-injection note in prepare's PR step.
+          git tag -a "v${NEW_VERSION}" -m "${TITLE}"
+          git push origin "v${NEW_VERSION}"
         # Pushing this tag is what triggers cd.yml's build-push/deploy pipeline
         # (on: push: tags: ["v*"]) — that happens automatically from here.
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          NEW_VERSION: ${{ inputs.version }}
+          TITLE: ${{ inputs.title }}
+          PRERELEASE: ${{ inputs.prerelease }}
         run: |
-          gh release create "v${{ inputs.version }}" \
-            --title "v${{ inputs.version }} — ${{ inputs.title }}" \
-            --notes "${{ inputs.changelog_notes }}" \
-            ${{ inputs.prerelease && '--prerelease' || '' }}
+          ARGS=()
+          if [ "$PRERELEASE" = "true" ]; then ARGS+=(--prerelease); fi
+          gh release create "v${NEW_VERSION}" \
+            --title "v${NEW_VERSION} — ${TITLE}" \
+            --notes-file release-notes.md \
+            "${ARGS[@]}"
+
+      - name: Summary
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+        run: |
+          {
+            echo "## Released — v${NEW_VERSION}"
+            echo "- Tag \`v${NEW_VERSION}\` pushed from \`main\`; cd.yml's deploy pipeline is now running."
+            echo "- GitHub Release published with the CHANGELOG.md notes."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -48,6 +49,51 @@ def _list(key: str, default: list[str] | None = None) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+# Last-resort literal, used only if BOTH files below are unreadable. Kept
+# deliberately vague rather than a plausible-looking version number: a wrong
+# version reported confidently is worse during an incident than an obviously
+# unknown one.
+_VERSION_FALLBACK = "0.0.0+unknown"
+
+
+def _read_project_version() -> str:
+    """The single source of truth for the running version.
+
+    Read, in order, from `pyproject.toml`'s `[project] version` and then the
+    `VERSION` file. Previously this was a hand-maintained literal, one of FOUR
+    copies of the version string across the repo that nothing kept in sync —
+    and `.github/workflows/release.yml` only ever rewrote two of them, so a
+    release could ship with `GET /version` reporting a different build than the
+    git tag that produced it.
+
+    `pyproject.toml` is tried first because it is the one file guaranteed to be
+    present at runtime: the Dockerfile's runtime stages `COPY pyproject.toml .`
+    into the same `/app` that `PROJECT_ROOT` resolves to, while `VERSION` is
+    not copied into the image at all. The `VERSION` fallback covers a source
+    checkout where pyproject.toml is somehow absent; `tests/unit/core/
+    test_version_consistency.py` pins the two to each other so the order can
+    never change the answer.
+
+    Parsed with a regex rather than `tomllib`, which is 3.11+ while this
+    project supports 3.10 and CI runs both.
+    """
+    root = Path(__file__).resolve().parents[2]
+    try:
+        text = (root / "pyproject.toml").read_text(encoding="utf-8")
+        match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
+        if match:
+            return match.group(1)
+    except OSError:
+        pass
+    try:
+        version = (root / "VERSION").read_text(encoding="utf-8").strip()
+        if version:
+            return version
+    except OSError:
+        pass
+    return _VERSION_FALLBACK
+
+
 def _cuda_available() -> bool:
     try:
         import torch
@@ -92,9 +138,12 @@ class Settings:
 
     # CORE APPLICATION
     APP_NAME: str = _str("APP_NAME", "Multimodal Agentic RAG Integrated Knowledge AI Assistant")
-    # Keep in sync with /VERSION and the test assertion below by hand — nothing
-    # reads /VERSION at runtime, so this drifts silently if only one is bumped.
-    APP_VERSION: str = _str("APP_VERSION", "1.0.0-rc3")
+    # Resolved from pyproject.toml (falling back to /VERSION) — see
+    # _read_project_version(). Not a literal: this used to be one of four
+    # hand-maintained copies of the version string, and a bump that missed one
+    # left GET /version reporting a different build than the tag that shipped
+    # it. Still env-overridable for a one-off diagnostic.
+    APP_VERSION: str = _str("APP_VERSION", _read_project_version())
     APP_DESCRIPTION: str = _str(
         "APP_DESCRIPTION", "Production Multimodal Agentic RAG Integrated AI System"
     )
@@ -1319,7 +1368,10 @@ class TestSettings:
 
     def test_defaults_are_valid(self):
         s = Settings()
-        assert s.APP_VERSION == "1.0.0-rc3"
+        # Compared to the resolved project version, not a hardcoded literal —
+        # a literal here was itself one of the four copies that drifted.
+        assert s.APP_VERSION == _read_project_version()
+        assert s.APP_VERSION != _VERSION_FALLBACK, "neither pyproject.toml nor VERSION was readable"
         assert s.TEXT_EMBEDDING_DIM == 1024
         assert s.VISION_EMBEDDING_DIM > 0
         assert s.CHUNK_OVERLAP < s.CHUNK_SIZE
