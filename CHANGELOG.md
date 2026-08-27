@@ -5,6 +5,80 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc3] - 2026-08-27
+
+v1.0.0-rc2 deployed successfully. `cd.yml`'s `report-quality-metrics` job —
+non-blocking, runs after every production promotion — had never once
+produced a report; this release root-causes and fixes it, and moves the job
+onto the box where it can actually succeed.
+
+### Fixed
+- **Missing script.** `scripts/generate_quality_badges.py` was caught by the
+  blanket `scripts/*` entry in `.gitignore`, so it never existed on any
+  runner. Added an explicit `!scripts/generate_quality_badges.py` negation.
+- **Import-time crash.** `python -m app.eval.ragas_report` /
+  `deepeval_suite` import `app.core.config`, which builds and validates a
+  `Settings()` object at import time; validation requires `JWT_SECRET_KEY`
+  to be ≥32 characters whenever `AUTH_ENABLED` is true (the default), so the
+  bare runner crashed before either report could run a single query.
+- **Wrong keyword argument.** Once the import crash was fixed, both report
+  modules turned out to call `_query_via_server(..., access_token=...)` — a
+  parameter that does not exist on that function's real signature
+  (`auth=`, an `EvalAuth` instance). Every gold row raised `TypeError` into
+  `errors`, so the report was written with zero rows regardless of the two
+  bugs above. `behavioral_runner.py` and `generation_runner.py`'s own calls
+  were already correct; only these two had drifted.
+- **Missing file scope.** Neither module passed `sources` on the query or
+  the grading-context lookup, so every row would additionally 400 against
+  `/rag/query`'s FILE SCOPE REQUIRED gate. Now built from
+  `relevant_doc_ids`/`source_file`, matching the two working runners, and
+  threaded into `_full_contexts()` too — grading context must mirror the
+  scope the answer was generated under, or faithfulness gets scored against
+  a different file's chunks (see that function's docstring for the live
+  audio-suite case where exactly this happened).
+- **Badge report selection used file mtime.** A fresh `actions/checkout`
+  stamps every committed file with checkout time, so a stale committed
+  report could outrank the one a run just produced. Badges now rank by the
+  `generated_at` timestamp inside each report.
+- **Badge script rendered `NaN` as a literal red badge.** A metric with no
+  successful rows (`MetricResult.empty()`) now degrades to the same gray
+  "not yet measured" badge as no report at all, instead of a red `nan`.
+- **Badge portfolio URLs were dead.** The printed shields.io URLs hardcoded
+  `vjkarthik98/multimodal-rag-assistant` — not this repository — so every
+  badge link 404'd. Now derived from `GITHUB_REPOSITORY` on CI, with the
+  correct repo slug as the local fallback.
+- **Illegal push to a protected branch.** The job's last step committed and
+  pushed straight to `main`, which could never have worked: `main` requires
+  7 status checks, and the commit was marked `[skip ci]`, so they would
+  never run to satisfy it. It had also never executed — always skipped
+  behind the earlier failures. It also contradicted this repo's own
+  documented policy (`quality-reports/README.md`: "Committing is always a
+  manual `git add`, never automatic ... that applies doubly to CI") and
+  the "never commit without explicit instruction" rule. Replaced with an
+  `actions/upload-artifact` publish (90-day retention) plus a job-summary
+  table; the job's `contents` permission dropped from `write` to `read`.
+- **Wrong execution environment, entirely.** Even with the above fixed, the
+  job ran on a bare `ubuntu-latest` runner, which cannot produce a real
+  number: the eval judge (`app/eval/judges/qwen_judge.py`, Qwen2.5-7B-Instruct)
+  runs locally by design and needs a GPU and a ~4.7GB GGUF neither of which
+  a hosted runner has; there is no `QDRANT_URL`/`QDRANT_API_KEY` so grading
+  context falls back to 200-char API snippets instead of full retrieved
+  chunks; and `actions/checkout`'s `git clean -ffdx` wipes the gitignored
+  BM25 index. The job now runs on `[self-hosted, gpu]` and execs into
+  `magik-current`, mirroring `tier2-eval.yml`'s established in-container
+  pattern — same GPU, same judge, same real BM25 index, same corpus
+  preflight check, and the container's own `JWT_SECRET_KEY` for in-process
+  auth (so `EVAL_REPORTER_EMAIL`/`PASSWORD` are no longer needed by this
+  job at all).
+- **Silent-pass masking.** `continue-on-error: true` on both report steps
+  meant every failure above rendered as a 2-second green tick — the gap
+  survived a full release undetected. The job now emits an explicit
+  `::warning` annotation whenever a report step's outcome isn't `success`.
+- **Mode mislabeling.** Running in-container means the call is over
+  `127.0.0.1`, which `_mode_tag()` reads as "local" — mislabeling a genuine
+  production measurement on both the report filename and the public badge.
+  Added an `EVAL_MODE_TAG` override, set to `live` for this job.
+
 ## [1.0.0-rc2] - 2026-08-23
 
 v1.0.0-rc1 never reached production. Its own fix was correct, but the tag

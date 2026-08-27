@@ -23,6 +23,16 @@ portfolio site.
   run and uploads them as a GitHub Actions artifact — it never commits
   anything back to the repo (see CLAUDE.md: never commit without explicit
   instruction — that applies doubly to CI).
+- **Produced by CI but still not committed**: `cd.yml`'s
+  `report-quality-metrics` job runs RAGAS + DeepEval against live production
+  after each promotion and attaches `quality-reports/ragas`,
+  `quality-reports/deepeval` and `quality-badges/` to the run as the
+  `quality-report-<tag>` artifact (90-day retention), with the headline numbers
+  in the job summary. Download it, and `git add` the reports worth keeping —
+  on `development`, like any other change. An earlier version of that job
+  committed and pushed straight to `main`; that both contradicted the rule
+  above and could not have worked (`main` is protected by required status
+  checks, and the commit was marked `[skip ci]`), so it was removed.
 
 ## Subdirectories
 
@@ -38,6 +48,14 @@ portfolio site.
 
 ## Generating the README/portfolio summary
 
-`scripts/generate_quality_badges.py` reads the latest committed report in
-each subdirectory and writes `quality-badges/*.json` (shields.io endpoint
-schema) plus prints a copy-paste Markdown block for the portfolio site.
+`scripts/generate_quality_badges.py` reads the newest report in each
+subdirectory — by the `generated_at` stamp inside it, never file mtime, which
+a fresh CI checkout flattens — and writes `quality-badges/*.json` (shields.io
+endpoint schema) plus prints a copy-paste Markdown block for the portfolio
+site. `--summary-md PATH` appends the same results as a Markdown table, which
+is how `cd.yml` fills its job summary.
+
+A tool with no report, an unparseable report, or a `NaN` score (what
+`MetricResult.empty()` writes when a metric had nothing to measure) gets the
+gray "not yet measured" badge. There is no path through this script that
+invents a number.
