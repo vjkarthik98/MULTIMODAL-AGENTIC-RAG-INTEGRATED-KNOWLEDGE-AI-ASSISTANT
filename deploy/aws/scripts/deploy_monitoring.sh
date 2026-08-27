@@ -48,6 +48,19 @@ command -v aws    >/dev/null 2>&1 || { log "FATAL: aws cli not installed"; exit 
 # inside monitoring/alerts/contact-points.yml, a separately mounted file
 # compose's own substitution never touches).
 SECRETS_ENV="/opt/magik/.env.monitoring.secrets"
+
+# Delete the throwaway secret files however this script exits, not just on the
+# happy path. The cleanup at the bottom was unreachable from any earlier
+# failure, so the GRAFANA_ADMIN_PASSWORD bug below (which aborted under
+# `set -u` mid-script on every promote) left the Grafana admin password and the
+# ntfy webhook URL sitting in plaintext on disk, and leaked one more
+# /tmp/monitoring-compose.*.env per run — the exact opposite of the
+# fetch-use-delete lifecycle this file exists to implement. COMPOSE_ENV is
+# created further down, hence the `:-` guards: the trap is armed before it
+# exists and must not itself trip `set -u`.
+cleanup_secrets(){ rm -f "${COMPOSE_ENV:-}" "${SECRETS_ENV:-}" 2>/dev/null || true; }
+trap cleanup_secrets EXIT
+
 rm -f "${SECRETS_ENV}"
 : > "${SECRETS_ENV}"
 chmod 600 "${SECRETS_ENV}"
@@ -62,6 +75,14 @@ do
            --with-decryption --query Parameter.Value --output text 2>/dev/null)" \
     || { log "FATAL: could not read /magik/${SSM_NAME} from SSM"; FETCH_OK="no"; break; }
   echo "${ENV_KEY}=${VAL}" >> "${SECRETS_ENV}"
+  # Also bind the value into THIS shell. The file is for Docker Compose; the
+  # Grafana annotation step near the bottom needs the password in the script's
+  # own environment, and nothing ever put it there — so `${GRAFANA_ADMIN_PASSWORD}`
+  # was an unbound variable and `set -u` killed the script at that line on
+  # every single production promote (v1.0.0-rc3, CD run 33037783625:
+  # "line 129: GRAFANA_ADMIN_PASSWORD: unbound variable"). `printf -v` assigns
+  # by variable name without an eval.
+  printf -v "${ENV_KEY}" '%s' "${VAL}"
 done
 if [ "${FETCH_OK}" != "yes" ]; then
   rm -f "${SECRETS_ENV}"
@@ -106,6 +127,41 @@ else
   RC=1
 fi
 
+# ── Make sure Grafana actually PICKED UP the alerting webhook ────────────────
+# `up -d` alone is not enough to trust here. NTFY_WEBHOOK_URL reaches Grafana
+# through `env_file:` (docker-compose.monitoring.yml), and this project has
+# already been bitten by Compose not re-reading env_file content for a
+# container it considers unchanged — a plain restart definitively does not, and
+# the v1.0.0-rc3 promote logged "Container magik-grafana Running" (i.e. NOT
+# recreated) on the very run that was supposed to roll out a freshly-rotated
+# ntfy topic. Grafana expands ${NTFY_WEBHOOK_URL} itself, at runtime, inside
+# the mounted monitoring/alerts/contact-points.yml, so a container holding the
+# old value leaves all 11 alert rules provisioned-but-undeliverable: silently
+# healthy-looking, with nothing actually paging.
+#
+# So: compare what the running container HAS against what SSM just gave us, and
+# recreate only Grafana when they differ. Idempotent — a correct container is
+# left alone, so this costs nothing on the common path.
+if [ "${RC}" = "0" ]; then
+  RUNNING_NTFY="$(docker exec magik-grafana printenv NTFY_WEBHOOK_URL 2>/dev/null || true)"
+  if [ "${RUNNING_NTFY}" != "${NTFY_WEBHOOK_URL:-}" ]; then
+    log "grafana is holding a stale NTFY_WEBHOOK_URL — forcing a recreate to pick up the SSM value"
+    if docker compose --env-file "${COMPOSE_ENV}" -f docker-compose.monitoring.yml \
+         up -d --force-recreate grafana; then
+      RECHECK="$(docker exec magik-grafana printenv NTFY_WEBHOOK_URL 2>/dev/null || true)"
+      if [ "${RECHECK}" = "${NTFY_WEBHOOK_URL:-}" ]; then
+        log "grafana recreated; NTFY_WEBHOOK_URL now matches SSM"
+      else
+        log "WARN: grafana recreated but NTFY_WEBHOOK_URL still does not match SSM — alerts will not deliver"
+      fi
+    else
+      log "WARN: grafana force-recreate failed — alert delivery may be stale"
+    fi
+  else
+    log "grafana already has the current NTFY_WEBHOOK_URL"
+  fi
+fi
+
 # ── Grafana deployment annotation ────────────────────────────────────────────
 # Without this, a step-change on a dashboard (recall/faithfulness/latency)
 # can't be told apart from an unrelated incident at a glance — someone has to
@@ -122,11 +178,14 @@ fi
 # block's outcome, matching the rest of this script's monitoring-must-never-
 # block-the-real-deploy stance (see cd.yml's `continue-on-error: true` on the
 # step that calls this whole script).
-if [ "${RC}" = "0" ]; then
+if [ "${RC}" = "0" ] && [ -n "${GRAFANA_ADMIN_PASSWORD:-}" ]; then
   DEPLOYED_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
   DEPLOYED_TAG="$(git describe --tags --exact-match 2>/dev/null || true)"
   ANNOTATION_TEXT="Deploy: ${DEPLOYED_SHA}${DEPLOYED_TAG:+ (${DEPLOYED_TAG})}"
-  if curl -fsS -m 5 -u "admin:${GRAFANA_ADMIN_PASSWORD}" \
+  # `:-` and the -n guard above are belt-and-braces on top of the printf -v
+  # binding at the fetch loop: this block is explicitly best-effort, so it must
+  # degrade to a skipped annotation, never abort the deploy under `set -u`.
+  if curl -fsS -m 5 -u "admin:${GRAFANA_ADMIN_PASSWORD:-}" \
        -X POST "http://127.0.0.1:3001/api/annotations" \
        -H "Content-Type: application/json" \
        -d "{\"text\": \"${ANNOTATION_TEXT}\", \"tags\": [\"deploy\", \"magik\"]}" \
@@ -141,7 +200,10 @@ fi
 # Compose bakes env_file/environment values into each container at create
 # time; deleting the source files afterward does not affect already-running
 # containers, only prevents them from lingering as plaintext on disk.
-rm -f "${COMPOSE_ENV}" "${SECRETS_ENV}"
+# The actual removal is the EXIT trap armed at the top, so it also covers every
+# early-exit path; this call just keeps the ordering explicit and the log line
+# on the success path. `rm -f` is idempotent, so running twice is harmless.
+cleanup_secrets
 log "throwaway env files removed"
 
 exit "${RC}"

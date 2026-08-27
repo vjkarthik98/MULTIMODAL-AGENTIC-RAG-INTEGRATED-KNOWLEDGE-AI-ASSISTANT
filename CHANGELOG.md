@@ -5,6 +5,189 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc4] - 2026-08-27
+
+v1.0.0-rc3 promoted to production cleanly — the first successful promotion
+since v0.31.0 — and in doing so produced the first real output the
+`report-quality-metrics` job had ever generated. That output was wrong, in
+two independent ways that had been invisible for as long as the job had been
+failing earlier. Both public quality badges were reporting numbers that did
+not measure what they claimed. This release fixes those, the reason nothing
+caught them, and the two release/deploy bugs found in the same pass. No
+retrieval, agent, guardrail, or memory behaviour changes; nothing here alters
+what the app does at request time.
+
+### Fixed
+- **Ragas never ran. At all.** `compute_generation_metrics_ragas()` builds
+  `ragas.embeddings.HuggingfaceEmbeddings`, whose `__post_init__` decides
+  bi-encoder vs cross-encoder with
+  `bool(np.intersect1d(SEQ_CLASSIFICATION_ARCHITECTURES, config.architectures))`.
+  `BAAI/bge-large-en-v1.5` is a `BertModel`, so that intersection is always
+  empty, and `bool()` of an empty array is a hard `ValueError` on NumPy >= 2
+  — surfaced through Ragas's pydantic dataclass as "1 validation error for
+  HuggingfaceEmbeddings". Deterministic: this project's embedding model could
+  never construct that class. The `except` around it silently re-scored every
+  metric with the crude lexical judge, so
+  `quality-reports/ragas/20260827-064744-live.json` reported 98 rows, 0
+  errors, `faithfulness=0.87` — with `judge=lexical_fallback (ragas_error:
+  ...)` buried in each metric's `notes` and a bright-green
+  "ragas faithfulness 0.87" badge on the README. Replaced with a small
+  `BaseRagasEmbeddings` adapter over MAGIK's own `TextEmbedder` singleton:
+  no NumPy version sniff, no second copy of the same weights loaded
+  (`_make_full_context_retriever()` has already loaded it in that process),
+  and relevancy measured in the exact embedding space production retrieval
+  ranks in. Length is preserved 1:1 because `TextEmbedder.embed_texts` drops
+  entries it cannot encode while Ragas reshapes on the input length.
+- **DeepEval's judge was fine; the JSON extractor was eating its answers.**
+  `_extract_json_from_text()` searched for an array *before* an object,
+  unconditionally, so every object-shaped reply was reduced to its inner
+  list and the wrapper discarded — and every DeepEval schema is an object
+  wrapping a list (`Truths` `{"truths": [...]}`, `Claims`, `Verdicts`).
+  DeepEval's own parser locates the payload with `find("{")`/`rfind("}")`,
+  finds neither in a bare array, parses the empty string, and reports
+  "Evaluation LLM outputted an invalid JSON. Please use a better evaluation
+  model." That is the error on every row of
+  `quality-reports/deepeval/20260827-065236-live.json`: 5 of 6 metrics
+  `mean=None, n=0`. The 6th scored exactly one row — the one reply that
+  happened to arrive in a markdown code fence, the single branch that
+  returned the object intact — and that lone score became the
+  "deepeval avg 1.00" badge. Extraction is now decided by position: whichever
+  of `{` or `[` opens first wins, with the other still tried as a fallback.
+  Ragas's array-shaped replies are unaffected.
+- **Both badges could publish a number that measured something else.**
+  `generate_quality_badges.py` read the score and never looked at how it was
+  produced. It now refuses to render a Ragas badge whose `notes` say
+  `lexical_fallback`, and requires both frameworks to clear a coverage floor —
+  DeepEval a majority of its metrics and half of all metric-row slots, Ragas
+  half of `n_queries` — before showing an average. On the rc3 report those
+  render "judge unavailable" and "insufficient data (1/6 metrics)". Excluding
+  empty metrics from the average was correct on its own but, without a
+  coverage floor, is what turned one lucky row into a perfect score.
+- **`faithfulness` scored every ungradeable row as 1.0 — a perfect score.**
+  "No statements to check", "no context", "the judge returned unparseable
+  output" and "an exception was raised" all appended 1.0 to the mean. Same
+  class of defect as the lexical fallback above, aimed at the same public
+  badge, and newly dangerous: this block sits *after* the
+  `HuggingfaceEmbeddings` construction that raised, so it had never once
+  executed — fixing Ragas turns it on. Ungradeable rows are now excluded from
+  the mean and counted in `notes`; if nothing grades, the metric is empty
+  rather than perfect.
+- **`faithfulness` judged answers against 800 characters of context** — about
+  an eighth of what the model under test was given
+  (`MAX_CONTEXT_CHARS=16000`), so any claim supported only by later context
+  looked unfaithful because the judge could not see its own evidence. That is
+  the exact failure `qwen_judge.grade_metric` documents for its own budget,
+  which live measurement settled at 6000 against the same n_ctx=8192 judge.
+  Matched to 6000. This cannot regress a published baseline, because the code
+  path had never run.
+- **Every production promote aborted its monitoring sync.**
+  `deploy_monitoring.sh` fetches `GRAFANA_ADMIN_PASSWORD` from SSM into a
+  file for Docker Compose, but the Grafana deployment-annotation step reads it
+  as a *shell* variable, and nothing ever set one — so `set -u` killed the
+  script at that line on every run ("line 129: GRAFANA_ADMIN_PASSWORD:
+  unbound variable", CD run 33037783625). Two consequences beyond the missing
+  annotation: the run reported failure on an otherwise healthy promote, and
+  the cleanup at the bottom of the script became unreachable, leaving the
+  Grafana admin password and the ntfy webhook URL in plaintext on disk and
+  leaking a `/tmp/monitoring-compose.*.env` per run — the exact opposite of
+  the fetch-use-delete lifecycle the script exists to implement. The fetch
+  loop now also binds each value into the shell (`printf -v`, no eval),
+  cleanup moved to an `EXIT` trap so it covers every exit path, and the
+  annotation block is guarded so it can never again abort the deploy.
+- **Grafana could keep serving a stale alerting webhook after a sync.**
+  `NTFY_WEBHOOK_URL` reaches Grafana through `env_file:`, and Compose does not
+  reliably re-read env_file content for a container it considers unchanged —
+  a plain `restart` definitively does not, and rc3's promote logged
+  "Container magik-grafana Running" (not recreated) on the very run meant to
+  roll out a freshly-rotated ntfy topic. Because Grafana expands
+  `${NTFY_WEBHOOK_URL}` itself at runtime inside the mounted
+  `contact-points.yml`, a container holding the old value leaves all 11 alert
+  rules provisioned but undeliverable — looking healthy while nothing pages.
+  `deploy_monitoring.sh` now compares the value inside the running container
+  against what it just fetched from SSM and force-recreates *only* Grafana
+  when they differ, then re-checks and warns if it still does not match.
+  Idempotent: a correct container is left alone.
+- **`release.yml` could not have cut v1.0.0.** Its version gate compared with
+  `sort -V`, which has no notion of a pre-release and ranks `1.0.0` *below*
+  `1.0.0-rc3` — so the real release would have been rejected as "not greater
+  than" its own release candidate — and its `^[0-9]+\.[0-9]+\.[0-9]+$` regex
+  rejected every `-rcN` version outright. Replaced with real SemVer
+  precedence. Its changelog step was also a plain `>>` append, writing each
+  new release to the *bottom* of this file, below `[0.1.0]`, under a heading
+  format (`# [vX.Y.Z] — Title`) matching nothing else in it; it now inserts a
+  correctly-formatted `## [X.Y.Z] - YYYY-MM-DD` section above the newest
+  entry.
+- **`release.yml` also pushed to whatever branch it was dispatched on**, which
+  no branch in this repo can accept: on `main` the push is rejected outright
+  (PR + status checks required), and on `development` the bump *and* the tag
+  both landed on `development`, so the release tag never pointed at `main`.
+  Split into two dispatchable modes that match the documented flow —
+  `prepare` (from `development`: bump, insert changelog, push a
+  `release/vX.Y.Z` branch, open a PR into `main`) and `tag` (from `main`,
+  after that PR merges: verify `main` really is at this version, tag it,
+  publish the release using the notes already in `CHANGELOG.md` rather than
+  asking for the same prose twice). Neither mode writes to a protected branch.
+- **`release.yml` interpolated free-text inputs directly into shell commands**
+  (`--title "… ${{ inputs.title }}"`, `--notes "${{ inputs.changelog_notes }}"`).
+  A title containing a quote or `$(...)` would have been executed by the
+  runner. All user-supplied values now reach the CLI through environment
+  variables or a file.
+- **`make release` preflight could never pass.** It asserted the substring
+  `v<version>` appeared in `CHANGELOG.md`, but v0.32.0 normalised every
+  heading to `## [X.Y.Z] - date` with no `v` inside the brackets, so the check
+  had been a false negative on every release since. Now matches the real
+  line-anchored heading.
+- DeepEval reports were stamped `"judge": "magik-mistral-7b-gguf"`. Mistral
+  was retired as the judge on 2026-08-01; every report written since has
+  mislabelled which model graded it.
+- DeepEval's judge calls used the 768-token default, which truncates the
+  longer truths/claims lists mid-array — indistinguishable downstream from a
+  model that cannot follow the format. Raised to 1536, and the retrieval
+  context handed to each test case is now bounded by the same 6000-char
+  budget `qwen_judge.grade_metric` already applies for the same n_ctx reason
+  (it was previously unbounded).
+
+### Added
+- `tests/unit/eval/test_judge_json_extraction.py` — pins both shapes the one
+  extractor has to serve, in both directions, so DeepEval's objects and
+  Ragas's arrays can't be traded off against each other again.
+- `tests/unit/core/test_version_consistency.py` — pins `VERSION` and
+  `pyproject.toml` to each other, checks the resolver returns that version and
+  never silently serves its unknown-version sentinel, and fails if
+  `app/main.py`'s header ever grows a hardcoded version again.
+
+### Changed
+- **The version is single-sourced.** It was four independent literals —
+  `VERSION`, `pyproject.toml`, `app/core/config.py`'s `APP_VERSION` default
+  plus that file's own `TestSettings` assertion, and `app/main.py`'s header
+  comment — with nothing deriving one from another, and `release.yml` only
+  ever rewrote two of them. A bump that missed one shipped an image whose
+  `GET /version` and `GET /status` disagreed with the git tag that built it.
+  `APP_VERSION` now resolves at import via `config._read_project_version()`,
+  which reads `pyproject.toml` (the one version-bearing file the Dockerfile
+  actually copies into the runtime image — `VERSION` is not) and falls back to
+  `VERSION`, then to an explicit `0.0.0+unknown` sentinel rather than a
+  plausible-looking wrong number. Parsed by regex, not `tomllib`, which is
+  3.11+ while this project supports 3.10. `app/main.py`'s header no longer
+  carries a version at all.
+- `deepeval` upper-bounded to `>=4.1,<5` in both `requirements.txt` and
+  `pyproject.toml`'s `[quality]` extra. `>=1.4` was unbounded, so 4.1.10
+  installed itself — three majors past what the suite was written against —
+  exactly the failure mode already documented for Schemathesis in the same
+  file.
+
+### Known limitations
+- The image's installed NumPy is >= 2 despite `requirements.txt` pinning
+  `numpy>=1.26,<2.0.0`: `Dockerfile`'s CUDA `llama-cpp-python` build runs
+  `pip install --force-reinstall`, which reinstalls that package's
+  dependencies without re-applying requirements.txt's ceiling. Identified,
+  deliberately not changed here — the image works on NumPy 2 today, and
+  forcing it back down on a release-eve build is a larger risk than the drift
+  itself. The Ragas fix above is version-agnostic either way. Reconciling the
+  declared and installed pins is a follow-up that needs its own build test.
+- Everything else unchanged from [1.0.0-rc3] below — see README.md's Known
+  Limitations & Roadmap section.
+
 ## [1.0.0-rc3] - 2026-08-27
 
 v1.0.0-rc2 deployed successfully. `cd.yml`'s `report-quality-metrics` job —

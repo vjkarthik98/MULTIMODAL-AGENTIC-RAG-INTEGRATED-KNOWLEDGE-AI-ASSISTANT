@@ -52,7 +52,23 @@ jobs:
     # cancellation regardless of whether the API comes up cleanly. Matches
     # zap-baseline's already-20min budget below, which builds the identical
     # image.
-    timeout-minutes: 20
+    #
+    # 20 -> 30: ~1min of headroom was never enough, because hosted-runner I/O
+    # varies by more than that. Measured on two runs of this same job a few
+    # hours apart (2026-08-27, jobs 98400656768 and 98590519189):
+    #
+    #   layer                                  passed    cancelled   ratio
+    #   #20 RUN pip install -r requirements    416.5s      594.9s    1.43x
+    #   #22 COPY --from=base-deps /opt/venv     83.2s      173.6s    2.09x
+    #
+    # #22 is a pure local filesystem copy — no network, no dependency
+    # resolution — so a 2x swing there is the runner itself, not anything in
+    # the build. The slower run blew the 20min budget mid-`docker build` and
+    # was cancelled before Schemathesis ever started, presenting as a red
+    # "failing check" that had nothing to do with the API contract. This is a
+    # timeout budget, not a performance target: raising it costs nothing on a
+    # fast runner and stops a slow one from reporting a false failure.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -155,7 +171,10 @@ jobs:
   zap-baseline:
     name: OWASP ZAP baseline (passive DAST)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 20 -> 30 for the same reason as api-contract above: it builds the
+    # identical image, and on the slow runner measured there it finished in
+    # 14m23s — inside 20min, but only just. Same budget, same rationale.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

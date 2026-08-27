@@ -299,56 +299,86 @@ def _extract_json_from_text(text: str) -> str:
     """Extract JSON from a conversational completion.
 
     Instruct models often wrap structured output in prose or a markdown code
-    fence rather than returning raw JSON. Tries multiple extraction
-    strategies in order of reliability. Used by both the Ragas wrapper below
+    fence rather than returning raw JSON. Used by both the Ragas wrapper below
     and deepeval_suite.py's DeepEval wrapper.
+
+    SHAPE-AGNOSTIC BY POSITION, deliberately. The previous version tried to
+    find an array BEFORE an object, unconditionally. That silently destroyed
+    every object-shaped response whose value happened to contain a list —
+    which is the shape of literally every DeepEval schema (`Truths`
+    {"truths": [...]}, `Claims` {"claims": [...]}, `Verdicts`
+    {"verdicts": [...]}). A judge reply of
+
+        {"truths": ["Revenue was $94.9B."]}
+
+    came back out of here as
+
+        ["Revenue was $94.9B."]
+
+    — the wrapper object stripped off. DeepEval's own parser
+    (`deepeval.metrics.utils.trimAndLoadJson`) is object-only: it does
+    `input_string.find("{")` / `rfind("}")` and, finding neither in a bare
+    array, parses the empty string and raises "Evaluation LLM outputted an
+    invalid JSON. Please use a better evaluation model." That is exactly the
+    error every DeepEval row reported in the v1.0.0-rc3 quality run
+    (quality-reports/deepeval/20260827-065236-live.json: 5 of 6 metrics
+    mean=None, n=0). The one metric that scored at all got its single row
+    through the code-fence branch below, which returns the object intact —
+    which is precisely why the report showed contextual_recall n=1 and
+    everything else n=0.
+
+    So: whichever of `{` or `[` opens FIRST in the text wins, and if that
+    candidate doesn't parse the other is still tried. Ragas's array-shaped
+    replies are unaffected (their `[` is first); DeepEval's object-shaped
+    replies now survive intact.
     """
     text = text.strip()
 
-    # Strategy 1: triple-backtick code block
-    cb = re.search(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", text, re.DOTALL)
+    # Strategy 1: triple-backtick code block. The fence itself delimits the
+    # payload, so take its whole body and let json.loads be the arbiter —
+    # the old inner `(\{.*?\}|\[.*?\])` was non-greedy and truncated any
+    # nested object at its first inner `}`.
+    cb = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
     if cb:
+        candidate = cb.group(1).strip()
         try:
-            json.loads(cb.group(1))
-            return cb.group(1).strip()
+            json.loads(candidate)
+            return candidate
         except json.JSONDecodeError:
             pass
 
-    # Strategy 2: find JSON array (greedy — handles nested objects)
-    arr = re.search(r"(\[[\s\S]*\])", text)
-    if arr:
-        try:
-            json.loads(arr.group(1))
-            return arr.group(1).strip()
-        except json.JSONDecodeError:
-            pass
+    # Strategy 2: try each opener in the order it appears in the text. For
+    # each, a greedy first-open..last-close slice, then a depth-balanced scan
+    # for the first complete value.
+    openers = sorted(
+        (idx, open_c, close_c)
+        for idx, open_c, close_c in ((text.find(o), o, c) for o, c in (("{", "}"), ("[", "]")))
+        if idx >= 0
+    )
 
-    # Strategy 3: find JSON object (greedy)
-    obj = re.search(r"(\{[\s\S]*\})", text)
-    if obj:
-        try:
-            json.loads(obj.group(1))
-            return obj.group(1).strip()
-        except json.JSONDecodeError:
-            pass
+    for idx, open_c, close_c in openers:
+        last = text.rfind(close_c)
+        if last > idx:
+            candidate = text[idx : last + 1]
+            try:
+                json.loads(candidate)
+                return candidate.strip()
+            except json.JSONDecodeError:
+                pass
 
-    # Strategy 4: find first { or [ and extract to matching close
-    for start_char, end_char in [("[", "]"), ("{", "}")]:
-        idx = text.find(start_char)
-        if idx >= 0:
-            depth = 0
-            for i, c in enumerate(text[idx:], idx):
-                if c == start_char:
-                    depth += 1
-                elif c == end_char:
-                    depth -= 1
-                    if depth == 0:
-                        candidate = text[idx : i + 1]
-                        try:
-                            json.loads(candidate)
-                            return candidate.strip()
-                        except json.JSONDecodeError:
-                            break
+        depth = 0
+        for i, c in enumerate(text[idx:], idx):
+            if c == open_c:
+                depth += 1
+            elif c == close_c:
+                depth -= 1
+                if depth == 0:
+                    candidate = text[idx : i + 1]
+                    try:
+                        json.loads(candidate)
+                        return candidate.strip()
+                    except json.JSONDecodeError:
+                        break
 
     # Last resort — return as-is
     return text

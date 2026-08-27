@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-# APP/MAIN.PY — MAGIK FINANCE RAG v1.0.0-rc3
+# APP/MAIN.PY — MAGIK FINANCE RAG
+# (version deliberately not repeated here — it lives in pyproject.toml and is
+#  resolved at runtime by app/core/config.py::_read_project_version(); this
+#  comment was a fourth hand-maintained copy that silently went stale)
 # FASTAPI APPLICATION ENTRY POINT — WIRES EVERYTHING TOGETHER
 # SECTION 4.6 — LIFESPAN, MIDDLEWARE, OTEL, PROMETHEUS, CORS, RATE LIMIT
 # ── HF CACHE MUST BE SET BEFORE ANY TRANSFORMERS/TORCH IMPORT ──────────────
