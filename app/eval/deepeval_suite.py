@@ -103,15 +103,38 @@ def get_deepeval_llm(temperature: float = 0.0):
                 "matching the schema requested in the prompt — no preamble, no "
                 "markdown fences, no explanation.",
                 temperature=self.temperature,
+                # Every DeepEval schema is a list — the truths/claims/verdicts
+                # extracted from a whole answer against a whole retrieval
+                # context. The 768-token default truncated the longer ones
+                # mid-array, which reads downstream as invalid JSON and is
+                # indistinguishable from a model that simply cannot follow the
+                # format. Still well inside the judge's n_ctx=8192 alongside
+                # _CONTEXT_CHAR_BUDGET below.
+                max_tokens=1536,
             )
             extracted = _extract_json_from_text(raw)
-            if schema is not None:
-                try:
-                    return schema(**json.loads(extracted))
-                except Exception:
-                    # Let the metric's own trimAndLoadJson parsing have a shot
-                    # at the raw text rather than hard-failing the whole run.
-                    return extracted
+            if schema is None:
+                return extracted
+            try:
+                data = json.loads(extracted)
+            except json.JSONDecodeError:
+                # Let the metric's own trimAndLoadJson parsing have a shot at
+                # the raw text rather than hard-failing the whole run.
+                return extracted
+            try:
+                if isinstance(data, dict):
+                    return schema(**data)
+                # A bare list where an object was asked for. Every DeepEval
+                # schema wraps exactly one list field (Truths.truths,
+                # Claims.claims, Verdicts.verdicts), so when the judge answers
+                # with the list itself the intended mapping is unambiguous —
+                # recover it instead of failing the row.
+                if isinstance(data, list):
+                    fields = list(getattr(schema, "model_fields", {}) or {})
+                    if len(fields) == 1:
+                        return schema(**{fields[0]: data})
+            except Exception:
+                pass
             return extracted
 
         async def a_generate(self, prompt: str, schema=None) -> object:
@@ -121,6 +144,41 @@ def get_deepeval_llm(temperature: float = 0.0):
             return "qwen2.5-7b-instruct (local, no OpenAI)"
 
     return _MagikLocalLLM(temperature=temperature)
+
+
+# Total characters of retrieval context handed to the judge for one row.
+#
+# Same budget, same reason as qwen_judge.grade_metric's `_CTX_CHAR_BUDGET`:
+# the judge runs at n_ctx=8192, and that file's live measurement (2026-08-17)
+# found output silently degrading once context crowded the window — the model
+# stops honouring the requested output format rather than failing loudly.
+# `_full_contexts()` returns FULL untruncated chunks precisely because the
+# 200-char API snippets starve the judge, so the list arriving here has no
+# upper bound of its own and needs one imposed.
+_CONTEXT_CHAR_BUDGET = 6000
+
+
+def _budget_contexts(contexts: list[str], budget: int = _CONTEXT_CHAR_BUDGET) -> list[str]:
+    """Trim to `budget` chars, keeping whole chunks, highest-ranked first.
+
+    Chunks arrive retrieval-ranked, so truncating from the tail drops the
+    least relevant evidence. A single oversized first chunk is cut rather than
+    dropped — returning nothing would score the row against no context at all.
+    """
+    kept: list[str] = []
+    used = 0
+    for chunk in contexts:
+        if not chunk:
+            continue
+        if used + len(chunk) <= budget:
+            kept.append(chunk)
+            used += len(chunk)
+        elif not kept:
+            kept.append(chunk[:budget])
+            break
+        else:
+            break
+    return kept
 
 
 # Metrics that need only (input, actual_output) — run on every answer.
@@ -228,7 +286,7 @@ async def _build_eval_rows(cfg: EvalConfig, limit: int | None) -> tuple[list[dic
                 "row_id": row["id"],
                 "query": query,
                 "answer": answer,
-                "contexts": context_texts or ["(no retrieved context available)"],
+                "contexts": _budget_contexts(context_texts) or ["(no retrieved context available)"],
                 "reference_answer": ref if ref and ref != "TODO" else None,
             }
         )
@@ -286,7 +344,11 @@ def _write_report(payload: dict, mode: str, errors: list[str]) -> tuple[Path, Pa
         "generated_at": timestamp,
         "mode": mode,
         "server_url": _SERVER_URL,
-        "judge": "magik-mistral-7b-gguf (local, no OpenAI)",
+        # Must match _MagikLocalLLM.get_model_name(). Mistral was retired as
+        # the judge on 2026-08-01 (see app/eval/judges/qwen_judge.py's module
+        # docstring); this string was left behind and mislabelled every report
+        # written since, including v1.0.0-rc3's.
+        "judge": "qwen2.5-7b-instruct (local, no OpenAI)",
         "errors": errors,
         **payload,
     }
@@ -302,7 +364,7 @@ def _write_report(payload: dict, mode: str, errors: list[str]) -> tuple[Path, Pa
         "",
         f"**Mode:** `{mode}` ({_SERVER_URL})  ",
         f"**Generated:** {timestamp}  ",
-        "**Judge:** local Mistral-7B GGUF (no OpenAI)  ",
+        "**Judge:** Qwen2.5-7B-Instruct (local, no OpenAI)  ",
         "",
         "| Metric | Mean | n |",
         "|---|---|---|",

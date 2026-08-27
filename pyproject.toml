@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT"
-version         = "1.0.0-rc3"
+version         = "1.0.0-rc4"
 description     = "Production Multimodal RAG + Agentic AI System — Phase 31"
 readme          = "README.md"
 requires-python = ">=3.10"
@@ -234,7 +234,9 @@ quality = [
     # change behind it. v4 is the target (that file uses the v4 API); the <5
     # ceiling is what stops the next major doing this again.
     "schemathesis>=4.24,<5",
-    "deepeval>=1.4",
+    # Same story, same fix — see requirements.txt's note. `>=1.4` let DeepEval
+    # 4.x in unannounced; the suite now targets v4 and is bounded below <5.
+    "deepeval>=4.1,<5",
 ]
 
 dev = [

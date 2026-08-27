@@ -168,10 +168,17 @@ zap-baseline:  ## OWASP ZAP passive baseline DAST scan against the local docker-
 
 # Preflight only — it deliberately does NOT cut the release. Tagging is done by
 # .github/workflows/release.yml (Actions tab -> Release -> Run workflow), which
-# owns bumping VERSION/pyproject.toml, appending CHANGELOG.md, tagging, and
-# publishing — all in one auditable place. A `make release` that pushed tags
-# from a laptop would be a second, divergent release path. What this DOES do is
-# catch the mistakes that make a release messy, before you trigger it.
+# owns bumping VERSION/pyproject.toml, inserting the CHANGELOG.md section
+# (mode=prepare, from development -> PR into main) and then tagging and
+# publishing (mode=tag, from main). A `make release` that pushed tags from a
+# laptop would be a second, divergent release path. What this DOES do is catch
+# the mistakes that make a release messy, before you trigger it.
+#
+# The changelog check below looks for a line-anchored `## [X.Y.Z]` heading. It
+# used to search for the bare substring 'v'+version, which no longer appears
+# anywhere: CHANGELOG.md was normalised in v0.32.0 to `## [X.Y.Z] - date` with
+# no 'v' inside the brackets, so this check had been failing every release as a
+# false negative.
 release:  ## Preflight the repo for a release (does not tag — release.yml does that)
 	@$(PYTHON) -c "import re,subprocess,sys; \
 fail=[]; \
@@ -182,12 +189,11 @@ dirty=subprocess.run(['git','status','--porcelain'],capture_output=True,text=Tru
 dirty and fail.append('working tree is dirty (%d files) - commit or stash first' % len(dirty.splitlines())); \
 tags=subprocess.run(['git','tag'],capture_output=True,text=True).stdout.split(); \
 ('v'+ver) in tags and fail.append('tag v%s already exists - bump VERSION' % ver); \
-('v'+ver) in open('CHANGELOG.md',encoding='utf-8').read() or fail.append('CHANGELOG.md has no [v%s] section' % ver); \
-branch=subprocess.run(['git','branch','--show-current'],capture_output=True,text=True).stdout.strip(); \
+re.search(r'(?m)^\#\# \[%s\]' % re.escape(ver), open('CHANGELOG.md',encoding='utf-8').read()) or fail.append('CHANGELOG.md has no [%s] section' % ver); \
 [print('  FAIL  '+f) for f in fail]; \
 print('  ok    version %s consistent, tree clean, tag free, changelog present' % ver) if not fail else None; \
 print(); \
-print('Next: GitHub -> Actions -> Release -> Run workflow (version=%s)' % ver) if not fail else None; \
+print('Next: GitHub -> Actions -> Release -> Run workflow (mode=tag, version=%s) from main' % ver) if not fail else None; \
 sys.exit(1 if fail else 0)"
 
 docker-build:  ## Build the production (CUDA) image explicitly — see Dockerfile stage comments

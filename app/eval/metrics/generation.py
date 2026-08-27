@@ -24,6 +24,27 @@ _TEMPLATE_LEAK_PATTERNS = [
 ]
 _TEMPLATE_LEAK_RE = re.compile("|".join(_TEMPLATE_LEAK_PATTERNS), re.IGNORECASE)
 
+# Context budget for the direct-NLI faithfulness call in
+# compute_generation_metrics_ragas(). Was 800 chars — roughly an eighth of what
+# the production model itself was given (settings.MAX_CONTEXT_CHARS=16000), so
+# any claim supported only by later context looked unfaithful purely because the
+# judge could not see its own evidence. That is the identical failure
+# qwen_judge.grade_metric documents at length for its own `_CTX_CHAR_BUDGET`,
+# which live measurement (2026-08-17) settled at 6000 against the same
+# n_ctx=8192 judge. Matched to it here.
+#
+# 6000 is comfortable rather than tight in this path: grade_metric has to insert
+# its context TWICE (once as the instruction, once as the graded reference,
+# because faithfulness has no separate gold answer), whereas this prompt embeds
+# it once alongside at most _NLI_MAX_STATEMENTS short sentences.
+#
+# Raising this cannot regress a published baseline, because this code has never
+# executed: it sits after the HuggingfaceEmbeddings construction that raised on
+# NumPy >= 2, so every run to date fell through to the lexical judge before
+# reaching it.
+_NLI_CTX_CHAR_BUDGET = 6000
+_NLI_MAX_STATEMENTS = 4
+
 
 def _extract_context_texts(contexts: list[Any]) -> list[str]:
     """Normalize contexts to list of strings."""
@@ -358,6 +379,86 @@ def compute_generation_metrics_rubric(
     return metrics_out
 
 
+def _build_ragas_embeddings():
+    """Ragas-compatible embeddings backed by MAGIK's OWN resident encoder.
+
+    NOT `ragas.embeddings.HuggingfaceEmbeddings`, and not as a style
+    preference — that class cannot be constructed here at all. Its
+    `__post_init__` decides bi-encoder vs cross-encoder with
+
+        self.is_cross_encoder = bool(np.intersect1d(
+            list(MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES.values()),
+            config.architectures))
+
+    For any plain bi-encoder — `BAAI/bge-large-en-v1.5`'s architecture is
+    `BertModel`, which is not a sequence-classification head — that
+    intersection is EMPTY, and `bool()` of an empty NumPy array raises
+    `ValueError: The truth value of an empty array is ambiguous` on NumPy
+    >= 2. Ragas declares the class with `pydantic.dataclasses.dataclass`, so
+    it surfaces as "1 validation error for HuggingfaceEmbeddings". It is
+    deterministic: the embedding model this project uses can never construct
+    it, on any run.
+
+    `compute_generation_metrics_ragas` caught that and fell through to the
+    lexical judge — silently. Every metric in v1.0.0-rc3's quality report
+    (quality-reports/ragas/20260827-064744-live.json) carries
+    `judge=lexical_fallback (ragas_error: ...)` in its notes while the badge
+    read "ragas faithfulness 0.87" in bright green. 98 rows, 0 errors, real
+    numbers — from a crude lexical scorer, not the Qwen-judge-backed Ragas
+    evaluation the label claimed.
+
+    Reusing MAGIK's own embedder is strictly better than repairing the Ragas
+    class would have been:
+      * `model_loader.get_embedder()` is a singleton that
+        `generation_runner._make_full_context_retriever()` has ALREADY loaded
+        in this process to build grading context, so this costs no extra
+        VRAM — whereas HuggingfaceEmbeddings would load a second, independent
+        SentenceTransformer copy of the same weights.
+      * Relevancy is then measured in the exact embedding space production
+        retrieval ranks in (same model, same device placement, same
+        finance-number normalisation), rather than a parallel one.
+
+    Length is preserved 1:1 on purpose. `TextEmbedder.embed_texts` DROPS any
+    entry it cannot sanitise or encode (it appends nothing in that branch),
+    and Ragas's `AnswerRelevancy.calculate_similarity` does
+    `np.asarray(embed_documents(qs)).reshape(len(qs), -1)` — a short list is
+    a hard ValueError there, so every input must map to exactly one vector.
+    """
+    from ragas.embeddings import BaseRagasEmbeddings
+    from ragas.run_config import RunConfig
+
+    from app.core.config import settings as app_settings
+    from app.core.model_loader import model_loader
+
+    # Ragas can generate an empty question for a degenerate answer. Embedding
+    # a placeholder keeps the 1:1 contract above with a real vector; a zero
+    # vector would divide by a zero norm in calculate_similarity and turn the
+    # WHOLE metric's mean into NaN over one bad row.
+    _EMPTY_PLACEHOLDER = "(empty)"
+
+    class _MagikRagasEmbeddings(BaseRagasEmbeddings):  # type: ignore[misc]
+        def __init__(self) -> None:
+            self._embedder = model_loader.get_embedder()
+            self._dim = getattr(self._embedder, "expected_dim", app_settings.TEXT_EMBEDDING_DIM)
+            self.set_run_config(RunConfig(max_workers=1, timeout=600))
+
+        def _embed_one(self, text: str) -> list[float]:
+            try:
+                return self._embedder.embed_text((text or "").strip() or _EMPTY_PLACEHOLDER)
+            except Exception:
+                # Never propagate: one unembeddable string must degrade that
+                # single comparison, not abort the whole report.
+                return [0.0] * self._dim
+
+        def embed_query(self, text: str) -> list[float]:
+            return self._embed_one(text)
+
+        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            return [self._embed_one(t) for t in texts]
+
+    return _MagikRagasEmbeddings()
+
+
 async def compute_generation_metrics_ragas(
     eval_rows: list[dict],
 ) -> dict[str, MetricResult]:
@@ -370,19 +471,16 @@ async def compute_generation_metrics_ragas(
     try:
         from datasets import Dataset
         from ragas import evaluate
-        from ragas.embeddings import HuggingfaceEmbeddings
         from ragas.metrics import (
             answer_relevancy,
             context_recall,
         )
         from ragas.run_config import RunConfig
 
-        from app.core.config import settings as app_settings
         from app.eval.judges.qwen_judge import get_ragas_judge
 
-        RunConfig(max_workers=1, timeout=300)
         judge = get_ragas_judge()
-        embeddings = HuggingfaceEmbeddings(model_name=app_settings.EMBEDDING_MODEL)
+        embeddings = _build_ragas_embeddings()
 
         # Build ragas-compatible dataset (use ground_truth, not deprecated ground_truths)
         data: dict[str, list] = {
@@ -428,16 +526,35 @@ async def compute_generation_metrics_ragas(
             from app.eval.judges.qwen_judge import _extract_json_from_text
             from app.eval.judges.qwen_judge import generate as _judge_generate
 
+            # A row the judge could not grade is NOT a faithful row.
+            #
+            # Every failure path here used to append 1.0 — a perfect score for
+            # "no statements to check", "no context", "the judge returned
+            # something unparseable", and "an exception was raised" alike. That
+            # is the same class of bug as the lexical fallback above (a number
+            # that does not measure what it claims), pointing at the same
+            # public badge, and it matters more now than it ever has: this
+            # whole block sits AFTER the HuggingfaceEmbeddings construction
+            # that used to raise, so until that was fixed none of it had ever
+            # executed in production — rc3's report scored faithfulness with
+            # the lexical judge, not this. Turning the Ragas path back on turns
+            # this on with it, so an ungradeable row is now excluded from the
+            # mean and counted in `notes` instead of silently inflating it.
             faith_scores = []
+            faith_unscored = 0
             for row in eval_rows:
                 answer = row.get("answer") or ""
                 contexts = row.get("contexts") or []
-                ctx_text = " ".join(contexts)[:800] if contexts else ""
+                ctx_text = " ".join(contexts)[:_NLI_CTX_CHAR_BUDGET] if contexts else ""
+                # First _NLI_MAX_STATEMENTS sentences only. A deliberate cap on
+                # judge cost per row, not an oversight — but it does mean
+                # `faithfulness` describes the opening of each answer rather
+                # than all of it, which is worth knowing when reading the number.
                 sentences = [
                     s.strip() for s in _re.split(r'(?<=[.!?])\s+', answer) if len(s.strip()) > 10
-                ][:4]
+                ][:_NLI_MAX_STATEMENTS]
                 if not sentences or not ctx_text:
-                    faith_scores.append(1.0)
+                    faith_unscored += 1
                     continue
                 stmts_str = str(sentences)
                 nli_prompt = (
@@ -452,19 +569,34 @@ async def compute_generation_metrics_ragas(
                 extracted = _extract_json_from_text(raw)
                 try:
                     items = _json.loads(extracted)
-                    if isinstance(items, list) and items:
-                        verdicts = [int(x.get("verdict", 0)) for x in items if isinstance(x, dict)]
-                        faith_scores.append(sum(verdicts) / len(verdicts) if verdicts else 1.0)
+                    verdicts = (
+                        [int(x.get("verdict", 0)) for x in items if isinstance(x, dict)]
+                        if isinstance(items, list)
+                        else []
+                    )
+                    if verdicts:
+                        faith_scores.append(sum(verdicts) / len(verdicts))
                     else:
-                        faith_scores.append(1.0)
+                        faith_unscored += 1
                 except Exception:
-                    faith_scores.append(1.0)
+                    faith_unscored += 1
             if faith_scores:
                 metrics_out["faithfulness"] = MetricResult(
                     name="faithfulness",
                     value=round(sum(faith_scores) / len(faith_scores), 4),
                     n=len(faith_scores),
-                    notes="judge=qwen2.5_7b_direct_nli",
+                    notes=(
+                        "judge=qwen2.5_7b_direct_nli"
+                        + (
+                            f" ({faith_unscored} rows ungradeable, excluded)"
+                            if faith_unscored
+                            else ""
+                        )
+                    ),
+                )
+            elif faith_unscored:
+                metrics_out["faithfulness"] = MetricResult.empty(
+                    "faithfulness", f"judge returned nothing gradeable on all {faith_unscored} rows"
                 )
         except Exception:
             pass
