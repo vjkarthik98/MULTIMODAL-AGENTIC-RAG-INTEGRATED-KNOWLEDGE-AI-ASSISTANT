@@ -5,6 +5,62 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc5] - 2026-08-28
+
+v1.0.0-rc4 deployed to production cleanly and its monitoring fixes are
+confirmed working live (the promote log shows the Grafana deployment
+annotation posting for the first time, the ntfy webhook verified current, and
+the throwaway secret files finally removed). What rc4 did *not* manage was to
+prove its own quality-report fixes: the `report-quality-metrics` job was
+OOM-killed before it reached any of the corrected code. This release fixes
+that, and nothing else — no application behaviour changes.
+
+### Fixed
+- **The RAGAS report was OOM-killed on the box, taking the CI runner with it.**
+  `cd.yml` runs `ragas_report` as a *second* Python process inside the live
+  `magik-current` container, so it loads its own text embedder and SigLIP
+  beside the copies the app already has resident — both of which
+  `model_loader._EVICTABLE_MODELS` deliberately refuses to evict, being core
+  query-path models — while every gold row drives a full RAG query through the
+  app in that same container. Unbounded that is 98 rows and ~17 minutes
+  (measured on rc3) of two model stacks coexisting on a 32GB host. The rc4 run
+  did not survive it: the kernel OOM-killer took the eval at 8m17s
+  (`exit code 137`, about half way through the query phase, CD run
+  33134484078) and the cascade knocked the self-hosted runner offline,
+  cancelling the job — so `continue-on-error` never got the chance to absorb
+  it and no artifact was produced at all. The 137 also rendered as a green
+  tick in the job list, visible only in the step log.
+
+  `ragas_report.py` now takes `--limit` (deterministic, gold-set order,
+  mirroring the `--limit` `deepeval_suite.py` has always had) and `cd.yml`
+  passes `--limit 30`, cutting the window in which both stacks are resident
+  from ~17 minutes to a few. A capped run stays honest: the report records
+  `n_queries`, and `generate_quality_badges.py` refuses to publish a Ragas
+  badge whose graded rows cover less than half of it.
+
+  Three candidate causes were ruled out with evidence rather than assumed:
+  the idle-stop Lambda (its own CloudWatch log shows the `_runner_busy()`
+  guard firing correctly at 05:08 and the box still running at 05:23), a
+  container memory limit (none is set — this is the host OOM killer), and
+  rc4's own judge fixes (rc3 ran the identical query phase to completion in
+  16m55s, and the kill landed before `compute_generation_metrics_ragas`
+  executes). Model eviction was considered and rejected: the models actually
+  loaded here are precisely the non-evictable ones, so it would free nothing.
+- `cd.yml`'s post-report warning now names the `exit code 137` signature and
+  says to lower the limit rather than retry unchanged, so the next person
+  meets a diagnosis instead of a cancelled job.
+
+### Known limitations
+- **Mitigated, not eliminated.** `--limit 30` shortens the overlap; it does
+  not remove the second model stack from the container. A real fix is a
+  dedicated eval container with its own memory budget, or a larger host.
+  Neither belongs in a release-eve change.
+- Whether the rc4 Ragas/DeepEval judge fixes actually work is **still
+  unproven** — no run has yet got far enough to produce a report from the real
+  judge. The check is this release's own artifact: `quality-reports/ragas/*.json`
+  must carry `judge=qwen2.5_7b` in its `notes`, not `lexical_fallback`.
+- Everything else unchanged from [1.0.0-rc4] below.
+
 ## [1.0.0-rc4] - 2026-08-27
 
 v1.0.0-rc3 promoted to production cleanly — the first successful promotion
@@ -146,6 +202,16 @@ what the app does at request time.
   context handed to each test case is now bounded by the same 6000-char
   budget `qwen_judge.grade_metric` already applies for the same n_ctx reason
   (it was previously unbounded).
+- **`quality.yml`'s Schemathesis and ZAP jobs could be cancelled mid-build.**
+  Both build the dev-runtime image with no layer cache (~13–14 min measured)
+  inside a 20-minute budget, which the job's own comment admitted left "as
+  little as ~1min" of headroom. Hosted-runner I/O varies by more than that: on
+  two runs of the same job hours apart, the pure-filesystem layer
+  `COPY --from=base-deps /opt/venv` went 83.2s → 173.6s (2.09×) while
+  `pip install -r requirements.txt` went 416.5s → 594.9s (1.43×). The slower
+  run was killed mid-`docker build` and reported as a failing API-contract
+  check that never ran Schemathesis at all. Both budgets raised to 30 minutes;
+  a timeout is a ceiling, not a target.
 
 ### Added
 - `tests/unit/eval/test_judge_json_extraction.py` — pins both shapes the one
@@ -185,6 +251,11 @@ what the app does at request time.
   forcing it back down on a release-eve build is a larger risk than the drift
   itself. The Ragas fix above is version-agnostic either way. Reconciling the
   declared and installed pins is a follow-up that needs its own build test.
+- The post-release `report-quality-metrics` job runs the eval as a second
+  process inside the live container, and has never yet completed a run whose
+  Ragas numbers came from the real judge — v1.0.0-rc3 fell back to the lexical
+  scorer, and this release's own run was OOM-killed before reaching the fixed
+  code. Addressed in [1.0.0-rc5] above.
 - Everything else unchanged from [1.0.0-rc3] below — see README.md's Known
   Limitations & Roadmap section.
 
