@@ -75,8 +75,35 @@ def _mode_tag(server_url: str) -> str:
     return "local" if host in ("127.0.0.1", "localhost") else "live"
 
 
-async def _build_eval_rows(cfg: EvalConfig) -> tuple[list[dict], list[str]]:
-    """Query the live server for each gold row. Returns (eval_rows, errors)."""
+async def _build_eval_rows(
+    cfg: EvalConfig, limit: int | None = None
+) -> tuple[list[dict], list[str]]:
+    """Query the live server for each gold row. Returns (eval_rows, errors).
+
+    `limit` caps how many gold rows are queried, the same way
+    deepeval_suite.py's `--limit` already does, and for a concrete reason:
+    cd.yml runs this as a SECOND python process inside the running
+    `magik-current` container (`docker exec`), so its own model_loader loads a
+    second copy of the text embedder and SigLIP alongside everything the live
+    app already has resident — and those are exactly the models
+    model_loader._EVICTABLE_MODELS deliberately refuses to evict, being
+    core query-path models. Meanwhile every row drives a full RAG query
+    through the app process in the same container.
+
+    Unbounded, that meant ~17 minutes (v1.0.0-rc3, 98 rows) of two model
+    stacks coexisting on a 32GB box. v1.0.0-rc4's run did not survive it: the
+    kernel OOM-killer took the eval process at 8m17s (`exit code 137`, roughly
+    half way through the query phase), and the cascade knocked the self-hosted
+    runner offline, cancelling the job before any report was written.
+
+    Capping the row count is the only lever that actually applies here —
+    eviction frees nothing (the loaded models are non-evictable by design) and
+    the memory is per-process, not per-request. Fewer rows means a shorter
+    window in which both stacks are resident.
+
+    Rows are taken in gold-set order, so a capped run is deterministic and
+    comparable between releases rather than a random sample.
+    """
     if not _server_available():
         raise RuntimeError(
             f"MAGIK API not reachable at {_SERVER_URL} — start it first "
@@ -85,6 +112,8 @@ async def _build_eval_rows(cfg: EvalConfig) -> tuple[list[dict], list[str]]:
         )
 
     gold_rows = _load_eval_rows(cfg)
+    if limit:
+        gold_rows = gold_rows[:limit]
     if not gold_rows:
         raise RuntimeError(
             "No curated gold rows with reference answers for the requested modality — "
@@ -249,6 +278,16 @@ def main() -> int:
         help="Evaluate only this modality (default: txt/pdf/docx, same as generation_runner)",
     )
     parser.add_argument("--user-id", default=None)
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=(
+            "Cap the number of gold rows queried (deterministic, gold-set order). "
+            "Mirrors deepeval_suite.py's --limit; see _build_eval_rows for why the "
+            "in-container run needs a bound."
+        ),
+    )
     args = parser.parse_args()
 
     cfg = load_config()
@@ -266,7 +305,7 @@ def main() -> int:
         )
 
     try:
-        eval_rows, errors = asyncio.run(_build_eval_rows(cfg))
+        eval_rows, errors = asyncio.run(_build_eval_rows(cfg, args.limit))
     except RuntimeError as exc:
         print(f"[ragas-report] FATAL: {exc}")
         return 2
