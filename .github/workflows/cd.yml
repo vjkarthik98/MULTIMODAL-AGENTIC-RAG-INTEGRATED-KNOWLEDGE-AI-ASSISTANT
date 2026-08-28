@@ -1318,6 +1318,19 @@ jobs:
       # EVAL_MODE_TAG=live: the call is over loopback, but the thing being
       # measured is production. Without it _mode_tag() sniffs 127.0.0.1 and
       # stamps "local" on both the report filename and the public badge.
+      # --limit 30: this runs as a SECOND python process inside the live
+      # container, so it loads its own text embedder + SigLIP next to the ones
+      # the app already has resident (both are non-evictable core query-path
+      # models), while every row drives a full RAG query through the app in the
+      # same container. Unbounded that is ~98 rows / ~17min of two model stacks
+      # coexisting on a 32GB box, and v1.0.0-rc4 did not survive it: the kernel
+      # OOM-killer took the eval at 8m17s (exit 137) and the cascade knocked
+      # this self-hosted runner offline, cancelling the job before anything was
+      # written. 30 rows keeps the run to a few minutes.
+      #
+      # A capped run stays honest: the report records n_queries, and
+      # scripts/generate_quality_badges.py refuses to publish a Ragas badge
+      # whose graded rows cover less than half of it.
       - name: RAGAS report (post-release, in-container)
         id: ragas
         if: steps.preflight.outputs.ok == 'true'
@@ -1328,7 +1341,7 @@ jobs:
             -e EVAL_USER_ID="${EVAL_USER_ID}" \
             -e EVAL_SERVER_URL="http://127.0.0.1:8000" \
             -e EVAL_MODE_TAG="live" \
-            "$CONTAINER" python3.12 -m app.eval.ragas_report
+            "$CONTAINER" python3.12 -m app.eval.ragas_report --limit 30
 
       - name: DeepEval report (post-release, in-container)
         id: deepeval
@@ -1419,6 +1432,6 @@ jobs:
             name="${tool%%:*}"
             outcome="${tool##*:}"
             if [ "$outcome" != "success" ]; then
-              echo "::warning title=${name} report did not run::outcome=${outcome} — badges stay 'not yet measured' for this release. Open the step log above; this did NOT affect the deploy."
+              echo "::warning title=${name} report did not run::outcome=${outcome} — badges stay 'not yet measured' for this release. Open the step log above; this did NOT affect the deploy. If the step log ends in 'exit code 137' the eval process was OOM-killed: it runs as a second model stack inside the live container, so lower the --limit on that step rather than retrying unchanged."
             fi
           done
