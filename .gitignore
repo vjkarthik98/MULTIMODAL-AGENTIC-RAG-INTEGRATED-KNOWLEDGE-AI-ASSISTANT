@@ -18,27 +18,40 @@ deploy/aws/.secrets.local.env
 
 # -----------------------------------------------------------------------------
 # Folders tracked as structure only — the directory ships via .gitkeep, but
-# its contents (corpus files, user uploads, generated indexes, run logs,
-# docs, and ad-hoc scripts) are local/regenerable and stay out of git.
+# its contents (corpus files, user uploads, generated indexes, run logs, and
+# ad-hoc scripts) are local/regenerable and stay out of git.
 # -----------------------------------------------------------------------------
 data/*
 !data/.gitkeep
 
-docs/*
-!docs/.gitkeep
+# docs/ IS tracked (2026-08-29). It was under the blanket rule above on the
+# theory that docs are regenerable, which they are not: docs/runbooks/ holds
+# the CI/CD, GPU-memory, AWS-deployment and monitoring runbooks, and
+# docs/EVAL_*.md hold the per-modality accuracy write-ups. None of that can be
+# regenerated from the code, and every one of them is referenced BY the code
+# and by CI — cd.yml, tier2-eval.yml and quality-report.yml all send readers to
+# docs/runbooks/ci-cd.md by path. An error message pointing at a file that only
+# exists on the author's laptop is worse than no error message, and the same
+# blanket rule already cost us exactly that once with
+# scripts/generate_quality_badges.py (see its negation below).
+#
+# These are public-repo docs: they are prose and workflow explanations, and
+# they name secrets only as NAMES (QDRANT_API_KEY, SLACK_WEBHOOK_URL, ...),
+# never values — verified with `detect-secrets scan docs/` before un-ignoring.
+# Keep it that way; real values belong in SSM and repo secrets.
 
 logs/*
 !logs/.gitkeep
 
 scripts/*
 !scripts/.gitkeep
-# Tracked despite the blanket scripts/* above: cd.yml's report-quality-metrics
-# job runs this on every production promotion. It was never carved out, so the
+# Tracked despite the blanket scripts/* above: quality-report.yml's `badges`
+# job runs this on every manual quality run. It was never carved out, so the
 # file existed only on the author's machine and the "Regenerate quality badges"
 # step died with "No such file or directory" on every run that reached it —
-# confirmed 2026-08-23, CD run 32633959840, the first promotion that ever got
-# that far. Anything else added under scripts/ that CI invokes needs the same
-# explicit negation here.
+# confirmed 2026-08-23, CD run 32633959840, under the cd.yml job this workflow
+# has since replaced. Anything else added under scripts/ that CI invokes needs
+# the same explicit negation here.
 !scripts/generate_quality_badges.py
 
 mlruns/

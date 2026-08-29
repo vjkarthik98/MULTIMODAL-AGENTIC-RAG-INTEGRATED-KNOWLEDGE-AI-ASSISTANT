@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name            = "MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT"
-version         = "1.0.0-rc5"
+version         = "1.0.0-rc6"
 description     = "Production Multimodal RAG + Agentic AI System — Phase 31"
 readme          = "README.md"
 requires-python = ">=3.10"

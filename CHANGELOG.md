@@ -5,6 +5,93 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc6] - 2026-08-29
+
+rc5 shipped the `--limit 30` cap for the RAGAS report and it was not enough:
+the DeepEval step that runs immediately after was OOM-killed again, and this
+time the kernel took the self-hosted runner offline with it, so the job
+recorded no conclusion, no completion time, and none of its five
+`if: always()` steps ever ran. That failure mode is the subject of this
+release. No application behaviour changes.
+
+### Changed
+- **The post-release quality report no longer runs on the production box, or
+  automatically.** `cd.yml`'s `report-quality-metrics` job ran Ragas +
+  DeepEval inside the live production container, on a runner registered on the
+  production instance. It is deleted, and replaced by
+  `.github/workflows/quality-report.yml`: a `workflow_dispatch`-only workflow
+  that wakes the staging box, evaluates the deployed image in-container on the
+  staging GPU, regenerates badges on a hosted runner, and stops staging again.
+  Two facts drove this. `continue-on-error` is evaluated *by* the runner, so
+  it cannot protect a job whose failure mode is the runner dying — every
+  mitigation built for that failure died with it. And a report that gates
+  nothing had no business OOM-pressuring the instance serving real traffic.
+  The release pipeline now ends at `promote-production`.
+- **`quality-live.yml` no longer offers `ragas-report` / `deepeval-report`.**
+  Both ran on `ubuntu-latest`, and both Ragas and DeepEval load the Qwen2.5-7B
+  judge locally — `qwen_judge._start_worker()` raises rather than downloading
+  the GGUF, so Ragas silently degraded to its lexical fallback and DeepEval
+  errored every row while the run reported success. A broken path that stays
+  clickable gets clicked.
+- `docs/` is now tracked in git. It sat under the same blanket
+  "regenerable, keep it local" rule that had already hidden
+  `scripts/generate_quality_badges.py` from CI, while `cd.yml`,
+  `tier2-eval.yml` and `quality-report.yml` all point readers at
+  `docs/runbooks/ci-cd.md` by path.
+
+### Fixed
+- **RAGAS rows failed to parse because the judge wrapper returned the wrong
+  `LLMResult` shape.** `AnswerRelevancy._ascore` requests `n=strictness`
+  generations and reads them out of `result.generations[0]`, so all n must
+  share one inner list. `QwenRagasJudge` built one generation per *outer*
+  entry, so Ragas only ever saw a single response and `strictness` was
+  silently always 1 regardless of what it asked for.
+- **`answer_relevancy` now runs at `strictness=1`, explicitly.** `_ascore`
+  discards a row entirely if *any* of its generations fails to parse
+  (`if any(answer is None ...): return np.nan`), so the default of 3 is a
+  three-fold amplifier on per-row judge flakiness — and three times the judge
+  calls on the process whose memory footprint caused the OOM. Correcting the
+  shape bug above without this would have switched that cost and that risk on
+  for the first time.
+- **The judge was given two contradictory formatting orders in one turn.**
+  Ragas' own prompt ends "return only a pure JSON string surrounded by triple
+  backticks"; the injected system prompt said "No markdown." Fenced replies
+  are now explicitly allowed — `_extract_json_from_text` unwraps a fence in
+  its first branch, making that the cheapest reply to parse.
+- **Ragas' retry was wasted on every failure.** When a reply fails to parse,
+  `RagasoutputParser.aparse` re-prompts with `FIX_OUTPUT_FORMAT`, whose text
+  embeds the entire original prompt. Every content branch of
+  `_build_ragas_prompt` matched that embedded copy and told the judge to
+  answer the original question again — reproducing the reply that had just
+  failed and burning the single retry Ragas allows. The repair prompt is now
+  detected first.
+- **Long answers truncated mid-JSON.** The Ragas judge path capped generation
+  at 1024 tokens, but `context_recall` returns one object *per sentence* of
+  the answer, each carrying a statement echo and a free-text reason. Long
+  finance answers exceeded the cap and were cut mid-object — unparseable, and
+  deterministically so on exactly the longest rows. Raised to 2048.
+- **The eval process held two model stacks at its peak.** It runs via
+  `docker exec` as a second process with its own `model_loader` singleton, and
+  the query phase loads BGE-large, SigLIP and the SigLIP text encoder — none
+  of which are in `_EVICTABLE_MODELS`, being core query-path models, so
+  nothing ever released them. They stayed resident while the ~4.7GB judge
+  worker spawned on top. The query and judge phases never overlap, so both
+  report modules now free that stack at the end of the query phase
+  (`release_full_context_models()`).
+
+### Added
+- `tests/unit/eval/test_ragas_judge_contract.py` — pins the `LLMResult`
+  generation shape (sync and async), the repair-prompt branch ordering, and
+  the fence-compatible system prompt, and keeps Ragas' exact
+  `FIX_OUTPUT_FORMAT` instruction string as a canary for library upgrades.
+
+### Known limitations
+- **None of the quality-report fixes above have executed on a GPU box.** They
+  are derived from the `ragas-0.1.21` source and pinned by unit tests; the
+  memory fix is reasoned from rc4's log, where the kill lands in the query
+  phase before the judge starts, rather than from a memory profile. The
+  verification is a manual `quality-report.yml` run against staging.
+
 ## [1.0.0-rc5] - 2026-08-28
 
 v1.0.0-rc4 deployed to production cleanly and its monitoring fixes are
