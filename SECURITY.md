@@ -12,16 +12,18 @@ itself* — not the product security features documented elsewhere.
 
 ## Supported Versions
 
-Pre-1.0.0, only the latest tagged release is supported; there is no
-maintained backport branch.
+Only the latest tagged release of the current major version is supported.
+There is no maintained backport branch: fixes land on `development`, ship in
+the next tag, and are not backported to earlier ones.
 
 | Version | Supported |
 |---|---|
 | 1.0.x (latest) | ✅ |
 | < 1.0.0 | ❌ |
 
-Once 1.0.0 ships, this table will be updated to reflect the actual support
-window (e.g. latest major only, per [Semantic Versioning](https://semver.org/)).
+Pre-1.0.0 tags and the `1.0.0-rcN` candidates are development history and
+receive no security fixes. Versioning follows
+[Semantic Versioning](https://semver.org/).
 
 ## Reporting a Vulnerability
 
