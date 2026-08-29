@@ -1,5 +1,5 @@
 """
-Admin API — industry-standard admin capabilities for a RAG system.
+Admin API — user, role, and platform-management routes for a RAG system.
 
 All routes require role=admin in the JWT. A regular user hitting any
 of these endpoints gets HTTP 403 Forbidden.

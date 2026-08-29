@@ -93,7 +93,7 @@ def _psi(reference: list[float], current: list[float], buckets: int = 10) -> flo
     distribution's own quantiles, so PSI is ~0 when current resembles
     reference regardless of the underlying value range. Informational only
     (not part of severity classification) — the KS-test p-value is the
-    actual statistical test; PSI is here because it's the industry-standard
+    actual statistical test; PSI is here because it's the conventional drift
     number an operator reading this dashboard will expect to see."""
     if len(reference) < _MIN_ROWS_FOR_TEST or len(current) < _MIN_ROWS_FOR_TEST:
         return None
