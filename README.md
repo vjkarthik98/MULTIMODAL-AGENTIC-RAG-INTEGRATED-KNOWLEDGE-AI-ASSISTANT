@@ -1,6 +1,6 @@
 # MAGIK — Multimodal Agentic RAG Integrated Knowledge AI Assistant
 
-**A production-grade, finance-domain retrieval-augmented generation system** that ingests text, PDF, DOCX, XLSX, images, audio, and video, routes queries through an agentic controller, retrieves with a hybrid BM25 + dense pipeline, verifies its own answers before they reach the user, and runs entirely on open-source models — no third-party LLM API required.
+**A finance-domain retrieval-augmented generation system** that ingests text, PDF, DOCX, XLSX, images, audio, and video, routes queries through an agentic controller, retrieves with a hybrid BM25 + dense pipeline, verifies its own answers before they reach the user, and runs entirely on open-source models — no third-party LLM API required.
 
 [![CI](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/ci.yml/badge.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/ci.yml)
 [![Eval Gate](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/eval-gate.yml/badge.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/eval-gate.yml)
@@ -9,6 +9,12 @@
 [![Quality](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/quality.yml/badge.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/quality.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
+[![Release](https://img.shields.io/badge/release-v1.0.0-brightgreen.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/releases/tag/v1.0.0)
+
+> **v1.0.0 — first stable release.** The HTTP interfaces are covered by
+> [Semantic Versioning](https://semver.org/) from this release forward.
+> Release notes: [CHANGELOG.md](CHANGELOG.md#100---2026-08-29) ·
+> Supported versions: [SECURITY.md](SECURITY.md#supported-versions)
 
 **Live demo:** [launch.vk-ai.online](https://launch.vk-ai.online) → redirects to [magik.vk-ai.online](https://magik.vk-ai.online)
 
@@ -37,6 +43,7 @@ The demo runs on a scale-to-zero AWS GPU box. If it's asleep, the link shows a l
 - [Deployment](#deployment)
 - [Observability](#observability)
 - [Known Limitations & Roadmap](#known-limitations--roadmap)
+- [Versioning & Releases](#versioning--releases)
 - [License](#license)
 - [Author](#author)
 
@@ -214,8 +221,8 @@ MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/
 ├── ui/                      # React + Vite + Tailwind frontend (never imports from app/)
 │   └── src/{api,components,context,hooks,pages,utils}/
 │
-├── tests/                   # 137 test files
-│   ├── unit/                # Fast, mocked, no external services — mirrors app/ structure (89)
+├── tests/                   # 141 test files
+│   ├── unit/                # Fast, mocked, no external services — mirrors app/ structure (93)
 │   ├── integration/           # Live Qdrant/Redis/Mongo required (13)
 │   ├── eval/                  # Eval-harness correctness tests (14)
 │   ├── auth/                 # JWT, MFA, tenant isolation, admin, GDPR purge (10)
@@ -434,7 +441,7 @@ A live, LLM-judged run (Qwen2.5-7B-Instruct) against the current codebase, one g
 
 One measurement-integrity note, kept rather than smoothed over: partway through this run, the app server hit a broken internal process state (repeated I/O errors, unrelated to any modality under test); it was diagnosed to the process level, the GPU and LLM backend were confirmed healthy independently, and the affected process was restarted. Every figure above was captured after that recovery, on a verified-healthy server.
 
-Source: `app/eval/run.py --suite generation --modality <name>`, full report in `docs/modality_scorecard_2026-08-20.pdf`. Full write-ups per modality also live in `docs/EVAL_*.md`; the harness itself is documented in [`app/eval/README.md`](app/eval/README.md).
+Source: `app/eval/run.py --suite generation --modality <name>`. Full write-ups per modality live in `docs/EVAL_*.md`; the harness itself is documented in [`app/eval/README.md`](app/eval/README.md).
 
 ## Security & Guardrails
 
@@ -458,7 +465,7 @@ pytest tests/ -m "not slow" --ignore=tests/integration/test_document_pipeline.py
 
 Always scope pytest to a specific subdirectory (`tests/unit/`, `tests/auth/`, `tests/guardrails/`) rather than running bare `pytest tests/ -m <marker>` — pytest collects every file under `testpaths` regardless of marker filtering, and one broken file under `tests/integration/` is enough to abort collection for the entire run.
 
-137 test files across eight categories: unit (89 files, mirrors `app/`'s module structure), integration (13, requires live Qdrant/Redis/Mongo), eval-harness correctness (14), auth (10), guardrails (7), pipeline (2), plus a dedicated video end-to-end suite and an API-contract (Schemathesis) suite.
+141 test files across eight categories: unit (93 files, mirrors `app/`'s module structure), integration (13, requires live Qdrant/Redis/Mongo), eval-harness correctness (14), auth (10), guardrails (7), pipeline (2), plus a dedicated video end-to-end suite and an API-contract (Schemathesis) suite.
 
 ## CI/CD
 
@@ -467,10 +474,11 @@ Always scope pytest to a specific subdirectory (`tests/unit/`, `tests/auth/`, `t
 | `ci.yml` | Every push/PR | Lint (Ruff/Black/isort), mypy, unit tests — fast and hermetic, no models or GPU |
 | `eval-gate.yml` | Every PR (Tier-1) + self-hosted GPU runner (Tier-2) | Tier-1: retrieval-only regression gate, CPU, blocks merge. Tier-2: full generation + LLM-judge suite against the live production box |
 | `cd.yml` | Tag push (`v*`) | Builds the production image, pushes to GHCR, deploys via SSM, health-checks, auto-rolls back on failure |
-| `release.yml` | Manual dispatch | Syncs version files, tags, publishes a GitHub Release |
+| `release.yml` | Manual dispatch | Two modes. `prepare` (from `development`): bumps the version, inserts the changelog section, opens a PR into `main`. `tag` (from `main`, after that PR merges): verifies the version, tags, and publishes the GitHub Release from the notes already in `CHANGELOG.md`. Neither writes to a protected branch |
 | `security.yml` | Push/PR + weekly cron | Secret scanning (`detect-secrets`), dependency CVEs (`pip-audit`), SAST (Bandit), container scanning |
 | `quality.yml` | Every PR touching `app/api/`, `ui/`, auth, or `perf/k6/` | API contract (Schemathesis), k6 smoke, OWASP ZAP baseline (DAST), Lighthouse — all against the local docker-compose stack. Informational, not a required check yet — see `quality-reports/README.md` |
-| `quality-live.yml` | Manual dispatch only | The live-mode equivalents (RAGAS, DeepEval, k6, Lighthouse, ZAP baseline) against the real deployed URL — never scheduled, never on push/PR |
+| `quality-live.yml` | Manual dispatch only | Live-mode Schemathesis, k6 (profile + multi-user), Lighthouse, and ZAP baseline against the real deployed URL — never scheduled, never on push/PR |
+| `quality-report.yml` | Manual dispatch only | Ragas + DeepEval against the deployed image, in-container on the **staging** GPU box — wakes staging, evaluates, regenerates badges, stops staging. Gates nothing; deliberately not part of the release pipeline |
 
 `cd.yml` authenticates to AWS via GitHub OIDC — there are no long-lived AWS credentials stored in the repository.
 
@@ -487,18 +495,18 @@ Full design rationale in `quality-reports/README.md`.
 | Ask | Tool | Local (automatic, every PR) | Live (manual, real deployed URL) |
 |---|---|---|---|
 | API testing | [Schemathesis](https://schemathesis.readthedocs.io/) | ✅ `quality.yml` | `make -f Makefile` → `scripts/schemathesis_live.sh` |
-| RAGAS | [Ragas](https://github.com/explodinggradients/ragas) `0.1.21` | `make ragas-report` | ✅ default mode — `app/eval/ragas_report.py` |
-| DeepEval | [DeepEval](https://github.com/confident-ai/deepeval) (local GGUF judge, never OpenAI) | `make deepeval-report` | ✅ default mode — `app/eval/deepeval_suite.py` |
+| RAGAS | [Ragas](https://github.com/explodinggradients/ragas) `0.1.21` | `make ragas-report` | manual `quality-report.yml`, on staging — `app/eval/ragas_report.py` |
+| DeepEval | [DeepEval](https://github.com/confident-ai/deepeval) (local GGUF judge, never OpenAI) | `make deepeval-report` | manual `quality-report.yml`, on staging — `app/eval/deepeval_suite.py` |
 | Stress / performance | [k6](https://k6.io/) | ✅ smoke only, `quality.yml` | `perf/k6/live_profile.js` (manual) |
 | Multi-user simulation | k6, dedicated test tenants | `make k6-multiuser` | `perf/k6/multi_user_tenant.js` — asserts **zero cross-tenant leakage** under concurrent load |
 | Browser performance | [Lighthouse](https://github.com/GoogleChrome/lighthouse) / Lighthouse CI | ✅ `quality.yml` | manual, real Core Web Vitals |
 | Security scan (DAST) | [OWASP ZAP](https://www.zaproxy.org/) | ✅ baseline (passive), `quality.yml` | baseline safe any time; **active scan is a local, human-supervised script only** — never CI, see `security/zap/README.md` |
 | Uptime monitoring | [Uptime Kuma](https://github.com/louislam/uptime-kuma) | — | passive push from the wake/idle-stop Lambdas themselves; Kuma never polls the app (that would wake it) — see `monitoring/uptime-kuma/README.md` |
 
-Reports land in `quality-reports/<tool>/` (tracked in git — unlike `docs/`,
-this directory exists specifically to be visible on GitHub and linkable from
-here and the portfolio site). `scripts/generate_quality_badges.py` turns the
-latest committed report per tool into shields.io badges.
+Reports land in `quality-reports/<tool>/`, tracked in git so they are visible
+on GitHub and linkable from here and the portfolio site.
+`scripts/generate_quality_badges.py` turns the latest committed report per
+tool into shields.io badges.
 
 This is freshly built tooling, not yet run against the live deployment — the
 Local/Live columns above describe what each tool does and how to run it, not
@@ -545,8 +553,31 @@ Documented here deliberately, rather than left implicit — a system that only l
 - **Finance numeric fidelity is measured offline, not sampled from live traffic** — the CI gate applies at merge time; continuous live-traffic sampling of this specific metric is a documented gap.
 - **PDF's context recall (0.2846) is an unexplained outlier** in the 2026-08-20 per-modality scorecard, well below every other modality and PDF's own earlier measurements — flagged for a follow-up investigation, not yet root-caused.
 - **Audio is the weakest modality on citation accuracy (0.5385) and retry cost** (0.92 retries/query on average, same scorecard) — a known issue, partially fixed, not fully closed.
+- **The Ragas and DeepEval quality report has never completed a run on a GPU box** — the judge, memory, and parsing fixes in rc4–rc6 are pinned by unit tests and derived from the library source, but every run inside the live production container was OOM-killed before reaching them. It now runs manually against staging (`quality-report.yml`) and gates nothing; until it completes there, the public quality badges deliberately render "not yet measured" rather than a number.
+- **The GHCR image-layer fix is a mitigation, not a cure** — ghcr.io returns `429` on a single 7.63GB virtualenv layer regardless of retry, so rc7 split it across six. A future dependency bump could push one bucket back over the threshold; the `du -sh` output in the build log is the early warning. The durable fix is a registry in the same region as the deployment target.
 
 The full, unfiltered engineering history — including root-caused production incidents — is in [`CHANGELOG.md`](CHANGELOG.md).
+
+## Versioning & Releases
+
+The project follows [Semantic Versioning](https://semver.org/). The HTTP
+interfaces (`/rag`, `/auth`, `/admin`, and the system routes) and the
+documented configuration keys in `.env.example` form the public surface; a
+breaking change to either requires a major version. Modules under `app/` are
+internal and may change in any release.
+
+Every release is recorded in [`CHANGELOG.md`](CHANGELOG.md) in
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format, with a
+comparison link per version.
+
+Changes land on `development` and reach `main` only through a pull request —
+`main` is protected and is never a direct target. Pushing a `v*` tag on `main`
+triggers `cd.yml`, which builds the image, deploys to staging, runs the Tier-2
+gate, promotes to production behind a health check, and rolls back
+automatically on failure.
+
+Supported versions are listed in [SECURITY.md](SECURITY.md#supported-versions).
+The running version is reported by `GET /version`.
 
 ## License
 

@@ -428,7 +428,7 @@ function ImageCitations({ sources }) {
 
 /* Compact "moment" chip for an audio/video citation — an icon, an optional
    short label, and the timestamp (accent-colored). One clean chip per cited
-   moment, industry-standard (ChatGPT/Gemini/NotebookLM) style: no raw caption
+   moment, in the familiar (ChatGPT/Gemini/NotebookLM) style: no raw caption
    or OCR dumps. */
 function MomentChip({ icon, label, ts, title }) {
   const t = fmtTimestamp(ts)
