@@ -5,6 +5,100 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0] - 2026-08-29
+
+**First stable release.**
+
+This release closes the candidate line that ran from rc1 on 2026-08-23 through
+rc7 — seven candidates whose shared purpose was to get a verified build onto a
+GPU host and keep it there. Their full engineering record, including every
+root-caused failure, sits directly below this entry and is unedited.
+
+There is no functional change from `1.0.0-rc7`. The retrieval, agent,
+guardrail, verification, memory, and authentication behaviour is unchanged from
+[0.33.0]; every candidate in between hardened the machinery around it — model
+provisioning, release tooling, image delivery, deployment, and the accuracy of
+the numbers the project publishes about itself.
+
+### Compatibility and support
+
+- The HTTP interfaces — the `/rag`, `/auth`, `/admin`, and system routes, and
+  their request and response schemas — are covered by Semantic Versioning from
+  this release forward. A breaking change to them requires a major version.
+- Documented configuration keys (`.env.example`) are covered by the same
+  guarantee. Modules under `app/` are internal and carry no such guarantee.
+- Requires Python 3.10 or later.
+- Only the latest tagged release of the current major version is supported.
+  See [SECURITY.md](SECURITY.md).
+
+### Highlights
+
+- **Seven independent multimodal pipelines** — text, PDF, DOCX, XLSX, image,
+  audio, and video, each owning its own ingestion, chunking, embedding, and
+  BM25 implementation with no shared per-modality state, so a defect in one
+  cannot reach another.
+- **Agentic query routing** — every query is classified into `rag`, `web`,
+  `hybrid_web`, `direct`, or a finance tool call before it is answered, under
+  an enforced timeout and token budget. A RAG query requires an explicit file
+  selection, so every answer carries unambiguous document provenance rather
+  than a guessed source.
+- **Hybrid retrieval** — BM25 with a finance-aware tokenizer fused with dense
+  Qdrant search, reranked by a cross-encoder and diversified with MMR;
+  cross-modal text-to-image search runs through a separate SigLIP text encoder.
+- **Self-verifying answers** — groundedness and citation accuracy are checked
+  before an answer reaches the client, with a bounded retry against an expanded
+  retrieval strategy when either check fails.
+- **Numeric fidelity** — financial figures in a generated answer are matched
+  against the literal text of retrieved chunks at 0.5% tolerance with no
+  unit-scale bridging. This is enforced in CI, not merely measured.
+- **Guardrails** — a single sanitization entry point covers all 28
+  modality x layer surfaces, with 100% recall (64/64) against the adversarial
+  corpus at a 0.9% false-positive rate, and all ten OWASP LLM Top 10 (2025)
+  categories addressed.
+- **Authentication and tenant isolation** — JWT access and refresh tokens,
+  Argon2 password hashing, Google OAuth (PKCE), TOTP MFA, a Redis-backed
+  revocation list so logout genuinely revokes access, and `user_id` filtering
+  enforced independently at all four data layers.
+- **A regression-gated evaluation harness** — ten suites run against gold
+  datasets, every threshold carrying a written rationale, with the retrieval
+  suite wired in as a merge gate.
+- **Full observability** — structured JSON logs, Prometheus metrics,
+  OpenTelemetry traces, Grafana dashboards, Loki aggregation, Tempo tracing,
+  and alerting.
+- **Cost-aware deployment** — a single AWS GPU instance that stops itself when
+  idle and wakes on demand, behind a staging gate, a health check, and
+  automatic rollback on every production promotion.
+- **Reproducible by construction** — every model pinned to an exact commit SHA,
+  Python dependencies fully locked, infrastructure codified in Terraform, and a
+  single source of truth for the version string.
+
+### Changed
+
+- The project no longer describes itself in promotional terms anywhere in the
+  repository. Five files were edited for wording only —
+  `app/auth/admin_router.py`, `app/eval/jobs/drift_eval.py`,
+  `ui/src/components/MessageBubble.jsx`, `docs/runbooks/phase29-plan.md`, and
+  `README.md` — along with the `[0.7.0]` heading below. The two `app/` edits
+  and the `ui/` edit are a docstring and two comments; no behaviour changes.
+- `README.md` corrects five drifted facts: the test-file counts (141 total, 93
+  unit), a link to a scorecard PDF that is not in the repository, a note
+  claiming `docs/` is untracked when it has been tracked since rc6, the absence
+  of `quality-report.yml` from the CI/CD table, and two rows still listing Ragas
+  and DeepEval as live-mode `quality-live.yml` options after rc6 removed them.
+- `SECURITY.md` states the support window now that 1.0.0 has shipped, replacing
+  the placeholder that deferred it.
+- This file now carries a comparison link for every version, completing the
+  Keep a Changelog format it has declared since [0.1.0].
+- `VERSION` and `pyproject.toml` are at `1.0.0`; `APP_VERSION` and every other
+  consumer derive from them rather than carrying their own copy.
+
+### Upgrading
+
+No action is required when upgrading from `1.0.0-rc7`; the image is unchanged
+apart from the version string. From [0.33.0] or earlier, follow the normal
+deploy path — no data migration, re-ingestion, or configuration change is
+needed. Confirm the running version with `GET /version`.
+
 ## [1.0.0-rc7] - 2026-08-29
 
 rc6 built and pushed cleanly but could never be deployed: `deploy-staging`
@@ -1190,7 +1284,7 @@ Text and image ingestion and query.
 
 ## [0.7.0] - 2026-03-25
 
-Production-grade ingestion pipeline.
+End-to-end ingestion pipeline.
 
 ### Added
 - End-to-end ingestion orchestration with structured API responses and
@@ -1250,3 +1344,45 @@ Initial setup.
 ### Added
 - Project structure, dependency management, and semantic versioning
   scaffolding.
+
+[1.0.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v1.0.0-rc7...v1.0.0
+[1.0.0-rc7]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v1.0.0-rc6...v1.0.0-rc7
+[1.0.0-rc6]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v1.0.0-rc5...v1.0.0-rc6
+[1.0.0-rc5]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v1.0.0-rc4...v1.0.0-rc5
+[1.0.0-rc4]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v1.0.0-rc3...v1.0.0-rc4
+[1.0.0-rc3]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v1.0.0-rc2...v1.0.0-rc3
+[1.0.0-rc2]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v1.0.0-rc1...v1.0.0-rc2
+[1.0.0-rc1]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.33.0...v1.0.0-rc1
+[0.33.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.32.0...v0.33.0
+[0.32.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.31.0...v0.32.0
+[0.31.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.30.0...v0.31.0
+[0.30.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.29.0...v0.30.0
+[0.29.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.28.0...v0.29.0
+[0.28.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.27.0...v0.28.0
+[0.27.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.26.0...v0.27.0
+[0.26.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.25.0...v0.26.0
+[0.25.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.24.0...v0.25.0
+[0.24.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.23.0...v0.24.0
+[0.23.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.22.0...v0.23.0
+[0.22.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.21.0...v0.22.0
+[0.21.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.20.0...v0.21.0
+[0.20.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.19.0...v0.20.0
+[0.19.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.18.0...v0.19.0
+[0.18.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.17.0...v0.18.0
+[0.17.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.16.0...v0.17.0
+[0.16.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/releases/tag/v0.1.0

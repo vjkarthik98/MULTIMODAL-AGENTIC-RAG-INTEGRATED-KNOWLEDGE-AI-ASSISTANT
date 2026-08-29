@@ -166,7 +166,7 @@ never physically run. Compiling a CUDA wheel is a *build-time* step (nvcc cross-
 sm_89 — no GPU needed to build), so the first real build on a hosted runner is expected to
 succeed, but this is the one Phase-29 artifact verified by review, not execution.
 
-**⛔ Optional-but-recommended before calling C enterprise-grade:** container scan (Trivy/Grype)
+**⛔ Optional-but-recommended before calling C complete:** container scan (Trivy/Grype)
 and SBOM (Syft) as post-build steps — both need a real built image, so they're naturally gated
 behind the first successful build.
 
