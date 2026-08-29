@@ -748,6 +748,26 @@ def _build_ragas_prompt(ragas_prompt: str) -> str:
     """
     p = ragas_prompt.lower()
 
+    # Ragas' repair round-trip, and it must be matched FIRST. When
+    # RagasoutputParser.aparse() fails to parse a reply it re-prompts with
+    # FIX_OUTPUT_FORMAT (ragas/llms/output_parser.py), whose text EMBEDS the
+    # entire original prompt as its `prompt` input key. Every branch below
+    # therefore still pattern-matches on that embedded copy, and the judge was
+    # told to answer the ORIGINAL question again — re-emitting the same reply
+    # that just failed to parse, burning the single retry ragas allows, and
+    # landing on "Failed to parse output. Returning None." A None from either
+    # metric is not a soft failure: _answer_relevance._ascore does
+    # `if any(answer is None ...): return np.nan`, so the row is discarded.
+    if "did not satisfy the constraints given in the prompt" in p:
+        return (
+            "You are a JSON-only evaluator. The previous completion was not valid "
+            "JSON, or did not match the requested schema. Re-read the original "
+            "prompt shown below and output a CORRECTED version of the completion "
+            "that satisfies it exactly. Output only the corrected JSON value — "
+            "the same shape the original prompt asked for. No apology, no "
+            "explanation, no commentary about what was wrong."
+        )
+
     if "simpler_statements" in p or "sentence_index" in p or "break down each sentence" in p:
         schema = (
             '[{"sentence_index": 0, "simpler_statements": ["full statement without pronouns"]}]'
@@ -769,10 +789,21 @@ def _build_ragas_prompt(ragas_prompt: str) -> str:
         schema = '[{"statement": "text", "reason": "reason", "verdict": 1}]'
         instruction = "Evaluate each statement. Output ONLY valid JSON."
 
+    # "No markdown" used to be in here, and it directly contradicted the user
+    # prompt ragas itself builds: JSON_FORMAT_INSTRUCTIONS
+    # (ragas/llms/output_parser.py) ends with "return only a pure JSON string
+    # surrounded by triple backticks (```)". The judge was handed two
+    # incompatible orders in one turn — a system prompt banning fences and a
+    # user prompt demanding them — and an instruct model resolving that
+    # conflict tends to hedge, which is exactly how a reply picks up the
+    # preamble that breaks parsing. Fences are now explicitly ALLOWED: strategy
+    # 1 of _extract_json_from_text() unwraps a fenced block before anything
+    # else, so a fenced reply is the cheapest possible reply to parse.
     system = (
         f"You are a JSON-only evaluator. {instruction} "
         f"The exact output schema is: {schema} "
-        "Output ONLY raw JSON. No preamble. No explanation. No markdown. No extra text."
+        "Return only the JSON value, either bare or wrapped in a single ```json "
+        "code fence. No preamble, no explanation, no commentary before or after."
     )
     return system
 
@@ -785,9 +816,23 @@ class QwenRagasJudge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: igno
             cfg = run_config or RunConfig(max_workers=1, timeout=600)
             super().__init__(run_config=cfg)
 
+    # 1024 -> 2048. context_recall is the binding case: CONTEXT_RECALL_RA asks
+    # for one object PER SENTENCE of the answer, each carrying a `statement`
+    # echo, a free-text `reason` AND an `attributed` flag. A ten-sentence
+    # finance answer therefore needs well over a thousand tokens just to
+    # restate itself, and a reply cut off at the cap is truncated mid-object —
+    # unparseable JSON, every time, and deterministically on exactly the long
+    # answers, which is what "mostly failed to parse" looks like from outside.
+    # The worker's n_ctx is 8192 (QWEN_JUDGE_N_CTX) and ragas' own few-shot
+    # examples are long, so this is not free headroom — it is the reason the
+    # cap has to be explicit rather than raised to n_ctx.
+    _RAGAS_MAX_TOKENS = 2048
+
     def _run(self, prompt_text: str) -> str:
         system = _build_ragas_prompt(prompt_text)
-        raw = generate(prompt_text, system=system, max_tokens=1024, temperature=0.0)
+        raw = generate(
+            prompt_text, system=system, max_tokens=self._RAGAS_MAX_TOKENS, temperature=0.0
+        )
         return _extract_json_from_text(raw)
 
     def generate_text(self, prompt, n: int = 1, temperature=None, stop=None, callbacks=None):
@@ -795,7 +840,7 @@ class QwenRagasJudge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: igno
 
         text = prompt.to_string() if hasattr(prompt, "to_string") else str(prompt)
         out = self._run(text)
-        return LLMResult(generations=[[Generation(text=out)] for _ in range(n)])
+        return LLMResult(generations=[[Generation(text=out) for _ in range(n)]])
 
     async def agenerate_text(self, prompt, n: int = 1, temperature=None, stop=None, callbacks=None):
         import asyncio
@@ -804,7 +849,7 @@ class QwenRagasJudge(BaseRagasLLM if RAGAS_AVAILABLE else object):  # type: igno
 
         text = prompt.to_string() if hasattr(prompt, "to_string") else str(prompt)
         out = await asyncio.get_event_loop().run_in_executor(None, lambda: self._run(text))
-        return LLMResult(generations=[[Generation(text=out)] for _ in range(n)])
+        return LLMResult(generations=[[Generation(text=out) for _ in range(n)]])
 
     def set_run_config(self, run_config: t.Any) -> None:
         if RAGAS_AVAILABLE and hasattr(super(), "set_run_config"):

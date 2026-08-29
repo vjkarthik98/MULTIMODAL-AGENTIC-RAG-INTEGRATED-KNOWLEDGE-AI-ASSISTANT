@@ -23,24 +23,31 @@ portfolio site.
   run and uploads them as a GitHub Actions artifact — it never commits
   anything back to the repo (see CLAUDE.md: never commit without explicit
   instruction — that applies doubly to CI).
-- **Produced by CI but still not committed**: `cd.yml`'s
-  `report-quality-metrics` job runs RAGAS + DeepEval against live production
-  after each promotion and attaches `quality-reports/ragas`,
-  `quality-reports/deepeval` and `quality-badges/` to the run as the
-  `quality-report-<tag>` artifact (90-day retention), with the headline numbers
-  in the job summary. Download it, and `git add` the reports worth keeping —
-  on `development`, like any other change. An earlier version of that job
-  committed and pushed straight to `main`; that both contradicted the rule
-  above and could not have worked (`main` is protected by required status
-  checks, and the commit was marked `[skip ci]`), so it was removed.
+- **Produced by CI but still not committed**: `quality-report.yml` runs RAGAS +
+  DeepEval **on demand** (`workflow_dispatch`) against the **staging** box, and
+  attaches `quality-reports/ragas`, `quality-reports/deepeval` and
+  `quality-badges/` to the run as artifacts (90-day retention), with the
+  headline numbers in the job summary. Download it, and `git add` the reports
+  worth keeping — on `development`, like any other change.
+
+  Two pieces of history are worth keeping in view here. An early version of
+  that job committed and pushed straight to `main`; that both contradicted the
+  rule above and could not have worked (`main` is protected by required status
+  checks, and the commit was marked `[skip ci]`), so it was removed. And until
+  v1.0.0 the whole thing ran automatically after every promotion, against
+  **live production**, on a runner registered on the production box — where
+  DeepEval's judge OOM-killed the runner and took it offline mid-release. It is
+  manual and staging-only now: reports of this kind gate nothing, so they have
+  no business running unattended next to real traffic. See that workflow's
+  header for the full post-mortem.
 
 ## Subdirectories
 
 | Directory | Tool | Mode |
 |---|---|---|
 | `api-contract/` | Schemathesis | local (CI) + live (manual) |
-| `ragas/` | Ragas (`app/eval/ragas_report.py`) | live by default |
-| `deepeval/` | DeepEval (`app/eval/deepeval_suite.py`) | live by default |
+| `ragas/` | Ragas (`app/eval/ragas_report.py`) | staging (manual, `quality-report.yml`) |
+| `deepeval/` | DeepEval (`app/eval/deepeval_suite.py`) | staging (manual, `quality-report.yml`) |
 | `performance/` | k6 | local (CI) + live (manual) |
 | `browser-performance/` | Lighthouse / Lighthouse CI | local (CI) + live (manual) |
 | `security-dast/` | OWASP ZAP | local baseline (CI) + live baseline/active (manual) |
@@ -53,7 +60,7 @@ subdirectory — by the `generated_at` stamp inside it, never file mtime, which
 a fresh CI checkout flattens — and writes `quality-badges/*.json` (shields.io
 endpoint schema) plus prints a copy-paste Markdown block for the portfolio
 site. `--summary-md PATH` appends the same results as a Markdown table, which
-is how `cd.yml` fills its job summary.
+is how `quality-report.yml`'s `badges` job fills its job summary.
 
 A tool with no report, an unparseable report, or a `NaN` score (what
 `MetricResult.empty()` writes when a metric had nothing to measure) gets the

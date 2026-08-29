@@ -223,6 +223,61 @@ def _make_full_context_retriever():
         return None
 
 
+def release_full_context_models() -> None:
+    """Drop the query-phase model stack before the judge phase loads.
+
+    THIS IS THE OOM FIX, and it is only safe because of where it runs. The
+    eval is launched with `docker exec` INTO the serving container, so it is a
+    second, independent python process with its own `model_loader` singleton —
+    dropping references here cannot touch the models the app process is
+    serving traffic with. It only frees this process's duplicate copies.
+
+    Why it is needed: `_make_full_context_retriever()` loads BGE-large
+    (~1.35GB) plus SigLIP and the SigLIP text encoder (~1.8GB) into the eval
+    process, and `model_loader` caches them for the life of that process.
+    Neither is in `_EVICTABLE_MODELS` — they are deliberately non-evictable
+    core query-path models — so nothing ever released them. They then stayed
+    resident while the ~4.7GB Qwen judge worker spawned on top, against a live
+    app already holding its own full stack. That peak is what the kernel
+    OOM-killer landed on twice: v1.0.0-rc4 (CD run 33134484078, `exit code
+    137` at 8m17s) and again in rc5, where it took the self-hosted runner
+    offline mid-job.
+
+    The two phases never overlap — every row is queried and its grading
+    context collected BEFORE any judging starts — so by the time this is
+    called nothing needs these weights again. Calling it is idempotent and
+    failure here is never fatal: a process that cannot free memory should
+    still be allowed to try to finish its report.
+    """
+    import gc
+
+    try:
+        from app.core.model_loader import model_loader
+
+        for attr in (
+            "_text_embedder",
+            "_siglip_text_embedder",
+            "_siglip_model",
+            "_siglip_processor",
+            "_siglip_device",
+            "_reranker",
+        ):
+            if hasattr(model_loader, attr):
+                setattr(model_loader, attr, None)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[eval] could not drop query-phase models ({exc}); continuing")
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+    print("[eval] released query-phase model stack before judging")
+
+
 def _full_contexts(
     retriever, query: str, user_id: str, session_id: str, sources: list[str] | None = None
 ) -> list[str]:
