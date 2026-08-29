@@ -207,7 +207,7 @@ jobs:
       # (`docker buildx imagetools inspect`), not reconstructed from the
       # Dockerfile. The standalone Syft step below additionally emits a
       # downloadable SBOM artifact for anyone without registry access.
-      - uses: docker/build-push-action@v5
+      - uses: docker/build-push-action@v7
         with:
           context: .
           target: runtime
