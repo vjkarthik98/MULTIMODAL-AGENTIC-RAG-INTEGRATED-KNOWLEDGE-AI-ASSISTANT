@@ -107,7 +107,7 @@ jobs:
       SECRET_KEY: "ci-test-only-placeholder-secret-not-a-real-credential"
       JWT_SECRET_KEY: "ci-test-only-placeholder-jwt-secret-not-a-real-credential"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Fail in 5 seconds with the actual reason, instead of ~20 minutes of
       # installing torch and then scoring an empty index as "recall regressed".
@@ -351,7 +351,7 @@ jobs:
     env:
       CONTAINER: magik-current
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Runs in the deployed container for the same reasons as tier2-eval.yml's
       # job (deps, Qdrant credentials, and the persistent /opt/magik/data

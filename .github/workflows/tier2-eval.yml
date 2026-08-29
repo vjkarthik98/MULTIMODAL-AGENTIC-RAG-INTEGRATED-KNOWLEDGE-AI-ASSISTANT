@@ -63,7 +63,7 @@ jobs:
       CONTAINER: ${{ inputs.container }}
       PREVIOUS_CONTAINER: ${{ inputs.previous_container }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ── Why this runs INSIDE the deployed container ──────────────────────
       # Running `python -m app.eval.run` directly on the runner cannot work: no

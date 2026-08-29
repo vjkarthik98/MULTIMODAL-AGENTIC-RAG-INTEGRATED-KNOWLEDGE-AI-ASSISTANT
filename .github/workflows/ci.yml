@@ -63,7 +63,7 @@ jobs:
       SECRET_KEY: "ci-test-only-placeholder-secret-not-a-real-credential"
       JWT_SECRET_KEY: "ci-test-only-placeholder-jwt-secret-not-a-real-credential"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # NO `cache: pip` — deliberate, and it is not an oversight.
       #

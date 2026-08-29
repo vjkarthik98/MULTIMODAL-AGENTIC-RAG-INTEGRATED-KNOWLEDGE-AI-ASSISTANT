@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Warn this wakes the live box
         run: echo "::notice::Targeting ${{ inputs.tool }} against the live deployed URL — this wakes the AWS box if it's asleep."
