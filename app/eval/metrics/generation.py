@@ -472,7 +472,7 @@ async def compute_generation_metrics_ragas(
         from datasets import Dataset
         from ragas import evaluate
         from ragas.metrics import (
-            answer_relevancy,
+            AnswerRelevancy,
             context_recall,
         )
         from ragas.run_config import RunConfig
@@ -498,6 +498,32 @@ async def compute_generation_metrics_ragas(
             data["ground_truth"].append(ref if ref and ref != "TODO" else "")
 
         dataset = Dataset.from_dict(data)
+
+        # strictness=1, not the module singleton's default of 3.
+        #
+        # AnswerRelevancy._ascore asks the judge for `strictness` independent
+        # question-generations per row and then does:
+        #
+        #     if any(answer is None for answer in answers): return np.nan
+        #
+        # (ragas/metrics/_answer_relevance.py). So with the default the row is
+        # discarded unless ALL THREE replies parse — one flaky JSON reply in
+        # three NaNs a row that two good replies would have scored. Against a
+        # local 7B judge that is a per-row failure probability compounded three
+        # times over, for an ensemble whose only benefit is variance reduction
+        # on a metric already averaged across the whole suite.
+        #
+        # It is also 3x the judge calls, on the exact process whose memory
+        # footprint OOM-killed the production runner twice.
+        #
+        # Note this only became live behaviour once the LLMResult shape bug in
+        # qwen_judge.QwenRagasJudge was fixed: that wrapper returned
+        # `[[g], [g], [g]]` where ragas reads `generations[0]`, so ragas only
+        # ever saw ONE generation and strictness was silently already 1. Fixing
+        # the shape without fixing this would have turned a latent 3x cost and
+        # a 3x NaN amplification on for the first time.
+        answer_relevancy = AnswerRelevancy(strictness=1)
+
         # Run answer_relevancy and context_recall via Ragas (no decompose step)
         result = evaluate(
             dataset,

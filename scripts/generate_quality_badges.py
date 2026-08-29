@@ -7,11 +7,13 @@ Badges are honest by construction: a tool that hasn't been run yet — or whose
 latest report carries a NaN/absent score — gets a gray "not yet measured"
 badge, never a fabricated number.
 
-Run this after each report you choose to commit. cd.yml's report-quality-metrics
-job also runs it on every production promotion, to regenerate badges from the
+Run this after each report you choose to commit. quality-report.yml's `badges`
+job also runs it on every manual quality run, to regenerate badges from the
 reports the RAGAS/DeepEval steps just produced; that job publishes the result
 rather than committing it, so the "never auto-commit" principle this whole
-initiative rests on still holds (see quality-reports/README.md).
+initiative rests on still holds (see quality-reports/README.md). It runs there
+on a hosted runner, not the GPU box — badge generation needs no GPU, and the
+predecessor step in cd.yml never once ran to completion on a self-hosted one.
 
 shields.io endpoint badges (https://shields.io/badges/endpoint-badge) fetch
 this JSON straight from raw.githubusercontent.com at render time — so

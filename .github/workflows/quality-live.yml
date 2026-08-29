@@ -18,15 +18,23 @@ name: Quality & Performance (live)
 # tenants, never the shared public demo login). Set these once in
 # Settings -> Secrets and variables -> Actions before the first run.
 #
-# ragas-report / deepeval-report additionally require EVAL_REPORTER_EMAIL and
-# EVAL_REPORTER_PASSWORD (from app/bin/seed_eval_reporter.py, run once against
-# the real deployed Mongo). These jobs run on a bare runner, outside the
-# server's own container — app/eval/http_client.py's EvalAuth cannot mint a
-# token in-process there (it would sign with the wrong secret and get
-# rejected, see that module's docstring), so it logs in for a real one
-# instead. EVAL_USER_ID is not a secret (same literal value already committed
-# in deploy/aws/prod.env) — it is the tenant that owns the ingested gold-set
-# corpus these reports grade against.
+# NO RAGAS / DEEPEVAL HERE — see .github/workflows/quality-report.yml instead.
+# Both options used to live in the list below and neither could ever have
+# produced a real number from this workflow. app/eval/judges/qwen_judge.py runs
+# Qwen2.5-7B-Instruct Q4_K_M as a local process and `_start_worker()` does NOT
+# download it — it raises when the ~4.7GB GGUF is absent, which it always is on
+# a hosted runner (data/ and .hf_cache are gitignored, and checkout runs
+# `git clean -ffdx`). Ragas catches that and silently re-scores with the crude
+# lexical fallback, so the run went GREEN while publishing a number no judge
+# ever computed; DeepEval errored every row. A broken path that stays clickable
+# gets clicked, so they were removed rather than annotated. The replacement runs
+# in-container on the staging GPU box, where the judge, Qdrant credentials and
+# BM25 index all actually exist.
+#
+# EVAL_REPORTER_EMAIL / EVAL_REPORTER_PASSWORD (from app/bin/seed_eval_reporter.py)
+# are consequently unused by this workflow now. They are left in the repo
+# secrets deliberately: they are the only way to drive the server from OUTSIDE
+# its secret boundary, which is what any future live-URL check would need.
 on:
   workflow_dispatch:
     inputs:
@@ -36,8 +44,6 @@ on:
         type: choice
         options:
           - schemathesis
-          - ragas-report
-          - deepeval-report
           - k6-live-profile
           - k6-multiuser
           - lighthouse
@@ -58,7 +64,7 @@ jobs:
         run: echo "::notice::Targeting ${{ inputs.tool }} against the live deployed URL — this wakes the AWS box if it's asleep."
 
       - uses: actions/setup-python@v7
-        if: contains(fromJSON('["schemathesis","ragas-report","deepeval-report"]'), inputs.tool)
+        if: inputs.tool == 'schemathesis'
         with:
           python-version: "3.11"
 
@@ -69,48 +75,6 @@ jobs:
         run: |
           pip install "schemathesis>=4.24,<5"
           bash scripts/schemathesis_live.sh
-
-      - name: RAGAS report (live)
-        if: inputs.tool == 'ragas-report'
-        env:
-          EVAL_SERVER_URL: ${{ secrets.MAGIK_LIVE_URL }}
-          EVAL_USER_ID: "5ead49e7-42f0-4368-80ac-8014595c3980"
-          EVAL_REPORTER_EMAIL: ${{ secrets.EVAL_REPORTER_EMAIL }}
-          EVAL_REPORTER_PASSWORD: ${{ secrets.EVAL_REPORTER_PASSWORD }}
-          # `python -m app.eval.ragas_report` imports app.core.config, which
-          # builds and validates a local Settings object at import time —
-          # same requirement ci.yml's lint-type-test job and eval-gate.yml's
-          # tier1-retrieval job already guard against. This job never
-          # actually uses this local Settings object for anything real: it
-          # authenticates to the live server over HTTP via
-          # EVAL_REPORTER_EMAIL/PASSWORD, not by minting a JWT in-process.
-          # Placeholder values only, never used to sign anything real.
-          ENV: test
-          AUTH_ENABLED: "false"
-          SECRET_KEY: "ci-test-only-placeholder-secret-not-a-real-credential"  # pragma: allowlist secret
-          JWT_SECRET_KEY: "ci-test-only-placeholder-jwt-secret-not-a-real-credential"  # pragma: allowlist secret
-        run: |
-          pip install -r requirements.txt
-          pip install -e .
-          python -m app.eval.ragas_report
-
-      - name: DeepEval suite (live)
-        if: inputs.tool == 'deepeval-report'
-        env:
-          EVAL_SERVER_URL: ${{ secrets.MAGIK_LIVE_URL }}
-          EVAL_USER_ID: "5ead49e7-42f0-4368-80ac-8014595c3980"
-          EVAL_REPORTER_EMAIL: ${{ secrets.EVAL_REPORTER_EMAIL }}
-          EVAL_REPORTER_PASSWORD: ${{ secrets.EVAL_REPORTER_PASSWORD }}
-          # Same import-time Settings.validate() requirement as the RAGAS
-          # step above — see that step's comment.
-          ENV: test
-          AUTH_ENABLED: "false"
-          SECRET_KEY: "ci-test-only-placeholder-secret-not-a-real-credential"  # pragma: allowlist secret
-          JWT_SECRET_KEY: "ci-test-only-placeholder-jwt-secret-not-a-real-credential"  # pragma: allowlist secret
-        run: |
-          pip install -r requirements.txt
-          pip install -e ".[quality]"
-          python -m app.eval.deepeval_suite --limit 10
 
       - uses: grafana/setup-k6-action@v1
         if: contains(fromJSON('["k6-live-profile","k6-multiuser"]'), inputs.tool)
