@@ -78,6 +78,53 @@ RUN CMAKE_ARGS="-DGGML_CUDA=on -DGGML_BACKEND_DL=OFF -DGGML_NATIVE=OFF \
 # pip dependency (unlike the GB-scale GGUF/embedding/vision models below).
 RUN python3.12 -m spacy download en_core_web_lg
 
+# ── Split the venv so no single image layer exceeds GHCR's serving limit ──
+# GHCR refuses to serve a blob this large. Measured directly against
+# ghcr.io on 2026-08-29, every layer of v1.0.0-rc6:
+#
+#   15 layers, 0-285MB ....... HTTP 206  (served fine)
+#   1953a5f9db28, 2.07GB ..... HTTP 206  (served fine)
+#   1082e86f7de3, 7.63GB ..... HTTP 429  {"code":"TOOMANYREQUESTS",
+#                                          "message":"retry-after: 476ms"}
+#
+# HEAD on that blob returns 200 — it exists and is intact, GHCR just will not
+# serve the body. It is size-related, not specific to one build: v1.0.0-rc5's
+# equivalent 7.63GB layer 429s identically while its 2.07GB layer serves. And
+# it is not a transient window — four `deploy-staging` attempts over 4 hours
+# (including one after 2h13m of complete quiet) all died the same way, and 8
+# consecutive direct requests returned 429 every time. Retrying does NOT get
+# past it, which is why there is no retry loop in cd.yml's docker pull.
+#
+# The offending layer was `COPY --from=cuda-builder /opt/venv /opt/venv` in
+# `runtime` — the entire venv (torch + the pip-installed CUDA libraries) as
+# ONE blob. Splitting the biggest subtrees out gives the runtime stage six
+# moderate layers instead of one enormous one, all comfortably inside the
+# range GHCR demonstrably serves.
+#
+# Buckets are the four subtrees that dominate a torch-CUDA venv, each isolated
+# so no one of them can drift back over the limit on its own. The `du -sh` is
+# deliberate: it prints the achieved split into the build log, so the next
+# person can see the real sizes without reproducing this investigation.
+#
+# Moving costs nothing in the final image — cuda-builder is only ever a COPY
+# source, its own layers are never shipped.
+RUN set -eux; \
+    SP="/opt/venv/lib/python3.12/site-packages"; \
+    mkdir -p /venv-split; \
+    for d in torch triton; do \
+      if [ -d "$SP/$d" ]; then mv "$SP/$d" "/venv-split/$d"; \
+      else mkdir -p "/venv-split/$d"; fi; \
+    done; \
+    for d in cudnn cublas; do \
+      mkdir -p "/venv-split/nvidia_$d"; \
+      if [ -d "$SP/nvidia/$d" ]; then mv "$SP/nvidia/$d" "/venv-split/nvidia_$d/$d"; \
+      else mkdir -p "/venv-split/nvidia_$d/$d"; fi; \
+    done; \
+    if [ -d "$SP/nvidia" ]; then mv "$SP/nvidia" /venv-split/nvidia; \
+    else mkdir -p /venv-split/nvidia; fi; \
+    echo "=== venv split sizes (each becomes one image layer) ==="; \
+    du -sh /venv-split/* /opt/venv | sort -h
+
 # NOTE: a build-time `llama_supports_gpu_offload()` smoke check previously
 # lived here, but it doesn't just check compile flags — it probes for an
 # actual physical GPU, which GitHub-hosted CI runners never have. That made
@@ -157,7 +204,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd --gid 10001 appuser \
     && useradd --uid 10001 --gid appuser --shell /bin/bash --create-home appuser
 
+# Six layers, not one — see the split step in cuda-builder for the GHCR 429
+# that forced this. Every path below lands exactly where it was in the venv, so
+# nothing downstream (imports, .pth files, torch's lookup of the nvidia libs)
+# can tell the difference. `bin/` is deliberately NOT split: it holds the
+# `python3.12` symlink into /usr/bin that this stage's own python3.12 install
+# resolves, and that has broken once already (see dev-runtime's note below).
+# The remainder copy goes first so the nvidia sub-buckets land inside a
+# directory that already exists.
 COPY --from=cuda-builder /opt/venv /opt/venv
+COPY --from=cuda-builder /venv-split/nvidia /opt/venv/lib/python3.12/site-packages/nvidia
+COPY --from=cuda-builder /venv-split/nvidia_cudnn/cudnn /opt/venv/lib/python3.12/site-packages/nvidia/cudnn
+COPY --from=cuda-builder /venv-split/nvidia_cublas/cublas /opt/venv/lib/python3.12/site-packages/nvidia/cublas
+COPY --from=cuda-builder /venv-split/torch /opt/venv/lib/python3.12/site-packages/torch
+COPY --from=cuda-builder /venv-split/triton /opt/venv/lib/python3.12/site-packages/triton
 
 WORKDIR /app
 COPY app/ app/

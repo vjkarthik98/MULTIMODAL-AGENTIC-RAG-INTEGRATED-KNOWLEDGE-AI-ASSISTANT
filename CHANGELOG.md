@@ -5,6 +5,49 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0-rc7] - 2026-08-29
+
+rc6 built and pushed cleanly but could never be deployed: `deploy-staging`
+failed on `docker pull` four times across four hours, each attempt taking the
+staging box down with it via `stop-staging`. The cause was not in this
+repository. No application behaviour changes.
+
+### Fixed
+- **GHCR refused to serve the image's largest layer, so no deploy could
+  start.** `COPY --from=cuda-builder /opt/venv /opt/venv` shipped the entire
+  virtualenv — torch plus the pip-installed CUDA libraries — as a single
+  7.63GB blob, and ghcr.io answers requests for it with
+  `429 TOOMANYREQUESTS {"message":"retry-after: 476ms"}`. Measured against the
+  registry directly, every one of the image's other 17 layers served normally,
+  including a 2.07GB one; `HEAD` on the failing blob returns 200, so the blob
+  exists and is intact — the registry simply will not send the body.
+  It is size-related rather than specific to one build: v1.0.0-rc5's
+  equivalent 7.63GB layer 429s identically today, so rc5 could not be
+  redeployed either. It is also not a transient window — one attempt came
+  after 2h13m of complete quiet and failed in 35 seconds, and eight
+  consecutive direct requests to the blob returned 429 every time, which is
+  why no retry was added to the deploy: retrying demonstrably does not get
+  past it.
+  The venv is now split across six layers in the `runtime` stage — `torch`,
+  `triton`, `nvidia/cudnn`, `nvidia/cublas`, the rest of `nvidia`, and the
+  remainder of the venv — each landing at its original path so nothing
+  downstream can observe the difference. `bin/` is deliberately left in the
+  remainder: it holds the `python3.12` symlink into `/usr/bin` that the
+  runtime stage's own interpreter install resolves, which has broken once
+  before. The split step prints `du -sh` of each bucket into the build log so
+  the achieved sizes are visible without reproducing the investigation.
+  `dev-runtime` copies from `base-deps` and is unchanged.
+
+### Known limitations
+- The split targets the four subtrees that dominate a torch-CUDA venv. If a
+  future dependency bump pushes one bucket back over the limit the same
+  failure returns; the `du -sh` output in the build log is the early warning.
+  The durable fix is a registry in the same region as the deployment target
+  (ECR), which removes both the throttle and the cross-internet pull.
+- The quality-report fixes from rc6 still have not executed on a GPU box —
+  rc6 never deployed. Verification remains a manual `quality-report.yml` run
+  against staging once this release lands.
+
 ## [1.0.0-rc6] - 2026-08-29
 
 rc5 shipped the `--limit 30` cap for the RAGAS report and it was not enough:
