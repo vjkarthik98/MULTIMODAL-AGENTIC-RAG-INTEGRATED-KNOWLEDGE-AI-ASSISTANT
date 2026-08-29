@@ -53,22 +53,25 @@ from app.eval.runners.generation_runner import (
     _query_via_server,
     _server_available,
     _strip_verification_hedge,
+    release_full_context_models,
 )
 
 REPORTS_DIR = Path(__file__).resolve().parents[2] / "quality-reports" / "deepeval"
 
 
 def _mode_tag(server_url: str) -> str:
-    """Which deployment the graded ANSWERS came from — "live" or "local".
+    """Which deployment the graded ANSWERS came from — free-form, not an enum.
 
     EVAL_MODE_TAG overrides the URL sniff, because the URL stopped being a
-    reliable proxy for it. cd.yml's report-quality-metrics runs on the
-    production box's own self-hosted runner and reaches the production
-    container over `http://127.0.0.1:8000` (the same loopback call
-    tier2-eval.yml makes) — a real production measurement that the sniff below
-    would stamp `local`, on the report filename AND on the public shields.io
-    badge. The transport says nothing about what was measured; only the caller
-    knows, so the caller may say.
+    reliable proxy for it. quality-report.yml runs on the staging box's own
+    self-hosted runner and reaches the staging container over
+    `http://127.0.0.1:8000` (the same loopback call tier2-eval.yml makes) — a
+    real measurement of a deployed image that the sniff below would stamp
+    `local`, on the report filename AND on the public shields.io badge. The
+    transport says nothing about what was measured; only the caller knows, so
+    the caller may say. That workflow passes "staging" rather than "live" on
+    purpose: it grades the promoted image on a box cloned from production, not
+    production itself, and the badge should not claim otherwise.
     """
     override = os.getenv("EVAL_MODE_TAG", "").strip()
     if override:
@@ -239,7 +242,7 @@ async def _build_eval_rows(cfg: EvalConfig, limit: int | None) -> tuple[list[dic
     #     TypeError: got an unexpected keyword argument 'access_token'
     # straight into `errors` and the report was written with zero rows. It went
     # unnoticed because the module crashed earlier still, at import, on
-    # Settings.validate() (see cd.yml's report-quality-metrics env block) — the
+    # Settings.validate() (see quality-live.yml's placeholder env block) — the
     # import crash masked this one. Matches behavioral_runner.py:45,63 and
     # generation_runner.py:378-383, the two callers that were already correct.
     eval_auth = EvalAuth(cfg.user_id)
@@ -290,6 +293,12 @@ async def _build_eval_rows(cfg: EvalConfig, limit: int | None) -> tuple[list[dic
                 "reference_answer": ref if ref and ref != "TODO" else None,
             }
         )
+
+    # Free the query-phase stack before any judging begins — see
+    # release_full_context_models() for why this is both safe (separate
+    # process from the serving app) and necessary (the OOM that killed the
+    # production runner in rc4 and rc5).
+    release_full_context_models()
 
     return eval_rows, errors
 

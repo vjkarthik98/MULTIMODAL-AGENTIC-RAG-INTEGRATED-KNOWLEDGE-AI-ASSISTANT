@@ -1,0 +1,456 @@
+name: Quality Report (Ragas + DeepEval, manual)
+
+# Portfolio-facing Ragas + DeepEval report — MANUAL ONLY, and deliberately not
+# part of any release.
+#
+# ── Why this is not in cd.yml any more ────────────────────────────────────
+# It used to be cd.yml's `report-quality-metrics`, running against the LIVE
+# PRODUCTION container on a runner registered on the production box. It never
+# once completed. The final failure (CD run 33149188726, v1.0.0-rc5, job
+# 98925269773) is the one that settled it: the DeepEval step started at
+# 17:23:50 and recorded NO conclusion and NO completion time, and the five
+# steps after it — every one of them `if: always()` — never ran at all. That is
+# not a step failing; that is the runner process dying. DeepEval loads
+# Qwen2.5-7B as a second model stack beside the live server's resident models,
+# the kernel OOM-killer fired ~12 minutes into a 45-minute budget, and it took
+# `magik-prod-runner` offline with it.
+#
+# Two things follow, and they are why "add another guard" was not the fix:
+#   1. `continue-on-error` cannot protect that job. It is evaluated BY the
+#      runner, and the runner is what dies — so the annotation, the artifact,
+#      the badge and the summary built to absorb this failure all die with it.
+#   2. The blast radius was production. A report with no SLO attached was
+#      OOM-pressuring the instance that serves real traffic.
+# So the workload moved to the staging box, which is disposable, and the
+# trigger became a human — because automating a measurement whose own tooling
+# is knowingly unreliable just converts one broken number into a red release
+# every single time.
+#
+# ── Why it still runs ON THE BOX, in the deployed container ───────────────
+# Inherited verbatim from the job this replaces. All three reasons are about
+# the eval code, not about which box it points at, so they survive the move:
+#
+#   1. The judge is LOCAL BY DESIGN. app/eval/judges/qwen_judge.py runs
+#      Qwen2.5-7B-Instruct Q4_K_M as its own process, deliberately NOT the
+#      served model — DeepEval used to judge the RAG server with itself, a real
+#      self-evaluation-bias problem fixed by giving the judge its own
+#      checkpoint. A hosted runner has no GPU and no ~4.7GB GGUF, and
+#      `_start_worker()` does NOT download one — it raises. On this box the
+#      GGUF is already in the mounted .hf_cache and the GPU runs it in seconds.
+#   2. No QDRANT_URL/QDRANT_API_KEY in a bare shell, so
+#      generation_runner._make_full_context_retriever() returns None and
+#      faithfulness/context_recall get graded against the 200-char source
+#      snippets /rag/query returns instead of the full retrieved chunks.
+#      In-container, the retriever is the real one.
+#   3. No BM25 index — actions/checkout runs `git clean -ffdx`, and the index
+#      lives in gitignored data/ on the box's mounted volume.
+#
+# Same three reasons tier2-eval.yml runs in-container; see its "Why this runs
+# INSIDE the deployed container" note.
+#
+# ── What the number means ─────────────────────────────────────────────────
+# EVAL_MODE_TAG=staging, so the report filename and the shields.io badge read
+# e.g. "0.82 (staging)". That is the honest claim, and it is deliberately not
+# "live": this grades the promoted image on a box cloned from production (same
+# AMI, same data-volume snapshot, same Qdrant tenant), not production itself. A
+# badge that said "live" off a staging run would be exactly the kind of unearned
+# claim scripts/generate_quality_badges.py exists to prevent.
+#
+# Nothing here is ever committed — reports and badges are published as run
+# artifacts and a human decides what is worth keeping, on `development`. See
+# quality-reports/README.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tools:
+        description: "Which report(s) to run"
+        required: true
+        type: choice
+        default: both
+        options:
+          - both
+          - ragas
+          - deepeval
+      ragas_limit:
+        # The cap is not arbitrary. This runs as a SECOND python process inside
+        # the container, loading its own text embedder + SigLIP next to the ones
+        # the app already has resident, while every row drives a full RAG query
+        # through that same app. Unbounded that is ~98 rows of two model stacks
+        # coexisting — the exact shape of the OOM that killed the production
+        # runner. A capped run stays honest: the report records n_queries, and
+        # scripts/generate_quality_badges.py refuses to publish a Ragas badge
+        # whose graded rows cover less than half of it.
+        description: "Max gold rows for RAGAS (blank = all ~98; not advised)"
+        required: false
+        type: string
+        default: "30"
+      deepeval_limit:
+        description: "Max gold rows for DeepEval (blank = all)"
+        required: false
+        type: string
+        default: "10"
+      keep_staging_running:
+        # Escape hatch for debugging a failed run on the box itself. Costs
+        # ~$1.86/hr for as long as it is left on, and the idle-stop Lambda
+        # watches magik-prod ONLY — nothing else will turn staging off.
+        description: "Leave staging running afterwards (debugging — it will bill)"
+        required: false
+        type: boolean
+        default: false
+
+# There is exactly ONE staging box, and cd.yml's deploy-staging drives it too.
+# Same group name there; concurrency groups are repo-global, so the two
+# interlock and a release triggered mid-report queues instead of swapping the
+# container out from under a running eval.
+concurrency:
+  group: magik-staging-box
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write   # OIDC — no static AWS credentials
+
+env:
+  CONTAINER: magik-staging-current
+  EVAL_USER_ID: ${{ vars.EVAL_USER_ID || 'eval_default' }}
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Staging is stopped by default for cost. Waking it is enough to get the
+  # system under test back: magik-staging-current runs with
+  # `--restart unless-stopped` (cd.yml), so the last-deployed image — the one
+  # promoted by the most recent release — comes back on boot with the mounted
+  # .hf_cache and data volume intact. No deploy machinery is duplicated here.
+  # -----------------------------------------------------------------------
+  wake-staging:
+    # Same guard the `report` job carries. Without it, a repo with no staging
+    # runner registered would wake (and bill) the box for an eval job that is
+    # then skipped grey — the wake is the expensive part, so it has to be
+    # gated at the same place, not just downstream.
+    if: vars.SELF_HOSTED_STAGING_GPU_RUNNER == 'true'
+    runs-on: ubuntu-latest
+    environment: staging
+    outputs:
+      id: ${{ steps.instance.outputs.id }}
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Resolve staging instance ID by tag
+        id: instance
+        run: |
+          ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${{ vars.EC2_STAGING_INSTANCE_TAG || 'magik-staging' }}" \
+                      "Name=instance-state-name,Values=stopped,running,stopping" \
+            --query "Reservations[0].Instances[0].InstanceId" --output text)
+          if [ "$ID" = "None" ] || [ -z "$ID" ]; then
+            echo "::error::No instance tagged Name=${{ vars.EC2_STAGING_INSTANCE_TAG || 'magik-staging' }} found. See docs/runbooks/ci-cd.md 'Staging gate' prerequisites."
+            exit 1
+          fi
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+
+      - name: Wake staging instance (idempotent)
+        run: aws ec2 start-instances --instance-ids ${{ steps.instance.outputs.id }} || true
+
+      - name: Wait until running + SSM-reachable
+        run: |
+          aws ec2 wait instance-running --instance-ids ${{ steps.instance.outputs.id }}
+          for i in $(seq 1 30); do
+            STATUS=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=${{ steps.instance.outputs.id }}" \
+              --query "InstanceInformationList[0].PingStatus" --output text 2>/dev/null || echo "None")
+            [ "$STATUS" = "Online" ] && break
+            sleep 10
+          done
+          [ "$STATUS" = "Online" ] || { echo "::error::SSM agent not reachable after 5 min"; exit 1; }
+
+  # -----------------------------------------------------------------------
+  # The only job that needs the GPU box — and it does only the GPU work.
+  # -----------------------------------------------------------------------
+  report:
+    needs: wake-staging
+    # Mirrors tier2-eval.yml's `runner_available` input: with no registered
+    # staging runner this skips grey rather than queueing a job no machine will
+    # ever pick up.
+    if: vars.SELF_HOSTED_STAGING_GPU_RUNNER == 'true'
+    runs-on: [self-hosted, staging-gpu]
+    # Backstop only — each eval step carries its own, smaller timeout-minutes so
+    # a slow judge fails THAT STEP (absorbed by continue-on-error) instead of
+    # cancelling the job. The job-level cap also bounds what stop-staging has to
+    # wait for in the worst case.
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight — staging container is running, healthy, and has eval data
+        id: preflight
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          if ! docker ps --filter "name=^/${CONTAINER}$" --filter status=running -q | grep -q .; then
+            echo "::warning title=Quality report skipped::Container '${CONTAINER}' is not running. Waking the box should restart it (--restart unless-stopped); if it did not, run cd.yml's deploy-staging to redeploy."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          # 40 x 15s = 10 min, deliberately double the 5 min the cd.yml job
+          # allowed. That job inherited a box promote-production had just
+          # health-checked; this one runs against an instance that cold-booted
+          # seconds ago and is still faulting the model stack back in.
+          ok=""
+          for _ in $(seq 1 40); do
+            if docker exec "$CONTAINER" curl -sf http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              ok="yes"; break
+            fi
+            sleep 15
+          done
+          if [ -z "$ok" ]; then
+            echo "::warning title=Quality report skipped::/health did not answer within 10 minutes inside '${CONTAINER}'."
+            docker logs --tail 60 "$CONTAINER" 2>&1 || true
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          # Same corpus check tier2-eval.yml's preflight makes, and for the same
+          # reason: without this index HybridRetriever silently degrades to
+          # dense-only, so faithfulness/context_recall would be graded against a
+          # half-retrieved corpus. A false number is worse than no number — that
+          # goes double here, where the number ends up on a public shields.io
+          # badge. Skip and stay grey instead. Path: app/utils/paths.py's
+          # DATA_ROOT is RELATIVE ("data/users"), resolved against the process
+          # CWD — /app inside the container, where the box's /opt/magik/data is
+          # mounted.
+          if ! docker exec "$CONTAINER" \
+               test -f "/app/data/users/${EVAL_USER_ID}/bm25_index/bm25.pkl"; then
+            echo "::warning title=Quality report skipped::Missing /app/data/users/${EVAL_USER_ID}/bm25_index/bm25.pkl inside '${CONTAINER}'. Retrieval would degrade to dense-only and the report would publish a falsely-low score. Rebuild from Qdrant payloads (no GPU, no re-embedding): docker exec ${CONTAINER} python3.12 -m app.retrieval.bm25_retriever --user_id ${EVAL_USER_ID}"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+          echo "preflight OK — ${CONTAINER} healthy, eval corpus present"
+
+      # There is no needs.build-push.outputs.image_tag to inherit here, so ask
+      # the container what it is actually running. The summary and the artifact
+      # name are stamped with this, so a downloaded report can always be traced
+      # back to an image.
+      - name: Identify the image under test
+        id: image
+        if: steps.preflight.outputs.ok == 'true'
+        run: |
+          set -uo pipefail
+          IMG="$(docker inspect --format '{{.Config.Image}}' "$CONTAINER" 2>/dev/null || echo unknown)"
+          echo "ref=$IMG" >> "$GITHUB_OUTPUT"
+          # Artifact names may not contain ':' or '/'.
+          echo "slug=$(printf '%s' "$IMG" | tr ':/' '--')" >> "$GITHUB_OUTPUT"
+          echo "image under test: $IMG"
+
+      # EVAL_MODE_TAG=staging: the call is over loopback, but what is being
+      # measured is the staging deployment. Without the override _mode_tag()
+      # sniffs 127.0.0.1 and stamps "local" on both the report filename and the
+      # public badge.
+      #
+      # The limit reaches the shell through `env:`, never through `${{ }}`
+      # interpolated into `run:`. A workflow_dispatch string pasted straight
+      # into a shell line is script injection — dispatch is maintainer-only
+      # here, but "only trusted people can trigger it" is not a security
+      # boundary worth relying on when passing it as an env var and validating
+      # it costs four lines.
+      - name: RAGAS report (in-container, staging)
+        id: ragas
+        if: steps.preflight.outputs.ok == 'true' && (inputs.tools == 'both' || inputs.tools == 'ragas')
+        continue-on-error: true
+        timeout-minutes: 75
+        env:
+          ROW_LIMIT: ${{ inputs.ragas_limit }}
+        run: |
+          set -uo pipefail
+          ARGS=""
+          if [ -n "${ROW_LIMIT}" ]; then
+            case "${ROW_LIMIT}" in
+              ''|*[!0-9]*) echo "::error::ragas_limit must be a positive integer (got '${ROW_LIMIT}')"; exit 1 ;;
+            esac
+            ARGS="--limit ${ROW_LIMIT}"
+          fi
+          # shellcheck disable=SC2086  # ARGS is validated-numeric or empty
+          docker exec \
+            -e EVAL_USER_ID="${EVAL_USER_ID}" \
+            -e EVAL_SERVER_URL="http://127.0.0.1:8000" \
+            -e EVAL_MODE_TAG="staging" \
+            "$CONTAINER" python3.12 -m app.eval.ragas_report $ARGS
+
+      - name: DeepEval report (in-container, staging)
+        id: deepeval
+        if: steps.preflight.outputs.ok == 'true' && (inputs.tools == 'both' || inputs.tools == 'deepeval')
+        continue-on-error: true
+        timeout-minutes: 45
+        env:
+          ROW_LIMIT: ${{ inputs.deepeval_limit }}
+        run: |
+          set -uo pipefail
+          ARGS=""
+          if [ -n "${ROW_LIMIT}" ]; then
+            case "${ROW_LIMIT}" in
+              ''|*[!0-9]*) echo "::error::deepeval_limit must be a positive integer (got '${ROW_LIMIT}')"; exit 1 ;;
+            esac
+            ARGS="--limit ${ROW_LIMIT}"
+          fi
+          # shellcheck disable=SC2086  # ARGS is validated-numeric or empty
+          docker exec \
+            -e EVAL_USER_ID="${EVAL_USER_ID}" \
+            -e EVAL_SERVER_URL="http://127.0.0.1:8000" \
+            -e EVAL_MODE_TAG="staging" \
+            "$CONTAINER" python3.12 -m app.eval.deepeval_suite $ARGS
+
+      # Both writers put their .json/.md under <repo root>/quality-reports/<tool>/,
+      # which inside the image is /app/quality-reports (the Dockerfile chowns
+      # /app to appuser, so _write_report's mkdir succeeds). Copy them into the
+      # workspace so the artifact — and the badge job downstream — can see them.
+      - name: Extract reports from container
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p "${GITHUB_WORKSPACE}/quality-reports"
+          docker cp "${CONTAINER}:/app/quality-reports/." "${GITHUB_WORKSPACE}/quality-reports/" 2>/dev/null \
+            || echo "no reports produced (the eval steps failed before writing)"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: quality-reports-${{ steps.image.outputs.slug || github.run_id }}
+          path: quality-reports/
+          if-no-files-found: warn
+          retention-days: 90
+
+      # The reports live inside a container the NEXT staging deploy replaces.
+      # Leaving them there would let a later run's docker cp pick up an older
+      # image's numbers if its own eval failed, so the container is left clean
+      # and the artifact above is the only copy that outlives the run.
+      - name: Clear in-container reports
+        if: always()
+        run: |
+          docker exec "$CONTAINER" rm -rf /app/quality-reports >/dev/null 2>&1 \
+            || echo "nothing to clear"
+
+      - name: Post summary
+        if: always()
+        run: |
+          {
+            echo "## Quality report — ${{ steps.image.outputs.ref || 'image unknown' }}"
+            echo "- Measured: staging \`${CONTAINER}\` in-container over loopback; judge on this box's GPU"
+            echo "- Tools requested: ${{ inputs.tools }}"
+            echo "- Ragas: ${{ steps.ragas.outcome }}"
+            echo "- DeepEval: ${{ steps.deepeval.outcome }}"
+            echo "- Manual, non-blocking, and nowhere near production — this gates nothing."
+            echo "- Reports are attached to this run; badges are regenerated by the \`badges\` job."
+          } >> "$GITHUB_STEP_SUMMARY"
+          # continue-on-error keeps a failed report from failing the run — it
+          # must not also make one look like a pass. On 2026-08-23 both steps
+          # died at import and still rendered as 2-second green ticks; the run
+          # read as healthy and the gap survived a whole release. An explicit
+          # annotation puts it at the top of the run page instead.
+          for tool in "Ragas:${{ steps.ragas.outcome }}" "DeepEval:${{ steps.deepeval.outcome }}"; do
+            name="${tool%%:*}"
+            outcome="${tool##*:}"
+            if [ "$outcome" != "success" ] && [ "$outcome" != "skipped" ]; then
+              echo "::warning title=${name} report did not run::outcome=${outcome} — badges stay 'not yet measured'. Open the step log above. If it ends in 'exit code 137' the eval was OOM-killed: it runs as a second model stack inside the container, so lower that step's row limit rather than retrying unchanged."
+            fi
+          done
+
+  # -----------------------------------------------------------------------
+  # Badge generation needs no GPU, so it does not run on the GPU box. That is
+  # not tidiness: the equivalent step never once executed to completion in
+  # cd.yml — v1.0.0-rc1..rc3 died on the `scripts/*` gitignore trap and rc5
+  # never reached it — so nothing has ever demonstrated that a usable python3
+  # exists on a self-hosted runner. A hosted runner with setup-python removes
+  # the question entirely.
+  # -----------------------------------------------------------------------
+  badges:
+    needs: report
+    if: always() && needs.report.result != 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      # continue-on-error: if both eval steps died before writing anything,
+      # there is no artifact to fetch. The badge generator still has a job to do
+      # in that case — it regenerates honestly from whatever reports are
+      # committed in the repo, which is how a run that measured nothing ends up
+      # publishing "not yet measured" rather than a stale number.
+      - name: Download reports from the eval job
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          pattern: quality-reports-*
+          merge-multiple: true
+          path: quality-reports
+
+      - name: Regenerate quality badges
+        run: python scripts/generate_quality_badges.py --summary-md "$GITHUB_STEP_SUMMARY"
+
+      # Published, never committed — quality-reports/README.md states the policy
+      # plainly ("Committing is always a manual `git add`, never automatic ...
+      # that applies doubly to CI"), and CLAUDE.md's "never commit or push
+      # without explicit user instruction" says the same. An earlier revision of
+      # the job this workflow replaces ran `git commit` + `git push origin main`,
+      # which could not have worked either: main carries branch protection with
+      # 7 required status checks, and the commit message said `[skip ci]`, so
+      # those checks would never have run to satisfy it.
+      - name: Upload badges
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: quality-badges
+          path: quality-badges
+          if-no-files-found: warn
+          retention-days: 90
+
+  # -----------------------------------------------------------------------
+  # `always()` is load-bearing. If the staging runner dies mid-eval the way
+  # magik-prod-runner did, this is the only thing that stops a $1.86/hr GPU box
+  # from billing indefinitely — the idle-stop Lambda's NetworkIn heuristic
+  # watches magik-prod ONLY. The instance is re-resolved by tag rather than read
+  # from wake-staging's output, so this still works when that job failed.
+  # -----------------------------------------------------------------------
+  stop-staging:
+    needs: [wake-staging, report]
+    # `needs.wake-staging.result != 'skipped'` keeps this honest about what it
+    # owns: stop the box only if THIS run is what woke it. Otherwise a dispatch
+    # made while a maintainer had staging up by hand would shut it down
+    # underneath them.
+    if: always() && needs.wake-staging.result != 'skipped' && inputs.keep_staging_running != true
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Resolve staging instance ID by tag
+        id: instance
+        run: |
+          ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${{ vars.EC2_STAGING_INSTANCE_TAG || 'magik-staging' }}" \
+                      "Name=instance-state-name,Values=running,pending" \
+            --query "Reservations[0].Instances[0].InstanceId" --output text)
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+
+      - name: Stop staging instance
+        if: steps.instance.outputs.id != '' && steps.instance.outputs.id != 'None'
+        run: aws ec2 stop-instances --instance-ids ${{ steps.instance.outputs.id }}
+
+      - name: Note when there was nothing to stop
+        if: steps.instance.outputs.id == '' || steps.instance.outputs.id == 'None'
+        run: echo "::notice::No running staging instance found to stop."
