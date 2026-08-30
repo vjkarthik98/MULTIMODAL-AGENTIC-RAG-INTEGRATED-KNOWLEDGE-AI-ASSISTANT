@@ -864,7 +864,7 @@ pyannote-core==5.0.0
     #   pyannote-database
     #   pyannote-metrics
     #   pyannote-pipeline
-pyannote-database==5.1.3
+pyannote-database==6.1.1
     # via
     #   pyannote-audio
     #   pyannote-metrics
