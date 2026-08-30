@@ -584,7 +584,7 @@ numba==0.67.0
     # via
     #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
     #   librosa
-numpy==1.26.4
+numpy==2.2.6
     # via
     #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
     #   accelerate

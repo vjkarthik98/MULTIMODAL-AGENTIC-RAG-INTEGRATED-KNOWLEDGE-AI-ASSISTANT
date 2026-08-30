@@ -101,7 +101,7 @@ langchain-text-splitters>=0.0.1
 # langchain, and deepeval together — deepeval does not actually require
 # numpy>=2.5, pip just over-resolved to latest by default.
 # ------------------------------------------------------------------------------
-numpy>=1.26,<2.0.0
+numpy>=1.26,<3.0.0
 scikit-learn>=1.4
 pandas>=2.2
 # Already an installed transitive dependency (via scikit-learn) before this
