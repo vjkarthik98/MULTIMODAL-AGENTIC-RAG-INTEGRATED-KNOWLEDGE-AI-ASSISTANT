@@ -48,6 +48,17 @@ STUCK_MINUTES="${STUCK_MINUTES:-6}"
 # silently-failing pushes (harmless, but worth getting right).
 KUMA_PUSH_URL="${KUMA_PUSH_URL:-}"
 
+# HMAC key gating StartInstances behind a real poll from the wake page's own
+# JS — see deploy/aws/lambda/wake_gateway/handler.py's "Bot / scanner
+# mitigation" docstring for why this exists (v1.0.1 fix for the instance
+# waking on bare HTTP hits with no visitor behind them). Regenerated on every
+# re-run unless the caller pins one via the environment — safe either way,
+# since this Lambda is the only thing that ever mints or checks a token, so
+# rotating it just means any page load in flight at the exact moment of a
+# redeploy gets a token signed with the old value and self-heals on its next
+# poll (REFRESH_SECONDS later) with a fresh one.
+WAKE_TOKEN_SECRET="${WAKE_TOKEN_SECRET:-$(openssl rand -hex 32)}"
+
 WAKE_FN="magik-wake-gateway"
 IDLE_FN="magik-idle-stop"
 WAKE_ROLE="magik-wake-gateway-role"
@@ -132,7 +143,7 @@ ensure_role "$WAKE_ROLE" "${AWS_DIR}/iam/lambda-wake-gateway-permissions.json" "
 
 say "Wake gateway — Lambda"
 deploy_fn "$WAKE_FN" "${AWS_DIR}/lambda/wake_gateway" "$WAKE_ROLE" \
-  "Variables={EC2_INSTANCE_TAG=${INSTANCE_TAG},APP_URL=${APP_URL},HEALTH_TIMEOUT_S=3,REFRESH_SECONDS=7,STUCK_MINUTES=${STUCK_MINUTES},KUMA_PUSH_URL=${KUMA_PUSH_URL}}" \
+  "Variables={EC2_INSTANCE_TAG=${INSTANCE_TAG},APP_URL=${APP_URL},HEALTH_TIMEOUT_S=3,REFRESH_SECONDS=7,STUCK_MINUTES=${STUCK_MINUTES},KUMA_PUSH_URL=${KUMA_PUSH_URL},WAKE_TOKEN_SECRET=${WAKE_TOKEN_SECRET}}" \
   15
 
 say "Wake gateway — public API Gateway HTTP API"
