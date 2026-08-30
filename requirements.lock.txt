@@ -856,7 +856,7 @@ psutil==7.2.2
     #   accelerate
 py-serializable==2.1.0
     # via cyclonedx-python-lib
-pyannote-audio==3.4.0
+pyannote-audio==4.0.7
     # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
 pyannote-core==5.0.0
     # via
