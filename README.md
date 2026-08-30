@@ -3,41 +3,35 @@
 **A finance-domain retrieval-augmented generation system** that ingests text, PDF, DOCX, XLSX, images, audio, and video, routes queries through an agentic controller, retrieves with a hybrid BM25 + dense pipeline, verifies its own answers before they reach the user, and runs entirely on open-source models — no third-party LLM API required.
 
 [![CI](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/ci.yml/badge.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/ci.yml)
-[![Eval Gate](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/eval-gate.yml/badge.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/eval-gate.yml)
+[![Eval Gate](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/eval-gate.yml/badge.svg?event=pull_request)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/eval-gate.yml)
 [![CD](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/cd.yml/badge.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/cd.yml)
 [![Security](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/security.yml/badge.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/security.yml)
 [![Quality](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/quality.yml/badge.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/quality.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
-[![Release](https://img.shields.io/badge/release-v1.0.0-brightgreen.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/releases/tag/v1.0.0)
+[![Release](https://img.shields.io/badge/release-v1.0.1-brightgreen.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/releases)
 
-> **v1.0.0 — first stable release.** The HTTP interfaces are covered by
-> [Semantic Versioning](https://semver.org/) from this release forward.
-> Release notes: [CHANGELOG.md](CHANGELOG.md#100---2026-08-29) ·
+> **v1.0.1 — stable.** The HTTP interfaces are covered by
+> [Semantic Versioning](https://semver.org/) from v1.0.0 forward.
+> Release notes: [CHANGELOG.md](CHANGELOG.md#101---2026-08-30) ·
 > Supported versions: [SECURITY.md](SECURITY.md#supported-versions)
-
-**Live demo:** [launch.vk-ai.online](https://launch.vk-ai.online) → redirects to [magik.vk-ai.online](https://magik.vk-ai.online)
-
-The demo runs on a scale-to-zero AWS GPU box. If it's asleep, the link shows a live status page (waking → loading models → ready) and redirects automatically — first load after idle typically takes 60–90 seconds. See [Deployment](#deployment) for why.
-
-**Demo login:** `magikaiassistant@gmail.com` / `Demo@2026` — a fixed account, pre-loaded with a real finance knowledge base (10-K, earnings call, transcript, spreadsheet) and chat history, so citations and answers are genuine retrieval, not scripted. It skips the email OTP step so a recruiter can log in immediately.
 
 ---
 
 ## Table of Contents
 
 - [Overview](#overview)
-- [Why This Project Exists](#why-this-project-exists)
-- [Key Features](#key-features)
+- [Key Capabilities](#key-capabilities)
+- [Evidence at a Glance](#evidence-at-a-glance)
 - [Architecture](#architecture)
 - [Per-Modality Isolation](#per-modality-isolation)
-- [Tech Stack](#tech-stack)
-- [Project Structure](#project-structure)
-- [Getting Started](#getting-started)
-- [API Reference](#api-reference)
 - [Evaluation & Quality Gates](#evaluation--quality-gates)
 - [Security & Guardrails](#security--guardrails)
 - [Testing](#testing)
+- [Getting Started](#getting-started)
+- [API Reference](#api-reference)
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
 - [CI/CD](#cicd)
 - [Quality & Performance Reports](#quality--performance-reports)
 - [Deployment](#deployment)
@@ -51,29 +45,27 @@ The demo runs on a scale-to-zero AWS GPU box. If it's asleep, the link shows a l
 
 ## Overview
 
-MAGIK is a full-stack RAG system built around a single premise: **most RAG demos fall apart under the exact conditions production traffic creates** — malformed documents, adversarial input, numbers that get silently rounded, sessions from other users bleeding into context, judges that inflate their own scores. This repository is an attempt to build one that does not, and to prove it with a real evaluation harness rather than a claim.
+MAGIK is a full-stack RAG system built around a single premise: **most RAG demos fall apart under the exact conditions real traffic creates** — malformed documents, adversarial input, numbers that get silently rounded, sessions from other users bleeding into context, judges that inflate their own scores. This repository is an attempt to build one that does not, and to prove it with a real evaluation harness rather than a claim.
 
 It specializes in **financial documents** — earnings calls, 10-K/10-Q filings, spreadsheets of financial ratios, investor presentations — because finance is an unforgiving domain for RAG: a hallucinated number is worse than a hallucinated sentence. The system enforces verbatim numeric fidelity between retrieved context and generated answers, and gates its own CI on that guarantee.
 
 Everything runs locally: a quantized GGUF LLM via `llama.cpp`, open embedding and reranking models, open OCR/ASR/vision models. There is no OpenAI, Anthropic, or other paid LLM API in the request path.
 
-## Why This Project Exists
-
-Most RAG tutorials stop at "chunk it, embed it, retrieve it, prompt it." That gets a demo working; it does not get a system through a security review, a load test, or a finance team asking "prove this number is real." MAGIK exists to work through the parts that tutorials skip:
+**Why it exists.** Most RAG tutorials stop at "chunk it, embed it, retrieve it, prompt it." That gets a demo working; it does not get a system through a security review, a load test, or a finance team asking "prove this number is real." Each section below exists because one of these questions had a real, sometimes embarrassing answer during development:
 
 - What happens when the router misclassifies a query — is there a fallback, or does it just fail?
-- What happens when a chunk's number gets truncated mid-context — does the model make one up to fill the gap?
+- What happens when a chunk's number gets truncated mid-context — does the model invent one to fill the gap?
 - What happens when a prompt-injection payload is embedded inside an ingested PDF, not typed by the user?
 - What happens when two tenants' data lives in the same vector collection?
 - How do you know retrieval quality didn't regress when you changed the chunking strategy — a passing test suite won't tell you.
 
-Each of the sections below exists because one of these questions had a real, sometimes embarrassing answer during development — documented in full in [`CHANGELOG.md`](CHANGELOG.md).
+The full, unfiltered engineering history — including root-caused production incidents — is in [`CHANGELOG.md`](CHANGELOG.md).
 
-## Key Features
+## Key Capabilities
 
 **Multimodal ingestion** — seven independent pipelines (text, PDF, DOCX, XLSX, image, audio, video), each with dedicated extraction, chunking, embedding, and BM25 indexing code. A bug in the XLSX pipeline cannot break the audio pipeline; they share no per-modality state.
 
-**Agentic query routing** — an `AgentController` classifies every query into `rag`, `web`, `hybrid_web`, `direct`, or a finance-specific tool call (`financial_calculator`, `sec_edgar_search`) before deciding how to answer it, under an enforced timeout and token budget. Two of these are intentionally not left to inference alone: a RAG query requires an explicit file selection, so every answer has unambiguous document provenance rather than a guessed source; web search is heuristic by default (real-time-signal phrases route automatically) with an explicit toggle for a deterministic contract — a real web failure surfaces as an explicit error instead of silently falling back to a knowledge-base answer.
+**Agentic query routing** — an `AgentController` classifies every query into `rag`, `web`, `hybrid_web`, `direct`, or a finance-specific tool call (`financial_calculator`, `sec_edgar_search`) before deciding how to answer it, under an enforced timeout and token budget. Two decisions are deliberately not left to inference: a RAG query requires an explicit file selection, so every answer has unambiguous document provenance rather than a guessed source; and web search is heuristic by default with an explicit toggle, so a real web failure surfaces as an error instead of silently falling back to a knowledge-base answer.
 
 **Hybrid retrieval** — BM25 (finance-aware tokenizer) and dense Qdrant search are fused, then reranked with a cross-encoder (`BGE-reranker-large`) and diversified with MMR. Cross-modal search (text query against image/video content) goes through a separate SigLIP text encoder.
 
@@ -81,21 +73,36 @@ Each of the sections below exists because one of these questions had a real, som
 
 **Numeric fidelity guarantees** — financial figures in a generated answer are checked against the literal text of retrieved chunks with a 0.5% tolerance and no unit-scale bridging. This is gated in CI, not just measured.
 
-**Guardrails against adversarial input** — every text surface across all 28 modality x layer combinations is sanitized through a single injection-detection entry point before it reaches a model. 100% recall (64/64) against an adversarial corpus, 0.9% false-positive rate, all 10 OWASP LLM Top 10 (2025) categories addressed.
+**Guardrails against adversarial input** — every text surface across all 28 modality × layer combinations is sanitized through a single injection-detection entry point before it reaches a model.
 
-**Real authentication, not a demo login** — JWT (HS256) access/refresh tokens, Argon2 password hashing, Google OAuth (PKCE), TOTP MFA, a Redis-backed token blacklist for logout/revocation, and sliding-window rate limits.
-
-**Enforced tenant isolation** — every one of the four data layers (Qdrant, BM25, Redis, MongoDB) filters on `user_id` independently. There is no layer where isolation is "handled upstream."
+**Real authentication and enforced tenant isolation** — JWT (HS256) access/refresh tokens, Argon2 password hashing, Google OAuth (PKCE), TOTP MFA, a Redis-backed token blacklist for logout/revocation, and sliding-window rate limits. Every one of the four data layers (Qdrant, BM25, Redis, MongoDB) filters on `user_id` independently — there is no layer where isolation is "handled upstream."
 
 **Conversation memory** — short-term memory in Redis, persistent history in MongoDB, and automatic summarization to keep long conversations within the LLM's context budget.
 
-**Full observability stack** — structured JSON logs, Prometheus metrics, OpenTelemetry traces, Grafana dashboards, Loki log aggregation, Tempo distributed tracing, and alerting — not just a `/health` endpoint.
+**Full observability** — structured JSON logs, Prometheus metrics, OpenTelemetry traces, Grafana dashboards, Loki log aggregation, Tempo distributed tracing, and alerting — not just a `/health` endpoint.
 
-**A real evaluation harness** — ten evaluation suites (retrieval, generation, hallucination, finance, OCR, audio, video, routing, e2e, verification) with regression thresholds derived from measured production baselines, wired into CI as a merge gate.
+**A real evaluation harness** — ten evaluation suites (retrieval, generation, hallucination, finance, OCR, audio, video, routing, e2e, verification) with regression thresholds derived from measured baselines, wired into CI as a merge gate.
 
-**Cost-aware GPU deployment** — the production system runs on a single AWS GPU instance that stops itself after 20 minutes of idle traffic and wakes on the next request, cutting infrastructure cost by roughly two orders of magnitude versus an always-on box.
+**Cost-aware GPU deployment** — a single AWS GPU instance that stops itself after 20 minutes of idle traffic and wakes only on an explicit visitor click, cutting infrastructure cost by roughly two orders of magnitude versus an always-on box.
 
 **Reproducible by design** — every HuggingFace-hosted model is pinned to an exact commit SHA (not a moving default branch), Python dependencies are fully locked (`requirements.lock.txt`), infrastructure is codified in Terraform, and Qdrant collections can be snapshotted and restored on demand — a fresh box today builds the same system as the one that was evaluated.
+
+## Evidence at a Glance
+
+Every number below is measured, not estimated, and links to the section that shows how it was produced.
+
+| | Result | Detail |
+|---|---|---|
+| Retrieval quality (CI merge gate) | Hit Rate **0.679**, MRR **0.356**, n=56 gold queries | [Evaluation](#retrieval-ci-gated) |
+| Adversarial corpus recall | **64/64 (100%)**, 0.9% false-positive rate, F1 = 0.994 | [Security](#security--guardrails) |
+| OWASP LLM Top 10 (2025) | **10/10** categories addressed | [Security](#security--guardrails) |
+| Guardrail test suite | **257 passing**, 0 failures | [Security](#security--guardrails) |
+| Test files | **142** across eight categories | [Testing](#testing) |
+| Modality pipelines | **7**, fully isolated from each other | [Per-Modality Isolation](#per-modality-isolation) |
+| Finance numeric fidelity | Gated at **≥ 0.95** — verbatim match, 0.5% tolerance | [Evaluation](#generation-finance-and-routing-informational-real-numbers) |
+| Infrastructure cost | **~$12/month** fixed vs ~$1,340 always-on | [Deployment](#deployment) |
+
+The per-modality scorecard below reports every modality's real numbers, **including the weak ones** — see [Known Limitations](#known-limitations--roadmap) for what is still open and why.
 
 ## Architecture
 
@@ -163,190 +170,6 @@ The defining structural decision in this codebase: every modality owns exactly f
 | Video | `video_ingest.py` | `video_chunker.py` | `video_embedder.py` | `video_bm25.py` |
 
 The pipeline never imports a per-modality file directly — it dispatches through a public API that lazy-loads the right implementation: `chunk_raw_extracts()`, `get_embedder(modality)`, and `router.py`'s `INGESTOR_MAP` / `detect_modality()`. Shared logic (sanitization, the BGE embedder singleton, finance-number protection, the BM25 circuit breaker) lives in per-layer base classes, not in the per-modality files themselves.
-
-## Tech Stack
-
-**Backend** — FastAPI, Pydantic v2, Uvicorn, SSE (`sse-starlette`) for streaming responses.
-
-**LLM inference** — `llama.cpp` (`llama-cpp-python`), running as a separate `llama-server` process. Default model: **Qwen2.5-14B-Instruct**, Q4_K_M GGUF quantization.
-
-**Embeddings & retrieval** — `BAAI/bge-large-en-v1.5` (dense embeddings), `BAAI/bge-reranker-large` (cross-encoder reranking), `google/siglip-so400m-patch14-384` (cross-modal text/image search), `rank-bm25` with a finance-aware tokenizer, Qdrant (vector store).
-
-**Vision** — Qwen2-VL (7B for images, 2B for video frames) for captioning; Tesseract + EasyOCR + TrOCR for OCR; a deterministic OpenCV digitizer for extracting values from financial charts.
-
-**Audio** — `faster-whisper` (`large-v3`) for transcription, `pyannote.audio` (`speaker-diarization-3.1`) for diarization.
-
-**Memory & storage** — Redis (short-term working memory + hot-path cache), Upstash Redis (production long-term memory), MongoDB (persistent chat history).
-
-**Auth & security** — `python-jose` (JWT), `passlib[argon2]`, `authlib` (Google OAuth PKCE), `pyotp` (TOTP MFA), Presidio (PII detection), ClamAV (`clamd`/`pyclamd`), `bleach`.
-
-**Observability** — `structlog`, `prometheus-client`, OpenTelemetry (API/SDK/OTLP exporter), Grafana, Loki, Tempo.
-
-**Evaluation** — a custom harness (`app/eval/`) with `ragas`, `jiwer` (WER/CER), `mlflow`; a single self-hosted judge (Qwen2.5-7B-Instruct) backs the Tier-2 gate, the RAGAS report, and DeepEval, with a pure-Python lexical fallback if it's unavailable.
-
-**Frontend** — React 19, Vite, Tailwind CSS, `react-markdown` + `remark-gfm` for rendering tables and formatted answers.
-
-**Dev tooling** — Ruff, Black, isort, mypy (strict-optional), pytest (+ asyncio, cov, timeout, randomly), pre-commit, `detect-secrets`, Bandit, `pip-audit`.
-
-**Infrastructure** — Docker (multi-stage: CUDA build, CUDA runtime, CPU-only dev runtime), Docker Compose, AWS EC2 (GPU), AWS Lambda + API Gateway + EventBridge (scale-to-zero), GitHub Actions, Caddy (HTTPS reverse proxy).
-
-## Project Structure
-
-```
-MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/
-├── app/
-│   ├── agents/          # Query classification, routing, bounded execution, tool registry
-│   ├── api/              # FastAPI route definitions and middleware
-│   ├── auth/              # JWT, Argon2, Google OAuth, TOTP MFA, tenant isolation, admin routes
-│   ├── bin/               # Model download/provisioning scripts
-│   ├── bm25/              # Per-modality BM25 indexes + shared base class
-│   ├── chunking/          # Per-modality chunkers + finance-number protection
-│   ├── core/              # Settings, device manager, model loader/registry, startup validation
-│   ├── embeddings/        # Per-modality embedders + shared BGE singleton
-│   ├── eval/              # Evaluation harness: runners, judges, metrics, gold datasets, thresholds
-│   ├── guardrails/        # Input/output sanitization, jailbreak/PII/SSRF defenses, audit log
-│   ├── ingestion/         # Per-modality extraction + security-gated router
-│   ├── llm/               # GGUF model interface (proxies to llama-server)
-│   ├── memory/            # Redis + MongoDB conversational memory, summarization
-│   ├── pipeline/          # Ingestion pipeline, query pipeline, streaming RAG pipeline
-│   ├── prompt/             # Prompt construction
-│   ├── reasoning/         # Query decomposition, context/memory fusion
-│   ├── retrieval/          # BM25 retriever, hybrid retriever, reranker
-│   ├── tools/               # Web search and other agent-callable tools
-│   ├── utils/               # Logging, networking, path utilities
-│   ├── vectorstore/        # Qdrant client wrapper
-│   ├── verification/       # Groundedness, citation, confidence, retry-controlled answer verification
-│   └── main.py             # FastAPI application entry point
-│
-├── ui/                      # React + Vite + Tailwind frontend (never imports from app/)
-│   └── src/{api,components,context,hooks,pages,utils}/
-│
-├── tests/                   # 141 test files
-│   ├── unit/                # Fast, mocked, no external services — mirrors app/ structure (93)
-│   ├── integration/           # Live Qdrant/Redis/Mongo required (13)
-│   ├── eval/                  # Eval-harness correctness tests (14)
-│   ├── auth/                 # JWT, MFA, tenant isolation, admin, GDPR purge (10)
-│   ├── guardrails/            # Red-team injection/jailbreak/SSRF/PII suite (7)
-│   ├── pipeline/               # End-to-end pipeline behavior (2)
-│   ├── video/                  # Video-modality end-to-end test (1)
-│   └── api_contract/           # Schemathesis property-based API fuzzing (1)
-│
-├── docs/
-│   ├── runbooks/              # CI/CD, deployment, and monitoring runbooks
-│   └── EVAL_*.md              # Per-modality evaluation write-ups
-│
-├── monitoring/                 # Prometheus, Grafana, Loki, Tempo, OTel collector, alert rules
-├── deploy/aws/                  # Lambda wake/idle-stop, IAM policies, Caddy config, deploy scripts
-├── scripts/                      # Accuracy benchmarks and quality audits per modality
-├── data/                          # Runtime state (BM25 indexes, uploads) — gitignored
-│
-├── docker-compose.yml               # Local CPU-only dev stack (API + Qdrant + Redis + Mongo)
-├── docker-compose.monitoring.yml    # Prometheus/Grafana/Loki/Tempo/OTel stack
-├── Dockerfile                        # Multi-stage: CUDA build, CUDA runtime, CPU dev-runtime
-├── Makefile                           # install, lint, test, eval, docker, release targets
-├── start_server.py                     # Cross-platform launcher (auto-detects CPU vs CUDA)
-├── pyproject.toml / requirements.txt / requirements.lock.txt
-├── CHANGELOG.md                         # Full version history with root-caused bug write-ups
-└── LICENSE
-```
-
-## Getting Started
-
-### Try it live
-
-The fastest way to see the system working end to end is [launch.vk-ai.online](https://launch.vk-ai.online) — no setup required. It shows a live wake-up status page if the GPU box is asleep and redirects automatically once it's ready (typically 60-90 seconds on a cold start).
-
-### Run it locally
-
-**Prerequisites:** Python 3.10+, Docker, Node.js 20.19+ (for the UI — required by Vite 8), FFmpeg, Tesseract OCR.
-
-```bash
-git clone https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT.git
-cd MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT
-
-cp .env.example .env          # fill in secrets — see .env.example for what's required
-make install-dev              # runtime + lint/type/test tooling
-make compose-up                # API + Qdrant + Redis + Mongo, CPU-only dev stack
-```
-
-This brings up the API against a local CPU-only stack — enough to exercise health, auth, and routing logic without downloading model weights. To run the full multimodal pipeline (ingestion, retrieval, generation):
-
-```bash
-python app/bin/models/download_all_models.py   # one-time, ~25.2GB into .hf_cache/ (17 models)
-python start_server.py                          # auto-detects CPU vs CUDA, launches llama-server + API
-```
-
-### Run the UI
-
-```bash
-cd ui
-npm install
-npm run dev       # dev server on http://localhost:5173
-```
-
-### Common Makefile targets
-
-```bash
-make lint               # Ruff + black --check + isort --check
-make typecheck            # mypy over app/
-make test-unit              # fast unit tests, no external services
-make test-guardrails         # red-team injection/guardrail suite
-make eval-retrieval           # Tier-1 eval gate (retrieval only, no LLM)
-make eval-full                 # Tier-2 eval (full generation + judge suite, needs a live server)
-make docker-build                # production CUDA image
-make compose-down                 # tear down the local dev stack
-```
-
-Run `make help` for the complete, current list.
-
-## API Reference
-
-All routes are documented live at `/docs` (Swagger UI) when the server is running. The tables below reflect the routes as they exist in `app/api/api_routes.py`, `app/auth/router.py`, and `app/auth/admin_router.py`.
-
-### RAG (mounted at `/rag`)
-
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/rag/query` | Single-shot query, full response |
-| POST | `/rag/query/stream` | Streaming query via Server-Sent Events |
-| POST | `/rag/upload` | Upload a document for ingestion |
-| POST | `/rag/ingest` | Trigger ingestion directly |
-| GET | `/rag/ingestion/status/{job_id}` | Poll background ingestion status (audio/video) |
-| GET | `/rag/knowledge-base` | List ingested files |
-| DELETE | `/rag/knowledge-base/{filename}` | Delete a file and its indexed data |
-| GET | `/rag/sessions` | List chat sessions |
-| GET / DELETE | `/rag/sessions/{session_id}` | Get or delete a specific session |
-| PATCH | `/rag/sessions/{session_id}` | Rename/update a session |
-| POST | `/rag/memory/clear`, `/rag/memory/purge` | Clear or purge conversational memory |
-| POST | `/rag/feedback` | Submit answer feedback |
-| GET | `/rag/health`, `/rag/infra/health`, `/rag/models/health` | Health checks |
-| GET | `/rag/tools` | List available agent tools |
-
-### Auth (mounted at `/auth`)
-
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/auth/register` | Create an account |
-| POST | `/auth/login` | Email/password login |
-| GET | `/auth/google`, `/auth/callback/google` | Google OAuth (PKCE) flow |
-| POST | `/auth/verify-otp`, `/auth/resend-otp` | Email OTP verification |
-| POST | `/auth/mfa/enroll`, `/auth/mfa/verify`, `/auth/mfa/disable` | TOTP MFA lifecycle |
-| POST | `/auth/refresh` | Refresh an access token |
-| POST | `/auth/logout`, `/auth/logout-all` | Revoke the current or all refresh tokens |
-| POST | `/auth/forgot-password`, `/auth/reset-password` | Password reset flow |
-| GET | `/auth/me` | Current user profile |
-| DELETE | `/auth/me` | Self-service account deletion (GDPR) |
-
-### Admin (mounted at `/admin`, requires `role=admin`)
-
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/admin/users`, `/admin/users/{user_id}` | List or inspect users |
-| PATCH | `/admin/users/{user_id}/role`, `/admin/users/{user_id}/status` | Promote/demote, activate/deactivate |
-| DELETE | `/admin/users/{user_id}` | GDPR purge of a user's data |
-| GET | `/admin/system/health`, `/admin/system/audit`, `/admin/stats` | Platform health, audit log, usage stats |
-
-Prometheus metrics are served on a dedicated port (`PROMETHEUS_PORT`, default `9464`), separate from the API port — not exposed as a JSON route.
 
 ## Evaluation & Quality Gates
 
@@ -465,14 +288,194 @@ pytest tests/ -m "not slow" --ignore=tests/integration/test_document_pipeline.py
 
 Always scope pytest to a specific subdirectory (`tests/unit/`, `tests/auth/`, `tests/guardrails/`) rather than running bare `pytest tests/ -m <marker>` — pytest collects every file under `testpaths` regardless of marker filtering, and one broken file under `tests/integration/` is enough to abort collection for the entire run.
 
-141 test files across eight categories: unit (93 files, mirrors `app/`'s module structure), integration (13, requires live Qdrant/Redis/Mongo), eval-harness correctness (14), auth (10), guardrails (7), pipeline (2), plus a dedicated video end-to-end suite and an API-contract (Schemathesis) suite.
+142 test files across eight categories: unit (94 files, mostly mirroring `app/`'s module structure — plus one directory, `tests/unit/deploy/`, covering the standalone AWS Lambda handlers under `deploy/aws/lambda/`), integration (13, requires live Qdrant/Redis/Mongo), eval-harness correctness (14), auth (10), guardrails (7), pipeline (2), plus a dedicated video end-to-end suite and an API-contract (Schemathesis) suite.
+
+## Getting Started
+
+### Run it locally
+
+**Prerequisites:** Python 3.10+, Docker, Node.js 20.19+ (for the UI — required by Vite 8), FFmpeg, Tesseract OCR.
+
+```bash
+git clone https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT.git
+cd MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT
+
+cp .env.example .env          # fill in secrets — see .env.example for what's required
+make install-dev              # runtime + lint/type/test tooling
+make compose-up                # API + Qdrant + Redis + Mongo, CPU-only dev stack
+```
+
+This brings up the API against a local CPU-only stack — enough to exercise health, auth, and routing logic without downloading model weights. To run the full multimodal pipeline (ingestion, retrieval, generation):
+
+```bash
+python app/bin/models/download_all_models.py   # one-time, ~25.2GB into .hf_cache/ (17 models)
+python start_server.py                          # auto-detects CPU vs CUDA, launches llama-server + API
+```
+
+### Run the UI
+
+```bash
+cd ui
+npm install
+npm run dev       # dev server on http://localhost:5173
+```
+
+### Common Makefile targets
+
+```bash
+make lint               # Ruff + black --check + isort --check
+make typecheck            # mypy over app/
+make test-unit              # fast unit tests, no external services
+make test-guardrails         # red-team injection/guardrail suite
+make eval-retrieval           # Tier-1 eval gate (retrieval only, no LLM)
+make eval-full                 # Tier-2 eval (full generation + judge suite, needs a live server)
+make docker-build                # production CUDA image
+make compose-down                 # tear down the local dev stack
+```
+
+Run `make help` for the complete, current list.
+
+## API Reference
+
+All routes are documented live at `/docs` (Swagger UI) when the server is running. The tables below reflect the routes as they exist in `app/api/api_routes.py`, `app/auth/router.py`, and `app/auth/admin_router.py`.
+
+### RAG (mounted at `/rag`)
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/rag/query` | Single-shot query, full response |
+| POST | `/rag/query/stream` | Streaming query via Server-Sent Events |
+| POST | `/rag/upload` | Upload a document for ingestion |
+| POST | `/rag/ingest` | Trigger ingestion directly |
+| GET | `/rag/ingestion/status/{job_id}` | Poll background ingestion status (audio/video) |
+| GET | `/rag/knowledge-base` | List ingested files |
+| DELETE | `/rag/knowledge-base/{filename}` | Delete a file and its indexed data |
+| GET | `/rag/sessions` | List chat sessions |
+| GET / DELETE | `/rag/sessions/{session_id}` | Get or delete a specific session |
+| PATCH | `/rag/sessions/{session_id}` | Rename/update a session |
+| POST | `/rag/memory/clear`, `/rag/memory/purge` | Clear or purge conversational memory |
+| POST | `/rag/feedback` | Submit answer feedback |
+| GET | `/rag/health`, `/rag/infra/health`, `/rag/models/health` | Health checks |
+| GET | `/rag/tools` | List available agent tools |
+
+### Auth (mounted at `/auth`)
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/auth/register` | Create an account |
+| POST | `/auth/login` | Email/password login |
+| GET | `/auth/google`, `/auth/callback/google` | Google OAuth (PKCE) flow |
+| POST | `/auth/verify-otp`, `/auth/resend-otp` | Email OTP verification |
+| POST | `/auth/mfa/enroll`, `/auth/mfa/verify`, `/auth/mfa/disable` | TOTP MFA lifecycle |
+| POST | `/auth/refresh` | Refresh an access token |
+| POST | `/auth/logout`, `/auth/logout-all` | Revoke the current or all refresh tokens |
+| POST | `/auth/forgot-password`, `/auth/reset-password` | Password reset flow |
+| GET | `/auth/me` | Current user profile |
+| DELETE | `/auth/me` | Self-service account deletion (GDPR) |
+
+### Admin (mounted at `/admin`, requires `role=admin`)
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/admin/users`, `/admin/users/{user_id}` | List or inspect users |
+| PATCH | `/admin/users/{user_id}/role`, `/admin/users/{user_id}/status` | Promote/demote, activate/deactivate |
+| DELETE | `/admin/users/{user_id}` | GDPR purge of a user's data |
+| GET | `/admin/system/health`, `/admin/system/audit`, `/admin/stats` | Platform health, audit log, usage stats |
+
+Prometheus metrics are served on a dedicated port (`PROMETHEUS_PORT`, default `9464`), separate from the API port — not exposed as a JSON route.
+
+## Tech Stack
+
+**Backend** — FastAPI, Pydantic v2, Uvicorn, SSE (`sse-starlette`) for streaming responses.
+
+**LLM inference** — `llama.cpp` (`llama-cpp-python`), running as a separate `llama-server` process. Default model: **Qwen2.5-14B-Instruct**, Q4_K_M GGUF quantization.
+
+**Embeddings & retrieval** — `BAAI/bge-large-en-v1.5` (dense embeddings), `BAAI/bge-reranker-large` (cross-encoder reranking), `google/siglip-so400m-patch14-384` (cross-modal text/image search), `rank-bm25` with a finance-aware tokenizer, Qdrant (vector store).
+
+**Vision** — Qwen2-VL (7B for images, 2B for video frames) for captioning; Tesseract + EasyOCR + TrOCR for OCR; a deterministic OpenCV digitizer for extracting values from financial charts.
+
+**Audio** — `faster-whisper` (`large-v3`) for transcription, `pyannote.audio` (`speaker-diarization-3.1`) for diarization.
+
+**Memory & storage** — Redis (short-term working memory + hot-path cache), Upstash Redis (production long-term memory), MongoDB (persistent chat history).
+
+**Auth & security** — `python-jose` (JWT), `passlib[argon2]`, `authlib` (Google OAuth PKCE), `pyotp` (TOTP MFA), Presidio (PII detection), ClamAV (`clamd`/`pyclamd`), `bleach`.
+
+**Observability** — `structlog`, `prometheus-client`, OpenTelemetry (API/SDK/OTLP exporter), Grafana, Loki, Tempo.
+
+**Evaluation** — a custom harness (`app/eval/`) with `ragas`, `jiwer` (WER/CER), `mlflow`; a single self-hosted judge (Qwen2.5-7B-Instruct) backs the Tier-2 gate, the RAGAS report, and DeepEval, with a pure-Python lexical fallback if it's unavailable.
+
+**Frontend** — React 19, Vite, Tailwind CSS, `react-markdown` + `remark-gfm` for rendering tables and formatted answers.
+
+**Dev tooling** — Ruff, Black, isort, mypy (strict-optional), pytest (+ asyncio, cov, timeout, randomly), pre-commit, `detect-secrets`, Bandit, `pip-audit`.
+
+**Infrastructure** — Docker (multi-stage: CUDA build, CUDA runtime, CPU-only dev runtime), Docker Compose, AWS EC2 (GPU), AWS Lambda + API Gateway + EventBridge (scale-to-zero), GitHub Actions, Caddy (HTTPS reverse proxy).
+
+## Project Structure
+
+```
+MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/
+├── app/
+│   ├── agents/          # Query classification, routing, bounded execution, tool registry
+│   ├── api/              # FastAPI route definitions and middleware
+│   ├── auth/              # JWT, Argon2, Google OAuth, TOTP MFA, tenant isolation, admin routes
+│   ├── bin/               # Model download/provisioning scripts
+│   ├── bm25/              # Per-modality BM25 indexes + shared base class
+│   ├── chunking/          # Per-modality chunkers + finance-number protection
+│   ├── core/              # Settings, device manager, model loader/registry, startup validation
+│   ├── embeddings/        # Per-modality embedders + shared BGE singleton
+│   ├── eval/              # Evaluation harness: runners, judges, metrics, gold datasets, thresholds
+│   ├── guardrails/        # Input/output sanitization, jailbreak/PII/SSRF defenses, audit log
+│   ├── ingestion/         # Per-modality extraction + security-gated router
+│   ├── llm/               # GGUF model interface (proxies to llama-server)
+│   ├── memory/            # Redis + MongoDB conversational memory, summarization
+│   ├── pipeline/          # Ingestion pipeline, query pipeline, streaming RAG pipeline
+│   ├── prompt/             # Prompt construction
+│   ├── reasoning/         # Query decomposition, context/memory fusion
+│   ├── retrieval/          # BM25 retriever, hybrid retriever, reranker
+│   ├── tools/               # Web search and other agent-callable tools
+│   ├── utils/               # Logging, networking, path utilities
+│   ├── vectorstore/        # Qdrant client wrapper
+│   ├── verification/       # Groundedness, citation, confidence, retry-controlled answer verification
+│   └── main.py             # FastAPI application entry point
+│
+├── ui/                      # React + Vite + Tailwind frontend (never imports from app/)
+│   └── src/{api,components,context,hooks,pages,utils}/
+│
+├── tests/                   # 142 test files
+│   ├── unit/                # Fast, mocked, no external services — mostly mirrors app/ structure (94)
+│   ├── integration/           # Live Qdrant/Redis/Mongo required (13)
+│   ├── eval/                  # Eval-harness correctness tests (14)
+│   ├── auth/                 # JWT, MFA, tenant isolation, admin, GDPR purge (10)
+│   ├── guardrails/            # Red-team injection/jailbreak/SSRF/PII suite (7)
+│   ├── pipeline/               # End-to-end pipeline behavior (2)
+│   ├── video/                  # Video-modality end-to-end test (1)
+│   └── api_contract/           # Schemathesis property-based API fuzzing (1)
+│
+├── docs/
+│   ├── runbooks/              # CI/CD, deployment, and monitoring runbooks
+│   └── EVAL_*.md              # Per-modality evaluation write-ups
+│
+├── monitoring/                 # Prometheus, Grafana, Loki, Tempo, OTel collector, alert rules
+├── deploy/aws/                  # Lambda wake/idle-stop, IAM policies, Caddy config, deploy scripts
+├── scripts/                      # Accuracy benchmarks and quality audits per modality
+├── data/                          # Runtime state (BM25 indexes, uploads) — gitignored
+│
+├── docker-compose.yml               # Local CPU-only dev stack (API + Qdrant + Redis + Mongo)
+├── docker-compose.monitoring.yml    # Prometheus/Grafana/Loki/Tempo/OTel stack
+├── Dockerfile                        # Multi-stage: CUDA build, CUDA runtime, CPU dev-runtime
+├── Makefile                           # install, lint, test, eval, docker, release targets
+├── start_server.py                     # Cross-platform launcher (auto-detects CPU vs CUDA)
+├── pyproject.toml / requirements.txt / requirements.lock.txt
+├── CHANGELOG.md                         # Full version history with root-caused bug write-ups
+└── LICENSE
+```
 
 ## CI/CD
 
 | Workflow | Trigger | What it does |
 |---|---|---|
 | `ci.yml` | Every push/PR | Lint (Ruff/Black/isort), mypy, unit tests — fast and hermetic, no models or GPU |
-| `eval-gate.yml` | Every PR (Tier-1) + self-hosted GPU runner (Tier-2) | Tier-1: retrieval-only regression gate, CPU, blocks merge. Tier-2: full generation + LLM-judge suite against the live production box |
+| `eval-gate.yml` | Every PR (Tier-1) + self-hosted GPU runner (Tier-2) | Tier-1: retrieval-only regression gate, CPU, blocks merge — this is what the Eval Gate badge tracks. Tier-2: full generation + LLM-judge suite, post-deploy against the live box |
 | `cd.yml` | Tag push (`v*`) | Builds the production image, pushes to GHCR, deploys via SSM, health-checks, auto-rolls back on failure |
 | `release.yml` | Manual dispatch | Two modes. `prepare` (from `development`): bumps the version, inserts the changelog section, opens a PR into `main`. `tag` (from `main`, after that PR merges): verifies the version, tags, and publishes the GitHub Release from the notes already in `CHANGELOG.md`. Neither writes to a protected branch |
 | `security.yml` | Push/PR + weekly cron | Secret scanning (`detect-secrets`), dependency CVEs (`pip-audit`), SAST (Bandit), container scanning |
@@ -515,13 +518,14 @@ and as badges once each tool has actually been run and a report committed.
 
 ## Deployment
 
-The production system runs on a single AWS GPU instance that is **stopped by default** and wakes on demand, rather than an always-on box.
+The production system runs on a single AWS GPU instance that is **stopped by default** and wakes only when a visitor explicitly asks it to, rather than an always-on box.
 
 ```mermaid
 flowchart LR
     V["Visitor"] --> GW["API Gateway HTTP API"]
     GW --> WL["wake-gateway Lambda<br/>(always on, near-zero cost)"]
-    WL -- "stopped" --> ST["StartInstances +<br/>warming-up interstitial"]
+    WL -- "stopped (read-only)" --> ASLEEP["'Start the demo' page<br/>waits for a human click"]
+    ASLEEP -- "click: ?wake=1 + signed token" --> ST["StartInstances +<br/>progress interstitial"]
     WL -- "healthy" --> EC2["EC2 g6e.xlarge (L40S)<br/>Caddy :443 -> app :8000"]
     EB["EventBridge, every 5 min"] --> IL["idle-stop Lambda"]
     IL -- "20 min idle, min 15 min uptime" --> STOP["StopInstances"]
@@ -531,6 +535,7 @@ flowchart LR
 - Stopped-by-default with this gateway: roughly **$12/month fixed**, plus a few dollars per active hour.
 - HTTPS end to end via Caddy + Let's Encrypt on the box; port 8000 is never exposed directly to the internet.
 - The idle-stop Lambda guards against killing a box that is warming up, mid-deploy, or running a live eval job.
+- Only an explicit click on the interstitial's Start button can wake the instance. A page load or a background status poll is strictly read-only, so automated traffic against the public URL cannot start the GPU — see [`CHANGELOG.md`](CHANGELOG.md#101---2026-08-30) for the incident that drove this.
 
 Full detail in [`deploy/aws/README.md`](deploy/aws/README.md).
 
@@ -555,6 +560,7 @@ Documented here deliberately, rather than left implicit — a system that only l
 - **Audio is the weakest modality on citation accuracy (0.5385) and retry cost** (0.92 retries/query on average, same scorecard) — a known issue, partially fixed, not fully closed.
 - **The Ragas and DeepEval quality report has never completed a run on a GPU box** — the judge, memory, and parsing fixes in rc4–rc6 are pinned by unit tests and derived from the library source, but every run inside the live production container was OOM-killed before reaching them. It now runs manually against staging (`quality-report.yml`) and gates nothing; until it completes there, the public quality badges deliberately render "not yet measured" rather than a number.
 - **The GHCR image-layer fix is a mitigation, not a cure** — ghcr.io returns `429` on a single 7.63GB virtualenv layer regardless of retry, so rc7 split it across six. A future dependency bump could push one bucket back over the threshold; the `du -sh` output in the build log is the early warning. The durable fix is a registry in the same region as the deployment target.
+- **The Tier-2 post-deploy eval has not completed a clean run since 2026-08-03**, when it crashed with a segfault against a v0.29.0 container. Tier-1 — the retrieval regression gate that actually blocks merges — runs on every PR and passes; Tier-2 is a non-blocking post-deploy report and is due a re-run on the current image.
 
 The full, unfiltered engineering history — including root-caused production incidents — is in [`CHANGELOG.md`](CHANGELOG.md).
 

@@ -5,6 +5,125 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] - 2026-08-30
+
+Fixes a real production bug found the day after [1.0.0] shipped: the
+`magik-prod` GPU instance was waking on its own, roughly every two hours,
+around the clock — including the middle of the night, when no hiring manager
+is looking at a portfolio link. CloudTrail confirmed `magik-wake-gateway`
+issued every `StartInstances` call; `magik-idle-stop` was working correctly
+throughout and stopping the instance again ~15-20 minutes later, exactly as
+designed. Nothing in the retrieval, agent, guardrail, verification, memory,
+or auth path changed.
+
+### Fixed
+
+- **The wake gateway started the production instance on any HTTP request.**
+  The API Gateway route is `$default` — a catch-all — and `handler()`
+  computed real status, including calling `StartInstances` when the instance
+  was stopped, before a single line of the page's own JavaScript had run. A
+  bare GET (a scanner, a crawler, `curl`, or a certificate-transparency bot
+  that found `launch.vk-ai.online` within minutes of its TLS certificate
+  being issued — the domain is public, and cert issuance is published to
+  public CT logs) received exactly the same server-side treatment as a real
+  visitor. The ~2-hour, 24/7 cadence in CloudTrail (00:51, 02:41, 04:38,
+  06:50, 08:40, 10:44, 12:40 UTC on 2026-08-30) is not a plausible visitor
+  pattern; it is the signature of an automated, scheduled prober.
+
+  **The instance now starts only when a person clicks a button.** Nothing
+  automatic starts it — not a page load, not a status poll. The request that
+  may call `StartInstances` is separated into its own action, and both
+  passive paths are hard-wired read-only:
+
+  | Request | May start the instance? |
+  |---|---|
+  | `GET /` | No — read-only. If stopped, renders state `asleep` + a Start button |
+  | `GET /?check=1` | No — read-only status poll |
+  | `GET /?wake=1&t=<token>` | Yes — and the Start button is its only caller |
+
+  An automated client that never renders the page, never sees the button,
+  and never clicks it cannot wake the instance no matter how many times it
+  hits any URL here.
+
+  Two HMAC token kinds over `WAKE_TOKEN_SECRET` back this. A `page` token is
+  minted into every rendered page and is required by `?wake=1`, proving a
+  wake request came from a page this Lambda actually served rather than a
+  hand-built URL. A `wake` token is minted *only* in response to a
+  successful `?wake=1` — it proves a human already clicked, and polls
+  carrying it (`?check=1&w=...`) may retry a start. The kind is inside the
+  signed payload, so relabeling a page token as a wake grant fails the
+  signature rather than escalating.
+
+  That second token kind exists for a specific real reason: a wake the human
+  has already authorized can legitimately need many retries before the
+  instance leaves the `stopped` state. This was observed live the same day —
+  AWS returned `InsufficientInstanceCapacity` for ~36 minutes straight while
+  the instance stayed stopped. Without a wake grant every one of those
+  retries would be a read-only poll, and the click would silently accomplish
+  nothing. Both kinds are re-minted on each response, so a real session stays
+  valid while a scraped token replayed later by something that never
+  re-renders the page goes stale within `WAKE_TOKEN_MAX_AGE_S` (default 90s).
+
+  `WAKE_TOKEN_SECRET` unset fails closed — it refuses every start, the same
+  posture this file already used for a missing `APP_URL`, never reverting to
+  the old always-allow behavior.
+
+- **A stopped instance was reported as "waking" even when nothing was
+  starting it.** The status object had no way to say "asleep", so a page
+  loaded against a stopped box showed a "Starting the GPU server" message and
+  an active progress spinner that described nothing actually happening. Added
+  an explicit `asleep` state with `retry: false`, so the page states the truth
+  and waits for a person instead of spinning indefinitely.
+
+### Changed
+
+- **The interstitial now asks before it spends money.** A visitor landing on
+  a sleeping demo gets "Start the MAGIK demo", a one-line explanation that it
+  takes about 60-90 seconds, and a button — rather than an automatic wake and
+  a progress bar they never asked for. This is one extra click on a cold
+  start; in exchange the ~$1.86/hr GPU only ever runs because someone
+  deliberately asked for it. Once the instance is already running the flow is
+  unchanged: no button, straight through the existing loading/ready steps to
+  the redirect.
+- `deploy/aws/scripts/deploy_lambdas.sh` generates `WAKE_TOKEN_SECRET`
+  (`openssl rand -hex 32`) and wires it into the wake gateway's Lambda
+  environment on every deploy, overridable via the environment like every
+  other value the script accepts. Rotating it on redeploy is safe: this
+  Lambda is the only thing that mints or checks a token, so a page in flight
+  during a redeploy self-heals on its next interaction.
+
+### Added
+
+- `tests/unit/deploy/test_wake_gateway_handler.py` — 11 tests, boto3/botocore
+  stubbed via `sys.modules` rather than declared as a project dependency
+  (this handler runs in AWS Lambda's managed runtime, which provides boto3
+  itself; the app's own dependency tree never needs it). Asserts the
+  invariant from both directions. Nothing automatic can start the instance:
+  a bare GET, a status poll, a `?wake=1` with no token, an expired token, a
+  page token relabeled as a wake grant, a missing secret, and — the case
+  that caught a real gap in the first attempt at this fix — a headless
+  client that renders the page and polls ten times without ever clicking.
+  And the human path still works: a click starts it exactly once, and a
+  click followed by ten consecutive `InsufficientInstanceCapacity` failures
+  keeps retrying, reproducing the live incident.
+
+### Known limitations
+
+- **No request-level access log names the actual scanners.** API Gateway
+  stage access logging was not enabled (`AccessLogSettings: null`), so the
+  source IPs and User-Agents behind the observed pattern were never
+  captured. Enabling it is a follow-up; the fix closes the bug regardless of
+  who was sending the requests.
+- **A determined attacker could still script the click.** This repository is
+  public, so `?wake=1` and its token flow are documented above. Someone
+  willing to render the real page, extract a token, and issue the wake call
+  could start the instance. The threat model here is the observed automated
+  background noise — scanners, crawlers, scheduled probers, and headless
+  renderers, none of which click anything — not a targeted adversary. Closing
+  that remaining gap needs a CAPTCHA or an authenticated gate, which would
+  cost a real hiring manager more than it saves. A deliberate, proportionate
+  choice, not an oversight.
+
 ## [1.0.0] - 2026-08-29
 
 **First stable release.**
@@ -1345,6 +1464,7 @@ Initial setup.
 - Project structure, dependency management, and semantic versioning
   scaffolding.
 
+[1.0.1]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v1.0.0-rc7...v1.0.0
 [1.0.0-rc7]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v1.0.0-rc6...v1.0.0-rc7
 [1.0.0-rc6]: https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/compare/v1.0.0-rc5...v1.0.0-rc6
