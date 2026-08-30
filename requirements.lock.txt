@@ -1097,7 +1097,7 @@ requests-toolbelt==1.0.0
     # via langsmith
 resend==2.39.0
     # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
-rich==14.3.4
+rich==15.0.0
     # via
     #   bandit
     #   deepeval
