@@ -709,7 +709,7 @@ orjson==3.12.0
     #   langsmith
 packageurl-python==0.17.6
     # via cyclonedx-python-lib
-packaging==24.2
+packaging==26.3
     # via
     #   accelerate
     #   bitsandbytes
