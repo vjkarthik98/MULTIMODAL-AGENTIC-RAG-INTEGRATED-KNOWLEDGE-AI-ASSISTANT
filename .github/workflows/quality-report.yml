@@ -389,7 +389,7 @@ jobs:
       # publishing "not yet measured" rather than a stale number.
       - name: Download reports from the eval job
         continue-on-error: true
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: quality-reports-*
           merge-multiple: true
