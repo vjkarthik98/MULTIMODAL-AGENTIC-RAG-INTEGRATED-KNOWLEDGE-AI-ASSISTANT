@@ -14,12 +14,14 @@
 > **v1.0.1 — stable.** The HTTP interfaces are covered by
 > [Semantic Versioning](https://semver.org/) from v1.0.0 forward.
 > Release notes: [CHANGELOG.md](CHANGELOG.md#101---2026-08-30) ·
-> Supported versions: [SECURITY.md](SECURITY.md#supported-versions)
+> Supported versions: [SECURITY.md](SECURITY.md#supported-versions) ·
+> Full system card: [docs/MODEL_CARD.md](docs/MODEL_CARD.md)
 
 ---
 
 ## Table of Contents
 
+- [Model / System Card](docs/MODEL_CARD.md)
 - [Overview](#overview)
 - [Key Capabilities](#key-capabilities)
 - [Evidence at a Glance](#evidence-at-a-glance)
