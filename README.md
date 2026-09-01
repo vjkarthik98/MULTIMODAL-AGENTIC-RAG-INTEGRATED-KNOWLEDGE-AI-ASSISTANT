@@ -308,7 +308,7 @@ make compose-up                # API + Qdrant + Redis + Mongo, CPU-only dev stac
 This brings up the API against a local CPU-only stack — enough to exercise health, auth, and routing logic without downloading model weights. To run the full multimodal pipeline (ingestion, retrieval, generation):
 
 ```bash
-python app/bin/models/download_all_models.py   # one-time, ~25.2GB into .hf_cache/ (17 models)
+python app/bin/models/download_all_models.py   # one-time, ~42GB into .hf_cache/ (18 models)
 python start_server.py                          # auto-detects CPU vs CUDA, launches llama-server + API
 ```
 
