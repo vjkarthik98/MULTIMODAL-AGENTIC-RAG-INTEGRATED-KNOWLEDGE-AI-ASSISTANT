@@ -1,7 +1,7 @@
 # MAGIK — System Card
 
 **System:** Multimodal Agentic RAG Integrated Knowledge Assistant · **Release:** v1.0.1 (30 August 2026)
-**License:** MIT · **Author:** [Vijaya Karthik](https://github.com/vjkarthik98) · **Live demo:** [magik.vk-ai.online](https://magik.vk-ai.online)
+**License:** MIT · **Author:** [Vijaya Karthik](https://github.com/vjkarthik98)
 
 Every figure below is read from this repository — the model manifest, `app/eval/thresholds.yaml`, the deployment config, and the test tree — not from summary documentation. Where this card and other repo docs disagreed, the code was treated as authoritative. Open defects and a currently-failing quality gate are included deliberately, not omitted.
 
@@ -151,6 +151,72 @@ Not gate-enforced; three-run average, default corpus (text/PDF/DOCX, n=42).
 | Faithfulness | 0.5146 |
 | Route accuracy (routing suite, 12/12) | 1.000 |
 
+### Per-modality scorecard — single-run snapshot (2026-08-20)
+
+A live, LLM-judged run (Qwen2.5-7B-Instruct) against the current codebase, one gold set per modality (n=14 rows each, 98 total). This is a **single-run snapshot for a detailed per-metric picture — not the N=3-averaged number the CI gates above enforce** — reported exactly as measured, anomalies included.
+
+**Generation quality**
+
+| Modality | Faithfulness | Answer Relevancy | Answer Correctness | Context Recall |
+|---|---:|---:|---:|---:|
+| Text | 0.4545 | 0.7045 | 0.6591 | 1.0000 |
+| PDF | 0.5714 | 0.7679 | 0.8571 | 0.2846 |
+| DOCX | 0.6429 | 0.8077 | 0.7857 | 0.7667 |
+| XLSX | 0.6154 | 0.7143 | 0.7321 | 0.7917 |
+| Image | 0.8036 | 0.8393 | 0.8929 | 1.0000 |
+| Audio | 0.3929 | 0.6429 | 0.6786 | 0.8000 |
+| Video | 0.3929 | 0.8214 | 0.7857 | 0.8738 |
+
+**Hallucination & safety**
+
+| Modality | Hallucination Rate | Fabrication Rate | Omission Rate | Template Leak Rate | Citation Accuracy |
+|---|---:|---:|---:|---:|---:|
+| Text | 0.0909 | 0.0909 | 0.0909 | 0.0000 | 1.0000 |
+| PDF | 0.5000 | 0.1429 | 0.3571 | 0.0000 | N/A* |
+| DOCX | 0.4286 | 0.0714 | 0.3571 | 0.0000 | 1.0000 |
+| XLSX | 0.1429 | 0.0000 | 0.1429 | 0.0000 | 1.0000 |
+| Image | 0.0714 | 0.0714 | 0.0000 | 0.0000 | 1.0000 |
+| Audio | 0.1429 | 0.0714 | 0.1429 | 0.0000 | 1.0000 |
+| Video | 0.2857 | 0.0000 | 0.2857 | 0.0000 | 1.0000 |
+
+<sup>*PDF's heuristic citation-accuracy metric had zero measurable rows this run (n=0) — excluded rather than shown as a false 0 or 100.</sup>
+
+**Verification loop (grounding / citation / retry)**
+
+| Modality | Grounding Success | Citation Accuracy v2 | Retry Success | Avg Retry Count |
+|---|---:|---:|---:|---:|
+| Text | 1.0000 | 0.8889 | 0.5000 | 0.2222 |
+| PDF | 0.9286 | 0.7857 | 0.3333 | 0.4286 |
+| DOCX | 1.0000 | 0.6923 | 0.0000 | 0.1538 |
+| XLSX | 0.9167 | 1.0000 | 0.0000 | 0.0833 |
+| Image | 0.9286 | 0.9286 | 0.0000 | 0.0714 |
+| Audio | 0.7692 | 0.5385 | 0.2727 | 0.9231 |
+| Video | 1.0000 | 0.9286 | 0.0000 | 0.3571 |
+
+**Finance fidelity & latency**
+
+| Modality | Finance Fidelity | Verification p50 | Verification p95 | Generation p50 | Generation p95 | Generation p99 |
+|---|---:|---:|---:|---:|---:|---:|
+| Text | 0.9091 | 4.01s | 11.62s | 11.81s | 34.07s | 44.15s |
+| PDF | 0.8433 | 7.13s | 13.95s | 9.70s | 19.36s | 20.52s |
+| DOCX | 0.8125 | 3.91s | 9.02s | 6.69s | 10.91s | 11.53s |
+| XLSX | 0.9286 | 4.37s | 9.18s | 10.20s | 14.86s | 16.65s |
+| Image | 0.9929 | 3.14s | 4.89s | 4.33s | 6.05s | 6.54s |
+| Audio | 0.6310 | 9.21s | 15.34s | 12.89s | 19.29s | 22.57s |
+| Video | 0.9643 | 3.97s | 6.92s | 8.57s | 11.03s | 11.19s |
+
+**Where it stands:**
+
+- **Image is the strongest modality across the board** — highest correctness (0.89) and faithfulness (0.80), best finance fidelity (0.99), and the fastest generation latency (p95 6.1s).
+- **Faithfulness is the weakest quality axis system-wide** (0.39–0.80), not just in audio and video — most modalities have real room to reduce ungrounded claims.
+- **Audio needs real improvement** — weakest citation grounding in the verification loop (0.5385), lowest finance fidelity (0.6310), and it retries almost once per query on average (0.9231). A known issue, partially fixed, not fully closed.
+- **PDF and DOCX show elevated hallucination rates** (50% and 43% of sampled responses) despite strong correctness scores, alongside PDF's context-recall drop to 0.2846 — an outlier against every other modality. Under investigation, not yet root-caused.
+- **Text has unexplained tail-latency spikes** (generation p95 34.07s, p99 44.15s) despite being the structurally simplest modality (no OCR/ASR/vision preprocessing) — flagged for follow-up, not yet root-caused.
+
+**Measurement conditions, kept rather than smoothed over:** partway through this run the app server hit a broken internal process state (repeated I/O errors, unrelated to any modality under test); it was diagnosed to the process level, the GPU and LLM backend were confirmed healthy independently, and the affected process was restarted. Every figure above was captured after that recovery, on a verified-healthy server.
+
+Source: `app/eval/run.py --suite generation --modality <name>`. Full write-ups per modality: [`docs/EVAL_*.md`](.).
+
 ## 7. Answer verification
 
 Before an answer reaches the user, a verification loop checks whether its claims are supported by retrieved context and whether its citations point at real chunks, retrying once with an expanded retrieval strategy on failure. At the previous release these metrics existed in the request path but were never scored — they now are.
@@ -216,6 +282,9 @@ Documented deliberately rather than left implicit — a system that lists only i
 - **The default generation suite covers only text, PDF and DOCX** — image and spreadsheet rows must be requested explicitly.
 - **Streaming evaluation is manual, not continuous** — the harness can exercise the endpoint the UI uses, but not yet on every CI run.
 - **A modality-tagging audit is incomplete** — the fix in Section 7 was found by inspection; PDF/DOCX/XLSX ingestion paths construct tags the same way and have not been fully audited.
+- **PDF's context recall (0.2846) and PDF/DOCX's hallucination rates (50% and 43%) are unexplained outliers** in the 2026-08-20 per-modality scorecard ([Section 6](#6-evaluation)) — flagged for follow-up, not yet root-caused.
+- **Audio is the weakest modality on citation accuracy (0.5385) and retry cost** (0.92 retries/query on average, same scorecard) — a known issue, partially fixed, not fully closed.
+- **Text shows unexplained tail-latency spikes** (generation p95 34.07s, p99 44.15s, same scorecard) despite being the structurally simplest modality — flagged for follow-up, not yet investigated.
 - **Finance numeric fidelity is enforced at merge time, not sampled from live traffic.**
 - **No formal fairness or bias audit has been conducted** — the system reasons over documents, not people, but that is a scope argument, not an evaluation.
 - **Single production instance, no horizontal scaling or failover** — the second GPU instance ([Section 12](#12-deployment)) is a pre-deploy quality gate, not a hot standby.
@@ -261,7 +330,6 @@ Observability on production is a full stack: structured JSON logs in Loki under 
 
 | | |
 |---|---|
-| Live demo | [magik.vk-ai.online](https://magik.vk-ai.online) — GPU box wakes on click; first response 60–90s |
 | Repository | [github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT) |
 | Release | v1.0.1 · 30 August 2026 |
 | License | MIT |
