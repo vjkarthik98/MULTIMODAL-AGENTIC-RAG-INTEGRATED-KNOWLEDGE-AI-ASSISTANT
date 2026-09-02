@@ -95,7 +95,7 @@ Every number below is measured, not estimated, and links to the section that sho
 
 | | Result | Detail |
 |---|---|---|
-| Retrieval quality (CI merge gate) | Hit Rate **0.679**, MRR **0.356**, n=56 gold queries | [Evaluation](#retrieval-ci-gated) |
+| Retrieval quality (CI merge gate) | Baseline Hit Rate **0.679**, MRR **0.356**, n=56 gold queries — ⚠️ **gate currently open, 3/6 metrics breaching** | [Evaluation](#retrieval-ci-gated) |
 | Adversarial corpus recall | **64/64 (100%)**, 0.9% false-positive rate, F1 = 0.994 | [Security](#security--guardrails) |
 | OWASP LLM Top 10 (2025) | **10/10** categories addressed | [Security](#security--guardrails) |
 | Guardrail test suite | **257 passing**, 0 failures | [Security](#security--guardrails) |
@@ -188,14 +188,17 @@ python -m app.eval.run --query "What was Q3 revenue?" --debug   # single-query d
 
 Measured on the production box (AWS g6e.xlarge / L40S), n=56 gold queries, 2026-07-28. This is the only suite currently wired as a hard merge gate — every other suite below is informational until it has an equivalent live-box baseline.
 
-| Metric | Baseline | Gate (baseline x 0.95) |
-|---|---|---|
-| Recall@5 | 0.509 | ≥ 0.484 |
-| Recall@10 | 0.554 | ≥ 0.526 |
-| MRR | 0.356 | ≥ 0.338 |
-| nDCG@10 | 0.402 | ≥ 0.382 |
-| Hit Rate | 0.679 | ≥ 0.645 |
-| p50 / p95 latency | 0.14s / 0.23s | — |
+| Metric | Baseline | Gate (baseline x 0.95) | Latest (staging) | Status |
+|---|---|---|---|---|
+| Recall@5 | 0.509 | ≥ 0.484 | 0.4464 | 🔴 breach |
+| MRR | 0.356 | ≥ 0.338 | 0.3069 | 🔴 breach |
+| nDCG@10 | 0.402 | ≥ 0.382 | 0.3642 | 🔴 breach |
+| Recall@10 | 0.554 | ≥ 0.526 | 0.5625 | 🟢 pass |
+| Hit Rate | 0.679 | ≥ 0.645 | 0.8036 | 🟢 pass |
+| Context Precision | 0.027 | ≥ 0.026 | 0.0321 | 🟢 pass |
+| p50 / p95 latency | 0.14s / 0.23s | — | — | — |
+
+**This gate is currently open — 3 of 6 metrics are breaching their floor.** Coverage improved (Recall@10, Hit Rate, Context Precision all rose) while ranking degraded (Recall@5, MRR, nDCG@10 all fell) — not a simple "quality got worse" story. Two candidate causes are under investigation: a metadata-backfill step in result fusion that isn't as ranking-neutral as documented, or a staging-vs-production environment mismatch (the breach was measured on the private staging box described in [Deployment](#deployment), against a snapshot-derived lexical index). The gate stays red until the cause is attributed — re-baselining now would encode whichever cause it is as "expected," exactly what the gate exists to prevent.
 
 ### Generation, finance, and routing (informational, real numbers)
 
@@ -262,7 +265,7 @@ A live, LLM-judged run (Qwen2.5-7B-Instruct) against the current codebase, one g
 | Audio | 0.6310 | 9.21s | 15.34s | 12.89s | 19.29s | 22.57s |
 | Video | 0.9643 | 3.97s | 6.92s | 8.57s | 11.03s | 11.19s |
 
-**Reading it, honestly:** Image is the strongest all-around modality — best correctness, faithfulness, finance fidelity, and latency. Audio is the weakest on citation accuracy (0.5385) and retry cost (0.92 retries/query on average) — a known, partially-fixed issue, not fully closed. PDF's context recall (0.2846) is a clear outlier against every other modality and against PDF's own earlier measurements — flagged here as a genuine open question, not yet root-caused.
+**Reading it, honestly:** Image is the strongest all-around modality — best correctness, faithfulness, finance fidelity, and latency. Faithfulness is the weakest quality axis system-wide (0.39–0.80), not just in audio and video — most modalities have real room to reduce ungrounded claims. Audio is the weakest on citation accuracy (0.5385) and retry cost (0.92 retries/query on average) — a known, partially-fixed issue, not fully closed. PDF and DOCX show elevated hallucination rates (50% and 43% of sampled responses) despite strong correctness scores, and PDF's context recall (0.2846) is a clear outlier against every other modality and against PDF's own earlier measurements — both flagged as genuine open questions, not yet root-caused. Text also shows unexplained tail-latency spikes (generation p95 34.07s, p99 44.15s) despite being the structurally simplest modality — flagged for follow-up, not yet investigated.
 
 One measurement-integrity note, kept rather than smoothed over: partway through this run, the app server hit a broken internal process state (repeated I/O errors, unrelated to any modality under test); it was diagnosed to the process level, the GPU and LLM backend were confirmed healthy independently, and the affected process was restarted. Every figure above was captured after that recovery, on a verified-healthy server.
 
@@ -554,12 +557,15 @@ Full detail in [`deploy/aws/README.md`](deploy/aws/README.md).
 
 Documented here deliberately, rather than left implicit — a system that only lists its strengths is less credible, not more.
 
+- **The retrieval CI gate is currently open — 3 of 6 metrics are breaching their floor** (Recall@5, MRR, nDCG@10; see [Evaluation](#retrieval-ci-gated) for the full numbers). Left red on purpose rather than re-baselined while the cause — a metadata-backfill fusion change or a staging/production provenance mismatch — is under attribution.
 - **Retrieval `context_precision` is low in absolute terms** (0.027 on the production baseline) — flagged for a dedicated retrieval-quality pass (coarser chunking, improved rerank), not yet scheduled.
 - **`hybrid_web` routing does not yet execute a live web search** on the hybrid path — a known open issue, currently thresholded at 0.0 rather than silently passing.
 - **Generation, hallucination, and end-to-end eval suites are informational, not CI-gated** — they route through an LLM judge over HTTP against a live server, which is a heavier re-baselining exercise than the CPU-only retrieval suite; re-baselining and gating them is in progress.
 - **Finance numeric fidelity is measured offline, not sampled from live traffic** — the CI gate applies at merge time; continuous live-traffic sampling of this specific metric is a documented gap.
 - **PDF's context recall (0.2846) is an unexplained outlier** in the 2026-08-20 per-modality scorecard, well below every other modality and PDF's own earlier measurements — flagged for a follow-up investigation, not yet root-caused.
 - **Audio is the weakest modality on citation accuracy (0.5385) and retry cost** (0.92 retries/query on average, same scorecard) — a known issue, partially fixed, not fully closed.
+- **PDF and DOCX show elevated hallucination rates** (50% and 43% of sampled responses, same scorecard) despite strong correctness scores — under investigation, not yet root-caused.
+- **Text has unexplained tail-latency spikes** (generation p95 34.07s, p99 44.15s, same scorecard) despite being the structurally simplest modality — flagged for follow-up, not yet investigated.
 - **The Ragas and DeepEval quality report has never completed a run on a GPU box** — the judge, memory, and parsing fixes in rc4–rc6 are pinned by unit tests and derived from the library source, but every run inside the live production container was OOM-killed before reaching them. It now runs manually against staging (`quality-report.yml`) and gates nothing; until it completes there, the public quality badges deliberately render "not yet measured" rather than a number.
 - **The GHCR image-layer fix is a mitigation, not a cure** — ghcr.io returns `429` on a single 7.63GB virtualenv layer regardless of retry, so rc7 split it across six. A future dependency bump could push one bucket back over the threshold; the `du -sh` output in the build log is the early warning. The durable fix is a registry in the same region as the deployment target.
 - **The Tier-2 post-deploy eval has not completed a clean run since 2026-08-03**, when it crashed with a segfault against a v0.29.0 container. Tier-1 — the retrieval regression gate that actually blocks merges — runs on every PR and passes; Tier-2 is a non-blocking post-deploy report and is due a re-run on the current image.
