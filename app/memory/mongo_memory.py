@@ -78,6 +78,31 @@ _VALID_MODALITIES = {"text", "image", "audio", "video", "table", "document"}
 # CAP ON EMBEDDED MESSAGES PER CHAT SESSION DOCUMENT (≈200 turns)
 _MAX_SESSION_MESSAGES = 400
 
+# HOW RECENT A STORED TURN MUST BE TO COUNT AS THE SAME TURN BEING RE-SAVED.
+# The streaming path persists a turn before it sends [DONE], and the client
+# then re-runs the full meta pipeline whenever the streamed text trips its
+# isRefusal() safety net (ChatPage.jsx) — which persists the SAME question a
+# second time, seconds later. Anything inside this window is that echo, not a
+# person deliberately re-asking; see save_chat_turn().
+_DUP_TURN_WINDOW_SEC = 180
+
+
+def _norm_q(text: Any) -> str:
+    """Normalize a question for identity comparison between the streaming and
+    meta persistence paths — whitespace-collapsed and case-folded, matching how
+    _clean() stored it."""
+    return " ".join(str(text or "").split()).casefold()
+
+
+def _age_seconds(ts: Any) -> float:
+    """Seconds since a stored timestamp. Returns inf for anything unusable so
+    callers fall through to their 'too old / unknown' branch."""
+    if not isinstance(ts, datetime):
+        return float("inf")
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(tz=timezone.utc) - ts).total_seconds()
+
 
 class MongoMemory:
 
@@ -793,6 +818,37 @@ class MongoMemory:
             src = sources if isinstance(sources, list) else []
 
             def _do():
+                # RE-SAVE OF THE TURN ALREADY AT THE END OF THE TRANSCRIPT?
+                # Overwrite it instead of appending a second copy of the same
+                # question. Both persistence paths (stream before [DONE], then
+                # the client's meta fallback) call this with the same query
+                # within seconds of each other, which used to leave the
+                # question duplicated in Recents with two different answers.
+                existing = self.sessions.find_one(
+                    {"user_id": user_id, "session_id": session_id},
+                    {"messages": 1, "_id": 1},
+                )
+                if existing:
+                    messages = list(existing.get("messages") or [])
+                    if (
+                        len(messages) >= 2
+                        and messages[-1].get("role") == "assistant"
+                        and messages[-2].get("role") == "user"
+                        and _norm_q(messages[-2].get("content")) == _norm_q(q)
+                        and _age_seconds(messages[-1].get("timestamp")) <= _DUP_TURN_WINDOW_SEC
+                    ):
+                        messages[-1] = {
+                            **messages[-1],
+                            "content": a,
+                            "sources": src,
+                            "timestamp": now,
+                        }
+                        self.sessions.update_one(
+                            {"_id": existing["_id"]},
+                            {"$set": {"messages": messages, "updated_at": now}},
+                        )
+                        return
+
                 self.sessions.update_one(
                     {"user_id": user_id, "session_id": session_id},
                     {
@@ -912,11 +968,25 @@ class MongoMemory:
         content: str,
         sources: list | None = None,
         msg_id: str | None = None,
+        expected_query: str | None = None,
     ) -> bool:
         """Overwrite the last assistant message in the session transcript.
         Called after streaming completes so reload shows the exact streamed answer.
         If msg_id is provided it is stamped onto the message so the frontend ID
-        and DB msg_id stay in sync for vote persistence."""
+        and DB msg_id stay in sync for vote persistence.
+
+        `expected_query` is the question the caller believes it is patching the
+        answer to. When given, the patch is REFUSED (returns False, writes
+        nothing) unless the transcript really does end with that question.
+
+        Without that check this method silently corrupted history: a turn is
+        only persisted when the stream produced a non-refused answer, but the
+        client patches unconditionally afterwards. On a refusal — the common
+        case once a knowledge base is empty — nothing had been stored for the
+        current turn, so "the last assistant message" was the PREVIOUS turn's,
+        and it got overwritten with this turn's text. The previous answer was
+        destroyed and the current question never appeared at all. Returning
+        False here lets the caller store the missing turn instead."""
         if not session_id or not content or not self._is_available():
             return False
         if not user_id:
@@ -939,6 +1009,19 @@ class MongoMemory:
                 updated = False
                 for i in range(len(messages) - 1, -1, -1):
                     if messages[i].get("role") == "assistant":
+                        if expected_query is not None:
+                            # The user message this answer belongs to is the
+                            # nearest preceding one. If it isn't the question
+                            # the caller is answering, this turn was never
+                            # stored — leave the older turn untouched.
+                            prior = next(
+                                (m for m in reversed(messages[:i]) if m.get("role") == "user"),
+                                None,
+                            )
+                            if prior is None or _norm_q(prior.get("content")) != _norm_q(
+                                expected_query
+                            ):
+                                return False
                         patch = {
                             **messages[i],
                             "content": str(content)[: settings.MAX_PROMPT_CHARS],
