@@ -1356,7 +1356,7 @@ tqdm==4.70.0
     #   spacy
     #   speechbrain
     #   transformers
-transformers==4.57.6
+transformers==5.16.1
     # via
     #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
     #   detoxify
