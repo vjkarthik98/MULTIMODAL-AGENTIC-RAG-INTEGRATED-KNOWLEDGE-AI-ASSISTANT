@@ -464,7 +464,7 @@ langchain-core==0.2.43
     #   ragas
 langchain-openai==0.1.25
     # via ragas
-langchain-text-splitters==0.2.4
+langchain-text-splitters==1.1.2
     # via
     #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
     #   langchain
