@@ -8,10 +8,11 @@
     "",
     "UPDATED 2026-09-08: migrated to a NEW AWS account (266901698137, was",
     "857194222592) after the prior account hit its 4 vCPU GPU-instance quota.",
-    "magik-prod itself also moved AZ within this account (us-east-1b, not",
-    "us-east-1a) after hitting InsufficientInstanceCapacity for g6e.xlarge in",
-    "1a during bring-up -- the instance ARN's region field is unaffected by",
-    "that, only the account ID and instance ID below changed."
+    "magik-prod also moved AZ TWICE within this account during bring-up",
+    "(us-east-1a -> 1b -> 1c) chasing InsufficientInstanceCapacity for",
+    "g6e.xlarge each time -- the instance ARN's region field is unaffected,",
+    "only the account ID and instance ID below changed. The 1b attempt",
+    "(i-005406894211e9f7f) is orphaned/stopped, not this one."
   ],
   "Version": "2012-10-17",
   "Statement": [
@@ -25,7 +26,7 @@
       "Sid": "StartOnlyTheDemoInstance",
       "Effect": "Allow",
       "Action": "ec2:StartInstances",
-      "Resource": "arn:aws:ec2:us-east-1:266901698137:instance/i-005406894211e9f7f"
+      "Resource": "arn:aws:ec2:us-east-1:266901698137:instance/i-022cdb0f18161a280"
     }
   ]
 }

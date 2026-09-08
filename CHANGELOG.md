@@ -7,11 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [1.0.2] - 2026-09-08
 
-Infrastructure-only release: migrates production to a new AWS account after
-the previous one's GPU vCPU quota left no room to grow, and fixes several real
-bugs found doing it. No application code changed — the retrieval, agent,
-guardrail, verification, memory, and authentication behaviour is unchanged
-from [1.0.1].
+Fixes a data-integrity bug that was quietly corrupting saved chat history,
+adds a one-command path to rebuild a knowledge base after a box is replaced,
+and unblocks the `development` → `main` merge. It also completes the
+production migration to a new AWS account, begun because the previous
+account's GPU vCPU quota left no room to grow — that work is recorded at the
+bottom of this entry.
+
+Retrieval, agent routing, guardrail, verification, and authentication
+behaviour is unchanged from [1.0.1]. The one behavioural change is in how a
+chat turn is written to the Recents transcript, described below.
+
+### Added
+
+- **`app/bin/restore_demo_kb.py` — rebuild a knowledge base in one command.**
+  Uploaded originals live only on the box, under
+  `data/users/<user_id>/knowledge_base` (bind-mounted from `/opt/magik/data`),
+  as do the per-user BM25 indexes — so replacing the instance takes both with
+  it, as the account migration below did. The script logs in and re-uploads a
+  corpus through the normal `/rag/upload` route, which is what makes it a
+  repair rather than a copy: that one path rebuilds the disk copy, the Qdrant
+  vectors, and the BM25 index together, where hand-copying files onto the box
+  would restore only the first and leave retrieval empty. It skips files
+  already present, so it is safe to re-run.
+
+### Fixed
+
+- **Chat transcripts lost a turn on every refused answer — and overwrote the
+  answer before it.** Two halves of a turn disagreed about whether it had been
+  saved. The streaming handler persists a turn only when the answer is
+  non-empty and was not refused, so refused turns were never written; the
+  frontend then issued its `PATCH .../last-message` regardless, and the patch
+  overwrote "the last assistant message" with no notion of which turn that
+  was. With the current turn unstored, that message belonged to the
+  *previous* turn: its answer was destroyed and the current question never
+  appeared at all. Reloading Recents showed four questions where five were
+  asked, one of them now carrying the wrong answer.
+
+  The severity came from the coupling: an empty knowledge base makes nearly
+  every answer a refusal, so a data-loss incident silently escalated into
+  history corruption. The patch is now turn-aware — the caller passes the
+  question it believes it is answering, a patch that doesn't match the end of
+  the transcript is refused rather than applied, and the route stores the
+  missing turn instead of discarding it. `save_chat_turn()` also collapses a
+  re-save of the turn already at the end of the transcript (180-second
+  window), so the streaming path and the client's meta fallback no longer
+  write the same question twice. Covered by
+  `tests/unit/memory/test_chat_transcript_integrity.py`.
+
+- **`Security / detect-secrets` failed every `development` → `main` merge.**
+  `deploy/aws/terraform-new-account/manual-deploy.sh` sets and tests a
+  `SECRETS_OK` pass/fail flag; because the name begins with `SECRET`,
+  detect-secrets' keyword detector read `"yes"` as a credential value and
+  failed the required check. No credential was ever committed — the script
+  reads all nine secrets from SSM at runtime. The identical line in
+  `.github/workflows/cd.yml` goes unflagged only because the YAML detector
+  does not match inside a block scalar, which is why this surfaced just as
+  the new-account tooling landed. Both lines are now marked
+  `pragma: allowlist secret` with the reasoning inline, and `.secrets.baseline`
+  picked up a line-number refresh for a long-known false positive in
+  `app/core/config.py` (the `CHANGE_ME_IN_PRODUCTION` placeholder guard,
+  drifted 1240 → 1289).
+
+- **`seed_demo_account.py` printed setup paths that never existed.** Its
+  suggested demo corpus pointed at `data/finance/<name>`, a directory this
+  repo has never had; the files are at `data/raw/finance/<ext>/<name>`.
+  Anyone following the printed instructions hit "no such file" on every line.
+
+- **`deploy_lambdas.sh` didn't run outside AWS CloudShell.** Three independent
+  bugs surfaced deploying from a local Windows/Git Bash shell for the first
+  time: a hard dependency on `zip` (not present outside CloudShell, replaced
+  with a portable `python3 -c "import zipfile..."` packaging step); Git
+  Bash/MSYS silently rewriting POSIX-path-shaped substrings embedded inside
+  the Lambda `--environment` value (`/magik/...`, `https://...`) into
+  Windows paths before the AWS CLI ever saw them; and a build directory from
+  `mktemp -d` that the AWS CLI's own Python couldn't resolve inside a
+  `file://` paramfile URI. All three are fixed for any future operator running
+  this script locally, not just from CloudShell.
+
+- **A false "missing parameter" warning during Lambda deploy.** The same
+  path-mangling bug made `deploy_lambdas.sh`'s own pre-flight SSM check
+  report `/magik/github_actions_pat` as absent even when present — confirmed
+  via two independent boto3-based checks that never touch a shell. Cosmetic
+  only (the Lambda itself reads the parameter correctly at runtime via its
+  own boto3 client), now fixed at the source.
 
 ### Changed
 
@@ -35,27 +114,15 @@ from [1.0.1].
   to the new account (`AWS_DEPLOY_ROLE_ARN`). This is a deliberate, temporary
   bridge, reverted once the new account's staging box exists.
 
-### Fixed
-
-- **`deploy_lambdas.sh` didn't run outside AWS CloudShell.** Three independent
-  bugs surfaced deploying from a local Windows/Git Bash shell for the first
-  time: a hard dependency on `zip` (not present outside CloudShell, replaced
-  with a portable `python3 -c "import zipfile..."` packaging step); Git
-  Bash/MSYS silently rewriting POSIX-path-shaped substrings embedded inside
-  the Lambda `--environment` value (`/magik/...`, `https://...`) into
-  Windows paths before the AWS CLI ever saw them; and a build directory from
-  `mktemp -d` that the AWS CLI's own Python couldn't resolve inside a
-  `file://` paramfile URI. All three are fixed for any future operator running
-  this script locally, not just from CloudShell.
-- **A false "missing parameter" warning during Lambda deploy.** The same
-  path-mangling bug made `deploy_lambdas.sh`'s own pre-flight SSM check
-  report `/magik/github_actions_pat` as absent even when present — confirmed
-  via two independent boto3-based checks that never touch a shell. Cosmetic
-  only (the Lambda itself reads the parameter correctly at runtime via its
-  own boto3 client), now fixed at the source.
-
 ### Known limitations
 
+- Uploaded files and per-user BM25 indexes are stored only on the instance's
+  root EBS volume (`/opt/magik/data`), which is blank on a newly built box —
+  so replacing the instance loses them, as this migration did. Managed stores
+  (Qdrant, MongoDB Atlas, Upstash Redis) are unaffected. Nothing deletes these
+  files; there is simply no second copy. Until that changes, rebuild a
+  knowledge base after any instance replacement with
+  `app/bin/restore_demo_kb.py` above.
 - Staging does not yet exist in the new account — blocked on a second GPU
   vCPU quota increase, requested the same day. Once granted: flip
   `create_staging = true` in the new account's Terraform (already supports

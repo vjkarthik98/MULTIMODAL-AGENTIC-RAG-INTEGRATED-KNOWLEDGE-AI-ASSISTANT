@@ -24,7 +24,7 @@ REGION="${AWS_REGION:-us-east-1}"
 # during bring-up). Only used for this script's own printed verification
 # commands (the Lambdas resolve the instance by tag at runtime, not this
 # default).
-INSTANCE_ID="${INSTANCE_ID:-i-005406894211e9f7f}"
+INSTANCE_ID="${INSTANCE_ID:-i-022cdb0f18161a280}"
 INSTANCE_TAG="${INSTANCE_TAG:-magik-prod}"
 
 # Where the wake gateway redirects to once /health answers. HTTPS via Caddy

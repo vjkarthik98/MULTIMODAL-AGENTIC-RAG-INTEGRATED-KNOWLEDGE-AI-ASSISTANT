@@ -500,7 +500,10 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
         ))
         await streamTextIntoBubble(finalText)
         // Stamp botId onto the DB message so votes on refusal-path answers persist.
-        patchLastMessage(auth.token, sessionId, finalText, metaSources, botId)
+        // Passing `text` also lets the backend detect that this turn was never
+        // persisted (meta failed, or the stream refused and saved nothing) and
+        // store it, instead of overwriting the previous turn's answer.
+        patchLastMessage(auth.token, sessionId, finalText, metaSources, botId, text)
       } else {
         // Lock in the streamed answer immediately.
         setMessages(prev => prev.map(m =>
@@ -516,7 +519,7 @@ export default function ChatPage({ auth, onLogout, dark, onToggleTheme, onStream
         // sending [DONE]. Patch it with the client-cleaned text and stamp
         // botId so votes persist and reload shows exactly what the user saw.
         if (streamedAnswer && !isRefusal(streamedAnswer)) {
-          patchLastMessage(auth.token, sessionId, streamedAnswer, streamedSources || [], botId)
+          patchLastMessage(auth.token, sessionId, streamedAnswer, streamedSources || [], botId, text)
         }
       }
     } catch (err) {

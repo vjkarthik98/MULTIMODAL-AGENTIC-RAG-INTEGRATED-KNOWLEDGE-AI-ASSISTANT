@@ -371,13 +371,17 @@ export async function submitFeedback(csrf, sessionId, vote, messageId, query, re
 }
 
 // Overwrite the last assistant message in the session so reload = what user saw.
-export async function patchLastMessage(csrf, sessionId, content, sources, msgId = null) {
+// `query` is the question this answer belongs to. The backend uses it to tell
+// "patch the answer I just streamed" from "this turn was never saved" — on a
+// refusal nothing is persisted, and without the question the patch overwrote
+// the PREVIOUS turn's answer and dropped this one. Always pass it.
+export async function patchLastMessage(csrf, sessionId, content, sources, msgId = null, query = null) {
   try {
     await fetch(`${API}/rag/sessions/${encodeURIComponent(sessionId)}/last-message`, {
       method: 'PATCH',
       credentials: 'include',
       headers: csrfHeaders(csrf, { 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ content, sources: sources || [], msg_id: msgId }),
+      body: JSON.stringify({ content, sources: sources || [], msg_id: msgId, query }),
     })
   } catch (_) {}  // fire-and-forget — failure is non-critical
 }

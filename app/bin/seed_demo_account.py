@@ -29,14 +29,20 @@ DEFAULT_EMAIL = settings.DEMO_ACCOUNT_EMAIL or "magikaiassistant@gmail.com"
 DEFAULT_PASSWORD = "Demo@2026"  # pragma: allowlist secret — intentionally public demo credential, not a real secret
 
 # Bundled finance benchmark files already used for accuracy testing —
-# reasonable defaults to upload for a finance-RAG demo walkthrough.
+# reasonable defaults to upload for a finance-RAG demo walkthrough. One per
+# modality, so the walkthrough exercises every ingestion path.
+#
+# These are the REAL repo paths (data/raw/finance/<ext>/…). They previously
+# read "data/finance/<name>" — a directory that has never existed — so anyone
+# following these instructions hit "no such file" on every line.
 SUGGESTED_FILES = [
-    "data/finance/apple_10k.pdf",
-    "data/finance/ctryprem.xlsx",
-    "data/finance/aapl-20240928_g2.jpg",
-    "data/finance/FOMC Press Conference September 18, 2024.mp3",
-    "data/finance/Q4 2025 Earnings Call.mp4",
-    "data/finance/fomc_dec2024.txt",
+    "data/raw/finance/pdf/apple_10k.pdf",
+    "data/raw/finance/xlsx/ctryprem.xlsx",
+    "data/raw/finance/image/aapl-20240928_g2.jpg",
+    "data/raw/finance/docx/apple_investment_research_report.docx",
+    "data/raw/finance/txt/fomc_dec2024.txt",
+    "data/raw/finance/audio/FOMC Press Conference September 18, 2024.mp3",
+    "data/raw/finance/video/Q4 2025 Earnings Call.mp4",
 ]
 
 SUGGESTED_QUERIES = [
