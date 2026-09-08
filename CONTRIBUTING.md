@@ -28,6 +28,12 @@ to any change.
   into it.
 - Branch naming: `<type>/<short-description>` (e.g. `fix/qdrant-filter-leak`,
   `feat/sec-edgar-tool`) mirrors the commit prefixes below.
+- `fix/hotfixes` is the one intentional exception to the branch-per-fix rule
+  above: a long-lived branch off `development`, kept around for small,
+  low-risk patches where opening and deleting a dedicated `fix/*` branch
+  would be pure overhead. Rebase it onto `development` before starting new
+  work on it so it doesn't drift; anything non-trivial still gets its own
+  short-lived `fix/*` branch and its own PR.
 
 ## Commit conventions
 
