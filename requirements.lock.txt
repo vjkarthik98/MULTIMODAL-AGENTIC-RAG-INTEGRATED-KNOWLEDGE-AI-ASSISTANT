@@ -376,7 +376,7 @@ httpx[http2]==0.28.1
     #   weasel
 huey==3.3.4
     # via mlflow
-huggingface-hub==0.36.2
+huggingface-hub==1.30.0
     # via
     #   -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
     #   accelerate
