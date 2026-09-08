@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars (gitignored) and fill in real values.
+
+aws_region  = "us-east-1"
+aws_profile = "magik-admin"
+
+# Find yours with: curl -s https://checkip.amazonaws.com
+# NEVER 0.0.0.0/0 for SSH.
+admin_ssh_cidr = "203.0.113.4/32"
+
+# First apply: leave both null (production-only bring-up).
+# staging_model_snapshot_id = null
+# staging_root_snapshot_id  = null

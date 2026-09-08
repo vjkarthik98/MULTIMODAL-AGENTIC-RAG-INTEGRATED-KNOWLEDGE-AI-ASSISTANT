@@ -6,11 +6,12 @@
     "from a public, unauthenticated API Gateway endpoint, so it must not be able to start",
     "anything else in the account.",
     "",
-    "UPDATED 2026-08-21: rebuilt in a NEW AWS account (857194222592, was",
-    "537557168406). The instance ARN below is a PLACEHOLDER -- fill in the real",
-    "magik-prod instance ID from `terraform output production_instance_arn`",
-    "(deploy/aws/terraform/) after the first `terraform apply`, before running",
-    "deploy_lambdas.sh."
+    "UPDATED 2026-09-08: migrated to a NEW AWS account (266901698137, was",
+    "857194222592) after the prior account hit its 4 vCPU GPU-instance quota.",
+    "magik-prod itself also moved AZ within this account (us-east-1b, not",
+    "us-east-1a) after hitting InsufficientInstanceCapacity for g6e.xlarge in",
+    "1a during bring-up -- the instance ARN's region field is unaffected by",
+    "that, only the account ID and instance ID below changed."
   ],
   "Version": "2012-10-17",
   "Statement": [
@@ -24,7 +25,7 @@
       "Sid": "StartOnlyTheDemoInstance",
       "Effect": "Allow",
       "Action": "ec2:StartInstances",
-      "Resource": "arn:aws:ec2:us-east-1:857194222592:instance/i-09831ac06b063d36f"
+      "Resource": "arn:aws:ec2:us-east-1:266901698137:instance/i-005406894211e9f7f"
     }
   ]
 }
