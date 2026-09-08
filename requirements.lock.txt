@@ -448,7 +448,7 @@ keybert==0.9.0
     # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
 kiwisolver==1.5.0
     # via matplotlib
-langchain==0.2.17
+langchain==1.4.0
     # via
     #   langchain-community
     #   ragas
