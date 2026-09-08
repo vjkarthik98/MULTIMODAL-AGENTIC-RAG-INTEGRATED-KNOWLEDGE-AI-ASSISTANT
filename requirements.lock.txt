@@ -964,7 +964,7 @@ pytest-asyncio==1.4.0
     #   deepeval
 pytest-cov==7.1.0
     # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
-pytest-randomly==4.1.0
+pytest-randomly==5.0.0
     # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
 pytest-repeat==0.9.4
     # via deepeval
