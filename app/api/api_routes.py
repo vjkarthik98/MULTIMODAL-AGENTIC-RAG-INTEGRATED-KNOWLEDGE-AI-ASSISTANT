@@ -2768,6 +2768,11 @@ class LastMessagePatchRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=50000)
     sources: list[dict[str, Any]] | None = Field(default=None)
     msg_id: str | None = Field(default=None, max_length=128)
+    # The question this answer belongs to. Optional for backward compatibility
+    # with an older frontend build, but the frontend always sends it now: it is
+    # what stops a patch from overwriting the PREVIOUS turn when the current
+    # turn was never persisted (refusal path). See patch_last_message().
+    query: str | None = Field(default=None, max_length=50000)
 
 
 @router.patch("/sessions/{session_id}/last-message")
@@ -2777,20 +2782,56 @@ async def patch_last_message(
     current_user: UserPublic = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Overwrite the last assistant message content + sources so reload shows
-    exactly what the user saw during streaming."""
+    exactly what the user saw during streaming.
+
+    Self-healing: when `query` is supplied and the transcript does not end with
+    that question, the turn was never persisted — the streaming path only saves
+    non-refused answers, and its meta fallback can fail or be skipped. Rather
+    than patching (which would overwrite the previous turn's answer and lose
+    this one entirely), store the missing turn here. This is why questions that
+    ended in a refusal used to vanish from Recents on reload.
+    """
     user_id = current_user.user_id
     try:
         mongo = infra.get_mongo()
         if mongo:
-            await asyncio.to_thread(
+            patched = await asyncio.to_thread(
                 mongo.patch_last_assistant_message,
                 session_id,
                 user_id,
                 body.content,
                 body.sources or [],
                 body.msg_id,
+                body.query,
             )
-        return {"status": "ok"}
+            if not patched and body.query:
+                await asyncio.to_thread(
+                    mongo.save_chat_turn,
+                    session_id,
+                    user_id,
+                    body.query,
+                    body.content,
+                    body.sources or [],
+                )
+                # Re-run the patch purely to stamp msg_id onto the row just
+                # written, so votes on this answer still persist.
+                if body.msg_id:
+                    await asyncio.to_thread(
+                        mongo.patch_last_assistant_message,
+                        session_id,
+                        user_id,
+                        body.content,
+                        body.sources or [],
+                        body.msg_id,
+                        body.query,
+                    )
+                logger.info(
+                    event="chat_turn_recovered_on_patch",
+                    session_id=session_id,
+                    reason="turn was not persisted by the stream/meta path",
+                )
+                return {"status": "ok", "action": "appended"}
+        return {"status": "ok", "action": "patched"}
     except Exception as exc:
         logger.warning(event="api_patch_last_msg_failed", session_id=session_id, error=str(exc))
         return {"status": "error"}
