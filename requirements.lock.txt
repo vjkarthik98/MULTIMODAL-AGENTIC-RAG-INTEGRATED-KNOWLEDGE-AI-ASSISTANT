@@ -1265,7 +1265,7 @@ textstat==0.7.13
     # via -r C:/Users/karth/AppData/Local/Temp/requirements_for_lock.txt
 tf-keras==2.21.0
     # via tensorflow-hub
-thinc==8.3.13
+thinc==9.1.1
     # via spacy
 threadpoolctl==3.6.0
     # via scikit-learn
