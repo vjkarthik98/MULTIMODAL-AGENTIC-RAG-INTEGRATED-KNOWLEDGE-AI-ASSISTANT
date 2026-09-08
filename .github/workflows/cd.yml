@@ -58,8 +58,7 @@ name: CD
 #      the LEGACY (non-ID-qualified) subject format
 #      (`use_immutable_subject: false`), and both forms are present regardless
 #      so a future format flip on GitHub's side won't silently break this
-#      again. GitHub repo variable AWS_DEPLOY_ROLE_ARN updated to point at the
-#      new account's role.
+#      again.
 #   6. Self-hosted runners re-registered from scratch: `magik-prod-runner`
 #      (label `gpu`) and `magik-staging-runner` (label `staging-gpu`), both
 #      installed as systemd services, confirmed Online in GitHub. Production's
@@ -75,6 +74,24 @@ name: CD
 #      required by tier2-eval.yml's own preflight) was rebuilt from Qdrant
 #      payloads post-rebuild (no GPU/re-embedding needed — the vectors
 #      themselves live in Qdrant Cloud, untouched by the AWS account change).
+#
+# SPLIT-ACCOUNT ARRANGEMENT — TEMPORARY, since 2026-09-08: production migrated
+# to a second AWS account (266901698137, was 857194222592) after the first
+# account's GPU vCPU quota (4) left no room for a second g6e.xlarge. A second
+# quota increase was requested the same day but had not landed yet, so rather
+# than let deploy-staging hard-fail with no staging box to find (it does not
+# skip gracefully when one is missing — it exits 1), staging stays on the OLD
+# account's still-intact box (i-09a14af803649d70d) for now, production moves to
+# the NEW account. This needs its OWN deploy role, since a single
+# AWS_DEPLOY_ROLE_ARN can only ever authenticate into one account:
+#   AWS_DEPLOY_ROLE_ARN          -> arn:aws:iam::266901698137:role/magik-deploy-role  (production, NEW account)
+#   AWS_STAGING_DEPLOY_ROLE_ARN  -> arn:aws:iam::857194222592:role/magik-deploy-role  (staging, OLD account, unchanged)
+# deploy-staging and stop-staging assume the staging-specific role below;
+# every other job keeps using AWS_DEPLOY_ROLE_ARN. Revert this the moment the
+# new account's staging box exists: point AWS_STAGING_DEPLOY_ROLE_ARN at the
+# new account's role (or drop it and let deploy-staging/stop-staging fall back
+# to AWS_DEPLOY_ROLE_ARN like every other job) and decommission the old
+# account's staging box.
 
 on:
   push:
@@ -394,7 +411,10 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          # Staging lives in the OLD account for now — see the "SPLIT-ACCOUNT
+          # ARRANGEMENT" note at the top of this file. Every other job in this
+          # workflow uses AWS_DEPLOY_ROLE_ARN.
+          role-to-assume: ${{ vars.AWS_STAGING_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: Resolve staging instance ID by tag
@@ -707,7 +727,10 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          # Staging lives in the OLD account for now — see the "SPLIT-ACCOUNT
+          # ARRANGEMENT" note at the top of this file. Every other job in this
+          # workflow uses AWS_DEPLOY_ROLE_ARN.
+          role-to-assume: ${{ vars.AWS_STAGING_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: Resolve staging instance ID by tag

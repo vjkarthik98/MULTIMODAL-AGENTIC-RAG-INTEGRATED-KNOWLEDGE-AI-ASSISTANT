@@ -5,6 +5,62 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] - 2026-09-08
+
+Infrastructure-only release: migrates production to a new AWS account after
+the previous one's GPU vCPU quota left no room to grow, and fixes several real
+bugs found doing it. No application code changed — the retrieval, agent,
+guardrail, verification, memory, and authentication behaviour is unchanged
+from [1.0.1].
+
+### Changed
+
+- **Production migrated to a new AWS account.** The previous account's GPU
+  vCPU quota (4) left no room to ever run a second `g6e.xlarge` — this is
+  already the second such migration (see [1.0.0]'s account rebuild note).
+  `magik-prod` now runs in account `266901698137` (was `857194222592`),
+  rebuilt via the same `deploy/aws/terraform/` module used for every prior
+  rebuild. Managed data (Qdrant, MongoDB Atlas, Upstash Redis) is untouched —
+  it lives outside AWS and was never part of the migration.
+- **Production landed in `us-east-1b`, not `us-east-1a`.** The new account hit
+  `InsufficientInstanceCapacity` for `g6e.xlarge` in `1a` during bring-up; a
+  second public subnet was added so production could launch in `1b` instead.
+  Staging and the Uptime Kuma box are unaffected and stay on `1a`.
+- **The CD pipeline temporarily deploys across two AWS accounts.** Staging
+  quota for the new account was requested the same day but hadn't landed yet,
+  and `deploy-staging` has no graceful "box doesn't exist" path — it fails
+  outright rather than skipping. Rather than ship that gap, staging keeps
+  running on the old account's still-intact box for now
+  (`AWS_STAGING_DEPLOY_ROLE_ARN`, new repo variable) while production deploys
+  to the new account (`AWS_DEPLOY_ROLE_ARN`). This is a deliberate, temporary
+  bridge, reverted once the new account's staging box exists.
+
+### Fixed
+
+- **`deploy_lambdas.sh` didn't run outside AWS CloudShell.** Three independent
+  bugs surfaced deploying from a local Windows/Git Bash shell for the first
+  time: a hard dependency on `zip` (not present outside CloudShell, replaced
+  with a portable `python3 -c "import zipfile..."` packaging step); Git
+  Bash/MSYS silently rewriting POSIX-path-shaped substrings embedded inside
+  the Lambda `--environment` value (`/magik/...`, `https://...`) into
+  Windows paths before the AWS CLI ever saw them; and a build directory from
+  `mktemp -d` that the AWS CLI's own Python couldn't resolve inside a
+  `file://` paramfile URI. All three are fixed for any future operator running
+  this script locally, not just from CloudShell.
+- **A false "missing parameter" warning during Lambda deploy.** The same
+  path-mangling bug made `deploy_lambdas.sh`'s own pre-flight SSM check
+  report `/magik/github_actions_pat` as absent even when present — confirmed
+  via two independent boto3-based checks that never touch a shell. Cosmetic
+  only (the Lambda itself reads the parameter correctly at runtime via its
+  own boto3 client), now fixed at the source.
+
+### Known limitations
+
+- Staging does not yet exist in the new account — blocked on a second GPU
+  vCPU quota increase, requested the same day. Once granted: flip
+  `create_staging = true` in the new account's Terraform (already supports
+  this natively), then revert the split-account CD arrangement above.
+
 ## [1.0.1] - 2026-08-30
 
 Fixes a real production bug found the day after [1.0.0] shipped: the

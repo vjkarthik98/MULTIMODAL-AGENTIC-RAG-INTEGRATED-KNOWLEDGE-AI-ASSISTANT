@@ -15,14 +15,16 @@
 set -euo pipefail
 
 # ── Configuration ────────────────────────────────────────────────────────────
-ACCOUNT_ID="${ACCOUNT_ID:-857194222592}"
+ACCOUNT_ID="${ACCOUNT_ID:-266901698137}"
 REGION="${AWS_REGION:-us-east-1}"
-# Rebuilt 2026-08-21 in a new AWS account (was 537557168406) after the prior
-# EC2 fleet + EBS volumes were deleted. New magik-prod instance from
-# deploy/aws/terraform/'s production_instance_id output. Only used for this
-# script's own printed verification commands (the Lambdas resolve the
-# instance by tag at runtime, not this default).
-INSTANCE_ID="${INSTANCE_ID:-i-09831ac06b063d36f}"
+# Migrated 2026-09-08 to a new AWS account (was 857194222592) after the prior
+# account hit its 4 vCPU GPU-instance quota. New magik-prod instance from
+# deploy/aws/terraform-new-account's production_instance_id output (it landed
+# in us-east-1b, not us-east-1a, after an InsufficientInstanceCapacity error
+# during bring-up). Only used for this script's own printed verification
+# commands (the Lambdas resolve the instance by tag at runtime, not this
+# default).
+INSTANCE_ID="${INSTANCE_ID:-i-005406894211e9f7f}"
 INSTANCE_TAG="${INSTANCE_TAG:-magik-prod}"
 
 # Where the wake gateway redirects to once /health answers. HTTPS via Caddy
@@ -68,6 +70,15 @@ SCHEDULE_RULE="magik-idle-stop-schedule"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AWS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_DIR="$(mktemp -d)"
+# On Git Bash / MSYS (not AWS CloudShell), the AWS CLI's own Python can't
+# resolve an MSYS-style /tmp/... path passed inside a file:// paramfile URI —
+# it needs a native Windows path. cygpath -m gives the mixed form
+# (C:/Users/... — forward slashes, real drive letter) that both bash and
+# native Windows binaries can open. No-op on real Linux (CloudShell), where
+# cygpath doesn't exist.
+if command -v cygpath >/dev/null 2>&1; then
+  BUILD_DIR="$(cygpath -m "$BUILD_DIR")"
+fi
 trap 'rm -rf "${BUILD_DIR}"' EXIT
 
 say() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
@@ -113,21 +124,33 @@ deploy_fn() {
   local fn="$1" src_dir="$2" role="$3" env_vars="$4" timeout="$5"
   local zip="${BUILD_DIR}/${fn}.zip"
 
-  ( cd "$src_dir" && zip -qr "$zip" handler.py )
+  # Portable zip via python3's zipfile module — `zip` itself isn't guaranteed
+  # present outside AWS CloudShell (e.g. plain Windows Git Bash), while
+  # python3 already is (used below for JSON _comment-stripping too).
+  ( cd "$src_dir" && python3 -c "import zipfile; zipfile.ZipFile('${zip}', 'w', zipfile.ZIP_DEFLATED).write('handler.py')" )
 
   local role_arn="arn:aws:iam::${ACCOUNT_ID}:role/${role}"
 
+  # MSYS/Git Bash rewrites POSIX-path-looking substrings (e.g. "/magik/...",
+  # "https://...") embedded INSIDE this --environment value, not just whole
+  # bare arguments — the same bug class as the /dev/sdf one, just triggering
+  # on a substring rather than the whole token. MSYS2_ARG_CONV_EXCL="*" is
+  # too broad — it also breaks the `aws` shim's own internal re-exec of
+  # python.exe (same failure as MSYS_NO_PATHCONV). Scoping the exclusion to
+  # just this one argument's own prefix ("Variables=") leaves every other
+  # argument, including whatever the aws shim needs internally, converted
+  # normally. No-op outside MSYS (e.g. real Linux/CloudShell).
   if aws lambda get-function --function-name "$fn" --region "$REGION" >/dev/null 2>&1; then
     aws lambda update-function-code --function-name "$fn" \
       --zip-file "fileb://${zip}" --region "$REGION" >/dev/null
     aws lambda wait function-updated --function-name "$fn" --region "$REGION"
-    aws lambda update-function-configuration --function-name "$fn" \
+    MSYS2_ARG_CONV_EXCL="Variables=" aws lambda update-function-configuration --function-name "$fn" \
       --environment "$env_vars" --timeout "$timeout" --memory-size 256 \
       --region "$REGION" >/dev/null
     aws lambda wait function-updated --function-name "$fn" --region "$REGION"
     ok "updated $fn"
   else
-    aws lambda create-function --function-name "$fn" \
+    MSYS2_ARG_CONV_EXCL="Variables=" aws lambda create-function --function-name "$fn" \
       --runtime python3.12 --handler handler.handler \
       --role "$role_arn" --zip-file "fileb://${zip}" \
       --environment "$env_vars" --timeout "$timeout" --memory-size 256 \
@@ -193,7 +216,11 @@ GITHUB_REPO="${GITHUB_REPO:-vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLE
 GITHUB_RUNNER_LABEL="${GITHUB_RUNNER_LABEL:-gpu}"
 GITHUB_TOKEN_PARAM="${GITHUB_TOKEN_PARAM:-/magik/github_actions_pat}"
 
-if ! aws ssm get-parameter --name "$GITHUB_TOKEN_PARAM" --region "$REGION" >/dev/null 2>&1; then
+# MSYS2_ARG_CONV_EXCL="/magik" — same bare-/magik/-path mangling bug as
+# elsewhere in this script; without it, this check falsely reports "missing"
+# on Git Bash even when the parameter exists (the CLI receives a mangled
+# Windows path as --name, not the real parameter name).
+if ! MSYS2_ARG_CONV_EXCL="/magik" aws ssm get-parameter --name "$GITHUB_TOKEN_PARAM" --region "$REGION" >/dev/null 2>&1; then
   printf '    \033[0;33mwarn\033[0m %s\n' \
     "${GITHUB_TOKEN_PARAM} not found in SSM — idle-stop will fail SAFE (treat the" \
     "          runner as busy, never stop) until it exists. See README.md:" \
@@ -202,7 +229,7 @@ fi
 
 say "Idle stop — Lambda"
 deploy_fn "$IDLE_FN" "${AWS_DIR}/lambda/idle_stop" "$IDLE_ROLE" \
-  "Variables={EC2_INSTANCE_TAG=${INSTANCE_TAG},IDLE_MINUTES=${IDLE_MINUTES},MIN_UPTIME_MINUTES=${MIN_UPTIME_MINUTES},NETWORK_IN_THRESHOLD_BYTES=1000000,DRY_RUN=false,GITHUB_REPO=${GITHUB_REPO},GITHUB_RUNNER_LABEL=${GITHUB_RUNNER_LABEL},GITHUB_TOKEN_PARAM=${GITHUB_TOKEN_PARAM},APP_URL=${APP_URL},KUMA_PUSH_URL=${KUMA_PUSH_URL}}" \
+  "Variables={EC2_INSTANCE_TAG=${INSTANCE_TAG},IDLE_MINUTES=${IDLE_MINUTES},MIN_UPTIME_MINUTES=${MIN_UPTIME_MINUTES},NETWORK_IN_THRESHOLD_BYTES=1000000,DRY_RUN=false,GITHUB_REPO=${GITHUB_REPO},GITHUB_RUNNER_LABEL=${GITHUB_RUNNER_LABEL},GITHUB_TOKEN_PARAM=${GITHUB_TOKEN_PARAM},KUMA_PUSH_URL=${KUMA_PUSH_URL},APP_URL=${APP_URL}}" \
   60
 
 say "Idle stop — EventBridge schedule (every 5 minutes)"
