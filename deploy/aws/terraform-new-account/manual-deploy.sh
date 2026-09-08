@@ -51,7 +51,7 @@ SECRETS_ENV="/opt/magik/.env.secrets"
 rm -f "$SECRETS_ENV"
 : > "$SECRETS_ENV"
 chmod 600 "$SECRETS_ENV"
-SECRETS_OK="yes"
+SSM_FETCH_OK="yes"
 for PARAM_KEY in \
   "google_client_secret:GOOGLE_CLIENT_SECRET" \
   "smtp_password:SMTP_PASSWORD" \
@@ -67,10 +67,10 @@ do
   ENV_KEY="${PARAM_KEY##*:}"
   VAL="$(aws ssm get-parameter --name "/magik/${SSM_NAME}" \
            --with-decryption --query Parameter.Value --output text 2>/dev/null)" \
-    || { log "FATAL: could not read /magik/${SSM_NAME} from SSM"; SECRETS_OK="no"; break; }
+    || { log "FATAL: could not read /magik/${SSM_NAME} from SSM"; SSM_FETCH_OK="no"; break; }
   echo "${ENV_KEY}=${VAL}" >> "$SECRETS_ENV"
 done
-if [ "$SECRETS_OK" != "yes" ]; then
+if [ "$SSM_FETCH_OK" != "yes" ]; then
   rm -f "$SECRETS_ENV"
   log "FATAL: app-secrets fetch from SSM failed"
   exit 1
