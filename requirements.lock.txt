@@ -1494,7 +1494,7 @@ zxcvbn-python==4.4.24
 # The following packages are considered to be unsafe in a requirements file:
 pip==26.2.1
     # via pip-api
-setuptools==81.0.0
+setuptools==84.0.0
     # via
     #   ctranslate2
     #   deepeval
