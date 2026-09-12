@@ -21,7 +21,7 @@ terraform {
   # contains the VPC/instance/EIP IDs and, transiently, the SSH private key
   # material from tls_private_key. Back it up after every apply that changes
   # state (private, versioned, encrypted bucket — see state_backup.tf):
-  #   aws s3 cp terraform.tfstate s3://magik-terraform-state-857194222592/terraform.tfstate
+  #   aws s3 cp terraform.tfstate s3://magik-terraform-state-266901698137/terraform.tfstate
   # so a lost laptop doesn't repeat the "deleted everything, no record of
   # what existed" problem this whole rebuild is fixing.
 }

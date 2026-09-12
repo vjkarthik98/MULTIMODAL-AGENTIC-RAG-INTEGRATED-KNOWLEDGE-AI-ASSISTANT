@@ -228,7 +228,7 @@ is scanned, not assumed.
   conftest.py` now sets `WARMUP_AT_STARTUP=false` as a test-session default. Verified: 24/24 passed,
   97.82 s, no hang. This was very likely inflating every earlier guardrails/auth timing this session
   too, not memory pressure as first suspected.
-- **Security pipeline additions (⛔):** `pip-audit`/Dependabot (dependency CVEs), Bandit (SAST),
+- **Security pipeline additions (⛔):** `pip-audit` (dependency CVEs), Bandit (SAST),
   license scan. `detect-secrets` is already live with a reviewed baseline.
 - **Secret hygiene:** confirmed — no hardcoded secrets; `.env` gitignored, `.env.example` tracked;
   6 detect-secrets findings all confirmed false positives.

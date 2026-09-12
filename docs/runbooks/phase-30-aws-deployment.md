@@ -183,9 +183,12 @@ runs on a CPU-only laptop — no physical GPU needed at build time).
 
 ## Stage 2 — Provision the EC2 instance (☁️ AWS)
 
-> **SUPERSEDED 2026-08-21:** Stage 2 (and the "Appendix E — Terraform skeleton"
-> it used to point to as optional/future work) is now **implemented and
-> current**, not a skeleton — see `deploy/aws/terraform/`. This happened
+> **SUPERSEDED 2026-08-21, account updated 2026-09-12:** Stage 2 (and the
+> "Appendix E — Terraform skeleton" it used to point to as optional/future
+> work) is now **implemented and current**, not a skeleton. The live module is
+> **`deploy/aws/terraform-new-account/`** (AWS account `266901698137`);
+> `deploy/aws/terraform/` below is the earlier `857194222592` build and is
+> **deprecated — do not apply it** (see its `DEPRECATED.md`). This happened
 > because the entire prior EC2 fleet + EBS volumes were manually deleted,
 > which is exactly the failure mode "codify after you've launched by hand
 > once" was meant to protect against. Run `terraform init && terraform plan`
@@ -236,7 +239,7 @@ appears **Online** in Systems Manager → Fleet Manager.
 > 100GiB EBS volume (`/opt/magik/.hf_cache`), separate from the 100GiB root
 > volume (OS, Docker, `/opt/magik/{data,logs,.env}`) — not a single combined
 > `/opt/magik` directory tree on one volume as items 2–3 below originally
-> described. Terraform (`deploy/aws/terraform/ec2.tf`) creates and attaches
+> described. Terraform (`deploy/aws/terraform-new-account/ec2.tf`) creates and attaches
 > both volumes; run `deploy/aws/scripts/bootstrap_instance.sh <production|staging>`
 > first (formats/mounts the model volume by UUID, creates the rest of the
 > directory tree) — it replaces item 2 below and half of item 3 (the mount,
@@ -620,13 +623,31 @@ systemctl enable --now caddy
 
 ---
 
-## Appendix E — Terraform (`deploy/aws/terraform/`) — IMPLEMENTED
+## Appendix E — Terraform — IMPLEMENTED
 
 > **UPDATED 2026-08-21:** no longer a skeleton/optional-future-step — this was
 > built and applied for real after the entire prior EC2 fleet + EBS volumes
 > were deleted (proof that "codify after you've launched by hand once" needed
-> to actually happen, not stay deferred indefinitely). Actual file layout,
-> which diverged from the sketch below in a few ways worth noting explicitly:
+> to actually happen, not stay deferred indefinitely).
+>
+> **UPDATED 2026-09-12 — read this first.** The layout below documents
+> `deploy/aws/terraform/`, which built account `857194222592` and is now
+> **deprecated**. The live module is **`deploy/aws/terraform-new-account/`**
+> (account `266901698137`). It is the same layout plus three things the second
+> migration forced:
+>
+> - a **second public subnet** (`network.tf`'s `magik_public_1b`) and separate
+>   `production_availability_zone` / `staging_availability_zone` variables,
+>   because `g6e.xlarge` capacity, not quota, decided where the boxes could go;
+>   both GPU boxes ended up in `us-east-1c` and only Uptime Kuma is still in
+>   `us-east-1a`;
+> - `aws_instance.staging[0]` and `aws_ebs_volume.staging_models[0]` are
+>   **imported, not applied** — see the comment above the staging block in
+>   `ec2.tf` for why and for the exact `terraform import` commands;
+> - `uptime_kuma.tf`, the always-on `t4g.micro` status-page box.
+>
+> Actual file layout, which diverged from the sketch below in a few ways worth
+> noting explicitly:
 
 ```
 deploy/aws/terraform/

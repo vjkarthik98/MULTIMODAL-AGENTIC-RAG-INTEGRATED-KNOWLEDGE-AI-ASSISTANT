@@ -1,3 +1,8 @@
+# ============================================================================
+# DEPRECATED — AWS account 857194222592, decommissioned 2026-09-12.
+# Do NOT apply. The live module is deploy/aws/terraform-new-account/.
+# See DEPRECATED.md in this directory (includes a leaked-key disclosure).
+# ============================================================================
 # Fresh AWS account (857194222592) has NO default VPC in us-east-1 at all —
 # confirmed via `aws ec2 describe-vpcs` returning zero results. Everything
 # below is new, not a reuse of a pre-existing default VPC as the original

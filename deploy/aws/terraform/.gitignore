@@ -10,4 +10,12 @@ crash.*.log
 # (e.g. tls_private_key's private key material) even for resources marked
 # "sensitive" in `terraform plan`'s human-readable output — the underlying
 # .tfplan binary is not redacted the same way. Never commit these.
+#
+# BOTH spellings are required. An earlier version of this file listed only
+# `tfplan*`, which matches `tfplan3.out` but NOT `destroy.tfplan` or
+# `kuma.tfplan` — and four such files were committed to this public repo as a
+# result, each embedding the 857194222592 account's RSA break-glass private
+# key. See deploy/aws/terraform/DEPRECATED.md.
 tfplan*
+*.tfplan
+*.tfplan.*

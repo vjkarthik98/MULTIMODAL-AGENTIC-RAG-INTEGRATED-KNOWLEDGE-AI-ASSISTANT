@@ -117,25 +117,12 @@ jobs:
       # than "the gate is unconfigured". A gate that can't distinguish "broken"
       # from "regressed" trains people to ignore it.
       - name: Preflight — required eval configuration
-        env:
-          TRIGGERING_ACTOR: ${{ github.actor }}
         run: |
           missing=""
           [ -z "${QDRANT_URL}" ] && missing="${missing} QDRANT_URL"
           [ -z "${QDRANT_API_KEY}" ] && missing="${missing} QDRANT_API_KEY"
           if [ -n "${missing}" ]; then
-            if [ "${TRIGGERING_ACTOR}" = "dependabot[bot]" ]; then
-              # Dependabot-triggered runs are DENIED repository Actions secrets
-              # by design (GitHub security model) — they read from a separate
-              # "Dependabot secrets" store instead. Every early failure of this
-              # gate was exactly this: the runs were all on dependabot/* branches,
-              # and the generic "add your secrets" message would have sent you to
-              # the wrong settings page. The same values must be added TWICE,
-              # under both stores, with identical names.
-              echo "::error title=Eval gate: missing Dependabot secrets::Missing:${missing}. This run was triggered by Dependabot, which cannot read repository Actions secrets. Add the SAME values under Settings -> Secrets and variables -> Dependabot (not Actions). See docs/runbooks/ci-cd.md."
-            else
-              echo "::error title=Eval gate not configured::Missing:${missing}. Tier-1 scores retrieval against the real Qdrant collection; without these it has no corpus and would report a false regression. Add them under Settings -> Secrets and variables -> Actions. See docs/runbooks/ci-cd.md."
-            fi
+            echo "::error title=Eval gate not configured::Missing:${missing}. Tier-1 scores retrieval against the real Qdrant collection; without these it has no corpus and would report a false regression. Add them under Settings -> Secrets and variables -> Actions. See docs/runbooks/ci-cd.md."
             exit 1
           fi
           if [ "${EVAL_USER_ID}" = "eval_default" ]; then

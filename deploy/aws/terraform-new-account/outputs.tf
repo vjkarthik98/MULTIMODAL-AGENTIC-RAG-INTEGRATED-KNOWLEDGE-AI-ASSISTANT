@@ -21,7 +21,7 @@ output "staging_instance_arn" {
 }
 
 output "magik_deploy_role_arn" {
-  description = "Set this as the AWS_DEPLOY_ROLE_ARN GitHub Actions repo variable."
+  description = "Set this as BOTH the AWS_DEPLOY_ROLE_ARN and AWS_STAGING_DEPLOY_ROLE_ARN GitHub Actions repo variables. They are separate variables only so a future cross-account split is a variable change, not a workflow edit — while prod and staging share an account they hold the same value."
   value       = aws_iam_role.magik_deploy.arn
 }
 

@@ -159,11 +159,27 @@ the up-to-date list):
    skips cleanly rather than queueing forever, but that also means **nothing
    gates promotion**, so this variable should only ever be "false" during
    initial bring-up, never in steady state.
-7. On the staging box itself: `/opt/magik-staging/{.env,.hf_cache,data,logs}`
-   present (same shape as prod's `/opt/magik/...`), with the full ~25GB model
-   cache paged into `.hf_cache` — staging is a second real GPU box, not a
-   lightweight clone, since a genuine champion/successor test has to run on
-   hardware that isn't already serving prod traffic.
+7. On the staging box itself: `/opt/magik/{.env,.hf_cache,data,logs}` present
+   — the **same** paths as prod, created by
+   `deploy/aws/scripts/bootstrap_instance.sh staging` (the argument selects the
+   model-volume device and swap size, never the path). Staging is a second real
+   GPU box, not a lightweight clone, since a genuine champion/successor test has
+   to run on hardware that isn't already serving prod traffic, so it needs the
+   full ~25GB model cache paged into `.hf_cache`. On a freshly built box that
+   cache is **empty** and the first `deploy-staging` pays the whole download.
+8. `data/users/<EVAL_USER_ID>/bm25_index/bm25.pkl` present on the staging box.
+   `tier2-eval.yml` preflights this and hard-fails without it, which blocks
+   `promote-production`. It is not created by bootstrap and does not survive a
+   box rebuild — the root volume is blank on a new instance. Rebuild it from
+   Qdrant payloads (no GPU, no re-embedding, no re-chunking) once a container
+   is running:
+
+   ```bash
+   docker exec magik-staging-current      python3.12 -m app.retrieval.bm25_retriever --user_id <EVAL_USER_ID>
+   ```
+
+   **As of 2026-09-12 the current staging box (`i-067fa0abb13ed6481`, rebuilt
+   in account `266901698137`) has not had this done yet.**
 
 **Manual end-to-end validation**, once the above exists: push a real tag and
 confirm, in order — `wait-for-ci-green` passes, `deploy-staging` brings up
@@ -429,9 +445,9 @@ version of each rationale; this is the narrative summary.
   timing-attack CVE (no upstream fix planned, ever) requires ECDSA signing,
   and this app's JWT defaults to HS256 (HMAC) — confirmed unreachable, not
   just assumed; `keras`/`diskcache` are both pinned by their parent package
-  (tensorflow / llama-cpp-python respectively). Dependabot
-  (`.github/dependabot.yml`) is the standing mechanism that drives fixes as
-  compatible patched versions land upstream.
+  (tensorflow / llama-cpp-python respectively). These are re-checked by
+  `pip-audit` on every PR and fixed by hand as compatible patched versions land
+  upstream; nothing watches the manifest automatically between PRs.
 - **License scan** — blocks only on AGPL/SSPL (network-copyleft — would force
   source disclosure of this whole hosted service; zero ambiguity, zero found).
   Found `mutagen` (GPL-2.0-or-later) and `CairoSVG` (LGPL-3.0-or-later)
@@ -501,24 +517,6 @@ instead of installing torch for 20 minutes first, plus a warning when
 `QDRANT_API_KEY` under *Settings → Secrets and variables → Actions → Secrets*.
 `EVAL_USER_ID` is already set under *Variables*. Until the secrets exist,
 Tier-1 fails fast and loudly, which is the intended behaviour.
-
-**⚠️ Add the same two values a SECOND time, under *Dependabot* secrets.**
-This is not redundancy — it is the reason every early failure of this gate
-happened. GitHub deliberately denies Dependabot-triggered workflow runs access
-to repository *Actions* secrets; they read from a separate *Dependabot* secret
-store instead. Every failing Eval Gate run in the first batch was on a
-`dependabot/*` branch, and a generic "add your secrets" message would have sent
-you to the Actions page, where the values already were. The preflight step now
-detects `github.actor == 'dependabot[bot]'` and prints the Dependabot-specific
-instruction instead — verified by executing the step's own shell across all
-three cases (dependabot+missing → dependabot message; owner+missing → generic
-message; owner+present → exit 0).
-
-Leaving Dependabot secrets unset is not a safe shortcut once Tier-1 is a
-*required* check: every dependency PR would be permanently red and unmergeable.
-And skipping the gate for Dependabot would be worse — a bump to `rank-bm25`,
-`sentence-transformers`, or `qdrant-client` is precisely when a retrieval
-regression is most likely.
 
 **3. The nightly Tier-2 schedule was queuing forever.** `tier2-nightly` (via
 `tier2-eval.yml`) also targets `[self-hosted, gpu]`. A scheduled run against a
