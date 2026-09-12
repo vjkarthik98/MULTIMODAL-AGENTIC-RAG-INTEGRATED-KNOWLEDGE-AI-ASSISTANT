@@ -8,9 +8,11 @@ name: Security
 # existing debt trains people to ignore it. Each step below states what a
 # real run found and why it landed where it did.
 #
-# Dependabot (.github/dependabot.yml) is the complementary standing watch —
-# it opens PRs on its own schedule; pip-audit here is the point-in-time gate
-# on whatever a PR is introducing right now.
+# pip-audit here is the point-in-time gate on whatever a PR is introducing
+# right now. There is no automated standing watch on the manifest between PRs,
+# so a CVE disclosed against an already-pinned version is caught on the next
+# PR that runs this workflow, not the day it lands — review the pip-audit
+# summary periodically rather than assuming something is watching for you.
 
 # No paths-ignore on pull_request — same reasoning as ci.yml (a filtered-out
 # workflow reports no status, so a required check would hang a doc-only PR
@@ -172,10 +174,10 @@ jobs:
       #   - `keras` (via tensorflow) and `diskcache` (via llama-cpp-python)
       #     are both pinned by their parent package, not independently
       #     upgradable without touching that parent's own compatibility range.
-      # Dependabot (.github/dependabot.yml) is the standing mechanism that
-      # actually drives fixes over time as compatible patched versions land.
-      # Flip continue-on-error to false once the ragas upgrade (the one item
-      # here needing real work, not just risk acceptance) lands.
+      # These get fixed by hand as compatible patched versions land; this step
+      # is what surfaces them. Flip continue-on-error to false once the ragas
+      # upgrade (the one item here needing real work, not just risk
+      # acceptance) lands.
       - name: pip-audit
         continue-on-error: true
         run: pip-audit -r requirements.txt --desc -f json -o pip-audit-report.json

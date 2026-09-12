@@ -90,13 +90,27 @@ resource "aws_eip_association" "production" {
 # Staging
 # =============================================================================
 
+# NOT created by `terraform apply` — IMPORTED. g6e.xlarge returned
+# InsufficientInstanceCapacity in every us-east-1 AZ for three consecutive days
+# (2026-09-09 → 2026-09-12) once the second 4 vCPU quota increase landed, and
+# Terraform gives no way to retry-until-capacity: each apply picks one AZ, waits
+# out the API error, and rolls back. The box was finally caught by hand from the
+# console in us-east-1c, tagged to match this resource, then imported:
+#
+#   terraform import 'aws_instance.staging[0]'      i-067fa0abb13ed6481
+#   terraform import 'aws_ebs_volume.staging_models[0]' vol-0eb84c616bac51dd3
+#
+# `terraform plan` is clean against the imported box, so this block is an
+# accurate description of what is live — it just did not create it. If staging
+# is ever rebuilt, expect to repeat the manual-launch-then-import dance rather
+# than assuming an apply will succeed.
 resource "aws_instance" "staging" {
   count = var.create_staging ? 1 : 0
 
   ami                    = data.aws_ami.deep_learning.id
   instance_type          = var.instance_type
-  availability_zone      = var.availability_zone
-  subnet_id              = aws_subnet.magik_public.id
+  availability_zone      = var.staging_availability_zone
+  subnet_id              = aws_subnet.magik_public_1b.id
   vpc_security_group_ids = [aws_security_group.staging.id]
   key_name               = aws_key_pair.magik.key_name
   iam_instance_profile   = aws_iam_instance_profile.magik_ec2.name
@@ -132,7 +146,7 @@ resource "aws_instance" "staging" {
 resource "aws_ebs_volume" "staging_models" {
   count = var.create_staging ? 1 : 0
 
-  availability_zone = var.availability_zone
+  availability_zone = var.staging_availability_zone
   size              = var.model_volume_size_gb
   type              = "gp3"
   snapshot_id       = var.staging_model_snapshot_id

@@ -16,31 +16,40 @@ name: CD
 # whenever a dependency fails. There is no separate "rollback" job for production:
 # there is nothing to roll back, since nothing was deployed there.
 #
-# STAGING + PRODUCTION PREREQUISITES — REBUILT 2026-08-21 in a NEW AWS account
-# (857194222592, was 537557168406) after the prior EC2 fleet + EBS volumes were
-# manually deleted. Rebuilt via Terraform this time (deploy/aws/terraform/) —
-# see its README section in docs/runbooks/phase-30-aws-deployment.md Appendix E
-# for the full as-built resource list. Recorded here because every one of these
-# is invisible from the repo alone, so a future failure in deploy-staging/
+# STAGING + PRODUCTION PREREQUISITES — CURRENT AS OF 2026-09-12, in AWS account
+# 266901698137 (the third account this fleet has lived in: 537557168406 →
+# 857194222592 → 266901698137; see the ACCOUNT MIGRATION NOTE below for why).
+# Built via Terraform (deploy/aws/terraform-new-account/ — NOT the older
+# deploy/aws/terraform/, which is the now-deprecated 857194222592 module kept
+# only as an as-built record). Recorded here because every one of these is
+# invisible from the repo alone, so a future failure in deploy-staging/
 # tier2-staging-gate is almost certainly one of these having drifted:
-#   1. Production: EC2 instance i-09831ac06b063d36f, Elastic IP 184.73.239.9,
-#      tagged Name=magik-prod. Staging: EC2 instance i-09a14af803649d70d, no
+#   1. Production: EC2 instance i-022cdb0f18161a280, Elastic IP 34.199.163.242,
+#      tagged Name=magik-prod. Staging: EC2 instance i-067fa0abb13ed6481, no
 #      Elastic IP (never needed one — resolved fresh by tag on every run),
-#      tagged Name=magik-staging. Both g6e.xlarge in us-east-1a. These are
-#      exactly what the `Resolve instance ID by tag` steps below look up
-#      (vars.EC2_INSTANCE_TAG / vars.EC2_STAGING_INSTANCE_TAG default to
-#      'magik-prod' / 'magik-staging' when the repo variable is unset).
+#      tagged Name=magik-staging. Both g6e.xlarge, both in us-east-1c on the
+#      shared subnet magik_public_1b (see network.tf — neither box could get
+#      g6e.xlarge capacity in 1a). These are exactly what the `Resolve instance
+#      ID by tag` steps below look up (vars.EC2_INSTANCE_TAG /
+#      vars.EC2_STAGING_INSTANCE_TAG default to 'magik-prod' / 'magik-staging'
+#      when the repo variable is unset). Instance IDs change on every rebuild —
+#      nothing in this workflow hardcodes them, they are recorded here only so
+#      a drifted lookup is diagnosable.
 #   2. EBS layout changed from the original single-volume design: each box now
 #      has a dedicated 100GiB model-cache volume (mounted at
 #      /opt/magik/.hf_cache) SEPARATE from the 100GiB root volume (OS, Docker,
 #      /opt/magik/{data,logs,.env}) — see deploy/aws/scripts/bootstrap_instance.sh.
-#      Staging's model volume was first cloned from a snapshot of production's
-#      (matching the old clone-based design), but that hit EBS's snapshot
-#      lazy-load penalty hard enough (scattered app reads capped near 5MB/s)
-#      that it was rebuilt as a blank volume + direct HF download instead —
-#      faster in practice, and what's actually live now. Both boxes downloaded
-#      their own models directly; there is no clone relationship between them
-#      going forward.
+#      Neither box's model volume is a clone. An early design cloned staging's
+#      from a snapshot of production's; that hit EBS's snapshot lazy-load
+#      penalty hard enough (scattered app reads capped near 5MB/s) that it was
+#      abandoned for a blank volume + direct HF download, which is faster in
+#      practice. The 2026-09-12 staging box was created blank the same way
+#      (terraform: aws_ebs_volume.staging_models, snapshot_id null) and
+#      bootstrapped by deploy/aws/scripts/bootstrap_instance.sh in `staging`
+#      mode. CONSEQUENCE, and the thing most likely to bite: a freshly built
+#      box starts with an EMPTY .hf_cache and an EMPTY data/ — so its first
+#      deploy pays a full model download, and item 8's BM25 index does not
+#      exist until it is rebuilt by hand.
 #   3. Security groups: magik-prod-sg (22 from an admin CIDR, 80/443 public),
 #      magik-staging-sg (ZERO inbound rules, matching the design intent from
 #      before — SSM is the only way in; the 127.0.0.1 port binding below is
@@ -49,7 +58,7 @@ name: CD
 #      (deploy/aws/iam/ec2-instance-profile-permissions.json is not
 #      prod-specific), created fresh by Terraform in the new account.
 #   5. magik-deploy-role (GitHub OIDC) created fresh by Terraform
-#      (deploy/aws/terraform/iam.tf), trust policy built from BOTH the
+#      (deploy/aws/terraform-new-account/iam.tf), trust policy built from BOTH the
 #      ID-qualified and legacy `sub` forms (same defensive pattern as the
 #      original hand-maintained deploy/aws/iam/github-oidc-trust-policy.json,
 #      now just Terraform-managed instead of a manual
@@ -59,39 +68,62 @@ name: CD
 #      (`use_immutable_subject: false`), and both forms are present regardless
 #      so a future format flip on GitHub's side won't silently break this
 #      again.
-#   6. Self-hosted runners re-registered from scratch: `magik-prod-runner`
-#      (label `gpu`) and `magik-staging-runner` (label `staging-gpu`), both
-#      installed as systemd services, confirmed Online in GitHub. Production's
-#      runner goes `offline` whenever the box is stopped (idle-stop / manual
-#      cost-saving stop) and comes back automatically when promote-production
-#      wakes the instance (systemd service is enabled, starts on boot).
-#   7. Repo variable SELF_HOSTED_STAGING_GPU_RUNNER=true (and
-#      SELF_HOSTED_GPU_RUNNER=true). While false, tier2-staging-gate skips
-#      cleanly rather than queueing forever — but that also means NOTHING
-#      gates promotion, so it belongs "off" only during initial bring-up,
-#      never in steady state.
-#   8. Both boxes' BM25 index (data/users/<EVAL_USER_ID>/bm25_index/bm25.pkl,
-#      required by tier2-eval.yml's own preflight) was rebuilt from Qdrant
-#      payloads post-rebuild (no GPU/re-embedding needed — the vectors
-#      themselves live in Qdrant Cloud, untouched by the AWS account change).
+#   6. Self-hosted runners, one per box, installed as systemd services:
+#      `magik-staging-runner` (label `staging-gpu`) and `magik-prod-runner`
+#      (label `gpu`). A runner shows `offline` in GitHub whenever its box is
+#      stopped (idle-stop / manual cost-saving stop) and comes back on its own
+#      when a deploy job wakes the instance — the service is enabled and
+#      starts on boot, so `offline` on a stopped box is normal, not a fault.
+#      STATE AS OF 2026-09-12: `magik-staging-runner` is registered (re-created
+#      on the new staging box i-067fa0abb13ed6481). `magik-prod-runner` is NOT
+#      registered at all — `gh api repos/:owner/:repo/actions/runners` returns
+#      it nowhere, so nothing in this account currently answers the `gpu`
+#      label. Re-register it on the production box before relying on item 7.
+#   7. Repo variables SELF_HOSTED_STAGING_GPU_RUNNER and SELF_HOSTED_GPU_RUNNER.
+#      Each must be 'true' ONLY while a runner carrying the matching label is
+#      actually registered. These are not feature flags; they are assertions
+#      about the world. Set 'false', the dependent job skips cleanly (grey);
+#      set 'true' with no matching runner, the job queues forever until the
+#      workflow times out. Because a skipped gate also means NOTHING gates
+#      promotion, 'false' belongs to initial bring-up only, never steady state.
+#      STATE AS OF 2026-09-12: SELF_HOSTED_STAGING_GPU_RUNNER=true, correct —
+#      the staging runner exists. SELF_HOSTED_GPU_RUNNER=true is WRONG for as
+#      long as item 6's `magik-prod-runner` is missing: it makes
+#      eval-gate.yml's `runs-on: [self-hosted, gpu]` job queue rather than
+#      skip. Either re-register that runner or set the variable false.
+#   8. Each box's BM25 index (data/users/<EVAL_USER_ID>/bm25_index/bm25.pkl,
+#      required by tier2-eval.yml's own preflight) has to be rebuilt from
+#      Qdrant payloads after every box rebuild. It is cheap — no GPU, no
+#      re-embedding, no re-chunking, because the vectors themselves live in
+#      Qdrant Cloud and are untouched by an AWS account change — but it is NOT
+#      automatic, and the index lives on the box's own root volume, which is
+#      blank on a new box.
+#      STATE AS OF 2026-09-12: production's index was rebuilt during the
+#      2026-09-08 migration. The NEW staging box has NOT had one built —
+#      bootstrap left /opt/magik/data empty — so tier2-staging-gate's preflight
+#      will hard-fail on the first tagged deploy that reaches it, blocking
+#      promote-production. Build it once, on the staging box, after the first
+#      deploy-staging run puts a container there:
+#        docker exec magik-staging-current #          python3.12 -m app.retrieval.bm25_retriever --user_id <EVAL_USER_ID>
 #
-# SPLIT-ACCOUNT ARRANGEMENT — TEMPORARY, since 2026-09-08: production migrated
-# to a second AWS account (266901698137, was 857194222592) after the first
-# account's GPU vCPU quota (4) left no room for a second g6e.xlarge. A second
-# quota increase was requested the same day but had not landed yet, so rather
-# than let deploy-staging hard-fail with no staging box to find (it does not
-# skip gracefully when one is missing — it exits 1), staging stays on the OLD
-# account's still-intact box (i-09a14af803649d70d) for now, production moves to
-# the NEW account. This needs its OWN deploy role, since a single
-# AWS_DEPLOY_ROLE_ARN can only ever authenticate into one account:
-#   AWS_DEPLOY_ROLE_ARN          -> arn:aws:iam::266901698137:role/magik-deploy-role  (production, NEW account)
-#   AWS_STAGING_DEPLOY_ROLE_ARN  -> arn:aws:iam::857194222592:role/magik-deploy-role  (staging, OLD account, unchanged)
-# deploy-staging and stop-staging assume the staging-specific role below;
-# every other job keeps using AWS_DEPLOY_ROLE_ARN. Revert this the moment the
-# new account's staging box exists: point AWS_STAGING_DEPLOY_ROLE_ARN at the
-# new account's role (or drop it and let deploy-staging/stop-staging fall back
-# to AWS_DEPLOY_ROLE_ARN like every other job) and decommission the old
-# account's staging box.
+# ACCOUNT MIGRATION NOTE: production migrated to a second AWS account
+# (266901698137, was 857194222592) on 2026-09-08 after the first account's GPU
+# vCPU quota (4) left no room for a second g6e.xlarge. Between 2026-09-08 and
+# 2026-09-12, staging ran as a temporary cross-account bridge on the OLD
+# account's still-intact box while a second quota increase (8 vCPU total) was
+# pending — AWS_STAGING_DEPLOY_ROLE_ARN pointed at the old account's
+# magik-deploy-role during that window. The old account has since been fully
+# decommissioned and staging now runs in the NEW account too (manually
+# launched after g6e.xlarge hit InsufficientInstanceCapacity in every AZ for
+# several consecutive days — see deploy/aws/terraform-new-account/ec2.tf's
+# staging_availability_zone comment). Both deploy roles now point at the same
+# account/role:
+#   AWS_DEPLOY_ROLE_ARN          -> arn:aws:iam::266901698137:role/magik-deploy-role
+#   AWS_STAGING_DEPLOY_ROLE_ARN  -> arn:aws:iam::266901698137:role/magik-deploy-role
+# Kept as two separate repo variables (rather than collapsing deploy-staging/
+# stop-staging back onto AWS_DEPLOY_ROLE_ARN directly) so a future account
+# split, if one is ever needed again, is a variable update, not a workflow
+# edit.
 
 on:
   push:
@@ -411,9 +443,10 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          # Staging lives in the OLD account for now — see the "SPLIT-ACCOUNT
-          # ARRANGEMENT" note at the top of this file. Every other job in this
-          # workflow uses AWS_DEPLOY_ROLE_ARN.
+          # Staging has its own role variable — see the "ACCOUNT MIGRATION
+          # NOTE" at the top of this file. It currently resolves to the SAME
+          # account/role as AWS_DEPLOY_ROLE_ARN; it stays a separate variable
+          # so a future account split is a variable update, not a workflow edit.
           role-to-assume: ${{ vars.AWS_STAGING_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
@@ -457,15 +490,17 @@ jobs:
       # enforcing the same thing.
       #
       # HOST PATHS ARE /opt/magik ON BOTH BOXES — deliberately the same, not
-      # a staging-specific path. An earlier revision used /opt/magik
+      # a staging-specific path. An earlier revision used /opt/magik-staging
       # "so it never collides with prod on a shared AMI image", which was
       # wrong on its own terms: these are two separate EC2 instances with
-      # separate filesystems, so there was never a collision to avoid. The
-      # cost was real though — staging is provisioned by cloning production
-      # (AMI for the root volume, EBS snapshot for the data volume), so it
-      # arrives with the models, .env and BM25 index already at /opt/magik.
-      # Pointing at /opt/magik would have failed the preflight below
-      # on a box that is, in fact, correctly provisioned.
+      # separate filesystems, so there was never a collision to avoid. It also
+      # split the layout away from bootstrap_instance.sh, which provisions
+      # /opt/magik/{.env,.hf_cache,data,logs} on BOTH boxes (it takes an
+      # environment argument, but only to pick the model-volume device and
+      # swap size — never to change the path). Pointing at /opt/magik-staging
+      # therefore failed the preflight below on a box that was, in fact,
+      # correctly provisioned. Any doc still describing /opt/magik-staging is
+      # stale; this workflow and bootstrap_instance.sh are the source of truth.
       - name: Deploy via SSM (pull, swap, health check, auto-rollback)
         env:
           IMAGE_REF: ${{ needs.build-push.outputs.image }}:${{ needs.build-push.outputs.image_tag }}
@@ -727,9 +762,10 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          # Staging lives in the OLD account for now — see the "SPLIT-ACCOUNT
-          # ARRANGEMENT" note at the top of this file. Every other job in this
-          # workflow uses AWS_DEPLOY_ROLE_ARN.
+          # Staging has its own role variable — see the "ACCOUNT MIGRATION
+          # NOTE" at the top of this file. It currently resolves to the SAME
+          # account/role as AWS_DEPLOY_ROLE_ARN; it stays a separate variable
+          # so a future account split is a variable update, not a workflow edit.
           role-to-assume: ${{ vars.AWS_STAGING_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 

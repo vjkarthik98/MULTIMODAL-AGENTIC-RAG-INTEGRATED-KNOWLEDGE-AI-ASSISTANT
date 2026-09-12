@@ -1,14 +1,19 @@
 # `deploy/aws` — Phase 30 scale-to-zero infrastructure
 
-> **REBUILD NOTE (2026-08-21):** the entire prior EC2 fleet + EBS volumes were
-> deleted and rebuilt in a **new AWS account (857194222592, was
-> 537557168406)** via `deploy/aws/terraform/` (see that directory's own README
-> section in `docs/runbooks/phase-30-aws-deployment.md` Appendix E). Every
-> instance ID / Elastic IP example below is now current as of the rebuild
-> (production: `i-09831ac06b063d36f`, EIP `184.73.239.9`) — but if this ever
-> gets rebuilt again, re-run `terraform output` and update these examples
-> again rather than trusting them blindly. The architecture, Lambda behavior,
-> and DNS/monitoring design described here are otherwise unchanged.
+> **ACCOUNT NOTE (current as of 2026-09-12):** this fleet lives in AWS account
+> **`266901698137`**, built by **`deploy/aws/terraform-new-account/`**. It has
+> been rebuilt twice: `537557168406` → `857194222592` (2026-08-21, after the
+> prior fleet was manually deleted) → `266901698137` (2026-09-08, after the
+> second account's GPU vCPU quota of 4 left no room for production and staging
+> `g6e.xlarge` boxes at once). The older `deploy/aws/terraform/` module is the
+> `857194222592` build and is **deprecated** — see its `DEPRECATED.md`.
+>
+> As-built right now: production `i-022cdb0f18161a280` (EIP `34.199.163.242`,
+> `us-east-1c`), staging `i-067fa0abb13ed6481` (no EIP, `us-east-1c`), Uptime
+> Kuma `i-0ba2d968b007524e5` (`us-east-1a`). Instance IDs and IPs change on
+> every rebuild — re-run `terraform output` and update these examples rather
+> than trusting them blindly. The architecture, Lambda behavior, and
+> DNS/monitoring design described here are otherwise unchanged.
 
 Everything needed to run MAGIK's public demo on a GPU box that is **stopped by
 default** and wakes on demand.
@@ -132,19 +137,22 @@ client-side `location.replace()` fires the moment status is `"ready"`. See
 for the full state machine (`waking` / `loading` / `stuck` / `capacity` /
 `error` / `ready`) — `capacity` (AWS's `InsufficientInstanceCapacity`) is a
 distinct, clearly-worded state now instead of a generic failure, which
-matters more than it might look: this genuinely happens for `g6e.xlarge` in
-`us-east-1a` from time to time, confirmed live during this rebuild.
+matters more than it might look: this genuinely happens for `g6e.xlarge`, and
+not rarely. Account `266901698137` hit it in `us-east-1a` and again in
+`us-east-1b` while placing production (2026-09-08), then in every AZ in the
+region for three consecutive days while placing staging (2026-09-09 →
+2026-09-12). Both boxes ended up in `us-east-1c`.
 
 ## Verify
 
 ```bash
 # 1. Cold start
-aws ec2 stop-instances --instance-ids i-09831ac06b063d36f
+aws ec2 stop-instances --instance-ids i-022cdb0f18161a280
 #    then open the API Gateway endpoint — expect the interstitial, then a redirect
 
 # 2. Idle stop (watch for ~25 min after the box has been up 15+ min)
 aws logs tail /aws/lambda/magik-idle-stop --follow
-aws ec2 describe-instances --instance-ids i-09831ac06b063d36f \
+aws ec2 describe-instances --instance-ids i-022cdb0f18161a280 \
   --query 'Reservations[0].Instances[0].State.Name' --output text
 ```
 
@@ -163,7 +171,7 @@ symptom visible; it can't fix an app that won't come up. Diagnose from here:
 aws logs tail /aws/lambda/magik-wake-gateway --follow
 
 # What the app itself is doing once EC2 is up — SSM into the box, no SSH key needed
-aws ssm start-session --target i-09831ac06b063d36f
+aws ssm start-session --target i-022cdb0f18161a280
 sudo journalctl -u magik -n 200 --no-pager   # or: docker compose logs --tail 200, per how it's actually run
 curl -s localhost:8000/health               # bypasses Caddy — isolates "app is fine" vs "Caddy/TLS is the problem"
 curl -sI https://magik.vk-ai.online/health  # the exact request the Lambda makes, from the box itself
@@ -388,9 +396,13 @@ which staging never receives. It:
 - has **no security-group ingress on 80/443/8000** (SSM is the only way in,
   exactly like management access to the prod box today),
 - runs the app container bound to `127.0.0.1:8000` only, never `0.0.0.0`,
-- lives under `/opt/magik-staging/{.env,.hf_cache,data,logs}` — parallel to,
-  and never colliding with, prod's `/opt/magik/...` — with its own
-  `magik-staging-current`/`magik-staging-previous` container pair,
+- lives under `/opt/magik/{.env,.hf_cache,data,logs}` — the **same** host
+  layout as production, because these are two separate instances with separate
+  filesystems and there was never a collision to avoid; isolation comes from
+  the distinct `magik-staging-current`/`magik-staging-previous` container pair
+  and the staging-scoped docker network, not from the path. (An earlier design
+  used `/opt/magik-staging`; `bootstrap_instance.sh` and `cd.yml` are the
+  source of truth and both use `/opt/magik` on both boxes.)
 - reuses `iam/ec2-instance-profile-permissions.json` unchanged (attach the
   same policy to its own instance profile — nothing in that file is
   prod-specific) and shares prod's SSM app secrets and external services
@@ -403,7 +415,10 @@ which staging never receives. It:
 `magik.vk-ai.online` → A record → the Elastic IP, HTTPS via Caddy + Let's
 Encrypt on the box. Completed 2026-07-30:
 
-1. GoDaddy DNS: A record, name `magik`, value `184.73.239.9`.
+1. GoDaddy DNS: A record, name `magik`, value = production's Elastic IP
+   (`34.199.163.242` as of the 2026-09-08 account move; it was `184.73.239.9`
+   in the previous account). **This record is the one thing an account
+   migration always breaks** — the EIP does not move with the instance.
 2. Ports 80 (ACME challenge) and 443 opened in the security group.
 3. Caddy installed on the box (`apt` via Cloudsmith's repo), config at
    `/etc/caddy/Caddyfile` — the site address is written as `https://

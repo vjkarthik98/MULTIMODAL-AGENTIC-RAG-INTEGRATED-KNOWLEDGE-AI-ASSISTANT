@@ -1,3 +1,8 @@
+# ============================================================================
+# DEPRECATED — AWS account 857194222592, decommissioned 2026-09-12.
+# Do NOT apply. The live module is deploy/aws/terraform-new-account/.
+# See DEPRECATED.md in this directory (includes a leaked-key disclosure).
+# ============================================================================
 # Naming moved since the last build (was "...GPU PyTorch...(Ubuntu 22.04)...") —
 # confirmed live via `aws ec2 describe-images` on 2026-08-21. No AMI ID pinned
 # (never was, in the original setup either); most_recent + a version-agnostic
