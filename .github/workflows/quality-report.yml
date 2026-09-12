@@ -137,7 +137,15 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          # STAGING role, not AWS_DEPLOY_ROLE_ARN — this job wakes/stops the
+          # staging box, so it must authenticate wherever staging actually
+          # lives. Both variables resolve to the same account today; they did
+          # NOT between 2026-09-08 and 2026-09-12, when staging ran in the old
+          # account and these two steps were silently pointed at the wrong one.
+          # See cd.yml's "ACCOUNT MIGRATION NOTE". Falls back to
+          # AWS_DEPLOY_ROLE_ARN so an unset variable degrades to the old
+          # behaviour instead of an empty role ARN.
+          role-to-assume: ${{ vars.AWS_STAGING_DEPLOY_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: Resolve staging instance ID by tag
@@ -435,7 +443,15 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          # STAGING role, not AWS_DEPLOY_ROLE_ARN — this job wakes/stops the
+          # staging box, so it must authenticate wherever staging actually
+          # lives. Both variables resolve to the same account today; they did
+          # NOT between 2026-09-08 and 2026-09-12, when staging ran in the old
+          # account and these two steps were silently pointed at the wrong one.
+          # See cd.yml's "ACCOUNT MIGRATION NOTE". Falls back to
+          # AWS_DEPLOY_ROLE_ARN so an unset variable degrades to the old
+          # behaviour instead of an empty role ARN.
+          role-to-assume: ${{ vars.AWS_STAGING_DEPLOY_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: Resolve staging instance ID by tag

@@ -1,3 +1,8 @@
+# ============================================================================
+# DEPRECATED — AWS account 857194222592, decommissioned 2026-09-12.
+# Do NOT apply. The live module is deploy/aws/terraform-new-account/.
+# See DEPRECATED.md in this directory (includes a leaked-key disclosure).
+# ============================================================================
 # Break-glass SSH key. The CD pipeline itself never uses this (SSM only) —
 # this exists solely for manual admin access (initial bootstrap: mounting EBS
 # volumes, downloading models, registering the self-hosted runner; and later,

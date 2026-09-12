@@ -11,15 +11,21 @@ variable "aws_profile" {
 }
 
 variable "availability_zone" {
-  description = "AZ hosting staging and Uptime Kuma. Production moved out of this AZ in this account — see production_availability_zone."
+  description = "AZ hosting Uptime Kuma. Production and staging both moved out of this AZ in this account due to GPU capacity — see production_availability_zone and staging_availability_zone."
   type        = string
   default     = "us-east-1a"
 }
 
 variable "production_availability_zone" {
-  description = "AZ hosting the production box specifically. Separate from availability_zone because this account hit InsufficientInstanceCapacity for g6e.xlarge in us-east-1a (2026-09-08) — production and its model volume live in us-east-1b instead, on their own subnet (network.tf's magik_public_1b)."
+  description = "AZ hosting the production box specifically. Separate from availability_zone because this account hit InsufficientInstanceCapacity for g6e.xlarge TWICE during bring-up (2026-09-08) — first in us-east-1a, then again in us-east-1b — production and its model volume ended up in us-east-1c instead, on their own subnet (network.tf's magik_public_1b, kept under that name despite the AZ change to avoid churn)."
   type        = string
-  default     = "us-east-1b"
+  default     = "us-east-1c"
+}
+
+variable "staging_availability_zone" {
+  description = "AZ hosting the staging box specifically. Separate from availability_zone for the same reason as production_availability_zone: g6e.xlarge InsufficientInstanceCapacity hit every one of us-east-1a/b/c/d repeatedly across several days once the second 4 vCPU quota was approved (2026-09-09 through 2026-09-12) — staging finally launched (manually, via console) in us-east-1c, on the same subnet as production (network.tf's magik_public_1b)."
+  type        = string
+  default     = "us-east-1c"
 }
 
 variable "admin_ssh_cidr" {

@@ -7,17 +7,20 @@
 # cd.yml).
 #
 # Run ON THE BOX as root (via SSM Session Manager, or SSH using the key
-# Terraform generated at deploy/aws/terraform/magik-admin-key.pem):
+# Terraform generated at deploy/aws/terraform-new-account/magik-admin-key.pem):
 #
 #     sudo bash bootstrap_instance.sh production   # or: staging
 #
 # Idempotent: safe to re-run. Does NOT touch an already-formatted/mounted
-# model volume (detected via blkid) — this matters for staging, whose model
-# volume is cloned from a snapshot and already has ext4 + populated data; only
-# a genuinely blank volume (production's first boot) gets mkfs'd.
+# model volume (detected via blkid) — that guard matters on any re-run, and it
+# used to matter for staging specifically, back when staging's volume was
+# cloned from a production snapshot and arrived with ext4 + populated data.
+# Neither box is built that way any more (the snapshot's lazy-load penalty made
+# it slower than a direct download), so both now start from a genuinely blank
+# volume on first boot and get mkfs'd here.
 #
 # What this script deliberately does NOT do (separate, later steps — see
-# deploy/aws/terraform/README output and docs/runbooks/ci-cd.md):
+# deploy/aws/terraform-new-account/ output and docs/runbooks/ci-cd.md):
 #   - Download HF models into .hf_cache (~20GB, needs GHCR auth + the pulled
 #     app image first)
 #   - Rebuild the BM25 index (needs Qdrant reachable + a populated .env)

@@ -94,25 +94,55 @@ chat turn is written to the Recents transcript, described below.
 
 ### Changed
 
-- **Production migrated to a new AWS account.** The previous account's GPU
-  vCPU quota (4) left no room to ever run a second `g6e.xlarge` — this is
+- **The whole fleet migrated to a new AWS account.** The previous account's
+  GPU vCPU quota (4) left no room to ever run a second `g6e.xlarge` — this is
   already the second such migration (see [1.0.0]'s account rebuild note).
-  `magik-prod` now runs in account `266901698137` (was `857194222592`),
-  rebuilt via the same `deploy/aws/terraform/` module used for every prior
-  rebuild. Managed data (Qdrant, MongoDB Atlas, Upstash Redis) is untouched —
-  it lives outside AWS and was never part of the migration.
-- **Production landed in `us-east-1b`, not `us-east-1a`.** The new account hit
-  `InsufficientInstanceCapacity` for `g6e.xlarge` in `1a` during bring-up; a
-  second public subnet was added so production could launch in `1b` instead.
-  Staging and the Uptime Kuma box are unaffected and stay on `1a`.
-- **The CD pipeline temporarily deploys across two AWS accounts.** Staging
-  quota for the new account was requested the same day but hadn't landed yet,
-  and `deploy-staging` has no graceful "box doesn't exist" path — it fails
-  outright rather than skipping. Rather than ship that gap, staging keeps
-  running on the old account's still-intact box for now
-  (`AWS_STAGING_DEPLOY_ROLE_ARN`, new repo variable) while production deploys
-  to the new account (`AWS_DEPLOY_ROLE_ARN`). This is a deliberate, temporary
-  bridge, reverted once the new account's staging box exists.
+  Both `magik-prod` and `magik-staging` now run in account `266901698137`
+  (was `857194222592`), built by the new `deploy/aws/terraform-new-account/`
+  module; the older `deploy/aws/terraform/` module is the previous account's
+  build and is now deprecated (see its `DEPRECATED.md`). Managed data (Qdrant,
+  MongoDB Atlas, Upstash Redis) is untouched — it lives outside AWS and was
+  never part of the migration.
+- **Both GPU boxes landed in `us-east-1c`, not `us-east-1a`.**
+  `InsufficientInstanceCapacity` for `g6e.xlarge` turned out to be the
+  dominant constraint on this migration, not quota. Production missed `1a`,
+  then missed `1b`, and took `1c`; staging then missed every AZ in the region
+  for three days (2026-09-09 → 2026-09-12) before taking `1c` as well. A
+  second public subnet carries both. Only the Uptime Kuma box (`t4g.micro`,
+  no capacity pressure) remains on `1a`.
+- **The CD pipeline briefly deployed across two AWS accounts, and no longer
+  does.** Between 2026-09-08 and 2026-09-12, production ran in the new account
+  while staging stayed on the old account's still-intact box, because
+  `deploy-staging` has no graceful "box doesn't exist" path — it fails
+  outright rather than skipping, and the second quota increase had not landed.
+  `AWS_STAGING_DEPLOY_ROLE_ARN` (new repo variable) addressed the old account
+  for that window. Both roles now resolve to `266901698137`. The variable is
+  deliberately kept as a separate knob so a future account split is a variable
+  change rather than a workflow edit — and `quality-report.yml`, which also
+  wakes and stops the staging box, now honours it too instead of hardcoding
+  the production role.
+
+### Security
+
+- **Four Terraform plan files containing a private key were removed from the
+  repo.** `deploy/aws/terraform/{destroy,destroy2,kuma,kuma_t4g}.tfplan` were
+  tracked in this public repository. A `.tfplan` is a zip whose `tfplan` and
+  `tfstate` members are **not** redacted the way `terraform plan`'s console
+  output is, so each embedded the full PEM of `tls_private_key.magik` — the
+  RSA-4096 break-glass SSH key for account `857194222592`. The directory's
+  `.gitignore` did list plan files, but only as `tfplan*`, which matches
+  `tfplan3.out` and misses `destroy.tfplan`; both spellings are now listed, in
+  that module and in `terraform-new-account/`.
+
+  Scope: the key belongs to the account decommissioned by the migration above,
+  and every instance it could open is deleted. No SSM parameter *values* were
+  exposed — the embedded state contains no `aws_ssm_parameter` resources at
+  all, and `/magik/ghcr_pat` and the app secrets appear only as IAM policy
+  ARNs. The current account is unaffected: `terraform-new-account/` generates
+  its own key pair, and its public key differs from the leaked one. The files
+  are untracked as of this release, which clears the tip but not git history;
+  history was left intact because the key opens nothing that still exists.
+  Full write-up in `deploy/aws/terraform/DEPRECATED.md`.
 
 ### Known limitations
 
