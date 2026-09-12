@@ -159,11 +159,27 @@ the up-to-date list):
    skips cleanly rather than queueing forever, but that also means **nothing
    gates promotion**, so this variable should only ever be "false" during
    initial bring-up, never in steady state.
-7. On the staging box itself: `/opt/magik-staging/{.env,.hf_cache,data,logs}`
-   present (same shape as prod's `/opt/magik/...`), with the full ~25GB model
-   cache paged into `.hf_cache` — staging is a second real GPU box, not a
-   lightweight clone, since a genuine champion/successor test has to run on
-   hardware that isn't already serving prod traffic.
+7. On the staging box itself: `/opt/magik/{.env,.hf_cache,data,logs}` present
+   — the **same** paths as prod, created by
+   `deploy/aws/scripts/bootstrap_instance.sh staging` (the argument selects the
+   model-volume device and swap size, never the path). Staging is a second real
+   GPU box, not a lightweight clone, since a genuine champion/successor test has
+   to run on hardware that isn't already serving prod traffic, so it needs the
+   full ~25GB model cache paged into `.hf_cache`. On a freshly built box that
+   cache is **empty** and the first `deploy-staging` pays the whole download.
+8. `data/users/<EVAL_USER_ID>/bm25_index/bm25.pkl` present on the staging box.
+   `tier2-eval.yml` preflights this and hard-fails without it, which blocks
+   `promote-production`. It is not created by bootstrap and does not survive a
+   box rebuild — the root volume is blank on a new instance. Rebuild it from
+   Qdrant payloads (no GPU, no re-embedding, no re-chunking) once a container
+   is running:
+
+   ```bash
+   docker exec magik-staging-current      python3.12 -m app.retrieval.bm25_retriever --user_id <EVAL_USER_ID>
+   ```
+
+   **As of 2026-09-12 the current staging box (`i-067fa0abb13ed6481`, rebuilt
+   in account `266901698137`) has not had this done yet.**
 
 **Manual end-to-end validation**, once the above exists: push a real tag and
 confirm, in order — `wait-for-ci-green` passes, `deploy-staging` brings up

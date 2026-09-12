@@ -1,3 +1,8 @@
+# ============================================================================
+# DEPRECATED — AWS account 857194222592, decommissioned 2026-09-12.
+# Do NOT apply. The live module is deploy/aws/terraform-new-account/.
+# See DEPRECATED.md in this directory (includes a leaked-key disclosure).
+# ============================================================================
 # =============================================================================
 # GitHub OIDC provider + the role cd.yml assumes (magik-deploy-role)
 # =============================================================================

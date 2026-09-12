@@ -1,3 +1,8 @@
+# ============================================================================
+# DEPRECATED — AWS account 857194222592, decommissioned 2026-09-12.
+# Do NOT apply. The live module is deploy/aws/terraform-new-account/.
+# See DEPRECATED.md in this directory (includes a leaked-key disclosure).
+# ============================================================================
 # Production: 22 (restricted to admin_ssh_cidr, break-glass only — cd.yml uses
 # SSM, never SSH), 80/443 (Caddy, public app + Grafana behind basic_auth).
 resource "aws_security_group" "production" {

@@ -1,3 +1,8 @@
+# ============================================================================
+# DEPRECATED — AWS account 857194222592, decommissioned 2026-09-12.
+# Do NOT apply. The live module is deploy/aws/terraform-new-account/.
+# See DEPRECATED.md in this directory (includes a leaked-key disclosure).
+# ============================================================================
 # Uptime Kuma host — small, separate, always-on box per
 # monitoring/uptime-kuma/README.md. Deliberately NOT the g6e.xlarge GPU boxes
 # (those sleep by design; a status page hosted there would go dark exactly

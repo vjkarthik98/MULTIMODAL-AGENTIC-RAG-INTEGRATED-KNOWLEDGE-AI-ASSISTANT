@@ -1,3 +1,8 @@
+# ============================================================================
+# DEPRECATED — AWS account 857194222592, decommissioned 2026-09-12.
+# Do NOT apply. The live module is deploy/aws/terraform-new-account/.
+# See DEPRECATED.md in this directory (includes a leaked-key disclosure).
+# ============================================================================
 # Private, encrypted, versioned bucket for manual Terraform state backups.
 # NOT used as a remote backend (this project deliberately stays on local
 # state — see versions.tf's comment: single-operator rebuild, not a team
