@@ -2954,6 +2954,8 @@ _STREAM_LIMITATION_NOTICE = (
 # never a wrong figure reaching the user.
 
 _NUMBER_RE = re.compile(r'\d+(?:,\d{3})*(?:\.\d+)?')
+# CJK ideographs, kana, hangul, and CJK punctuation/fullwidth forms.
+_CJK_RE = re.compile(r'[　-〿぀-ヿ㐀-䶿一-鿿가-힯＀-￯]')
 _CITATION_FOOTER_RE = re.compile(r'^Sources?:\s', re.IGNORECASE)
 _REWRAP_SKIP_QUERY_TYPES = frozenset({"structured", "code"})
 
@@ -2998,6 +3000,15 @@ def _conversational_rewrap(answer: str, query: str, session_id: str, llm: Any) -
         pass  # if detection fails, still attempt the rewrap — worst case a no-op below
 
     body, footer = _split_citation_footer(answer)
+    # The verification limitation notice is fixed safety text, not prose to
+    # rephrase. Letting the model "conversationalise" it is how a Chinese
+    # translation of it reached a user (2026-10-06): hold it out, re-append it
+    # verbatim after the rewrite.
+    notice = ""
+    head, found, tail = body.partition(_STREAM_LIMITATION_NOTICE)
+    if found:
+        body = head.rstrip()
+        notice = "\n\n" + found + tail
     if len(body) < 20:
         return answer
 
@@ -3023,13 +3034,21 @@ def _conversational_rewrap(answer: str, query: str, session_id: str, llm: Any) -
         logger.info(event="rag_stream_rewrap_rejected_number_mismatch", session_id=session_id)
         return answer
 
+    # LANGUAGE GATE — the number gate above cannot see a language switch (digits
+    # survive translation). Qwen is bilingual and drifts into Chinese mid-
+    # sentence when asked to "rephrase"; the original answer is English, so any
+    # CJK that was not in it means the rewrite is discarded.
+    if _CJK_RE.search(rewritten) and not _CJK_RE.search(body):
+        logger.warning(event="rag_stream_rewrap_rejected_language_drift", session_id=session_id)
+        return answer
+
     # A rewrite that collapsed to near-nothing (truncated/garbage generation)
     # is worse than the original — discard it too.
     if len(rewritten) < 0.4 * len(body):
         logger.info(event="rag_stream_rewrap_rejected_too_short", session_id=session_id)
         return answer
 
-    return rewritten + footer
+    return rewritten + notice + footer
 
 
 # SANDWICH REORDER — Liu et al. "Lost in the Middle" (2023):

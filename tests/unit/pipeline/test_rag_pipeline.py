@@ -607,6 +607,50 @@ class TestConversationalRewrap:
         sent_prompt = llm.generate.call_args[0][0]
         assert "Sources: [p.27]" not in sent_prompt
 
+    def test_rejects_rewrite_that_drifts_into_chinese(self):
+        """Live 2026-10-06: the digits survived, so the number gate passed a
+        rewrite whose second half was Chinese. Language must be gated too."""
+        original = "EPS was $1.85 against $1.76 expected. Sales were $102.466 billion."
+        drifted = "EPS came in at $1.85, above $1.76. Sales总额为$102.466 billion，超过了估计。"
+        llm = MagicMock()
+        llm.generate.return_value = drifted
+        with patch("app.prompt.prompt_builder._detect_query_type", return_value="general"):
+            result = _conversational_rewrap(original, "q", "s1", llm)
+        assert result == original
+
+    def test_cjk_already_in_the_original_is_not_treated_as_drift(self):
+        original = "The filing lists the entity as 苹果公司 with revenue of $102.5 billion."
+        rewritten = "The filing names the entity 苹果公司, and revenue was $102.5 billion."
+        llm = MagicMock()
+        llm.generate.return_value = rewritten
+        with patch("app.prompt.prompt_builder._detect_query_type", return_value="general"):
+            result = _conversational_rewrap(original, "q", "s1", llm)
+        assert result == rewritten
+
+    def test_limitation_notice_is_held_out_and_reappended_verbatim(self):
+        from app.pipeline.rag_pipeline import _STREAM_LIMITATION_NOTICE
+
+        original = f"Revenue was $102.5 billion, up 8%.\n\n{_STREAM_LIMITATION_NOTICE}"
+        rewritten_body = "Revenue came in at $102.5 billion, up 8%."
+        llm = MagicMock()
+        llm.generate.return_value = rewritten_body
+        with patch("app.prompt.prompt_builder._detect_query_type", return_value="general"):
+            result = _conversational_rewrap(original, "q", "s1", llm)
+        assert result == f"{rewritten_body}\n\n{_STREAM_LIMITATION_NOTICE}"
+        # The model must never see the safety notice, so it can't rephrase or translate it.
+        assert "could not be fully verified" not in llm.generate.call_args[0][0]
+
+    def test_notice_and_citation_footer_both_survive(self):
+        from app.pipeline.rag_pipeline import _STREAM_LIMITATION_NOTICE
+
+        original = f"Revenue was $391,035 million.\n\n{_STREAM_LIMITATION_NOTICE}\n\nSources: [p.27]"
+        rewritten_body = "The company reported $391,035 million in revenue."
+        llm = MagicMock()
+        llm.generate.return_value = rewritten_body
+        with patch("app.prompt.prompt_builder._detect_query_type", return_value="general"):
+            result = _conversational_rewrap(original, "q", "s1", llm)
+        assert result == f"{rewritten_body}\n\n{_STREAM_LIMITATION_NOTICE}\n\nSources: [p.27]"
+
     def test_skips_structured_query_type(self):
         original = "Net sales: $391,035 million."
         llm = MagicMock()

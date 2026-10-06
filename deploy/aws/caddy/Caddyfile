@@ -58,6 +58,24 @@ https://APP_DOMAIN_PLACEHOLDER {
 		}
 	}
 
+	# A cold start (instance start -> container up -> models verified -> LLM
+	# loaded) takes ~7 minutes, and for that whole window the upstream on :8000
+	# refuses connections, so Caddy's default was a bare "502 Bad Gateway" —
+	# indistinguishable from a broken deploy. During a live interview on
+	# 2026-10-02 that raw error read as "the site is dead", and the instance was
+	# stopped mid-boot, which restarted the whole 7 minutes. Say what is
+	# actually happening and retry on its own. Only upstream-unavailable
+	# statuses are covered; real app errors (500, 4xx) still pass through.
+	handle_errors {
+		@upstream_down expression {err.status_code} in [502, 503, 504]
+		handle @upstream_down {
+			header Content-Type "text/html; charset=utf-8"
+			header Cache-Control "no-store"
+			header Retry-After "20"
+			respond `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="15"><title>MAGIK AI is starting</title><style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;background:#0f1115;color:#e8eaf0}main{max-width:30rem;padding:2rem;text-align:center}h1{font-size:1.4rem;margin:0 0 .75rem}p{line-height:1.5;color:#aab0c0;margin:.5rem 0}</style></head><body><main><h1>MAGIK AI is starting up</h1><p>The server is loading its models. After a cold start this takes about 7 minutes.</p><p>This page refreshes by itself every 15 seconds. Please do not stop the instance while it loads.</p></main></body></html>` 503
+		}
+	}
+
 	encode gzip
 
 	header {

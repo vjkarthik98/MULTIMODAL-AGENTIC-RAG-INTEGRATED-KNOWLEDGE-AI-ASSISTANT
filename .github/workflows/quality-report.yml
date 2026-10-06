@@ -161,8 +161,21 @@ jobs:
           fi
           echo "id=$ID" >> "$GITHUB_OUTPUT"
 
+      # Idempotent for a box that is already up, but NOT `|| true`: run
+      # 36949002119 (2026-10-02) hit InsufficientInstanceCapacity here, the
+      # error was swallowed, and the InstanceRunning waiter below then burned
+      # 10 minutes on a box that was never going to start.
       - name: Wake staging instance (idempotent)
-        run: aws ec2 start-instances --instance-ids ${{ steps.instance.outputs.id }} || true
+        run: |
+          if ! OUT=$(aws ec2 start-instances --instance-ids ${{ steps.instance.outputs.id }} 2>&1); then
+            case "$OUT" in
+              *IncorrectInstanceState*) echo "already starting/running: $OUT" ;;
+              *InsufficientInstanceCapacity*)
+                echo "::error title=No staging capacity::AWS has no spare capacity for the staging instance type right now. Retry later; nothing ran."
+                exit 1 ;;
+              *) echo "::error::start-instances failed: $OUT"; exit 1 ;;
+            esac
+          fi
 
       - name: Wait until running + SSM-reachable
         run: |

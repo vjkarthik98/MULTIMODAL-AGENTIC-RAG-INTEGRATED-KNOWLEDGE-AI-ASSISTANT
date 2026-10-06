@@ -334,6 +334,12 @@ class Settings:
         "BGE_QUERY_INSTRUCTION", "Represent this sentence for searching relevant passages: "
     )
 
+    # Internal eval API (app/api/eval_internal.py) — lets the isolated RAGAS /
+    # DeepEval container borrow this process's resident retriever + embedder
+    # instead of loading a duplicate model stack (the rc4/rc5 OOM). Off unless a
+    # box opts in via its committed env file; see deploy/aws/prod.env.
+    EVAL_INTERNAL_API_ENABLED: bool = _bool("EVAL_INTERNAL_API_ENABLED", False)
+
     # MODALITY FEATURE FLAGS — set to false to skip model load and all related processing
     ENABLE_VISION: bool = _bool("ENABLE_VISION", True)
     ENABLE_AUDIO: bool = _bool("ENABLE_AUDIO", True)
