@@ -207,7 +207,15 @@ def _make_full_context_retriever():
     """In-process HybridRetriever for grading context. The /rag/query API returns
     source text truncated to 200 chars (query_pipeline._build_sources_array), which
     starves the LLM judge — faithfulness/context_recall must be graded against the
-    FULL retrieved chunks. Returns None if retrieval infra can't load."""
+    FULL retrieved chunks. Returns None if retrieval infra can't load.
+
+    Under EVAL_REMOTE_MODELS=1 the serving app does the retrieval instead (see
+    app/eval/remote_models.py), so this process never loads BGE at all."""
+    from app.eval.remote_models import RemoteContextRetriever, remote_models_enabled
+
+    if remote_models_enabled():
+        print("[eval] grading contexts served by the app (/internal/eval/contexts)")
+        return RemoteContextRetriever()
     try:
         from app.core.infra_registry import infra
         from app.core.model_loader import model_loader

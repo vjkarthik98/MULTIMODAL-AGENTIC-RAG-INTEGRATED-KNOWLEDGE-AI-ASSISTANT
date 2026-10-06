@@ -897,6 +897,497 @@
         }
       ],
       "description": "Bounded by AGENT_VERIFY_TIMEOUT_SEC (config.py, currently 120.0s)."
+    },
+    {
+      "id": 32,
+      "type": "text",
+      "title": "Offline judge: RAGAS / DeepEval (production, manual) - below this line",
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 102
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**From `deploy/aws/scripts/run_quality_report.sh`**, run by hand on the production box in its own memory-capped container (the live app is never at risk). Real Ragas 0.1.21 / DeepEval 4.x graded by the local Qwen2.5-7B judge. Read a score together with **Coverage** and **Judge**: a score with low coverage is a mean over a few rows, and Judge = NOT JUDGE means the number came from a fallback, not the judge. A failed run never overwrites the last good scores; it shows up in **Last run status** instead."
+      }
+    },
+    {
+      "id": 33,
+      "type": "stat",
+      "title": "RAGAS scores (latest run)",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 105
+      },
+      "targets": [
+        {
+          "expr": "magik_quality_metric{job=\"magik_quality_report\",tool=\"ragas\",environment=\"production\"}",
+          "legendFormat": "{{metric}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.4
+              },
+              {
+                "color": "green",
+                "value": 0.7
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "hallucination_rate"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 0.1
+                    },
+                    {
+                      "color": "red",
+                      "value": 0.25
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "template_leak_rate"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 0.05
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "description": "faithfulness (direct NLI), answer_relevancy + context_recall (ragas.evaluate), finance_fidelity, hallucination_rate (lower is better), citation_accuracy, template_leak_rate (lower is better)."
+    },
+    {
+      "id": 34,
+      "type": "stat",
+      "title": "DeepEval scores (latest run)",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 105
+      },
+      "targets": [
+        {
+          "expr": "magik_quality_metric{job=\"magik_quality_report\",tool=\"deepeval\",environment=\"production\"}",
+          "legendFormat": "{{metric}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.4
+              },
+              {
+                "color": "green",
+                "value": 0.7
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "description": "Mean per DeepEval metric over the rows that scored. A metric missing here errored on every row."
+    },
+    {
+      "id": 35,
+      "type": "stat",
+      "title": "Coverage (graded fraction of the run)",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 111
+      },
+      "targets": [
+        {
+          "expr": "magik_quality_coverage{job=\"magik_quality_report\",environment=\"production\"}",
+          "legendFormat": "{{tool}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0.5
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "description": "Red under 50% - the same floor scripts/generate_quality_badges.py uses before it will publish a badge."
+    },
+    {
+      "id": 36,
+      "type": "stat",
+      "title": "Judge",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 111
+      },
+      "targets": [
+        {
+          "expr": "magik_quality_judge_ok{job=\"magik_quality_report\",environment=\"production\"}",
+          "legendFormat": "{{tool}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "QWEN JUDGE",
+                  "color": "green"
+                },
+                "0": {
+                  "text": "NOT JUDGE",
+                  "color": "red"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 37,
+      "type": "stat",
+      "title": "Last run age",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 111
+      },
+      "targets": [
+        {
+          "expr": "time() - magik_quality_run_timestamp_seconds{job=\"magik_quality_report_run\",environment=\"production\"}",
+          "legendFormat": "{{tool}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 604800
+              },
+              {
+                "color": "red",
+                "value": 2592000
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "description": "Manual runs - yellow past 7 days, red past 30."
+    },
+    {
+      "id": 38,
+      "type": "stat",
+      "title": "Last run status",
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 115
+      },
+      "targets": [
+        {
+          "expr": "magik_quality_run_exit_code{job=\"magik_quality_report_run\",environment=\"production\"} + 1000 * magik_quality_run_oom_killed{job=\"magik_quality_report_run\",environment=\"production\"}",
+          "legendFormat": "{{tool}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "OK",
+                  "color": "green"
+                }
+              }
+            },
+            {
+              "type": "range",
+              "options": {
+                "from": 1000,
+                "to": 100000,
+                "result": {
+                  "text": "OOM-KILLED (cap)",
+                  "color": "red"
+                }
+              }
+            },
+            {
+              "type": "range",
+              "options": {
+                "from": 1,
+                "to": 999,
+                "result": {
+                  "text": "FAILED",
+                  "color": "orange"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "description": "Exit status of the eval container. OOM-KILLED means it hit its own --memory cap; the live app is outside that cgroup and unaffected."
+    },
+    {
+      "id": 39,
+      "type": "stat",
+      "title": "Eval container peak memory",
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 115
+      },
+      "targets": [
+        {
+          "expr": "magik_quality_run_peak_memory_bytes{job=\"magik_quality_report_run\",environment=\"production\"}",
+          "legendFormat": "{{tool}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 9663676416
+              },
+              {
+                "color": "red",
+                "value": 11811160064
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "description": "From the container's own cgroup. Yellow past 9GB, red past 11GB of the default 12GB cap - the signal to raise EVAL_MEMORY_LIMIT_GB before the next run."
+    },
+    {
+      "id": 40,
+      "type": "timeseries",
+      "title": "Offline judge score history",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 119
+      },
+      "targets": [
+        {
+          "expr": "magik_quality_metric{job=\"magik_quality_report\",environment=\"production\"}",
+          "legendFormat": "{{tool}} {{metric}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "points",
+            "pointSize": 6
+          }
+        }
+      },
+      "description": "One point per Prometheus scrape while a value sits in the Pushgateway, so a flat run of points between two reports is the same report, not a new measurement."
     }
   ]
 }

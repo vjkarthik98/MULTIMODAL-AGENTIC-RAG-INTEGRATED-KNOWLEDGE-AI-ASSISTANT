@@ -320,6 +320,78 @@ def wait_for_llama_server(proc: subprocess.Popen, timeout: int = 180) -> bool:
     return False
 
 
+# Markers llama.cpp writes when it was asked for the GPU and found none. Live
+# 2026-10-02: the box passed `Device: CUDA`, spent ~6 min in ensure_models(),
+# and by the time llama-server launched the GPU was no longer visible to the
+# container. llama.cpp logged the line below, then quietly loaded all 49 layers
+# of the 14B model onto 4 vCPUs. Every answer then hit the 630 s generation
+# deadline — the interview-day "no answer" — while this script kept reporting
+# device=cuda. A CPU-resident 14B is never a usable production state.
+_CUDA_FAILURE_MARKERS = (
+    "failed to initialize CUDA",
+    "no CUDA-capable device",
+)
+
+
+def cuda_init_failure(log_path: Path, offset: int) -> str | None:
+    """The first CUDA-init failure line llama-server wrote after `offset`."""
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+            fh.seek(offset)
+            for line in fh:
+                if any(marker in line for marker in _CUDA_FAILURE_MARKERS):
+                    return line.strip()
+    except OSError:
+        pass
+    return None
+
+
+def start_llama_server_checked(cuda: bool) -> subprocess.Popen:
+    """Launch llama-server and, on a GPU box, prove it really got the GPU.
+
+    Retries (the GPU can reappear after a driver/container-toolkit hiccup),
+    then exits non-zero so the container restarts and the failure is visible,
+    rather than serving from CPU. LLM_ALLOW_CPU_FALLBACK=true opts back in to
+    the old silent-CPU behaviour for a deliberate degraded run.
+    """
+    logs_dir = SCRIPT_DIR / "logs"
+    log_path = logs_dir / "llama_server.log"
+    attempts = max(1, int(os.environ.get("LLM_GPU_LAUNCH_ATTEMPTS", "3")))
+    pause = int(os.environ.get("LLM_GPU_RETRY_PAUSE_S", "20"))
+    allow_cpu = os.environ.get("LLM_ALLOW_CPU_FALLBACK", "false").lower() == "true"
+
+    for attempt in range(1, attempts + 1):
+        try:
+            offset = log_path.stat().st_size
+        except OSError:
+            offset = 0
+        proc = launch_llama_server(cuda)
+        wait_for_llama_server(proc)
+        if not cuda:
+            return proc
+        failure = cuda_init_failure(log_path, offset)
+        if failure is None:
+            return proc
+
+        log(f"ERROR: llama-server could not use the GPU (attempt {attempt}/{attempts}): {failure}")
+        proc.terminate()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        if attempt < attempts:
+            time.sleep(pause)
+
+    if allow_cpu:
+        log("WARN: LLM_ALLOW_CPU_FALLBACK=true — serving the LLM from CPU. Expect minutes per answer.")
+        return launch_llama_server(False)
+    log(
+        "FATAL: GPU unavailable to llama-server after all retries; refusing to serve a 14B "
+        "model from CPU. Exiting so the container restarts. Check `nvidia-smi` on the host."
+    )
+    sys.exit(3)
+
+
 def check_llama_cpp_import() -> None:
     try:
         import llama_cpp
@@ -375,9 +447,8 @@ def main() -> None:
         set_offline_env()
         check_llama_cpp_import()
 
-        llama_proc = launch_llama_server(cuda)
+        llama_proc = start_llama_server_checked(cuda)
         atexit.register(lambda: llama_proc.poll() is None and llama_proc.terminate())
-        wait_for_llama_server(llama_proc)
 
     port = int(os.environ.get("PORT", "8000"))
     extra_args = sys.argv[1:]

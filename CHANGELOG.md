@@ -5,6 +5,75 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.4] - 2026-10-06
+
+Fixes the start-up and answer problems behind a failed live demo on
+2026-10-02, each traced to its cause in the production logs. Retrieval,
+agent routing, guardrail, verification scoring, and authentication
+behaviour is unchanged from [1.0.3].
+
+### Fixed
+
+- **The 14B model is served from the GPU or not at all.** `start_server.py`
+  now confirms from llama-server's own log that the GPU was actually used. If
+  the GPU has dropped out of the container it retries, then exits non-zero so
+  the container restarts and the problem is visible. Before, a GPU that
+  vanished during start-up left every layer on four CPU cores, and each answer
+  ran into the 630 second generation deadline while the log still said
+  `device=cuda`. `LLM_ALLOW_CPU_FALLBACK=true` keeps CPU serving available as
+  a deliberate choice.
+- **Every cached model loads offline.** Models are pinned to commit SHAs,
+  which leaves a cache entry without `refs/main`, and the app runs with
+  `HF_HUB_OFFLINE=1`, so loads by repo id could not resolve. The entity
+  recogniser, BLIP captioner and diarizer failed this way on every boot.
+  `app/utils/hf_cache.py` writes the missing ref at app start and after every
+  downloader run, repairing an existing cache without a re-download.
+- **The NLI groundedness model is provisioned.** `cross-encoder/nli-deberta-v3-base`
+  is in the downloader manifest, pinned to its commit, so the contradiction
+  check in answer verification has its model on a fresh box.
+- **Rephrased answers stay in English.** The conversational rewrap pass now
+  rejects a rewrite that contains CJK text the original lacked, and the
+  verification limitation notice is held out of the rewrite and appended
+  verbatim, so it is never reworded or translated.
+- **A cold start shows a status page.** Caddy answers 502, 503 and 504 with a
+  "MAGIK AI is starting up" page that refreshes every 15 seconds, so the roughly
+  seven minutes of model loading no longer looks like a failed deploy.
+
+## [1.0.3] - 2026-10-02
+
+RAGAS and DeepEval now run on the production box itself and report into
+Grafana. Retrieval, agent routing, guardrail, verification, and
+authentication behaviour is unchanged from [1.0.2].
+
+### Added
+
+- **`deploy/aws/scripts/run_quality_report.sh` — the quality report, run on
+  production without risk to the live app.** The eval runs in its own
+  container from the same image, under a hard memory cap
+  (`--memory` == `--memory-swap`, 12GB by default) and with the highest OOM
+  score, so if it outgrows its budget the kernel stops that container and
+  nothing else. It refuses to start unless the GPU has room for the Qwen judge
+  and the host has room for the cap, and the judge is no longer allowed to
+  fall back to CPU mid-run (`QWEN_JUDGE_REQUIRE_GPU`). The run records its
+  peak memory, exit status, and whether it was OOM-killed.
+- **`/internal/eval/contexts` and `/internal/eval/embed` (`app/api/eval_internal.py`).**
+  The eval now borrows the serving app's resident retriever and BGE encoder
+  instead of loading its own copies (`EVAL_REMOTE_MODELS=1`,
+  `app/eval/remote_models.py`), so the eval container holds only the judge.
+  The routes are off unless `EVAL_INTERNAL_API_ENABLED` is set, return 404 to
+  anything that came through Caddy, require a JWT, and serve only the
+  `EVAL_USER_ID` tenant, taken from the token.
+- **Grafana: "Offline judge: RAGAS / DeepEval" row on the RAG Quality
+  dashboard.** Scores per metric, the graded fraction of each run, whether the
+  Qwen judge produced them, last-run age and status, and the eval container's
+  peak memory. Pushed by `app/eval/quality_push.py` to the box's Pushgateway;
+  a failed run never overwrites the last good scores.
+- **Idle-stop honours a running quality report.** The script holds a
+  self-expiring `magik:eval-busy-until` instance tag, renewed every five
+  minutes; the idle-stop Lambda skips the box while it is live and ignores it
+  once it lapses, so an interrupted run cannot keep the instance on. The
+  instance role may set only that one tag (`terraform-new-account/iam.tf`).
+
 ## [1.0.2] - 2026-09-08
 
 Fixes a data-integrity bug that was quietly corrupting saved chat history,
