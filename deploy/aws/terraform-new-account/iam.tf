@@ -180,6 +180,35 @@ resource "aws_iam_role_policy" "magik_ec2_ssm_secrets" {
   policy = data.aws_iam_policy_document.ec2_ssm_secrets.json
 }
 
+# deploy/aws/scripts/run_quality_report.sh stamps a self-expiring
+# `magik:eval-busy-until` lease on the box it runs on, which the idle-stop
+# Lambda honours (deploy/aws/lambda/idle_stop/handler.py::_eval_busy). Scoped
+# to exactly that one tag key on exactly these instances — the role cannot
+# touch Name or any other tag, so it cannot e.g. retag itself out of the
+# Lambda's `tag:Name` filter.
+data "aws_iam_policy_document" "ec2_eval_busy_tag" {
+  statement {
+    sid     = "EvalBusyLeaseTag"
+    effect  = "Allow"
+    actions = ["ec2:CreateTags", "ec2:DeleteTags"]
+    resources = concat(
+      [aws_instance.production.arn],
+      var.create_staging ? [aws_instance.staging[0].arn] : [],
+    )
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "aws:TagKeys"
+      values   = ["magik:eval-busy-until"]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "magik_ec2_eval_busy_tag" {
+  name   = "magik-ec2-eval-busy-tag"
+  role   = aws_iam_role.magik_ec2.id
+  policy = data.aws_iam_policy_document.ec2_eval_busy_tag.json
+}
+
 resource "aws_iam_instance_profile" "magik_ec2" {
   name = "magik-ec2-instance-profile"
   role = aws_iam_role.magik_ec2.name

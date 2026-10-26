@@ -24,6 +24,11 @@ _os.environ["HF_HUB_CACHE"] = _hf_home + "/hub"
 # imports this module directly and never goes through start_server.py — this
 # is the earliest point in THAT path, before any transformers/torch import.
 _os.environ.setdefault("PYTORCH_JIT", "0")
+# SHA-pinned downloads leave no refs/main, so offline loads by repo id fail
+# (ner/blip/diarizer on every boot, 2026-10). See app/utils/hf_cache.py.
+from app.utils.hf_cache import heal_hub_refs as _heal_hub_refs
+
+_hf_refs_healed = _heal_hub_refs(_hf_home + "/hub")
 # ────────────────────────────────────────────────────────────────────────────
 
 import asyncio
@@ -293,6 +298,8 @@ async def lifespan(app: FastAPI):
         version=settings.APP_VERSION,
         app=settings.APP_NAME,
     )
+    if _hf_refs_healed:
+        logger.info(event="hf_cache_refs_repaired", models=_hf_refs_healed)
 
     # SYNC FAST-PATH — only cheap, local operations that must finish before
     # Uvicorn signals ready. Target: <500 ms total.
@@ -762,6 +769,10 @@ app.include_router(auth_router)  # mounts at /auth (prefix defined in router.py)
 from app.auth.admin_router import router as admin_router
 
 app.include_router(admin_router)  # mounts at /admin — requires role=admin JWT
+
+from app.api.eval_internal import router as eval_internal_router
+
+app.include_router(eval_internal_router)  # /internal/eval — off unless EVAL_INTERNAL_API_ENABLED
 
 
 # ROOT — see the STATIC SPA block at the end of this module.

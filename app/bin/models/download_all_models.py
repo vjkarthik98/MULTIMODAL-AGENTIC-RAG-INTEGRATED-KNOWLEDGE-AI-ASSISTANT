@@ -128,6 +128,20 @@ MODELS: list[dict] = [
         "revision": "d1a3e8f13f8c3566299d95fcfc9a8d2382a9affc",  # pragma: allowlist secret
     },
     {
+        # settings.NLI_MODEL — groundedness checker (app/verification/
+        # groundedness_checker.py). Was never in this manifest, so no box ever
+        # had it cached and nli_groundedness_failed fired on every verified
+        # answer (120+ times in the 2026-10 prod logs). Optional because the
+        # checker already fails open when the model can't load.
+        "key": "nli",
+        "model_id": "cross-encoder/nli-deberta-v3-base",
+        "type": "sentence-transformers",
+        "size_gb": 0.74,
+        "gated": False,
+        "optional": True,
+        "revision": "6c749ce3425cd33b46d187e45b92bbf96ee12ec7",  # pragma: allowlist secret
+    },
+    {
         "key": "finbert",
         "model_id": "yiyanghkust/finbert-tone",
         "type": "sequence-classification",
@@ -438,7 +452,7 @@ def _dl_sentence_transformers(model_id: str, revision: str | None = None) -> Non
     from sentence_transformers import CrossEncoder, SentenceTransformer
 
     kw = {"revision": revision} if revision else {}
-    if "reranker" in model_id.lower():
+    if "reranker" in model_id.lower() or "cross-encoder" in model_id.lower():
         CrossEncoder(model_id, **kw)
     else:
         SentenceTransformer(model_id, **kw)
@@ -973,6 +987,15 @@ def main() -> None:
             else:
                 print(f"  FAILED: {exc}\n")
                 failed.append(key)
+
+    # SHA-pinned downloads leave no refs/main, which offline loads by repo id
+    # need (see app/utils/hf_cache.py). Heal on every run, including no-op
+    # cache-hit runs, so an already-provisioned box is repaired too.
+    from app.utils.hf_cache import heal_hub_refs
+
+    healed = heal_hub_refs(Path(_hf_home) / "hub")
+    if healed:
+        print(f"Repaired missing refs/main for {len(healed)} cached model(s): {', '.join(healed)}")
 
     # ── summary ───────────────────────────────────────────────────────────────
     required_total = sum(1 for m in run_list if not m.get("optional"))

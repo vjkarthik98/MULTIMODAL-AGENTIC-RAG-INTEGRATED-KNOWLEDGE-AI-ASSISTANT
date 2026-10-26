@@ -158,6 +158,15 @@ def _resolve_gpu_layers() -> int:
     # ~4.7GB GGUF plus headroom for the n_ctx=8192 KV cache and inference buffers.
     _required_gb = 6.0
     if free_gb < _required_gb:
+        # QWEN_JUDGE_REQUIRE_GPU=1 (set by deploy/aws/scripts/run_quality_report.sh)
+        # refuses the CPU fallback. On the production box a 7B judge on 4 vCPUs
+        # beside the live app is not "slower but functional": it outlives
+        # _GEN_TIMEOUT_SEC per call and competes with serving for CPU and RAM.
+        if os.getenv("QWEN_JUDGE_REQUIRE_GPU", "").strip().lower() in ("1", "true", "yes"):
+            raise RuntimeError(
+                f"Qwen judge needs ~{_required_gb:.0f}GB free VRAM, only {free_gb:.1f}GB free "
+                "and QWEN_JUDGE_REQUIRE_GPU is set — refusing CPU fallback."
+            )
         print(
             f"[eval] Qwen judge: only {free_gb:.1f}GB VRAM free (need ~{_required_gb:.0f}GB) — "
             "loading on CPU instead of GPU to avoid an OOM crash. Slower, but functional."

@@ -436,9 +436,15 @@ def _build_ragas_embeddings():
     # WHOLE metric's mean into NaN over one bad row.
     _EMPTY_PLACEHOLDER = "(empty)"
 
+    from app.eval.remote_models import RemoteEmbedder, remote_models_enabled
+
     class _MagikRagasEmbeddings(BaseRagasEmbeddings):  # type: ignore[misc]
         def __init__(self) -> None:
-            self._embedder = model_loader.get_embedder()
+            # Same encoder either way; under EVAL_REMOTE_MODELS=1 it is the
+            # serving app's resident copy, reached over /internal/eval/embed.
+            self._embedder = (
+                RemoteEmbedder() if remote_models_enabled() else model_loader.get_embedder()
+            )
             self._dim = getattr(self._embedder, "expected_dim", app_settings.TEXT_EMBEDDING_DIM)
             self.set_run_config(RunConfig(max_workers=1, timeout=600))
 

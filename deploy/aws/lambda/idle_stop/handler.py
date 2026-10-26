@@ -20,6 +20,9 @@ failure modes rather than theory:
     guard the CloudWatch signal alone would look idle mid-eval and this Lambda
     would stop the instance out from under a running Tier-2 suite — corrupting
     the run and knocking the runner itself offline until the box wakes again.
+  * the `magik:eval-busy-until` instance tag — the same blind spot for the
+    RAGAS / DeepEval report, which runs from an SSM session rather than a
+    runner. A self-expiring lease; see _eval_busy().
 
 Deliberately conservative: the cost of one extra idle interval (~$0.15) is far
 below the cost of stopping a live session, a running deploy, or a running eval.
@@ -87,6 +90,12 @@ DIRECT_HEALTH_URL = os.environ.get("DIRECT_HEALTH_URL") or (f"{APP_URL}/health" 
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT")
 GITHUB_RUNNER_LABEL = os.environ.get("GITHUB_RUNNER_LABEL", "gpu")
 GITHUB_TOKEN_PARAM = os.environ.get("GITHUB_TOKEN_PARAM", "/magik/github_actions_pat")
+
+# Set by deploy/aws/scripts/run_quality_report.sh to a unix-time expiry; see
+# _eval_busy(). Lease is re-stamped every 5 min with a 15 min horizon, so 1h is
+# a generous ceiling on how far ahead a value is trusted.
+EVAL_BUSY_TAG = os.environ.get("EVAL_BUSY_TAG", "magik:eval-busy-until")
+EVAL_BUSY_MAX_LEASE_SECONDS = int(os.environ.get("EVAL_BUSY_MAX_LEASE_SECONDS", "3600"))
 
 _cfg = Config(connect_timeout=5, read_timeout=10, retries={"max_attempts": 3})
 ec2 = boto3.client("ec2", config=_cfg)
@@ -217,6 +226,44 @@ def _runner_busy() -> bool:
     return False
 
 
+def _eval_busy(instance_id: str) -> bool:
+    """True while deploy/aws/scripts/run_quality_report.sh holds the busy tag.
+
+    That script runs RAGAS / DeepEval on this box from an interactive SSM
+    session — not via send-command (so _has_inflight_ssm cannot see it) and not
+    via a GitHub runner (so _runner_busy cannot either). The judge phase is
+    GPU-bound with almost no external NetworkIn, which is exactly the shape
+    _is_idle reads as "nobody here".
+
+    The tag holds an expiry, not a flag, and the script re-stamps it every few
+    minutes. A script that dies without cleaning up therefore stops protecting
+    the box within one lease (EVAL_BUSY_MAX_LEASE_SECONDS caps how far ahead a
+    value is believed), instead of pinning a $1.86/hr instance on forever.
+
+    Fails OPEN on an API error (returns False): the other guards still apply,
+    and a missed eval is cheaper than a box that can never be stopped.
+    """
+    try:
+        resp = ec2.describe_instances(InstanceIds=[instance_id])
+        tags = resp["Reservations"][0]["Instances"][0].get("Tags") or []
+    except (ClientError, KeyError, IndexError) as exc:
+        log.warning("could not read eval busy tag: %s", exc)
+        return False
+    raw = next((t.get("Value") for t in tags if t.get("Key") == EVAL_BUSY_TAG), None)
+    if not raw:
+        return False
+    try:
+        until = int(raw)
+    except ValueError:
+        log.warning("ignoring malformed %s=%r", EVAL_BUSY_TAG, raw)
+        return False
+    now = int(time.time())
+    if until <= now or until - now > EVAL_BUSY_MAX_LEASE_SECONDS:
+        return False
+    log.info("eval in progress (%s expires in %ds)", EVAL_BUSY_TAG, until - now)
+    return True
+
+
 def _is_idle(instance_id: str) -> bool:
     end = datetime.now(timezone.utc)
     start = end - timedelta(minutes=IDLE_MINUTES)
@@ -274,6 +321,9 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
 
     if _runner_busy():
         return {"action": "none", "instance": instance_id, "reason": "self-hosted runner busy"}
+
+    if _eval_busy(instance_id):
+        return {"action": "none", "instance": instance_id, "reason": "quality report running"}
 
     if not _is_idle(instance_id):
         return {"action": "none", "instance": instance_id, "reason": "recent network activity"}

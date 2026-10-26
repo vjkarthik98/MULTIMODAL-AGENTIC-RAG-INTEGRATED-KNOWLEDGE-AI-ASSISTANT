@@ -71,6 +71,15 @@
       ]
     },
     {
+      "Sid": "EvalBusyLeaseTag",
+      "Effect": "Allow",
+      "Action": ["ec2:CreateTags", "ec2:DeleteTags"],
+      "Resource": "arn:aws:ec2:us-east-1:857194222592:instance/*",
+      "Condition": {
+        "ForAllValues:StringEquals": { "aws:TagKeys": ["magik:eval-busy-until"] }
+      }
+    },
+    {
       "Sid": "ReadMonitoringSecretsAtDeployTime",
       "Effect": "Allow",
       "Action": ["ssm:GetParameter"],

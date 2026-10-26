@@ -41,7 +41,7 @@ This repo follows [Conventional Commits](https://www.conventionalcommits.org/)
 style, consistent with the existing git history:
 
 ```
-feat: add financial_calculator tool to agent routing
+feat: add hybrid_web route to agent controller
 fix: correct off-by-one in chunk overlap
 ci: bump actions/checkout to v5
 style: apply black formatting
