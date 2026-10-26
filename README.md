@@ -9,9 +9,9 @@
 [![Quality](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/quality.yml/badge.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/actions/workflows/quality.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
-[![Release](https://img.shields.io/badge/release-v1.0.1-brightgreen.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/releases)
+[![Release](https://img.shields.io/badge/release-v1.0.4-brightgreen.svg)](https://github.com/vjkarthik98/MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/releases)
 
-> **v1.0.1 — stable.** The HTTP interfaces are covered by
+> **v1.0.4 — stable.** The HTTP interfaces are covered by
 > [Semantic Versioning](https://semver.org/) from v1.0.0 forward.
 > Release notes: [CHANGELOG.md](CHANGELOG.md#101---2026-08-30) ·
 > Supported versions: [SECURITY.md](SECURITY.md#supported-versions) ·
