@@ -13,7 +13,8 @@
 
 > **v1.0.4 — stable.** The HTTP interfaces are covered by
 > [Semantic Versioning](https://semver.org/) from v1.0.0 forward.
-> Release notes: [CHANGELOG.md](CHANGELOG.md#101---2026-08-30) ·
+> Release notes: [CHANGELOG.md](CHANGELOG.md#104---2026-10-06) ·
+> Release runbook: [docs/runbooks/MAGIK_v1.0.4_Release_Runbook.pdf](docs/runbooks/MAGIK_v1.0.4_Release_Runbook.pdf) ·
 > Supported versions: [SECURITY.md](SECURITY.md#supported-versions) ·
 > Full system card: [docs/MODEL_CARD.md](docs/MODEL_CARD.md)
 
@@ -22,6 +23,7 @@
 ## Table of Contents
 
 - [Model / System Card](docs/MODEL_CARD.md)
+- [Release Runbook](docs/runbooks/MAGIK_v1.0.4_Release_Runbook.pdf)
 - [Overview](#overview)
 - [Key Capabilities](#key-capabilities)
 - [Evidence at a Glance](#evidence-at-a-glance)
@@ -457,7 +459,7 @@ MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/
 │   └── api_contract/           # Schemathesis property-based API fuzzing (1)
 │
 ├── docs/
-│   ├── runbooks/              # CI/CD, deployment, and monitoring runbooks
+│   ├── runbooks/              # CI/CD, deployment, monitoring, and the release runbook (PDF)
 │   └── EVAL_*.md              # Per-modality evaluation write-ups
 │
 ├── monitoring/                 # Prometheus, Grafana, Loki, Tempo, OTel collector, alert rules
@@ -489,6 +491,8 @@ MULTIMODAL-AGENTIC-RAG-INTEGRATED-KNOWLEDGE-AI-ASSISTANT/
 | `quality-report.yml` | Manual dispatch only | Ragas + DeepEval against the deployed image, in-container on the **staging** GPU box — wakes staging, evaluates, regenerates badges, stops staging. Gates nothing; deliberately not part of the release pipeline |
 
 `cd.yml` authenticates to AWS via GitHub OIDC — there are no long-lived AWS credentials stored in the repository.
+
+To cut a release, follow the [release runbook](docs/runbooks/MAGIK_v1.0.4_Release_Runbook.pdf). It covers the checks to make before tagging (green CI and Security on the exact commit, a registered staging runner, a running Qdrant Cloud cluster), the tag-to-production sequence, recovery steps, and the open items in the release tooling.
 
 ## Quality & Performance Reports
 
@@ -588,7 +592,8 @@ Changes land on `development` and reach `main` only through a pull request —
 `main` is protected and is never a direct target. Pushing a `v*` tag on `main`
 triggers `cd.yml`, which builds the image, deploys to staging, runs the Tier-2
 gate, promotes to production behind a health check, and rolls back
-automatically on failure.
+automatically on failure. The step-by-step procedure is in the
+[release runbook](docs/runbooks/MAGIK_v1.0.4_Release_Runbook.pdf).
 
 Supported versions are listed in [SECURITY.md](SECURITY.md#supported-versions).
 The running version is reported by `GET /version`.
